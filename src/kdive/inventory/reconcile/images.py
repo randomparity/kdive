@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +59,7 @@ from kdive.inventory.reconcile.records import CONFIG_MANAGED_BY, ReconcileDiff, 
 _log = logging.getLogger(__name__)
 
 _DEFINED = ImageState.DEFINED.value
+_PENDING = ImageState.PENDING.value
 _REGISTERED = ImageState.REGISTERED.value
 
 
@@ -182,7 +183,7 @@ async def _load_config_rows(
         await cur.execute(
             "SELECT id, provider, name, arch, format, root_device, visibility, capabilities, "
             "       object_key, digest, volume, path, provenance, provenance_attested, state, "
-            "       description, kernel_config_key "
+            "       description, kernel_config_key, publication_attempt_id "
             "FROM image_catalog WHERE managed_by = %s",
             (CONFIG_MANAGED_BY,),
         )
@@ -253,7 +254,7 @@ async def _update_entry(
     store: ImageHeadStore,
     diff: ReconcileDiff,
 ) -> None:
-    """Change-detecting update of an existing config row's config-owned + realized fields."""
+    """Update config fields while fencing runtime realization from publication changes."""
     desired = {
         "format": entry.format,
         "root_device": entry.root_device,
@@ -281,33 +282,68 @@ async def _update_entry(
 
     config_changed = any(row.get(k) != v for k, v in desired.items())
     realized_changed = any(row.get(k) != v for k, v in realized.items())
-    if config_changed or realized_changed:
-        await conn.execute(
-            "UPDATE image_catalog SET format = %s, root_device = %s, visibility = %s, "
-            "capabilities = %s, object_key = %s, volume = %s, path = %s, digest = %s, "
-            "provenance = %s, provenance_attested = %s, state = %s, description = %s, "
-            "kernel_config_key = %s "
-            "WHERE id = %s",
-            (
-                desired["format"],
-                desired["root_device"],
-                desired["visibility"],
-                desired["capabilities"],
-                realized_image.object_key,
-                realized_image.volume,
-                realized_image.path,
-                realized_image.digest,
-                Jsonb(realized_image.provenance),
-                realized_image.provenance_attested,
-                realized_image.state,
-                desired["description"],
-                realized_image.kernel_config_key,
-                row["id"],
-            ),
-        )
+    updated = config_changed and await _persist_config_fields(conn, row, desired)
+    runtime_deferred = False
+    if realized_changed:
+        if row.get("state") == _PENDING:
+            runtime_deferred = True
+        else:
+            runtime_updated = await _persist_runtime_fields(conn, row, realized_image)
+            updated = updated or runtime_updated
+            runtime_deferred = not runtime_updated
+    if updated:
         diff.updated.append(_record(entry))
+    if runtime_deferred:
+        warning = (
+            f"{entry.name}: runtime realization deferred because the catalog row is pending or "
+            "changed after inventory loaded it; retry inventory reconcile"
+        )
     if warning is not None:
         diff.warned.append(_record(entry, warning))
+
+
+async def _persist_config_fields(
+    conn: AsyncConnection, row: dict[str, object], desired: Mapping[str, object]
+) -> bool:
+    """Persist only declarative columns, which remain config-owned during publication."""
+    cur = await conn.execute(
+        "UPDATE image_catalog SET format = %s, root_device = %s, visibility = %s, "
+        "capabilities = %s, description = %s WHERE id = %s",
+        (
+            desired["format"],
+            desired["root_device"],
+            desired["visibility"],
+            desired["capabilities"],
+            desired["description"],
+            row["id"],
+        ),
+    )
+    return cur.rowcount == 1
+
+
+async def _persist_runtime_fields(
+    conn: AsyncConnection, row: dict[str, object], realized: _RealizedImage
+) -> bool:
+    """CAS runtime fields against the loaded state and publication-attempt snapshot."""
+    cur = await conn.execute(
+        "UPDATE image_catalog SET object_key = %s, volume = %s, path = %s, digest = %s, "
+        "provenance = %s, provenance_attested = %s, state = %s, kernel_config_key = %s "
+        "WHERE id = %s AND state = %s AND publication_attempt_id IS NOT DISTINCT FROM %s",
+        (
+            realized.object_key,
+            realized.volume,
+            realized.path,
+            realized.digest,
+            Jsonb(realized.provenance),
+            realized.provenance_attested,
+            realized.state,
+            realized.kernel_config_key,
+            row["id"],
+            row["state"],
+            row.get("publication_attempt_id"),
+        ),
+    )
+    return cur.rowcount == 1
 
 
 @dataclass(frozen=True, slots=True)

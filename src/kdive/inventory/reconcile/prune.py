@@ -8,6 +8,7 @@ from uuid import UUID
 from psycopg import AsyncConnection, AsyncCursor
 from psycopg.rows import dict_row
 
+from kdive.domain.catalog.images import ImageState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.images.cataloging.read_model import image_referenced_by_live_system
@@ -19,10 +20,11 @@ async def prune_or_cordon_image(conn: AsyncConnection, row_id: UUID) -> PruneOut
     """Apply the non-destructive prune contract to one config image row."""
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT id FROM image_catalog WHERE id = %s AND managed_by = %s FOR UPDATE",
+            "SELECT id, state FROM image_catalog WHERE id = %s AND managed_by = %s FOR UPDATE",
             (row_id, CONFIG_MANAGED_BY),
         )
-        if await cur.fetchone() is None:
+        row = await cur.fetchone()
+        if row is None or row["state"] == ImageState.PENDING.value:
             return PruneOutcome(pruned=False, cordoned=False)
         if await image_referenced_by_live_system(cur, row_id):
             return PruneOutcome(pruned=False, cordoned=True)

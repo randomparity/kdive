@@ -42,13 +42,16 @@ async def _insert_image(
     *,
     name: str,
     managed_by: ManagedBy = ManagedBy.CONFIG,
+    state: str = "registered",
 ) -> UUID:
+    attempt_id = uuid4() if state == "pending" else None
     cur = await conn.execute(
         "INSERT INTO image_catalog "
-        "(provider, name, arch, format, root_device, visibility, state, object_key, managed_by) "
+        "(provider, name, arch, format, root_device, visibility, state, object_key, managed_by, "
+        " publication_attempt_id) "
         "VALUES ('local-libvirt', %s, 'x86_64', 'qcow2', '/dev/vda', 'public', "
-        "'registered', %s, %s) RETURNING id",
-        (name, f"images/{name}.qcow2", managed_by.value),
+        "%s, %s, %s, %s) RETURNING id",
+        (name, state, f"images/{name}.qcow2", managed_by.value, attempt_id),
     )
     row = await cur.fetchone()
     assert row is not None
@@ -174,6 +177,18 @@ def test_prune_image_deletes_idle_config_row(migrated_url: str) -> None:
             assert outcome.pruned is True
             assert outcome.cordoned is False
             assert await _image_exists(conn, image_id) is False
+
+    asyncio.run(_run())
+
+
+def test_prune_image_pending_config_row_is_noop(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            image_id = await _insert_image(conn, name=f"pending-{uuid4()}", state="pending")
+            outcome = await prune_or_cordon_image(conn, image_id)
+
+            assert outcome == PruneOutcome(pruned=False, cordoned=False)
+            assert await _image_exists(conn, image_id) is True
 
     asyncio.run(_run())
 

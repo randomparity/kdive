@@ -27,7 +27,8 @@ non-autocommit pool connection so the real transaction framing is exercised.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+import threading
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -117,6 +118,21 @@ class _FakeImageStore:
         )
 
 
+class _BlockingHeadStore(_FakeImageStore):
+    """Pause an s3 HEAD so a test can mutate the loaded catalog snapshot."""
+
+    def __init__(self, present: set[str]) -> None:
+        super().__init__(present)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def head_present(self, key: str) -> bool:
+        self.entered.set()
+        if not self.release.wait(timeout=10):
+            raise TimeoutError("test did not release blocked image HEAD")
+        return super().head_present(key)
+
+
 def _write_toml(tmp_path: Path, body: str) -> Path:
     path = tmp_path / "systems.toml"
     path.write_text(body)
@@ -139,6 +155,23 @@ async def _exists(conn: psycopg.AsyncConnection, name: str) -> bool:
     async with conn.cursor() as cur:
         await cur.execute("SELECT 1 FROM image_catalog WHERE name = %s", (name,))
         return await cur.fetchone() is not None
+
+
+async def _insert_defined_config_row(conn: psycopg.AsyncConnection, *, name: str) -> UUID:
+    cur = await conn.execute(
+        "INSERT INTO image_catalog "
+        "(provider, name, arch, format, root_device, visibility, state, managed_by) "
+        "VALUES ('local-libvirt', %s, 'x86_64', 'qcow2', '/dev/vda', 'public', "
+        "'defined', 'config') RETURNING id",
+        (name,),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _assert_protected_columns(row: dict[str, object], expected: dict[str, object]) -> None:
+    assert {column: row[column] for column in expected} == expected
 
 
 async def _insert_registered_build_row(
@@ -898,6 +931,172 @@ def test_reconcile_never_overwrites_realized_object_key(migrated_url: str, tmp_p
         assert row["object_key"] == "images/local-libvirt/built/x86_64.qcow2"
         assert row["digest"] == "sha256:dead"
         assert store.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_reconcile_runtime_cas_preserves_row_that_became_pending(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    async def _run() -> None:
+        key = "images/local-libvirt/i/from-config.qcow2"
+        doc = load_inventory(
+            _write_toml(
+                tmp_path,
+                _s3_image_body(key=key, digest="sha256:config")
+                .replace('root_device = "/dev/vda"', 'root_device = "/dev/sda"')
+                .replace(
+                    "[image.source]",
+                    'capabilities = ["kdump"]\ndescription = "updated config"\n[image.source]',
+                ),
+            )
+        )
+        attempt_id = uuid4()
+        pending_since = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
+        protected: dict[str, object] = {
+            "object_key": "images/local-libvirt/i/publish-attempt.qcow2",
+            "volume": None,
+            "path": None,
+            "digest": "sha256:publisher",
+            "provenance": {"writer": "publisher"},
+            "provenance_attested": True,
+            "state": "pending",
+            "kernel_config_key": "images/local-libvirt/i/publish-attempt.config",
+            "publication_attempt_id": attempt_id,
+            "publication_principal": "alice",
+            "size_bytes": 4096,
+            "pending_since": pending_since,
+        }
+        async with await _connect(migrated_url) as seed:
+            row_id = await _insert_defined_config_row(seed, name="i")
+
+        store = _BlockingHeadStore({key})
+        try:
+            async with (
+                AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+                pool.connection() as conn,
+            ):
+                task = asyncio.create_task(reconcile_images(conn, doc, store))
+                assert await asyncio.to_thread(store.entered.wait, 10)
+                async with await _connect(migrated_url) as publisher:
+                    await publisher.execute(
+                        "UPDATE image_catalog SET object_key = %s, volume = %s, path = %s, "
+                        "digest = %s, provenance = %s, provenance_attested = %s, state = %s, "
+                        "kernel_config_key = %s, publication_attempt_id = %s, "
+                        "publication_principal = %s, size_bytes = %s, pending_since = %s "
+                        "WHERE id = %s",
+                        (
+                            protected["object_key"],
+                            protected["volume"],
+                            protected["path"],
+                            protected["digest"],
+                            Jsonb(protected["provenance"]),
+                            protected["provenance_attested"],
+                            protected["state"],
+                            protected["kernel_config_key"],
+                            protected["publication_attempt_id"],
+                            protected["publication_principal"],
+                            protected["size_bytes"],
+                            protected["pending_since"],
+                            row_id,
+                        ),
+                    )
+                store.release.set()
+                diff = await task
+        finally:
+            store.release.set()
+
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "i")
+        _assert_protected_columns(row, protected)
+        assert row["format"] == "qcow2"
+        assert row["root_device"] == "/dev/sda"
+        assert row["visibility"] == "public"
+        assert row["capabilities"] == ["kdump"]
+        assert row["description"] == "updated config"
+        assert [record.name for record in diff.updated] == ["i"]
+        assert [record.name for record in diff.warned] == ["i"]
+
+    asyncio.run(_run())
+
+
+def test_reconcile_loaded_pending_row_preserves_concurrent_registration(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    async def _run() -> None:
+        key = "images/local-libvirt/i/from-config.qcow2"
+        doc = load_inventory(_write_toml(tmp_path, _s3_image_body(key=key, digest="sha256:config")))
+        attempt_id = uuid4()
+        pending_since = datetime(2026, 7, 31, 13, 0, tzinfo=UTC)
+        async with await _connect(migrated_url) as seed:
+            row_id = await _insert_defined_config_row(seed, name="i")
+            await seed.execute(
+                "UPDATE image_catalog SET state = 'pending', object_key = %s, digest = %s, "
+                "provenance = %s, provenance_attested = true, kernel_config_key = %s, "
+                "publication_attempt_id = %s, publication_principal = 'alice', size_bytes = 2048, "
+                "pending_since = %s WHERE id = %s",
+                (
+                    "images/local-libvirt/i/pending.qcow2",
+                    "sha256:pending",
+                    Jsonb({"writer": "pending"}),
+                    "images/local-libvirt/i/pending.config",
+                    attempt_id,
+                    pending_since,
+                    row_id,
+                ),
+            )
+
+        registered: dict[str, object] = {
+            "object_key": None,
+            "volume": "publisher-registered-volume.qcow2",
+            "path": None,
+            "digest": "sha256:registered",
+            "provenance": {"writer": "publisher", "complete": True},
+            "provenance_attested": False,
+            "state": "registered",
+            "kernel_config_key": "images/local-libvirt/i/registered.config",
+            "publication_attempt_id": None,
+            "publication_principal": None,
+            "size_bytes": 8192,
+            "pending_since": pending_since,
+        }
+        store = _BlockingHeadStore({key})
+        try:
+            async with (
+                AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+                pool.connection() as conn,
+            ):
+                task = asyncio.create_task(reconcile_images(conn, doc, store))
+                assert await asyncio.to_thread(store.entered.wait, 10)
+                async with await _connect(migrated_url) as publisher:
+                    await publisher.execute(
+                        "UPDATE image_catalog SET object_key = %s, volume = %s, path = %s, "
+                        "digest = %s, provenance = %s, provenance_attested = %s, state = %s, "
+                        "kernel_config_key = %s, publication_attempt_id = NULL, "
+                        "publication_principal = NULL, size_bytes = %s WHERE id = %s",
+                        (
+                            registered["object_key"],
+                            registered["volume"],
+                            registered["path"],
+                            registered["digest"],
+                            Jsonb(registered["provenance"]),
+                            registered["provenance_attested"],
+                            registered["state"],
+                            registered["kernel_config_key"],
+                            registered["size_bytes"],
+                            row_id,
+                        ),
+                    )
+                store.release.set()
+                diff = await task
+        finally:
+            store.release.set()
+
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "i")
+        _assert_protected_columns(row, registered)
+        assert diff.updated == []
+        assert [record.name for record in diff.warned] == ["i"]
 
     asyncio.run(_run())
 
