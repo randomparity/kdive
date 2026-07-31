@@ -30,7 +30,9 @@ the writer is still active.
 - The configured S3-compatible store honors the existing read-after-write and
   read-after-delete HEAD behavior on which KDIVE's current object lifecycle already relies.
 - `image_catalog.digest` is `sha256:<hex>` and `size_bytes` is the expected qcow2 byte length for a
-  pending reservation. Missing or malformed integrity evidence fails closed as invalid.
+  pending reservation. New requests validate that form before reservation. A malformed legacy row
+  is terminally unverifiable, not a retryable store failure: recovery deletes its object, confirms
+  absence, and removes the row.
 - The issue is one cohesive change. No new tool, setting, worker job, or operator procedure is
   introduced.
 
@@ -100,7 +102,9 @@ attempt, later inventory passes resume normal ownership.
 `repair_dangling_images` keeps the configured grace as the abandonment threshold. For each expired
 non-`defined` candidate it opens a transaction and tries the candidate's publication fence without
 waiting. If the lock is held, this pass skips the row. If acquired, it re-reads the candidate under
-row lock and rechecks the deadline before any store call.
+row lock and rechecks the deadline before any store call. That same transaction, xact advisory lock,
+and row lock remain open through every HEAD/delete call, terminal row mutation or private audit, and
+commit. Recovery never commits the fence before acting on the store.
 
 Registered candidates preserve current semantics: missing objects remove the row and present
 objects remain untouched. Pending candidates use the following decision table:
@@ -110,6 +114,7 @@ objects remain untouched. Pending candidates use the following decision table:
 | absent | object never landed or was removed | delete row |
 | present; size and SHA-256 match row | complete abandoned publication | reconcile config key and set `registered`; atomically audit private recovery under persisted principal |
 | present; size/checksum missing or mismatched | incomplete, overwritten, or unverifiable | delete object; confirm absent; delete row |
+| persisted digest malformed | legacy/unverifiable reservation | delete any object; confirm absent; delete row |
 | store error, or object remains after delete | outcome is not proven | roll back/retain row and retry next pass |
 
 The repair returns the number of rows that reached a terminal catalog outcome in that pass, whether
@@ -157,11 +162,13 @@ an attempt-aware helper produces both publish keys.
 `ArtifactWriteRequest` gains `sha256_b64: str | None = None`, matching
 `ArtifactStreamRequest.sha256_b64`. A single helper accepts only `sha256:` plus exactly 64 hex
 digits, converts the 32 digest bytes to standard padded base64, and raises
-`CONFIGURATION_ERROR` for malformed persisted/input digests. `ObjectStore.put_artifact` passes a
-non-null value as the SDK's `ChecksumSHA256` and omits the argument otherwise. The normal publish
-HEAD gate and recovery both require `size_bytes == reservation.size_bytes` and
-`checksum_sha256 == expected padded base64`; presence-only or missing checksum evidence never
-registers a qcow2. Config siblings retain their best-effort presence-only HEAD contract.
+`CONFIGURATION_ERROR` for malformed input digests before a reservation is committed. Recovery calls
+a non-raising parse form: a malformed persisted digest selects the invalid-object terminal branch,
+not the retry/error branch. `ObjectStore.put_artifact` passes a non-null value as the SDK's
+`ChecksumSHA256` and omits the argument otherwise. The normal publish HEAD gate and recovery both
+require `size_bytes == reservation.size_bytes` and `checksum_sha256 == expected padded base64`;
+presence-only or missing checksum evidence never registers a qcow2. Config siblings retain their
+best-effort presence-only HEAD contract.
 
 The image sweep store port gains `head(key) -> HeadResult | None` in addition to delete/list
 operations. Publication exposes a narrow fence helper shared by the publisher and repair, backed by
@@ -215,6 +222,7 @@ The focused acceptance matrix is binding:
 | transaction boundary | both worker-autocommit and MCP-non-autocommit shapes enter PUT transaction-idle with PROJECT lock absent and IMAGE_PUBLISH held |
 | active slow publisher | a blocked PUT with an expired pending row survives the real dangling repair; the same pass repairs it after fence release |
 | stale reservation | recovery wins before fence acquisition, publisher raises `CONFLICT`, and no PUT occurs |
+| recovery fence lifetime | recovery pauses after acquiring xact+row locks; a publisher blocks before revalidation/PUT until terminal commit, then conflicts without PUT |
 | session loss/cancellation | a late PUT lands only under the abandoned attempt key and cannot alter a successor/recovered row |
 | attempt adoption | every adoption changes both qcow2/config keys; cross-principal private adoption persists the second actor |
 | valid abandoned object | matching size/canonical checksum registers and increments the repair terminal-outcome count |
@@ -222,6 +230,7 @@ The focused acceptance matrix is binding:
 | private audit | recovered registration and the existing audit transition commit atomically under the persisted principal; injected audit failure registers nothing |
 | missing private principal | valid bytes are deleted and the row reclaimed, never registered |
 | invalid object | wrong size, missing/malformed checksum, or mismatched checksum deletes; a still-present post-delete HEAD preserves the row |
+| malformed digest | a new request fails before reservation; a seeded legacy pending row deletes object+row and releases quota |
 | crash after delete | rollback/death after confirmed object deletion preserves the row; the next pass sees missing and removes it |
 | private expiry | both candidate and locked predicates skip pending; an already-expired recovered row registers first and prunes only on the next TTL pass |
 | inventory races | `defined -> pending` and `pending -> registered` interleavings preserve every protected column and report deferred realization accurately |
@@ -229,7 +238,9 @@ The focused acceptance matrix is binding:
 | registered regression | present registered rows remain; missing registered rows retain existing deadline removal semantics |
 | quota release | before/after usage asserts both pending+registered count and summed `size_bytes`; reclaimed row releases both caps |
 | schema/read model | migrated finish, resolve, list, and describe accept the new columns and expose neither internal field |
+| migration invariant | two pre-0093 pending rows receive distinct non-null attempts, non-pending rows remain null, null-attempt pending writes fail, and both registration paths clear attempt/principal atomically |
 | exact SDK checksum | the request maps canonical padded base64 to `ChecksumSHA256`; null omits it |
+| normal HEAD integrity | matching size+checksum registers; absent, wrong-size, missing/malformed, or mismatched checksum stays pending and raises the typed publish failure |
 
 Every terminal recovery arm asserts the repair return count; every retry/no-op arm asserts zero.
 
@@ -241,4 +252,5 @@ quota concurrency tests continue to prove that the PROJECT lock is not held duri
 Tests must be shown to bite by temporarily disabling the fence and integrity predicate, observing
 the focused failures, and restoring the implementation before the final guardrails. The
 private-expiry locked predicate and inventory CAS each get the same bite check because candidate-only
-and one-sided implementations are plausible regressions that simpler tests would miss.
+and one-sided implementations are plausible regressions that simpler tests would miss. The normal
+publish HEAD test must also redden when its predicate is temporarily weakened to presence-only.
