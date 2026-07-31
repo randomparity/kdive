@@ -76,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add a worker-count knob for real job concurrency
 - Add the restore_incomplete failure category
 - Gate PRs on strictly ascending migration numbers
+- Carry the decode diagnosis to the operator checksum warning
 
 ### Changed
 
@@ -261,6 +262,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Be fair to the rejection this record overturns
 - State the KDIVE_WORKER_COUNT ceiling and bind it to lib.sh
 - Note the remedy indent is load-bearing, not incidental
+- Re-run the mutation set against the final tree and state its selection
+- Document the short-read outcome in the utility's Raises
+- Name the module's real consumer, not a future one
 
 ### Fixed
 
@@ -462,6 +466,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compare against the PR's base commit, not main's tip
 - Test the surplus pids against the caller's uid, not for root
 - Sweep the same ownership gap in stop_daemons
+- Consult the transport hash before declaring a gzip object defect
+- Keep the decode diagnosis when the drain hits a store fault
+- Report an empty ranged read as the store's failure to serve
 
 ### Build
 
