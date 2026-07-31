@@ -41,6 +41,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.cataloging.catalog import resolve_rootfs
 from kdive.images.cataloging.validation import GUEST_CONTRACT_PATHS, InspectSeam
 from kdive.security.audit import args_digest
+from kdive.services.images.audit import record_private_registration
 from kdive.services.images.upload import (
     PrivateUploadRequest,
     _clamp_expiry,
@@ -1133,5 +1134,8 @@ def test_records_principal_in_audit_owner_is_project(
             assert row[2] == args_digest(
                 {"provider": entry.provider, "name": entry.name, "arch": entry.arch}
             )
+            ownerless = entry.model_copy(update={"owner": None})
+            with pytest.raises(RuntimeError, match="no owner project"):
+                await record_private_registration(conn, ownerless, "bob")
 
     asyncio.run(_run())

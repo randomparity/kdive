@@ -11,7 +11,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.artifacts.storage import ArtifactWriteRequest, HeadResult, ObjectListing, StoredArtifact
-from kdive.domain.catalog.images import ImageVisibility
+from kdive.domain.catalog.images import ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError
 from kdive.images.cataloging.read_model import image_referenced_by_live_system
 
@@ -50,8 +50,9 @@ async def repair_expired_private_images(conn: AsyncConnection, store: ImageSweep
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id, object_key, kernel_config_key FROM image_catalog "
-            "WHERE visibility = %s AND expires_at IS NOT NULL AND expires_at < now()",
-            (_PRIVATE_VISIBILITY,),
+            "WHERE visibility = %s AND state <> %s "
+            "AND expires_at IS NOT NULL AND expires_at < now()",
+            (_PRIVATE_VISIBILITY, ImageState.PENDING.value),
         )
         candidates = await cur.fetchall()
     pruned = 0
@@ -84,9 +85,9 @@ async def expire_one_private_image(
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT 1 FROM image_catalog "
-            "WHERE id = %s AND visibility = %s "
+            "WHERE id = %s AND visibility = %s AND state <> %s "
             "  AND expires_at IS NOT NULL AND expires_at < now() FOR UPDATE",
-            (row_id, _PRIVATE_VISIBILITY),
+            (row_id, _PRIVATE_VISIBILITY, ImageState.PENDING.value),
         )
         if await cur.fetchone() is None:
             return False

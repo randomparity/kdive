@@ -88,6 +88,7 @@ class _FakeImageStore:
         self._objects: dict[str, tuple[bytes, timedelta]] = dict(objects or {})
         now = datetime.now(UTC)
         self._mtimes = {key: now - age for key, (_data, age) in self._objects.items()}
+        self._checksums: dict[str, str | None] = {}
         self.puts: list[str] = []
         self.deleted: list[str] = []
 
@@ -99,6 +100,7 @@ class _FakeImageStore:
         self.puts.append(key)
         self._objects[key] = (request.data, timedelta())
         self._mtimes[key] = datetime.now(UTC)
+        self._checksums[key] = request.sha256_b64
         etag = hashlib.md5(request.data).hexdigest()  # noqa: S324 - etag stand-in, not security
         return artifact_types.StoredArtifact(
             key,
@@ -114,7 +116,7 @@ class _FakeImageStore:
             return None
         return artifact_types.HeadResult(
             size_bytes=len(entry[0]),
-            checksum_sha256=None,
+            checksum_sha256=self._checksums.get(key),
             etag="e",
             last_modified=self._mtimes.setdefault(key, datetime.now(UTC) - entry[1]),
             version_id="test-version",

@@ -73,6 +73,7 @@ class _FakePlane:
 class _FakeStore:
     def __init__(self, *, fail_put: bool = False) -> None:
         self._objects: dict[str, bytes] = {}
+        self._checksums: dict[str, str | None] = {}
         self._fail_put = fail_put
 
     def put_artifact(
@@ -85,6 +86,7 @@ class _FakeStore:
                 details={},
             )
         self._objects[request.key()] = request.data
+        self._checksums[request.key()] = request.sha256_b64
         return artifact_types.StoredArtifact(
             request.key(),
             "etag",
@@ -99,7 +101,7 @@ class _FakeStore:
             return None
         return artifact_types.HeadResult(
             size_bytes=len(data),
-            checksum_sha256=None,
+            checksum_sha256=self._checksums.get(key),
             etag="etag",
             last_modified=STORE_MTIME,
             version_id="test-version",

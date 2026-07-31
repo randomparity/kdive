@@ -21,6 +21,8 @@ windows are set in SQL against the Postgres clock, so there is no test-vs-DB ske
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -31,6 +33,7 @@ import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.reconciler.cleanup.images as image_cleanup
 from kdive.artifacts.storage import ArtifactWriteRequest, HeadResult, StoredArtifact
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.images import (
@@ -49,6 +52,8 @@ from kdive.services.images.retention import (
 from kdive.services.images.retention import (
     repair_expired_private_images as _repair_expired_private_images,
 )
+from kdive.services.images.upload import _project_usage
+from tests.clock import STORE_MTIME
 from tests.reconciler.conftest import connect, run_repair, seed_system
 
 
@@ -61,10 +66,21 @@ class _FakeImageStore:
     """
 
     def __init__(
-        self, objects: dict[str, timedelta], *, fails_on: frozenset[str] = frozenset()
+        self,
+        objects: dict[str, timedelta],
+        *,
+        fails_on: frozenset[str] = frozenset(),
+        heads: dict[str, HeadResult] | None = None,
+        head_errors: set[str] | None = None,
+        delete_errors: set[str] | None = None,
+        sticky_deletes: set[str] | None = None,
     ) -> None:
         # objects maps key -> age; the absolute mtime is now - age.
         self._objects = dict(objects)
+        self._heads = dict(heads or {})
+        self._head_errors = set(head_errors or ())
+        self._delete_errors = set(delete_errors or ())
+        self._sticky_deletes = set(sticky_deletes or ())
         self._now = datetime.now(UTC)
         self.deleted: list[str] = []
         self.deleted_versions: list[tuple[str, str]] = []
@@ -78,22 +94,29 @@ class _FakeImageStore:
         ]
 
     def head_present(self, key: str) -> bool:
-        return key in self._objects and key not in self.deleted
+        return self.head(key) is not None
 
     def head(self, key: str) -> HeadResult | None:
-        if not self.head_present(key):
+        if key in self._head_errors:
+            raise RuntimeError(f"HEAD failed for {key}")
+        if key not in self._objects or (key in self.deleted and key not in self._sticky_deletes):
             return None
-        return HeadResult(
-            1,
-            None,
-            "etag",
-            last_modified=self._now - self._objects[key],
-            version_id="test-version",
+        return self._heads.get(
+            key,
+            HeadResult(
+                size_bytes=1,
+                checksum_sha256=None,
+                etag="etag",
+                last_modified=self._now - self._objects[key],
+                version_id="test-version",
+            ),
         )
 
     def delete_version(self, key: str, version_id: str) -> None:
         if key in self._fails_on:
             raise CategorizedError("delete failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+        if key in self._delete_errors:
+            raise RuntimeError(f"delete failed for {key}")
         self.deleted.append(key)
         self.deleted_versions.append((key, version_id))
 
@@ -176,16 +199,21 @@ async def _insert_image_row(
     pending_age: timedelta = timedelta(hours=2),
     expires_in: timedelta | None = None,
     kernel_config_key: str | None = None,
+    digest: str | None = None,
+    size_bytes: int = 0,
+    publication_principal: str | None = None,
 ) -> UUID:
     """Insert one image_catalog row with DB-clock-relative pending_since/expires_at."""
     expires_clause = "now() + make_interval(secs => %(expires_secs)s)" if expires_in else "NULL"
     cur = await conn.execute(
         "INSERT INTO image_catalog "
         "(provider, name, arch, format, root_device, object_key, kernel_config_key, digest, "
-        " visibility, owner, expires_at, state, publication_attempt_id, pending_since) "
+        " visibility, owner, expires_at, state, size_bytes, publication_attempt_id, "
+        "publication_principal, pending_since) "
         "VALUES (%(provider)s, %(name)s, %(arch)s, 'qcow2', '/dev/vda', %(object_key)s, "
         " %(kernel_config_key)s, %(digest)s, %(visibility)s, %(owner)s, "
-        f"{expires_clause}, %(state)s, %(publication_attempt_id)s, "
+        f"{expires_clause}, %(state)s, %(size_bytes)s, %(publication_attempt_id)s, "
+        "%(publication_principal)s, "
         "now() - make_interval(secs => %(pending_secs)s)) "
         "RETURNING id",
         {
@@ -194,11 +222,13 @@ async def _insert_image_row(
             "arch": arch,
             "object_key": object_key,
             "kernel_config_key": kernel_config_key,
-            "digest": None if object_key is None else "sha256:abc",
+            "digest": None if object_key is None else digest or "sha256:" + "a" * 64,
             "visibility": visibility,
             "owner": owner,
             "state": state,
+            "size_bytes": size_bytes,
             "publication_attempt_id": uuid4() if state == "pending" else None,
+            "publication_principal": publication_principal,
             "pending_secs": pending_age.total_seconds(),
             "expires_secs": (expires_in or timedelta()).total_seconds(),
         },
@@ -231,6 +261,24 @@ async def _set_catalog_rootfs(
 
 def _grace() -> timedelta:
     return timedelta(hours=1)
+
+
+def _digest(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _head(data: bytes, *, checksum: str | None = None) -> HeadResult:
+    return HeadResult(
+        size_bytes=len(data),
+        checksum_sha256=checksum,
+        etag="etag",
+        last_modified=STORE_MTIME,
+        version_id="test-version",
+    )
+
+
+def _checksum(data: bytes) -> str:
+    return base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
 
 
 # --- leaked_images -------------------------------------------------------------------
@@ -509,6 +557,345 @@ def test_dangling_present_row_does_not_halt_subsequent_removal(migrated_url: str
     asyncio.run(_run())
 
 
+def test_abandoned_matching_publication_is_registered(migrated_url: str) -> None:
+    data = b"complete-abandoned-publication"
+    key = "images/local-libvirt/recovered/x86_64/attempt.qcow2"
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            row_id = await _insert_image_row(
+                seed,
+                name="recovered",
+                state="pending",
+                object_key=key,
+                digest=_digest(data),
+                size_bytes=len(data),
+            )
+        store = _FakeImageStore(
+            {key: timedelta(hours=2)}, heads={key: _head(data, checksum=_checksum(data))}
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            terminal = await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace()))
+        assert terminal == 1
+        async with await connect(migrated_url) as check:
+            cur = await check.execute(
+                "SELECT state, publication_attempt_id, publication_principal "
+                "FROM image_catalog WHERE id = %s",
+                (row_id,),
+            )
+            assert await cur.fetchone() == ("registered", None, None)
+        assert store.deleted == []
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("case", "digest", "head"),
+    [
+        ("wrong-size", _digest(b"expected"), _head(b"wrong-size", checksum=_checksum(b"expected"))),
+        ("missing-checksum", _digest(b"expected"), _head(b"expected")),
+        ("malformed-checksum", _digest(b"expected"), _head(b"expected", checksum="not-base64")),
+        (
+            "mismatched-checksum",
+            _digest(b"expected"),
+            _head(b"expected", checksum=_checksum(b"different")),
+        ),
+        ("malformed-digest", "sha256:abc", _head(b"expected", checksum=_checksum(b"expected"))),
+    ],
+)
+def test_invalid_abandoned_publication_is_deleted(
+    migrated_url: str, case: str, digest: str, head: HeadResult
+) -> None:
+    key = f"images/local-libvirt/{case}/x86_64/attempt.qcow2"
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            row_id = await _insert_image_row(
+                seed,
+                name=case,
+                state="pending",
+                object_key=key,
+                digest=digest,
+                size_bytes=len(b"expected"),
+            )
+        store = _FakeImageStore({key: timedelta(hours=2)}, heads={key: head})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            terminal = await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace()))
+        assert terminal == 1
+        assert store.deleted == [key]
+        async with await connect(migrated_url) as check:
+            cur = await check.execute("SELECT 1 FROM image_catalog WHERE id = %s", (row_id,))
+            assert await cur.fetchone() is None
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("config_present", [True, False])
+def test_recovered_publication_reconciles_config_key(
+    migrated_url: str, config_present: bool
+) -> None:
+    data = b"valid-with-optional-config"
+    key = "images/local-libvirt/configured/x86_64/attempt.qcow2"
+    config_key = "images/local-libvirt/configured/x86_64/attempt.config"
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            row_id = await _insert_image_row(
+                seed,
+                name="configured",
+                state="pending",
+                object_key=key,
+                kernel_config_key=config_key,
+                digest=_digest(data),
+                size_bytes=len(data),
+            )
+        objects = {key: timedelta(hours=2)}
+        if config_present:
+            objects[config_key] = timedelta(hours=2)
+        store = _FakeImageStore(objects, heads={key: _head(data, checksum=_checksum(data))})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            terminal = await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace()))
+        assert terminal == 1
+        async with await connect(migrated_url) as check:
+            cur = await check.execute(
+                "SELECT state, kernel_config_key FROM image_catalog WHERE id = %s", (row_id,)
+            )
+            assert await cur.fetchone() == (
+                "registered",
+                config_key if config_present else None,
+            )
+
+    asyncio.run(_run())
+
+
+def test_config_head_failure_keeps_publication_pending_for_retry(migrated_url: str) -> None:
+    data = b"valid-but-config-head-fails"
+    key = "images/local-libvirt/config-error/x86_64/attempt.qcow2"
+    config_key = "images/local-libvirt/config-error/x86_64/attempt.config"
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            row_id = await _insert_image_row(
+                seed,
+                name="config-error",
+                state="pending",
+                object_key=key,
+                kernel_config_key=config_key,
+                digest=_digest(data),
+                size_bytes=len(data),
+            )
+        store = _FakeImageStore(
+            {key: timedelta(hours=2), config_key: timedelta(hours=2)},
+            heads={key: _head(data, checksum=_checksum(data))},
+            head_errors={config_key},
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(RuntimeError, match="HEAD failed"):
+                await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace()))
+        async with await connect(migrated_url) as check:
+            cur = await check.execute(
+                "SELECT state, kernel_config_key FROM image_catalog WHERE id = %s", (row_id,)
+            )
+            assert await cur.fetchone() == ("pending", config_key)
+
+    asyncio.run(_run())
+
+
+def test_recovered_private_publication_audits_persisted_principal(migrated_url: str) -> None:
+    data = b"private-recovery"
+    key = "images/local-libvirt__proj/private/x86_64/attempt.qcow2"
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            row_id = await _insert_image_row(
+                seed,
+                name="private",
+                state="pending",
+                visibility="private",
+                owner="proj",
+                expires_in=timedelta(hours=1),
+                object_key=key,
+                digest=_digest(data),
+                size_bytes=len(data),
+                publication_principal="alice",
+            )
+        store = _FakeImageStore(
+            {key: timedelta(hours=2)}, heads={key: _head(data, checksum=_checksum(data))}
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert (
+                await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace())) == 1
+            )
+        async with await connect(migrated_url) as check:
+            cur = await check.execute(
+                "SELECT principal, project, transition FROM audit_log WHERE object_id = %s",
+                (row_id,),
+            )
+            assert await cur.fetchone() == ("alice", "proj", "private-upload:registered")
+
+    asyncio.run(_run())
+
+
+def test_missing_private_principal_reclaims_matching_object_and_quota(migrated_url: str) -> None:
+    data = b"private-without-actor"
+    key = "images/local-libvirt__proj/no-actor/x86_64/attempt.qcow2"
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            row_id = await _insert_image_row(
+                seed,
+                name="no-actor",
+                state="pending",
+                visibility="private",
+                owner="proj",
+                expires_in=timedelta(hours=1),
+                object_key=key,
+                digest=_digest(data),
+                size_bytes=len(data),
+            )
+            assert await _project_usage(seed, "proj", adopting=None) == (1, len(data))
+        store = _FakeImageStore(
+            {key: timedelta(hours=2)}, heads={key: _head(data, checksum=_checksum(data))}
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert (
+                await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace())) == 1
+            )
+        assert store.deleted == [key]
+        async with await connect(migrated_url) as check:
+            assert await _project_usage(check, "proj", adopting=None) == (0, 0)
+            cur = await check.execute("SELECT 1 FROM image_catalog WHERE id = %s", (row_id,))
+            assert await cur.fetchone() is None
+
+    asyncio.run(_run())
+
+
+def test_private_recovery_audit_failure_rolls_back_registration(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = b"private-audit-failure"
+    key = "images/local-libvirt__proj/audit-error/x86_64/attempt.qcow2"
+
+    async def _fail_audit(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr(image_cleanup, "record_private_registration", _fail_audit, raising=False)
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            row_id = await _insert_image_row(
+                seed,
+                name="audit-error",
+                state="pending",
+                visibility="private",
+                owner="proj",
+                expires_in=timedelta(hours=1),
+                object_key=key,
+                digest=_digest(data),
+                size_bytes=len(data),
+                publication_principal="alice",
+            )
+        store = _FakeImageStore(
+            {key: timedelta(hours=2)}, heads={key: _head(data, checksum=_checksum(data))}
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(RuntimeError, match="audit unavailable"):
+                await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace()))
+        async with await connect(migrated_url) as check:
+            cur = await check.execute("SELECT state FROM image_catalog WHERE id = %s", (row_id,))
+            assert await cur.fetchone() == ("pending",)
+            cur = await check.execute("SELECT 1 FROM audit_log WHERE object_id = %s", (row_id,))
+            assert await cur.fetchone() is None
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("failure", ["delete-error", "still-present"])
+def test_unproven_invalid_object_deletion_keeps_row_for_retry(
+    migrated_url: str, failure: str
+) -> None:
+    data = b"invalid-object"
+    key = f"images/local-libvirt/{failure}/x86_64/attempt.qcow2"
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            row_id = await _insert_image_row(
+                seed,
+                name=failure,
+                state="pending",
+                object_key=key,
+                digest=_digest(data),
+                size_bytes=len(data) + 1,
+            )
+        store = _FakeImageStore(
+            {key: timedelta(hours=2)},
+            heads={key: _head(data, checksum=_checksum(data))},
+            delete_errors={key} if failure == "delete-error" else None,
+            sticky_deletes={key} if failure == "still-present" else None,
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            if failure == "delete-error":
+                with pytest.raises(RuntimeError, match="delete failed"):
+                    await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace()))
+            else:
+                assert (
+                    await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace()))
+                    == 0
+                )
+        async with await connect(migrated_url) as check:
+            cur = await check.execute("SELECT state FROM image_catalog WHERE id = %s", (row_id,))
+            assert await cur.fetchone() == ("pending",)
+
+    asyncio.run(_run())
+
+
+def test_repair_terminal_count_includes_registered_and_removed(migrated_url: str) -> None:
+    valid = b"valid"
+    valid_key = "images/local-libvirt/valid/x86_64/attempt.qcow2"
+    invalid_key = "images/local-libvirt/invalid/x86_64/attempt.qcow2"
+    missing_key = "images/local-libvirt/missing/x86_64/attempt.qcow2"
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _insert_image_row(
+                seed,
+                name="valid",
+                state="pending",
+                object_key=valid_key,
+                digest=_digest(valid),
+                size_bytes=len(valid),
+            )
+            await _insert_image_row(
+                seed,
+                name="invalid",
+                state="pending",
+                object_key=invalid_key,
+                digest=_digest(b"expected"),
+                size_bytes=len(b"expected"),
+            )
+            await _insert_image_row(
+                seed,
+                name="missing",
+                state="pending",
+                object_key=missing_key,
+                digest=_digest(b"missing"),
+                size_bytes=len(b"missing"),
+            )
+        store = _FakeImageStore(
+            {valid_key: timedelta(hours=2), invalid_key: timedelta(hours=2)},
+            heads={
+                valid_key: _head(valid, checksum=_checksum(valid)),
+                invalid_key: _head(b"wrong", checksum=_checksum(b"wrong")),
+            },
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert (
+                await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace())) == 3
+            )
+
+    asyncio.run(_run())
+
+
 # --- expired_private_images ----------------------------------------------------------
 
 
@@ -587,6 +974,62 @@ def test_unexpired_private_image_is_kept(migrated_url: str) -> None:
         async with await connect(migrated_url) as check:
             cur = await check.execute("SELECT 1 FROM image_catalog WHERE id = %s", (row_id,))
             assert await cur.fetchone() is not None
+
+    asyncio.run(_run())
+
+
+def test_expired_pending_private_image_is_not_an_expiry_candidate(migrated_url: str) -> None:
+    async def _run() -> None:
+        key = "images/local-libvirt__proj/publishing/x86_64/attempt.qcow2"
+        async with await connect(migrated_url) as seed:
+            row_id = await _insert_image_row(
+                seed,
+                name="publishing",
+                state="pending",
+                visibility="private",
+                owner="proj",
+                object_key=key,
+                expires_in=timedelta(seconds=-1),
+                publication_principal="alice",
+            )
+        store = _FakeImageStore({key: timedelta(hours=2)})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, lambda c: _repair_expired_private_images(c, store)) == 0
+        assert store.deleted == []
+        async with await connect(migrated_url) as check:
+            cur = await check.execute("SELECT state FROM image_catalog WHERE id = %s", (row_id,))
+            assert await cur.fetchone() == ("pending",)
+
+    asyncio.run(_run())
+
+
+def test_private_expiry_locked_reread_rejects_candidate_that_became_pending(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        key = "images/local-libvirt__proj/rearmed/x86_64/attempt.qcow2"
+        async with await connect(migrated_url) as conn:
+            row_id = await _insert_image_row(
+                conn,
+                name="rearmed",
+                visibility="private",
+                owner="proj",
+                object_key=key,
+                expires_in=timedelta(seconds=-1),
+            )
+            # Candidate selection saw registered. A publisher adopted it before the locked
+            # re-read, so expiry must not delete the attempt's object or row.
+            await conn.execute(
+                "UPDATE image_catalog SET state = 'pending', publication_attempt_id = %s, "
+                "publication_principal = 'alice' WHERE id = %s",
+                (uuid4(), row_id),
+            )
+            store = _FakeImageStore({key: timedelta(hours=2)})
+            assert await _expire_one_private_image(conn, store, row_id, key, None) is False
+        assert store.deleted == []
+        async with await connect(migrated_url) as check:
+            cur = await check.execute("SELECT state FROM image_catalog WHERE id = %s", (row_id,))
+            assert await cur.fetchone() == ("pending",)
 
     asyncio.run(_run())
 
