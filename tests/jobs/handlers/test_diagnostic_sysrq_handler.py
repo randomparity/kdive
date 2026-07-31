@@ -10,15 +10,23 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.storage import ArtifactWriteRequest, FetchedArtifact, StoredArtifact
+from kdive.artifacts.storage import (
+    ArtifactWriteRequest,
+    FetchedArtifact,
+    HeadResult,
+    StoredArtifact,
+)
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, JobState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -34,6 +42,7 @@ from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.audit import args_digest
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
+from tests.clock import STORE_MTIME
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
@@ -57,6 +66,19 @@ class _FakeStore:
     def get_artifact(self, key: str, _etag: str | None) -> FetchedArtifact:
         data, sensitivity, retention = self.objects[key]
         return FetchedArtifact(data, sensitivity, retention)
+
+    def head(self, key: str) -> HeadResult | None:
+        """Serve the etag ``put_artifact`` derived, so ADR-0519's delete fence is testable."""
+        if key not in self.objects:
+            return None
+        data, sensitivity, _retention = self.objects[key]
+        return HeadResult(
+            size_bytes=len(data),
+            checksum_sha256=None,
+            etag=hashlib.sha256(data).hexdigest(),
+            sensitivity=sensitivity,
+            last_modified=STORE_MTIME,
+        )
 
 
 class _FakeControl:
@@ -585,3 +607,391 @@ def test_unsupported_provider_fails_capability_configuration_error(
     assert excinfo.value.details["reason"] == "diagnostic_sysrq_unsupported"
     # The fake Control port is never invoked once the capability gate refuses.
     assert control.calls == []
+
+
+def _advisory_locks_held_by(url: str, backend_pid: int) -> int:
+    """Count advisory locks ``backend_pid`` holds, probed from a **second**, sync connection.
+
+    Synchronous because it is called from inside ``put_artifact``, which the handler runs on a
+    worker thread via ``asyncio.to_thread``; and from a second backend because probing on the
+    connection under test would perturb the transaction being measured.
+    """
+    with psycopg.connect(url, autocommit=True) as probe, probe.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = %s",
+            (backend_pid,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def _locks_visible_while_one_is_held(url: str) -> int:
+    """Control for :func:`_advisory_locks_held_by`: what it reports while a lock IS held.
+
+    Without this, a ``locks_at_put == [0]`` assertion would pass just as happily if the probe
+    could never see an advisory lock at all.
+    """
+    async with (
+        await psycopg.AsyncConnection.connect(url) as conn,
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.SYSTEM, uuid4()),
+    ):
+        return await asyncio.to_thread(_advisory_locks_held_by, url, conn.info.backend_pid)
+
+
+class _LockProbingStore(_FakeStore):
+    """A store that records the handler's own advisory-lock count at the moment of each PUT."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__()
+        self._url = url
+        self.backend_pid: int | None = None
+        self.locks_at_put: list[int] = []
+        self.deleted: list[str] = []
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        assert self.backend_pid is not None, "the test must publish the handler's backend pid"
+        self.locks_at_put.append(_advisory_locks_held_by(self._url, self.backend_pid))
+        return super().put_artifact(request)
+
+    def delete(self, key: str) -> None:
+        self.deleted.append(key)
+        self.objects.pop(key, None)
+
+
+class _TearingDownStore(_LockProbingStore):
+    """Drives the System out of READY from a second backend while the PUT is in flight."""
+
+    def __init__(self, url: str, system_id: UUID) -> None:
+        super().__init__(url)
+        self._system_id = system_id
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        with psycopg.connect(self._url, autocommit=True) as teardown:
+            teardown.execute(
+                "UPDATE systems SET state = 'torn_down' WHERE id = %s", (self._system_id,)
+            )
+        return super().put_artifact(request)
+
+
+async def _run_probing(pool, store, control, job):
+    """Drive the handler the way the worker dispatches it, exposing its backend pid to the store.
+
+    ``set_autocommit(True)`` mirrors ``JobWorker._run_handler`` and is load-bearing, not
+    incidental: on a pooled non-autocommit connection the handler's ``conn.transaction()`` blocks
+    are savepoints inside one implicit transaction that the pool ends, so a
+    ``pg_advisory_xact_lock`` would outlive every block regardless of where the PUT sits
+    (ADR-0506/ADR-0516). Only under the worker's dispatch does releasing the lock mean anything.
+    """
+    resolver = provider_resolver(controller=control)
+    async with pool.connection() as conn:
+        await conn.set_autocommit(True)
+        store.backend_pid = conn.info.backend_pid
+        try:
+            return await diagnostic_sysrq.diagnostic_sysrq_handler(
+                conn,
+                job,
+                resolver=resolver,
+                secret_registry=SecretRegistry(),
+                artifact_store=cast(ObjectStore, store),
+            )
+        finally:
+            await conn.set_autocommit(False)
+
+
+def test_put_artifact_holds_no_advisory_lock(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The capture PUT runs with the per-System lock released (#1725).
+
+    ``SYSTEM`` is the contended scope — teardown, boot and console rotation serialize on it — so
+    a PUT held under it bounds all of them by object-store latency. The control probe pins that
+    the same query *does* report a lock when one is held, so the zero is a released lock rather
+    than a blind probe.
+    """
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot log\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
+    store = _LockProbingStore(migrated_url)
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            ref = await _run_probing(pool, store, control, _job(system_id, "show_blocked_tasks"))
+            return (
+                ref,
+                await _artifact_rows(pool, system_id),
+                await _locks_visible_while_one_is_held(migrated_url),
+            )
+
+    ref, rows, held = asyncio.run(_go())
+    assert held >= 1  # the probe can see an advisory lock when one is held
+    assert store.locks_at_put == [0]  # ...and saw none held while the dump was being written
+    assert ref is not None  # the capture still completed and registered its row
+    assert len(rows) == 1
+
+
+def test_teardown_during_put_discards_the_unregistered_object(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A System leaving READY while the PUT is in flight registers no row and deletes the object.
+
+    ``_reclaim_sysrq_artifacts`` selects the keys to delete *from the artifacts rows*, so an
+    object with no row survives the teardown that was supposed to reclaim it — permanently.
+    """
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot log\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
+    seen: dict[str, object] = {}
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            store = _TearingDownStore(migrated_url, system_id)
+            job = _job(system_id, "show_blocked_tasks")
+            seen["store"] = store
+            key = f"local/systems/{system_id}/sysrq-diagnostic-{job.id}"
+            seen["key"] = key
+            with pytest.raises(CategorizedError) as excinfo:
+                await _run_probing(pool, store, control, job)
+            seen["rows"] = await _artifact_rows(pool, system_id)
+            return excinfo.value
+
+    err = asyncio.run(_go())
+    store = cast(_TearingDownStore, seen["store"])
+    assert err.details["reason"] == "system_changed_state"  # the state guard still fails the job
+    assert store.deleted == [seen["key"]]  # exactly the key this attempt wrote
+    assert store.objects == {}  # the object did not survive the aborted registration
+    assert seen["rows"] == []
+
+
+def test_discard_failure_does_not_mask_the_changed_state_error(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store fault on the compensating delete is swallowed: the state error is still raised."""
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot log\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
+
+    class _UndeletableStore(_TearingDownStore):
+        def delete(self, key: str) -> None:
+            self.deleted.append(key)
+            raise CategorizedError(
+                "delete_object failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+
+    seen: dict[str, object] = {}
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            store = _UndeletableStore(migrated_url, system_id)
+            seen["store"] = store
+            with pytest.raises(CategorizedError) as excinfo:
+                await _run_probing(pool, store, control, _job(system_id, "show_blocked_tasks"))
+            return excinfo.value
+
+    err = asyncio.run(_go())
+    store = cast(_UndeletableStore, seen["store"])
+    assert store.deleted  # the compensating delete was attempted
+    assert err.details["reason"] == "system_changed_state"  # ...and did not become the outcome
+
+
+# --- Two concurrent attempts of one job (#1725 H1) -------------------------------------
+
+
+class _RacingStore(_LockProbingStore):
+    """Drives the H1 interleaving: leave READY during the first PUT, park in the first ``head``.
+
+    A lapsed lease lets two attempts of one job run at once (``jobs/worker.py`` names the
+    "mid-job reclaim and double-run" it cannot rule out), and ``SystemState.READY`` is not
+    monotonic — PAUSED and RESTORING return to it (ADR-0378). So an attempt whose phase 3 was
+    refused can be holding a compensating delete for a key a peer attempt then registers. The
+    park in ``head`` is where the delete's etag fence is evaluated, so it is the seam that
+    decides whether that peer's object survives.
+    """
+
+    def __init__(self, url: str, system_id: UUID) -> None:
+        super().__init__(url)
+        self._system_id = system_id
+        self.head_arrived = threading.Event()
+        self.release_head = threading.Event()
+        self.head_probed: list[str] = []
+        self._left_ready = False
+        self._parked = False
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        if not self._left_ready:
+            self._left_ready = True
+            with psycopg.connect(self._url, autocommit=True) as pauser:
+                pauser.execute(
+                    "UPDATE systems SET state = 'paused' WHERE id = %s", (self._system_id,)
+                )
+        return super().put_artifact(request)
+
+    def head(self, key: str):
+        self.head_probed.append(key)
+        if not self._parked:
+            self._parked = True
+            self.head_arrived.set()
+            self.release_head.wait(timeout=30)
+        return super().head(key)
+
+
+async def _row_etag(pool: AsyncConnectionPool, object_key: str) -> str:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT etag FROM artifacts WHERE object_key = %s", (object_key,))
+        row = await cur.fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+async def _run_attempt(pool, store, control, job):
+    """One worker-shaped attempt, on its own connection (autocommit, as the worker dispatches)."""
+    resolver = provider_resolver(controller=control)
+    async with pool.connection() as conn:
+        await conn.set_autocommit(True)
+        store.backend_pid = conn.info.backend_pid
+        try:
+            return await diagnostic_sysrq.diagnostic_sysrq_handler(
+                conn,
+                job,
+                resolver=resolver,
+                secret_registry=SecretRegistry(),
+                artifact_store=cast(ObjectStore, store),
+            )
+        finally:
+            await conn.set_autocommit(False)
+
+
+def test_concurrent_attempt_registering_the_key_survives_the_discard(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused attempt must not delete the object a peer attempt's committed row describes.
+
+    Attempt A is refused (the System left READY mid-PUT) and enters its compensating delete,
+    parking at the etag fence. The System returns to READY and attempt B registers ``row_B`` for
+    the same key, overwriting the object with B's bytes. A must then leave that object alone:
+    deleting it would leave a committed row pointing at nothing, and the reclaim sweeps are
+    row-driven, so nothing would ever detect it.
+    """
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot log\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
+    seen: dict[str, object] = {}
+
+    async def _go():
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4, open=False) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            store = _RacingStore(migrated_url, system_id)
+            job = _job(system_id, "show_blocked_tasks")
+            seen["store"] = store
+            key = f"local/systems/{system_id}/sysrq-diagnostic-{job.id}"
+            seen["key"] = key
+            task_a = asyncio.create_task(_run_attempt(pool, store, control, job))
+            await asyncio.to_thread(store.head_arrived.wait, 30)
+            # The System comes back; B is now free to register the key A is about to delete.
+            async with pool.connection() as conn:
+                await conn.execute("UPDATE systems SET state = 'ready' WHERE id = %s", (system_id,))
+            seen["ref_b"] = await _run_attempt(pool, store, control, job)
+            store.release_head.set()
+            with pytest.raises(CategorizedError) as excinfo:
+                await task_a
+            seen["rows"] = await _artifact_rows(pool, system_id)
+            seen["row_etag"] = await _row_etag(pool, key)
+            return excinfo.value
+
+    err = asyncio.run(_go())
+    store = cast(_RacingStore, seen["store"])
+    key = cast(str, seen["key"])
+    assert err.details["reason"] == "system_changed_state"  # A still fails, as it must
+    assert store.head_probed == [key]  # A's discard reached the etag fence...
+    assert store.deleted == []  # ...and declined to delete
+    assert key in store.objects  # the peer's object survived
+    assert seen["ref_b"] is not None  # B registered its row
+    rows = cast(list, seen["rows"])
+    assert len(rows) == 1
+    # The surviving row and the surviving object describe each other — the whole point.
+    assert seen["row_etag"] == hashlib.sha256(store.objects[key][0]).hexdigest()
+
+
+class _StallingSysrqStore(_FakeStore):
+    """Parks the FIRST ``put_artifact`` until released, so a peer attempt can overtake it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_put_arrived = threading.Event()
+        self.release_first_put = threading.Event()
+        self._stalled = False
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        if not self._stalled:
+            self._stalled = True
+            self.first_put_arrived.set()
+            self.release_first_put.wait(timeout=30)
+        return super().put_artifact(request)
+
+
+def test_etag_repair_survives_the_changed_state_raise(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repair must commit even on the sub-path that then fails the job.
+
+    This is the one site whose phase 3 *raises*, and psycopg discards a transaction on any
+    exception leaving its block — so a repair written inside that block would be rolled back and
+    the row left describing bytes the object no longer holds, which is precisely the drift the
+    repair exists to remove. Attempt A passes phase 1, parks in its PUT while B registers the
+    key, and finds the System no longer READY at phase 3: it must repair the row *and* raise.
+    """
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot log\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
+    store = _StallingSysrqStore()
+    seen: dict[str, object] = {}
+
+    async def _go():
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4, open=False) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            job = _job(system_id, "show_blocked_tasks")
+            key = f"local/systems/{system_id}/sysrq-diagnostic-{job.id}"
+            seen["key"] = key
+            task_a = asyncio.create_task(_run_attempt(pool, store, control, job))
+            await asyncio.to_thread(store.first_put_arrived.wait, 30)
+            # B registers the key while A is parked, so A's phase 3 will find a peer's row...
+            seen["ref_b"] = await _run_attempt(pool, store, control, job)
+            # ...and the System leaves READY, so A's phase 3 takes the raising sub-path.
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE systems SET state = 'paused' WHERE id = %s", (system_id,)
+                )
+            store.release_first_put.set()
+            with pytest.raises(CategorizedError) as excinfo:
+                await task_a
+            seen["row_etag"] = await _row_etag(pool, key)
+            seen["rows"] = await _artifact_rows(pool, system_id)
+            return excinfo.value
+
+    err = asyncio.run(_go())
+    key = cast(str, seen["key"])
+    assert err.details["reason"] == "system_changed_state"  # the job still fails, as it must
+    assert seen["ref_b"] is not None
+    assert cast(list, seen["rows"]) != []  # B's row survived
+    # A's PUT landed after B's, so the object holds A's bytes and the row must say so — the
+    # repair was written on a path that goes on to raise, and must not have been rolled back.
+    assert seen["row_etag"] == hashlib.sha256(store.objects[key][0]).hexdigest()

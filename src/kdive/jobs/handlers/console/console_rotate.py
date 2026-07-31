@@ -2,9 +2,12 @@
 
 Reads a running System's growing console log, rotates the new bytes into redacted
 gzip-compressed part artifacts via the pure :func:`~kdive.providers.console_parts.rotation.rotate`
-core, and persists the rotation cursor in the object-store sidecar. The read-sidecar -> seal
-critical section runs under the per-System advisory lock (ADR-0095) so two rotations of one
-System never interleave; the sidecar cursor is advanced only after the part rows commit so a
+core, and persists the rotation cursor in the object-store sidecar. The rotation is planned under
+the per-System advisory lock (ADR-0095) — cursor read, part derivation, insert-if-absent probe —
+and the part rows are registered under it again, but the part **objects** are PUT between those
+two locked phases rather than inside one (ADR-0519), because a rotation seals an unbounded number
+of parts and ``SYSTEM`` is the scope teardown, boot and revert also serialize on. The sidecar
+cursor is advanced only after the part rows commit so a
 crash before that write replays the identical ``(gen, index)`` parts as insert-if-absent no-ops.
 The handler is best-effort: a permission wall on the console log (a non-root worker, ADR-0223)
 degrades to "register no parts" rather than failing the job, and a missing object store is a no-op.
@@ -19,12 +22,14 @@ import asyncio
 import gzip
 import logging
 from collections.abc import Callable
-from typing import LiteralString
+from typing import LiteralString, NamedTuple
 from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.discard import discard_unregistered_objects
+from kdive.artifacts.etag_repair import reconcile_row_etag
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -64,7 +69,11 @@ _RETENTION_CLASS = "console"
 # parts/sidecar and set the System terminal; without this guard it would re-seal gen-0 parts from
 # the still-present console log (absent sidecar -> ZERO state) and orphan them past teardown. The
 # guard and teardown both run under the per-System advisory lock, so the lock serializes the
-# state-set against this state-read: whichever runs second sees the other's committed effect.
+# state-set against this state-read: whichever runs second sees the other's committed effect. The
+# guard is evaluated twice — once when the rotation is planned and again when its rows are
+# registered — because the part objects are PUT between those phases (ADR-0519). A teardown that
+# lands in that window fails the second evaluation, and the objects already written are deleted
+# rather than left behind a row-driven reclaim that has already passed them.
 _LIVE_STATES: frozenset[SystemState] = frozenset(
     {
         SystemState.READY,
@@ -76,7 +85,8 @@ _LIVE_STATES: frozenset[SystemState] = frozenset(
 )
 
 _PART_ROW_SQL: LiteralString = (
-    "SELECT id FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
+    "SELECT id, etag FROM artifacts "
+    "WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
 )
 
 _SYSTEM_STATE_SQL: LiteralString = "SELECT state FROM systems WHERE id = %s"
@@ -108,10 +118,25 @@ async def _system_is_live(conn: AsyncConnection, system_id: UUID) -> bool:
     return row is not None and SystemState(row[0]) in _LIVE_STATES
 
 
-async def _existing_part_row(conn: AsyncConnection, system_id: UUID, object_key: str) -> bool:
+class _ExistingRow(NamedTuple):
+    """A committed part row for this object key: its id, and the object etag it describes."""
+
+    id: UUID
+    etag: str
+
+
+async def _existing_part_row(
+    conn: AsyncConnection, system_id: UUID, object_key: str
+) -> _ExistingRow | None:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_PART_ROW_SQL, (system_id, object_key))
-        return await cur.fetchone() is not None
+        row = await cur.fetchone()
+    return None if row is None else _ExistingRow(row["id"], str(row["etag"]))
+
+
+async def _key_unregistered(conn: AsyncConnection, system_id: UUID, object_key: str) -> bool:
+    """Whether no committed row claims ``object_key`` — the discard's row fence, run unlocked."""
+    return await _existing_part_row(conn, system_id, object_key) is None
 
 
 def _put_part(store: ObjectStore, system_id: UUID, part: SealedPart) -> StoredArtifact:
@@ -121,7 +146,12 @@ def _put_part(store: ObjectStore, system_id: UUID, part: SealedPart) -> StoredAr
             owner_kind=_OWNER_KIND,
             owner_id=str(system_id),
             name=part_object_name(part.gen, part.index),
-            data=gzip.compress(part.redacted),
+            # mtime=0 is pinned rather than assumed: a re-derived part must compress to the same
+            # bytes, or its etag stops being a stable identity for the ``(gen, index)`` key that
+            # insert-if-absent is built on. CPython's default for this argument was the current
+            # time before 3.13 and is 0 from 3.13 on, so the value this repository depends on has
+            # already moved once; stating it keeps the invariant ours rather than the runtime's.
+            data=gzip.compress(part.redacted, mtime=0),
             sensitivity=Sensitivity.REDACTED,
             retention_class=_RETENTION_CLASS,
             content_encoding="gzip",
@@ -129,38 +159,40 @@ def _put_part(store: ObjectStore, system_id: UUID, part: SealedPart) -> StoredAr
     )
 
 
-async def _seal_part(
-    conn: AsyncConnection,
-    store: ObjectStore,
-    system_id: UUID,
-    part: SealedPart,
-    run_id: UUID | None,
-) -> None:
-    """Store one part's gzipped object and register its row, idempotent on the object key.
+class _Plan(NamedTuple):
+    """A planned rotation: the advanced state, the parts still unsealed, and their attribution."""
 
-    ``run_id`` is the System's most-recently-booted Run (ADR-0279), stamped as a correlation
-    attribute; ownership stays ``owner_kind='systems'``. ``None`` leaves the part uncorrelated.
-    """
-    object_key = artifact_key(
+    result: RotationResult
+    pending: tuple[SealedPart, ...]
+    run_id: UUID | None
+
+
+def _part_key(system_id: UUID, part: SealedPart) -> str:
+    """The object key a sealed part is stored under (its insert-if-absent identity)."""
+    return artifact_key(
         _TENANT, _OWNER_KIND, str(system_id), part_object_name(part.gen, part.index)
     )
-    if await _existing_part_row(conn, system_id, object_key):
-        return
-    stored = await asyncio.to_thread(_put_part, store, system_id, part)
-    await ARTIFACTS.insert(
-        conn,
-        register_artifact_row(stored, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=run_id),
-    )
 
 
-async def _rotate_under_lock(
+async def _plan_rotation(
     conn: AsyncConnection,
     store: ObjectStore,
     system_id: UUID,
     boot_id: str,
     redact: Callable[[bytes], bytes],
-) -> RotationResult | None:
-    """Read the cursor, seal new parts, and return the advanced state — all under the lock.
+) -> _Plan | None:
+    """Under the per-System lock: guard, read the cursor, and decide which parts to seal.
+
+    Writes nothing. The part objects are PUT by :func:`_seal_pending` after this lock is
+    released, because a rotation seals an unbounded number of parts and holding the contended
+    ``SYSTEM`` scope across that many object-store round-trips bounds every teardown, boot and
+    revert on this System by the store's latency (ADR-0519).
+
+    The sidecar GET stays under the lock **deliberately**. It is one small bounded read, and it
+    is the rotation cursor: moving it out would widen the window in which a peer rotation reads
+    the same cursor and re-derives the same ``(gen, index)`` parts. Insert-if-absent on the part
+    object key makes such a re-derivation harmless, but not free — it costs a duplicate PUT of
+    identical bytes — so ADR-0519 trades the unbounded PUT loop for a bounded GET, not both.
 
     Returns ``None`` (sealing nothing) when the System is no longer live (teardown reclaimed it,
     the race guard above) or the console log cannot be read (ADR-0223): the permission wall is a
@@ -185,9 +217,67 @@ async def _rotate_under_lock(
         run_id = await _resolve_run_id(conn, system_id)
         state = await asyncio.to_thread(read_sidecar, store, _TENANT, system_id)
         result = rotate(state, file_bytes, boot_id, redact)
+        pending = []
         for part in result.parts:
-            await _seal_part(conn, store, system_id, part, run_id)
-        return result
+            if await _existing_part_row(conn, system_id, _part_key(system_id, part)) is None:
+                pending.append(part)
+        return _Plan(result=result, pending=tuple(pending), run_id=run_id)
+
+
+async def _seal_pending(
+    conn: AsyncConnection, store: ObjectStore, system_id: UUID, plan: _Plan
+) -> bool:
+    """PUT the planned part objects lock-free, then register their rows under one short lock.
+
+    Returns ``False`` when the locked re-verify finds the System no longer live — teardown ran
+    while the objects were in flight, so its row-driven reclaim has already passed them by and
+    nothing else would ever reach them. Every object this attempt wrote is discarded in that
+    case. The ordering that makes this safe is teardown's own: ``jobs/handlers/systems.py``
+    writes ``TORN_DOWN`` **under this same SYSTEM lock** and runs ``_reclaim_console_artifacts``
+    only afterwards, so a peer rotation's row can only have committed before that write and is
+    therefore covered by the reclaim. The discard still re-probes each row and compares each
+    etag immediately before deleting, so the delete cannot destroy an object a peer's row owns.
+
+    ``plan.run_id`` is the System's most-recently-booted Run (ADR-0279), stamped as a correlation
+    attribute; ownership stays ``owner_kind='systems'``. ``None`` leaves the part uncorrelated.
+    """
+    if not plan.pending:
+        return True
+    stored = [await asyncio.to_thread(_put_part, store, system_id, part) for part in plan.pending]
+    claimed: list[tuple[_ExistingRow, str]] = []
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        live = await _system_is_live(conn, system_id)
+        if live:
+            for obj in stored:
+                # Re-check under the lock: another rotation may have sealed this exact
+                # ``(gen, index)`` while the object was in flight, and its row owns the key.
+                existing = await _existing_part_row(conn, system_id, obj.key)
+                if existing is not None:
+                    claimed.append((existing, obj.key))
+                    continue
+                await ARTIFACTS.insert(
+                    conn,
+                    register_artifact_row(
+                        obj, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=plan.run_id
+                    ),
+                )
+    # A peer rotation owns these keys, and this attempt's PUT overwrote the objects its rows
+    # describe. Re-point each row at what its object actually holds — by stat, not by assuming
+    # this attempt's etag, since landing last in the store and last at the lock are independent.
+    # Outside the lock: each stat is a store round-trip, and there is one per claimed part.
+    for row, key in claimed:
+        await reconcile_row_etag(conn, store, row_id=row.id, object_key=key, row_etag=row.etag)
+    if not live:
+        _log.info(
+            "system %s stopped being live while %d console part(s) were in flight; discarding "
+            "them unregistered (teardown race guard)",
+            system_id,
+            len(stored),
+        )
+        await discard_unregistered_objects(
+            store, stored, still_unregistered=lambda key: _key_unregistered(conn, system_id, key)
+        )
+    return live
 
 
 async def _resolve_run_id(conn: AsyncConnection, system_id: UUID) -> UUID | None:
@@ -218,18 +308,25 @@ async def console_rotate_handler(
 ) -> str | None:
     """Rotate a System's growing console into redacted gzip part artifacts (best-effort).
 
-    Seals parts under the per-System lock, then advances the sidecar cursor after the part rows
-    commit. A console log the worker cannot read degrades to "register no parts".
+    Plans the rotation under the per-System lock, PUTs the part objects lock-free, registers
+    their rows under the lock again (ADR-0519), then advances the sidecar cursor after the part
+    rows commit. A console log the worker cannot read degrades to "register no parts", and a
+    System that stops being live at either locked phase seals nothing and leaves the cursor
+    where it was — so the next rotation re-derives the same parts rather than skipping them.
     """
     payload = load_payload(job, ConsoleRotatePayload)
     system_id = UUID(payload.system_id)
     boot_id = payload.boot_id
-    result = await _rotate_under_lock(
+    plan = await _plan_rotation(
         conn, artifact_store, system_id, boot_id, _make_redactor(secret_registry)
     )
-    if result is None:
+    if plan is None:
         return None
-    await asyncio.to_thread(write_sidecar, artifact_store, _TENANT, system_id, result.next_state)
+    if not await _seal_pending(conn, artifact_store, system_id, plan):
+        return None
+    await asyncio.to_thread(
+        write_sidecar, artifact_store, _TENANT, system_id, plan.result.next_state
+    )
     return str(system_id)
 
 

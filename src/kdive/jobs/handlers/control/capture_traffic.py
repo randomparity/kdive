@@ -28,6 +28,8 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.discard import discard_unregistered_objects
+from kdive.artifacts.etag_repair import reconcile_row_etag
 from kdive.artifacts.pcap_count import count_pcap_packets
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
@@ -61,7 +63,7 @@ _PCAP_HEADER_LEN = 24
 POLL_INTERVAL_SECONDS = 0.5
 
 _ARTIFACT_ROW_SQL: LiteralString = (
-    "SELECT id FROM artifacts WHERE owner_kind = 'runs' AND owner_id = %s AND object_key = %s"
+    "SELECT id, etag FROM artifacts WHERE owner_kind = 'runs' AND owner_id = %s AND object_key = %s"
 )
 
 
@@ -139,13 +141,25 @@ async def _job_canceled(conn: AsyncConnection, job_id: UUID) -> bool:
     return row is not None and row.state is JobState.CANCELED
 
 
-async def _existing_artifact_id(
+class _ExistingRow(NamedTuple):
+    """A committed pcap row for this object key: its id, and the object etag it describes."""
+
+    id: UUID
+    etag: str
+
+
+async def _existing_artifact_row(
     conn: AsyncConnection, run_id: UUID, object_key: str
-) -> UUID | None:
+) -> _ExistingRow | None:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_ARTIFACT_ROW_SQL, (run_id, object_key))
         row = await cur.fetchone()
-    return row["id"] if row is not None else None
+    return None if row is None else _ExistingRow(row["id"], str(row["etag"]))
+
+
+async def _key_unregistered(conn: AsyncConnection, run_id: UUID, object_key: str) -> bool:
+    """Whether no committed row claims ``object_key`` — the discard's row fence, run unlocked."""
+    return await _existing_artifact_row(conn, run_id, object_key) is None
 
 
 def _put_artifact(store: ObjectStore, run_id: UUID, name: str, data: bytes) -> StoredArtifact:
@@ -165,36 +179,76 @@ def _put_artifact(store: ObjectStore, run_id: UUID, name: str, data: bytes) -> S
 async def _store_capture(
     conn: AsyncConnection, store: ObjectStore, job: Job, run_id: UUID, project: str, data: bytes
 ) -> UUID | None:
-    """Under the per-Run lock (tx 2): re-check cancel, store the pcap, audit. ``None`` if canceled.
+    """Store the pcap and register its row; ``None`` if the job was canceled.
+
+    Three phases, so the per-Run advisory lock never spans the object-store PUT (ADR-0519):
+    a locked guard read (tx 2), the unlocked PUT, then a locked re-read plus the row insert
+    and audit (tx 3). Both locked phases are short and purely database work, so a slow or
+    retrying object store no longer bounds how long this Run is serialized.
 
     Insert-if-absent on the object key keeps an at-least-once retry from duplicating the row.
+    The first phase's probe short-circuits the *sequential* retry before it writes anything, so
+    the common case never overwrites the stored object out from under a committed row. It does
+    not close the concurrent case: two attempts of one job can both pass phase 1 and both PUT
+    (the lease can lapse mid-job, ``jobs/worker.py``), and whichever PUT lands last leaves the
+    other's row describing bytes the object no longer holds. When this attempt wrote and then
+    found a peer's row, :func:`~kdive.artifacts.etag_repair.reconcile_row_etag` stats the object
+    and re-points the row at what it actually holds — stats it rather than assuming this
+    attempt's own etag, because landing last in the store and last at the lock are independent.
     """
     name = f"pcap-{job.id}"
     object_key = artifact_key(_TENANT, _OWNER_KIND, str(run_id), name)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
         if await _job_canceled(conn, job.id):
             return None
-        existing = await _existing_artifact_id(conn, run_id, object_key)
-        if existing is not None:
-            return existing
-        stored = await asyncio.to_thread(_put_artifact, store, run_id, name, data)
-        artifact = register_artifact_row(
-            stored, owner_kind=_OWNER_KIND, owner_id=run_id, run_id=run_id
+        existing = await _existing_artifact_row(conn, run_id, object_key)
+    if existing is not None:
+        return existing.id
+
+    stored = await asyncio.to_thread(_put_artifact, store, run_id, name, data)
+
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
+        canceled = await _job_canceled(conn, job.id)
+        existing = await _existing_artifact_row(conn, run_id, object_key)
+        if existing is None and not canceled:
+            artifact = register_artifact_row(
+                stored, owner_kind=_OWNER_KIND, owner_id=run_id, run_id=run_id
+            )
+            await ARTIFACTS.insert(conn, artifact)
+            await audit.record(
+                conn,
+                job_context_from_job(job, project),
+                audit.AuditEvent(
+                    tool="control.capture_traffic",
+                    object_kind="runs",
+                    object_id=run_id,
+                    transition="capture_traffic",
+                    args={"run_id": str(run_id)},
+                    project=project,
+                ),
+            )
+            return artifact.id
+    if existing is not None:
+        # A peer attempt registered the key while this PUT was in flight, so one of the two PUTs
+        # overwrote the object that row describes. Which one landed last is not knowable here —
+        # this attempt may have been first to write and last to take the lock — so the repair
+        # stats the object rather than assuming this attempt's etag. Outside the lock: it is
+        # store I/O.
+        await reconcile_row_etag(
+            conn, store, row_id=existing.id, object_key=object_key, row_etag=existing.etag
         )
-        await ARTIFACTS.insert(conn, artifact)
-        await audit.record(
-            conn,
-            job_context_from_job(job, project),
-            audit.AuditEvent(
-                tool="control.capture_traffic",
-                object_kind="runs",
-                object_id=run_id,
-                transition="capture_traffic",
-                args={"run_id": str(run_id)},
-                project=project,
-            ),
-        )
-        return artifact.id
+        return None if canceled else existing.id
+    # The cancel landed while the object was in flight. Reclaim is row-driven, so the object
+    # would be a permanent orphan — delete it. ``JobState.CANCELED`` is terminal (state.py's
+    # transition table gives it no successors), so unlike the SystemState guards this one cannot
+    # refuse here and admit a peer's registration afterwards; the fences in the discard are
+    # defence in depth rather than the thing that makes this site safe.
+    await discard_unregistered_objects(
+        store,
+        [stored],
+        still_unregistered=lambda key: _key_unregistered(conn, run_id, key),
+    )
+    return None
 
 
 def _unlink_quietly(path: Path) -> None:

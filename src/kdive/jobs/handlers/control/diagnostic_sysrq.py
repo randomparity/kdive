@@ -2,9 +2,10 @@
 
 Injects one allowlisted magic-SysRq keystroke into a ready guest and captures the console dump
 the kernel prints as a redacted System-owned artifact. The provider Control port is called
-lock-free between two brief per-System-locked transactions: the first snapshots the domain +
-console-read seam and verifies the System supports SysRq and is READY, the second re-verifies and
-stores the redacted capture. Correctness allows the lock-free poll because the console only grows
+lock-free between brief per-System-locked transactions: the first snapshots the domain +
+console-read seam and verifies the System supports SysRq and is READY, then the capture's object
+write happens lock-free between a locked guard read and a locked re-verify + row insert
+(ADR-0519). Correctness allows the lock-free poll because the console only grows
 while the System is READY (local-libvirt's serial log with ``append="off"`` truncates only on
 power-cycle, ADR-0258; remote-libvirt's S3 parts are immutable and assembled cumulatively,
 ADR-0429), so the tail read needs no cross-op exclusion. The console source is provider-gated: a
@@ -22,6 +23,8 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.discard import discard_unregistered_objects
+from kdive.artifacts.etag_repair import reconcile_row_etag
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -56,7 +59,8 @@ _OWNER_KIND = "systems"
 _RETENTION_CLASS = "console"
 
 _ARTIFACT_ROW_SQL: LiteralString = (
-    "SELECT id FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
+    "SELECT id, etag FROM artifacts "
+    "WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
 )
 
 # Bounded, count-driven capture window (no wall-clock, so the poll is deterministic under test).
@@ -231,13 +235,25 @@ def _put_artifact(store: ObjectStore, system_id: UUID, name: str, data: bytes) -
     )
 
 
-async def _existing_artifact_id(
+class _ExistingRow(NamedTuple):
+    """A committed capture row for this object key: its id, and the object etag it describes."""
+
+    id: UUID
+    etag: str
+
+
+async def _existing_artifact_row(
     conn: AsyncConnection, system_id: UUID, object_key: str
-) -> UUID | None:
+) -> _ExistingRow | None:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_ARTIFACT_ROW_SQL, (system_id, object_key))
         row = await cur.fetchone()
-    return row["id"] if row is not None else None
+    return None if row is None else _ExistingRow(row["id"], str(row["etag"]))
+
+
+async def _key_unregistered(conn: AsyncConnection, system_id: UUID, object_key: str) -> bool:
+    """Whether no committed row claims ``object_key`` — the discard's row fence, run unlocked."""
+    return await _existing_artifact_row(conn, system_id, object_key) is None
 
 
 async def _store_capture(
@@ -248,10 +264,22 @@ async def _store_capture(
     command: SysRqCommand,
     redacted: bytes,
 ) -> UUID:
-    """Under the per-System lock (tx 2): re-verify state, store the artifact, audit.
+    """Store the redacted capture and register its row; raise if the System left READY.
+
+    Three phases, so the per-System advisory lock never spans the object-store PUT (ADR-0519):
+    a locked state + insert-if-absent read (tx 2), the unlocked PUT, then a locked re-verify
+    plus the row insert and audit (tx 3). ``SYSTEM`` is the contended scope — teardown, boot and
+    console rotation all serialize on it — so both locked phases stay short and database-only.
 
     Insert-if-absent on the object key: jobs are at-least-once, so a retry that re-runs the
-    handler returns the existing artifact id rather than duplicating the row.
+    handler returns the existing artifact id rather than duplicating the row. The first phase's
+    probe short-circuits the *sequential* retry before it writes anything. It does not close the
+    concurrent case: two attempts of one job can both pass phase 1 and both PUT (the lease can
+    lapse mid-job, ``jobs/worker.py``), and whichever PUT lands last leaves the other's row
+    describing bytes the object no longer holds. When this attempt wrote and then found a peer's
+    row, :func:`~kdive.artifacts.etag_repair.reconcile_row_etag` stats the object and re-points
+    the row at what it actually holds — stats it rather than assuming this attempt's own etag,
+    because landing last in the store and last at the lock are independent orderings.
     """
     name = f"sysrq-diagnostic-{job.id}"
     object_key = artifact_key(_TENANT, _OWNER_KIND, str(system_id), name)
@@ -259,27 +287,60 @@ async def _store_capture(
         system = await SYSTEMS.get(conn, system_id)
         if system is None or system.state is not SystemState.READY:
             raise _changed_state_error(system_id)
-        existing = await _existing_artifact_id(conn, system_id, object_key)
-        if existing is not None:
-            return existing
-        stored = await asyncio.to_thread(_put_artifact, store, system_id, name, redacted)
-        artifact = register_artifact_row(
-            stored, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=None
+        existing = await _existing_artifact_row(conn, system_id, object_key)
+    if existing is not None:
+        return existing.id
+
+    stored = await asyncio.to_thread(_put_artifact, store, system_id, name, redacted)
+
+    ready = False
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        system = await SYSTEMS.get(conn, system_id)
+        ready = system is not None and system.state is SystemState.READY
+        existing = await _existing_artifact_row(conn, system_id, object_key)
+        if existing is None and system is not None and ready:
+            artifact = register_artifact_row(
+                stored, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=None
+            )
+            await ARTIFACTS.insert(conn, artifact)
+            await audit.record(
+                conn,
+                job_context_from_job(job, system.project),
+                audit.AuditEvent(
+                    tool="control.diagnostic_sysrq",
+                    object_kind="systems",
+                    object_id=system_id,
+                    transition=f"sysrq:{command.value}",
+                    args={"system_id": str(system_id), "command": command.value},
+                    project=system.project,
+                ),
+            )
+            return artifact.id
+    if existing is not None:
+        # A peer attempt registered the key while this PUT was in flight, so one of the two PUTs
+        # overwrote the object that row describes. Which one landed last is not knowable here —
+        # this attempt may have been first to write and last to take the lock — so the repair
+        # stats the object rather than assuming this attempt's etag. It runs out here rather
+        # than in the block above for two reasons: the stat is store I/O, and the not-READY exit
+        # below raises, which would roll the repair back with the transaction that wrote it.
+        await reconcile_row_etag(
+            conn, store, row_id=existing.id, object_key=object_key, row_etag=existing.etag
         )
-        await ARTIFACTS.insert(conn, artifact)
-        await audit.record(
-            conn,
-            job_context_from_job(job, system.project),
-            audit.AuditEvent(
-                tool="control.diagnostic_sysrq",
-                object_kind="systems",
-                object_id=system_id,
-                transition=f"sysrq:{command.value}",
-                args={"system_id": str(system_id), "command": command.value},
-                project=system.project,
-            ),
-        )
-        return artifact.id
+        if not ready:
+            raise _changed_state_error(system_id)
+        return existing.id
+    # The System left READY while the object was in flight. Reclaim is row-driven, so the object
+    # would be a permanent orphan — delete it. READY is NOT monotonic: PAUSED and RESTORING are
+    # ordinary states a System returns to READY from (ADR-0378), so a peer attempt of this job
+    # can register this key after the refusal above and before the delete below. That is why the
+    # discard re-probes the row and compares the etag immediately before deleting, rather than
+    # trusting the probe this transaction just made.
+    await discard_unregistered_objects(
+        store,
+        [stored],
+        still_unregistered=lambda key: _key_unregistered(conn, system_id, key),
+    )
+    raise _changed_state_error(system_id)
 
 
 async def diagnostic_sysrq_handler(

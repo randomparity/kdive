@@ -12,11 +12,13 @@ from __future__ import annotations
 import asyncio
 import gzip
 import hashlib
+import struct
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
@@ -26,6 +28,7 @@ from kdive.artifacts.storage import (
     HeadResult,
     StoredArtifact,
 )
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import JobState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -71,8 +74,11 @@ class _FakeStore:
         data, sensitivity, _retention, enc = self.objects[key]
         return HeadResult(
             size_bytes=len(data),
+            # The real store's etag identifies the bytes, and ADR-0519's compensating delete
+            # compares it against what the attempt wrote — a constant here would make that
+            # fence untestable, so derive it the same way ``put_artifact`` does.
             checksum_sha256=None,
-            etag="etag",
+            etag=hashlib.sha256(data).hexdigest(),
             sensitivity=sensitivity,
             content_encoding=enc,
             last_modified=STORE_MTIME,
@@ -432,3 +438,235 @@ def test_resolver_failure_degrades_to_null_and_advances_sidecar(
     assert result == str(system_id), "a resolver failure must not fail the rotation job"
     assert part_run_ids and all(rid is None for rid in part_run_ids), part_run_ids
     assert offset == len(_CONSOLE), "the sidecar still advances so rotation does not stall"
+
+
+# --- Lock span over the part PUTs (#1725, ADR-0519) ------------------------------------
+
+
+def _advisory_locks_held_by(url: str, backend_pid: int) -> int:
+    """Count advisory locks ``backend_pid`` holds, probed from a **second**, sync connection.
+
+    Synchronous because it is called from inside ``put_artifact``, which the handler runs on a
+    worker thread via ``asyncio.to_thread``; and from a second backend because probing on the
+    connection under test would perturb the transaction being measured.
+    """
+    with psycopg.connect(url, autocommit=True) as probe, probe.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = %s",
+            (backend_pid,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def _locks_visible_while_one_is_held(url: str) -> int:
+    """Control for :func:`_advisory_locks_held_by`: what it reports while a lock IS held.
+
+    Without this, an all-zeros assertion would pass just as happily if the probe could never
+    see an advisory lock at all.
+    """
+    async with (
+        await psycopg.AsyncConnection.connect(url) as conn,
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.SYSTEM, uuid4()),
+    ):
+        return await asyncio.to_thread(_advisory_locks_held_by, url, conn.info.backend_pid)
+
+
+class _LockProbingStore(_FakeStore):
+    """A store that records the handler's own advisory-lock count at each part PUT."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__()
+        self._url = url
+        self.backend_pid: int | None = None
+        self.locks_at_part_put: list[int] = []
+        self.deleted: list[str] = []
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        if "console-part-" in request.key():
+            assert self.backend_pid is not None, "the test must publish the handler's backend pid"
+            self.locks_at_part_put.append(_advisory_locks_held_by(self._url, self.backend_pid))
+        return super().put_artifact(request)
+
+    def delete(self, key: str) -> None:
+        self.deleted.append(key)
+        self.objects.pop(key, None)
+
+
+class _TearingDownStore(_LockProbingStore):
+    """Sets the System terminal from a second backend as the first part PUT lands."""
+
+    def __init__(self, url: str, system_id: UUID) -> None:
+        super().__init__(url)
+        self._system_id = system_id
+        self.torn_down = False
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        if "console-part-" in request.key() and not self.torn_down:
+            self.torn_down = True
+            with psycopg.connect(self._url, autocommit=True) as teardown:
+                teardown.execute(
+                    "UPDATE systems SET state = 'torn_down' WHERE id = %s", (self._system_id,)
+                )
+        return super().put_artifact(request)
+
+
+async def _run_probing(pool: AsyncConnectionPool, store: _LockProbingStore, job: Job) -> str | None:
+    """Drive the handler the way the worker dispatches it, exposing its backend pid to the store.
+
+    ``set_autocommit(True)`` mirrors ``JobWorker._run_handler`` and is load-bearing, not
+    incidental: on a pooled non-autocommit connection the handler's ``conn.transaction()`` blocks
+    are savepoints inside one implicit transaction that the pool ends, so a
+    ``pg_advisory_xact_lock`` would outlive every block regardless of where the PUTs sit
+    (ADR-0506/ADR-0516). Only under the worker's dispatch does releasing the lock mean anything.
+    """
+    async with pool.connection() as conn:
+        await conn.set_autocommit(True)
+        store.backend_pid = conn.info.backend_pid
+        try:
+            return await console_rotate.console_rotate_handler(
+                conn,
+                job,
+                secret_registry=SecretRegistry(),
+                artifact_store=cast(ObjectStore, store),
+            )
+        finally:
+            await conn.set_autocommit(False)
+
+
+def test_part_puts_hold_no_advisory_lock(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every console-part PUT runs with the per-System lock released (#1725).
+
+    A rotation seals an unbounded number of parts, and ``SYSTEM`` is the scope teardown, boot and
+    revert also serialize on, so this is the widest of the three lock spans the issue covers. The
+    control probe pins that the same query *does* report a lock when one is held.
+    """
+    system_id = uuid4()
+    log = _write_console(tmp_path, system_id, _CONSOLE)
+    monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
+
+    async def _run():
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            await _seed_system(pool, system_id, "ready")
+            store = _LockProbingStore(migrated_url)
+            result = await _run_probing(pool, store, _job(system_id, "boot-A"))
+            return (
+                result,
+                store,
+                await _row_keys(pool, system_id),
+                await _locks_visible_while_one_is_held(migrated_url),
+            )
+
+    result, store, rows, held = asyncio.run(_run())
+    assert held >= 1  # the probe can see an advisory lock when one is held
+    assert len(store.locks_at_part_put) > 1, "the fixture must seal several parts"
+    assert set(store.locks_at_part_put) == {0}  # ...and none was held at any part PUT
+    assert result == str(system_id)  # the rotation still completed
+    assert len(rows) == len(store.locks_at_part_put)  # every PUT part got its row
+
+
+def test_teardown_during_part_puts_discards_the_unregistered_objects(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A teardown landing while the part objects are in flight registers none and deletes them.
+
+    ``_reclaim_console_artifacts`` selects the keys to delete *from the artifacts rows*, so parts
+    written after that sweep has run would survive it permanently. The sidecar must also stay
+    where it was, so the next rotation re-derives these parts rather than skipping them.
+    """
+    system_id = uuid4()
+    log = _write_console(tmp_path, system_id, _CONSOLE)
+    monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
+    sidecar_key = f"local/systems/{system_id}/console-rotation-state.json"
+
+    async def _run():
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            await _seed_system(pool, system_id, "ready")
+            store = _TearingDownStore(migrated_url, system_id)
+            result = await _run_probing(pool, store, _job(system_id, "boot-A"))
+            return result, store, await _row_keys(pool, system_id)
+
+    result, store, rows = asyncio.run(_run())
+    assert result is None
+    assert store.torn_down  # the race actually fired
+    assert len(store.deleted) > 1  # every part this attempt wrote was deleted
+    assert store.deleted == store.part_puts()  # ...and exactly those, in the order written
+    assert store.objects == {}  # nothing survived, sidecar included
+    assert sidecar_key not in store.objects  # the cursor was not advanced past unsealed parts
+    assert rows == []
+
+
+def test_discard_failure_does_not_mask_the_teardown_outcome(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store fault on the compensating delete is swallowed: the rotation degrades to ``None``."""
+    system_id = uuid4()
+    log = _write_console(tmp_path, system_id, _CONSOLE)
+    monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
+
+    class _UndeletableStore(_TearingDownStore):
+        def delete(self, key: str) -> None:
+            self.deleted.append(key)
+            raise CategorizedError(
+                "delete_object failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+
+    async def _run():
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            await _seed_system(pool, system_id, "ready")
+            store = _UndeletableStore(migrated_url, system_id)
+            result = await _run_probing(pool, store, _job(system_id, "boot-A"))
+            return result, store, await _row_keys(pool, system_id)
+
+    result, store, rows = asyncio.run(_run())
+    assert store.deleted  # the compensating delete was attempted on every part
+    assert result is None  # ...and its failure did not become the handler's result
+    assert rows == []
+
+
+def test_part_objects_are_byte_deterministic(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-derived part must compress to the same bytes, so its etag is a stable identity.
+
+    A wall-clock stamp in the gzip header would give the same ``(gen, index)`` a different object
+    and a different etag on every rotation — defeating the insert-if-absent identity these parts
+    are keyed on, and manufacturing the etag drift ADR-0519's repair exists to correct.
+
+    CPython's ``gzip.compress`` default for ``mtime`` is 0 from 3.13 on (it was the current time
+    before), and this project pins ``requires-python = "==3.14.*"``, so today the handler would
+    be deterministic even without pinning it. That is exactly why this assertion is on the object
+    rather than on the call: it holds the property whoever supplies it, and it is the thing that
+    notices if the call or the runtime default moves again.
+
+    Asserted on the header's MTIME field rather than by compressing twice — two calls inside one
+    wall-clock second agree even when the stamp is live, so a "compress twice" test would pass
+    vacuously.
+    """
+    system_id = uuid4()
+    log = _write_console(tmp_path, system_id, _CONSOLE)
+    monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
+
+    async def _run() -> _FakeStore:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            await _seed_system(pool, system_id, "ready")
+            store = _FakeStore()
+            await _run_handler(pool, store, _job(system_id, "boot-A"))
+            return store
+
+    store = asyncio.run(_run())
+    part_keys = store.part_puts()
+    assert part_keys, "the fixture console must seal at least one part"
+    for key in part_keys:
+        data = store.objects[key][0]
+        assert data[:2] == b"\x1f\x8b", f"{key} is not a gzip member"
+        # Bytes 4..8 of a gzip member are its MTIME field, little-endian (RFC 1952 §2.3.1).
+        assert struct.unpack("<I", data[4:8])[0] == 0, f"{key} carries a wall-clock gzip stamp"
