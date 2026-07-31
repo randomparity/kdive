@@ -352,9 +352,19 @@ require_workers_alive() {
   # count exists to prevent. The two directions need different remedies, so they say different
   # things.
   if ((have > want)); then
-    local pid_csv
+    local pid_csv kill_cmd
     printf -v pid_csv '%s,' "${pids[@]}"
     pid_csv="${pid_csv%,}"
+    # Mirror stop_daemons' ownership test (above) rather than prescribing `sudo` unconditionally:
+    # under KDIVE_WORKER_AS_ROOT=0 the workers are the operator's own processes, and an operator
+    # already root on a host without sudo installed cannot run the command at all. One prefix
+    # covers the whole list either way — root may signal any of these pids, and if none is
+    # root-owned the caller owns them all.
+    kill_cmd="kill -9"
+    if [[ "$(id -un)" != "root" ]] &&
+      ps -o user= -p "$pid_csv" 2>/dev/null | awk '$1 == "root" { found = 1 } END { exit !found }'; then
+      kill_cmd="sudo kill -9"
+    fi
     # The remedy is deliberately NOT down.sh. It calls this same stop_daemons — one SIGTERM, a
     # ten-second poll, a WARN, `return 0`, no escalation — so the survivor this message is about
     # outlives it exactly as it outlived bring-up, and the compose backends come down for nothing.
@@ -377,7 +387,8 @@ require_workers_alive() {
       echo "  older code, and it masks a new worker that failed to start."
       echo "  Live worker pids: ${pids[*]}"
       echo "  That list is every worker running under ${py}, INCLUDING the ones this run started."
-      echo "  The survivor is whichever has the older start time:"
+      echo "  The survivors are whichever have the older start times. This step is diagnostic"
+      echo "  only — the kill below ends every pid in the list, survivor or not:"
       echo "    ps -ww -o pid,lstart,etime,args -p ${pid_csv}"
       echo "  Tearing the stack down will NOT clear it: that path sends the same SIGTERM and"
       echo "  gives up the same way. So either wait for the in-flight job to finish and re-run"
@@ -385,9 +396,9 @@ require_workers_alive() {
       echo "  new jobs and waiting never ends it; and this run's own workers above are claiming"
       echo "  jobs meanwhile, so a re-run can land on this same surplus), or end these in one"
       echo "  step and re-run:"
-      echo "    sudo kill -9 ${pids[*]}"
-      echo "  Killing abandons that job mid-flight: another worker reclaims it once its lease"
-      echo "  lapses, spending one of its bounded attempts."
+      echo "    ${kill_cmd} ${pids[*]}"
+      echo "  Killing abandons those jobs mid-flight: another worker reclaims each one once its"
+      echo "  lease lapses, spending one of its bounded attempts."
     } >&2
     return 1
   fi

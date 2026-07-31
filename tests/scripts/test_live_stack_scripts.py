@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from kdive.config.external_env import EXTERNAL_ENV_VARS
 from kdive.health.aux_bind import PROCESS_DEFAULT_PORTS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -181,6 +182,32 @@ def test_configured_worker_count_rejects_an_int64_wrapping_value() -> None:
         assert result.returncode != 0, f"{wrapping!r} wraps past int64 and must be refused"
         assert "ceiling" in result.stderr, result.stderr
         assert not result.stdout, f"a refused count must print nothing, got {result.stdout!r}"
+
+
+def test_the_worker_count_ceiling_is_documented_where_operators_read_it() -> None:
+    """The documented bound must track MAX_WORKER_COUNT rather than drift from it (#1739).
+
+    lib.sh holds the only copy of the ceiling, and exceeding it is a hard bring-up failure, so an
+    operator who reads either doc surface and picks a larger value gets no forewarning. Neither
+    surface was bound to the constant: `check_env_documented` is a name-set guard that never reads
+    description text, and MAX_WORKER_COUNT is not a KDIVE_* token, so it sits outside that guard
+    entirely. Read the live value out of lib.sh — sourcing it, so a moved or reformatted assignment
+    still resolves — and require both surfaces to state it. A future bump then reddens here instead
+    of silently re-opening the gap.
+    """
+    ceiling = _lib('printf %s "$MAX_WORKER_COUNT"').stdout
+    assert ceiling.isdigit(), f"MAX_WORKER_COUNT must be a plain integer, got {ceiling!r}"
+
+    help_text = next(var.help for var in EXTERNAL_ENV_VARS if var.name == "KDIVE_WORKER_COUNT")
+    assert f"above {ceiling} are refused" in help_text, (
+        f"the KDIVE_WORKER_COUNT help must state the {ceiling} ceiling — it is the source the "
+        f"generated config reference renders from: {help_text!r}"
+    )
+
+    runbook = (ROOT / "docs/operating/runbooks/live-testing.md").read_text()
+    assert f"Values above {ceiling} are refused" in runbook, (
+        f"the live-testing runbook drives KDIVE_WORKER_COUNT and must state the {ceiling} ceiling"
+    )
 
 
 def test_extra_workers_get_health_ports_clear_of_the_registered_defaults() -> None:
