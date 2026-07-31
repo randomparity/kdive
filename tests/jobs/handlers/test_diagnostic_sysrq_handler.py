@@ -15,10 +15,12 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import ArtifactWriteRequest, FetchedArtifact, StoredArtifact
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, JobState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -585,3 +587,200 @@ def test_unsupported_provider_fails_capability_configuration_error(
     assert excinfo.value.details["reason"] == "diagnostic_sysrq_unsupported"
     # The fake Control port is never invoked once the capability gate refuses.
     assert control.calls == []
+
+
+def _advisory_locks_held_by(url: str, backend_pid: int) -> int:
+    """Count advisory locks ``backend_pid`` holds, probed from a **second**, sync connection.
+
+    Synchronous because it is called from inside ``put_artifact``, which the handler runs on a
+    worker thread via ``asyncio.to_thread``; and from a second backend because probing on the
+    connection under test would perturb the transaction being measured.
+    """
+    with psycopg.connect(url, autocommit=True) as probe, probe.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = %s",
+            (backend_pid,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def _locks_visible_while_one_is_held(url: str) -> int:
+    """Control for :func:`_advisory_locks_held_by`: what it reports while a lock IS held.
+
+    Without this, a ``locks_at_put == [0]`` assertion would pass just as happily if the probe
+    could never see an advisory lock at all.
+    """
+    async with (
+        await psycopg.AsyncConnection.connect(url) as conn,
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.SYSTEM, uuid4()),
+    ):
+        return await asyncio.to_thread(_advisory_locks_held_by, url, conn.info.backend_pid)
+
+
+class _LockProbingStore(_FakeStore):
+    """A store that records the handler's own advisory-lock count at the moment of each PUT."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__()
+        self._url = url
+        self.backend_pid: int | None = None
+        self.locks_at_put: list[int] = []
+        self.deleted: list[str] = []
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        assert self.backend_pid is not None, "the test must publish the handler's backend pid"
+        self.locks_at_put.append(_advisory_locks_held_by(self._url, self.backend_pid))
+        return super().put_artifact(request)
+
+    def delete(self, key: str) -> None:
+        self.deleted.append(key)
+        self.objects.pop(key, None)
+
+
+class _TearingDownStore(_LockProbingStore):
+    """Drives the System out of READY from a second backend while the PUT is in flight."""
+
+    def __init__(self, url: str, system_id: UUID) -> None:
+        super().__init__(url)
+        self._system_id = system_id
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        with psycopg.connect(self._url, autocommit=True) as teardown:
+            teardown.execute(
+                "UPDATE systems SET state = 'torn_down' WHERE id = %s", (self._system_id,)
+            )
+        return super().put_artifact(request)
+
+
+async def _run_probing(pool, store, control, job):
+    """Drive the handler the way the worker dispatches it, exposing its backend pid to the store.
+
+    ``set_autocommit(True)`` mirrors ``JobWorker._run_handler`` and is load-bearing, not
+    incidental: on a pooled non-autocommit connection the handler's ``conn.transaction()`` blocks
+    are savepoints inside one implicit transaction that the pool ends, so a
+    ``pg_advisory_xact_lock`` would outlive every block regardless of where the PUT sits
+    (ADR-0506/ADR-0516). Only under the worker's dispatch does releasing the lock mean anything.
+    """
+    resolver = provider_resolver(controller=control)
+    async with pool.connection() as conn:
+        await conn.set_autocommit(True)
+        store.backend_pid = conn.info.backend_pid
+        try:
+            return await diagnostic_sysrq.diagnostic_sysrq_handler(
+                conn,
+                job,
+                resolver=resolver,
+                secret_registry=SecretRegistry(),
+                artifact_store=cast(ObjectStore, store),
+            )
+        finally:
+            await conn.set_autocommit(False)
+
+
+def test_put_artifact_holds_no_advisory_lock(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The capture PUT runs with the per-System lock released (#1725).
+
+    ``SYSTEM`` is the contended scope — teardown, boot and console rotation serialize on it — so
+    a PUT held under it bounds all of them by object-store latency. The control probe pins that
+    the same query *does* report a lock when one is held, so the zero is a released lock rather
+    than a blind probe.
+    """
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot log\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
+    store = _LockProbingStore(migrated_url)
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            ref = await _run_probing(pool, store, control, _job(system_id, "show_blocked_tasks"))
+            return (
+                ref,
+                await _artifact_rows(pool, system_id),
+                await _locks_visible_while_one_is_held(migrated_url),
+            )
+
+    ref, rows, held = asyncio.run(_go())
+    assert held >= 1  # the probe can see an advisory lock when one is held
+    assert store.locks_at_put == [0]  # ...and saw none held while the dump was being written
+    assert ref is not None  # the capture still completed and registered its row
+    assert len(rows) == 1
+
+
+def test_teardown_during_put_discards_the_unregistered_object(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A System leaving READY while the PUT is in flight registers no row and deletes the object.
+
+    ``_reclaim_sysrq_artifacts`` selects the keys to delete *from the artifacts rows*, so an
+    object with no row survives the teardown that was supposed to reclaim it — permanently.
+    """
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot log\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
+    seen: dict[str, object] = {}
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            store = _TearingDownStore(migrated_url, system_id)
+            job = _job(system_id, "show_blocked_tasks")
+            seen["store"] = store
+            seen["key"] = f"local/systems/{system_id}/sysrq-diagnostic-{job.id}"
+            with pytest.raises(CategorizedError) as excinfo:
+                await _run_probing(pool, store, control, job)
+            seen["rows"] = await _artifact_rows(pool, system_id)
+            return excinfo.value
+
+    err = asyncio.run(_go())
+    store = cast(_TearingDownStore, seen["store"])
+    assert err.details["reason"] == "system_changed_state"  # the state guard still fails the job
+    assert store.deleted == [seen["key"]]  # exactly the key this attempt wrote
+    assert store.objects == {}  # the object did not survive the aborted registration
+    assert seen["rows"] == []
+
+
+def test_discard_failure_does_not_mask_the_changed_state_error(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store fault on the compensating delete is swallowed: the state error is still raised."""
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot log\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
+
+    class _UndeletableStore(_TearingDownStore):
+        def delete(self, key: str) -> None:
+            self.deleted.append(key)
+            raise CategorizedError(
+                "delete_object failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+
+    seen: dict[str, object] = {}
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            store = _UndeletableStore(migrated_url, system_id)
+            seen["store"] = store
+            with pytest.raises(CategorizedError) as excinfo:
+                await _run_probing(pool, store, control, _job(system_id, "show_blocked_tasks"))
+            return excinfo.value
+
+    err = asyncio.run(_go())
+    store = cast(_UndeletableStore, seen["store"])
+    assert store.deleted  # the compensating delete was attempted
+    assert err.details["reason"] == "system_changed_state"  # ...and did not become the outcome

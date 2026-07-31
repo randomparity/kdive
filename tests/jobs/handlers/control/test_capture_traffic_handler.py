@@ -19,11 +19,13 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import ArtifactWriteRequest, FetchedArtifact, StoredArtifact
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -597,3 +599,184 @@ def test_unlink_quietly_suppresses_oserror(tmp_path) -> None:
     # Unlinking a directory raises IsADirectoryError (an OSError); the helper must suppress it.
     capture_traffic._unlink_quietly(tmp_path)  # tmp_path is a directory, so unlink() raises
     assert tmp_path.exists()  # helper returned without raising and did not remove the directory
+
+
+def _advisory_locks_held_by(url: str, backend_pid: int) -> int:
+    """Count advisory locks ``backend_pid`` holds, probed from a **second**, sync connection.
+
+    Synchronous because it is called from inside ``put_artifact``, which the handler runs on a
+    worker thread via ``asyncio.to_thread``; and from a second backend because probing on the
+    connection under test would perturb the transaction being measured.
+    """
+    with psycopg.connect(url, autocommit=True) as probe, probe.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = %s",
+            (backend_pid,),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def _locks_visible_while_one_is_held(url: str) -> int:
+    """Control for :func:`_advisory_locks_held_by`: what it reports while a lock IS held.
+
+    Without this, a ``locks_at_put == [0]`` assertion would pass just as happily if the probe
+    could never see an advisory lock at all.
+    """
+    async with (
+        await psycopg.AsyncConnection.connect(url) as conn,
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.RUN, uuid4()),
+    ):
+        return await asyncio.to_thread(_advisory_locks_held_by, url, conn.info.backend_pid)
+
+
+class _LockProbingStore(_FakeStore):
+    """A store that records the handler's own advisory-lock count at the moment of each PUT."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__()
+        self._url = url
+        self.backend_pid: int | None = None
+        self.locks_at_put: list[int] = []
+        self.deleted: list[str] = []
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        assert self.backend_pid is not None, "the test must publish the handler's backend pid"
+        self.locks_at_put.append(_advisory_locks_held_by(self._url, self.backend_pid))
+        return super().put_artifact(request)
+
+    def delete(self, key: str) -> None:
+        self.deleted.append(key)
+        self.objects.pop(key, None)
+
+
+class _CancelingStore(_LockProbingStore):
+    """Cancels the owning job from a second backend while the PUT is in flight."""
+
+    def __init__(self, url: str, job_id: UUID) -> None:
+        super().__init__(url)
+        self._job_id = job_id
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        with psycopg.connect(self._url, autocommit=True) as canceler:
+            canceler.execute("UPDATE jobs SET state = 'canceled' WHERE id = %s", (self._job_id,))
+        return super().put_artifact(request)
+
+
+async def _run_probing(pool, store, capturer, job, *, monkeypatch):
+    """Drive the handler the way the worker dispatches it, exposing its backend pid to the store.
+
+    ``set_autocommit(True)`` mirrors ``JobWorker._run_handler`` and is load-bearing, not
+    incidental: on a pooled non-autocommit connection the handler's ``conn.transaction()`` blocks
+    are savepoints inside one implicit transaction that the pool ends, so a
+    ``pg_advisory_xact_lock`` would outlive every block regardless of where the PUT sits
+    (ADR-0506/ADR-0516). Only under the worker's dispatch does releasing the lock mean anything.
+    """
+    resolver = provider_resolver(traffic_capturer=capturer)
+    monkeypatch.setattr(
+        capture_traffic,
+        "run_capture_loop",
+        _LoopSpy(capture_traffic.LoopResult(truncated=False, canceled=False)),
+    )
+    async with pool.connection() as conn:
+        await conn.set_autocommit(True)
+        store.backend_pid = conn.info.backend_pid
+        try:
+            return await capture_traffic.capture_traffic_handler(
+                conn, job, resolver=resolver, artifact_store=cast(ObjectStore, store)
+            )
+        finally:
+            await conn.set_autocommit(False)
+
+
+def test_put_artifact_holds_no_advisory_lock(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
+    """The pcap PUT runs with the per-Run lock released, so store latency never bounds it (#1725).
+
+    The store probes ``pg_locks`` for the handler's own backend at the instant of the PUT. The
+    control probe pins that the same query *does* report a lock when one is held, so the zero is
+    a released lock rather than a blind probe.
+    """
+    store = _LockProbingStore(migrated_url)
+    capturer = _FakeCapturer(tmp_path)
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            run_id, _ = await _seed_ready_run(pool)
+            job = _job(run_id)
+            await _insert_job(pool, job, JobState.RUNNING)
+            ref = await _run_probing(pool, store, capturer, job, monkeypatch=monkeypatch)
+            return (
+                ref,
+                await _artifact_rows(pool, run_id),
+                await _locks_visible_while_one_is_held(migrated_url),
+            )
+
+    ref, rows, control = asyncio.run(_go())
+    assert control >= 1  # the probe can see an advisory lock when one is held
+    assert store.locks_at_put == [0]  # ...and saw none held while the pcap was being written
+    assert ref is not None  # the capture still completed and registered its row
+    assert len(rows) == 1
+
+
+def test_cancel_during_put_discards_the_unregistered_object(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
+    """A cancel landing while the PUT is in flight registers no row and deletes the object.
+
+    Reclaim of Run-owned evidence is row-driven, so an object with no ``artifacts`` row would be
+    permanent. The handler deletes exactly the key it wrote.
+    """
+    capturer = _FakeCapturer(tmp_path)
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            run_id, _ = await _seed_ready_run(pool)
+            job = _job(run_id)
+            await _insert_job(pool, job, JobState.RUNNING)
+            store = _CancelingStore(migrated_url, job.id)
+            ref = await _run_probing(pool, store, capturer, job, monkeypatch=monkeypatch)
+            return ref, await _artifact_rows(pool, run_id), store, run_id, job
+
+    ref, rows, store, run_id, job = asyncio.run(_go())
+    expected_key = f"local/runs/{run_id}/pcap-{job.id}"
+    assert store.objects == {}  # the object did not survive the aborted registration
+    assert store.deleted == [expected_key]  # exactly the key this attempt wrote
+    assert rows == []  # and no row was registered for the canceled job
+    assert ref is None
+
+
+def test_discard_failure_does_not_mask_the_cancel_outcome(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
+    """A store fault on the compensating delete is swallowed: the job still ends canceled."""
+    capturer = _FakeCapturer(tmp_path)
+
+    class _UndeletableStore(_CancelingStore):
+        def delete(self, key: str) -> None:
+            self.deleted.append(key)
+            raise CategorizedError(
+                "delete_object failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            run_id, _ = await _seed_ready_run(pool)
+            job = _job(run_id)
+            await _insert_job(pool, job, JobState.RUNNING)
+            store = _UndeletableStore(migrated_url, job.id)
+            ref = await _run_probing(pool, store, capturer, job, monkeypatch=monkeypatch)
+            return ref, await _artifact_rows(pool, run_id), store, capturer
+
+    ref, rows, store, capturer = asyncio.run(_go())
+    assert store.deleted  # the compensating delete was attempted
+    assert ref is None  # ...and its failure did not become the handler's result
+    assert rows == []
+    assert capturer.reclaimed  # the host-side pcap is still reclaimed
