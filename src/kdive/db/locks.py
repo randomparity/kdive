@@ -14,6 +14,10 @@ split-brain guard relies on. That release trails the holder's client-side connec
 close by a short interval rather than landing with it, so an observer can still see a
 dead leader's lock briefly. Its key space is salted apart from the transaction-scoped
 scope-lock space so leadership never collides with a per-object op.
+
+`scoped_session_advisory_lock` is different from the leadership helper: it uses the exact
+same scoped key as the transaction helper so a multi-transaction publisher can contend
+with a reconciler transaction on one image-publication fence (ADR-0526).
 """
 
 from __future__ import annotations
@@ -41,6 +45,8 @@ class LockScope(StrEnum):
     ``resource.id``, co-held in the ``PROJECT → RESOURCE`` order above). The one exception is the
     reconcile / ``inventory.clear_override`` per-identity lock: a ``RESOURCE``-scope lock keyed by a
     ``"{kind}:{name}"`` string and always held alone, outside the co-hold total order.
+    ``IMAGE_PUBLISH`` is keyed by the image row UUID and is likewise held alone: its session form
+    spans object publication while its transaction form fences reconciliation (ADR-0526).
     """
 
     PROJECT = "project"
@@ -50,6 +56,7 @@ class LockScope(StrEnum):
     INVESTIGATION = "investigation"
     RUN = "run"
     INVENTORY = "inventory"
+    IMAGE_PUBLISH = "image_publish"
 
 
 def _lock_key(scope: LockScope, key: UUID | str) -> int:
@@ -165,6 +172,26 @@ async def try_advisory_xact_lock(conn: AsyncConnection, scope: LockScope, key: U
             "call in `async with conn.transaction()` or use a non-autocommit connection."
         )
     return bool(row is not None and row[0])
+
+
+@asynccontextmanager
+async def scoped_session_advisory_lock(
+    conn: AsyncConnection, scope: LockScope, key: UUID | str
+) -> AsyncIterator[None]:
+    """Hold the session form of the exact scoped advisory key over the block.
+
+    Unlike the separately salted leadership helper, this intentionally shares
+    :func:`_lock_key` with :func:`advisory_xact_lock` and
+    :func:`try_advisory_xact_lock`. PostgreSQL therefore makes the session and transaction
+    forms contend on the same bigint. The caller owns transaction-state management; image
+    publication uses an autocommit/transaction-idle connection while holding this lock.
+    """
+    lock_key = _lock_key(scope, key)
+    await conn.execute("SELECT pg_advisory_lock(%s)", (lock_key,))
+    try:
+        yield
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
 
 
 # The leadership name for the single reconciler that hosts console collectors (ADR-0095).

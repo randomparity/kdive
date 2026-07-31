@@ -52,6 +52,7 @@ from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisi
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.cataloging.validation import DEFAULT_INSPECT, InspectSeam, validate_guest_contract
 from kdive.security import audit
+from kdive.services.images.publication_fence import publication_fence
 from kdive.services.images.publish import (
     ImageObjectStore,
     PublishRequest,
@@ -394,28 +395,29 @@ async def _publish_under_quota(
     reservation = await _reserve_under_quota(
         conn, request=request, project=project, principal=principal, new_bytes=new_bytes
     )
-    try:
-        config_written = await write_publish_object(store, reservation, source)
-    except Exception:
-        # Re-raised unchanged — this only records that the committed reservation outlived the
-        # write that was supposed to consume it. Without the line, the project silently carries
-        # `new_bytes` against its cap until the reconciler reaps the row, and an operator chasing
-        # a spurious QUOTA_EXCEEDED has no trail until that removal logs an hour later.
-        _log.warning(
-            "private-upload reservation %s abandoned by a failed write: project %s holds "
-            "%d byte(s) against its cap until the publish deadline reaps the pending row",
-            reservation.row_id,
-            project,
-            new_bytes,
-            exc_info=True,
-        )
-        raise
-    # The flip and its audit row share one transaction so a registered image is never unaudited;
-    # `audit.record_system` opens none of its own, by contract, for exactly this composition.
-    async with conn.transaction():
-        entry = await finish_publish(conn, reservation, config_written=config_written)
-        await _audit_registration(conn, entry, principal=principal)
-    return entry
+    async with publication_fence(conn, reservation):
+        try:
+            config_written = await write_publish_object(store, reservation, source)
+        except Exception:
+            # Re-raised unchanged — this only records that the committed reservation outlived the
+            # write that was supposed to consume it. Without the line, the project silently carries
+            # `new_bytes` against its cap until the reconciler reaps the row. An operator chasing a
+            # spurious QUOTA_EXCEEDED otherwise has no trail until that removal logs an hour later.
+            _log.warning(
+                "private-upload reservation %s abandoned by a failed write: project %s holds "
+                "%d byte(s) against its cap until the publish deadline reaps the pending row",
+                reservation.row_id,
+                project,
+                new_bytes,
+                exc_info=True,
+            )
+            raise
+        # The flip and its audit row share one transaction so a registered image is never unaudited;
+        # `audit.record_system` opens none of its own, by contract, for exactly this composition.
+        async with conn.transaction():
+            entry = await finish_publish(conn, reservation, config_written=config_written)
+            await _audit_registration(conn, entry, principal=principal)
+        return entry
 
 
 async def _audit_registration(

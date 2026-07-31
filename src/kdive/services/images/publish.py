@@ -52,6 +52,7 @@ from kdive.images.cataloging.object_keys import (
     publication_write_request,
 )
 from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
+from kdive.services.images.publication_fence import publication_fence
 
 _log = logging.getLogger(__name__)
 
@@ -122,8 +123,10 @@ class PublishReservation:
 
     Attributes:
         row_id: The ``image_catalog`` row this publish owns.
+        publication_attempt_id: The unique attempt that currently owns the row.
         object_key: The qcow2's object-store key, already persisted on the row.
         config_key: The kernel-config sibling's key, or ``None`` when no config was captured.
+        size_bytes: The expected qcow2 size persisted by the reservation.
         request: The originating :class:`PublishRequest`.
     """
 
@@ -131,6 +134,7 @@ class PublishReservation:
     publication_attempt_id: UUID
     object_key: str
     config_key: str | None
+    size_bytes: int
     request: PublishRequest
 
 
@@ -503,6 +507,7 @@ async def reserve_publish(
         publication_attempt_id=publication_attempt_id,
         object_key=object_key,
         config_key=config_key,
+        size_bytes=size_bytes,
         request=request,
     )
 
@@ -621,5 +626,7 @@ async def publish_image(
     """
     stat = await asyncio.to_thread(source.stat)
     reservation = await reserve_publish(conn, request, size_bytes=stat.st_size, principal=principal)
-    config_written = await write_publish_object(store, reservation, source)
-    return await finish_publish(conn, reservation, config_written=config_written)
+    async with publication_fence(conn, reservation):
+        config_written = await write_publish_object(store, reservation, source)
+        async with conn.transaction():
+            return await finish_publish(conn, reservation, config_written=config_written)

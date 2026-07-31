@@ -34,7 +34,7 @@ from kdive.config.core_settings import (
     IMAGE_PRIVATE_MAX_BYTES,
     IMAGE_PRIVATE_MAX_COUNT,
 )
-from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.locks import LockScope, _lock_key, advisory_xact_lock
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -79,6 +79,7 @@ class _FakeStore:
 
     def __init__(self, quarantined: dict[str, bytes] | None = None) -> None:
         self._objects: dict[str, bytes] = dict(quarantined or {})
+        self._checksums: dict[str, str | None] = {}
         self.puts: list[str] = []
 
     def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact:
@@ -97,6 +98,7 @@ class _FakeStore:
         key = request.key()
         self.puts.append(key)
         self._objects[key] = request.data
+        self._checksums[key] = request.sha256_b64
         etag = hashlib.md5(request.data).hexdigest()  # noqa: S324 - etag stand-in, not security
         return artifact_types.StoredArtifact(
             key,
@@ -112,7 +114,7 @@ class _FakeStore:
             return None
         return artifact_types.HeadResult(
             size_bytes=len(data),
-            checksum_sha256=None,
+            checksum_sha256=self._checksums.get(key),
             etag="etag",
             last_modified=STORE_MTIME,
             version_id="test-version",
@@ -147,6 +149,58 @@ async def _advisory_locks_held_by(url: str, backend_pid: int) -> int:
         row = await cur.fetchone()
     assert row is not None
     return int(row[0])
+
+
+async def _scoped_lock_held_by(
+    url: str, backend_pid: int, scope: LockScope, key_value: str
+) -> bool:
+    key = _lock_key(scope, key_value)
+    unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
+    classid = (unsigned >> 32) & 0xFFFF_FFFF
+    objid = unsigned & 0xFFFF_FFFF
+    async with await _connect(url) as probe, probe.cursor() as cur:
+        await cur.execute(
+            "SELECT EXISTS ("
+            "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND pid = %s "
+            "AND classid = %s AND objid = %s AND objsubid = 1 AND granted)",
+            (backend_pid, classid, objid),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return bool(row[0])
+
+
+async def _pending_image_lock_held_by(url: str, backend_pid: int) -> bool:
+    async with await _connect(url) as observer, observer.cursor() as cur:
+        await cur.execute(
+            "SELECT id FROM image_catalog "
+            "WHERE owner = 'proj' AND state = 'pending' ORDER BY created_at"
+        )
+        rows = await cur.fetchall()
+    assert len(rows) == 1
+    return await _scoped_lock_held_by(url, backend_pid, LockScope.IMAGE_PUBLISH, str(rows[0][0]))
+
+
+async def _wait_for_pending_image_lock_waiter(url: str) -> None:
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        async with await _connect(url) as observer, observer.cursor() as cur:
+            await cur.execute("SELECT id FROM image_catalog WHERE state = 'pending'")
+            row = await cur.fetchone()
+            if row is not None:
+                key = _lock_key(LockScope.IMAGE_PUBLISH, row[0])
+                unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
+                await cur.execute(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' "
+                    "AND classid = %s AND objid = %s AND objsubid = 1 AND NOT granted)",
+                    ((unsigned >> 32) & 0xFFFF_FFFF, unsigned & 0xFFFF_FFFF),
+                )
+                waiting = await cur.fetchone()
+                if waiting is not None and waiting[0]:
+                    return
+        await asyncio.sleep(0.02)
+    raise AssertionError("second publisher never queued on the image publication fence")
 
 
 async def _ungranted_advisory_locks(url: str) -> int:
@@ -627,29 +681,38 @@ def test_advisory_lock_probe_reports_a_held_lock(migrated_url: str) -> None:
 def test_concurrent_same_identity_uploads_cannot_both_register(migrated_url: str) -> None:
     # Two uploads of the *same* provider/name/arch to one project, forced to overlap. The second
     # to reserve adopts the first's `pending` row (ADR-0092 idempotency) and overwrites its
-    # `digest`, and both then PUT the same object key with the lock released. Registering on
-    # `id` alone would let both flip that one row to `registered` and return success, leaving a
-    # live image whose digest cannot match its object. The reservation fence in `_registered`
-    # makes the superseded attempt fail with `CONFLICT` instead (ADR-0520 §7).
+    # `digest` and attempt-specific object key. Registering on `id` alone would let both flip that
+    # one row to `registered` and return success. The publication fence serializes their writes,
+    # and its revalidation makes the superseded attempt fail with `CONFLICT` before its write.
     from kdive.db.repositories import IMAGE_CATALOG
 
-    # Both writes wait here until both uploads have reserved, so the adopt is not a race the test
-    # hopes to win: the first reserver is still mid-write when the second adopts its row.
-    both_reserved = threading.Barrier(2, timeout=10)
+    first_put = True
+    put_order_lock = threading.Lock()
+    publishing_loop: list[asyncio.AbstractEventLoop] = []
 
-    class _BarrierStore(_FakeStore):
+    class _ContendedStore(_FakeStore):
         def put_artifact(
             self, request: artifact_types.ArtifactWriteRequest
         ) -> artifact_types.StoredArtifact:
-            both_reserved.wait()
+            nonlocal first_put
+            if request.key().endswith(".qcow2"):
+                with put_order_lock:
+                    wait_for_adoption = first_put
+                    first_put = False
+                if wait_for_adoption:
+                    asyncio.run_coroutine_threadsafe(
+                        _wait_for_pending_image_lock_waiter(migrated_url), publishing_loop[0]
+                    ).result(timeout=10)
             return super().put_artifact(request)
 
-    store_a = _BarrierStore({"uploads/q/proj/a.qcow2": b"alpha-bytes"})
-    store_b = _BarrierStore({"uploads/q/proj/b.qcow2": b"beta-bytes-differ"})
+    store_a = _ContendedStore({"uploads/q/proj/a.qcow2": b"alpha-bytes"})
+    store_b = _ContendedStore({"uploads/q/proj/b.qcow2": b"beta-bytes-differ"})
     store_b._objects.update(store_a._objects)  # noqa: SLF001 - one shared object namespace
     store_a._objects.update(store_b._objects)  # noqa: SLF001 - test seam
 
     async def _run() -> None:
+        publishing_loop.append(asyncio.get_running_loop())
+
         def _one(store: _FakeStore, key: str):
             async def _go() -> object:
                 conn = await _connect(migrated_url)
@@ -686,13 +749,14 @@ def test_concurrent_same_identity_uploads_cannot_both_register(migrated_url: str
     asyncio.run(_run())
 
 
-def test_no_advisory_lock_is_held_while_the_object_is_written(migrated_url: str) -> None:
+def test_only_image_publish_lock_is_held_while_the_object_is_written(migrated_url: str) -> None:
     # The property #1726 exists for, asserted at the only moment it can be observed: inside the
     # PUT. The store probes pg_locks from a *second* connection filtered to the publishing
     # backend's pid (probing the connection under test would itself open a transaction, ADR-0506)
     # and records what it saw. Before ADR-0520 the PROJECT lock was held here; after it, the
     # reservation transaction has committed and released it.
-    observed: list[int] = []
+    project_lock_observed: list[bool] = []
+    image_lock_observed: list[bool] = []
     publishing_pid: list[int] = []
     publishing_loop: list[asyncio.AbstractEventLoop] = []
 
@@ -700,9 +764,20 @@ def test_no_advisory_lock_is_held_while_the_object_is_written(migrated_url: str)
         def put_artifact(
             self, request: artifact_types.ArtifactWriteRequest
         ) -> artifact_types.StoredArtifact:
-            observed.append(
+            project_lock_observed.append(
                 asyncio.run_coroutine_threadsafe(
-                    _advisory_locks_held_by(migrated_url, publishing_pid[0]),
+                    _scoped_lock_held_by(
+                        migrated_url,
+                        publishing_pid[0],
+                        LockScope.PROJECT,
+                        "proj",
+                    ),
+                    publishing_loop[0],
+                ).result()
+            )
+            image_lock_observed.append(
+                asyncio.run_coroutine_threadsafe(
+                    _pending_image_lock_held_by(migrated_url, publishing_pid[0]),
                     publishing_loop[0],
                 ).result()
             )
@@ -716,9 +791,10 @@ def test_no_advisory_lock_is_held_while_the_object_is_written(migrated_url: str)
             publishing_pid.append(conn.info.backend_pid)
             entry = await _register(conn, store)
             assert entry.state is ImageState.REGISTERED
-        # The PUT happened, and the publishing backend held zero advisory locks while it ran.
+        # The PUT happened under its row fence, but never under the project quota lock.
         assert store.puts != []
-        assert observed == [0]
+        assert project_lock_observed == [False]
+        assert image_lock_observed == [True]
 
     asyncio.run(_run())
 
