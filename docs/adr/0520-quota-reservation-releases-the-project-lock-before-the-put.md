@@ -173,11 +173,16 @@ published image replaces that digest with the published object's. That is the co
 a row with an object must describe *that* object — but it is a behaviour change beyond the retry
 case, so it is recorded rather than left to be discovered.
 
-### 6. ADR-0516's §2 is struck, not rewritten
+### 6. ADR-0516 is annotated by appending, not by striking
 
-Per `docs/adr/README.md`, ADR-0516 §2 ("The lock spans the PUT by design, not by oversight") and the
-matching Consequences bullet are struck through with an italic *Superseded by 0520* note. Its
-decision prose is not edited in place.
+`docs/adr/README.md` describes marking a partially superseded section with strike-through
+(`~~…~~`). The records gate does not permit that: `check-records.sh` raises `E-REWRITE` when a
+merged record's `## Decision` or `## Consequences` **drops** a line the base ref had, and wrapping
+prose in `~~` rewrites every line it touches. The gate is the authority, so ADR-0516 keeps its
+prose byte-for-byte and gains only appended text: a partial-supersession banner beneath its
+`## Status`, an italic *Superseded by 0520* note after §2, and one after the matching Consequences
+bullet. That satisfies the README's intent — a reader of the superseded prose is told, in place,
+that it no longer holds — without an edit the gate rejects.
 
 ## Consequences
 
