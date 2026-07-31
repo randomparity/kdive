@@ -108,10 +108,10 @@ PUT loop for a bounded GET rather than moving both.
   one unsafe one under the same lock scope leaves the real instance in place.
 - **Add a unique index on `artifacts (owner_kind, owner_id, object_key)` and rely on `ON
   CONFLICT DO NOTHING`.** This is the shape the database would normally enforce, and it would let
-  phase 3 drop its probe. It needs a migration, it needs the 483k-row existing table to be
-  conflict-free first, and it still would not decide what happens to the object when the PUT wins
-  and the insert loses — which is the actual question. Worth filing separately; it does not
-  replace this decision.
+  phase 3 drop its probe. It needs a migration, it needs every existing row in `artifacts` to be
+  conflict-free under the new key first, and it still would not decide what happens to the object
+  when the PUT wins and the insert loses — which is the actual question. Worth filing separately;
+  it does not replace this decision.
 - **Skip the compensating delete and let the object leak.** Cheapest, and defensible under a
   prefix-driven sweep. It is not defensible here: reclaim reads the rows, so the leak is
   permanent rather than deferred, and for `capture_traffic` the leaked object is `SENSITIVE`.

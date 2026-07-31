@@ -168,9 +168,9 @@ async def _plan_rotation(
 
     The sidecar GET stays under the lock **deliberately**. It is one small bounded read, and it
     is the rotation cursor: moving it out would widen the window in which a peer rotation reads
-    the same cursor and re-derives the same ``(gen, index)`` parts. That the sealed parts are
-    idempotent on their object key makes such a re-derivation harmless rather than free, and
-    ADR-0519 trades a bounded GET for the unbounded PUT loop rather than moving both.
+    the same cursor and re-derives the same ``(gen, index)`` parts. Insert-if-absent on the part
+    object key makes such a re-derivation harmless, but not free — it costs a duplicate PUT of
+    identical bytes — so ADR-0519 trades the unbounded PUT loop for a bounded GET, not both.
 
     Returns ``None`` (sealing nothing) when the System is no longer live (teardown reclaimed it,
     the race guard above) or the console log cannot be read (ADR-0223): the permission wall is a
@@ -208,10 +208,11 @@ async def _seal_pending(
     """PUT the planned part objects lock-free, then register their rows under one short lock.
 
     Returns ``False`` when the locked re-verify finds the System no longer live — teardown ran
-    while the objects were in flight, so its row-driven reclaim has already passed them by. The
-    objects this attempt wrote are deleted in that case: nothing else would ever reach them, and
-    a peer rotation cannot have claimed the keys because the same guard refuses every rotation
-    once the System is not live.
+    while the objects were in flight, so its row-driven reclaim has already passed them by and
+    nothing else would ever reach them. Every object this attempt wrote is deleted in that case,
+    including any key a peer rotation registered: a peer's row can only have committed *before*
+    teardown's terminal-state write, because both take this same lock, so teardown's reclaim
+    covers that row and the delete is at worst redundant on an already-absent object.
 
     ``plan.run_id`` is the System's most-recently-booted Run (ADR-0279), stamped as a correlation
     attribute; ownership stays ``owner_kind='systems'``. ``None`` leaves the part uncorrelated.
