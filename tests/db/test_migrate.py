@@ -189,6 +189,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0085",
         "0086",
         "0087",
+        "0089",
     ]
     assert second == []
 
@@ -697,6 +698,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0085",
         "0086",
         "0087",
+        "0089",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1062,6 +1064,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0085",
         "0086",
         "0087",
+        "0089",
     ]
 
 
@@ -1678,9 +1681,7 @@ def test_migration_0089_adds_image_size_bytes_not_null_default_zero(
     assert _columns(pg_conn, "image_catalog").get("size_bytes") == "bigint"
     assert _nullable(pg_conn, "image_catalog").get("size_bytes") == "NO"
     _insert_public_image(pg_conn, name="sized", state="defined", object_key=None, volume=None)
-    row = pg_conn.execute(
-        "SELECT size_bytes FROM image_catalog WHERE name = 'sized'"
-    ).fetchone()
+    row = pg_conn.execute("SELECT size_bytes FROM image_catalog WHERE name = 'sized'").fetchone()
     assert row is not None and row[0] == 0
 
 
@@ -1709,9 +1710,7 @@ def test_migration_0089_leaves_pre_existing_rows_at_zero(pg_conn: psycopg.Connec
         "'rootfs/legacy.qcow2', 'projX', now())"
     )
     migrate.apply_migrations(pg_conn)  # applies only the pending 0089
-    row = pg_conn.execute(
-        "SELECT size_bytes FROM image_catalog WHERE name = 'legacy'"
-    ).fetchone()
+    row = pg_conn.execute("SELECT size_bytes FROM image_catalog WHERE name = 'legacy'").fetchone()
     assert row is not None and row[0] == 0
 
 

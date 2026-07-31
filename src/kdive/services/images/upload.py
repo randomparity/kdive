@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -54,10 +55,13 @@ from kdive.security import audit
 from kdive.services.images.publish import (
     ImageObjectStore,
     PublishRequest,
+    PublishReservation,
     finish_publish,
     reserve_publish,
     write_publish_object,
 )
+
+_log = logging.getLogger(__name__)
 
 _UPLOAD_TOOL = "images.upload"
 _OBJECT_KIND = "image_catalog"
@@ -300,6 +304,46 @@ async def register_private_upload(
     return entry
 
 
+async def _reserve_under_quota(
+    conn: AsyncConnection,
+    *,
+    request: PublishRequest,
+    project: str,
+    principal: str,
+    new_bytes: int,
+) -> PublishReservation:
+    """Enforce the quota fail-closed under the PROJECT lock and return the committed reservation.
+
+    The lock spans exactly this: one aggregate read of the project's live private rows, the cap
+    decision, and the ``pending`` row that claims ``new_bytes``. It holds no object-store call and
+    no unbounded loop, and it is released by the ``return`` committing the transaction — which is
+    what lets the caller run the PUT unlocked (ADR-0520).
+
+    The transaction must be a real one and not a savepoint: releasing a savepoint commits neither
+    the reservation nor the lock, so the claim would be invisible to a concurrent upload *and* the
+    PROJECT lock would still be held across the PUT — the exact span this shortens. Every caller
+    supplies a statement-free connection today, but that is a property of the callers, so it is
+    asserted (ADR-0516 §1, ADR-0506).
+
+    Raises:
+        CategorizedError: ``QUOTA_EXCEEDED``. The denial reserves nothing and the locked
+            transaction rolls back having written nothing, so it is audited durably on a fresh
+            transaction before raising — an over-cap upload is both denied and audited.
+    """
+    require_top_level_transaction(conn, "the private-upload quota reservation")
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.PROJECT, project):
+        count, used_bytes = await _project_usage(conn, project)
+        denial = _quota_denial(
+            project=project, count=count, used_bytes=used_bytes, new_bytes=new_bytes
+        )
+        if denial is None:
+            return await reserve_publish(conn, request, size_bytes=new_bytes)
+    await _audit_denial(
+        conn, project=project, principal=principal, name=request.name, denial=denial
+    )
+    raise denial
+
+
 async def _publish_under_quota(
     conn: AsyncConnection,
     store: UploadObjectStore,
@@ -309,49 +353,42 @@ async def _publish_under_quota(
     principal: str,
     new_bytes: int,
 ) -> ImageCatalogEntry:
-    """Reserve the quota under the PROJECT lock, then publish unlocked; audit either outcome.
+    """Reserve the quota under the PROJECT lock, then publish with the lock released.
 
-    The lock spans the reservation only (ADR-0520): one aggregate read of the project's live
-    private rows, the cap decision, and the ``pending`` row that claims this upload's bytes. That
-    row commits with the lock, so a concurrent upload's aggregate read already sees the claim —
-    which is what keeps the cap fail-closed without holding the lock across the multi-GiB PUT.
-
-    A denial reserves nothing, rolls back the locked transaction (no row written), and is audited
-    durably on a separate transaction before raising, so an over-cap upload is denied **and**
-    audited.
-
-    The transaction must be a real one and not a savepoint: releasing a savepoint commits neither
-    the reservation nor the lock, so the claim would be invisible to a concurrent upload *and* the
-    PROJECT lock would still be held across the PUT — the exact span this shortens. Every caller
-    supplies a statement-free connection today, but that is a property of the callers, so it is
-    asserted (ADR-0516 §1, ADR-0506).
+    The three phases are deliberately separate transactions (ADR-0520): the locked reservation,
+    the object write with nothing held, and the registration flip composed with its audit row. The
+    cap stays fail-closed because the reservation commits inside the lock — a concurrent upload's
+    aggregate read sees the claim — rather than because the lock spans the multi-GiB PUT.
 
     A PUT that fails or a worker that dies after the reservation commits leaves a ``pending`` row
     holding its bytes; the reconciler's ``repair_dangling_images`` releases it once its
-    ``pending_since + KDIVE_IMAGE_PUBLISH_GRACE`` deadline elapses, which is ADR-0092's recovery
-    path rather than a rollback this function would have to duplicate.
+    ``pending_since + KDIVE_IMAGE_PUBLISH_GRACE_SECONDS`` deadline elapses, which is ADR-0092's
+    recovery path rather than a rollback this function would have to duplicate.
     """
     project = request.owner
     if project is None:  # Invariant: this path always sets owner to the project.
         raise RuntimeError("private upload has no owning project")
-    require_top_level_transaction(conn, "the private-upload quota reservation")
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.PROJECT, project):
-        count, used_bytes = await _project_usage(conn, project)
-        denial = _quota_denial(
-            project=project, count=count, used_bytes=used_bytes, new_bytes=new_bytes
+    reservation = await _reserve_under_quota(
+        conn, request=request, project=project, principal=principal, new_bytes=new_bytes
+    )
+    try:
+        config_written = await write_publish_object(store, reservation, source)
+    except Exception:
+        # Re-raised unchanged — this only records that the committed reservation outlived the
+        # write that was supposed to consume it. Without the line, the project silently carries
+        # `new_bytes` against its cap until the reconciler reaps the row, and an operator chasing
+        # a spurious QUOTA_EXCEEDED has no trail until that removal logs an hour later.
+        _log.warning(
+            "private-upload reservation %s abandoned by a failed write: project %s holds "
+            "%d byte(s) against its cap until the publish deadline reaps the pending row",
+            reservation.row_id,
+            project,
+            new_bytes,
+            exc_info=True,
         )
-        if denial is None:
-            reservation = await reserve_publish(conn, request, size_bytes=new_bytes)
-    if denial is not None:
-        # Denied: the read-only locked transaction has closed (releasing the lock and writing
-        # nothing). Audit the denial durably on a fresh transaction, then raise the typed error
-        # so the over-cap upload is both denied and audited.
-        await _audit_denial(
-            conn, project=project, principal=principal, name=request.name, denial=denial
-        )
-        raise denial
-
-    config_written = await write_publish_object(store, reservation, source)
+        raise
+    # The flip and its audit row share one transaction so a registered image is never unaudited;
+    # `audit.record_system` opens none of its own, by contract, for exactly this composition.
     async with conn.transaction():
         entry = await finish_publish(conn, reservation, config_written=config_written)
         await _audit_registration(conn, entry, principal=principal)

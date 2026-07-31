@@ -4,9 +4,10 @@
 
 Accepted (2026-07-30)
 
-Partially supersedes [ADR-0516](0516-private-upload-holds-the-project-lock-across-its-put-by-design.md)
-§2 — the span that record accepted *pending #1726* is now shortened. Everything else in ADR-0516
-stands: the `require_top_level_transaction` assertion, the classification of the presign and
+Partially supersedes
+[ADR-0516](0516-private-upload-holds-the-project-lock-across-its-put-by-design.md) §2 — the span
+that record accepted *pending #1726* is now shortened. Everything else in ADR-0516 stands: the
+`require_top_level_transaction` assertion, the classification of the presign and
 complete-rootfs-upload sites, and the finding that the transaction was already top-level.
 
 ## Context
@@ -38,8 +39,8 @@ Two facts about the existing design make the reservation shape cheap rather than
   `pending` row's object does not exist yet, so the HEAD returned `None` and it contributed 0 bytes.
 - **The reclaim path for an abandoned `pending` row already exists.**
   `reconciler.cleanup.images.repair_dangling_images` removes a non-`defined` row whose object HEAD
-  is missing past `pending_since + grace` (`KDIVE_IMAGE_PUBLISH_GRACE`, default 3600s), under a
-  delete fenced on the same deadline so a re-armed publish is never wedged.
+  is missing past `pending_since + grace` (`KDIVE_IMAGE_PUBLISH_GRACE_SECONDS`, default 3600s),
+  under a delete fenced on the same deadline so a re-armed publish is never wedged.
 
 ## Decision
 
@@ -120,10 +121,35 @@ between reserve and finish — leaves a `pending` row holding its `size_bytes` a
 quota.
 
 That row is reclaimed by `repair_dangling_images`: its object HEAD is missing and its
-`pending_since + KDIVE_IMAGE_PUBLISH_GRACE` deadline elapses, so the reconciler deletes it and the
-quota is released. The bound on how long an orphaned reservation consumes quota is therefore
-`KDIVE_IMAGE_PUBLISH_GRACE` (default one hour), not forever. No new reclaimer, no new deadline
-column, no lease table.
+`pending_since + KDIVE_IMAGE_PUBLISH_GRACE_SECONDS` deadline elapses, so the reconciler deletes
+it and the quota is released. The bound on how long such a reservation consumes quota is
+therefore `KDIVE_IMAGE_PUBLISH_GRACE_SECONDS` (default one hour), not forever. No new reclaimer,
+no new deadline column, no lease table.
+
+**That covers the object-absent case only, which is not every case.** Two windows the sweep does
+not close, both disclosed rather than fixed here:
+
+- **The write landed but the flip did not.** If the process dies between `write_publish_object`
+  returning and `finish_publish` committing, the row is `pending` with its object **present**.
+  `repair_dangling_images` skips it (its `head_present` check passes) and `repair_leaked_images`
+  skips the object (a row references it), so nothing reaps it and it holds its bytes and its
+  count slot indefinitely. A re-publish of the same identity adopts it, which is the only
+  recovery. The window is one round trip wide, but it is exactly the width a worker restart or a
+  deploy lands in. This is a pre-existing property of the row-first publish — the build path has
+  had it since ADR-0092 — but this change is what brings the private-upload path into it, and the
+  quota is what gives it a lasting cost. Filed as #1757 rather than fixed here: closing it
+  means teaching the reconciler to resolve a pending-with-object row, which is a reconciler
+  decision and interacts with the next bullet.
+- **A publish slower than the grace is swept mid-upload.** `pending_since` is stamped at
+  reservation and the PUT now runs after the commit that makes the row visible, so a transfer
+  lasting longer than `KDIVE_IMAGE_PUBLISH_GRACE_SECONDS` can have its live reservation deleted
+  underneath it; `finish_publish` then raises `RuntimeError("image_catalog row … vanished before
+  registration")`. A 50 GiB image is in-bounds by `KDIVE_IMAGE_PRIVATE_MAX_BYTES`, so at ~10 MB/s
+  this is reachable at the default one-hour grace. Operators whose uploads are that large must set
+  the grace above their slowest expected transfer. Re-arming `pending_since` mid-write would need
+  a heartbeat, which is the second-deadline trap ADR-0502 rejected for `object_write_leases`.
+  Tracked with the previous bullet in #1757, since a sweep taught to resolve a pending-with-object
+  row must not race a slow publish about to flip it — one fence, one design.
 
 **No bespoke rollback is added on the PUT-failure path.** ADR-0092 already states that the recovery
 path for a crash mid-publish is the reconciler, not a rollback, and a rollback would only cover the
@@ -131,7 +157,23 @@ raised-exception case while doing nothing for the killed-worker case that needs 
 two mechanisms where the sweep must be correct anyway. The upload path now behaves exactly like the
 build path, which has committed its `pending` row before the PUT since ADR-0092.
 
-### 5. ADR-0516's §2 is struck, not rewritten
+### 5. The adopt refreshes `digest` alongside `size_bytes`
+
+Found while testing the retry path, and fixed here because the reservation is what makes it
+reachable often enough to matter: `_adopt_or_insert_pending` refreshed `object_key`,
+`kernel_config_key` and `pending_since` but never `digest`. An adopted row therefore kept the
+abandoned attempt's digest while the retry wrote different bytes, registering an image whose
+object can never satisfy the materialization fetch's `sha256(object) == row.digest` gate — the
+permanent unfetchability `_verify_source_digest` exists to prevent, arrived at from the other
+side. The adopt now assigns `request.digest`.
+
+This also applies to a `defined` baseline, including a `config`-managed one that
+`inventory/reconcile/images.py` seeded with an operator-declared digest: realizing it as a
+published image replaces that digest with the published object's. That is the correct direction —
+a row with an object must describe *that* object — but it is a behaviour change beyond the retry
+case, so it is recorded rather than left to be discovered.
+
+### 6. ADR-0516's §2 is struck, not rewritten
 
 Per `docs/adr/README.md`, ADR-0516 §2 ("The lock spans the PUT by design, not by oversight") and the
 matching Consequences bullet are struck through with an italic *Superseded by 0520* note. Its
@@ -143,10 +185,10 @@ decision prose is not edited in place.
   serialize behind a single-row write. Uploads to different projects were already unaffected.
 - The quota read costs one query instead of up to 50 object-store round trips, on every upload,
   whether or not it is contended.
-- A project's quota can be held by an orphaned reservation for up to `KDIVE_IMAGE_PUBLISH_GRACE`
-  after a failed or killed upload. Operators who shorten that setting shorten this window with it;
-  the setting's other consumers (`repair_leaked_images`, `repair_dangling_images`) already tie it to
-  publish liveness, so the meanings agree.
+- A project's quota can be held by an orphaned reservation for up to
+  `KDIVE_IMAGE_PUBLISH_GRACE_SECONDS` after a failed or killed upload. Operators who shorten that
+  setting shorten this window with it; the setting's other consumers (`repair_leaked_images`,
+  `repair_dangling_images`) already tie it to publish liveness, so the meanings agree.
 - A quota denial no longer needs the PUT to have been attempted, and an over-cap upload still writes
   nothing: the denial branch reserves no row, rolls back the locked transaction, and audits on a
   fresh one exactly as before.
@@ -157,8 +199,8 @@ decision prose is not edited in place.
 - Rows that predate migration `0089` carry `size_bytes = 0` and so contribute nothing to their
   project's bytes total until they expire. This is a greenfield rewrite with no deployment whose
   private-image quota is load-bearing (`AGENTS.md`), and private rows carry a
-  `KDIVE_IMAGE_PRIVATE_LIFETIME_MAX`-bounded `expires_at`, so the window is bounded and closes
-  itself. The **count** cap is exact from the first upload, since it never depended on size.
+  `KDIVE_IMAGE_PRIVATE_LIFETIME_MAX_SECONDS`-bounded `expires_at`, so the window is bounded and
+  closes itself. The **count** cap is exact from the first upload, since it never depended on size.
 - `publish_image` keeps its signature and behaviour; `image_build.py` is untouched. The three new
   functions are the seam the lock needs, not a second publish path — `publish_image` is their only
   other composition.

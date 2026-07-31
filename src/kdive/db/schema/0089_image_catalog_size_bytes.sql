@@ -14,7 +14,7 @@
 -- (_LIVE_PRIVATE_STATES already includes 'pending'), and the next upload's aggregate read
 -- sees it. The lock then spans one SELECT and one single-row write, and the PUT runs
 -- outside it. An abandoned reservation is reclaimed by repair_dangling_images on the
--- existing pending_since + KDIVE_IMAGE_PUBLISH_GRACE deadline — no new sweep, no new
+-- existing pending_since + KDIVE_IMAGE_PUBLISH_GRACE_SECONDS deadline — no new sweep, no new
 -- deadline column, and deliberately not a lease table (ADR-0520 Considered & rejected).
 --
 -- NOT NULL DEFAULT 0 rather than nullable-and-tied-to-object_key: a 'defined' baseline has
@@ -24,7 +24,7 @@
 --
 -- Rows that predate this migration take the 0 default and contribute nothing to their
 -- project's bytes total until they expire. Greenfield tree, and private rows carry a
--- KDIVE_IMAGE_PRIVATE_LIFETIME_MAX-bounded expires_at, so the window closes itself; the
+-- KDIVE_IMAGE_PRIVATE_LIFETIME_MAX_SECONDS-bounded expires_at, so the window closes itself; the
 -- count cap is exact from the first upload since it never depended on size. A backfill is
 -- not possible here — the size lives in the object store, which a migration cannot reach.
 ALTER TABLE image_catalog ADD COLUMN size_bytes bigint NOT NULL DEFAULT 0

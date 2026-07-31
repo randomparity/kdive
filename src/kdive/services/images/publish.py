@@ -186,6 +186,12 @@ async def _adopt_or_insert_pending(
     ``size_bytes`` is the size of the object this publish is about to write. It lands on the row
     *before* the object exists so the row is a durable quota claim (ADR-0520); an adopted row's
     stale size is overwritten by this attempt's.
+
+    The adopt refreshes ``digest`` for the same reason it refreshes ``object_key``: the row must
+    describe *this* attempt's bytes. Leaving the abandoned attempt's digest in place while writing
+    different bytes registers an image the materialization fetch can never verify — the exact
+    permanent-unfetchability :func:`_verify_source_digest` exists to prevent, arrived at from the
+    other side. A ``defined`` baseline's ``NULL`` digest is filled in by the same assignment.
     """
     select_q = sql.SQL(
         "SELECT id FROM image_catalog "
@@ -210,10 +216,17 @@ async def _adopt_or_insert_pending(
         if existing is not None:
             await cur.execute(
                 "UPDATE image_catalog "
-                "SET state = %s, object_key = %s, kernel_config_key = %s, size_bytes = %s, "
-                "    pending_since = now() "
+                "SET state = %s, object_key = %s, kernel_config_key = %s, digest = %s, "
+                "    size_bytes = %s, pending_since = now() "
                 "WHERE id = %s",
-                (ImageState.PENDING.value, object_key, config_key, size_bytes, existing["id"]),
+                (
+                    ImageState.PENDING.value,
+                    object_key,
+                    config_key,
+                    request.digest,
+                    size_bytes,
+                    existing["id"],
+                ),
             )
             return existing["id"]
         return await _insert_pending(cur, request, object_key, config_key, size_bytes)

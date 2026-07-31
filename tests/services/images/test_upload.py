@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -636,7 +637,7 @@ def test_concurrent_uploads_cannot_both_pass_the_bytes_cap(
 
 
 def test_a_failed_put_leaves_a_reservation_the_dangling_sweep_reclaims(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The worker-dies-mid-upload path, which is the cost of committing the reservation before the
     # write. The reservation must (a) still hold quota — otherwise the cap is fail-open between
@@ -645,6 +646,7 @@ def test_a_failed_put_leaves_a_reservation_the_dangling_sweep_reclaims(
     from kdive.reconciler.cleanup.images import repair_dangling_images
 
     monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "20")
+    caplog.set_level(logging.WARNING, logger="kdive.services.images.upload")
 
     class _DyingStore(_FakeStore):
         def put_artifact(
@@ -663,15 +665,24 @@ def test_a_failed_put_leaves_a_reservation_the_dangling_sweep_reclaims(
             with pytest.raises(CategorizedError) as err:
                 await _register(conn, dying, name="doomed", quarantine_key="uploads/q/proj/a.qcow2")
             assert err.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+            # The abandonment is announced. Without it the project silently carries the bytes
+            # until the sweep runs, and an operator chasing the resulting QUOTA_EXCEEDED has no
+            # trail; the error the caller sees names the store, not the quota it just stranded.
+            abandoned = [
+                r
+                for r in caplog.records
+                if r.levelno >= logging.WARNING and "abandoned" in r.getMessage()
+            ]
+            assert len(abandoned) == 1
+            assert "proj" in abandoned[0].getMessage()
+            assert "12 byte(s)" in abandoned[0].getMessage()
 
             # (a) The reservation survived the failed write and still occupies its bytes, so a
             # second upload that would jointly breach the cap is denied rather than admitted.
             assert await _project_usage(conn, "proj") == (1, 12)
             healthy = _quarantine(b"twelve-bytes", key="uploads/q/proj/b.qcow2")
             with pytest.raises(CategorizedError) as blocked:
-                await _register(
-                    conn, healthy, name="next", quarantine_key="uploads/q/proj/b.qcow2"
-                )
+                await _register(conn, healthy, name="next", quarantine_key="uploads/q/proj/b.qcow2")
             assert blocked.value.category is ErrorCategory.QUOTA_EXCEEDED
 
             # (b) Past its publish deadline the reconciler removes the row — object missing, grace
@@ -717,6 +728,11 @@ def test_retrying_an_abandoned_reservation_re_reserves_the_new_size(migrated_url
             # One row still — adopted, not duplicated — carrying the retry's size, not the
             # abandoned attempt's.
             assert await _project_usage(conn, "proj") == (1, 4)
+            # And the retry's digest. The adopt used to leave the abandoned attempt's digest on
+            # the row while writing the retry's bytes, which registers an image whose object can
+            # never satisfy the materialization fetch's `sha256(object) == row.digest` gate.
+            written = retry._objects[entry.object_key]  # noqa: SLF001 - test seam
+            assert entry.digest == "sha256:" + hashlib.sha256(written).hexdigest()
 
     asyncio.run(_run())
 
@@ -740,13 +756,14 @@ class _SweepStore:
 
 
 def test_publish_refuses_a_connection_that_already_opened_a_transaction(migrated_url: str) -> None:
-    # The publish holds the PROJECT lock across the object-store PUT on purpose (fail-closed
-    # quota, ADR-0516). That only works if its `conn.transaction()` is a real one: on a
-    # non-autocommit connection with a statement already run, it would be a SAVEPOINT, whose
-    # release commits nothing and releases no advisory lock — so the PROJECT lock would be held
-    # to the *caller's* commit, well past the PUT (ADR-0506, ADR-0244). No caller does this
-    # today, which is exactly why it is guarded rather than left to hold by luck; the dirty case
-    # is constructed here deliberately.
+    # The reservation must really commit and the PROJECT lock must really release, both at the
+    # end of the locked block (ADR-0520). That only works if its `conn.transaction()` is a real
+    # one: on a non-autocommit connection with a statement already run, it would be a SAVEPOINT,
+    # whose release commits nothing and releases no advisory lock. The reservation would then be
+    # invisible to a concurrent upload — the cap goes fail-open — *and* the lock would be held to
+    # the caller's commit, right back across the PUT this change moved it off (ADR-0506,
+    # ADR-0516 §1). No caller does this today, which is exactly why it is guarded rather than
+    # left to hold by luck; the dirty case is constructed here deliberately.
     from kdive.db.repositories import IMAGE_CATALOG
 
     store = _quarantine(b"conforming-rootfs")
