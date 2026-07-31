@@ -1,6 +1,10 @@
 # ADR 0336 — Offer the kernel config for staged-path and staged-volume images
 
 - **Status:** Accepted
+
+> **Publish-key rule partially superseded by [0526](0526-fence-and-reconcile-pending-image-publications.md)**
+> (2026-07-31). Staged-image keys remain deterministic.
+
 - **Date:** 2026-07-12
 - **Issue:** #1132
 - **Builds on:** ADR-0317 (image kernel-config offer), ADR-0331 (`has_kernel_config` disclosure), ADR-0228 (staged-path catalog source)
