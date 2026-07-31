@@ -71,18 +71,29 @@ while the PUT thread continues, the attempt key cannot collide with recovery or 
 The PROJECT lock remains absent during the PUT. Tests distinguish the image fence from the project
 quota lock rather than asserting that no advisory lock of any kind exists.
 
-The private-expiry query excludes `pending` state. The pending-publication repair is the only
-automatic deletion path for a reservation and therefore the only path that needs its fence. If it
-recovers an already-expired object to `registered`, normal expiry removes it on the next pass.
+Both private-expiry predicates exclude `pending` state: the candidate SELECT and the later
+`FOR UPDATE` re-read immediately before object/row deletion. The second predicate closes a selected
+`registered` candidate becoming an adopted `pending` reservation before the lock is obtained. The
+pending-publication repair is the only automatic deletion path for a reservation and therefore the
+only path that needs its fence. If it recovers an already-expired object to `registered`, normal
+expiry removes it on the next pass.
 
-Config inventory follows the same lifecycle ownership. It updates config-owned descriptive fields
-independently. Runtime realization/publication fields update only when the loaded snapshot was not
-`pending` and a SQL compare-and-swap confirms the current `(state, publication_attempt_id)` still
-matches that snapshot. A miss preserves runtime fields and defers recomputation to the next pass.
-This is two-sided: neither a `defined -> pending` reservation nor a `pending -> registered` finish
-can be overwritten by a stale inventory snapshot. Config prune re-reads under row lock and returns a
-no-op for `pending`. After recovery registers or deletes the attempt, later inventory passes resume
-normal ownership.
+Config inventory follows the same lifecycle ownership. Its config-only columns are `format`,
+`root_device`, `visibility`, `capabilities`, and `description`; those update independently. The
+CAS-protected set is `object_key`, `kernel_config_key`, `volume`, `path`, `digest`, `provenance`,
+`provenance_attested`, `state`, `size_bytes`, `pending_since`, `publication_attempt_id`, and
+`publication_principal`. Inventory has no reason to change the final four, and preserving them is an
+explicit invariant rather than an omission from its SET list.
+
+Runtime realization fields update only when the loaded snapshot was not `pending` and a SQL
+compare-and-swap confirms the current `(state, publication_attempt_id)` still matches that snapshot.
+A miss preserves the whole protected set and defers recomputation to the next pass. Config-only
+changes still count in `diff.updated`; a failed runtime CAS does not. When a desired runtime change
+was skipped by the CAS, the pass appends one `diff.warned` record saying publication state changed
+and realization was deferred. This is two-sided: neither a `defined -> pending` reservation nor a
+`pending -> registered` finish can be overwritten by a stale inventory snapshot. Config prune
+re-reads under row lock and returns a no-op for `pending`. After recovery registers or deletes the
+attempt, later inventory passes resume normal ownership.
 
 ## Reconciliation flow
 
@@ -132,12 +143,25 @@ registered or removed. It logs the outcome without object bytes or tenant-sensit
 
 Migration 0093 adds nullable `publication_attempt_id uuid` and `publication_principal text` columns,
 backfills a unique attempt UUID for existing pending rows, and constrains new pending rows to carry
-an attempt. Registration clears both fields. Publish object keys include the attempt UUID;
-consumers already read persisted keys and need no derivation change. The deterministic
-`config_object_key` remains for inventory/staged capture, while an attempt-aware helper produces
-both publish keys. `ArtifactWriteRequest` gains an optional base64 SHA-256 value, and the
-object-store adapter sends it only when present. Image qcow2 writes populate it; unrelated writes
-retain their existing request shape.
+an attempt. Registration clears both fields. `ImageCatalogEntry` gains both nullable fields so its
+`extra="forbid"` validation continues to accept `SELECT *`; `PublishReservation` gains the required
+attempt UUID. Every explicit image projection is audited and extended when it feeds that model.
+Catalog/MCP response builders remain explicit projections and must never render either internal
+publication field, especially `publication_principal`. Migrated-database finish, resolve, list, and
+describe paths are regression-tested.
+
+Publish object keys include the attempt UUID; consumers already read persisted keys and need no
+derivation change. The deterministic `config_object_key` remains for inventory/staged capture, while
+an attempt-aware helper produces both publish keys.
+
+`ArtifactWriteRequest` gains `sha256_b64: str | None = None`, matching
+`ArtifactStreamRequest.sha256_b64`. A single helper accepts only `sha256:` plus exactly 64 hex
+digits, converts the 32 digest bytes to standard padded base64, and raises
+`CONFIGURATION_ERROR` for malformed persisted/input digests. `ObjectStore.put_artifact` passes a
+non-null value as the SDK's `ChecksumSHA256` and omits the argument otherwise. The normal publish
+HEAD gate and recovery both require `size_bytes == reservation.size_bytes` and
+`checksum_sha256 == expected padded base64`; presence-only or missing checksum evidence never
+registers a qcow2. Config siblings retain their best-effort presence-only HEAD contract.
 
 The image sweep store port gains `head(key) -> HeadResult | None` in addition to delete/list
 operations. Publication exposes a narrow fence helper shared by the publisher and repair, backed by
@@ -183,15 +207,31 @@ publisher-versus-reconciler fence.
 
 ## Tests
 
-Focused service, migration, and reconciler tests must cover shared session/xact lock contention,
-transaction-idle PUT entry, successful fence acquisition/release, stale reservation rejection
-before PUT, attempt-key uniqueness, cross-principal adoption, death-after-write recovery, a PUT that
-outlives database-session loss or task cancellation, pending-row exclusion from private expiry,
-ordinary inventory ticks and declaration removal during a blocked publish, missing-object cleanup,
-both stale inventory races (`defined -> pending` and `pending -> registered`), valid size/digest
-registration, config presence/absence/error, private audit atomicity, size and checksum mismatch
-deletion, absent checksum deletion, delete/HEAD failure retry, and private quota release after row
-removal.
+The focused acceptance matrix is binding:
+
+| Contract branch | Required observable proof |
+|---|---|
+| shared fence | a real session holder makes the reconciler's exact xact try-lock return false; after release the same key succeeds |
+| transaction boundary | both worker-autocommit and MCP-non-autocommit shapes enter PUT transaction-idle with PROJECT lock absent and IMAGE_PUBLISH held |
+| active slow publisher | a blocked PUT with an expired pending row survives the real dangling repair; the same pass repairs it after fence release |
+| stale reservation | recovery wins before fence acquisition, publisher raises `CONFLICT`, and no PUT occurs |
+| session loss/cancellation | a late PUT lands only under the abandoned attempt key and cannot alter a successor/recovered row |
+| attempt adoption | every adoption changes both qcow2/config keys; cross-principal private adoption persists the second actor |
+| valid abandoned object | matching size/canonical checksum registers and increments the repair terminal-outcome count |
+| config sibling | present retains the key, absent clears it, and HEAD failure preserves pending state for retry |
+| private audit | recovered registration and the existing audit transition commit atomically under the persisted principal; injected audit failure registers nothing |
+| missing private principal | valid bytes are deleted and the row reclaimed, never registered |
+| invalid object | wrong size, missing/malformed checksum, or mismatched checksum deletes; a still-present post-delete HEAD preserves the row |
+| crash after delete | rollback/death after confirmed object deletion preserves the row; the next pass sees missing and removes it |
+| private expiry | both candidate and locked predicates skip pending; an already-expired recovered row registers first and prunes only on the next TTL pass |
+| inventory races | `defined -> pending` and `pending -> registered` interleavings preserve every protected column and report deferred realization accurately |
+| inventory removal | declaration removal during blocked PUT neither prunes nor cordons the pending row |
+| registered regression | present registered rows remain; missing registered rows retain existing deadline removal semantics |
+| quota release | before/after usage asserts both pending+registered count and summed `size_bytes`; reclaimed row releases both caps |
+| schema/read model | migrated finish, resolve, list, and describe accept the new columns and expose neither internal field |
+| exact SDK checksum | the request maps canonical padded base64 to `ChecksumSHA256`; null omits it |
+
+Every terminal recovery arm asserts the repair return count; every retry/no-op arm asserts zero.
 
 An adversarial concurrency test suspends a real publisher inside its store PUT, ages the row beyond
 grace, runs the real repair on another connection, and proves the pass skips it. A falsifier then
@@ -199,4 +239,6 @@ runs the same repair after the fence is released and proves the same row is reco
 quota concurrency tests continue to prove that the PROJECT lock is not held during the PUT.
 
 Tests must be shown to bite by temporarily disabling the fence and integrity predicate, observing
-the focused failures, and restoring the implementation before the final guardrails.
+the focused failures, and restoring the implementation before the final guardrails. The
+private-expiry locked predicate and inventory CAS each get the same bite check because candidate-only
+and one-sided implementations are plausible regressions that simpler tests would miss.
