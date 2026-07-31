@@ -221,7 +221,7 @@ def test_surplus_worker_remedy_keeps_sudo_when_a_pid_is_not_the_callers() -> Non
     shell's own pid exercises the mixed set — the shape a stack that switched
     `KDIVE_WORKER_AS_ROOT` between runs actually leaves behind.
     """
-    result = _lib('worker_pids() { echo 1; echo $$; }\nrequire_workers_alive 1\n')
+    result = _lib("worker_pids() { echo 1; echo $$; }\nrequire_workers_alive 1\n")
     assert result.returncode != 0, "two live workers against a want of 1 is a surplus"
     assert "sudo kill -9 1 " in result.stderr, (
         f"a pid the caller cannot signal must keep sudo in the remedy: {result.stderr}"
