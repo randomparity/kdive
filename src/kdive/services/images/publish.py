@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection, sql
 from psycopg.cursor_async import AsyncCursor
@@ -45,7 +45,11 @@ from kdive.artifacts import storage as artifact_types
 from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.cataloging.object_keys import config_object_key, object_write_request
+from kdive.images.cataloging.object_keys import (
+    config_object_key,
+    object_write_request,
+    publication_write_request,
+)
 from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
 
 _log = logging.getLogger(__name__)
@@ -123,15 +127,27 @@ class PublishReservation:
     """
 
     row_id: UUID
+    publication_attempt_id: UUID
     object_key: str
     config_key: str | None
     request: PublishRequest
 
 
 def _write_request(
-    request: PublishRequest, data: bytes, *, suffix: str
+    request: PublishRequest, data: bytes, *, suffix: str, attempt_id: UUID | None = None
 ) -> artifact_types.ArtifactWriteRequest:
     """A write request for ``request`` (delegates to the shared image object-key layout)."""
+    if attempt_id is not None:
+        return publication_write_request(
+            request.provider,
+            request.name,
+            request.arch,
+            request.visibility,
+            request.owner,
+            attempt_id=attempt_id,
+            data=data,
+            suffix=suffix,
+        )
     return object_write_request(
         request.provider,
         request.name,
@@ -143,7 +159,7 @@ def _write_request(
     )
 
 
-def image_object_key(request: PublishRequest) -> str:
+def image_object_key(request: PublishRequest, attempt_id: UUID | None = None) -> str:
     """The object-store key for a catalog image, scoped to its visibility and owner.
 
     A public image lives under ``images/{provider}/{name}/{arch}.qcow2``; a private image is
@@ -152,16 +168,18 @@ def image_object_key(request: PublishRequest) -> str:
     the materialization fetch reads it from the row (it never recomputes the key), so the scheme is
     free to encode owner without a fetch-side change.
     """
-    return _write_request(request, b"", suffix="qcow2").key()
+    return _write_request(request, b"", suffix="qcow2", attempt_id=attempt_id).key()
 
 
-def kernel_config_object_key(request: PublishRequest) -> str:
+def kernel_config_object_key(request: PublishRequest, attempt_id: UUID | None = None) -> str:
     """The object-store key for the image's ``/boot/config-<ver>`` sibling of the qcow2 (ADR-0317).
 
     Same tenant/owner scoping as :func:`image_object_key`; the ``.config`` suffix distinguishes it
     from the ``{arch}.qcow2`` object. Persisted on the row's ``kernel_config_key`` when a config is
     offered, ``None`` otherwise. Delegates to :func:`config_object_key` (the single key source).
     """
+    if attempt_id is not None:
+        return _write_request(request, b"", suffix="config", attempt_id=attempt_id).key()
     return config_object_key(
         request.provider, request.name, request.arch, request.visibility, request.owner
     )
@@ -173,6 +191,8 @@ async def _adopt_or_insert_pending(
     object_key: str,
     config_key: str | None,
     size_bytes: int,
+    publication_attempt_id: UUID,
+    publication_principal: str | None,
 ) -> UUID:
     """Adopt this scope's existing non-registered row, or insert a fresh ``pending`` row.
 
@@ -218,7 +238,8 @@ async def _adopt_or_insert_pending(
             await cur.execute(
                 "UPDATE image_catalog "
                 "SET state = %s, object_key = %s, kernel_config_key = %s, digest = %s, "
-                "    size_bytes = %s, pending_since = now() "
+                "    size_bytes = %s, pending_since = now(), publication_attempt_id = %s, "
+                "    publication_principal = %s "
                 "WHERE id = %s",
                 (
                     ImageState.PENDING.value,
@@ -226,11 +247,21 @@ async def _adopt_or_insert_pending(
                     config_key,
                     request.digest,
                     size_bytes,
+                    publication_attempt_id,
+                    publication_principal,
                     existing["id"],
                 ),
             )
             return existing["id"]
-        return await _insert_pending(cur, request, object_key, config_key, size_bytes)
+        return await _insert_pending(
+            cur,
+            request,
+            object_key,
+            config_key,
+            size_bytes,
+            publication_attempt_id,
+            publication_principal,
+        )
 
 
 async def _insert_pending(
@@ -239,6 +270,8 @@ async def _insert_pending(
     object_key: str,
     config_key: str | None,
     size_bytes: int,
+    publication_attempt_id: UUID,
+    publication_principal: str | None,
 ) -> UUID:
     """Insert a fresh ``pending`` row from ``request`` and return its id.
 
@@ -248,10 +281,11 @@ async def _insert_pending(
         "INSERT INTO image_catalog "
         "(provider, name, arch, format, root_device, object_key, kernel_config_key, digest, "
         " capabilities, provenance, visibility, owner, expires_at, state, size_bytes, "
-        " pending_since) "
+        " publication_attempt_id, publication_principal, pending_since) "
         "VALUES (%(provider)s, %(name)s, %(arch)s, %(format)s, %(root_device)s, %(object_key)s, "
         " %(kernel_config_key)s, %(digest)s, %(capabilities)s, %(provenance)s, %(visibility)s, "
-        " %(owner)s, %(expires_at)s, %(state)s, %(size_bytes)s, now()) RETURNING id"
+        " %(owner)s, %(expires_at)s, %(state)s, %(size_bytes)s, %(publication_attempt_id)s, "
+        " %(publication_principal)s, now()) RETURNING id"
     )
     params = {
         "provider": request.provider,
@@ -269,6 +303,8 @@ async def _insert_pending(
         "expires_at": request.expires_at,
         "state": ImageState.PENDING.value,
         "size_bytes": size_bytes,
+        "publication_attempt_id": publication_attempt_id,
+        "publication_principal": publication_principal,
     }
     await cur.execute(insert_q, params)
     row = await cur.fetchone()
@@ -294,12 +330,26 @@ def _verify_source_digest(data: bytes, digest: str) -> None:
         )
 
 
-async def _write_object(store: ImageObjectStore, request: PublishRequest, data: bytes) -> None:
-    await asyncio.to_thread(store.put_artifact, _write_request(request, data, suffix="qcow2"))
+async def _write_object(
+    store: ImageObjectStore, reservation: PublishReservation, data: bytes
+) -> None:
+    await asyncio.to_thread(
+        store.put_artifact,
+        _write_request(
+            reservation.request,
+            data,
+            suffix="qcow2",
+            attempt_id=reservation.publication_attempt_id,
+        ),
+    )
 
 
 async def _write_config_best_effort(
-    store: ImageObjectStore, request: PublishRequest, config_key: str | None
+    store: ImageObjectStore,
+    request: PublishRequest,
+    config_key: str | None,
+    *,
+    attempt_id: UUID | None = None,
 ) -> bool:
     """Write the config sibling object; return whether it is present. Never raises (advisory).
 
@@ -309,7 +359,7 @@ async def _write_config_best_effort(
     """
     if config_key is None or request.kernel_config is None:
         return False
-    write = _write_request(request, request.kernel_config, suffix="config")
+    write = _write_request(request, request.kernel_config, suffix="config", attempt_id=attempt_id)
     try:
         await asyncio.to_thread(store.put_artifact, write)
         head = await asyncio.to_thread(store.head, config_key)
@@ -353,15 +403,18 @@ async def _registered(
             publish deadline. Either way this attempt must not register, and the caller gets a
             typed error rather than a corrupt success or a bare ``RuntimeError``.
     """
-    set_clause = "state = %s" + (", kernel_config_key = NULL" if clear_config_key else "")
+    set_clause = "state = %s, publication_attempt_id = NULL, publication_principal = NULL" + (
+        ", kernel_config_key = NULL" if clear_config_key else ""
+    )
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             f"UPDATE image_catalog SET {set_clause} "
-            "WHERE id = %s AND digest = %s AND object_key = %s "
+            "WHERE id = %s AND publication_attempt_id = %s AND digest = %s AND object_key = %s "
             f"RETURNING {IMAGE_CATALOG_ENTRY_PROJECTION}",
             (
                 ImageState.REGISTERED.value,
                 reservation.row_id,
+                reservation.publication_attempt_id,
                 reservation.request.digest,
                 reservation.object_key,
             ),
@@ -379,7 +432,11 @@ async def _registered(
 
 
 async def reserve_publish(
-    conn: AsyncConnection, request: PublishRequest, *, size_bytes: int
+    conn: AsyncConnection,
+    request: PublishRequest,
+    *,
+    size_bytes: int,
+    principal: str | None = None,
 ) -> PublishReservation:
     """Commit this publish's ``pending`` row — the object's claim on its key and its quota bytes.
 
@@ -398,11 +455,29 @@ async def reserve_publish(
     Returns:
         The :class:`PublishReservation` naming the committed row and its object keys.
     """
-    object_key = image_object_key(request)
-    config_key = kernel_config_object_key(request) if request.kernel_config is not None else None
-    row_id = await _adopt_or_insert_pending(conn, request, object_key, config_key, size_bytes)
+    publication_attempt_id = uuid4()
+    object_key = image_object_key(request, publication_attempt_id)
+    config_key = (
+        kernel_config_object_key(request, publication_attempt_id)
+        if request.kernel_config is not None
+        else None
+    )
+    publication_principal = principal if request.visibility is ImageVisibility.PRIVATE else None
+    row_id = await _adopt_or_insert_pending(
+        conn,
+        request,
+        object_key,
+        config_key,
+        size_bytes,
+        publication_attempt_id,
+        publication_principal,
+    )
     return PublishReservation(
-        row_id=row_id, object_key=object_key, config_key=config_key, request=request
+        row_id=row_id,
+        publication_attempt_id=publication_attempt_id,
+        object_key=object_key,
+        config_key=config_key,
+        request=request,
     )
 
 
@@ -430,7 +505,7 @@ async def write_publish_object(
     request = reservation.request
     data = await asyncio.to_thread(source.read_bytes)
     _verify_source_digest(data, request.digest)
-    await _write_object(store, request, data)
+    await _write_object(store, reservation, data)
 
     head = await asyncio.to_thread(store.head, reservation.object_key)
     if head is None:
@@ -439,7 +514,12 @@ async def write_publish_object(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"object_key": reservation.object_key},
         )
-    return await _write_config_best_effort(store, request, reservation.config_key)
+    return await _write_config_best_effort(
+        store,
+        request,
+        reservation.config_key,
+        attempt_id=reservation.publication_attempt_id,
+    )
 
 
 async def finish_publish(

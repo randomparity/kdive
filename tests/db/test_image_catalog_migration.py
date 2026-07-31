@@ -8,6 +8,8 @@ duplicate is admitted so a crashed publish never wedges retry.
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import psycopg
 import pytest
 from psycopg import sql
@@ -50,6 +52,8 @@ def _insert_image(conn: psycopg.Connection, **overrides: object) -> None:
         "state": "registered",
     }
     row.update(overrides)
+    if row["state"] == ImageState.PENDING.value:
+        row.setdefault("publication_attempt_id", uuid4())
     columns = list(row.keys())
     query = sql.SQL("INSERT INTO image_catalog ({cols}) VALUES ({vals})").format(
         cols=sql.SQL(", ").join(sql.Identifier(c) for c in columns),
@@ -75,6 +79,8 @@ def test_migration_0023_creates_image_catalog(pg_conn: psycopg.Connection) -> No
     assert cols.get("expires_at") == "timestamp with time zone"
     assert cols.get("state") == "text"
     assert cols.get("pending_since") == "timestamp with time zone"
+    assert cols.get("publication_attempt_id") == "uuid"
+    assert cols.get("publication_principal") == "text"
     assert cols.get("created_at") == "timestamp with time zone"
     assert cols.get("updated_at") == "timestamp with time zone"
 
@@ -83,7 +89,14 @@ def test_nullable_columns(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
     nullable = _nullable(pg_conn, "image_catalog")
     # object_key/digest/owner/expires_at are conditionally present (CHECK-bound), so nullable.
-    for col in ("object_key", "digest", "owner", "expires_at"):
+    for col in (
+        "object_key",
+        "digest",
+        "owner",
+        "expires_at",
+        "publication_attempt_id",
+        "publication_principal",
+    ):
         assert nullable.get(col) == "YES", col
     # identity + state columns are always present.
     for col in ("provider", "name", "arch", "format", "root_device", "visibility", "state"):
@@ -295,7 +308,10 @@ def test_updated_at_trigger_bumps_on_update(pg_conn: psycopg.Connection) -> None
         "SELECT updated_at FROM image_catalog WHERE state = 'pending'"
     ).fetchone()
     assert before is not None
-    pg_conn.execute("UPDATE image_catalog SET state = 'registered' WHERE state = 'pending'")
+    pg_conn.execute(
+        "UPDATE image_catalog SET state = 'registered', publication_attempt_id = NULL "
+        "WHERE state = 'pending'"
+    )
     after = pg_conn.execute(
         "SELECT updated_at FROM image_catalog WHERE state = 'registered'"
     ).fetchone()
@@ -323,3 +339,113 @@ def test_visibility_check_covers_every_enum_value(pg_conn: psycopg.Connection) -
     definition = row[0]
     missing = [m.value for m in ImageVisibility if f"'{m.value}'" not in definition]
     assert not missing, f"image_visibility_check is missing {missing}"
+
+
+def test_0092_preserves_legacy_pending_rows_without_attempts(
+    pg_conn: psycopg.Connection,
+) -> None:
+    """The expand phase must not adopt predecessor publications during migration."""
+    for migration in migrate.discover_migrations():
+        if migration.version <= "0090":
+            pg_conn.execute(migration.sql.encode())
+
+    for name, state, object_key in (
+        ("pending-a", "pending", "images/a"),
+        ("pending-b", "pending", "images/b"),
+        ("registered", "registered", "images/c"),
+    ):
+        pg_conn.execute(
+            "INSERT INTO image_catalog "
+            "(provider, name, arch, format, root_device, object_key, digest, visibility, "
+            "owner, expires_at, state) "
+            "VALUES ('local-libvirt', %s, 'x86_64', 'qcow2', '/dev/vda', %s, 'sha256:abc', "
+            "'public', NULL, NULL, %s)",
+            (name, object_key, state),
+        )
+
+    migration = next(m for m in migrate.discover_migrations() if m.version == "0092")
+    pg_conn.execute(migration.sql.encode())
+    rows = pg_conn.execute(
+        "SELECT name, state, publication_attempt_id, publication_principal "
+        "FROM image_catalog ORDER BY name"
+    ).fetchall()
+    by_name = {row[0]: row[1:] for row in rows}
+    assert by_name["pending-a"] == ("pending", None, None)
+    assert by_name["pending-b"] == ("pending", None, None)
+    assert by_name["registered"] == ("registered", None, None)
+
+
+def test_predecessor_adoption_demotes_attempt_to_legacy(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    attempt = uuid4()
+    _insert_image(
+        pg_conn,
+        name="pending",
+        state="pending",
+        object_key="images/attempt-aware",
+        publication_attempt_id=attempt,
+        publication_principal="tenant-a",
+    )
+    pg_conn.execute(
+        "UPDATE image_catalog SET object_key = 'images/predecessor', pending_since = now()"
+    )
+    row = pg_conn.execute(
+        "SELECT publication_attempt_id, publication_principal FROM image_catalog"
+    ).fetchone()
+    assert row == (None, None)
+
+
+def test_stale_predecessor_registration_fails_for_successor_attempt(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    attempt = uuid4()
+    _insert_image(
+        pg_conn,
+        state="pending",
+        object_key="images/successor",
+        publication_attempt_id=attempt,
+    )
+
+    with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+        pg_conn.execute("UPDATE image_catalog SET state = 'registered'")
+
+    row = pg_conn.execute("SELECT state, publication_attempt_id FROM image_catalog").fetchone()
+    assert row == ("pending", attempt)
+
+
+def test_predecessor_delete_cannot_remove_attempt_aware_pending_row(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    attempt = uuid4()
+    _insert_image(
+        pg_conn,
+        state="pending",
+        object_key="images/protected",
+        publication_attempt_id=attempt,
+    )
+
+    deleted = pg_conn.execute("DELETE FROM image_catalog").rowcount
+
+    assert deleted == 0
+    assert pg_conn.execute("SELECT count(*) FROM image_catalog").fetchone() == (1,)
+
+
+def test_fenced_recovery_can_disarm_then_delete_attempt_aware_row(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    _insert_image(
+        pg_conn,
+        state="pending",
+        object_key="images/reclaimed",
+        publication_attempt_id=uuid4(),
+    )
+
+    pg_conn.execute(
+        "UPDATE image_catalog SET publication_attempt_id = NULL, publication_principal = NULL"
+    )
+    assert pg_conn.execute("DELETE FROM image_catalog").rowcount == 1

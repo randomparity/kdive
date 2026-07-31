@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.images.cataloging.object_keys import (
@@ -10,6 +12,7 @@ from kdive.images.cataloging.object_keys import (
     config_write_request,
     object_write_request,
     owner_kind_segment,
+    publication_write_request,
 )
 
 
@@ -59,3 +62,17 @@ def test_qcow2_and_config_siblings_share_prefix_and_differ_only_in_suffix() -> N
     assert qcow2.rsplit(".", 1)[0] == config.rsplit(".", 1)[0]
     assert qcow2.endswith(".qcow2")
     assert config.endswith(".config")
+
+
+def test_publication_keys_are_attempt_specific_qcow2_and_config_siblings() -> None:
+    args = ("libvirt", "fedora", "x86_64", ImageVisibility.PRIVATE, "proj")
+    first = uuid4()
+    second = uuid4()
+    first_qcow2 = publication_write_request(*args, attempt_id=first, data=b"", suffix="qcow2")
+    first_config = publication_write_request(*args, attempt_id=first, data=b"", suffix="config")
+    second_qcow2 = publication_write_request(*args, attempt_id=second, data=b"", suffix="qcow2")
+    assert first_qcow2.key() != second_qcow2.key()
+    assert first_qcow2.key().rsplit(".", 1)[0] == first_config.key().rsplit(".", 1)[0]
+    assert str(first) in first_qcow2.key()
+    assert first_qcow2.key().endswith(".qcow2")
+    assert first_config.key().endswith(".config")

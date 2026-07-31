@@ -43,6 +43,8 @@ def _entry(**kw: object) -> ImageCatalogEntry:
         "state": ImageState.REGISTERED,
     }
     base.update(kw)
+    if base["state"] is ImageState.PENDING:
+        base.setdefault("publication_attempt_id", uuid4())
     return ImageCatalogEntry.model_validate(base)
 
 

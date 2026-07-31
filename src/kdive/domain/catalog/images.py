@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
+from uuid import UUID
 
 from pydantic import Field
 
@@ -95,6 +96,8 @@ class ImageCatalogEntry(DomainModel):
     path: str | None = None
     description: str | None = None
     kernel_config_key: str | None = None
+    publication_attempt_id: UUID | None = None
+    publication_principal: str | None = None
     #: Size in bytes of the row's qcow2 object, recorded when the ``pending`` row is reserved and
     #: **before** the object is written (ADR-0520). This is what makes the row a durable quota
     #: claim: the per-project private-image bytes cap sums this column over live rows, so a publish

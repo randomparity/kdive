@@ -42,6 +42,7 @@ import pathlib
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -306,11 +307,11 @@ async def _insert_row(
     cur = await conn.execute(
         "INSERT INTO image_catalog "
         "(provider, name, arch, format, root_device, volume, object_key, kernel_config_key, "
-        "digest, "
-        " visibility, owner, expires_at, state, pending_since) "
+        "digest, visibility, owner, expires_at, state, publication_attempt_id, pending_since) "
         "VALUES (%(provider)s, %(name)s, 'x86_64', 'qcow2', '/dev/vda', %(volume)s, "
         " %(object_key)s, %(kernel_config_key)s, %(digest)s, %(visibility)s, %(owner)s, "
-        f"{expires}, %(state)s, now() - make_interval(secs => %(pending_secs)s)) RETURNING id",
+        f"{expires}, %(state)s, %(publication_attempt_id)s, "
+        "now() - make_interval(secs => %(pending_secs)s)) RETURNING id",
         {
             "provider": provider,
             "name": name,
@@ -321,6 +322,7 @@ async def _insert_row(
             "visibility": visibility,
             "owner": owner,
             "state": state,
+            "publication_attempt_id": uuid4() if state == "pending" else None,
             "pending_secs": pending_age_hours * 3600,
             "expires_secs": (expires_in_seconds or 0.0),
         },

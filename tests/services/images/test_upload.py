@@ -383,6 +383,8 @@ def test_registers_private_image_resolving_only_within_owning_project(migrated_u
             assert entry.visibility is ImageVisibility.PRIVATE
             assert entry.owner == "proj"
             assert entry.object_key is not None
+            assert entry.publication_attempt_id is None
+            assert entry.publication_principal is None
             # Resolves for the owning project, not for another.
             mine = await resolve_rootfs(conn, "local-libvirt", "myrootfs", project="proj")
             assert mine is not None and mine.id == entry.id

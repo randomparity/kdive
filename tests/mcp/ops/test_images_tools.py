@@ -24,7 +24,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -571,6 +571,7 @@ def test_upload_operator_registers_private_upload(
             expires_at=datetime.now(UTC) + timedelta(hours=1),
             state=ImageState.PENDING,
             pending_since=datetime.now(UTC),
+            publication_attempt_id=uuid4(),
         )
 
     monkeypatch.setattr(image_upload, "register_private_upload", fake_register_private_upload)

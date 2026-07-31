@@ -24,7 +24,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -182,10 +182,11 @@ async def _insert_image_row(
     cur = await conn.execute(
         "INSERT INTO image_catalog "
         "(provider, name, arch, format, root_device, object_key, kernel_config_key, digest, "
-        " visibility, owner, expires_at, state, pending_since) "
+        " visibility, owner, expires_at, state, publication_attempt_id, pending_since) "
         "VALUES (%(provider)s, %(name)s, %(arch)s, 'qcow2', '/dev/vda', %(object_key)s, "
         " %(kernel_config_key)s, %(digest)s, %(visibility)s, %(owner)s, "
-        f"{expires_clause}, %(state)s, now() - make_interval(secs => %(pending_secs)s)) "
+        f"{expires_clause}, %(state)s, %(publication_attempt_id)s, "
+        "now() - make_interval(secs => %(pending_secs)s)) "
         "RETURNING id",
         {
             "provider": provider,
@@ -197,6 +198,7 @@ async def _insert_image_row(
             "visibility": visibility,
             "owner": owner,
             "state": state,
+            "publication_attempt_id": uuid4() if state == "pending" else None,
             "pending_secs": pending_age.total_seconds(),
             "expires_secs": (expires_in or timedelta()).total_seconds(),
         },
