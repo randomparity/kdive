@@ -6,7 +6,9 @@ Accepted
 
 - **Narrowly supersedes:** [ADR-0317](0317-image-kernel-config-offer.md) §2 and
   [ADR-0336](0336-staged-kernel-config-offer.md)'s shared deterministic config-key rule for the
-  publish lane only. Staged-image config keys remain deterministic.
+  publish lane only, plus [ADR-0112](0112-systems-inventory-config.md)'s config update/prune
+  ownership while a config-managed image row is `pending`. Staged-image config keys remain
+  deterministic.
 
 ## Context
 
@@ -86,6 +88,13 @@ deletion owner; once it registers an already-expired private image, the next exp
 the registered row normally. This narrowly supersedes ADR-0093's all-private-row expiry rule and
 prevents the TTL path from bypassing the publication fence.
 
+Config inventory also yields runtime ownership while a config-managed row is `pending`. Its update
+may still change config-owned fields, but a database-state predicate preserves `object_key`,
+`kernel_config_key`, `digest`, `size_bytes`, publication fields, and `state` even when inventory
+loaded a stale pre-reservation snapshot. Its prune path re-reads under row lock and skips `pending`.
+Publication recovery removes a failed attempt; after successful registration, a later inventory
+pass may update or prune the row normally. This narrowly refines ADR-0112's config ownership.
+
 Store errors abort the candidate transaction and preserve the row for a later pass. If deletion
 returns but the follow-up HEAD still sees the object, the row is also preserved. A crash after
 object deletion but before row deletion leaves a pending row with a missing object, which the next
@@ -116,6 +125,8 @@ revalidating the same persisted attempt.
 - The existing same-identity writer ordering problem is not broadened here. This fence orders a
   publisher against the reconciler; it does not redefine the catalog uniqueness contract for two
   independent publications.
+- Automatic TTL and config-inventory deletion paths yield to pending-publication ownership, so the
+  dangling repair is the only automatic path that can remove an active reservation.
 
 ## Considered & rejected
 
