@@ -269,6 +269,9 @@ def test_surplus_worker_remedy_drops_sudo_for_self_owned_workers() -> None:
     )
     assert result.returncode != 0, "two live workers against a want of 1 is a surplus"
     first, second = result.stdout.split("PIDS=")[1].strip().split(",")
+    # The four-space indent IS the assertion here, not incidental formatting: it is what marks a
+    # line as a command the operator runs rather than prose about one, so an unindented match
+    # would pass against a sentence merely mentioning the kill.
     assert f"\n    kill -9 {first} {second}\n" in result.stderr, (
         f"self-owned workers must be killed without sudo: {result.stderr}"
     )
