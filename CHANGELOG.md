@@ -77,6 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add the restore_incomplete failure category
 - Gate PRs on strictly ascending migration numbers
 - Carry the decode diagnosis to the operator checksum warning
+- Fence the fetch pin on its holding job, not a 6-hour TTL
 
 ### Changed
 
@@ -114,6 +115,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Share the upload delete fences between both sweeps
 - Share one expiry predicate across both finalize lanes
 - Replace the flock fetch lease with durable DB state
+- Renumber the fetch-lease fence migration 0088 -> 0090
 
 ### Documentation
 
