@@ -84,7 +84,10 @@ already going to read, never a second pass.
 
 The truncated branch costs nothing at all: `offset` has already reached `compressed_size`, so the
 hasher has absorbed every stored byte and `_hash_remaining` is a no-op. The trailing-data branch
-needs the drain only when `eof` stopped the pass early with ranges still unread.
+needs the drain only when `eof` stopped the pass early — but "only" understates it, because that
+case is unbounded by anything except `compressed_size`: an object that is a short valid gzip member
+followed by an arbitrarily long tail stops the pass immediately and then drains the whole tail. Its
+worst case is the bomb's, and it is cheaper to construct (see Consequences).
 
 Completing the digest over that tail costs one thing, and it is worth stating rather than
 discovering. It **retires the checksum gate as an independent detector of trailing data.** Before,
@@ -140,19 +143,31 @@ branch and a `get_range` fault all exit before a digest exists, on either path.
   correct, so the ADR-0450 free-space compounding it fed is closed for the rotted-bytes case.
 - A staging failure on damaged gzip bytes now emits the stored-object-damage WARNING it previously
   suppressed (§5). Operator-visible volume rises on exactly the condition the log exists to name.
-- The `zlib.error` and bomb paths issue additional ranged GETs — the tail the pass never read,
-  bounded by `compressed_size` and hash-only. A stage that fails on the first range of a multi-GiB
-  object now reads the object through before reporting, where it used to fail immediately. For a
-  merely corrupt object that is bounded by what a successful stage reads anyway. **For the bomb
-  branch it is not**, and that is the case worth naming: a bomb has no successful stage to compare
-  against, so an object that declares a small `uncompressed_size` and trips the cap after a few KiB
-  of output now costs a read of the whole stored object — up to the single-PUT ceiling the upload
-  path enforces — where it used to cost one range. The retryable verdict compounds it, since an
-  agent told to retry pays the read again. Accepted rather than mitigated: the alternatives are to
-  skip the drain on a size heuristic, which restores the codec-decides-the-verdict asymmetry §1
-  removes, or to keep reporting a terminal category for damage the agent did not cause. The read is
-  hash-only and hard-bounded, so what a hostile object buys is bandwidth on a failing provision, not
-  memory, disk, or an expanded bomb.
+- The `zlib.error`, bomb and trailing-data paths issue additional ranged GETs — the tail the pass
+  never read, bounded by `compressed_size` and hash-only. A stage that fails on the first range of a
+  multi-GiB object now reads the object through before reporting, where it used to fail immediately.
+  For a merely corrupt object that is bounded by what a successful stage reads anyway. **For the
+  bomb and trailing-data branches it is not**, and those are the cases worth naming. A bomb has no
+  successful stage to compare against, so an object that declares a small `uncompressed_size` and
+  trips the cap after a few KiB of output now costs a read of the whole stored object — up to the
+  single-PUT ceiling the upload path enforces — where it used to cost one range. Trailing data
+  reaches the same worst case more cheaply still, needing no compression work at all: a short valid
+  gzip member followed by an arbitrarily long tail, correctly signed so the digest agrees, is read
+  through in full before the same terminal rejection it used to get after one range. The retryable
+  verdict compounds the first case, since an agent told to retry pays the read again. Accepted
+  rather than mitigated: the alternatives are to skip the drain on a size heuristic, which restores
+  the codec-decides-the-verdict asymmetry §1 removes, or to keep reporting a terminal category for
+  damage the agent did not cause. The read is hash-only and hard-bounded, so what a hostile object
+  buys is bandwidth on a failing provision, not memory, disk, or an expanded bomb.
+- **§4's terminal guarantee is conditional on the drain completing.** `_hash_remaining` calls
+  `get_range` uncaught, and the same widening that costs the reads above widens the window in which
+  a store fault can land: a connection reset during the drain leaves the digest unknowable, so the
+  store's own retryable error propagates and a genuinely defective object is reported as a transport
+  fault rather than as the defect it is. That verdict is honest — nothing at that point can prove
+  what the stored bytes were — but the decode's diagnosis would otherwise die with the frame, so it
+  is chained onto the store's error and survives on the traceback. The gate-keyed WARNING
+  deliberately does **not** fire there: a store fault is not stored-object damage, which is the
+  discrimination ADR-0445 §4 built that keying for.
 - No schema change, no migration, no MCP tool-surface change. The only externally visible changes
   are the `retryable` boolean and the message text on the four branches, in the subset where the
   digest disagrees.
