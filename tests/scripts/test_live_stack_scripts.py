@@ -204,6 +204,24 @@ def _stop_daemons_signals(pid_expr: str) -> str:
     ).stdout
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="a root caller needs sudo for nothing")
+def test_unknown_ownership_answers_sudo_even_under_pipefail() -> None:
+    """When ps reports no owner, the safe answer is sudo — and pipefail must not invert it.
+
+    `sudo kill` still works on a self-owned process; a bare `kill` does not work on a foreign one,
+    so an undetermined owner is safe in exactly one direction. The pipefail arm is the reason the
+    helper reads ps into a variable instead of piping it: `ps -o uid= -p <gone>` exits 1, so a
+    pipeline's status would come from ps rather than from the comparison and would silently answer
+    "no sudo" for precisely the case that cannot determine an owner. The callers run under
+    `set -euo pipefail`, so the bare-source case alone would not have caught it.
+    """
+    for prelude in ("", "set -euo pipefail\n"):
+        result = _lib(f"{prelude}if pids_need_sudo 999999; then echo SUDO; else echo BARE; fi")
+        assert result.stdout.strip() == "SUDO", (
+            f"an undeterminable owner must answer sudo (prelude={prelude!r}): {result.stdout!r}"
+        )
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="the self-owned arm needs a non-root caller")
 def test_stop_daemons_drops_sudo_for_a_daemon_the_caller_owns() -> None:
     """stop_daemons must not reach for sudo to signal the operator's own daemon (#1739).
