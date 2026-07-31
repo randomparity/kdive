@@ -333,17 +333,46 @@ async def _write_config_best_effort(
 
 
 async def _registered(
-    conn: AsyncConnection, row_id: UUID, *, clear_config_key: bool = False
+    conn: AsyncConnection, reservation: PublishReservation, *, clear_config_key: bool = False
 ) -> ImageCatalogEntry:
+    """Flip the reserved row to ``registered``, fenced on the reservation still owning it.
+
+    The predicate is the reservation's identity — ``id`` **and** the ``digest``/``object_key`` it
+    wrote — not ``id`` alone. `id` alone is not enough once the lock no longer spans the write
+    (ADR-0520 §7): a concurrent publish of the same identity adopts this very row under
+    :func:`_adopt_or_insert_pending`'s ``FOR UPDATE``, overwriting ``digest`` with its own, and
+    both attempts then race to PUT the same key. Whichever object survives, at most one attempt's
+    digest is still on the row, so registering on ``id`` alone lets the loser publish a row whose
+    digest can never match its object — a live, quota-consuming, permanently unfetchable image,
+    with both callers told they succeeded.
+
+    Raises:
+        CategorizedError: ``CONFLICT`` when the row no longer carries this reservation — a later
+            reservation of the same identity superseded it, or the reconciler swept it past its
+            publish deadline. Either way this attempt must not register, and the caller gets a
+            typed error rather than a corrupt success or a bare ``RuntimeError``.
+    """
     set_clause = "state = %s" + (", kernel_config_key = NULL" if clear_config_key else "")
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            f"UPDATE image_catalog SET {set_clause} WHERE id = %s RETURNING *",
-            (ImageState.REGISTERED.value, row_id),
+            f"UPDATE image_catalog SET {set_clause} "
+            "WHERE id = %s AND digest = %s AND object_key = %s RETURNING *",
+            (
+                ImageState.REGISTERED.value,
+                reservation.row_id,
+                reservation.request.digest,
+                reservation.object_key,
+            ),
         )
         row = await cur.fetchone()
-    if row is None:  # Invariant: the row was just written as pending.
-        raise RuntimeError(f"image_catalog row {row_id} vanished before registration")
+    if row is None:
+        raise CategorizedError(
+            "this publish's reservation no longer owns its catalog row; a concurrent publish of "
+            "the same image identity superseded it, or the reconciler reclaimed it past the "
+            "publish deadline",
+            category=ErrorCategory.CONFLICT,
+            details={"row_id": str(reservation.row_id), "object_key": reservation.object_key},
+        )
     return ImageCatalogEntry.model_validate(row)
 
 
@@ -420,10 +449,15 @@ async def finish_publish(
     with whatever else must land atomically with the registration — the private-upload path
     composes it with its audit row, which :func:`kdive.security.audit.record_system` likewise
     leaves to the caller to wrap.
+
+    Raises:
+        CategorizedError: ``CONFLICT`` when the reservation no longer owns its row (superseded by
+            a concurrent same-identity publish, or reclaimed by the reconciler). See
+            :func:`_registered` for why the fence is the reservation's identity, not its ``id``.
     """
     return await _registered(
         conn,
-        reservation.row_id,
+        reservation,
         clear_config_key=reservation.config_key is not None and not config_written,
     )
 

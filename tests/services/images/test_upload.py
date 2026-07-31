@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import threading
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -32,6 +34,7 @@ from kdive.config.core_settings import (
     IMAGE_PRIVATE_MAX_BYTES,
     IMAGE_PRIVATE_MAX_COUNT,
 )
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -136,6 +139,44 @@ async def _advisory_locks_held_by(url: str, backend_pid: int) -> int:
         row = await cur.fetchone()
     assert row is not None
     return int(row[0])
+
+
+async def _ungranted_advisory_locks(url: str) -> int:
+    """Count advisory locks some backend is **blocked** on, probed from a second connection."""
+    async with await _connect(url) as probe, probe.cursor() as cur:
+        await cur.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def _run_both_contending(url: str, *coro_factories) -> list[object]:
+    """Run two uploads with both provably blocked on the PROJECT lock before either proceeds.
+
+    `asyncio.gather` alone does not force overlap: two uploads can run start-to-finish in strict
+    sequence and still satisfy a cap assertion, which pins the aggregate arithmetic rather than
+    the mutual exclusion. This holds ``LockScope.PROJECT`` for ``proj`` from a *gate* connection,
+    starts both uploads, waits until **both** backends are queued on that lock, and only then
+    releases it — so each upload's reservation is known to have contended for the lock the
+    invariant depends on.
+    """
+    gate = await _connect_pooled_shape(url)
+    try:
+        tasks = [asyncio.create_task(factory()) for factory in coro_factories]
+        async with gate.transaction(), advisory_xact_lock(gate, LockScope.PROJECT, "proj"):
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                if await _ungranted_advisory_locks(url) >= len(tasks):
+                    break
+                await asyncio.sleep(0.02)
+            else:  # pragma: no cover - a hang here is a real defect, not a flake
+                raise AssertionError("uploads never queued on the PROJECT lock")
+        # Gate released: the uploads now serialize against each other, not against the gate.
+        return list(await asyncio.gather(*tasks))
+    finally:
+        await gate.close()
 
 
 def _quarantine(payload: bytes, key: str = "uploads/q/proj/rootfs.qcow2") -> _FakeStore:
@@ -287,9 +328,9 @@ def test_project_usage_counts_rows_and_sums_reserved_bytes(
         async with await _connect(migrated_url) as conn:
             await _register(conn, store, name="img-a", quarantine_key="uploads/q/proj/a.qcow2")
             await _register(conn, store, name="img-b", quarantine_key="uploads/q/proj/b.qcow2")
-            count, total = await _project_usage(conn, "proj")
+            count, total = await _project_usage(conn, "proj", adopting=None)
             # Another project's rows are not this project's usage.
-            assert await _project_usage(conn, "other") == (0, 0)
+            assert await _project_usage(conn, "other", adopting=None) == (0, 0)
         # Two live private rows, and the byte total is the sum of both rows' recorded sizes (not a
         # last-wins overwrite and not an off-by-one initial accumulator).
         assert count == 2
@@ -319,7 +360,7 @@ def test_reserved_pending_row_occupies_quota_before_its_object_exists(
             # Nothing was written to the store, and the row is `pending`, not `registered`.
             assert store.puts == []
             assert await _row_state(conn, reservation.row_id) == ImageState.PENDING.value
-            assert await _project_usage(conn, "proj") == (1, 4096)
+            assert await _project_usage(conn, "proj", adopting=None) == (1, 4096)
 
     asyncio.run(_run())
 
@@ -538,9 +579,10 @@ def test_concurrent_uploads_cannot_both_pass_the_cap(
             finally:
                 await conn.close()
 
-        results = await asyncio.gather(
-            _one(store_a, "alpha", "uploads/q/proj/a.qcow2"),
-            _one(store_b, "beta", "uploads/q/proj/b.qcow2"),
+        results = await _run_both_contending(
+            migrated_url,
+            lambda: _one(store_a, "alpha", "uploads/q/proj/a.qcow2"),
+            lambda: _one(store_b, "beta", "uploads/q/proj/b.qcow2"),
         )
         denials = [r for r in results if isinstance(r, CategorizedError)]
         assert len(denials) == 1
@@ -551,6 +593,85 @@ def test_concurrent_uploads_cannot_both_pass_the_cap(
                 r for r in await IMAGE_CATALOG.list_all(conn) if r.state is ImageState.REGISTERED
             ]
             assert len(registered) == 1
+
+    asyncio.run(_run())
+
+
+def test_advisory_lock_probe_reports_a_held_lock(migrated_url: str) -> None:
+    # Positive control for `_advisory_locks_held_by`. Every other use of it asserts `== 0`, so a
+    # helper broken in any direction — wrong pid, wrong locktype filter, a query that can only
+    # return 0 — would make those assertions pass vacuously, and one of them is the property this
+    # whole change exists to establish. This is the only test that pins a non-zero reading.
+    async def _run() -> None:
+        async with await _connect_pooled_shape(migrated_url) as conn:
+            assert await _advisory_locks_held_by(migrated_url, conn.info.backend_pid) == 0
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.PROJECT, "proj"):
+                assert await _advisory_locks_held_by(migrated_url, conn.info.backend_pid) >= 1
+            # And it drops back once the holding transaction ends, so it tracks the lock rather
+            # than merely counting something that grows.
+            assert await _advisory_locks_held_by(migrated_url, conn.info.backend_pid) == 0
+
+    asyncio.run(_run())
+
+
+def test_concurrent_same_identity_uploads_cannot_both_register(migrated_url: str) -> None:
+    # Two uploads of the *same* provider/name/arch to one project, forced to overlap. The second
+    # to reserve adopts the first's `pending` row (ADR-0092 idempotency) and overwrites its
+    # `digest`, and both then PUT the same object key with the lock released. Registering on
+    # `id` alone would let both flip that one row to `registered` and return success, leaving a
+    # live image whose digest cannot match its object. The reservation fence in `_registered`
+    # makes the superseded attempt fail with `CONFLICT` instead (ADR-0520 §7).
+    from kdive.db.repositories import IMAGE_CATALOG
+
+    # Both writes wait here until both uploads have reserved, so the adopt is not a race the test
+    # hopes to win: the first reserver is still mid-write when the second adopts its row.
+    both_reserved = threading.Barrier(2, timeout=10)
+
+    class _BarrierStore(_FakeStore):
+        def put_artifact(
+            self, request: artifact_types.ArtifactWriteRequest
+        ) -> artifact_types.StoredArtifact:
+            both_reserved.wait()
+            return super().put_artifact(request)
+
+    store_a = _BarrierStore({"uploads/q/proj/a.qcow2": b"alpha-bytes"})
+    store_b = _BarrierStore({"uploads/q/proj/b.qcow2": b"beta-bytes-differ"})
+    store_b._objects.update(store_a._objects)  # noqa: SLF001 - one shared object namespace
+    store_a._objects.update(store_b._objects)  # noqa: SLF001 - test seam
+
+    async def _run() -> None:
+        def _one(store: _FakeStore, key: str):
+            async def _go() -> object:
+                conn = await _connect(migrated_url)
+                try:
+                    # Same `name` for both — that is the collision under test.
+                    return await _register(conn, store, name="shared", quarantine_key=key)
+                except CategorizedError as exc:
+                    return exc
+                finally:
+                    await conn.close()
+
+            return _go
+
+        results = await _run_both_contending(
+            migrated_url,
+            _one(store_a, "uploads/q/proj/a.qcow2"),
+            _one(store_b, "uploads/q/proj/b.qcow2"),
+        )
+        conflicts = [r for r in results if isinstance(r, CategorizedError)]
+        registered = [r for r in results if not isinstance(r, CategorizedError)]
+        # Exactly one attempt owns the row it registers; the superseded one is told so.
+        assert len(conflicts) == 1
+        assert conflicts[0].category is ErrorCategory.CONFLICT
+        assert "superseded" in str(conflicts[0])
+        assert len(registered) == 1
+
+        async with await _connect(migrated_url) as conn:
+            rows = await IMAGE_CATALOG.list_all(conn)
+            # One adopted row, registered once — not two rows and not a second `pending` leak.
+            assert len(rows) == 1
+            assert rows[0].state is ImageState.REGISTERED
+            assert rows[0].id == registered[0].id  # ty: ignore[unresolved-attribute]
 
     asyncio.run(_run())
 
@@ -618,9 +739,10 @@ def test_concurrent_uploads_cannot_both_pass_the_bytes_cap(
             finally:
                 await conn.close()
 
-        results = await asyncio.gather(
-            _one(store_a, "alpha", "uploads/q/proj/a.qcow2"),
-            _one(store_b, "beta", "uploads/q/proj/b.qcow2"),
+        results = await _run_both_contending(
+            migrated_url,
+            lambda: _one(store_a, "alpha", "uploads/q/proj/a.qcow2"),
+            lambda: _one(store_b, "beta", "uploads/q/proj/b.qcow2"),
         )
         denials = [r for r in results if isinstance(r, CategorizedError)]
         assert len(denials) == 1
@@ -631,7 +753,7 @@ def test_concurrent_uploads_cannot_both_pass_the_bytes_cap(
             rows = await IMAGE_CATALOG.list_all(conn)
             assert len([r for r in rows if r.state is ImageState.REGISTERED]) == 1
             # The one that passed recorded its real size, so the next reader sees 12, not 0.
-            assert await _project_usage(conn, "proj") == (1, 12)
+            assert await _project_usage(conn, "proj", adopting=None) == (1, 12)
 
     asyncio.run(_run())
 
@@ -679,7 +801,7 @@ def test_a_failed_put_leaves_a_reservation_the_dangling_sweep_reclaims(
 
             # (a) The reservation survived the failed write and still occupies its bytes, so a
             # second upload that would jointly breach the cap is denied rather than admitted.
-            assert await _project_usage(conn, "proj") == (1, 12)
+            assert await _project_usage(conn, "proj", adopting=None) == (1, 12)
             healthy = _quarantine(b"twelve-bytes", key="uploads/q/proj/b.qcow2")
             with pytest.raises(CategorizedError) as blocked:
                 await _register(conn, healthy, name="next", quarantine_key="uploads/q/proj/b.qcow2")
@@ -689,12 +811,51 @@ def test_a_failed_put_leaves_a_reservation_the_dangling_sweep_reclaims(
             # elapsed — and the project's quota is released.
             removed = await repair_dangling_images(conn, _SweepStore(), timedelta(seconds=0))
             assert removed == 1
-            assert await _project_usage(conn, "proj") == (0, 0)
+            assert await _project_usage(conn, "proj", adopting=None) == (0, 0)
             # With the quota released the previously-blocked upload now succeeds.
             entry = await _register(
                 conn, healthy, name="next", quarantine_key="uploads/q/proj/b.qcow2"
             )
             assert entry.state is ImageState.REGISTERED
+
+    asyncio.run(_run())
+
+
+def test_retrying_an_abandoned_reservation_is_not_double_counted(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The retry ADR-0520 §4 names as the recovery from a failed write must not be denied by the
+    # bytes its own abandoned reservation is holding. `reserve_publish` *adopts* that row and
+    # overwrites its size rather than adding a second one, so counting it in the usage read would
+    # charge the project twice for one image and lock the user out for the whole publish grace.
+    # The cap here admits one 12-byte image and not two; the earlier test misses this because it
+    # leaves the cap at its 50 GiB default.
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "20")
+
+    class _DyingStore(_FakeStore):
+        def put_artifact(
+            self, request: artifact_types.ArtifactWriteRequest
+        ) -> artifact_types.StoredArtifact:
+            raise CategorizedError(
+                "object store is unreachable",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={},
+            )
+
+    first = _DyingStore({"uploads/q/proj/a.qcow2": b"twelve-bytes"})
+    retry = _quarantine(b"twelve-bytes", key="uploads/q/proj/b.qcow2")
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            with pytest.raises(CategorizedError) as err:
+                await _register(conn, first, quarantine_key="uploads/q/proj/a.qcow2")
+            assert err.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+            # The abandoned reservation is holding the full cap against everyone...
+            assert await _project_usage(conn, "proj", adopting=None) == (1, 12)
+            # ...but not against the retry of that same image, which will adopt it.
+            entry = await _register(conn, retry, quarantine_key="uploads/q/proj/b.qcow2")
+            assert entry.state is ImageState.REGISTERED
+            assert await _project_usage(conn, "proj", adopting=None) == (1, 12)
 
     asyncio.run(_run())
 
@@ -721,13 +882,13 @@ def test_retrying_an_abandoned_reservation_re_reserves_the_new_size(migrated_url
         async with await _connect(migrated_url) as conn:
             with pytest.raises(CategorizedError):
                 await _register(conn, first, quarantine_key="uploads/q/proj/a.qcow2")
-            assert await _project_usage(conn, "proj") == (1, 12)
+            assert await _project_usage(conn, "proj", adopting=None) == (1, 12)
             # Same identity (provider/name/arch/visibility/owner), smaller image.
             entry = await _register(conn, retry, quarantine_key="uploads/q/proj/b.qcow2")
             assert entry.state is ImageState.REGISTERED
             # One row still — adopted, not duplicated — carrying the retry's size, not the
             # abandoned attempt's.
-            assert await _project_usage(conn, "proj") == (1, 4)
+            assert await _project_usage(conn, "proj", adopting=None) == (1, 4)
             # And the retry's digest. The adopt used to leave the abandoned attempt's digest on
             # the row while writing the retry's bytes, which registers an image whose object can
             # never satisfy the materialization fetch's `sha256(object) == row.digest` gate.

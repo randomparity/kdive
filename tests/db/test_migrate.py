@@ -1702,7 +1702,7 @@ def test_migration_0089_leaves_pre_existing_rows_at_zero(pg_conn: psycopg.Connec
     # contributes 0 to its project's bytes total, because its size lives in the object store and
     # a migration cannot reach it. Pinned here so the residual is a recorded fact rather than a
     # surprise, and so a later backfill has a test to change.
-    _apply_through(pg_conn, "0088")
+    _apply_through(pg_conn, "0087")
     pg_conn.execute(
         "INSERT INTO image_catalog (provider, name, arch, format, root_device, "
         "visibility, state, object_key, owner, expires_at) VALUES ('local-libvirt', "

@@ -104,7 +104,9 @@ def _clamp_expiry(expires_at: datetime, *, now: datetime) -> datetime:
     return min(expires_at, ceiling)
 
 
-async def _project_usage(conn: AsyncConnection, project: str) -> tuple[int, int]:
+async def _project_usage(
+    conn: AsyncConnection, project: str, *, adopting: PublishRequest | None
+) -> tuple[int, int]:
     """Return the project's live private image count and reserved bytes, under the held lock.
 
     One aggregate over the ``pending`` + ``registered`` private rows owned by ``project``: their
@@ -116,17 +118,38 @@ async def _project_usage(conn: AsyncConnection, project: str) -> tuple[int, int]
     A ``pending`` row counts its full reserved size even though its object is not written yet;
     that is the point of the reservation. An abandoned one is released by the reconciler's
     ``repair_dangling_images`` on its ``pending_since`` deadline.
+
+    ``adopting`` is the identity the caller's reservation is about to publish, or ``None`` for a
+    caller only measuring the project. Its in-flight ``pending`` row is **excluded**, because
+    :func:`~kdive.services.images.publish.reserve_publish` will *adopt* that row and overwrite its
+    ``size_bytes`` rather than adding a second one. Counting it would charge the project twice for
+    one image and deny the retry of an abandoned reservation — which is the very recovery ADR-0520
+    §4 names — for the whole publish grace. Only ``pending`` is excluded: a ``registered`` row of
+    the same identity is not adoptable and does still occupy quota.
     """
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT count(*) AS live_count, COALESCE(SUM(size_bytes), 0) AS used_bytes "
             "FROM image_catalog "
             "WHERE visibility = %(private)s AND owner = %(owner)s "
-            "AND state = ANY(%(states)s)",
+            "AND state = ANY(%(states)s) "
+            # `IS NOT DISTINCT FROM` rather than `=` so a NULL `adopting` excludes nothing:
+            # provider/name/arch are NOT NULL columns, so each comparison is false and the whole
+            # NOT(...) stays true. With `=` the clause would go NULL and drop every row.
+            "AND NOT ("
+            "  state = %(pending)s"
+            "  AND provider IS NOT DISTINCT FROM %(adopt_provider)s"
+            "  AND name IS NOT DISTINCT FROM %(adopt_name)s"
+            "  AND arch IS NOT DISTINCT FROM %(adopt_arch)s"
+            ")",
             {
                 "private": ImageVisibility.PRIVATE.value,
                 "owner": project,
                 "states": list(_LIVE_PRIVATE_STATES),
+                "pending": ImageState.PENDING.value,
+                "adopt_provider": adopting.provider if adopting else None,
+                "adopt_name": adopting.name if adopting else None,
+                "adopt_arch": adopting.arch if adopting else None,
             },
         )
         row = await cur.fetchone()
@@ -332,7 +355,7 @@ async def _reserve_under_quota(
     """
     require_top_level_transaction(conn, "the private-upload quota reservation")
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.PROJECT, project):
-        count, used_bytes = await _project_usage(conn, project)
+        count, used_bytes = await _project_usage(conn, project, adopting=request)
         denial = _quota_denial(
             project=project, count=count, used_bytes=used_bytes, new_bytes=new_bytes
         )

@@ -67,6 +67,15 @@ The read is *not* maintained as a separate counter row or table. Summing a colum
 denormalized counter would be a second source of truth that can drift from the rows the sweeps
 delete.
 
+The aggregate **excludes the in-flight `pending` row of the identity this reservation is about to
+publish**, because `reserve_publish` will *adopt* that row and overwrite its `size_bytes` rather
+than add a second one. Counting it would charge the project twice for one image, and the case that
+makes concrete is the retry §4 names as the recovery: a user whose write failed, retrying the same
+image, would be denied by the bytes their own abandoned reservation is holding — for the whole
+publish grace. Only `pending` is excluded; a `registered` row of the same identity is not adoptable
+and does still occupy quota. At most one such row can exist, because every private reservation for
+one identity serializes on the PROJECT lock and adopts rather than inserts.
+
 ### 3. The lock spans the reservation only; the PUT runs unlocked
 
 `publish_image` is split into three composable steps, and the upload path interleaves the lock
@@ -184,6 +193,41 @@ prose byte-for-byte and gains only appended text: a partial-supersession banner 
 bullet. That satisfies the README's intent — a reader of the superseded prose is told, in place,
 that it no longer holds — without an edit the gate rejects.
 
+### 7. The registration flip is fenced on the reservation, not on the row id
+
+Releasing the lock before the write opens a window §3 did not close on its own. Two uploads of
+the *same* `(provider, name, arch)` to one project now interleave: the first reserves, and the
+second — which blocked on the PROJECT lock, so its usage read is correct — **adopts that same
+`pending` row** under `_adopt_or_insert_pending`'s `FOR UPDATE`, because ADR-0092 idempotency
+deliberately adopts an in-flight row of the identity rather than colliding with it. The adopt
+overwrites `digest` and `size_bytes` with the second attempt's. Both attempts then leave the lock
+and PUT the same deterministic object key.
+
+`_registered` used to flip on `id` alone. That let **both** attempts flip the one row to
+`registered` and return an entry, so both callers were told they succeeded, and at most one of
+their digests was still on the row — the other had published a live, quota-consuming image whose
+object can never satisfy the materialization fetch's `sha256(object) == row.digest` gate.
+
+This was not reachable before this change: the PROJECT lock spanned the whole publish, so the
+second attempt could not observe an in-flight `pending` row at all. It is a consequence of the
+shorter span and is fixed here rather than deferred.
+
+The flip is now fenced on the reservation's own identity —
+`WHERE id = %s AND digest = %s AND object_key = %s` — and a zero-row update raises
+`ErrorCategory.CONFLICT`. Exactly one attempt registers; the superseded one is told so in a typed
+error. This is the concrete state-conflict seam `CONFLICT` was reserved for and previously had no
+emitter (`domain/errors.py`). The same fence turns §4's swept-mid-write case from a bare
+`RuntimeError("image_catalog row … vanished")` into that typed error.
+
+**Residual, stated rather than claimed closed.** The fence guarantees one *registration*; it does
+not order the two PUTs. Both attempts write the same key unlocked, so if the superseded attempt's
+PUT lands *after* the winner's, the object holds the loser's bytes while the row carries the
+winner's digest — an unfetchable image again, now with one caller correctly told it failed. Fully
+closing this needs same-identity publishes to serialize across the write, which is the object-key
+collision tracked in #1756 (that issue's `registered`-name case and this one share the cause: one
+deterministic key, no writer exclusion). The fence is the part that belongs in this change; the
+exclusion is a design that issue owns.
+
 ## Consequences
 
 - Concurrent uploads to one project no longer serialize behind each other's HEADs and PUT. They
@@ -209,6 +253,15 @@ that it no longer holds — without an edit the gate rejects.
 - `publish_image` keeps its signature and behaviour; `image_build.py` is untouched. The three new
   functions are the seam the lock needs, not a second publish path — `publish_image` is their only
   other composition.
+- `ErrorCategory.CONFLICT` gains its first emitter (§7). It was defined-but-unemitted, reserved in
+  `domain/errors.py` for "a uniqueness/state conflict" pending a concrete seam; this is that seam.
+  Agents calling `images.upload` can now receive it, and the correct response is to retry — the
+  retry adopts the winning row rather than colliding with it (§2's exclusion is what keeps that
+  retry from being quota-denied).
+- The build path inherits the same fence. `publish_image` composes `finish_publish`, so two
+  concurrent builds of one public identity now also get one registration and one `CONFLICT`
+  instead of two claimed successes. That path had the race before this change; it is fixed by
+  being on the shared step rather than by a separate change.
 
 ## Considered & rejected
 
