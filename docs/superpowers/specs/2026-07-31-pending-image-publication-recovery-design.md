@@ -75,6 +75,13 @@ The private-expiry query excludes `pending` state. The pending-publication repai
 automatic deletion path for a reservation and therefore the only path that needs its fence. If it
 recovers an already-expired object to `registered`, normal expiry removes it on the next pass.
 
+Config inventory follows the same lifecycle ownership. An update of a config-managed row uses a
+current-state SQL predicate: while the row is `pending`, it may update only config-owned descriptive
+fields and must preserve runtime realization/publication fields. This predicate is evaluated by the
+write, not only against the pass's earlier snapshot. Config prune re-reads under row lock and returns
+a no-op for `pending`. After recovery registers or deletes the attempt, later inventory passes resume
+normal ownership.
+
 ## Reconciliation flow
 
 `repair_dangling_images` keeps the configured grace as the abandonment threshold. For each expired
@@ -116,6 +123,8 @@ registered or removed. It logs the outcome without object bytes or tenant-sensit
   principal in the same transaction as the flip. Missing principal state fails closed to reclaim.
 - Adoption by another principal replaces the prior actor before any write, so recovery attributes
   the current attempt rather than the abandoned one.
+- Inventory reconcile and declaration removal cannot overwrite or prune a pending reservation,
+  including when their candidate snapshot predates the reservation commit.
 
 ## Data and interface changes
 
@@ -176,9 +185,10 @@ Focused service, migration, and reconciler tests must cover shared session/xact 
 transaction-idle PUT entry, successful fence acquisition/release, stale reservation rejection
 before PUT, attempt-key uniqueness, cross-principal adoption, death-after-write recovery, a PUT that
 outlives database-session loss or task cancellation, pending-row exclusion from private expiry,
-missing-object cleanup, valid size/digest registration, config presence/absence/error, private audit
-atomicity, size and checksum mismatch deletion, absent checksum deletion, delete/HEAD failure retry,
-and private quota release after row removal.
+ordinary inventory ticks and declaration removal during a blocked publish, missing-object cleanup,
+valid size/digest registration, config presence/absence/error, private audit atomicity, size and
+checksum mismatch deletion, absent checksum deletion, delete/HEAD failure retry, and private quota
+release after row removal.
 
 An adversarial concurrency test suspends a real publisher inside its store PUT, ages the row beyond
 grace, runs the real repair on another connection, and proves the pass skips it. A falsifier then
