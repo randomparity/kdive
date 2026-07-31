@@ -10,6 +10,7 @@ import os
 
 import pytest
 
+import kdive.artifacts.transport_encoding as transport_encoding
 from kdive.artifacts.transport_encoding import (
     _RANGE_CHUNK_BYTES,
     GZIP_ENCODING,
@@ -42,6 +43,17 @@ class _FakeRangedStore:
             length = min(length, self._max_read)
         self.reads.append((start, length))
         return self._data[start : start + length]
+
+
+class _OverServingRangedStore(_FakeRangedStore):
+    """A ranged reader that appends bytes beyond every requested interval."""
+
+    def __init__(self, data: bytes, overread: bytes, *, max_read: int | None = None) -> None:
+        super().__init__(data, max_read=max_read)
+        self._overread = overread
+
+    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+        return super().get_range(key, start=start, length=length) + self._overread
 
 
 def _b64_sha256(data: bytes) -> str:
@@ -318,6 +330,68 @@ def test_strip_gzip_boundary_aligned_trailing_member_is_still_rejected() -> None
     # the one that fired -- without this the test could pass on the `unused_data` clause instead.
     assert store.reads[0] == (0, len(first))
     assert sum(length for _, length in store.reads) == len(concatenated)  # the tail was read
+
+
+def test_strip_gzip_ignores_bytes_an_over_serving_reader_returns_outside_a_range() -> None:
+    # The range contract bounds what this loop may hash or decompress. A store returning bytes
+    # outside that interval must not turn an otherwise valid object into trailing data.
+    payload = b"canonical bytes" * 20
+    compressed = gzip.compress(payload)
+    store = _OverServingRangedStore(compressed, b"outside the requested range")
+    writer = io.BytesIO()
+
+    result = strip_gzip_to_writer(store, _req(compressed, len(payload)), writer)
+
+    assert writer.getvalue() == payload
+    assert result.uncompressed_bytes == len(payload)
+
+
+def test_strip_gzip_over_serving_reader_does_not_hide_a_later_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The first request ends at the member boundary. The store supplies a byte from the second
+    # member too, but the decoder must advance only to the boundary and inspect that later member
+    # through its own requested range.
+    concatenated, first, max_read = _two_members()
+    monkeypatch.setattr(transport_encoding, "_RANGE_CHUNK_BYTES", max_read)
+
+    class _BoundaryOverServingStore(_OverServingRangedStore):
+        def get_range(self, key: str, *, start: int, length: int) -> bytes:
+            chunk = super().get_range(key, start=start, length=length)
+            if start == 0:
+                return chunk + concatenated[len(first) : len(first) + 1]
+            return chunk
+
+    store = _BoundaryOverServingStore(concatenated, b"")
+    with pytest.raises(CategorizedError) as exc:
+        strip_gzip_to_writer(
+            store,
+            _req(concatenated, len(gzip.decompress(first))),
+            io.BytesIO(),
+        )
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "trailing data after the gzip stream" in str(exc.value)
+    assert [start for start, _ in store.reads] == [0, len(first)]
+
+
+def test_strip_gzip_drain_ignores_an_over_serving_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A defect in the first small range makes the hash-only drain run. It too must hash only the
+    # requested interval, so bytes appended by a misbehaving reader cannot change the verdict.
+    payload = b"canonical bytes" * 400
+    corrupt = bytearray(gzip.compress(payload))
+    corrupt[2] = 0xFF
+    stored = bytes(corrupt)
+    monkeypatch.setattr(transport_encoding, "_RANGE_CHUNK_BYTES", 16)
+    store = _OverServingRangedStore(stored, b"outside the requested range")
+
+    with pytest.raises(CategorizedError) as exc:
+        strip_gzip_to_writer(store, _req(stored, len(payload)), io.BytesIO())
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "gzip transport stream is corrupt" in str(exc.value)
 
 
 @pytest.mark.parametrize(
