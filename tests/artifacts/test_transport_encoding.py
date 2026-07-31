@@ -127,7 +127,9 @@ def test_strip_gzip_rejects_bomb_exceeding_bound() -> None:
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "exceeds the declared uncompressed_size bound" in str(exc.value)
-    assert len(writer.getvalue()) <= bound + 1  # never expanded past the bound
+    # Non-empty as well as capped: `<=` alone is satisfied by writing nothing, so a regression
+    # in which `_drain` stopped writing (or was never reached) would leave this green.
+    assert 0 < len(writer.getvalue()) <= bound + 1  # decompressed, and never past the bound
 
 
 def test_strip_gzip_transport_hash_mismatch_is_retryable_infrastructure_failure() -> None:
@@ -350,6 +352,33 @@ def test_strip_gzip_mid_pass_defect_keeps_configuration_error_when_the_digest_ag
     assert exc.value.details == {}  # no gate marker: this is not the checksum gate
 
 
+def test_strip_gzip_store_fault_during_the_drain_keeps_the_decode_diagnosis_on_the_chain() -> None:
+    # The window the hash-only drain opens. ``get_range`` is called uncaught, and a connection
+    # reset on one of these GETs is the likeliest failure on this path -- so a defect found
+    # mid-pass, which lives only in a local, would die with the frame. The store's own retryable
+    # verdict is the honest one (the digest is now unknowable, so nothing can be asserted about
+    # the object), but losing WHY the decode failed is pure information loss: ADR-0523 §4's
+    # terminal guarantee is conditional on the drain completing, and this is what records it.
+    payload = b"canonical bytes" * 400
+    corrupt = bytearray(gzip.compress(payload))
+    corrupt[2] = 0xFF  # the gzip method byte: zlib rejects the FIRST range, deterministically
+    stored = bytes(corrupt)
+    assert len(stored) > 16  # otherwise the pass consumes the object and no drain read happens
+    fault = CategorizedError("get_range on 'k' failed", category=ErrorCategory.TRANSPORT_FAILURE)
+
+    class _FaultingStore(_FakeRangedStore):
+        def get_range(self, key: str, *, start: int, length: int) -> bytes:
+            if start > 0:  # the pass stopped inside range 0, so every later read is the drain's
+                raise fault
+            return super().get_range(key, start=start, length=length)
+
+    with pytest.raises(CategorizedError) as exc:
+        strip_gzip_to_writer(_FaultingStore(stored, max_read=16), _req(stored, 6000), io.BytesIO())
+
+    assert exc.value is fault  # passed through, not reclassified as an object defect
+    assert "gzip transport stream is corrupt" in str(exc.value.__cause__)
+
+
 def test_strip_gzip_hash_only_drain_never_expands_a_bomb_and_reads_each_byte_once() -> None:
     # The bound holds across the new drain. A bomb whose stored bytes also rotted takes the
     # transport verdict, and getting there must not reopen decompression: the writer still stops at
@@ -373,7 +402,9 @@ def test_strip_gzip_hash_only_drain_never_expands_a_bomb_and_reads_each_byte_onc
         strip_gzip_to_writer(store, request, writer)
 
     _assert_transport_verdict(exc.value)
-    assert len(writer.getvalue()) <= bound + 1  # never expanded past the bound
+    # Non-empty as well as capped: `<=` alone is satisfied by writing nothing, so a regression
+    # in which `_drain` stopped writing (or was never reached) would leave this green.
+    assert 0 < len(writer.getvalue()) <= bound + 1  # decompressed, and never past the bound
     assert sum(length for _, length in store.reads) == len(stored)
     starts = [start for start, _ in store.reads]
     assert starts == sorted(starts) and len(set(starts)) == len(starts)  # no range re-read

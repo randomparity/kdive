@@ -58,6 +58,7 @@ No schema, migration, MCP-surface, config or dependency change.
 | AC4 | The *converse* assertions carry this: a genuinely multi-member object, or a genuinely corrupt one, only keeps `CONFIGURATION_ERROR` if the unread tail reached the hasher. Delete `_hash_remaining` and the digest comes up short and those tests redden as a transport mismatch. |
 | The retired backstop (ADR-0523 §3) | `test_strip_gzip_boundary_aligned_trailing_member_is_still_rejected` constructs the case where `unused_data` is empty and the whole second member is unread — the only case in which `_framing_defect`'s `offset < compressed_size` clause is the sole guard — and asserts on the read pattern so it cannot pass on the other clause instead. |
 | AC6 | The staging tests assert on `caplog` in both directions: the WARNING fires for damaged stored bytes and does not fire for a defective upload. |
+| A store fault during the drain (ADR-0523 Consequences) | `test_strip_gzip_store_fault_during_the_drain_keeps_the_decode_diagnosis_on_the_chain` — the store's own error passes through unreclassified, and the decode diagnosis it would otherwise have destroyed survives on `__cause__`. |
 | The decode diagnosis reaches the operator (ADR-0523 §5) | `test_stage_gzip_damaged_stored_bytes_report_the_identity_verdict` asserts the branch's own message is *absent* from the error and from `details`, and *present* in the WARNING behind "the decode also failed". The clean-hash test asserts that clause is absent when there was no decode failure to report. |
 
 Mutation-verified, `__pycache__` cleared between every run and the restored tree re-confirmed green
@@ -70,3 +71,5 @@ Mutation-verified, `__pycache__` cleared between every run and the restored tree
 | A second full pass added to `_hash_remaining` | the tiling test, on both the read-length sum and the no-repeat check |
 | `_framing_defect`'s `offset < compressed_size` clause deleted | the boundary-aligned trailing-member test, and *only* it — the review pass that surfaced this found the pre-fix suite green under the same mutation |
 | The `from decoded.defect` chain dropped | both staging-seam parametrisations, on the carried-diagnosis assertion |
+| The chain-preserving `except` around `_hash_remaining` dropped | the store-fault test |
+| `_drain` stops writing entirely | both bomb tests, on the `0 < len(...)` lower bound the review pass added — under the bare `<=` only a sibling test would have caught it |

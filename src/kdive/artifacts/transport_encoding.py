@@ -201,7 +201,19 @@ def strip_gzip_to_writer(
     """
     hasher = hashlib.sha256()
     decoded = _decode_pass(store, request, writer, hasher)
-    _hash_remaining(store, request, hasher, start=decoded.offset)
+    try:
+        _hash_remaining(store, request, hasher, start=decoded.offset)
+    except Exception as fault:
+        # The drain reads uncaught, so the store's own faults propagate — and this frame is the
+        # only one that ever held ``decoded.defect``, which would otherwise die with it. A fault
+        # here leaves the digest unknowable, so the store's retryable verdict is the honest one and
+        # passes through unchanged; only the decode diagnosis is chained on, so a postmortem can
+        # still see the object did not decode. This window is why ADR-0523 §4's terminal guarantee
+        # is conditional on the drain completing, and the branch that widened it records that.
+        if decoded.defect is None:
+            raise
+        raise fault from decoded.defect
+
     actual = base64.b64encode(hasher.digest()).decode("ascii")
     if actual != request.expected_sha256:
         # Chained, not merged. A defect found before the digest disagreed is a real observation
