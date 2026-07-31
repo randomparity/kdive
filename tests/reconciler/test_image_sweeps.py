@@ -896,6 +896,31 @@ def test_repair_terminal_count_includes_registered_and_removed(migrated_url: str
     asyncio.run(_run())
 
 
+def test_dangling_repair_rejects_an_enclosing_transaction_before_store_access(
+    migrated_url: str,
+) -> None:
+    key = "images/local-libvirt/nested/x86_64/attempt.qcow2"
+
+    class _UntouchedStore(_FakeImageStore):
+        def head(self, key: str) -> HeadResult | None:
+            raise AssertionError(f"nested repair touched object store for {key}")
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as conn:
+            await _insert_image_row(
+                conn,
+                name="nested",
+                state="pending",
+                object_key=key,
+                pending_age=timedelta(hours=2),
+            )
+            async with conn.transaction():
+                with pytest.raises(RuntimeError, match="transaction-free connection"):
+                    await _repair_dangling_images(conn, _UntouchedStore({}), _grace())
+
+    asyncio.run(_run())
+
+
 # --- expired_private_images ----------------------------------------------------------
 
 

@@ -29,7 +29,7 @@ from psycopg.cursor_async import AsyncCursor
 from psycopg.rows import DictRow, dict_row
 
 from kdive.artifacts.storage import HeadResult, ObjectListing
-from kdive.db.locks import LockScope, try_advisory_xact_lock
+from kdive.db.locks import LockScope, require_top_level_transaction, try_advisory_xact_lock
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError
 from kdive.services.images.audit import record_private_registration
@@ -106,6 +106,7 @@ async def repair_dangling_images(
 
     Returns the number of terminal catalog outcomes: rows registered or removed.
     """
+    require_top_level_transaction(conn, "image publication recovery candidate scan")
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id, state, publication_attempt_id FROM image_catalog "
@@ -131,6 +132,7 @@ async def _repair_image_candidate(
     row_id = candidate["id"]
     if not isinstance(row_id, UUID):
         raise RuntimeError("image repair candidate id is not a UUID")
+    require_top_level_transaction(conn, "image publication recovery candidate")
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         if not await try_advisory_xact_lock(conn, LockScope.IMAGE_PUBLISH, row_id):
             return False
