@@ -25,6 +25,8 @@ the writer is still active.
 - A publisher with a live PostgreSQL session is protected as active. A disconnected publisher is a
   failed attempt even if its blocking store thread continues; attempt-specific keys make the late
   PUT harmless to catalog state and eligible for the existing leaked-object sweep.
+- Async task cancellation is also a failed attempt even if `asyncio.to_thread` continues the PUT.
+  The same attempt-key isolation applies after normal context unwinding releases the session lock.
 - The configured S3-compatible store honors the existing read-after-write and
   read-after-delete HEAD behavior on which KDIVE's current object lifecycle already relies.
 - `image_catalog.digest` is `sha256:<hex>` and `size_bytes` is the expected qcow2 byte length for a
@@ -46,8 +48,10 @@ ADR-0526.
 
 `reserve_publish` continues to commit the quota-bearing `pending` row under the existing scope and,
 for private images, PROJECT lock. Each reservation/adoption mints a new attempt UUID and persists
-it, the attempt-specific qcow2/config keys, and the initiating principal for private uploads. It
-returns the row UUID, attempt UUID, keys, request digest, and expected size.
+it and the attempt-specific qcow2/config keys. A private insert/adoption replaces
+`publication_principal` with the current authenticated principal in that transaction; a public
+reservation writes `NULL`. It returns the row UUID, attempt UUID, keys, request digest, and expected
+size.
 
 Before reading or writing source bytes, the publisher acquires the row's session advisory lock.
 The session and reconciler transaction helpers both use the same
@@ -66,6 +70,10 @@ while the PUT thread continues, the attempt key cannot collide with recovery or 
 
 The PROJECT lock remains absent during the PUT. Tests distinguish the image fence from the project
 quota lock rather than asserting that no advisory lock of any kind exists.
+
+The private-expiry query excludes `pending` state. The pending-publication repair is the only
+automatic deletion path for a reservation and therefore the only path that needs its fence. If it
+recovers an already-expired object to `registered`, normal expiry removes it on the next pass.
 
 ## Reconciliation flow
 
@@ -94,6 +102,8 @@ registered or removed. It logs the outcome without object bytes or tenant-sensit
 - Death during PUT releases the fence when PostgreSQL detects the dead backend. A missing, partial,
   or complete object then follows the decision table. A PUT that lands later uses the abandoned
   attempt's unique key and becomes a bounded leaked-object candidate, never the new row's object.
+- Async cancellation has the same safe failed-attempt outcome. It need not pretend the offloaded
+  SDK thread was cancelled; a late object remains isolated under the abandoned attempt key.
 - Death after PUT but before registration leaves a checksum-bearing object; recovery registers it.
 - A transient HEAD or delete failure preserves the pending row and its quota reservation for retry.
 - Death after a successful delete but before row commit rolls the row deletion back. The next pass
@@ -104,15 +114,19 @@ registered or removed. It logs the outcome without object bytes or tenant-sensit
   offer, absence clears it, and a store error retains the row for retry.
 - Valid private recovery emits the existing registration audit under the persisted initiating
   principal in the same transaction as the flip. Missing principal state fails closed to reclaim.
+- Adoption by another principal replaces the prior actor before any write, so recovery attributes
+  the current attempt rather than the abandoned one.
 
 ## Data and interface changes
 
 Migration 0093 adds nullable `publication_attempt_id uuid` and `publication_principal text` columns,
 backfills a unique attempt UUID for existing pending rows, and constrains new pending rows to carry
-an attempt. Registration clears both fields. Object keys include the attempt UUID; consumers already
-read persisted keys and need no derivation change. `ArtifactWriteRequest` gains an optional base64
-SHA-256 value, and the object-store adapter sends it only when present. Image qcow2 writes populate
-it; unrelated writes retain their existing request shape.
+an attempt. Registration clears both fields. Publish object keys include the attempt UUID;
+consumers already read persisted keys and need no derivation change. The deterministic
+`config_object_key` remains for inventory/staged capture, while an attempt-aware helper produces
+both publish keys. `ArtifactWriteRequest` gains an optional base64 SHA-256 value, and the
+object-store adapter sends it only when present. Image qcow2 writes populate it; unrelated writes
+retain their existing request shape.
 
 The image sweep store port gains `head(key) -> HeadResult | None` in addition to delete/list
 operations. Publication exposes a narrow fence helper shared by the publisher and repair, backed by
@@ -160,10 +174,11 @@ publisher-versus-reconciler fence.
 
 Focused service, migration, and reconciler tests must cover shared session/xact lock contention,
 transaction-idle PUT entry, successful fence acquisition/release, stale reservation rejection
-before PUT, attempt-key uniqueness, death-after-write recovery, a PUT that outlives database-session
-loss, missing-object cleanup, valid size/digest registration, config presence/absence/error, private
-audit atomicity, size and checksum mismatch deletion, absent checksum deletion, delete/HEAD failure
-retry, and private quota release after row removal.
+before PUT, attempt-key uniqueness, cross-principal adoption, death-after-write recovery, a PUT that
+outlives database-session loss or task cancellation, pending-row exclusion from private expiry,
+missing-object cleanup, valid size/digest registration, config presence/absence/error, private audit
+atomicity, size and checksum mismatch deletion, absent checksum deletion, delete/HEAD failure retry,
+and private quota release after row removal.
 
 An adversarial concurrency test suspends a real publisher inside its store PUT, ages the row beyond
 grace, runs the real repair on another connection, and proves the pass skips it. A falsifier then

@@ -1,6 +1,10 @@
 # ADR 0317 — Advertise default-kernel version and offer the image's kernel `.config`
 
 - **Status:** Accepted
+
+> **Publish-key rule partially superseded by [0526](0526-fence-and-reconcile-pending-image-publications.md)**
+> (2026-07-31). Staged-image keys remain deterministic.
+
 - **Date:** 2026-07-08
 - **Deciders:** kdive maintainers
 - **Issue:** #1051 (redesign spec 2 of 3)

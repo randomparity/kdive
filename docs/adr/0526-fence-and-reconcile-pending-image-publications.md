@@ -4,6 +4,10 @@
 
 Accepted
 
+- **Narrowly supersedes:** [ADR-0317](0317-image-kernel-config-offer.md) §2 and
+  [ADR-0336](0336-staged-kernel-config-offer.md)'s shared deterministic config-key rule for the
+  publish lane only. Staged-image config keys remain deterministic.
+
 ## Context
 
 Image publication commits a `pending` catalog row before writing its object. A worker death after
@@ -30,10 +34,17 @@ the sibling object exists.
 ## Decision
 
 Migration 0093 adds a non-null publication-attempt UUID to each `pending` row and a nullable
-initiating principal. Every reservation, including adoption, mints a fresh attempt UUID. The qcow2
-and optional config object keys include that UUID, so a PUT from a superseded or disconnected
-attempt can land only at its own now-rowless key; it cannot recreate or overwrite the key a later
-attempt or recovery validated. Normal registration clears the attempt and principal fields.
+initiating principal. Every reservation, including adoption, mints a fresh attempt UUID. Every
+private insert or adoption writes the current authenticated principal in that same reservation
+transaction, replacing any prior attempt's actor; every public reservation writes `NULL`. Normal
+and recovered registration clear both fields only after using the principal for any atomic audit.
+
+The qcow2 and optional config object keys include the attempt UUID, so a PUT from a superseded,
+cancelled, or disconnected attempt can land only at its own now-rowless key; it cannot recreate or
+overwrite the key a later attempt or recovery validated. This narrowly replaces ADR-0317/0336's
+shared deterministic config key for the publish lane. A new attempt-aware publish-key helper owns
+both qcow2 and config keys. Inventory/staged-image capture retains the deterministic
+`config_object_key` helper because that lane has no publication attempt.
 
 Each reserved image row defines a publication fence from its row UUID. New session-scoped and
 transaction-scoped helpers use one shared `LockScope.IMAGE_PUBLISH` bigint derivation; they do not
@@ -70,23 +81,29 @@ the existing `private-upload:registered` audit event in the same transaction as 
 flip. A private pending row without a principal is unverifiable state and is reclaimed rather than
 registered. Public image recovery needs no project audit, matching normal public publication.
 
+Private-image expiry no longer selects `pending` rows. Publication recovery is their sole automatic
+deletion owner; once it registers an already-expired private image, the next expiry pass can prune
+the registered row normally. This narrowly supersedes ADR-0093's all-private-row expiry rule and
+prevents the TTL path from bypassing the publication fence.
+
 Store errors abort the candidate transaction and preserve the row for a later pass. If deletion
 returns but the follow-up HEAD still sees the object, the row is also preserved. A crash after
 object deletion but before row deletion leaves a pending row with a missing object, which the next
 pass removes. A crash after the publisher PUT but before registration releases the advisory lock
 and leaves a valid object that the next pass registers.
 
-Database-session loss while the blocking PUT thread remains alive is a safe terminal publication
-failure, not an active-publisher guarantee: Postgres releases the fence and recovery may remove the
-row, but the attempt-specific key prevents the late PUT from recreating the reclaimed key. That
-late object is rowless and the existing leaked-image sweep removes it after grace. The publisher
-cannot register without revalidating the same persisted attempt.
+Database-session loss or async task cancellation while the blocking PUT thread remains alive is a
+safe terminal publication failure, not an active-publisher guarantee: either condition may release
+the fence while the thread continues, and recovery may remove the row, but the attempt-specific key
+prevents the late PUT from recreating the reclaimed key. That late object is rowless and the
+existing leaked-image sweep removes it after grace. The publisher cannot register without
+revalidating the same persisted attempt.
 
 ## Consequences
 
-- A publisher whose database session remains live is protected for the duration of its write
-  without sizing or renewing another deadline. Database-session loss fails the publication safely
-  and may leave a bounded rowless object for the existing leaked-image sweep.
+- A publisher whose database session and async task remain live is protected for the duration of
+  its write without sizing or renewing another deadline. Session loss or cancellation fails the
+  publication safely and may leave a bounded rowless object for the existing leaked-image sweep.
 - The fence holds one database connection and one session advisory lock across a potentially long
   PUT, but no database transaction and no project-wide lock.
 - Recovery registers only byte-identical objects and releases abandoned private-image quota after
@@ -103,8 +120,9 @@ cannot register without revalidating the same persisted attempt.
 ## Considered & rejected
 
 **Persist a publisher heartbeat and lease expiry.** This creates a second deadline whose renewal
-must remain live while a blocking SDK call runs. A transient database failure could let the lease
-expire while the PUT is still active, reopening the destructive race the fence exists to close.
+must remain live while a blocking SDK call runs. Attempt-specific keys would make expiry safe, but
+the heartbeat state and renewal complexity buy no required behavior over the session fence: either
+mechanism safely fails the attempt when its database liveness is lost.
 
 **Hold a row lock and database transaction across the PUT.** This gives the necessary ordering but
 keeps a long-lived transaction snapshot during a transfer and can delay vacuum cleanup globally.
