@@ -2,7 +2,18 @@
 
 ## Status
 
-Accepted (2026-07-31)
+Proposed (2026-07-31)
+
+Adversarial review blocked acceptance. PostgreSQL-backend disappearance and an ambiguous store
+error do not prove that an earlier `DeleteObject` can no longer land. Adopting or clearing the
+claim can therefore reopen publication while the earlier request is still in flight, allowing it
+to destroy the newly published bytes. The decision below is retained as the reviewed candidate,
+not as an implementable contract.
+
+The sound alternative identified by review is deletion by immutable S3 version ID, with a durable
+retry obligation for ambiguous failures. It requires bucket versioning as a deployment prerequisite
+and provisioning/rollout changes outside #1751's authorized scope. An operator must choose whether
+to authorize that storage-contract change or retain the existing lock-held deletes.
 
 ## Context
 
@@ -106,3 +117,12 @@ client's own retry/transport budget now bounds that job, but no database lock is
 - **Hold a session advisory lock.** It would recover automatically with a backend, but it is still
   a PostgreSQL advisory lock held across object-store I/O and preserves the defect this decision
   removes.
+- **Delete an immutable S3 version ID.** This prevents a delayed request from targeting a later PUT
+  at the same logical key and is the only unlocked-delete alternative the review found sound. It is
+  not selected here because it requires enabling and provisioning bucket versioning, defining a
+  mixed-version rollout, and persisting failed version-specific deletion obligations. That is a
+  deployment and object-store contract change requiring operator authorization.
+- **Keep the status quo.** It remains fail-closed against publication races but leaves store
+  latency inside the transaction and owner lock. It is the safe fallback while the versioning
+  decision is unauthorized; the issue cannot meet its requested unlocked-delete outcome on that
+  fallback.

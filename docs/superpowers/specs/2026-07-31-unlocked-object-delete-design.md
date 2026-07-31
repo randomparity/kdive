@@ -1,5 +1,18 @@
 # Unlocked object-store delete design
 
+## Design review outcome
+
+Blocked pending an operator decision. Adversarial review rejected the selected backend-owned claim:
+database-backend death, task cancellation, and ambiguous object-store failures do not establish
+that an older delete request is quiescent. Reopening publication after claim takeover can let that
+request destroy newly published bytes.
+
+Deleting a captured immutable S3 version ID closes that interval, but requires bucket versioning,
+deployment provisioning, a rolling-upgrade contract, and durable retry records for ambiguous
+version-specific deletes. The campaign orchestrator did not authorize that scope. The design below
+is retained as the reviewed candidate and investigation record; it is not approved for
+implementation.
+
 ## Scope
 
 Issue #1751 covers exactly three real object-store delete sites:
