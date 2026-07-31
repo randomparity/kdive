@@ -136,7 +136,7 @@ edited; read §3 and §4 as history.
 §3's premise no longer holds. "There is nothing to fence on without plumbing a job id through the
 provider seam" was a statement about the seam, and #1740 plumbed it: `Provisioner.provision` and
 `.reprovision` carry a `job_id`, the job handler supplies `job.id`, and it reaches the fetch through
-`RootfsUploadContext`. Migration 0088 therefore drops `expires_at` and adds
+`RootfsUploadContext`. Migration 0090 therefore drops `expires_at` and adds
 `job_id uuid NOT NULL REFERENCES jobs (id) ON DELETE CASCADE`, and the pin probe reuses
 `object_write_leases`' own `LIVE_HOLDER_SQL` — `jobs.state = 'running' AND
 jobs.lease_expires_at > now()`. §4's whole table goes with it: there is no derived constant left,

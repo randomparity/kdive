@@ -1,4 +1,4 @@
-"""Migration 0088 fences the uploaded-rootfs fetch lease on its holding job (ADR-0522, #1740).
+"""Migration 0090 fences the uploaded-rootfs fetch lease on its holding job (ADR-0522, #1740).
 
 0087 gave the lease a 6-hour ``expires_at`` because the provision seam carried no job identity, so
 there was nothing to fence on; #1740 threaded the provision job's id through that seam. What this
@@ -26,7 +26,7 @@ def _apply_through(conn: psycopg.Connection, last_version: str) -> None:
     """Apply migrations up to and including ``last_version`` without the migration runner.
 
     Resumable: already-recorded versions are skipped, so a test can stop at ``0087``, write a row
-    the way a pre-fence worker did, and then apply ``0088`` over it. Re-executing ``0001`` would
+    the way a pre-fence worker did, and then apply ``0090`` over it. Re-executing ``0001`` would
     otherwise fail on the tables it already created.
     """
     conn.execute(
@@ -122,9 +122,9 @@ def _live_lease_exists(conn: psycopg.Connection, inv_id: str, token: str) -> boo
     return bool(row[0])
 
 
-def test_0088_a_lease_held_by_a_live_job_pins_its_base(pg_conn: psycopg.Connection) -> None:
+def test_0090_a_lease_held_by_a_live_job_pins_its_base(pg_conn: psycopg.Connection) -> None:
     """A running job with an un-lapsed lease pins; a different token is unaffected."""
-    _apply_through(pg_conn, "0088")
+    _apply_through(pg_conn, "0090")
     inv_id, system_id = _seed_system(pg_conn)
     job_id = _seed_job(pg_conn, state="running", lease=timedelta(minutes=5))
 
@@ -153,12 +153,12 @@ def test_0088_a_lease_held_by_a_live_job_pins_its_base(pg_conn: psycopg.Connecti
         ("queued", timedelta(minutes=5), "the job was requeued, so no worker holds this fetch"),
     ],
 )
-def test_0088_a_lease_whose_holder_is_not_a_live_claim_pins_nothing(
+def test_0090_a_lease_whose_holder_is_not_a_live_claim_pins_nothing(
     pg_conn: psycopg.Connection, state: str, lease: timedelta, why: str
 ) -> None:
     """AC-8's property at the schema level, on every shape of a holder that is no longer running.
 
-    This is what ``expires_at`` bought before 0088 and what the job fence buys now, without the
+    This is what ``expires_at`` bought before 0090 and what the job fence buys now, without the
     derived constant. The first case is the one that matters most: a fetcher killed by ``SIGKILL``
     releases nothing, and nothing in the lease module ever clears its row — ``failed`` is terminal
     and ``torn_down`` is the achieved post-state — so a bare existence test would pin a base of up
@@ -167,7 +167,7 @@ def test_0088_a_lease_whose_holder_is_not_a_live_claim_pins_nothing(
     Where ADR-0515 had to wait out a worst-case transfer estimate, the pin now lapses on the
     job-lease interval the worker was already heartbeating.
     """
-    _apply_through(pg_conn, "0088")
+    _apply_through(pg_conn, "0090")
     inv_id, system_id = _seed_system(pg_conn)
     job_id = _seed_job(pg_conn, state=state, lease=lease)
 
@@ -181,7 +181,7 @@ def test_0088_a_lease_whose_holder_is_not_a_live_claim_pins_nothing(
     assert not _live_lease_exists(pg_conn, inv_id, "token-x"), why
 
 
-def test_0088_a_lease_cannot_be_recorded_without_a_holder(pg_conn: psycopg.Connection) -> None:
+def test_0090_a_lease_cannot_be_recorded_without_a_holder(pg_conn: psycopg.Connection) -> None:
     """``job_id`` is ``NOT NULL``: a holderless row is the unbounded pin the fence exists to stop.
 
     The column that replaced the deadline must not be optional. A row naming no job satisfies no
@@ -189,7 +189,7 @@ def test_0088_a_lease_cannot_be_recorded_without_a_holder(pg_conn: psycopg.Conne
     strictly worse than the 6 hours 0087 accepted. The database refuses it rather than trusting
     every writer to remember.
     """
-    _apply_through(pg_conn, "0088")
+    _apply_through(pg_conn, "0090")
     inv_id, system_id = _seed_system(pg_conn)
 
     with pytest.raises(psycopg.errors.NotNullViolation):
@@ -200,13 +200,13 @@ def test_0088_a_lease_cannot_be_recorded_without_a_holder(pg_conn: psycopg.Conne
         )
 
 
-def test_0088_the_lease_carries_no_second_deadline(pg_conn: psycopg.Connection) -> None:
+def test_0090_the_lease_carries_no_second_deadline(pg_conn: psycopg.Connection) -> None:
     """``expires_at`` is gone, not merely unread — ADR-0522 deletes §4 rather than tuning it.
 
     Leaving the column would leave a writer able to set it and a reader able to believe it, which is
     two definitions of when this pin ends. The schema keeps one.
     """
-    _apply_through(pg_conn, "0088")
+    _apply_through(pg_conn, "0090")
 
     row = pg_conn.execute(
         "SELECT count(*) FROM information_schema.columns "
@@ -215,7 +215,7 @@ def test_0088_the_lease_carries_no_second_deadline(pg_conn: psycopg.Connection) 
     assert row is not None and row[0] == 0
 
 
-def test_0088_sibling_fetchers_hold_independent_leases(pg_conn: psycopg.Connection) -> None:
+def test_0090_sibling_fetchers_hold_independent_leases(pg_conn: psycopg.Connection) -> None:
     """Two fetchers of the same base each hold their own row, so neither releases the other's.
 
     The collision a ``(investigation_id, token)`` primary key would have had: the first sibling to
@@ -223,7 +223,7 @@ def test_0088_sibling_fetchers_hold_independent_leases(pg_conn: psycopg.Connecti
     fence swap, and re-asserted here because the surviving pin's liveness now travels through
     ``job_id`` — two siblings under *different* provision jobs is the production shape.
     """
-    _apply_through(pg_conn, "0088")
+    _apply_through(pg_conn, "0090")
     inv_id, system_id = _seed_system(pg_conn)
     first_job = _seed_job(pg_conn, state="running", lease=timedelta(minutes=5))
     second_job = _seed_job(pg_conn, state="running", lease=timedelta(minutes=5))
@@ -236,14 +236,14 @@ def test_0088_sibling_fetchers_hold_independent_leases(pg_conn: psycopg.Connecti
     assert _live_lease_exists(pg_conn, inv_id, "token-x"), "a sibling's release dropped the pin"
 
 
-def test_0088_a_lease_does_not_outlive_its_job(pg_conn: psycopg.Connection) -> None:
+def test_0090_a_lease_does_not_outlive_its_job(pg_conn: psycopg.Connection) -> None:
     """``ON DELETE CASCADE`` on ``job_id``: a lease with no ``jobs`` row protects nothing.
 
     The same rule ``object_write_leases`` takes (ADR-0502 / migration 0084), for the same
     relationship. It covers the job-retention sweep; the reap collects the far commoner case of a
     job that merely stopped running.
     """
-    _apply_through(pg_conn, "0088")
+    _apply_through(pg_conn, "0090")
     inv_id, system_id = _seed_system(pg_conn)
     job_id = _seed_job(pg_conn, state="running", lease=timedelta(minutes=5))
     _insert_lease(pg_conn, inv_id, system_id, "token-x", job_id)
@@ -254,9 +254,9 @@ def test_0088_a_lease_does_not_outlive_its_job(pg_conn: psycopg.Connection) -> N
     assert row is not None and row[0] == 0
 
 
-def test_0088_a_lease_does_not_outlive_its_investigation(pg_conn: psycopg.Connection) -> None:
+def test_0090_a_lease_does_not_outlive_its_investigation(pg_conn: psycopg.Connection) -> None:
     """The 0087 cascade, unchanged: a lease whose investigation is gone pins nothing."""
-    _apply_through(pg_conn, "0088")
+    _apply_through(pg_conn, "0090")
     inv_id, system_id = _seed_system(pg_conn)
     job_id = _seed_job(pg_conn, state="running", lease=timedelta(minutes=5))
     _insert_lease(pg_conn, inv_id, system_id, "token-x", job_id)
@@ -268,12 +268,12 @@ def test_0088_a_lease_does_not_outlive_its_investigation(pg_conn: psycopg.Connec
     assert row is not None and row[0] == 0
 
 
-def test_0088_drops_rows_that_predate_the_fence(pg_conn: psycopg.Connection) -> None:
-    """A lease written before 0088 names no job, so the migration collects rather than keeps it.
+def test_0090_drops_rows_that_predate_the_fence(pg_conn: psycopg.Connection) -> None:
+    """A lease written before 0090 names no job, so the migration collects rather than keeps it.
 
     Not data loss: the rows are transient evidence about in-flight downloads, and one that cannot
     satisfy the new fence would be a permanent pin under a ``NOT NULL`` column it has nothing to
-    put in. The bounded cost is stated in 0088's own comment — one reclaim pass may proceed as it
+    put in. The bounded cost is stated in 0090's own comment — one reclaim pass may proceed as it
     did before ADR-0515 for a fetch straddling the upgrade, still covered by ADR-0495's flock probe
     once that fetch reaches its partial.
     """
@@ -285,7 +285,7 @@ def test_0088_drops_rows_that_predate_the_fence(pg_conn: psycopg.Connection) -> 
         (str(uuid.uuid4()), inv_id, system_id),
     )
 
-    _apply_through(pg_conn, "0088")
+    _apply_through(pg_conn, "0090")
 
     row = pg_conn.execute("SELECT count(*) FROM rootfs_fetch_leases").fetchone()
     assert row is not None and row[0] == 0

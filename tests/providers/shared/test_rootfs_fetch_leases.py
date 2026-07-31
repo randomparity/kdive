@@ -1,7 +1,7 @@
 """The uploaded-rootfs fetch lease helpers (ADR-0515 as amended by ADR-0522, #1702/#1740).
 
 The database behaviour of the table is covered against real Postgres in
-``tests/db/test_migration_0088_rootfs_fetch_lease_job_fence.py``, and the gate end-to-end in
+``tests/db/test_migration_0090_rootfs_fetch_lease_job_fence.py``, and the gate end-to-end in
 ``tests/jobs/handlers/test_rootfs_reclaim.py``. What this file pins is the module's own contract:
 that the pin is fenced on its holding job rather than on a deadline, and the three degrade paths
 that must not turn a missing fence into a failed provision.
@@ -75,7 +75,7 @@ def test_acquire_records_the_lease_and_returns_its_id() -> None:
     sql, params = conn.statements[0]
     assert "INSERT INTO rootfs_fetch_leases" in sql
     # The holder is written to the row, because the gate's whole predicate reads it back. A row that
-    # named no job would be the holderless pin migration 0088 made unrepresentable.
+    # named no job would be the holderless pin migration 0090 made unrepresentable.
     assert params == (lease_id, inv, "token-x", system_id, job_id)
 
 

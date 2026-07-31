@@ -67,7 +67,7 @@ obligation a future call site cannot forget, and it is the same reason ADR-0502'
 no job at all. A `None` there is not an error; it simply has no fence.
 
 ### 2. `job_id NOT NULL REFERENCES jobs (id) ON DELETE CASCADE`, and `expires_at` is dropped
-(migration 0088)
+(migration 0090)
 
 The column that replaces the deadline is not optional. A lease naming no job satisfies no liveness
 test and nothing in this subsystem ever clears it — `failed` is terminal, `torn_down` is the
@@ -80,6 +80,12 @@ that carried it go with it, and `rootfs_fetch_leases_job_id_idx` is added — th
 the referencing side, and the reap now selects on the join.
 
 `ON DELETE CASCADE` is `object_write_leases`' own rule for the same relationship.
+
+The number skips 0088 and 0089, which two sibling branches held while this was authored.
+[ADR-0517](0517-migration-numbers-are-strictly-ascending-across-merges.md)'s guard requires a
+version strictly above the base branch maximum rather than exactly one above it, so an abandoned
+number is a legitimate gap; taking 0090 makes this branch's gate independent of which sibling
+merges first, instead of coupling three PRs' merge order to one integer.
 
 Rows predating the migration are deleted. They carry no holder, so under a `NOT NULL` column there
 is nothing to put in them; they are transient evidence about in-flight downloads rather than records
@@ -136,7 +142,7 @@ pre-ADR-0515 reach, which is a rare and survivable race, where failing would tur
 uploaded-rootfs provisioning outage. The log line is the only evidence — the provision succeeds
 either way — so it says what is missing and what that costs.
 
-**Rolling upgrade.** While 0088 is applied but a pre-0088 process is still running, an old fetcher's
+**Rolling upgrade.** While 0090 is applied but a pre-0090 process is still running, an old fetcher's
 `INSERT` names a dropped column and takes the existing acquire-fault degrade (unleased, logged); an
 old reclaim's pin probe names it too and raises, which fails that reclaim job **before** it deletes
 anything. Both directions fail toward retention, and both end when the process restarts. The

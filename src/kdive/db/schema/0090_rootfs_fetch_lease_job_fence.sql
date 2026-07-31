@@ -1,6 +1,12 @@
--- 0088_rootfs_fetch_lease_job_fence.sql — the rootfs fetch lease is fenced on its
+-- 0090_rootfs_fetch_lease_job_fence.sql — the rootfs fetch lease is fenced on its
 -- holding job, not on a derived deadline (ADR-0522, #1740). Forward-only (ADR-0015);
 -- 0087 is immutable and is never edited.
+--
+-- The jump from 0087 is deliberate and is not a lost file. This work was authored as
+-- 0088 while two sibling branches held 0088/0089; ADR-0517's ordering guard requires a
+-- version strictly above the base branch maximum, not exactly one above it, precisely so
+-- an abandoned number leaves a legitimate gap rather than forcing a renumber race. If
+-- neither sibling lands, 0088 and 0089 simply stay unused.
 --
 -- 0087 lines 19-28 stated the precondition this migration discharges: that lease could
 -- not fence on jobs.lease_expires_at "because the provision seam passes the fetch a
