@@ -9,6 +9,8 @@ would create (ADR-0336).
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from kdive.artifacts import storage as artifact_types
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageVisibility
@@ -91,4 +93,27 @@ def config_write_request(
     """
     return object_write_request(
         provider, name, arch, visibility, owner, data=config, suffix="config"
+    )
+
+
+def publication_write_request(
+    provider: str,
+    name: str,
+    arch: str,
+    visibility: ImageVisibility,
+    owner: str | None,
+    *,
+    attempt_id: UUID,
+    data: bytes,
+    suffix: str,
+) -> artifact_types.ArtifactWriteRequest:
+    """Return an attempt-specific image publish request for a qcow2 or config sibling."""
+    return artifact_types.ArtifactWriteRequest(
+        tenant="images",
+        owner_kind=owner_kind_segment(provider, visibility, owner),
+        owner_id=name,
+        name=f"{arch}.{attempt_id}.{suffix}",
+        data=data,
+        sensitivity=Sensitivity.REDACTED,
+        retention_class=IMAGE_RETENTION_CLASS,
     )

@@ -360,7 +360,7 @@ async def _reserve_under_quota(
             project=project, count=count, used_bytes=used_bytes, new_bytes=new_bytes
         )
         if denial is None:
-            return await reserve_publish(conn, request, size_bytes=new_bytes)
+            return await reserve_publish(conn, request, size_bytes=new_bytes, principal=principal)
     await _audit_denial(
         conn, project=project, principal=principal, name=request.name, denial=denial
     )

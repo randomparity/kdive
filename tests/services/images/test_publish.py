@@ -32,9 +32,11 @@ from kdive.images.cataloging.catalog import resolve_rootfs
 from kdive.services.images.publish import (
     PublishRequest,
     _write_config_best_effort,
-    image_object_key,
+    finish_publish,
     kernel_config_object_key,
     publish_image,
+    reserve_publish,
+    write_publish_object,
 )
 from tests.clock import STORE_MTIME
 
@@ -231,6 +233,91 @@ def test_rerun_adopts_pending_and_rearms_pending_since(migrated_url: str, tmp_pa
     asyncio.run(_run())
 
 
+def test_each_adoption_mints_a_new_attempt_and_publish_keys(migrated_url: str) -> None:
+    request = replace(_PUBLIC_REQUEST, kernel_config=_CONFIG)
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            first = await reserve_publish(conn, request, size_bytes=len(_QCOW2))
+            second = await reserve_publish(conn, request, size_bytes=len(_QCOW2))
+            assert first.row_id == second.row_id
+            assert first.publication_attempt_id != second.publication_attempt_id
+            assert first.object_key != second.object_key
+            assert first.config_key != second.config_key
+
+    asyncio.run(_run())
+
+
+def test_private_adoption_replaces_persisted_publication_principal(migrated_url: str) -> None:
+    request = replace(
+        _PUBLIC_REQUEST,
+        visibility=ImageVisibility.PRIVATE,
+        owner="proj",
+        expires_at=_DT + timedelta(days=1),
+    )
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            first = await reserve_publish(conn, request, size_bytes=len(_QCOW2), principal="alice")
+            second = await reserve_publish(conn, request, size_bytes=len(_QCOW2), principal="bob")
+            row = await IMAGE_CATALOG.get(conn, second.row_id)
+            assert row is not None
+            assert first.row_id == second.row_id
+            assert row.publication_principal == "bob"
+
+    asyncio.run(_run())
+
+
+def test_registration_clears_publication_attempt_and_principal(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    request = replace(
+        _PUBLIC_REQUEST,
+        visibility=ImageVisibility.PRIVATE,
+        owner="proj",
+        expires_at=_DT + timedelta(days=1),
+    )
+    source = _qcow2_source(tmp_path)
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            reservation = await reserve_publish(
+                conn, request, size_bytes=len(_QCOW2), principal="alice"
+            )
+            config_written = await write_publish_object(_FakeStore(), reservation, source)
+            entry = await finish_publish(conn, reservation, config_written=config_written)
+            assert entry.publication_attempt_id is None
+            assert entry.publication_principal is None
+
+    asyncio.run(_run())
+
+
+def test_catalog_projections_withhold_publication_attempt_fields() -> None:
+    from kdive.images.kdump_support import DEFAULT_KERNEL_BASIS
+    from kdive.mcp.tools.catalog.images import _describe_envelope, _row_envelope
+
+    entry = ImageCatalogEntry(
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        pending_since=_DT,
+        provider="local-libvirt",
+        name="base",
+        arch="x86_64",
+        format="qcow2",
+        root_device="/dev/vda",
+        object_key="images/local-libvirt/base/x86_64.qcow2",
+        digest=_DIGEST,
+        visibility=ImageVisibility.PUBLIC,
+        state=ImageState.PENDING,
+        publication_attempt_id=uuid4(),
+        publication_principal="alice",
+    )
+    for envelope in (_row_envelope(entry), _describe_envelope(entry, DEFAULT_KERNEL_BASIS)):
+        assert "publication_attempt_id" not in envelope.data
+        assert "publication_principal" not in envelope.data
+
+
 def test_realizing_defined_baseline_follows_same_path(migrated_url: str, tmp_path: Path) -> None:
     store = _FakeStore()
     source = _qcow2_source(tmp_path)
@@ -317,9 +404,9 @@ def test_publish_fails_when_object_does_not_head(migrated_url: str, tmp_path: Pa
             message = str(err.value)
             assert message.startswith("published image object is not present after write")
             assert "HEAD gate failed" in message
-            assert err.value.details == {"object_key": image_object_key(_PUBLIC_REQUEST)}
             row = (await IMAGE_CATALOG.list_all(conn))[0]
             assert row.state is ImageState.PENDING
+            assert err.value.details == {"object_key": row.object_key}
 
     asyncio.run(_run())
 
@@ -474,9 +561,8 @@ def test_publish_writes_config_object_and_sets_key(migrated_url: str, tmp_path: 
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             entry = await publish_image(conn, store, request=request, source=source)
-            ckey = kernel_config_object_key(request)
-            assert entry.kernel_config_key == ckey
-            assert store._objects[ckey] == _CONFIG
+            assert entry.kernel_config_key is not None
+            assert store._objects[entry.kernel_config_key] == _CONFIG
 
     asyncio.run(_run())
 
