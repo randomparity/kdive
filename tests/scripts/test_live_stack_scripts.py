@@ -211,6 +211,23 @@ def test_surplus_worker_remedy_drops_sudo_for_self_owned_workers() -> None:
     assert "sudo kill" not in result.stderr, f"sudo must not be prescribed here: {result.stderr}"
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="a root caller needs sudo for nothing")
+def test_surplus_worker_remedy_keeps_sudo_when_a_pid_is_not_the_callers() -> None:
+    """One unsignalable pid in the list must pull `sudo` back in, even mixed with the caller's own.
+
+    The complement of the self-owned arm, and the reason the test is "is any pid NOT mine" rather
+    than "are they all mine": a bare `kill -9` against a pid the operator cannot signal fails with
+    EPERM and no guidance. pid 1 is root-owned on any host this runs on, so pairing it with this
+    shell's own pid exercises the mixed set — the shape a stack that switched
+    `KDIVE_WORKER_AS_ROOT` between runs actually leaves behind.
+    """
+    result = _lib('worker_pids() { echo 1; echo $$; }\nrequire_workers_alive 1\n')
+    assert result.returncode != 0, "two live workers against a want of 1 is a surplus"
+    assert "sudo kill -9 1 " in result.stderr, (
+        f"a pid the caller cannot signal must keep sudo in the remedy: {result.stderr}"
+    )
+
+
 def test_the_worker_count_ceiling_is_documented_where_operators_read_it() -> None:
     """The documented bound must track MAX_WORKER_COUNT rather than drift from it (#1739).
 

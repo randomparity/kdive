@@ -355,14 +355,17 @@ require_workers_alive() {
     local pid_csv kill_cmd
     printf -v pid_csv '%s,' "${pids[@]}"
     pid_csv="${pid_csv%,}"
-    # Mirror stop_daemons' ownership test (above) rather than prescribing `sudo` unconditionally:
-    # under KDIVE_WORKER_AS_ROOT=0 the workers are the operator's own processes, and an operator
-    # already root on a host without sudo installed cannot run the command at all. One prefix
-    # covers the whole list either way — root may signal any of these pids, and if none is
-    # root-owned the caller owns them all.
+    # Prescribe `sudo` only when the operator actually needs it, as stop_daemons does per-pid
+    # (above), rather than unconditionally: under KDIVE_WORKER_AS_ROOT=0 these are the operator's
+    # own processes, and an operator already root on a host without sudo installed cannot run the
+    # command at all. The test is "is any pid NOT mine", not "is any pid root's" — a surplus worker
+    # left by another account on a shared host is equally unsignalable, and worker_pids scopes by
+    # interpreter path, not by owner, so it can list one. Compare numeric uids: `ps -o user=`
+    # truncates names past 8 characters, which would mis-compare a long-named caller against
+    # itself. One prefix covers the whole list, since root may signal every pid here.
     kill_cmd="kill -9"
-    if [[ "$(id -un)" != "root" ]] &&
-      ps -o user= -p "$pid_csv" 2>/dev/null | awk '$1 == "root" { found = 1 } END { exit !found }'; then
+    if ((EUID != 0)) &&
+      ps -o uid= -p "$pid_csv" 2>/dev/null | awk -v me="$EUID" '$1 != me { found = 1 } END { exit !found }'; then
       kill_cmd="sudo kill -9"
     fi
     # The remedy is deliberately NOT down.sh. It calls this same stop_daemons — one SIGTERM, a
