@@ -108,9 +108,12 @@ against a moving base — has no second instance here today.
 
 A merge queue is the option this decision did not weigh. It would recompute checks against the
 prospective merge result and remove the staleness without the per-PR churn strict mode imposes,
-at the cost of serializing merges and of wiring `merge_group` into every required workflow — a
-`pull_request`-only workflow does not run in the queue, so the guard would stop gating rather
-than fail. Neither evaluated nor rejected here; tracked in #1753. Non-strict stands either way.
+at the cost of serializing merges and of wiring `merge_group` into every required workflow.
+`ci.yml` triggers on `pull_request`, on `push` to `main`, and on `workflow_dispatch`, so as it
+stands the guard would not report in a queue at all — and a required context that never reports
+holds the queue entry until it times out and is dropped. That blocks merges rather than letting
+them through unguarded, which is the safer of the two failures but still a prerequisite to do
+first. Neither evaluated nor rejected here; tracked in #1753. Non-strict stands either way.
 
 What the gate does still hold, which is more than nothing:
 
