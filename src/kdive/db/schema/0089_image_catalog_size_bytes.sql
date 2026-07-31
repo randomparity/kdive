@@ -1,0 +1,31 @@
+-- 0089_image_catalog_size_bytes.sql — the published object's size on the row, so the
+-- per-project private-image quota is a committed aggregate rather than N store HEADs
+-- (ADR-0520, #1726). Additive, forward-only (ADR-0015).
+--
+-- Before this column, _project_usage summed the project's bytes by HEADing every live
+-- private row's object, and the PROJECT advisory lock had to be held across that loop AND
+-- the multi-GiB PUT that followed, because the lock was the only thing making
+-- read-then-publish atomic. A `pending` row's object does not exist yet, so its HEAD
+-- returned NULL and it contributed 0 bytes — which is exactly why the row could not serve
+-- as the quota claim on its own.
+--
+-- With the size on the row, the ADR-0092 row-first `pending` row IS the reservation: it is
+-- committed inside the lock, counts toward both caps the instant it lands
+-- (_LIVE_PRIVATE_STATES already includes 'pending'), and the next upload's aggregate read
+-- sees it. The lock then spans one SELECT and one single-row write, and the PUT runs
+-- outside it. An abandoned reservation is reclaimed by repair_dangling_images on the
+-- existing pending_since + KDIVE_IMAGE_PUBLISH_GRACE_SECONDS deadline — no new sweep, no new
+-- deadline column, and deliberately not a lease table (ADR-0520 Considered & rejected).
+--
+-- NOT NULL DEFAULT 0 rather than nullable-and-tied-to-object_key: a 'defined' baseline has
+-- no object, so 0 is its truthful size, not a placeholder. That keeps the quota read a
+-- plain SUM with no COALESCE over a per-row NULL branch, and avoids a fourth rewrite of
+-- the image_object_present CHECK (migrations 0030 and 0047 already rewrote it once each).
+--
+-- Rows that predate this migration take the 0 default and contribute nothing to their
+-- project's bytes total until they expire. Greenfield tree, and private rows carry a
+-- KDIVE_IMAGE_PRIVATE_LIFETIME_MAX_SECONDS-bounded expires_at, so the window closes itself; the
+-- count cap is exact from the first upload since it never depended on size. A backfill is
+-- not possible here — the size lives in the object store, which a migration cannot reach.
+ALTER TABLE image_catalog ADD COLUMN size_bytes bigint NOT NULL DEFAULT 0
+    CONSTRAINT image_catalog_size_bytes_check CHECK (size_bytes >= 0);

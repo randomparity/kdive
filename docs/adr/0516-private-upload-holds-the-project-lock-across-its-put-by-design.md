@@ -4,6 +4,11 @@
 
 Accepted (2026-07-30)
 
+> **Partially superseded by
+> [0520](0520-quota-reservation-releases-the-project-lock-before-the-put.md)** (2026-07-30)
+> — §2 only, the span this record accepted *pending #1726*. §1's
+> `require_top_level_transaction` assertion, §3, and §4 stand and are load-bearing for 0520.
+
 ## Context
 
 ADR-0506 classified 46 `conn.transaction(), advisory_xact_lock(...)` sites into three groups by
@@ -90,6 +95,11 @@ optimistic over-admission and reconcile — are real designs, and each is a larg
 quota model than #1712 scopes. The lock *duration* concern they answer is filed separately as
 #1726, which this record leaves as the open question rather than pre-empting.
 
+*Superseded by [ADR-0520](0520-quota-reservation-releases-the-project-lock-before-the-put.md) —
+#1726 took the first of the two alternatives named just above. The quota is now claimed by a
+committed `pending` row carrying `size_bytes`, so the lock spans that reservation only and the PUT
+runs unlocked. This section is no longer in force; §1, §3 and §4 are unaffected.*
+
 ### 3. The presign site records why it is not guarded
 
 `mcp/tools/catalog/artifacts/uploads.py` gets a comment at its `conn.transaction()` stating that
@@ -146,6 +156,9 @@ top-level.
 - The PROJECT lock still spans N `store.head` calls plus a multi-GiB PUT. That is accepted here
   and tracked as #1726; this record makes the span deliberate and pinned, which is the
   precondition for changing it safely later.
+  *Superseded by [ADR-0520](0520-quota-reservation-releases-the-project-lock-before-the-put.md) —
+  the span was changed, as this bullet anticipated, and the pinning it describes is what made the
+  change safe.*
 
 ## Considered & rejected
 
