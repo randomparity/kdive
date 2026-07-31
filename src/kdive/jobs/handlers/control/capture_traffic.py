@@ -28,6 +28,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.discard import discard_unregistered_objects
 from kdive.artifacts.pcap_count import count_pcap_packets
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
@@ -165,9 +166,17 @@ def _put_artifact(store: ObjectStore, run_id: UUID, name: str, data: bytes) -> S
 async def _store_capture(
     conn: AsyncConnection, store: ObjectStore, job: Job, run_id: UUID, project: str, data: bytes
 ) -> UUID | None:
-    """Under the per-Run lock (tx 2): re-check cancel, store the pcap, audit. ``None`` if canceled.
+    """Store the pcap and register its row; ``None`` if the job was canceled.
+
+    Three phases, so the per-Run advisory lock never spans the object-store PUT (ADR-0519):
+    a locked guard read (tx 2), the unlocked PUT, then a locked re-read plus the row insert
+    and audit (tx 3). Both locked phases are short and purely database work, so a slow or
+    retrying object store no longer bounds how long this Run is serialized.
 
     Insert-if-absent on the object key keeps an at-least-once retry from duplicating the row.
+    The *first* phase's probe is load-bearing rather than an optimization: a retry that skipped
+    it would PUT its fresh capture over the key while the committed row still carried the first
+    attempt's etag and size, leaving the row describing bytes the object no longer holds.
     """
     name = f"pcap-{job.id}"
     object_key = artifact_key(_TENANT, _OWNER_KIND, str(run_id), name)
@@ -175,26 +184,38 @@ async def _store_capture(
         if await _job_canceled(conn, job.id):
             return None
         existing = await _existing_artifact_id(conn, run_id, object_key)
-        if existing is not None:
-            return existing
-        stored = await asyncio.to_thread(_put_artifact, store, run_id, name, data)
-        artifact = register_artifact_row(
-            stored, owner_kind=_OWNER_KIND, owner_id=run_id, run_id=run_id
-        )
-        await ARTIFACTS.insert(conn, artifact)
-        await audit.record(
-            conn,
-            job_context_from_job(job, project),
-            audit.AuditEvent(
-                tool="control.capture_traffic",
-                object_kind="runs",
-                object_id=run_id,
-                transition="capture_traffic",
-                args={"run_id": str(run_id)},
-                project=project,
-            ),
-        )
-        return artifact.id
+    if existing is not None:
+        return existing
+
+    stored = await asyncio.to_thread(_put_artifact, store, run_id, name, data)
+
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
+        canceled = await _job_canceled(conn, job.id)
+        existing = await _existing_artifact_id(conn, run_id, object_key)
+        if not canceled and existing is None:
+            artifact = register_artifact_row(
+                stored, owner_kind=_OWNER_KIND, owner_id=run_id, run_id=run_id
+            )
+            await ARTIFACTS.insert(conn, artifact)
+            await audit.record(
+                conn,
+                job_context_from_job(job, project),
+                audit.AuditEvent(
+                    tool="control.capture_traffic",
+                    object_kind="runs",
+                    object_id=run_id,
+                    transition="capture_traffic",
+                    args={"run_id": str(run_id)},
+                    project=project,
+                ),
+            )
+            return artifact.id
+    # The cancel landed while the object was in flight. Reclaim is row-driven, so the object
+    # would be a permanent orphan — delete it, but only when no row claims the key (a peer that
+    # registered it between the two phases owns that object, and this attempt does not).
+    if existing is None:
+        await discard_unregistered_objects(store, [stored.key])
+    return None if canceled else existing
 
 
 def _unlink_quietly(path: Path) -> None:

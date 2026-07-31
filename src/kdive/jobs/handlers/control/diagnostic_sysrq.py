@@ -2,9 +2,10 @@
 
 Injects one allowlisted magic-SysRq keystroke into a ready guest and captures the console dump
 the kernel prints as a redacted System-owned artifact. The provider Control port is called
-lock-free between two brief per-System-locked transactions: the first snapshots the domain +
-console-read seam and verifies the System supports SysRq and is READY, the second re-verifies and
-stores the redacted capture. Correctness allows the lock-free poll because the console only grows
+lock-free between brief per-System-locked transactions: the first snapshots the domain +
+console-read seam and verifies the System supports SysRq and is READY, then the capture's object
+write happens lock-free between a locked guard read and a locked re-verify + row insert
+(ADR-0519). Correctness allows the lock-free poll because the console only grows
 while the System is READY (local-libvirt's serial log with ``append="off"`` truncates only on
 power-cycle, ADR-0258; remote-libvirt's S3 parts are immutable and assembled cumulatively,
 ADR-0429), so the tail read needs no cross-op exclusion. The console source is provider-gated: a
@@ -22,6 +23,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.discard import discard_unregistered_objects
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -248,10 +250,18 @@ async def _store_capture(
     command: SysRqCommand,
     redacted: bytes,
 ) -> UUID:
-    """Under the per-System lock (tx 2): re-verify state, store the artifact, audit.
+    """Store the redacted capture and register its row; raise if the System left READY.
+
+    Three phases, so the per-System advisory lock never spans the object-store PUT (ADR-0519):
+    a locked state + insert-if-absent read (tx 2), the unlocked PUT, then a locked re-verify
+    plus the row insert and audit (tx 3). ``SYSTEM`` is the contended scope — teardown, boot and
+    console rotation all serialize on it — so both locked phases stay short and database-only.
 
     Insert-if-absent on the object key: jobs are at-least-once, so a retry that re-runs the
-    handler returns the existing artifact id rather than duplicating the row.
+    handler returns the existing artifact id rather than duplicating the row. The *first*
+    phase's probe is load-bearing rather than an optimization: a retry that skipped it would PUT
+    its fresh capture over the key while the committed row still carried the first attempt's
+    etag and size, leaving the row describing bytes the object no longer holds.
     """
     name = f"sysrq-diagnostic-{job.id}"
     object_key = artifact_key(_TENANT, _OWNER_KIND, str(system_id), name)
@@ -260,26 +270,40 @@ async def _store_capture(
         if system is None or system.state is not SystemState.READY:
             raise _changed_state_error(system_id)
         existing = await _existing_artifact_id(conn, system_id, object_key)
-        if existing is not None:
-            return existing
-        stored = await asyncio.to_thread(_put_artifact, store, system_id, name, redacted)
-        artifact = register_artifact_row(
-            stored, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=None
-        )
-        await ARTIFACTS.insert(conn, artifact)
-        await audit.record(
-            conn,
-            job_context_from_job(job, system.project),
-            audit.AuditEvent(
-                tool="control.diagnostic_sysrq",
-                object_kind="systems",
-                object_id=system_id,
-                transition=f"sysrq:{command.value}",
-                args={"system_id": str(system_id), "command": command.value},
-                project=system.project,
-            ),
-        )
-        return artifact.id
+    if existing is not None:
+        return existing
+
+    stored = await asyncio.to_thread(_put_artifact, store, system_id, name, redacted)
+
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        system = await SYSTEMS.get(conn, system_id)
+        existing = await _existing_artifact_id(conn, system_id, object_key)
+        if system is not None and system.state is SystemState.READY:
+            if existing is not None:
+                return existing
+            artifact = register_artifact_row(
+                stored, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=None
+            )
+            await ARTIFACTS.insert(conn, artifact)
+            await audit.record(
+                conn,
+                job_context_from_job(job, system.project),
+                audit.AuditEvent(
+                    tool="control.diagnostic_sysrq",
+                    object_kind="systems",
+                    object_id=system_id,
+                    transition=f"sysrq:{command.value}",
+                    args={"system_id": str(system_id), "command": command.value},
+                    project=system.project,
+                ),
+            )
+            return artifact.id
+    # The System left READY while the object was in flight. Reclaim is row-driven, so the object
+    # would be a permanent orphan — delete it, but only when no row claims the key (a peer that
+    # registered it between the two phases owns that object, and this attempt does not).
+    if existing is None:
+        await discard_unregistered_objects(store, [stored.key])
+    raise _changed_state_error(system_id)
 
 
 async def diagnostic_sysrq_handler(
