@@ -16,37 +16,59 @@ The same deadline can race a live slow publisher. Once `pending_since` ages past
 being written. Extending or heartbeating that deadline would create a second liveness lease beside
 the worker lease, with its own renewal and failure semantics.
 
-Recovery can register an abandoned object only when the object still matches the row that reserved
-it. The row already persists the expected key, byte size, and SHA-256 digest, but image PUTs do not
-currently ask the object store to retain the SHA-256 for a later HEAD comparison.
+Recovery can register an abandoned object only when the object still matches the attempt that
+reserved it. The row already persists the expected byte size and SHA-256 digest, but object keys
+are deterministic across attempts and image PUTs do not currently ask the object store to retain
+the SHA-256 for a later HEAD comparison. A late PUT must not be able to recreate a key after its
+reservation was reclaimed.
+
+Private registration also has an atomic audit invariant: the catalog flip and its audit row commit
+together under the initiating principal. The pending row does not currently retain that principal.
+The optional kernel-config key has a similar invariant: a registered row advertises it only when
+the sibling object exists.
 
 ## Decision
 
-Each reserved image row defines a publication-fence name from its UUID. Before the first object
-write, the publisher takes the corresponding Postgres session advisory lock. It revalidates the
-reservation after acquiring the lock, holds the lock through the PUT, HEAD gate, registration, and
-private-image registration audit, then releases it. The lock is image-scoped; the PROJECT advisory
-lock still ends when quota reservation commits. PostgreSQL releases the session lock if the
-publisher connection or process dies.
+Migration 0093 adds a non-null publication-attempt UUID to each `pending` row and a nullable
+initiating principal. Every reservation, including adoption, mints a fresh attempt UUID. The qcow2
+and optional config object keys include that UUID, so a PUT from a superseded or disconnected
+attempt can land only at its own now-rowless key; it cannot recreate or overwrite the key a later
+attempt or recovery validated. Normal registration clears the attempt and principal fields.
+
+Each reserved image row defines a publication fence from its row UUID. New session-scoped and
+transaction-scoped helpers use one shared `LockScope.IMAGE_PUBLISH` bigint derivation; they do not
+use the existing separately salted leadership-lock namespace. Before the first object write, the
+publisher takes the session form, revalidates the attempt in a committed short transaction, and
+proves the connection is transaction-idle before starting the PUT. It holds the session lock
+through the PUT, HEAD gate, registration, and private-image registration audit, then releases it.
+The lock is image-scoped; the PROJECT advisory lock still ends when quota reservation commits.
 
 The dangling-image repair considers an expired row one at a time. In a short transaction it tries
-the same advisory key as a transaction lock. Contention means an active publisher owns the row, so
-the repair skips it without waiting. A granted lock orders recovery before any publisher that has
-not started its write; the repair re-reads and row-locks the candidate before touching the store.
+the transaction form of that exact advisory key. Contention means a publisher with a live database
+session owns the row, so the repair skips it without waiting. A granted lock orders recovery before
+any publisher that has not started its write; the repair re-reads and row-locks the candidate
+before touching the store.
 
 For an expired `pending` row:
 
 - a missing object causes the row to be deleted;
 - a present object whose HEAD size and SHA-256 equal the persisted `size_bytes` and `digest` is
-  registered;
+  registered; a persisted config key is retained only when its object HEADs, and is cleared when
+  absent;
 - a present object with missing or mismatched integrity evidence is deleted, its absence is
   confirmed with another HEAD, and only then is the row deleted.
 
 Every image qcow2 PUT supplies its base64 SHA-256 through `ChecksumSHA256`, so later HEAD requests
 can make the integrity decision without downloading a potentially multi-gigabyte image. Objects
 written before this decision with no stored checksum are unverifiable and follow the invalid-object
-path. Registered rows retain the existing behavior: a missing object is removed after the deadline,
-while a present object is not revalidated by this repair.
+path. A config HEAD error preserves the pending row for retry. Registered rows retain the existing
+behavior: a missing object is removed after the deadline, while a present object is not revalidated
+by this repair.
+
+For a valid abandoned private image, the repair reads the persisted initiating principal and emits
+the existing `private-upload:registered` audit event in the same transaction as the registration
+flip. A private pending row without a principal is unverifiable state and is reclaimed rather than
+registered. Public image recovery needs no project audit, matching normal public publication.
 
 Store errors abort the candidate transaction and preserve the row for a later pass. If deletion
 returns but the follow-up HEAD still sees the object, the row is also preserved. A crash after
@@ -54,14 +76,23 @@ object deletion but before row deletion leaves a pending row with a missing obje
 pass removes. A crash after the publisher PUT but before registration releases the advisory lock
 and leaves a valid object that the next pass registers.
 
+Database-session loss while the blocking PUT thread remains alive is a safe terminal publication
+failure, not an active-publisher guarantee: Postgres releases the fence and recovery may remove the
+row, but the attempt-specific key prevents the late PUT from recreating the reclaimed key. That
+late object is rowless and the existing leaked-image sweep removes it after grace. The publisher
+cannot register without revalidating the same persisted attempt.
+
 ## Consequences
 
-- A genuinely active publisher is protected for the duration of its write without sizing or
-  renewing another deadline.
+- A publisher whose database session remains live is protected for the duration of its write
+  without sizing or renewing another deadline. Database-session loss fails the publication safely
+  and may leave a bounded rowless object for the existing leaked-image sweep.
 - The fence holds one database connection and one session advisory lock across a potentially long
   PUT, but no database transaction and no project-wide lock.
 - Recovery registers only byte-identical objects and releases abandoned private-image quota after
   invalid or absent objects are reclaimed.
+- Recovered private registrations preserve normal audit attribution, and recovered rows never
+  advertise a missing kernel-config sibling.
 - Recovery still relies on the object store's existing HEAD-after-delete visibility contract. It
   does not claim deletion complete while HEAD still observes the key, and the rowless leaked-image
   sweep remains a backstop after a committed row removal.
@@ -85,3 +116,6 @@ that later materialization rejects.
 
 **Always delete expired pending rows and let the leaked-object sweep clean up.** This discards a
 complete object after the only missing step was a catalog flip and adds a rowless-object window.
+
+**Keep the current behavior.** This leaves valid pending objects and their private quota immortal,
+and it retains the independent slow-publisher race. It does not meet either requirement.
