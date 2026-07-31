@@ -352,19 +352,63 @@ def test_strip_gzip_mid_pass_defect_keeps_configuration_error_when_the_digest_ag
     assert exc.value.details == {}  # no gate marker: this is not the checksum gate
 
 
-def test_strip_gzip_store_fault_during_the_drain_keeps_the_decode_diagnosis_on_the_chain() -> None:
+@pytest.mark.parametrize("loop", ["decode-pass", "drain"], ids=["decode-pass", "drain"])
+def test_strip_gzip_empty_range_inside_the_object_is_the_store_s_failure(loop: str) -> None:
+    # A store that answers a range below the size its own HEAD reported with nothing has failed to
+    # serve, and that is a claim about the READ, not about the object. Reported as a retryable
+    # infrastructure failure from BOTH loops, so the same signal cannot mean two things depending
+    # on which one saw it. Left as a bare `break` it reached the truncated branch, and once the
+    # drain re-read the tail successfully the digest AGREED -- so the object was proven intact and
+    # still told to re-upload, which inverts the very guarantee ADR-0523 §1 makes.
+    payload = b"canonical bytes" * 400
+    stored = gzip.compress(payload)
+    served: list[int] = []
+    # In `decode-pass` the empty range lands while the pass is still decoding; in `drain` a defect
+    # has already stopped the pass, so the empty range lands in `_hash_remaining` instead.
+    if loop == "drain":
+        stored = bytes(bytearray(stored[:2]) + b"\xff" + stored[3:])  # bad method byte
+    assert len(stored) > 32
+
+    class _EmptyOnceStore(_FakeRangedStore):
+        def get_range(self, key: str, *, start: int, length: int) -> bytes:
+            if start == 16:
+                served.append(start)
+                return b""
+            return super().get_range(key, start=start, length=length)
+
+    with pytest.raises(CategorizedError) as exc:
+        strip_gzip_to_writer(
+            _EmptyOnceStore(stored, max_read=16), _req(stored, len(payload)), io.BytesIO()
+        )
+
+    assert served == [16]  # the empty range was actually reached, in the loop under test
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "returned no bytes for a range" in str(exc.value)
+    assert "truncated" not in str(exc.value)  # never the object-defect claim
+    assert exc.value.details == {}  # no gate marker: this is not stored-object damage
+
+
+def test_strip_gzip_store_fault_during_the_drain_keeps_the_decode_diagnosis() -> None:
     # The window the hash-only drain opens. ``get_range`` is called uncaught, and a connection
     # reset on one of these GETs is the likeliest failure on this path -- so a defect found
     # mid-pass, which lives only in a local, would die with the frame. The store's own retryable
     # verdict is the honest one (the digest is now unknowable, so nothing can be asserted about
     # the object), but losing WHY the decode failed is pure information loss: ADR-0523 §4's
     # terminal guarantee is conditional on the drain completing, and this is what records it.
+    #
+    # A NOTE rather than ``raise ... from``: the store chained its own botocore cause onto this
+    # error already, and taking that over would render the causality backwards -- the traceback
+    # would read as though the gzip corruption caused the connection reset.
     payload = b"canonical bytes" * 400
     corrupt = bytearray(gzip.compress(payload))
     corrupt[2] = 0xFF  # the gzip method byte: zlib rejects the FIRST range, deterministically
     stored = bytes(corrupt)
     assert len(stored) > 16  # otherwise the pass consumes the object and no drain read happens
+    root = ConnectionResetError("peer went away")
     fault = CategorizedError("get_range on 'k' failed", category=ErrorCategory.TRANSPORT_FAILURE)
+    fault.__cause__ = (
+        root  # as `ObjectStore.get_range` raises it: `_infrastructure_error(...) from err`
+    )
 
     class _FaultingStore(_FakeRangedStore):
         def get_range(self, key: str, *, start: int, length: int) -> bytes:
@@ -376,7 +420,8 @@ def test_strip_gzip_store_fault_during_the_drain_keeps_the_decode_diagnosis_on_t
         strip_gzip_to_writer(_FaultingStore(stored, max_read=16), _req(stored, 6000), io.BytesIO())
 
     assert exc.value is fault  # passed through, not reclassified as an object defect
-    assert "gzip transport stream is corrupt" in str(exc.value.__cause__)
+    assert exc.value.__cause__ is root  # the store's real root cause is NOT taken over
+    assert any("gzip transport stream is corrupt" in note for note in exc.value.__notes__)
 
 
 def test_strip_gzip_hash_only_drain_never_expands_a_bomb_and_reads_each_byte_once() -> None:
