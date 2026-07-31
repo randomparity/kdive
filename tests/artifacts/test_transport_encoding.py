@@ -264,34 +264,57 @@ def test_strip_gzip_truncated_stored_object_reports_the_transport_gate() -> None
     _assert_transport_verdict(exc.value)
 
 
+def _two_members() -> tuple[bytes, bytes, int]:
+    """A boundary-aligned concatenated gzip: ``(whole, first_member, max_read)``.
+
+    ``max_read`` is the first member's own length, **derived** so the pass consumes exactly that
+    member in one range. ``eof`` then lands on a range boundary, which leaves ``unused_data``
+    *empty* and the whole second member in ranges the pass never reads. That is the case
+    ``_framing_defect``'s ``offset < compressed_size`` clause exists for, and the only case where
+    it is the sole guard — a boundary that falls mid-range sets ``unused_data`` and the other
+    clause carries it. Derived rather than hardcoded because the member's length is a property of
+    the linked compressor, not of this test.
+    """
+    first = gzip.compress(b"canonical bytes" * 20)
+    return first + gzip.compress(b"trailing member"), first, len(first)
+
+
 def test_strip_gzip_trailing_data_with_damaged_bytes_reports_the_transport_gate() -> None:
-    # The trailing-data branch reached with an unread tail: ``max_read`` forces many ranges, the
-    # first member's ``eof`` stops the pass early, and the unread ranges are hashed before the
+    # The trailing-data branch reached with the whole second member unread: the first member's
+    # ``eof`` stops the pass on a range boundary, and the unread ranges are hashed before the
     # verdict. Damaged here, so the digest overrules the multi-member defect.
-    payload = b"canonical bytes" * 20
-    concatenated = gzip.compress(payload) + gzip.compress(b"trailing member")
+    concatenated, _, max_read = _two_members()
     stored, request = _damaged(concatenated, len(concatenated) - 4, 0xFF)
 
     with pytest.raises(CategorizedError) as exc:
-        strip_gzip_to_writer(_FakeRangedStore(stored, max_read=16), request, io.BytesIO())
+        strip_gzip_to_writer(_FakeRangedStore(stored, max_read=max_read), request, io.BytesIO())
 
     _assert_transport_verdict(exc.value)
 
 
-def test_strip_gzip_trailing_data_in_unread_ranges_still_hashes_them() -> None:
-    # The converse, and the assertion that bites: a genuinely multi-member object the agent really
-    # did upload keeps CONFIGURATION_ERROR. That only holds if the ranges the pass never read --
-    # everything past the first member's ``eof`` -- were fed to the hasher anyway. Skip that drain
-    # and the digest comes up short, and this reddens as a transport mismatch.
-    payload = b"canonical bytes" * 20
-    concatenated = gzip.compress(payload) + gzip.compress(b"trailing member")
-    store = _FakeRangedStore(concatenated, max_read=16)
+def test_strip_gzip_boundary_aligned_trailing_member_is_still_rejected() -> None:
+    # Two guards in one, and both bite. (a) The framing clause: hashing the unread tail retired the
+    # digest as an INDEPENDENT detector of trailing data -- on the old order the tail went unhashed,
+    # so a boundary-aligned second member was caught by the checksum gate even if the clause were
+    # gone. It no longer is, so ``offset < compressed_size`` is now the sole guard between a
+    # multi-member object and a SILENT success that stages only the first member as a durable
+    # rootfs base, past the qcow2-magic gate the first member's prefix satisfies. Delete that
+    # clause and this test is what reddens. (b) The drain: a genuinely multi-member object the
+    # agent really did upload only keeps CONFIGURATION_ERROR if the ranges the pass never read were
+    # fed to the hasher anyway -- skip the drain and the digest comes up short and this reddens as
+    # a transport mismatch instead.
+    concatenated, first, max_read = _two_members()
+    store = _FakeRangedStore(concatenated, max_read=max_read)
+    payload_size = len(gzip.decompress(first))
 
     with pytest.raises(CategorizedError) as exc:
-        strip_gzip_to_writer(store, _req(concatenated, len(payload)), writer=io.BytesIO())
+        strip_gzip_to_writer(store, _req(concatenated, payload_size), writer=io.BytesIO())
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "trailing data after the gzip stream" in str(exc.value)
+    # The pass stopped at the member boundary with `unused_data` empty, so the clause under test is
+    # the one that fired -- without this the test could pass on the `unused_data` clause instead.
+    assert store.reads[0] == (0, len(first))
     assert sum(length for _, length in store.reads) == len(concatenated)  # the tail was read
 
 

@@ -56,6 +56,7 @@ No schema, migration, MCP-surface, config or dependency change.
 | AC2 | `test_strip_gzip_mid_pass_defect_keeps_configuration_error_when_the_digest_agrees` and the four pre-existing object-defect tests, plus `test_stage_gzip_defective_upload_keeps_the_terminal_verdict` at the seam. |
 | AC3 | `test_strip_gzip_hash_only_drain_never_expands_a_bomb_and_reads_each_byte_once` — output stays `<= bound + 1` on a bomb whose stored bytes also rotted, read starts are strictly increasing with no repeats, and the read lengths sum to exactly `compressed_size`. |
 | AC4 | The *converse* assertions carry this: a genuinely multi-member object, or a genuinely corrupt one, only keeps `CONFIGURATION_ERROR` if the unread tail reached the hasher. Delete `_hash_remaining` and the digest comes up short and those tests redden as a transport mismatch. |
+| The retired backstop (ADR-0523 §3) | `test_strip_gzip_boundary_aligned_trailing_member_is_still_rejected` constructs the case where `unused_data` is empty and the whole second member is unread — the only case in which `_framing_defect`'s `offset < compressed_size` clause is the sole guard — and asserts on the read pattern so it cannot pass on the other clause instead. |
 | AC6 | The staging tests assert on `caplog` in both directions: the WARNING fires for damaged stored bytes and does not fire for a defective upload. |
 
 Mutation-verified, `__pycache__` cleared between every run and the restored tree re-confirmed green
@@ -66,3 +67,4 @@ Mutation-verified, `__pycache__` cleared between every run and the restored tree
 | Digest compared *last* again — the pre-ADR-0523 order | 6 tests, including both staging-seam parametrisations and the bomb tiling test |
 | `_hash_remaining` made a no-op | 4 tests — every one of them a *converse* assertion, which is the point: an unhashed tail shows up as a false transport mismatch, not as a missing one |
 | A second full pass added to `_hash_remaining` | the tiling test, on both the read-length sum and the no-repeat check |
+| `_framing_defect`'s `offset < compressed_size` clause deleted | the boundary-aligned trailing-member test, and *only* it — the review pass that surfaced this found the pre-fix suite green under the same mutation |

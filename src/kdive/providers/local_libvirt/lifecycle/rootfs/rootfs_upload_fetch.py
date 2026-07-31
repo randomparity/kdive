@@ -913,9 +913,13 @@ def _log_checksum_mismatch(key: str, *, system_id: UUID, encoding: str) -> None:
 
     **Reach** (ADR-0523, closing ADR-0445 §6): this fires exactly where the checksum gate fires,
     and since that gate now runs ahead of the gzip path's framing and bound checks, the two paths
-    log the same damage. Under ADR-0445 §6 framing-first damage raised an object-defect error and
-    logged nothing, so absence of this line was not evidence of an intact object for a gzip upload;
-    it is now.
+    log the same damage — under ADR-0445 §6 framing-first damage raised an object-defect error on
+    the gzip path and logged nothing at all. What the widening does *not* buy is an inference from
+    silence. Absence of this line means the digest agreed **or the verification never ran**: a
+    reusable staged base short-circuits before any fetch, the free-space precheck and the
+    missing-checksum branch raise before the first read, and a ``get_range`` fault — which
+    :func:`_stage_gzip` calls the likeliest failure on this path — aborts the stage before a digest
+    exists. Silence is evidence of an intact object only for a stage that read the object through.
     """
     _log.warning(
         "uploaded rootfs object %s failed checksum verification while staging for system %s "

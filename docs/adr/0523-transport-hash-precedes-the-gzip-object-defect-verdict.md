@@ -86,6 +86,18 @@ The truncated branch costs nothing at all: `offset` has already reached `compres
 hasher has absorbed every stored byte and `_hash_remaining` is a no-op. The trailing-data branch
 needs the drain only when `eof` stopped the pass early with ranges still unread.
 
+Completing the digest over that tail costs one thing, and it is worth stating rather than
+discovering. It **retires the checksum gate as an independent detector of trailing data.** Before,
+a concatenated object whose first member ended on a ranged-read boundary — `unused_data` empty,
+the second member sitting in ranges the pass never reached — was caught twice: by
+`_framing_defect`'s `offset < compressed_size` clause, and, had that clause been absent, by the
+digest, which came up short because the tail went unhashed. Now the digest agrees, so that clause
+is the *sole* guard. What it guards against is the module's most expensive failure: a silent
+success that stages only the first member as a durable rootfs base, past a checksum gate that
+agrees and past the qcow2-magic gate the first member's prefix satisfies. The clause is therefore
+pinned by a test that constructs the boundary-aligned case deliberately and asserts on the read
+pattern, so it cannot pass on the `unused_data` clause instead.
+
 ### 4. A genuinely defective upload keeps `configuration_error`
 
 The convergence is one-directional. When the digest agrees, the bomb, corrupt-stream, truncated and
