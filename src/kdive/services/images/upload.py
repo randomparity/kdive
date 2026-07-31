@@ -53,6 +53,7 @@ from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisi
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.cataloging.validation import DEFAULT_INSPECT, InspectSeam, validate_guest_contract
 from kdive.security import audit
+from kdive.services.images.audit import record_private_registration
 from kdive.services.images.publication_fence import publication_fence
 from kdive.services.images.publish import (
     ImageObjectStore,
@@ -66,7 +67,6 @@ from kdive.services.images.publish import (
 _log = logging.getLogger(__name__)
 
 _UPLOAD_TOOL = "images.upload"
-_OBJECT_KIND = "image_catalog"
 _QCOW2_FORMAT: ImageFormat = "qcow2"
 _ROOT_DEVICE = "/dev/vda"
 
@@ -422,24 +422,5 @@ async def _publish_under_quota(
         # `audit.record_system` opens none of its own, by contract, for exactly this composition.
         async with conn.transaction():
             entry = await finish_publish(conn, reservation, config_written=config_written)
-            await _audit_registration(conn, entry, principal=principal)
+            await record_private_registration(conn, entry, principal)
         return entry
-
-
-async def _audit_registration(
-    conn: AsyncConnection, entry: ImageCatalogEntry, *, principal: str
-) -> None:
-    if entry.owner is None:  # Invariant: a private image always carries its owning project.
-        raise RuntimeError("registered private image has no owner project to audit under")
-    await audit.record_system(
-        conn,
-        principal=principal,
-        event=audit.AuditEvent(
-            tool=_UPLOAD_TOOL,
-            object_kind=_OBJECT_KIND,
-            object_id=entry.id,
-            transition="private-upload:registered",
-            args={"provider": entry.provider, "name": entry.name, "arch": entry.arch},
-            project=entry.owner,
-        ),
-    )
