@@ -184,9 +184,55 @@ def test_configured_worker_count_rejects_an_int64_wrapping_value() -> None:
         assert not result.stdout, f"a refused count must print nothing, got {result.stdout!r}"
 
 
+def _stop_daemons_signals(pid_expr: str) -> str:
+    """Run `stop_daemons` against `pid_expr` as the daemon scan; return the signals it sent.
+
+    `kill` and `sudo` are stubbed to a log so the ownership branch is observable without the test
+    signalling anything real, and `sleep` is stubbed so the ten-second settle poll — whose scan
+    keeps returning the same pid here — costs nothing. `daemon_pids` is stubbed because the real
+    one reads the live process table; `ps` is NOT stubbed, so the ownership test under scrutiny
+    runs against real uids.
+    """
+    return _lib(
+        "log=$(mktemp)\n"
+        "sleep() { :; }\n"
+        f"daemon_pids() {{ echo {pid_expr}; }}\n"
+        'kill() { echo "KILL $*" >> "$log"; }\n'
+        'sudo() { echo "SUDO $*" >> "$log"; }\n'
+        "stop_daemons >/dev/null 2>&1\n"
+        'cat "$log"\nrm -f "$log"\n'
+    ).stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="the self-owned arm needs a non-root caller")
+def test_stop_daemons_drops_sudo_for_a_daemon_the_caller_owns() -> None:
+    """stop_daemons must not reach for sudo to signal the operator's own daemon (#1739).
+
+    Under `KDIVE_WORKER_AS_ROOT=0` every daemon is the operator's, and on a host with no sudo
+    installed a `sudo kill` simply fails — silently, since the call swallows its status with
+    `|| true`. This shell's own pid stands in for such a daemon.
+    """
+    assert _stop_daemons_signals("$$").startswith("KILL "), "a self-owned daemon needs no sudo"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="a root caller needs sudo for nothing")
+def test_stop_daemons_keeps_sudo_for_a_daemon_the_caller_cannot_signal() -> None:
+    """The complement: an unsignalable daemon must still get sudo, or the kill silently no-ops.
+
+    pid 1 is root-owned on any host this runs on. The gap this closes is wider than root, though —
+    a daemon owned by another *non-root* account is equally unsignalable, which is why the helper
+    compares uids against the caller's rather than testing for root. That third case needs a second
+    account to construct, so it is not reachable from an unprivileged test; the two directions
+    pinned here plus the uid comparison itself are what carry it.
+    """
+    assert _stop_daemons_signals("1").startswith("SUDO kill "), (
+        "a daemon the caller cannot signal must be killed through sudo"
+    )
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="the self-owned arm needs a non-root caller")
 def test_surplus_worker_remedy_drops_sudo_for_self_owned_workers() -> None:
-    """The prescribed kill must mirror stop_daemons' ownership test, not hardcode `sudo` (#1739).
+    """The prescribed kill must use the same ownership test stop_daemons does (#1739).
 
     Under `KDIVE_WORKER_AS_ROOT=0` the workers are the operator's own processes, so a `sudo kill`
     is wrong — and on a host where the operator is already root with no sudo installed it is not
