@@ -926,3 +926,72 @@ def test_concurrent_attempt_registering_the_key_survives_the_discard(
     assert len(rows) == 1
     # The surviving row and the surviving object describe each other — the whole point.
     assert seen["row_etag"] == hashlib.sha256(store.objects[key][0]).hexdigest()
+
+
+class _StallingSysrqStore(_FakeStore):
+    """Parks the FIRST ``put_artifact`` until released, so a peer attempt can overtake it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_put_arrived = threading.Event()
+        self.release_first_put = threading.Event()
+        self._stalled = False
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        if not self._stalled:
+            self._stalled = True
+            self.first_put_arrived.set()
+            self.release_first_put.wait(timeout=30)
+        return super().put_artifact(request)
+
+
+def test_etag_repair_survives_the_changed_state_raise(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repair must commit even on the sub-path that then fails the job.
+
+    This is the one site whose phase 3 *raises*, and psycopg discards a transaction on any
+    exception leaving its block — so a repair written inside that block would be rolled back and
+    the row left describing bytes the object no longer holds, which is precisely the drift the
+    repair exists to remove. Attempt A passes phase 1, parks in its PUT while B registers the
+    key, and finds the System no longer READY at phase 3: it must repair the row *and* raise.
+    """
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot log\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
+    store = _StallingSysrqStore()
+    seen: dict[str, object] = {}
+
+    async def _go():
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4, open=False) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            job = _job(system_id, "show_blocked_tasks")
+            key = f"local/systems/{system_id}/sysrq-diagnostic-{job.id}"
+            seen["key"] = key
+            task_a = asyncio.create_task(_run_attempt(pool, store, control, job))
+            await asyncio.to_thread(store.first_put_arrived.wait, 30)
+            # B registers the key while A is parked, so A's phase 3 will find a peer's row...
+            seen["ref_b"] = await _run_attempt(pool, store, control, job)
+            # ...and the System leaves READY, so A's phase 3 takes the raising sub-path.
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE systems SET state = 'paused' WHERE id = %s", (system_id,)
+                )
+            store.release_first_put.set()
+            with pytest.raises(CategorizedError) as excinfo:
+                await task_a
+            seen["row_etag"] = await _row_etag(pool, key)
+            seen["rows"] = await _artifact_rows(pool, system_id)
+            return excinfo.value
+
+    err = asyncio.run(_go())
+    key = cast(str, seen["key"])
+    assert err.details["reason"] == "system_changed_state"  # the job still fails, as it must
+    assert seen["ref_b"] is not None
+    assert cast(list, seen["rows"]) != []  # B's row survived
+    # A's PUT landed after B's, so the object holds A's bytes and the row must say so — the
+    # repair was written on a path that goes on to raise, and must not have been rolled back.
+    assert seen["row_etag"] == hashlib.sha256(store.objects[key][0]).hexdigest()

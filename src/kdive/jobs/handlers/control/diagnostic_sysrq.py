@@ -24,6 +24,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.artifacts.discard import discard_unregistered_objects
+from kdive.artifacts.etag_repair import reconcile_row_etag
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -61,8 +62,6 @@ _ARTIFACT_ROW_SQL: LiteralString = (
     "SELECT id, etag FROM artifacts "
     "WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
 )
-
-_REFRESH_ETAG_SQL: LiteralString = "UPDATE artifacts SET etag = %s WHERE id = %s"
 
 # Bounded, count-driven capture window (no wall-clock, so the poll is deterministic under test).
 SEAM_OVERLAP = 4 * 1024
@@ -277,10 +276,10 @@ async def _store_capture(
     probe short-circuits the *sequential* retry before it writes anything. It does not close the
     concurrent case: two attempts of one job can both pass phase 1 and both PUT (the lease can
     lapse mid-job, ``jobs/worker.py``), and whichever PUT lands last leaves the other's row
-    describing bytes the object no longer holds. Phase 3 repairs that by refreshing the row's
-    etag whenever this attempt wrote and found a peer's row — the same repair
-    ``jobs/handlers/runs/boot_evidence.py`` makes, and the drift ``handlers/artifacts/vmcore.py``
-    fails a job over.
+    describing bytes the object no longer holds. When this attempt wrote and then found a peer's
+    row, :func:`~kdive.artifacts.etag_repair.reconcile_row_etag` stats the object and re-points
+    the row at what it actually holds — stats it rather than assuming this attempt's own etag,
+    because landing last in the store and last at the lock are independent orderings.
     """
     name = f"sysrq-diagnostic-{job.id}"
     object_key = artifact_key(_TENANT, _OWNER_KIND, str(system_id), name)
@@ -294,18 +293,12 @@ async def _store_capture(
 
     stored = await asyncio.to_thread(_put_artifact, store, system_id, name, redacted)
 
+    ready = False
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
+        ready = system is not None and system.state is SystemState.READY
         existing = await _existing_artifact_row(conn, system_id, object_key)
-        if existing is not None:
-            # A peer attempt registered the key while this PUT was in flight, and this PUT then
-            # overwrote the object its row describes. Point the row at what the object holds.
-            if existing.etag != stored.etag:
-                await conn.execute(_REFRESH_ETAG_SQL, (stored.etag, existing.id))
-            if system is None or system.state is not SystemState.READY:
-                raise _changed_state_error(system_id)
-            return existing.id
-        if system is not None and system.state is SystemState.READY:
+        if existing is None and system is not None and ready:
             artifact = register_artifact_row(
                 stored, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=None
             )
@@ -323,6 +316,19 @@ async def _store_capture(
                 ),
             )
             return artifact.id
+    if existing is not None:
+        # A peer attempt registered the key while this PUT was in flight, so one of the two PUTs
+        # overwrote the object that row describes. Which one landed last is not knowable here —
+        # this attempt may have been first to write and last to take the lock — so the repair
+        # stats the object rather than assuming this attempt's etag. It runs out here rather
+        # than in the block above for two reasons: the stat is store I/O, and the not-READY exit
+        # below raises, which would roll the repair back with the transaction that wrote it.
+        await reconcile_row_etag(
+            conn, store, row_id=existing.id, object_key=object_key, row_etag=existing.etag
+        )
+        if not ready:
+            raise _changed_state_error(system_id)
+        return existing.id
     # The System left READY while the object was in flight. Reclaim is row-driven, so the object
     # would be a permanent orphan — delete it. READY is NOT monotonic: PAUSED and RESTORING are
     # ordinary states a System returns to READY from (ADR-0378), so a peer attempt of this job

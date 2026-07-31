@@ -816,18 +816,29 @@ class _StallingStore(_FakeStore):
     and the PUT that lands last decides what the object holds.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, park_after_write: bool = False) -> None:
         super().__init__()
         self.first_put_arrived = threading.Event()
         self.release_first_put = threading.Event()
+        self._park_after_write = park_after_write
         self._stalled = False
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
-        if not self._stalled:
+        park = not self._stalled
+        if park:
             self._stalled = True
-            self.first_put_arrived.set()
-            self.release_first_put.wait(timeout=30)
-        return super().put_artifact(request)
+        if park and not self._park_after_write:
+            self._arrive_and_wait()
+        stored = super().put_artifact(request)
+        if park and self._park_after_write:
+            # Parking AFTER the write puts this attempt's bytes in the store FIRST while its
+            # phase 3 runs LAST — the ordering that tells an assumed etag from an observed one.
+            self._arrive_and_wait()
+        return stored
+
+    def _arrive_and_wait(self) -> None:
+        self.first_put_arrived.set()
+        self.release_first_put.wait(timeout=30)
 
 
 async def _run_attempt(pool, store, capturer, job, *, monkeypatch=None):
@@ -893,4 +904,59 @@ def test_concurrent_attempt_overwriting_the_object_repairs_the_rows_etag(
             assert row is not None
             return row[0]
 
+    assert asyncio.run(_row_etag()) == hashlib.sha256(_PCAP_ONE).hexdigest()
+
+
+def test_the_etag_repair_writes_the_observed_etag_not_this_attempts(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
+    """The attempt that reaches phase 3 last must not stamp its own etag over a correct row.
+
+    The unfavourable ordering, which the favourable-order test above structurally cannot reach:
+    B's PUT lands FIRST, A then PUTs and registers ``row(etag_A)`` — correct, the object holds
+    A's bytes — and only then does B reach its phase 3. B finds a row whose etag differs from
+    what B wrote, and an etag repair that assumed B's own etag would replace a right answer with
+    a wrong one. It must stat the object and leave ``etag_A`` in place.
+    """
+    store = _StallingStore(park_after_write=True)
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    capturer_b = _FakeCapturer(tmp_path / "b", pcap=_PCAP_TWO)
+    capturer_a = _FakeCapturer(tmp_path / "a", pcap=_PCAP_ONE)
+    monkeypatch.setattr(
+        capture_traffic,
+        "run_capture_loop",
+        _LoopSpy(capture_traffic.LoopResult(truncated=False, canceled=False)),
+    )
+
+    async def _go():
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4, open=False) as pool:
+            await pool.open()
+            run_id, _ = await _seed_ready_run(pool)
+            job = _job(run_id)
+            await _insert_job(pool, job, JobState.RUNNING)
+            # B writes its bytes, then parks before its phase 3.
+            task_b = asyncio.create_task(_run_attempt(pool, store, capturer_b, job))
+            await asyncio.to_thread(store.first_put_arrived.wait, 30)
+            # A now runs end to end: its PUT lands last, and it commits the row.
+            ref_a = await _run_attempt(pool, store, capturer_a, job)
+            store.release_first_put.set()
+            ref_b = await task_b
+            return ref_a, ref_b, await _artifact_rows(pool, run_id), run_id, job
+
+    ref_a, ref_b, rows, run_id, job = asyncio.run(_go())
+    key = f"local/runs/{run_id}/pcap-{job.id}"
+    assert len(rows) == 1
+    assert ref_a == ref_b
+    assert store.objects[key][0] == _PCAP_ONE  # A's PUT landed last
+
+    async def _row_etag():
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn, conn.cursor() as c:
+            await c.execute("SELECT etag FROM artifacts WHERE object_key = %s", (key,))
+            row = await c.fetchone()
+            assert row is not None
+            return row[0]
+
+    # The row still describes the object. Stamping B's etag here would be the drift the repair
+    # exists to remove, introduced by the repair itself.
     assert asyncio.run(_row_etag()) == hashlib.sha256(_PCAP_ONE).hexdigest()
