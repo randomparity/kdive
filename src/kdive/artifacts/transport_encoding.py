@@ -204,11 +204,17 @@ def strip_gzip_to_writer(
     _hash_remaining(store, request, hasher, start=decoded.offset)
     actual = base64.b64encode(hasher.digest()).decode("ascii")
     if actual != request.expected_sha256:
+        # Chained, not merged. A defect found before the digest disagreed is a real observation
+        # about *how* the stored bytes are broken, and an operator investigating bit rot wants it —
+        # but it must not reach the agent, whose message ADR-0523 deliberately strips of the decode
+        # advice (the bomb branch's "re-declare with the correct uncompressed_size" is wrong
+        # precisely here). ``details`` is documented as surfaceable in responses, so the chain is
+        # the carrier: the consumer's operator log lifts it off ``__cause__``.
         raise _transport_error(
             "transport checksum mismatch: the stored object's SHA-256 does not match the checksum "
             "signed at upload; retry, and if it persists the stored object is damaged and must be "
             "re-uploaded"
-        )
+        ) from decoded.defect
     if decoded.defect is not None:
         raise _object_error(str(decoded.defect)) from decoded.defect
     return StripDecodeResult(uncompressed_bytes=decoded.written)
@@ -283,6 +289,13 @@ def _hash_remaining(
     nor the writer, so the bomb bound the pass tripped is never reopened (ADR-0523). Every byte of
     the object is therefore read exactly once across the two loops. A no-op on the success path,
     where the pass already consumed the whole object.
+
+    It does replace an early abort with a full read on the two branches that fail mid-pass, and on
+    the bomb branch that is not free: a bomb has no successful stage to compare against, so a
+    hostile object that trips the cap after a few KiB now costs a read of the whole stored object —
+    up to the single-PUT ceiling — where it used to cost one range. ADR-0523's Consequences weigh
+    that; bounding or skipping the drain on a size heuristic is not the answer, because it restores
+    the codec-decides-the-verdict asymmetry the ADR exists to close.
     """
     offset = start
     while offset < request.compressed_size:
