@@ -406,9 +406,12 @@ def test_the_surplus_remedy_is_one_that_actually_clears_the_surplus(tmp_path: Pa
     # has lapsed and charges an attempt. The message deliberately claims nothing beyond that: two
     # earlier drafts asserted a downstream cleanup path the source contradicted, so the scope of
     # what it promises is itself the thing under test.
-    assert "another worker reclaims it once its lease" in surplus.stderr, (
-        f"the consequence of kill -9 and what recovers it must be stated: {surplus.stderr}"
-    )
+    # The clause spans the message's line wrap, so compare against a whitespace-normalized copy:
+    # the assertion is that the sentence is present and in order, not that the wrap falls anywhere
+    # in particular. Pinning the wrap point makes an unrelated rewording redden this for no reason.
+    assert "another worker reclaims each one once its lease lapses" in " ".join(
+        surplus.stderr.split()
+    ), f"the consequence of kill -9 and what recovers it must be stated: {surplus.stderr}"
     # The pid list is every worker sharing this interpreter, not only the survivor — telling the
     # operator otherwise sends them to kill -9 a set the prose has mislabelled.
     assert "INCLUDING the ones this run started" in surplus.stderr, surplus.stderr
