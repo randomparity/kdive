@@ -10,6 +10,7 @@ a seeded ``defined`` baseline through the same path.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -32,6 +33,7 @@ from kdive.images.cataloging.catalog import resolve_rootfs
 from kdive.services.images.publish import (
     PublishRequest,
     _write_config_best_effort,
+    digest_sha256_b64,
     finish_publish,
     kernel_config_object_key,
     publish_image,
@@ -42,6 +44,7 @@ from tests.clock import STORE_MTIME
 
 _QCOW2 = b"qcow2-bytes-for-publish-test"
 _DIGEST = "sha256:" + hashlib.sha256(_QCOW2).hexdigest()
+_CHECKSUM = base64.b64encode(hashlib.sha256(_QCOW2).digest()).decode("ascii")
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
@@ -59,6 +62,7 @@ class _FakeStore:
         self._fail_put = fail_put
         self._drop_object = drop_object
         self._fail_config = fail_config
+        self._checksums: dict[str, str | None] = {}
         self.puts: list[str] = []
         self.heads: list[str] = []
 
@@ -75,6 +79,7 @@ class _FakeStore:
             )
         if not self._drop_object:
             self._objects[key] = request.data
+            self._checksums[key] = request.sha256_b64
         etag = hashlib.md5(request.data).hexdigest()  # noqa: S324 - etag stand-in, not security
         return artifact_types.StoredArtifact(
             key,
@@ -91,7 +96,7 @@ class _FakeStore:
             return None
         return artifact_types.HeadResult(
             size_bytes=len(data),
-            checksum_sha256=None,
+            checksum_sha256=self._checksums[key],
             etag="etag",
             last_modified=STORE_MTIME,
             version_id="test-version",
@@ -119,6 +124,143 @@ def _qcow2_source(tmp_path: Path) -> Path:
     src = tmp_path / "rootfs.qcow2"
     src.write_bytes(_QCOW2)
     return src
+
+
+class _FixedHeadStore(_FakeStore):
+    """A store that reports the requested HEAD result after accepting a qcow2 PUT."""
+
+    def __init__(self, head_result: artifact_types.HeadResult | None) -> None:
+        super().__init__()
+        self._head_result = head_result
+
+    def head(self, key: str) -> artifact_types.HeadResult | None:
+        self.heads.append(key)
+        return self._head_result
+
+
+def test_digest_sha256_b64_converts_to_canonical_padded_base64() -> None:
+    assert digest_sha256_b64(_DIGEST) == _CHECKSUM
+
+
+@pytest.mark.parametrize(
+    "digest",
+    (
+        "sha256:",
+        "sha512:" + "0" * 64,
+        "sha256:" + "g" * 64,
+        "sha256:" + "0" * 62 + "  ",
+        "SHA256:" + "0" * 64,
+    ),
+)
+def test_digest_sha256_b64_rejects_non_sha256_hex_digest(digest: str) -> None:
+    with pytest.raises(CategorizedError) as err:
+        digest_sha256_b64(digest)
+
+    assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert err.value.details == {"digest": digest}
+
+
+@pytest.mark.parametrize(
+    ("head_result", "registered"),
+    (
+        (None, False),
+        (
+            artifact_types.HeadResult(
+                size_bytes=len(_QCOW2) - 1,
+                checksum_sha256=_CHECKSUM,
+                etag="etag",
+                last_modified=STORE_MTIME,
+                version_id="test-version",
+            ),
+            False,
+        ),
+        (
+            artifact_types.HeadResult(
+                size_bytes=len(_QCOW2),
+                checksum_sha256=None,
+                etag="etag",
+                last_modified=STORE_MTIME,
+                version_id="test-version",
+            ),
+            False,
+        ),
+        (
+            artifact_types.HeadResult(
+                size_bytes=len(_QCOW2),
+                checksum_sha256="not-valid-base64",
+                etag="etag",
+                last_modified=STORE_MTIME,
+                version_id="test-version",
+            ),
+            False,
+        ),
+        (
+            artifact_types.HeadResult(
+                size_bytes=len(_QCOW2),
+                checksum_sha256=base64.b64encode(
+                    hashlib.sha256(b"a different qcow2").digest()
+                ).decode("ascii"),
+                etag="etag",
+                last_modified=STORE_MTIME,
+                version_id="test-version",
+            ),
+            False,
+        ),
+        (
+            artifact_types.HeadResult(
+                size_bytes=len(_QCOW2),
+                checksum_sha256=_CHECKSUM,
+                etag="etag",
+                last_modified=STORE_MTIME,
+                version_id="test-version",
+            ),
+            True,
+        ),
+    ),
+)
+def test_publish_registers_only_after_exact_size_and_checksum_head(
+    migrated_url: str,
+    tmp_path: Path,
+    head_result: artifact_types.HeadResult | None,
+    *,
+    registered: bool,
+) -> None:
+    store = _FixedHeadStore(head_result)
+    source = _qcow2_source(tmp_path)
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            if registered:
+                entry = await publish_image(conn, store, request=_PUBLIC_REQUEST, source=source)
+                assert entry.state is ImageState.REGISTERED
+            else:
+                with pytest.raises(CategorizedError) as err:
+                    await publish_image(conn, store, request=_PUBLIC_REQUEST, source=source)
+                assert err.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+                row = (await IMAGE_CATALOG.list_all(conn))[0]
+                assert row.state is ImageState.PENDING
+
+    asyncio.run(_run())
+
+
+def test_publish_rejects_malformed_digest_before_reservation(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    source = _qcow2_source(tmp_path)
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            with pytest.raises(CategorizedError) as err:
+                await publish_image(
+                    conn,
+                    _FakeStore(),
+                    request=replace(_PUBLIC_REQUEST, digest="sha256:not-a-digest"),
+                    source=source,
+                )
+            assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert await IMAGE_CATALOG.list_all(conn) == []
+
+    asyncio.run(_run())
 
 
 def test_config_object_key_matches_kernel_config_object_key_public() -> None:

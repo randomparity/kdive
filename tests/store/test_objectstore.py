@@ -624,6 +624,27 @@ def test_put_artifact_writes_metadata_and_returns_stored_artifact() -> None:
     assert stored.version_id == "put-version-1"
 
 
+def test_put_artifact_passes_optional_sha256_checksum_to_s3() -> None:
+    checksum = base64.b64encode(hashlib.sha256(b"payload").digest()).decode("ascii")
+    client = _RecordingPutClient()
+
+    ObjectStore(client, "the-bucket").put_artifact(
+        ArtifactWriteRequest(
+            tenant="t",
+            owner_kind="vmcore",
+            owner_id="oid",
+            name="core",
+            data=b"payload",
+            sha256_b64=checksum,
+            sensitivity=Sensitivity.SENSITIVE,
+            retention_class="vmcore",
+        )
+    )
+
+    assert client.last_kwargs is not None
+    assert client.last_kwargs["ChecksumSHA256"] == checksum
+
+
 def test_put_artifact_records_content_encoding_under_the_exact_metadata_key() -> None:
     # S3/MinIO lowercases user-metadata keys, so a real round-trip cannot tell "content-encoding"
     # from a miscased literal; assert the exact key sent to put_object to pin the mapping.
