@@ -897,7 +897,9 @@ def _stage_identity(
         )
 
 
-def _log_checksum_mismatch(key: str, *, system_id: UUID, encoding: str) -> None:
+def _log_checksum_mismatch(
+    key: str, *, system_id: UUID, encoding: str, decode_detail: str | None = None
+) -> None:
     """Log an object-store integrity failure, which the category alone no longer distinguishes.
 
     Same reasoning as :func:`_require_staging_free_space`'s warning, for the same reason: ADR-0445
@@ -911,18 +913,34 @@ def _log_checksum_mismatch(key: str, *, system_id: UUID, encoding: str) -> None:
     first observable consequence of real damage would otherwise be a silent extra multi-GiB
     download and a second dead-lettered job, with nothing in the host logs naming the condition.
 
-    **Reach, on the gzip path only** (ADR-0445 §6): this fires exactly where the checksum gate
-    fires, so the framing-first damage that never reaches that gate logs nothing here either.
-    Absence of this line is not evidence of an intact object for a gzip upload; #1548 widens both
-    together.
+    **Reach** (ADR-0523, closing ADR-0445 §6): this fires exactly where the checksum gate fires,
+    and since that gate now runs ahead of the gzip path's framing and bound checks, the two paths
+    log the same damage — under ADR-0445 §6 framing-first damage raised an object-defect error on
+    the gzip path and logged nothing at all. What the widening does *not* buy is an inference from
+    silence. Absence of this line means the digest agreed **or the verification never ran**: a
+    reusable staged base short-circuits before any fetch, the free-space precheck and the
+    missing-checksum branch raise before the first read, and a ``get_range`` fault — which
+    :func:`_stage_gzip` calls the likeliest failure on this path — aborts the stage before a digest
+    exists. Silence is evidence of an intact object only for a stage that read the object through.
+
+    ``decode_detail`` is the gzip path's decode diagnosis, when the digest disagreed *and* the
+    stream was also unreadable. Since ADR-0523 every shape of gzip stored-byte damage lands on this
+    one line, so without it "truncated", "corrupt deflate", "trailing data" and "blew the declared
+    bound" — materially different store failures — would be indistinguishable to an operator, on
+    exactly the condition the same change makes far more common. It rides the exception chain
+    rather than ``CategorizedError.details``, which is surfaceable to the agent: the remediation
+    inside the carried text is the *decode's*, and is the wrong advice for a rotted object, which
+    is why the "the decode also failed" framing scopes it and the agent never sees it.
     """
     _log.warning(
         "uploaded rootfs object %s failed checksum verification while staging for system %s "
         "(%s encoding): the stored bytes do not hash to the checksum signed at upload — transient "
-        "read corruption clears on retry, a persistent mismatch means the stored object is damaged",
+        "read corruption clears on retry, a persistent mismatch means the stored object is "
+        "damaged%s",
         key,
         system_id,
         encoding,
+        f"; the decode also failed: {decode_detail}" if decode_detail else "",
     )
 
 
@@ -967,7 +985,16 @@ def _stage_gzip(
         # failure on this path — propagates through it. A category test would log every such blip as
         # stored-object damage, which is exactly the discrimination this log exists to provide.
         if exc.details.get("gate") == TRANSPORT_CHECKSUM_GATE:
-            _log_checksum_mismatch(key, system_id=system_id, encoding=GZIP_ENCODING)
+            # ``__cause__`` is the decode's own diagnosis when the stream was unreadable *and* the
+            # digest disagreed — the detail ADR-0523 keeps out of the agent's message and out of
+            # ``details``, and the only thing distinguishing the shapes of damage that now all land
+            # on this one line. ``None`` when the object decoded cleanly and only the hash differed.
+            _log_checksum_mismatch(
+                key,
+                system_id=system_id,
+                encoding=GZIP_ENCODING,
+                decode_detail=None if exc.__cause__ is None else str(exc.__cause__),
+            )
         raise
 
 

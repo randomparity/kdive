@@ -1,0 +1,228 @@
+# 0523 — The transport hash is consulted before the gzip path declares an object defect
+
+## Status
+
+Accepted (2026-07-30)
+
+## Context
+
+[ADR-0445](0445-reconcile-checksum-mismatch-error-category.md) converged the two uploaded-rootfs
+staging paths on `infrastructure_failure` for a checksum mismatch, so the transport codec no longer
+decided the agent-visible `retryable` boolean. Its own §6 recorded that on the gzip path the
+convergence reaches much less than §1 alone reads, because the hash comparison in
+`strip_gzip_to_writer` was the *last* gate and zlib's framing and the output cap tripped first.
+
+An exhaustive single-bit sweep of the deflate body of the residual test's fixture, with a
+**correct** signed checksum and damaged stored bytes, landed on three branches:
+
+| branch reached | share | reported |
+|---|---|---|
+| corrupt deflate stream (`zlib.error`) | 225/248 | `configuration_error` |
+| **gzip-bomb bound** (`_drain`'s output cap) | 13/248 | `configuration_error` |
+| transport checksum mismatch | 10/248 | `infrastructure_failure` |
+
+The exact split is a property of the object's content, not a constant, but the shape holds: the
+digest was reached by a small minority. Trailer CRC/ISIZE rot and post-PUT truncation likewise
+reported `configuration_error`. The identity path, having no framing to trip, reports every one of
+these as `infrastructure_failure`. So for most damage the codec still decided the verdict — the
+asymmetry ADR-0445 set out to remove, surviving in the majority of cases.
+
+This is wrong rather than merely inconsistent. Those four branches assert *"the object the agent
+uploaded is defective"*, and that claim is unfounded whenever the bytes read back are not the bytes
+signed at PUT: the object may be fine and the read may be damaged. ADR-0445 §2's own principle —
+the category follows from what is being asserted — decides it; the branches simply did not have the
+digest consulted before they asserted it.
+
+The bomb branch was the worst of the three, and not only for its category. Its message reads
+"re-declare with the correct `uncompressed_size`" — affirmatively wrong advice when the declaration
+was right and the stored bytes rotted. It also compounds: [ADR-0450](0450-uploaded-rootfs-staging-free-space-precheck.md)
+makes `uncompressed_size` the gzip path's free-space budget, so an agent that follows the advice and
+re-declares upward can have its next provision refused by the free-space precheck for a base the
+volume can hold.
+
+ADR-0445 could not close this. #1523's campaign brief constrained it explicitly — "do NOT change
+bomb/corrupt-stream categories for any caller" — so §6 documented the residual, pointed at #1548,
+and `test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual` pinned both the
+`zlib.error` and bomb shapes so the gap was visible rather than silent. This ADR is that decision.
+
+## Decision
+
+### 1. The transport digest is the first verdict, not the last
+
+`strip_gzip_to_writer` compares the transport hash **before** any object-defect branch raises. A
+framing or bound defect only reports `configuration_error` once the stored bytes have been proven to
+be the bytes the signed PUT bound; otherwise the call raises the transport error, with the same
+`TRANSPORT_CHECKSUM_GATE` marker, message and category the identity path gives for byte-identical
+damage.
+
+This is not a reordering of the existing checks. Two of the four branches — `zlib.error` and the
+bomb bound — raise from inside `_drain`, a frame that sees a decompressor and one input range and
+has no access to the store, the key, or the running hash. It cannot know whose fault the damage is.
+So the ordering follows from a seam change, not from moving three `if`s (§2).
+
+### 2. A mid-pass defect is a returned value; the caller decides what it means
+
+`_drain` and the end-of-pass framing checks raise or return a private `_ObjectDefect`, which never
+escapes the module. `strip_gzip_to_writer` — the one frame holding the store, the request and the
+hasher — receives it, completes the digest, and picks the constructor. The two public constructors
+ADR-0445 §2 introduced are unchanged; what changes is that `_object_error` is now reachable only
+after the digest has agreed, which is what makes its claim true rather than merely nearest.
+
+The decode is split into `_decode_pass` (read, hash, gunzip, stop at the first defect) and
+`_hash_remaining` (feed the unread tail to the hasher and nothing else). Carrying the defect as a
+value rather than raising it at the point of discovery is what lets the module keep one comparison
+site for the digest instead of four.
+
+### 3. The extra read is hash-only, so the bomb bound is never reopened
+
+A defect stops the pass mid-object, leaving the digest incomplete. `_hash_remaining` re-reads only
+the ranges the pass never reached — bounded by `compressed_size`, touching neither the decompressor
+nor the writer. The cap exists so a bomb is never expanded, and a drain that resumed decompression
+to finish the hash would defeat exactly that. Between the two loops every byte of the stored object
+is read exactly once; the cost of the new verdict is at most the compressed size the stage was
+already going to read, never a second pass.
+
+The truncated branch costs nothing at all: `offset` has already reached `compressed_size`, so the
+hasher has absorbed every stored byte and `_hash_remaining` is a no-op. The trailing-data branch
+needs the drain only when `eof` stopped the pass early — but "only" understates it, because that
+case is unbounded by anything except `compressed_size`: an object that is a short valid gzip member
+followed by an arbitrarily long tail stops the pass immediately and then drains the whole tail. Its
+worst case is the bomb's, and it is cheaper to construct (see Consequences).
+
+Completing the digest over that tail costs one thing, and it is worth stating rather than
+discovering. It **retires the checksum gate as an independent detector of trailing data.** Before,
+a concatenated object whose first member ended on a ranged-read boundary — `unused_data` empty,
+the second member sitting in ranges the pass never reached — was caught twice: by
+`_framing_defect`'s `offset < compressed_size` clause, and, had that clause been absent, by the
+digest, which came up short because the tail went unhashed. Now the digest agrees, so that clause
+is the *sole* guard. What it guards against is the module's most expensive failure: a silent
+success that stages only the first member as a durable rootfs base, past a checksum gate that
+agrees and past the qcow2-magic gate the first member's prefix satisfies. The clause is therefore
+pinned by a test that constructs the boundary-aligned case deliberately and asserts on the read
+pattern, so it cannot pass on the `unused_data` clause instead.
+
+### 4. A genuinely defective upload keeps `configuration_error`
+
+The convergence is one-directional. When the digest agrees, the bomb, corrupt-stream, truncated and
+multi-member branches keep their terminal category and their messages verbatim — including the
+bomb's `uncompressed_size` advice, which is correct precisely when the object really is what was
+signed. Widening the retryable constructor over these would tell an agent to retry a key that
+re-reads the same defect forever. Both directions are pinned, parametrised over the same two branch
+shapes, so neither can drift without reddening.
+
+### 5. The operator log widens with the category
+
+ADR-0445's Consequences noted that the gzip path's checksum WARNING inherits §6's reach exactly, so
+framing-first damage logged nothing and absence of the line was not evidence of an intact object.
+That follows the gate, and the gate moved: `_stage_gzip` keys the warning on
+`details["gate"] == TRANSPORT_CHECKSUM_GATE` and needs no change to log the widened set. Keying it
+on the gate rather than the category is what makes this free, and remains necessary — the store's
+own `get_range` faults propagate through the utility as `infrastructure_failure` too.
+
+What the line *says* has to widen with it. Routing every shape of gzip stored-byte damage onto one
+signal makes "truncated", "corrupt deflate", "trailing data" and "blew the declared bound" —
+materially different store failures — indistinguishable to the operator this log exists to serve,
+on exactly the condition §1 makes far more common. So the decode's diagnosis is carried to the log
+even though the agent no longer sees it: `strip_gzip_to_writer` raises the transport error `from`
+the `_ObjectDefect`, and `_stage_gzip` lifts it off `__cause__`. The chain, not `details` — a
+`CategorizedError`'s `details` may be surfaced in responses, and the remediation inside the carried
+text is the decode's, which is precisely the wrong advice for a rotted object. Absence of the
+clause is meaningful too: it says the object decoded cleanly and only the hash differed.
+
+This does not weaken §5's first paragraph. Absence of the *line* still means the digest agreed or
+verification never ran — a reusable staged base, the free-space precheck, the missing-checksum
+branch and a `get_range` fault all exit before a digest exists, on either path.
+
+### 6. An empty range is the store failing to serve, not a truncated object
+
+Both read loops now raise a retryable `_short_read_error` when `get_range` answers a range below
+`compressed_size` with nothing. `compressed_size` is the size the store's own `HEAD` reported, so a
+store that will not serve a range under it is internally inconsistent — a fault on the read,
+indistinguishable from the connection resets `get_range` raises for itself.
+
+This is §1's principle applied to the one place the old code got it backwards *because* of the
+drain. The decode pass used to end a short read with a bare `break`, which reached the truncated
+branch; the drain then re-read the same tail, and if the store served it that time the digest
+**agreed** — so the object was proven intact and the agent was still told, terminally, to re-upload
+a multi-GiB object that was never wrong. The evidence disproving the claim was produced by the very
+read this ADR added, and then discarded. Raising at the empty range makes the honest claim instead
+and never reaches a verdict about the object at all.
+
+It also removes an asymmetry: the same store signal used to mean "truncated object, terminal" in
+one loop and "digest comes up short, retryable" in the other. A genuinely truncated *upload* is
+untouched — `HEAD` reports the short length, so the pass reaches `compressed_size` with no empty
+range and the truncated branch fires as before. The error carries no gate marker, so it is never
+logged as stored-object damage.
+
+## Consequences
+
+- Damaged stored bytes under a gzip upload now report `retryable: true` with the transport
+  message, for **every** shape of damage rather than the minority that left the framing intact. An
+  exhaustive single-byte sweep of a gzip fixture — header, deflate body and CRC/ISIZE trailer, nine
+  masks per byte — reports the transport gate on every one, replacing ADR-0445 §6's three-way table.
+- The bomb branch no longer emits `uncompressed_size` remediation for a declaration that was
+  correct, so the ADR-0450 free-space compounding it fed is closed for the rotted-bytes case.
+- A staging failure on damaged gzip bytes now emits the stored-object-damage WARNING it previously
+  suppressed (§5). Operator-visible volume rises on exactly the condition the log exists to name.
+- The `zlib.error`, bomb and trailing-data paths issue additional ranged GETs — the tail the pass
+  never read, bounded by `compressed_size` and hash-only. A stage that fails on the first range of a
+  multi-GiB object now reads the object through before reporting, where it used to fail immediately.
+  For a merely corrupt object that is bounded by what a successful stage reads anyway. **For the
+  bomb and trailing-data branches it is not**, and those are the cases worth naming. A bomb has no
+  successful stage to compare against, so an object that declares a small `uncompressed_size` and
+  trips the cap after a few KiB of output now costs a read of the whole stored object — up to the
+  single-PUT ceiling the upload path enforces — where it used to cost one range. Trailing data
+  reaches the same worst case more cheaply still, needing no compression work at all: a short valid
+  gzip member followed by an arbitrarily long tail, correctly signed so the digest agrees, is read
+  through in full before the same terminal rejection it used to get after one range. The retryable
+  verdict compounds the first case, since an agent told to retry pays the read again. Accepted
+  rather than mitigated: the alternatives are to skip the drain on a size heuristic, which restores
+  the codec-decides-the-verdict asymmetry §1 removes, or to keep reporting a terminal category for
+  damage the agent did not cause. The read is hash-only and hard-bounded, so what a hostile object
+  buys is bandwidth on a failing provision, not memory, disk, or an expanded bomb.
+- **§4's terminal guarantee is conditional on the drain completing.** `_hash_remaining` calls
+  `get_range` uncaught, and the same widening that costs the reads above widens the window in which
+  a store fault can land: a connection reset during the drain leaves the digest unknowable, so the
+  store's own retryable error propagates and a genuinely defective object is reported as a transport
+  fault rather than as the defect it is. That verdict is honest — nothing at that point can prove
+  what the stored bytes were — but the decode's diagnosis would otherwise die with the frame, so it
+  is attached to the store's error as a **note** and survives on the traceback. A note rather than
+  `raise ... from`: the store already chained its own botocore cause onto that error, and taking
+  that over would suppress the real root cause and render the causality backwards. The gate-keyed
+  WARNING
+  deliberately does **not** fire there: a store fault is not stored-object damage, which is the
+  discrimination ADR-0445 §4 built that keying for.
+- A store that answers a ranged read below `compressed_size` with an empty body now reports a
+  retryable read failure naming the offset, where it previously reported a terminal "truncated,
+  re-upload" (§6). No caller distinguished the two, and the new message is the one an operator
+  can act on.
+- No schema change, no migration, no MCP tool-surface change. The only externally visible changes
+  are the `retryable` boolean and the message text on the four branches, in the subset where the
+  digest disagrees.
+- `strip_gzip_to_writer` keeps its signature, its result type and both error categories, so its one
+  production consumer (`_stage_gzip`) is unchanged apart from a docstring. The upload-declaration
+  validator imports only the codec constants.
+- `test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual` is retired; the flip
+  probe it introduced survives, inverted, as the fixture for both halves of §4.
+
+## Considered & rejected
+
+- **Move the hash comparison ahead of the framing checks and leave `_drain` alone.** The `effort:S`
+  reading of the issue, and it closes only the truncated branch. `zlib.error` and the bomb bound
+  raise from a frame with no store, key or hasher, and they are 238 of the 248 flips ADR-0445 §6
+  measured — the reorder would leave the whole majority reporting the wrong category.
+- **Hash the whole object up front, then decode.** One comparison site and no seam change, but it
+  doubles the ranged reads on the *success* path, which is every stage. Paying that on every
+  provision to improve the message on a failure is the wrong trade; the drain is paid only when a
+  defect is actually found.
+- **Resume decompression while draining the tail.** Would let the bomb branch report how far the
+  object really expands, and defeats the guard's entire purpose — the cap exists so a bomb is never
+  expanded, and the drain must not reopen it.
+- **A new category for "damaged stored bytes" distinct from both.** ADR-0445 already rejected
+  `TRANSPORT_FAILURE` for this gate on the grounds that it is the SSH/console transport's category
+  throughout the tree; nothing here changes that, and a third category would re-split the pair
+  ADR-0445 converged.
+- **Leave the residual and widen only the log.** An operator would see the damage while the agent
+  is still told the failure is permanent and pointed at re-uploading an object that was never
+  wrong. The agent-visible contract is the thing ADR-0445 §1 identified as the only thing the
+  category controls.

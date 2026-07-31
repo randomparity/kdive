@@ -69,8 +69,32 @@ worker_pids() {
     '$2 ~ /^python/ && index($0, needle) {print $1}'
 }
 
+# Does signalling every pid in <pid-csv> need sudo? Returns 0 (yes) or 1 (a bare kill suffices).
+#
+# The test is "is any pid NOT mine", never "is any pid root's". A daemon left by another account on
+# a shared host is exactly as unsignalable as a root-owned one, and both pid scans above match on
+# interpreter path rather than on owner, so either can list one; a root-only test sends the caller
+# to a bare kill that dies with EPERM. Numeric uids, because `ps -o user=` truncates a name past
+# eight characters and would then mis-compare a long-named caller against itself. root needs sudo
+# for nothing, so it short-circuits before spawning ps.
+#
+# Unknown ownership answers YES. If ps reports no row for a pid the scan just listed, the usual
+# cause is that the process exited in between — where both forms are equally harmless no-ops — and
+# the only other cause is a ps that cannot report uids. There `sudo kill` still works on a
+# self-owned process, while a bare `kill` does not work on a foreign one, so the unknown case is
+# safe in exactly one direction. Only a row actually read licenses dropping sudo. ps is read into a
+# variable rather than piped, because these scripts run under `set -o pipefail`, where a pipeline's
+# status would come from ps's own exit-1-on-no-match and silently invert that decision.
+pids_need_sudo() {
+  local rows
+  ((EUID != 0)) || return 1
+  rows="$(ps -o uid= -p "$1" 2>/dev/null || true)"
+  [[ -z "${rows//[[:space:]]/}" ]] && return 0
+  awk -v me="$EUID" '$1 != me { foreign = 1 } END { exit !foreign }' <<<"$rows"
+}
+
 stop_daemons() {
-  local pids pid owner
+  local pids pid
   local -a remaining
   mapfile -t pids < <(daemon_pids)
   ((${#pids[@]})) || {
@@ -79,8 +103,7 @@ stop_daemons() {
   }
   echo "stopping kdive daemons: ${pids[*]}"
   for pid in "${pids[@]}"; do
-    owner="$(ps -o user= -p "$pid" 2>/dev/null || true)"
-    if [[ "$owner" == "root" && "$(id -un)" != "root" ]]; then
+    if pids_need_sudo "$pid"; then
       sudo kill "$pid" 2>/dev/null || true
     else
       kill "$pid" 2>/dev/null || true
@@ -352,9 +375,19 @@ require_workers_alive() {
   # count exists to prevent. The two directions need different remedies, so they say different
   # things.
   if ((have > want)); then
-    local pid_csv
+    local pid_csv kill_cmd
     printf -v pid_csv '%s,' "${pids[@]}"
     pid_csv="${pid_csv%,}"
+    # Prescribe `sudo` only when the operator actually needs it, rather than unconditionally: under
+    # KDIVE_WORKER_AS_ROOT=0 these are the operator's own processes, and an operator already root
+    # on a host without sudo installed cannot run the command at all. Same helper stop_daemons
+    # uses, so the prescription an operator is told to run and the kill the script performs itself
+    # cannot disagree about who owns what. One prefix covers the whole list: the helper asks about
+    # the set, and root may signal every pid in it.
+    kill_cmd="kill -9"
+    if pids_need_sudo "$pid_csv"; then
+      kill_cmd="sudo kill -9"
+    fi
     # The remedy is deliberately NOT down.sh. It calls this same stop_daemons — one SIGTERM, a
     # ten-second poll, a WARN, `return 0`, no escalation — so the survivor this message is about
     # outlives it exactly as it outlived bring-up, and the compose backends come down for nothing.
@@ -377,7 +410,8 @@ require_workers_alive() {
       echo "  older code, and it masks a new worker that failed to start."
       echo "  Live worker pids: ${pids[*]}"
       echo "  That list is every worker running under ${py}, INCLUDING the ones this run started."
-      echo "  The survivor is whichever has the older start time:"
+      echo "  The survivors are whichever have the older start times. This step is diagnostic"
+      echo "  only — the kill below ends every pid in the list, survivor or not:"
       echo "    ps -ww -o pid,lstart,etime,args -p ${pid_csv}"
       echo "  Tearing the stack down will NOT clear it: that path sends the same SIGTERM and"
       echo "  gives up the same way. So either wait for the in-flight job to finish and re-run"
@@ -385,9 +419,9 @@ require_workers_alive() {
       echo "  new jobs and waiting never ends it; and this run's own workers above are claiming"
       echo "  jobs meanwhile, so a re-run can land on this same surplus), or end these in one"
       echo "  step and re-run:"
-      echo "    sudo kill -9 ${pids[*]}"
-      echo "  Killing abandons that job mid-flight: another worker reclaims it once its lease"
-      echo "  lapses, spending one of its bounded attempts."
+      echo "    ${kill_cmd} ${pids[*]}"
+      echo "  Killing abandons those jobs mid-flight: another worker reclaims each one once its"
+      echo "  lease lapses, spending one of its bounded attempts."
     } >&2
     return 1
   fi

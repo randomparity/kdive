@@ -348,6 +348,12 @@ single worker's claim loop runs one job at a time:
 KDIVE_WORKER_COUNT=2 scripts/live-stack/up.sh
 ```
 
+Values above 8 are refused, and the refusal is a hard bring-up failure rather than
+a clamp. The ceiling is `MAX_WORKER_COUNT` in `scripts/live-stack/lib.sh`; every
+worker is a root process with its own database pool and aux health port, so the
+bound guards against a transposition typo forking thousands of them. This arm
+needs 2.
+
 Confirm two worker processes really came up before drawing any conclusion — this
 arm is worthless against one worker, and it fails in exactly the silent way the
 old procedure did:

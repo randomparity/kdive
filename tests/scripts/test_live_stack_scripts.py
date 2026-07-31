@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from kdive.config.external_env import EXTERNAL_ENV_VARS
 from kdive.health.aux_bind import PROCESS_DEFAULT_PORTS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -183,6 +184,143 @@ def test_configured_worker_count_rejects_an_int64_wrapping_value() -> None:
         assert not result.stdout, f"a refused count must print nothing, got {result.stdout!r}"
 
 
+def _stop_daemons_signals(pid_expr: str) -> str:
+    """Run `stop_daemons` against `pid_expr` as the daemon scan; return the signals it sent.
+
+    `kill` and `sudo` are stubbed to a log so the ownership branch is observable without the test
+    signalling anything real, and `sleep` is stubbed so the ten-second settle poll — whose scan
+    keeps returning the same pid here — costs nothing. `daemon_pids` is stubbed because the real
+    one reads the live process table; `ps` is NOT stubbed, so the ownership test under scrutiny
+    runs against real uids.
+    """
+    return _lib(
+        "log=$(mktemp)\n"
+        "sleep() { :; }\n"
+        f"daemon_pids() {{ echo {pid_expr}; }}\n"
+        'kill() { echo "KILL $*" >> "$log"; }\n'
+        'sudo() { echo "SUDO $*" >> "$log"; }\n'
+        "stop_daemons >/dev/null 2>&1\n"
+        'cat "$log"\nrm -f "$log"\n'
+    ).stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="a root caller needs sudo for nothing")
+def test_unknown_ownership_answers_sudo_even_under_pipefail() -> None:
+    """When ps reports no owner, the safe answer is sudo — and pipefail must not invert it.
+
+    `sudo kill` still works on a self-owned process; a bare `kill` does not work on a foreign one,
+    so an undetermined owner is safe in exactly one direction. The pipefail arm is the reason the
+    helper reads ps into a variable instead of piping it: `ps -o uid= -p <gone>` exits 1, so a
+    pipeline's status would come from ps rather than from the comparison and would silently answer
+    "no sudo" for precisely the case that cannot determine an owner. The callers run under
+    `set -euo pipefail`, so the bare-source case alone would not have caught it.
+    """
+    for prelude in ("", "set -euo pipefail\n"):
+        result = _lib(f"{prelude}if pids_need_sudo 999999; then echo SUDO; else echo BARE; fi")
+        assert result.stdout.strip() == "SUDO", (
+            f"an undeterminable owner must answer sudo (prelude={prelude!r}): {result.stdout!r}"
+        )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="the self-owned arm needs a non-root caller")
+def test_stop_daemons_drops_sudo_for_a_daemon_the_caller_owns() -> None:
+    """stop_daemons must not reach for sudo to signal the operator's own daemon (#1739).
+
+    Under `KDIVE_WORKER_AS_ROOT=0` every daemon is the operator's, and on a host with no sudo
+    installed a `sudo kill` simply fails — silently, since the call swallows its status with
+    `|| true`. This shell's own pid stands in for such a daemon.
+    """
+    assert _stop_daemons_signals("$$").startswith("KILL "), "a self-owned daemon needs no sudo"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="a root caller needs sudo for nothing")
+def test_stop_daemons_keeps_sudo_for_a_daemon_the_caller_cannot_signal() -> None:
+    """The complement: an unsignalable daemon must still get sudo, or the kill silently no-ops.
+
+    pid 1 is root-owned on any host this runs on. The gap this closes is wider than root, though —
+    a daemon owned by another *non-root* account is equally unsignalable, which is why the helper
+    compares uids against the caller's rather than testing for root. That third case needs a second
+    account to construct, so it is not reachable from an unprivileged test; the two directions
+    pinned here plus the uid comparison itself are what carry it.
+    """
+    assert _stop_daemons_signals("1").startswith("SUDO kill "), (
+        "a daemon the caller cannot signal must be killed through sudo"
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="the self-owned arm needs a non-root caller")
+def test_surplus_worker_remedy_drops_sudo_for_self_owned_workers() -> None:
+    """The prescribed kill must use the same ownership test stop_daemons does (#1739).
+
+    Under `KDIVE_WORKER_AS_ROOT=0` the workers are the operator's own processes, so a `sudo kill`
+    is wrong — and on a host where the operator is already root with no sudo installed it is not
+    even runnable. Stand in two self-owned processes for the worker scan and drive the surplus
+    branch: the remedy it prints must be a bare `kill -9` naming both pids.
+    """
+    result = _lib(
+        "sleep 30 & first=$!\n"
+        "sleep 30 & second=$!\n"
+        'worker_pids() { echo "$first"; echo "$second"; }\n'
+        "require_workers_alive 1\n"
+        "status=$?\n"
+        'kill "$first" "$second" 2>/dev/null\n'
+        'echo "PIDS=$first,$second"\n'
+        "exit $status"
+    )
+    assert result.returncode != 0, "two live workers against a want of 1 is a surplus"
+    first, second = result.stdout.split("PIDS=")[1].strip().split(",")
+    # The four-space indent IS the assertion here, not incidental formatting: it is what marks a
+    # line as a command the operator runs rather than prose about one, so an unindented match
+    # would pass against a sentence merely mentioning the kill.
+    assert f"\n    kill -9 {first} {second}\n" in result.stderr, (
+        f"self-owned workers must be killed without sudo: {result.stderr}"
+    )
+    assert "sudo kill" not in result.stderr, f"sudo must not be prescribed here: {result.stderr}"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="a root caller needs sudo for nothing")
+def test_surplus_worker_remedy_keeps_sudo_when_a_pid_is_not_the_callers() -> None:
+    """One unsignalable pid in the list must pull `sudo` back in, even mixed with the caller's own.
+
+    The complement of the self-owned arm, and the reason the test is "is any pid NOT mine" rather
+    than "are they all mine": a bare `kill -9` against a pid the operator cannot signal fails with
+    EPERM and no guidance. pid 1 is root-owned on any host this runs on, so pairing it with this
+    shell's own pid exercises the mixed set — the shape a stack that switched
+    `KDIVE_WORKER_AS_ROOT` between runs actually leaves behind.
+    """
+    result = _lib("worker_pids() { echo 1; echo $$; }\nrequire_workers_alive 1\n")
+    assert result.returncode != 0, "two live workers against a want of 1 is a surplus"
+    assert "sudo kill -9 1 " in result.stderr, (
+        f"a pid the caller cannot signal must keep sudo in the remedy: {result.stderr}"
+    )
+
+
+def test_the_worker_count_ceiling_is_documented_where_operators_read_it() -> None:
+    """The documented bound must track MAX_WORKER_COUNT rather than drift from it (#1739).
+
+    lib.sh holds the only copy of the ceiling, and exceeding it is a hard bring-up failure, so an
+    operator who reads either doc surface and picks a larger value gets no forewarning. Neither
+    surface was bound to the constant: `check_env_documented` is a name-set guard that never reads
+    description text, and MAX_WORKER_COUNT is not a KDIVE_* token, so it sits outside that guard
+    entirely. Read the live value out of lib.sh — sourcing it, so a moved or reformatted assignment
+    still resolves — and require both surfaces to state it. A future bump then reddens here instead
+    of silently re-opening the gap.
+    """
+    ceiling = _lib('printf %s "$MAX_WORKER_COUNT"').stdout
+    assert ceiling.isdigit(), f"MAX_WORKER_COUNT must be a plain integer, got {ceiling!r}"
+
+    help_text = next(var.help for var in EXTERNAL_ENV_VARS if var.name == "KDIVE_WORKER_COUNT")
+    assert f"above {ceiling} are refused" in help_text, (
+        f"the KDIVE_WORKER_COUNT help must state the {ceiling} ceiling — it is the source the "
+        f"generated config reference renders from: {help_text!r}"
+    )
+
+    runbook = (ROOT / "docs/operating/runbooks/live-testing.md").read_text()
+    assert f"Values above {ceiling} are refused" in runbook, (
+        f"the live-testing runbook drives KDIVE_WORKER_COUNT and must state the {ceiling} ceiling"
+    )
+
+
 def test_extra_workers_get_health_ports_clear_of_the_registered_defaults() -> None:
     """Worker 1 keeps the process default; extras must not land on ANOTHER process's port.
 
@@ -352,9 +490,12 @@ def test_the_surplus_remedy_is_one_that_actually_clears_the_surplus(tmp_path: Pa
     # has lapsed and charges an attempt. The message deliberately claims nothing beyond that: two
     # earlier drafts asserted a downstream cleanup path the source contradicted, so the scope of
     # what it promises is itself the thing under test.
-    assert "another worker reclaims it once its lease" in surplus.stderr, (
-        f"the consequence of kill -9 and what recovers it must be stated: {surplus.stderr}"
-    )
+    # The clause spans the message's line wrap, so compare against a whitespace-normalized copy:
+    # the assertion is that the sentence is present and in order, not that the wrap falls anywhere
+    # in particular. Pinning the wrap point makes an unrelated rewording redden this for no reason.
+    assert "another worker reclaims each one once its lease lapses" in " ".join(
+        surplus.stderr.split()
+    ), f"the consequence of kill -9 and what recovers it must be stated: {surplus.stderr}"
     # The pid list is every worker sharing this interpreter, not only the survivor — telling the
     # operator otherwise sends them to kill -9 a set the prose has mislabelled.
     assert "INCLUDING the ones this run started" in surplus.stderr, surplus.stderr

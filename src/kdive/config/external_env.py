@@ -484,7 +484,9 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "`scripts/live-stack/lib.sh` starts. A worker runs one job at a time, so this is the "
         "local stack's only job-concurrency knob; raise it to exercise cross-worker paths such "
         "as the rootfs fetch advisory lock. Each worker past the first gets its own aux health "
-        "port and log file.",
+        "port and log file. Values above 8 are refused at bring-up (`MAX_WORKER_COUNT` in "
+        "`scripts/live-stack/lib.sh`), because every worker is a root process with its own "
+        "database pool and aux port.",
     ),
     # Host-published ports for the compose backends. Each is read by BOTH `docker-compose.yml`
     # (the publish side) and `scripts/live-stack/env.sh` (the client-facing DSN/endpoint), so an
