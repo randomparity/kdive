@@ -11,13 +11,14 @@ image:
 3. Under the project advisory lock, enforce the per-project count/bytes quota fail-closed and
    commit a ``pending`` row reserving this upload's bytes. A denial is audited and raises before
    any write.
-4. Release the lock, then write the object and flip the row to ``registered`` — the shared
-   row-first publish steps with ``visibility='private'`` and ``owner=project``, no second
-   implementation.
+4. Release the PROJECT lock, then take the row-scoped IMAGE_PUBLISH session fence across the object
+   write, registration flip, and audit — the shared row-first publish steps with
+   ``visibility='private'`` and ``owner=project``, no second implementation.
 
-The lock is held across the reservation only, never across the object-store write (ADR-0520): the
-committed ``pending`` row *is* the quota claim, so a concurrent upload sees it in the aggregate
-without the lock spanning a multi-GiB PUT.
+The PROJECT lock is held across the reservation only, never across the object-store write
+(ADR-0520): the committed ``pending`` row *is* the quota claim, so a concurrent upload sees it in
+the aggregate without the project-wide lock spanning a multi-GiB PUT. The row-scoped IMAGE_PUBLISH
+session lock remains held through the PUT, registration flip, and audit (ADR-0526).
 
 The owner of the registered image is the **project**; the uploading ``principal`` is recorded only
 for audit attribution.
@@ -108,13 +109,13 @@ def _clamp_expiry(expires_at: datetime, *, now: datetime) -> datetime:
 async def _project_usage(
     conn: AsyncConnection, project: str, *, adopting: PublishRequest | None
 ) -> tuple[int, int]:
-    """Return the project's live private image count and reserved bytes, under the held lock.
+    """Return the project's live private image count and reserved bytes, under the PROJECT lock.
 
     One aggregate over the ``pending`` + ``registered`` private rows owned by ``project``: their
     count, and the sum of the ``size_bytes`` each recorded when its row was reserved (ADR-0520).
     No object-store round trip — the earlier implementation HEADed every row's object, which cost
-    one network call per image and had to happen inside the lock. Reading committed state instead
-    is what lets the lock span the reservation alone.
+    one network call per image and had to happen inside the PROJECT lock. Reading committed state
+    instead is what lets that project-wide lock span the reservation alone.
 
     A ``pending`` row counts its full reserved size even though its object is not written yet;
     that is the point of the reservation. An abandoned one is released by the reconciler's
@@ -216,8 +217,9 @@ async def _reject_oversize_upload(store: UploadObjectStore, quarantine_key: str)
 
     HEADs the quarantined object (cheap — no body read) and rejects a single object larger than
     ``IMAGE_PRIVATE_MAX_BYTES`` up front, so the service never reads a multi-GiB body into memory
-    only to deny it under the lock. The authoritative cap (current usage + this upload) is still
-    enforced under the project lock; this is the pre-buffer DoS bound, not a replacement for it.
+    only to deny it under the PROJECT lock. The authoritative cap (current usage + this upload) is
+    still enforced under that project-wide lock; this is the pre-buffer DoS bound, not a
+    replacement for it.
 
     Raises:
         CategorizedError: ``QUOTA_EXCEEDED`` if the object alone exceeds the per-project bytes cap;
@@ -249,13 +251,14 @@ async def register_private_upload(
     """Register a quarantined upload as a project-private catalog image, quota-reserved.
 
     Takes the PROJECT advisory lock across the quota check and the ``pending``-row reservation
-    only, then publishes with the lock released (ADR-0520). The cap stays fail-closed because the
-    reservation commits inside the lock: two concurrent uploads cannot both pass it, since the
-    second one's usage read sees the first one's committed claim. The quarantined object is
-    validated against the guest contract *before* any reservation or write, so a non-conforming
-    image is rejected while still quarantined (never registered). The durable writes go through
-    the shared publish steps (``visibility='private'``, ``owner=project``); the uploading
-    ``principal`` is recorded only for audit attribution.
+    only, then publishes with that project-wide lock released (ADR-0520). The row-scoped
+    IMAGE_PUBLISH session lock remains held through PUT, registration, and audit (ADR-0526). The cap
+    stays fail-closed because the reservation commits inside the PROJECT lock: two concurrent
+    uploads cannot both pass it, since the second one's usage read sees the first one's committed
+    claim. The quarantined object is validated against the guest contract *before* any reservation
+    or write, so a non-conforming image is rejected while still quarantined (never registered).
+    The durable writes go through the shared publish steps (``visibility='private'``,
+    ``owner=project``); the uploading ``principal`` is recorded only for audit attribution.
 
     Args:
         conn: An async Postgres connection with **no transaction open** — this function opens its
@@ -341,7 +344,8 @@ async def _reserve_under_quota(
     The lock spans exactly this: one aggregate read of the project's live private rows, the cap
     decision, and the ``pending`` row that claims ``new_bytes``. It holds no object-store call and
     no unbounded loop, and it is released by the ``return`` committing the transaction — which is
-    what lets the caller run the PUT unlocked (ADR-0520).
+    what lets the caller run the PUT without the PROJECT or any transaction-scoped lock. The
+    caller separately holds the row-scoped IMAGE_PUBLISH session lock (ADR-0520, ADR-0526).
 
     The transaction must be a real one and not a savepoint: releasing a savepoint commits neither
     the reservation nor the lock, so the claim would be invisible to a concurrent upload *and* the
@@ -377,12 +381,14 @@ async def _publish_under_quota(
     principal: str,
     new_bytes: int,
 ) -> ImageCatalogEntry:
-    """Reserve the quota under the PROJECT lock, then publish with the lock released.
+    """Reserve quota under the PROJECT lock, then publish under the row-scoped session fence.
 
-    The three phases are deliberately separate transactions (ADR-0520): the locked reservation,
-    the object write with nothing held, and the registration flip composed with its audit row. The
-    cap stays fail-closed because the reservation commits inside the lock — a concurrent upload's
-    aggregate read sees the claim — rather than because the lock spans the multi-GiB PUT.
+    The three phases are deliberately separated (ADR-0520, ADR-0526): the PROJECT-locked
+    reservation transaction; the object write with no PROJECT or transaction-scoped lock, but with
+    the IMAGE_PUBLISH session lock held; and the registration flip composed with its audit row
+    under that same session fence. The cap stays fail-closed because the reservation commits inside
+    the PROJECT lock — a concurrent upload's aggregate read sees the claim — rather than because
+    that project-wide lock spans the multi-GiB PUT.
 
     A PUT that fails or a worker that dies after the reservation commits leaves a ``pending`` row
     holding its bytes; the reconciler's ``repair_dangling_images`` releases it once its
