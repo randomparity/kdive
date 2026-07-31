@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,8 +20,10 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg.pq import TransactionStatus
 
 from kdive.artifacts import storage as artifact_types
+from kdive.db.locks import LockScope, _lock_key
 from kdive.db.repositories import IMAGE_CATALOG
 from kdive.domain.catalog.images import (
     Capability,
@@ -118,6 +121,25 @@ _PUBLIC_REQUEST = PublishRequest(
 
 async def _connect(url: str) -> psycopg.AsyncConnection:
     return await psycopg.AsyncConnection.connect(url, autocommit=True)
+
+
+async def _scoped_lock_held_by(
+    url: str, backend_pid: int, scope: LockScope, key_value: str
+) -> bool:
+    key = _lock_key(scope, key_value)
+    unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
+    classid = (unsigned >> 32) & 0xFFFF_FFFF
+    objid = unsigned & 0xFFFF_FFFF
+    async with await _connect(url) as probe, probe.cursor() as cur:
+        await cur.execute(
+            "SELECT EXISTS ("
+            "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND pid = %s "
+            "AND classid = %s AND objid = %s AND objsubid = 1 AND granted)",
+            (backend_pid, classid, objid),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return bool(row[0])
 
 
 def _qcow2_source(tmp_path: Path) -> Path:
@@ -259,6 +281,102 @@ def test_publish_rejects_malformed_digest_before_reservation(
                 )
             assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
             assert await IMAGE_CATALOG.list_all(conn) == []
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "changed_field",
+    ("row", "publication_attempt_id", "state", "object_key", "digest", "size_bytes"),
+)
+def test_publication_fence_revalidates_complete_reservation_before_write(
+    migrated_url: str, changed_field: str
+) -> None:
+    async def _run() -> None:
+        from kdive.services.images.publication_fence import publication_fence
+
+        async with await _connect(migrated_url) as conn:
+            reservation = await reserve_publish(conn, _PUBLIC_REQUEST, size_bytes=len(_QCOW2))
+            if changed_field == "row":
+                await conn.execute("DELETE FROM image_catalog WHERE id = %s", (reservation.row_id,))
+            elif changed_field == "state":
+                await conn.execute(
+                    "UPDATE image_catalog SET state = 'registered', "
+                    "publication_attempt_id = NULL, publication_principal = NULL WHERE id = %s",
+                    (reservation.row_id,),
+                )
+            elif changed_field == "publication_attempt_id":
+                await conn.execute(
+                    "UPDATE image_catalog SET publication_attempt_id = %s WHERE id = %s",
+                    (uuid4(), reservation.row_id),
+                )
+            elif changed_field == "object_key":
+                await conn.execute(
+                    "UPDATE image_catalog SET object_key = %s WHERE id = %s",
+                    (reservation.object_key + ".new", reservation.row_id),
+                )
+            elif changed_field == "digest":
+                await conn.execute(
+                    "UPDATE image_catalog SET digest = %s WHERE id = %s",
+                    ("sha256:" + "0" * 64, reservation.row_id),
+                )
+            else:
+                await conn.execute(
+                    "UPDATE image_catalog SET size_bytes = size_bytes + 1 WHERE id = %s",
+                    (reservation.row_id,),
+                )
+
+            reached_write = False
+            with pytest.raises(CategorizedError) as err:
+                async with publication_fence(conn, reservation):
+                    reached_write = True
+            assert err.value.category is ErrorCategory.CONFLICT
+            assert not reached_write
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("autocommit", (True, False), ids=("worker", "pooled"))
+def test_publication_fence_enters_put_transaction_idle_and_holds_only_image_lock(
+    migrated_url: str, tmp_path: Path, *, autocommit: bool
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _BlockingStore(_FakeStore):
+        def put_artifact(
+            self, request: artifact_types.ArtifactWriteRequest
+        ) -> artifact_types.StoredArtifact:
+            entered.set()
+            if not release.wait(timeout=10):
+                raise AssertionError("test did not release blocked publication")
+            return super().put_artifact(request)
+
+    source = _qcow2_source(tmp_path)
+
+    async def _run() -> None:
+        store = _BlockingStore()
+        conn = await psycopg.AsyncConnection.connect(migrated_url, autocommit=autocommit)
+        task = asyncio.create_task(
+            publish_image(conn, store, request=_PUBLIC_REQUEST, source=source)
+        )
+        try:
+            assert await asyncio.to_thread(entered.wait, 10)
+            async with await _connect(migrated_url) as observer:
+                row = (await IMAGE_CATALOG.list_all(observer))[0]
+            assert conn.info.transaction_status is TransactionStatus.IDLE
+            assert await _scoped_lock_held_by(
+                migrated_url, conn.info.backend_pid, LockScope.IMAGE_PUBLISH, str(row.id)
+            )
+            assert not await _scoped_lock_held_by(
+                migrated_url, conn.info.backend_pid, LockScope.PROJECT, "proj"
+            )
+        finally:
+            release.set()
+        entry = await task
+        assert entry.state is ImageState.REGISTERED
+        assert conn.autocommit is autocommit
+        await conn.close()
 
     asyncio.run(_run())
 

@@ -16,6 +16,7 @@ from kdive.db.locks import (
     _session_lock_key,
     advisory_xact_lock,
     session_advisory_lock_held,
+    try_advisory_xact_lock,
 )
 from tests.db import conftest as db_conftest
 from tests.db_waits import wait_until_backend_waiting, wait_until_session_lock_released
@@ -143,6 +144,27 @@ def test_project_lock_does_not_block_distinct_projects(postgres_url: str) -> Non
                     return "acquired"
 
             assert await asyncio.wait_for(acquire_b(), timeout=5) == "acquired"
+
+    asyncio.run(_run())
+
+
+def test_image_publish_session_lock_contends_with_xact_try_lock(postgres_url: str) -> None:
+    """Publisher session and reconciler xact forms contend on the exact same key."""
+
+    async def _run() -> None:
+        from kdive.db.locks import scoped_session_advisory_lock
+
+        async with (
+            await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as publisher,
+            await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as reconciler,
+        ):
+            async with (
+                scoped_session_advisory_lock(publisher, LockScope.IMAGE_PUBLISH, _KEY),
+                reconciler.transaction(),
+            ):
+                assert not await try_advisory_xact_lock(reconciler, LockScope.IMAGE_PUBLISH, _KEY)
+            async with reconciler.transaction():
+                assert await try_advisory_xact_lock(reconciler, LockScope.IMAGE_PUBLISH, _KEY)
 
     asyncio.run(_run())
 

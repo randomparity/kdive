@@ -66,3 +66,8 @@ def test_lock_key_wire_format_is_stable() -> None:
     fixed_uuid = UUID("12345678-1234-5678-1234-567812345678")
     assert _lock_key(LockScope.ALLOCATION, fixed_uuid) == 3739314786859465954
     assert _lock_key(LockScope.PROJECT, "demo") == 6290104168325931531
+
+
+def test_image_publish_lock_key_wire_format_is_stable() -> None:
+    fixed_uuid = UUID("12345678-1234-5678-1234-567812345678")
+    assert _lock_key(LockScope.IMAGE_PUBLISH, fixed_uuid) == -1342061123942873837
