@@ -484,6 +484,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reserve upload quota on the row, unlock before the PUT
 - Refresh the adopted row's digest; disclose the reclaim gaps
 - Fence the registration flip on the reservation, not the row id
+- Clamp over-serving ranged reads
 
 ### Build
 
