@@ -363,7 +363,7 @@ def test_reserved_pending_row_occupies_quota_before_its_object_exists(
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             reservation = await reserve_publish(
-                conn, _publish_request(name="reserved"), size_bytes=4096
+                conn, _publish_request(name="reserved"), size_bytes=4096, principal="alice"
             )
             # Nothing was written to the store, and the row is `pending`, not `registered`.
             assert store.puts == []

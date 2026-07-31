@@ -174,9 +174,8 @@ def image_object_key(request: PublishRequest, attempt_id: UUID | None = None) ->
 def kernel_config_object_key(request: PublishRequest, attempt_id: UUID | None = None) -> str:
     """The object-store key for the image's ``/boot/config-<ver>`` sibling of the qcow2 (ADR-0317).
 
-    Same tenant/owner scoping as :func:`image_object_key`; the ``.config`` suffix distinguishes it
-    from the ``{arch}.qcow2`` object. Persisted on the row's ``kernel_config_key`` when a config is
-    offered, ``None`` otherwise. Delegates to :func:`config_object_key` (the single key source).
+    With an ``attempt_id``, this is the attempt-specific publish sibling of the qcow2. Without one,
+    it retains the deterministic staged/inventory config key from :func:`config_object_key`.
     """
     if attempt_id is not None:
         return _write_request(request, b"", suffix="config", attempt_id=attempt_id).key()
@@ -455,6 +454,8 @@ async def reserve_publish(
     Returns:
         The :class:`PublishReservation` naming the committed row and its object keys.
     """
+    if request.visibility is ImageVisibility.PRIVATE and principal is None:
+        raise ValueError("private image reservation requires a principal")
     publication_attempt_id = uuid4()
     object_key = image_object_key(request, publication_attempt_id)
     config_key = (
@@ -545,7 +546,12 @@ async def finish_publish(
 
 
 async def publish_image(
-    conn: AsyncConnection, store: ImageObjectStore, *, request: PublishRequest, source: Path
+    conn: AsyncConnection,
+    store: ImageObjectStore,
+    *,
+    request: PublishRequest,
+    source: Path,
+    principal: str | None = None,
 ) -> ImageCatalogEntry:
     """Row-first two-write publish: pending row → object → HEAD-gate → ``registered``.
 
@@ -557,7 +563,7 @@ async def publish_image(
     for different owners, intentionally do not adopt each other. Realizing a seeded ``defined``
     baseline is this same path.
 
-    When ``request.kernel_config`` is present its deterministic ``{arch}.config`` key is set on the
+    When ``request.kernel_config`` is present its attempt-specific config key is set on the
     ``pending`` row before any object is written (so the leaked-sweep protects it the instant the
     row exists, ADR-0317), and the config object is written **best-effort** after the qcow2
     HEAD-gate: a config write/HEAD failure degrades to a registered image with ``kernel_config_key``
@@ -569,6 +575,7 @@ async def publish_image(
         store: The image object store.
         request: The image identity, layout, digest, and scope.
         source: The local path to the built qcow2 to publish.
+        principal: Required to reserve a private image; persisted only while the row is pending.
 
     Returns:
         The persisted ``registered`` :class:`ImageCatalogEntry`.
@@ -580,6 +587,6 @@ async def publish_image(
             ``pending`` for the reconciler to recover).
     """
     stat = await asyncio.to_thread(source.stat)
-    reservation = await reserve_publish(conn, request, size_bytes=stat.st_size)
+    reservation = await reserve_publish(conn, request, size_bytes=stat.st_size, principal=principal)
     config_written = await write_publish_object(store, reservation, source)
     return await finish_publish(conn, reservation, config_written=config_written)

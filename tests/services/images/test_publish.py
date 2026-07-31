@@ -268,6 +268,22 @@ def test_private_adoption_replaces_persisted_publication_principal(migrated_url:
     asyncio.run(_run())
 
 
+def test_private_reservation_requires_a_principal(migrated_url: str) -> None:
+    request = replace(
+        _PUBLIC_REQUEST,
+        visibility=ImageVisibility.PRIVATE,
+        owner="proj",
+        expires_at=_DT + timedelta(days=1),
+    )
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            with pytest.raises(ValueError, match="private image reservation requires a principal"):
+                await reserve_publish(conn, request, size_bytes=len(_QCOW2))
+
+    asyncio.run(_run())
+
+
 def test_registration_clears_publication_attempt_and_principal(
     migrated_url: str, tmp_path: Path
 ) -> None:
@@ -459,6 +475,7 @@ def test_two_owners_same_identity_do_not_collide(migrated_url: str, tmp_path: Pa
                     expires_at=expires,
                 ),
                 source=source,
+                principal="alice",
             )
             b = await publish_image(
                 conn,
@@ -470,6 +487,7 @@ def test_two_owners_same_identity_do_not_collide(migrated_url: str, tmp_path: Pa
                     expires_at=expires,
                 ),
                 source=source,
+                principal="bob",
             )
             assert a.id != b.id
             assert a.object_key != b.object_key
@@ -506,6 +524,7 @@ def test_public_publish_does_not_adopt_a_private_pending(migrated_url: str, tmp_
                         expires_at=expires,
                     ),
                     source=source,
+                    principal="alice",
                 )
             private_pending = (await IMAGE_CATALOG.list_all(conn))[0]
 
@@ -539,6 +558,7 @@ def test_private_publish_records_owner_and_expiry(migrated_url: str, tmp_path: P
                     expires_at=expires,
                 ),
                 source=source,
+                principal="alice",
             )
             assert entry.visibility is ImageVisibility.PRIVATE
             assert entry.owner == "proj"

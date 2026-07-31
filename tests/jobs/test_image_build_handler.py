@@ -12,8 +12,10 @@ import hashlib
 import threading
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import psycopg
 import pytest
@@ -69,12 +71,19 @@ class _FakePlane:
 
 
 class _FakeStore:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_put: bool = False) -> None:
         self._objects: dict[str, bytes] = {}
+        self._fail_put = fail_put
 
     def put_artifact(
         self, request: artifact_types.ArtifactWriteRequest
     ) -> artifact_types.StoredArtifact:
+        if self._fail_put:
+            raise CategorizedError(
+                "object store unavailable",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={},
+            )
         self._objects[request.key()] = request.data
         return artifact_types.StoredArtifact(
             request.key(),
@@ -243,9 +252,51 @@ def test_handler_resolves_build_plane_from_provider_runtime(
                 conn, job, resolver=resolver, store=store, inspect=_all_present
             )
 
-            assert ref == "images/local-libvirt/fedora-kdive-ready-43/x86_64.qcow2"
+            prefix = "images/local-libvirt/fedora-kdive-ready-43/x86_64."
+            assert ref.startswith(prefix)
+            assert ref.endswith(".qcow2")
+            assert str(UUID(ref.removeprefix(prefix).removesuffix(".qcow2"))) == ref.removeprefix(
+                prefix
+            ).removesuffix(".qcow2")
             assert plane.spec is not None
             assert plane.spec.provider == ResourceKind.LOCAL_LIBVIRT.value
+
+    asyncio.run(_run())
+
+
+def test_private_handler_persists_authorizing_principal_after_failed_publish(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    plane = _FakePlane(tmp_path)
+    store = _FakeStore(fail_put=True)
+    authorizing = Authorizing(principal="alice", agent_session=None, project="private-project")
+
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            job = await queue.enqueue(
+                conn,
+                JobKind.IMAGE_BUILD,
+                _payload(
+                    visibility="private",
+                    owner="private-project",
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                ),
+                authorizing,
+                "dedup-private-principal",
+            )
+            with pytest.raises(CategorizedError) as err:
+                await image_build_handler(
+                    conn,
+                    job,
+                    resolver=_resolver_with_plane(plane),
+                    store=store,
+                    inspect=_all_present,
+                )
+            assert err.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+            rows = await IMAGE_CATALOG.list_all(conn)
+            assert len(rows) == 1
+            assert rows[0].state is ImageState.PENDING
+            assert rows[0].publication_principal == "alice"
 
     asyncio.run(_run())
 
