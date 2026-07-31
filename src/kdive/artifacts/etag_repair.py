@@ -10,11 +10,15 @@ landed *first* can still be the last to take the lock, and if it wrote its own e
 replace a correct row value with a stale one — introducing the very drift the repair exists to
 remove. Only the store knows what the object holds, so this asks it.
 
-That makes the repair convergent rather than merely last-writer-wins: every value it writes was
-observed on the object, so concurrent repairs cannot move a row further from the truth, only
-closer. It is not atomic — a PUT landing between the stat and the update leaves the row stale
-again — and it deliberately runs outside the caller's lock, because a stat is object-store I/O
-and keeping that out of a locked span is the whole point of ADR-0519.
+The guarantee that buys is bounded but real: every value this writes was true of the object when
+it was read. It is *not* a guarantee that the row ends up correct. The repair is not atomic, and
+concurrent repairs can still land out of order — stat A sees X, a PUT makes it Y, stat B sees Y,
+B's update commits, then A's commits and leaves the row at the stale X. A single repair racing a
+PUT goes stale the same way. What is excluded is a row being set to an etag no version of the
+object ever carried, which is what assuming the caller's own etag would do.
+
+It deliberately runs outside the caller's lock, because a stat is object-store I/O and keeping
+that out of a locked span is the whole point of ADR-0519.
 """
 
 from __future__ import annotations

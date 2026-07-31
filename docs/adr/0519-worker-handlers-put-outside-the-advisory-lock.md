@@ -70,8 +70,10 @@ attempt wrote, which is the obvious form and is wrong: which PUT landed last and
 reaches its locked phase last are independent orderings, so an attempt that wrote first and
 locked last would stamp its stale etag over a row another attempt had just set correctly —
 introducing the drift the repair exists to remove. Two concurrent attempts are enough to produce
-that. Writing an observed value makes the repair convergent: every value it writes was seen on
-the object, so concurrent repairs can only move a row toward the truth.
+that. Writing an observed value buys a bounded guarantee: every value the repair writes was true
+of the object when it was read. It does not guarantee the row ends up correct — see Consequences
+— but it excludes setting a row to an etag no version of the object ever carried, which is
+exactly what assuming the caller's own etag does.
 
 The repair runs **after** the locked phase, for two reasons. A stat is object-store I/O, which
 this ADR keeps out of a locked span. And `diagnostic_sysrq`'s phase 3 can end by raising
@@ -116,6 +118,13 @@ PUT loop for a bounded GET rather than moving both.
   the reclaim that would have swept it is row-driven and has already run. `console_rotate` leaks
   one object per part it had in flight, not one in total. The warning log names each key because
   it is the only record that will ever exist.
+- The etag repair is fenced but not atomic either, and it can still leave a row stale. Its stat
+  and its update are separate round-trips, so a PUT landing between them leaves the row
+  describing the previous bytes; and two concurrent repairs can commit out of order — stat A
+  observes X, a PUT makes the object Y, stat B observes Y, B's update commits, then A's commits
+  and puts the row back to X. The repair therefore narrows the drift rather than eliminating it.
+  It is worth having because the alternative is not "no drift" but "drift plus a row that names
+  bytes the object never held at all", and because nothing in the tree detects either.
 - The compensating delete is fenced but not atomic. Its two fences leave a window of one store
   round-trip in which a peer can commit a row, and two attempts that write byte-identical content
   are indistinguishable by etag. Whether that window is reachable at all is a per-site property:
