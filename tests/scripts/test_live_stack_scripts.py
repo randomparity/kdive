@@ -184,6 +184,33 @@ def test_configured_worker_count_rejects_an_int64_wrapping_value() -> None:
         assert not result.stdout, f"a refused count must print nothing, got {result.stdout!r}"
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="the self-owned arm needs a non-root caller")
+def test_surplus_worker_remedy_drops_sudo_for_self_owned_workers() -> None:
+    """The prescribed kill must mirror stop_daemons' ownership test, not hardcode `sudo` (#1739).
+
+    Under `KDIVE_WORKER_AS_ROOT=0` the workers are the operator's own processes, so a `sudo kill`
+    is wrong — and on a host where the operator is already root with no sudo installed it is not
+    even runnable. Stand in two self-owned processes for the worker scan and drive the surplus
+    branch: the remedy it prints must be a bare `kill -9` naming both pids.
+    """
+    result = _lib(
+        "sleep 30 & first=$!\n"
+        "sleep 30 & second=$!\n"
+        'worker_pids() { echo "$first"; echo "$second"; }\n'
+        "require_workers_alive 1\n"
+        "status=$?\n"
+        'kill "$first" "$second" 2>/dev/null\n'
+        'echo "PIDS=$first,$second"\n'
+        "exit $status"
+    )
+    assert result.returncode != 0, "two live workers against a want of 1 is a surplus"
+    first, second = result.stdout.split("PIDS=")[1].strip().split(",")
+    assert f"\n    kill -9 {first} {second}\n" in result.stderr, (
+        f"self-owned workers must be killed without sudo: {result.stderr}"
+    )
+    assert "sudo kill" not in result.stderr, f"sudo must not be prescribed here: {result.stderr}"
+
+
 def test_the_worker_count_ceiling_is_documented_where_operators_read_it() -> None:
     """The documented bound must track MAX_WORKER_COUNT rather than drift from it (#1739).
 
