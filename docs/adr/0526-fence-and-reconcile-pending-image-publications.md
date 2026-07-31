@@ -89,11 +89,15 @@ the registered row normally. This narrowly supersedes ADR-0093's all-private-row
 prevents the TTL path from bypassing the publication fence.
 
 Config inventory also yields runtime ownership while a config-managed row is `pending`. Its update
-may still change config-owned fields, but a database-state predicate preserves `object_key`,
-`kernel_config_key`, `digest`, `size_bytes`, publication fields, and `state` even when inventory
-loaded a stale pre-reservation snapshot. Its prune path re-reads under row lock and skips `pending`.
-Publication recovery removes a failed attempt; after successful registration, a later inventory
-pass may update or prune the row normally. This narrowly refines ADR-0112's config ownership.
+may still change config-owned fields independently, but runtime realization fields use a two-sided
+compare-and-swap. They update only when the loaded snapshot was not `pending` and the database row's
+current `(state, publication_attempt_id)` still equals that snapshot. A miss preserves
+`object_key`, `kernel_config_key`, `digest`, `size_bytes`, publication fields, and `state`; the next
+inventory pass re-reads and recomputes. This protects both a reservation committed after inventory
+loaded `defined` and a registration committed after inventory loaded `pending`. Prune re-reads under
+row lock and skips `pending`. Publication recovery removes a failed attempt; after successful
+registration, a later inventory pass may update or prune the row normally. This narrowly refines
+ADR-0112's config ownership.
 
 Store errors abort the candidate transaction and preserve the row for a later pass. If deletion
 returns but the follow-up HEAD still sees the object, the row is also preserved. A crash after
