@@ -3,8 +3,10 @@
 ``encoding`` is a *transport wrapper* on an agent upload, semantically distinct from the payload
 format: the stored object may be a gzip stream whose gunzip yields the *canonical object*, on which
 the existing per-artifact format validation runs. This module owns the codec vocabulary and the
-consumer-agnostic decode utility; the declaration validator imports the codec constants and a future
-consumer (rootfs, #1510) imports :func:`strip_gzip_to_writer`. No consumer is wired here.
+consumer-agnostic decode utility; the declaration validator imports the codec constants, and
+:func:`strip_gzip_to_writer` has exactly one production consumer — the local-libvirt
+uploaded-rootfs fetch's ``_stage_gzip`` (#1510), which annotates its errors on the way out rather
+than this module growing a consumer-specific field (ADR-0445 §4).
 """
 
 from __future__ import annotations
