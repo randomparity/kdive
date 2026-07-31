@@ -28,9 +28,10 @@ lock across the reservation only and releases it before the PUT (ADR-0520, #1726
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -329,17 +330,40 @@ def _verify_source_digest(data: bytes, digest: str) -> None:
         )
 
 
+def _digest_error(digest: str) -> CategorizedError:
+    return CategorizedError(
+        "image digest must be sha256:<64 hexadecimal digits>",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"digest": digest},
+    )
+
+
+def digest_sha256_b64(digest: str) -> str:
+    """Convert a strict ``sha256:<hex>`` digest to canonical padded base64."""
+    algorithm, separator, value = digest.partition(":")
+    if algorithm != "sha256" or separator != ":" or len(value) != 64:
+        raise _digest_error(digest)
+    try:
+        raw = bytes.fromhex(value)
+    except ValueError as err:
+        raise _digest_error(digest) from err
+    if len(raw) != 32:
+        raise _digest_error(digest)
+    return base64.b64encode(raw).decode("ascii")
+
+
 async def _write_object(
     store: ImageObjectStore, reservation: PublishReservation, data: bytes
 ) -> None:
+    write = _write_request(
+        reservation.request,
+        data,
+        suffix="qcow2",
+        attempt_id=reservation.publication_attempt_id,
+    )
     await asyncio.to_thread(
         store.put_artifact,
-        _write_request(
-            reservation.request,
-            data,
-            suffix="qcow2",
-            attempt_id=reservation.publication_attempt_id,
-        ),
+        replace(write, sha256_b64=digest_sha256_b64(reservation.request.digest)),
     )
 
 
@@ -456,6 +480,7 @@ async def reserve_publish(
     """
     if request.visibility is ImageVisibility.PRIVATE and principal is None:
         raise ValueError("private image reservation requires a principal")
+    digest_sha256_b64(request.digest)
     publication_attempt_id = uuid4()
     object_key = image_object_key(request, publication_attempt_id)
     config_key = (
@@ -512,6 +537,14 @@ async def write_publish_object(
     if head is None:
         raise CategorizedError(
             "published image object is not present after write (HEAD gate failed)",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"object_key": reservation.object_key},
+        )
+    checksum = digest_sha256_b64(request.digest)
+    if head.size_bytes != len(data) or head.checksum_sha256 != checksum:
+        raise CategorizedError(
+            "published image object does not match its declared size and checksum "
+            "after write (HEAD gate failed)",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"object_key": reservation.object_key},
         )

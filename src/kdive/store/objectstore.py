@@ -243,13 +243,16 @@ class ObjectStore:
         }
         if request.content_encoding is not None:
             metadata["content-encoding"] = request.content_encoding
+        put_kwargs: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": key,
+            "Body": request.data,
+            "Metadata": metadata,
+        }
+        if request.sha256_b64 is not None:
+            put_kwargs["ChecksumSHA256"] = request.sha256_b64
         try:
-            resp = self._client.put_object(
-                Bucket=self._bucket,
-                Key=key,
-                Body=request.data,
-                Metadata=metadata,
-            )
+            resp = self._client.put_object(**put_kwargs)
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("put_object", key, err) from err
         reply = _StoreReply("put_object", self._bucket, key, resp)

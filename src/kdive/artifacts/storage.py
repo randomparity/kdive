@@ -95,6 +95,7 @@ class ArtifactWriteRequest:
     sensitivity: Sensitivity
     retention_class: str
     content_encoding: str | None = None
+    sha256_b64: str | None = None
 
     def key(self) -> str:
         return artifact_key(self.tenant, self.owner_kind, self.owner_id, self.name)
