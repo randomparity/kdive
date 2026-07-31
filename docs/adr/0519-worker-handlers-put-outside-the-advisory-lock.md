@@ -61,11 +61,22 @@ retry to the existing row before anything is written.
 Phase 1 narrows that window; it does not close it. Two attempts of one job can run *concurrently*
 — `jobs/worker.py` rejects a heartbeat interval that "risks mid-job reclaim and double-run",
 naming the double-run it cannot rule out — and both can pass phase 1 before either writes.
-Whichever PUT lands last leaves the other's committed row describing bytes that are gone, which
-`jobs/handlers/artifacts/vmcore.py` treats as a job-failing corruption. So phase 3 also
-**repairs**: when this attempt wrote and then found a peer's row, it refreshes that row's `etag`
-to what the object now holds. `jobs/handlers/runs/boot_evidence.py` already makes exactly this
-repair for the per-Run console artifact; this adopts it rather than inventing one.
+Whichever PUT lands last leaves the other's committed row describing bytes that are gone. So when
+an attempt wrote and then found a peer's row, it **repairs** that row, in
+`kdive.artifacts.etag_repair.reconcile_row_etag`.
+
+The repair stats the object and writes the etag it *observes*. It must not write the etag this
+attempt wrote, which is the obvious form and is wrong: which PUT landed last and which attempt
+reaches its locked phase last are independent orderings, so an attempt that wrote first and
+locked last would stamp its stale etag over a row another attempt had just set correctly —
+introducing the drift the repair exists to remove. Two concurrent attempts are enough to produce
+that. Writing an observed value makes the repair convergent: every value it writes was seen on
+the object, so concurrent repairs can only move a row toward the truth.
+
+The repair runs **after** the locked phase, for two reasons. A stat is object-store I/O, which
+this ADR keeps out of a locked span. And `diagnostic_sysrq`'s phase 3 can end by raising
+`system_changed_state`; psycopg discards a transaction on any exception leaving its block, so a
+repair written inside that block would be rolled back on exactly the path that needed it.
 
 When phase 3 refuses to register — the job was canceled, or the System left its live state while
 the object was in flight — the handler deletes the objects this attempt wrote, through
@@ -74,10 +85,11 @@ the object was in flight — the handler deletes the objects this attempt wrote,
 Because the lock is released by then, the row probe phase 3 made is stale, and a delete decided
 on a stale probe is worse than the orphan it prevents: it would leave a committed row pointing at
 nothing, which a row-driven reclaim never detects. Each delete is therefore fenced twice,
-immediately before it: the row must still be absent (re-probed outside the lock), and the object
-must still carry the etag *this* attempt wrote. The delete is best-effort and logs at warning on
-failure, because the caller is already on an abort path whose own outcome is the result that
-matters.
+immediately before it: the object must still carry the etag *this* attempt wrote, and the row
+must still be absent (re-probed outside the lock). The row probe is the authoritative fence, so
+it runs second — nothing but the delete call itself sits between it and the delete. The delete is
+best-effort and logs at warning on failure, because the caller is already on an abort path whose
+own outcome is the result that matters.
 
 `console_rotate` keeps its sidecar GET under the lock **deliberately**. It is one small bounded
 read and it is the rotation cursor; moving it out would widen the window in which a peer rotation
@@ -150,6 +162,16 @@ PUT loop for a bounded GET rather than moving both.
   bug: that probe was taken under a lock this code has since released, so between it and the
   delete a peer attempt can register the key and the delete then strands a committed row. The
   fences exist because the probe and the delete are no longer in the same critical section.
+- **Repair the row to the etag this attempt wrote.** The form `boot_evidence.py` and
+  `remote_libvirt/console/snapshot.py` use, and sound there because each does its probe and its
+  write inside one critical section. Here the PUT is outside the lock, so an attempt can write
+  first and lock last; assuming its own etag then overwrites a correct row with a stale value.
+  The repair stats the object instead.
+- **Drop the repair and let a consumer detect the drift.** There is no such consumer.
+  `vmcore.py`'s etag check compares a stat against the `StoredArtifact` *it just wrote*, as a
+  pre-commit guard on its own capture; it never reads a committed `artifacts.etag`, and the
+  artifact read path conditions its GET on a freshly-stat'd etag rather than the row's. Dropping
+  the repair would leave the drift in place with nothing to notice it.
 - **Delete the object from inside phase 3's locked block.** Simpler control flow, and wrong for
   the reason this whole record exists — it puts object-store I/O back under the lock.
 - **Move `console_rotate`'s sidecar GET out of the lock too, for symmetry.** The cursor read is

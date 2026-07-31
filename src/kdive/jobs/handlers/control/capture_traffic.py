@@ -29,6 +29,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.artifacts.discard import discard_unregistered_objects
+from kdive.artifacts.etag_repair import reconcile_row_etag
 from kdive.artifacts.pcap_count import count_pcap_packets
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
@@ -64,8 +65,6 @@ POLL_INTERVAL_SECONDS = 0.5
 _ARTIFACT_ROW_SQL: LiteralString = (
     "SELECT id, etag FROM artifacts WHERE owner_kind = 'runs' AND owner_id = %s AND object_key = %s"
 )
-
-_REFRESH_ETAG_SQL: LiteralString = "UPDATE artifacts SET etag = %s WHERE id = %s"
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,10 +191,10 @@ async def _store_capture(
     the common case never overwrites the stored object out from under a committed row. It does
     not close the concurrent case: two attempts of one job can both pass phase 1 and both PUT
     (the lease can lapse mid-job, ``jobs/worker.py``), and whichever PUT lands last leaves the
-    other's row describing bytes the object no longer holds. Phase 3 repairs that by refreshing
-    the row's etag whenever this attempt wrote and found a peer's row — the same repair
-    ``jobs/handlers/runs/boot_evidence.py`` makes, and the drift ``handlers/artifacts/vmcore.py``
-    fails a job over.
+    other's row describing bytes the object no longer holds. When this attempt wrote and then
+    found a peer's row, :func:`~kdive.artifacts.etag_repair.reconcile_row_etag` stats the object
+    and re-points the row at what it actually holds — stats it rather than assuming this
+    attempt's own etag, because landing last in the store and last at the lock are independent.
     """
     name = f"pcap-{job.id}"
     object_key = artifact_key(_TENANT, _OWNER_KIND, str(run_id), name)
@@ -211,13 +210,7 @@ async def _store_capture(
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
         canceled = await _job_canceled(conn, job.id)
         existing = await _existing_artifact_row(conn, run_id, object_key)
-        if existing is not None:
-            # A peer attempt registered the key while this PUT was in flight, and this PUT then
-            # overwrote the object its row describes. Point the row at what the object holds.
-            if existing.etag != stored.etag:
-                await conn.execute(_REFRESH_ETAG_SQL, (stored.etag, existing.id))
-            return None if canceled else existing.id
-        if not canceled:
+        if existing is None and not canceled:
             artifact = register_artifact_row(
                 stored, owner_kind=_OWNER_KIND, owner_id=run_id, run_id=run_id
             )
@@ -235,6 +228,16 @@ async def _store_capture(
                 ),
             )
             return artifact.id
+    if existing is not None:
+        # A peer attempt registered the key while this PUT was in flight, so one of the two PUTs
+        # overwrote the object that row describes. Which one landed last is not knowable here —
+        # this attempt may have been first to write and last to take the lock — so the repair
+        # stats the object rather than assuming this attempt's etag. Outside the lock: it is
+        # store I/O.
+        await reconcile_row_etag(
+            conn, store, row_id=existing.id, object_key=object_key, row_etag=existing.etag
+        )
+        return None if canceled else existing.id
     # The cancel landed while the object was in flight. Reclaim is row-driven, so the object
     # would be a permanent orphan — delete it. ``JobState.CANCELED`` is terminal (state.py's
     # transition table gives it no successors), so unlike the SystemState guards this one cannot

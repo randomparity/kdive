@@ -29,6 +29,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.artifacts.discard import discard_unregistered_objects
+from kdive.artifacts.etag_repair import reconcile_row_etag
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -87,8 +88,6 @@ _PART_ROW_SQL: LiteralString = (
     "SELECT id, etag FROM artifacts "
     "WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
 )
-
-_REFRESH_ETAG_SQL: LiteralString = "UPDATE artifacts SET etag = %s WHERE id = %s"
 
 _SYSTEM_STATE_SQL: LiteralString = "SELECT state FROM systems WHERE id = %s"
 
@@ -245,17 +244,16 @@ async def _seal_pending(
     if not plan.pending:
         return True
     stored = [await asyncio.to_thread(_put_part, store, system_id, part) for part in plan.pending]
+    claimed: list[tuple[_ExistingRow, str]] = []
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         live = await _system_is_live(conn, system_id)
         if live:
             for obj in stored:
                 # Re-check under the lock: another rotation may have sealed this exact
                 # ``(gen, index)`` while the object was in flight, and its row owns the key.
-                # This attempt's PUT overwrote that object, so point the row at what is there.
                 existing = await _existing_part_row(conn, system_id, obj.key)
                 if existing is not None:
-                    if existing.etag != obj.etag:
-                        await conn.execute(_REFRESH_ETAG_SQL, (obj.etag, existing.id))
+                    claimed.append((existing, obj.key))
                     continue
                 await ARTIFACTS.insert(
                     conn,
@@ -263,6 +261,12 @@ async def _seal_pending(
                         obj, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=plan.run_id
                     ),
                 )
+    # A peer rotation owns these keys, and this attempt's PUT overwrote the objects its rows
+    # describe. Re-point each row at what its object actually holds — by stat, not by assuming
+    # this attempt's etag, since landing last in the store and last at the lock are independent.
+    # Outside the lock: each stat is a store round-trip, and there is one per claimed part.
+    for row, key in claimed:
+        await reconcile_row_etag(conn, store, row_id=row.id, object_key=key, row_etag=row.etag)
     if not live:
         _log.info(
             "system %s stopped being live while %d console part(s) were in flight; discarding "

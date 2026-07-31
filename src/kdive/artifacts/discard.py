@@ -41,13 +41,16 @@ async def discard_unregistered_objects(
     Call only after the caller's advisory lock has been released — the delete is object-store
     I/O, which is the very thing ADR-0519 keeps out of a locked span.
 
-    Two fences guard each delete, re-evaluated per key as late as possible:
+    Two fences guard each delete, evaluated per key as late as possible:
 
-    1. ``still_unregistered`` — the caller's own ``artifacts`` row probe, re-run *outside* the
+    1. The object still carries the etag this attempt wrote. A peer that replaced the bytes owns
+       what is there now, so deleting it would destroy another attempt's object.
+    2. ``still_unregistered`` — the caller's own ``artifacts`` row probe, re-run *outside* the
        lock. A row that appeared since the locked phase belongs to a peer attempt, and the
        object belongs to that row rather than to this attempt.
-    2. The object still carries the etag this attempt wrote. A peer that replaced the bytes owns
-       what is there now, so deleting it would destroy another attempt's object.
+
+    In that order: the row probe is the authoritative fence, so it goes last, leaving only the
+    delete call between it and the delete rather than a whole store round-trip.
 
     Neither fence is a proof: a peer can still commit its row inside the one store round-trip
     between the probe and the delete, and two attempts that write byte-identical content share
@@ -69,19 +72,21 @@ async def discard_unregistered_objects(
     """
     for obj in written:
         try:
-            if not await still_unregistered(obj.key):
-                _log.info(
-                    "object %s was registered by a peer attempt after the lock was released; "
-                    "leaving it to that row",
-                    obj.key,
-                )
-                continue
+            # The stat runs BEFORE the row probe so the probe is the last thing between the
+            # decision and the delete: nothing but the delete call itself sits in that gap.
             head = await asyncio.to_thread(store.head, obj.key)
             if head is None:
                 continue  # already gone; nothing left to reclaim
             if head.etag != obj.etag:
                 _log.info(
                     "object %s was replaced after this attempt wrote it; leaving it alone",
+                    obj.key,
+                )
+                continue
+            if not await still_unregistered(obj.key):
+                _log.info(
+                    "object %s was registered by a peer attempt after the lock was released; "
+                    "leaving it to that row",
                     obj.key,
                 )
                 continue
