@@ -304,6 +304,9 @@ def test_stage_checksum_mismatch_is_infra_error_on_every_encoding(
     # ADR-0445 the category no longer separates stored-object damage from routine infra noise;
     # this log line is what does, on both paths (same reasoning as the free-space warning above).
     assert "failed checksum verification while staging" in caplog.text
+    # A well-formed object whose hash simply differs has no decode diagnosis to carry, so the
+    # ADR-0523 clause must be absent rather than present-but-empty (or the string "None").
+    assert "the decode also failed" not in caplog.text
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
@@ -383,7 +386,13 @@ def test_stage_gzip_damaged_stored_bytes_report_the_identity_verdict(
     assert "transport checksum mismatch" in str(error.value)
     assert branch_message not in str(error.value)  # not the message that blamed the agent
     assert error.value.details["system_id"]
+    assert branch_message not in str(error.value.details)  # nor via the surfaceable details dict
     assert "failed checksum verification while staging" in caplog.text
+    # The decode's diagnosis is dropped from the agent's message but kept for the operator: every
+    # shape of gzip damage now lands on this one WARNING, so without it "corrupt deflate" and
+    # "blew the declared bound" -- different store failures -- would read identically.
+    assert branch_message in caplog.text
+    assert "the decode also failed" in caplog.text
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 

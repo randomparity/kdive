@@ -116,6 +116,20 @@ That follows the gate, and the gate moved: `_stage_gzip` keys the warning on
 on the gate rather than the category is what makes this free, and remains necessary — the store's
 own `get_range` faults propagate through the utility as `infrastructure_failure` too.
 
+What the line *says* has to widen with it. Routing every shape of gzip stored-byte damage onto one
+signal makes "truncated", "corrupt deflate", "trailing data" and "blew the declared bound" —
+materially different store failures — indistinguishable to the operator this log exists to serve,
+on exactly the condition §1 makes far more common. So the decode's diagnosis is carried to the log
+even though the agent no longer sees it: `strip_gzip_to_writer` raises the transport error `from`
+the `_ObjectDefect`, and `_stage_gzip` lifts it off `__cause__`. The chain, not `details` — a
+`CategorizedError`'s `details` may be surfaced in responses, and the remediation inside the carried
+text is the decode's, which is precisely the wrong advice for a rotted object. Absence of the
+clause is meaningful too: it says the object decoded cleanly and only the hash differed.
+
+This does not weaken §5's first paragraph. Absence of the *line* still means the digest agreed or
+verification never ran — a reusable staged base, the free-space precheck, the missing-checksum
+branch and a `get_range` fault all exit before a digest exists, on either path.
+
 ## Consequences
 
 - Damaged stored bytes under a gzip upload now report `retryable: true` with the transport
@@ -128,9 +142,17 @@ own `get_range` faults propagate through the utility as `infrastructure_failure`
   suppressed (§5). Operator-visible volume rises on exactly the condition the log exists to name.
 - The `zlib.error` and bomb paths issue additional ranged GETs — the tail the pass never read,
   bounded by `compressed_size` and hash-only. A stage that fails on the first range of a multi-GiB
-  object now reads the object through before reporting, where it used to fail immediately. That is
-  the price of the verdict; it is bounded by what a successful stage reads anyway, and it buys the
-  agent a truthful category rather than a re-upload of a multi-GiB object that was never wrong.
+  object now reads the object through before reporting, where it used to fail immediately. For a
+  merely corrupt object that is bounded by what a successful stage reads anyway. **For the bomb
+  branch it is not**, and that is the case worth naming: a bomb has no successful stage to compare
+  against, so an object that declares a small `uncompressed_size` and trips the cap after a few KiB
+  of output now costs a read of the whole stored object — up to the single-PUT ceiling the upload
+  path enforces — where it used to cost one range. The retryable verdict compounds it, since an
+  agent told to retry pays the read again. Accepted rather than mitigated: the alternatives are to
+  skip the drain on a size heuristic, which restores the codec-decides-the-verdict asymmetry §1
+  removes, or to keep reporting a terminal category for damage the agent did not cause. The read is
+  hash-only and hard-bounded, so what a hostile object buys is bandwidth on a failing provision, not
+  memory, disk, or an expanded bomb.
 - No schema change, no migration, no MCP tool-surface change. The only externally visible changes
   are the `retryable` boolean and the message text on the four branches, in the subset where the
   digest disagrees.

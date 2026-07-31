@@ -40,7 +40,7 @@ work is a seam change, not a reordering of three `if`s. See ADR-0523 §1–2.
 | Surface | Change |
 |---|---|
 | `artifacts/transport_encoding.py` | `_ObjectDefect` (private, never escapes) and `_DecodePass`; `strip_gzip_to_writer` compares the digest first; new `_decode_pass`, `_framing_defect`, `_hash_remaining`; `_drain` raises `_ObjectDefect` instead of `_object_error`. |
-| `providers/local_libvirt/.../rootfs_upload_fetch.py` | `_log_checksum_mismatch`'s reach paragraph only. The gate-keyed condition in `_stage_gzip` already covers the widened set (ADR-0523 §5), so no logic changes. |
+| `providers/local_libvirt/.../rootfs_upload_fetch.py` | `_log_checksum_mismatch` gains an optional `decode_detail`, which `_stage_gzip` lifts off the raised error's `__cause__` (ADR-0523 §5). The gate-keyed condition itself is unchanged — it already covers the widened set. |
 | `tests/artifacts/test_transport_encoding.py` | Exhaustive single-byte sweep; per-branch transport-verdict tests; per-branch digest-agrees tests; hash-only/tiling assertions. `_FakeRangedStore` gains `max_read`. |
 | `tests/providers/local_libvirt/test_rootfs_upload_fetch.py` | The residual test is inverted into `test_stage_gzip_damaged_stored_bytes_report_the_identity_verdict` plus its converse `test_stage_gzip_defective_upload_keeps_the_terminal_verdict`; `_flip_reaching` probes with the damaged object's own checksum. |
 | [ADR-0445](../adr/0445-reconcile-checksum-mismatch-error-category.md) | Append-only amendment: §7 closes §6's residual and points at ADR-0523. |
@@ -58,6 +58,7 @@ No schema, migration, MCP-surface, config or dependency change.
 | AC4 | The *converse* assertions carry this: a genuinely multi-member object, or a genuinely corrupt one, only keeps `CONFIGURATION_ERROR` if the unread tail reached the hasher. Delete `_hash_remaining` and the digest comes up short and those tests redden as a transport mismatch. |
 | The retired backstop (ADR-0523 §3) | `test_strip_gzip_boundary_aligned_trailing_member_is_still_rejected` constructs the case where `unused_data` is empty and the whole second member is unread — the only case in which `_framing_defect`'s `offset < compressed_size` clause is the sole guard — and asserts on the read pattern so it cannot pass on the other clause instead. |
 | AC6 | The staging tests assert on `caplog` in both directions: the WARNING fires for damaged stored bytes and does not fire for a defective upload. |
+| The decode diagnosis reaches the operator (ADR-0523 §5) | `test_stage_gzip_damaged_stored_bytes_report_the_identity_verdict` asserts the branch's own message is *absent* from the error and from `details`, and *present* in the WARNING behind "the decode also failed". The clean-hash test asserts that clause is absent when there was no decode failure to report. |
 
 Mutation-verified, `__pycache__` cleared between every run and the restored tree re-confirmed green
 (115 passed) at the end:
@@ -68,3 +69,4 @@ Mutation-verified, `__pycache__` cleared between every run and the restored tree
 | `_hash_remaining` made a no-op | 4 tests — every one of them a *converse* assertion, which is the point: an unhashed tail shows up as a false transport mismatch, not as a missing one |
 | A second full pass added to `_hash_remaining` | the tiling test, on both the read-length sum and the no-repeat check |
 | `_framing_defect`'s `offset < compressed_size` clause deleted | the boundary-aligned trailing-member test, and *only* it — the review pass that surfaced this found the pre-fix suite green under the same mutation |
+| The `from decoded.defect` chain dropped | both staging-seam parametrisations, on the carried-diagnosis assertion |
