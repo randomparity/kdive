@@ -1,10 +1,10 @@
-"""Image object-store key layout — the single source shared by publish, reconcile, stage-volume.
+"""Image object-store key layout for deterministic inventory/staged-image keys.
 
-The image tenant's object keys (``images/{provider}[__{owner}]/{name}/{arch}.{suffix}``) are
-computed here from plain identity fields so every writer/reader produces byte-identical keys without
-a service-layer :class:`~kdive.services.images.publish.PublishRequest`. Kept in the image layer so
-the inventory reconcile can import it without the layering inversion a ``kdive.services`` import
-would create (ADR-0336).
+The inventory and staged-image tenant keys (``images/{provider}[__{owner}]/{name}/{arch}.{suffix}``)
+are computed here from plain identity fields so readers and writers agree without a service-layer
+:class:`~kdive.services.images.publish.PublishRequest`. Publication uses
+:func:`publication_write_request` and includes its attempt UUID. Kept in the image layer so the
+inventory reconcile can import it without a ``kdive.services`` layering inversion (ADR-0336).
 """
 
 from __future__ import annotations
@@ -47,8 +47,8 @@ def object_write_request(
 
     The single source of the image object layout: the qcow2 (``suffix="qcow2"``) and its
     kernel-config sibling (``suffix="config"``) share the same tenant/owner-scoped prefix and
-    differ only in the object-name suffix, so a key computed from plain identity fields is
-    byte-identical to the key the publish write produced.
+    differ only in the object-name suffix. This deterministic layout is for inventory/staged-image
+    paths, not a publication attempt.
     """
     return artifact_types.ArtifactWriteRequest(
         tenant="images",
@@ -66,9 +66,9 @@ def config_object_key(
 ) -> str:
     """The object-store key for an image's ``/boot/config-<ver>`` sibling, from identity fields.
 
-    The single source of the ``.config`` key (ADR-0317/0336): reconcile and ``stage-volume``
-    compute it from a catalog row's identity, and get a key byte-identical to the one the publish
-    path writes and the fetch path presigns. Staged images are public, so their key omits the owner
+    The single source of the deterministic ``.config`` key (ADR-0317/0336): reconcile and
+    ``stage-volume`` compute it from a catalog row's identity. Publication uses an attempt-aware
+    sibling key instead. Staged images are public, so their key omits the owner
     segment: ``images/{provider}/{name}/{arch}.config``.
     """
     return object_write_request(

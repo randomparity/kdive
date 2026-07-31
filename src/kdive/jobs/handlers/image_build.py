@@ -89,7 +89,13 @@ async def image_build_handler(
         expires_at=payload.expires_at,
         kernel_config=output.kernel_config,
     )
-    entry = await publish_image(conn, store, request=request, source=output.qcow2_path)
+    entry = await publish_image(
+        conn,
+        store,
+        request=request,
+        source=output.qcow2_path,
+        principal=job.authorizing["principal"],
+    )
     if entry.object_key is None:  # Invariant: a registered row always carries its object key.
         raise RuntimeError(f"published image {entry.id} has no object_key")
     return entry.object_key
