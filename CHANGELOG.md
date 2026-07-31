@@ -271,6 +271,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct the merge-queue failure mode
 - Correct two overstated claims in the 0519 rationale
 - State the etag repair's real guarantee, not a stronger one
+- Annotate the superseded section by appending, not striking
 
 ### Fixed
 
@@ -478,6 +479,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release the advisory lock before the object-store write
 - Fence the compensating delete and repair etag drift
 - Repair a row's etag from a stat, not from an assumption
+- Reserve upload quota on the row, unlock before the PUT
+- Refresh the adopted row's digest; disclose the reclaim gaps
+- Fence the registration flip on the reservation, not the row id
 
 ### Build
 
