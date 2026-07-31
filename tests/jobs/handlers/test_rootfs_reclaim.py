@@ -1478,6 +1478,15 @@ def test_a_live_held_fetch_lease_pins_the_base_with_no_partial_yet(
         try:
             assert await _row_exists(check, artifact_id)  # the worklist anchor survives
             assert await _marker(check, inv) is not None
+            # ...and so does the lease itself. The reap runs in _finish_drained_investigation,
+            # AFTER this checksum deferred, so a reap looser than the gate would collect a row that
+            # is actively protecting a live download and unpin the base on the very next pass —
+            # with every other assertion above still green. This is where that shows.
+            leases = await check.execute(
+                "SELECT count(*) FROM rootfs_fetch_leases WHERE investigation_id = %s", (inv,)
+            )
+            held = await leases.fetchone()
+            assert held is not None and held[0] == 1, "the reap collected a live-held lease"
         finally:
             await check.close()
 
