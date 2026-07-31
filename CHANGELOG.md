@@ -269,6 +269,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tighten the amendment after review
 - Point the stale deferral sentence at the amendment
 - Correct the merge-queue failure mode
+- Correct two overstated claims in the 0519 rationale
+- State the etag repair's real guarantee, not a stronger one
 
 ### Fixed
 
@@ -473,6 +475,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consult the transport hash before declaring a gzip object defect
 - Keep the decode diagnosis when the drain hits a store fault
 - Report an empty ranged read as the store's failure to serve
+- Release the advisory lock before the object-store write
+- Fence the compensating delete and repair etag drift
+- Repair a row's etag from a stat, not from an assumption
 
 ### Build
 
