@@ -328,6 +328,7 @@ class FakeProvisioning:
         *,
         overlay_customizers: tuple[Any, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         self.provisioned.append(system_id)
         self.overlay_customizers.append(overlay_customizers)
@@ -352,6 +353,7 @@ class FakeProvisioning:
         *,
         overlay_customizers: tuple[Any, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         self.reprovisioned.append(system_id)
         self.overlay_customizers.append(overlay_customizers)

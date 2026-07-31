@@ -86,8 +86,9 @@ class _FailingProvisioner:
         *,
         overlay_customizers: Any = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
-        del system_id, profile, overlay_customizers, bootstrap_pubkey
+        del system_id, profile, overlay_customizers, bootstrap_pubkey, job_id
         raise CategorizedError(_REASON, category=ErrorCategory.CONFIGURATION_ERROR)
 
     def teardown(self, domain_name: str) -> None:

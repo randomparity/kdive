@@ -82,8 +82,9 @@ class _TrackingProvisioner:
         *,
         overlay_customizers: Any = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
-        del overlay_customizers, bootstrap_pubkey
+        del overlay_customizers, bootstrap_pubkey, job_id
         name = f"kdive-{system_id}"
         self.provisioned.append(system_id)
         self.live.add(name)
@@ -104,8 +105,9 @@ class _TrackingProvisioner:
         *,
         overlay_customizers: Any = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
-        del overlay_customizers, bootstrap_pubkey
+        del overlay_customizers, bootstrap_pubkey, job_id
         name = f"kdive-{system_id}"
         self.reprovisioned.append(system_id)
         self.live.add(name)
@@ -242,8 +244,9 @@ def test_provision_failure_marks_system_failed_and_raises_terminally(migrated_ur
             *,
             overlay_customizers: Any = (),
             bootstrap_pubkey: str | None = None,
+            job_id: UUID | None = None,
         ) -> str:
-            del overlay_customizers, bootstrap_pubkey
+            del overlay_customizers, bootstrap_pubkey, job_id
             raise CategorizedError(
                 "base image volume not staged",
                 category=ErrorCategory.CONFIGURATION_ERROR,

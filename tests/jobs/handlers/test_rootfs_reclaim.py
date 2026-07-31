@@ -30,6 +30,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from kdive.artifacts.content_address import rootfs_object_token
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -1403,24 +1404,40 @@ def test_an_orphan_base_drains_a_closed_investigation_that_has_no_rows_left(
     asyncio.run(_run())
 
 
+async def _seed_holding_job(conn: psycopg.AsyncConnection, *, state: str, lease: timedelta) -> UUID:
+    """The provision job a fetch lease is fenced on (ADR-0522), in a named liveness shape.
+
+    ``lease`` offsets ``lease_expires_at`` from Postgres ``now()``, never a Python clock: the
+    gate's own predicate compares in the database, and seeding from here would make the test assert
+    against a different clock than the code under test reads. A positive offset with
+    ``state='running'`` is what ``dequeue`` leaves and ``heartbeat`` renews; a lapsed one is what a
+    worker killed by ``SIGKILL`` leaves behind.
+    """
+    job_id = uuid4()
+    await conn.execute(
+        "INSERT INTO jobs (id, kind, state, max_attempts, authorizing, dedup_key, "
+        "lease_expires_at) VALUES (%s, 'provision', %s, 3, %s, %s, now() + %s)",
+        (job_id, state, Jsonb({"principal": "p", "project": "proj"}), f"lease-{job_id}", lease),
+    )
+    return job_id
+
+
 def _insert_lease(
-    conn: psycopg.AsyncConnection, inv: UUID, system_id: UUID, ttl: timedelta, token: str = _TOKEN
+    conn: psycopg.AsyncConnection, inv: UUID, system_id: UUID, job_id: UUID, token: str = _TOKEN
 ) -> Any:
     """A ``rootfs_fetch_leases`` row, as a fetcher's acquire leaves it.
 
-    ``ttl`` is applied against Postgres ``now()``, never a Python clock: the gate's own predicate
-    compares in the database, and seeding from here would make the test assert against a different
-    clock than the code under test reads.
+    The row carries no deadline of its own: since ADR-0522 its whole liveness is ``job_id``'s.
     """
     return conn.execute(
-        "INSERT INTO rootfs_fetch_leases (id, investigation_id, token, system_id, expires_at) "
-        "VALUES (%s, %s, %s, %s, now() + %s)",
-        (uuid4(), inv, token, system_id, ttl),
+        "INSERT INTO rootfs_fetch_leases (id, investigation_id, token, system_id, job_id) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (uuid4(), inv, token, system_id, job_id),
     )
 
 
 @pytest.mark.parametrize("system_state", ["torn_down", "failed"])
-def test_an_unexpired_fetch_lease_pins_the_base_with_no_partial_yet(
+def test_a_live_held_fetch_lease_pins_the_base_with_no_partial_yet(
     migrated_url: str, tmp_path: Path, system_state: str
 ) -> None:
     # #1702/#1558 option 2, on the exact interleaving ADR-0495 left open (its residual window 2):
@@ -1442,7 +1459,8 @@ def test_an_unexpired_fetch_lease_pins_the_base_with_no_partial_yet(
             inv = await _seed_investigation(seed, state="closed", closed=True)
             artifact_id = await _seed_rootfs_row(seed, inv)
             system_id = await _seed_system(seed, inv, system_state, _upload_profile())
-            await _insert_lease(seed, inv, system_id, timedelta(hours=6))
+            job_id = await _seed_holding_job(seed, state="running", lease=timedelta(minutes=5))
+            await _insert_lease(seed, inv, system_id, job_id)
         finally:
             await seed.close()
         rootfs_dir, uploads = _dirs(tmp_path)
@@ -1466,17 +1484,24 @@ def test_an_unexpired_fetch_lease_pins_the_base_with_no_partial_yet(
     asyncio.run(_run())
 
 
-def test_an_expired_fetch_lease_does_not_pin_the_base(migrated_url: str, tmp_path: Path) -> None:
-    # AC-8's property in the form ADR-0515 gives it, and the single most important test in this
-    # change. The regression AC-8 guards is a pin nothing can ever release: a base pinned by a dead
-    # fetcher is a SENSITIVE leak of up to the 50 GiB canonical cap, per investigation.
+def test_a_fetch_lease_whose_holding_job_is_dead_does_not_pin_the_base(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # AC-8's property in the form ADR-0522 gives it, and the single most important test here. The
+    # regression AC-8 guards is a pin nothing can ever release: a base pinned by a dead fetcher is a
+    # SENSITIVE leak of up to the 50 GiB canonical cap, per investigation.
     #
     # This design is exposed to exactly that, because a fetcher killed by SIGKILL releases nothing
     # and nothing else ever clears its row — `failed` is terminal with no transition out of it,
-    # `torn_down` is the achieved post-state, and no reconciler repair reaches a lease. The deadline
-    # is the ONLY thing standing between the lease and an unbounded pin. So: a lease whose fetcher
-    # is gone and whose deadline has passed must not defer, and the checksum must drain whole in the
-    # very same pass that would have deferred on an unexpired one.
+    # `torn_down` is the achieved post-state, and no reconciler repair reaches a lease. The holding
+    # job's liveness is the ONLY thing standing between the lease and an unbounded pin. So: a lease
+    # whose worker stopped heartbeating must not defer, and the checksum must drain whole in the
+    # very same pass that would have deferred on a live-held one.
+    #
+    # This is the mutation target for AC-8. Drop the LIVE_HOLDER_SQL conjunct from _PIN_SQL and this
+    # reddens on the first assertion — the abandoned row is read as a pin, the base is retained, and
+    # nothing else in the suite notices. Where ADR-0515 bought this with a 6-hour deadline, the
+    # `now() + -1 minute` lease below is what a killed worker leaves within one heartbeat interval.
     inv = uuid4()
 
     async def _run() -> None:
@@ -1486,7 +1511,11 @@ def test_an_expired_fetch_lease_does_not_pin_the_base(migrated_url: str, tmp_pat
             inv = await _seed_investigation(seed, state="closed", closed=True)
             artifact_id = await _seed_rootfs_row(seed, inv)
             system_id = await _seed_system(seed, inv, "failed", _upload_profile())
-            await _insert_lease(seed, inv, system_id, timedelta(hours=-1))
+            # `running` with a lapsed lease, not a terminal state: this is precisely the row a
+            # SIGKILLed worker leaves — the job never got to transition, so a fence that tested
+            # only `state <> 'running'` would still read it as live.
+            job_id = await _seed_holding_job(seed, state="running", lease=timedelta(minutes=-1))
+            await _insert_lease(seed, inv, system_id, job_id)
         finally:
             await seed.close()
         rootfs_dir, uploads = _dirs(tmp_path)
@@ -1503,7 +1532,7 @@ def test_an_expired_fetch_lease_does_not_pin_the_base(migrated_url: str, tmp_pat
         try:
             assert not await _row_exists(check, artifact_id)
             assert await _marker(check, inv) is None
-            # The expired row is reaped as table-growth hygiene while the lock is already held.
+            # The dead-held row is reaped as table-growth hygiene while the lock is already held.
             # Correctness never depended on this — the gate ignored it above regardless — so this
             # asserts the reap ran, not that the drain needed it.
             leases = await check.execute(
@@ -1534,7 +1563,8 @@ def test_a_fetch_lease_for_another_token_does_not_defer_this_checksum(
             inv = await _seed_investigation(seed, state="closed", closed=True)
             artifact_id = await _seed_rootfs_row(seed, inv)
             system_id = await _seed_system(seed, inv, "torn_down", _upload_profile())
-            await _insert_lease(seed, inv, system_id, timedelta(hours=6), token=other_token)
+            job_id = await _seed_holding_job(seed, state="running", lease=timedelta(minutes=5))
+            await _insert_lease(seed, inv, system_id, job_id, token=other_token)
         finally:
             await seed.close()
         rootfs_dir, uploads = _dirs(tmp_path)

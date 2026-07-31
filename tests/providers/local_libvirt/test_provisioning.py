@@ -806,7 +806,7 @@ def _prov(
             overlay_virtual_size=overlay_virtual_size,
             resize_overlay=resize_overlay,
         ),
-        materialize_rootfs=lambda rootfs, _system_id, _arch: (
+        materialize_rootfs=lambda rootfs, _system_id, _arch, *, job_id=None: (
             rootfs.path if rootfs.kind == "local" else "/var/lib/kdive/rootfs/upload.qcow2"
         ),
         free_port=free_port,
@@ -1157,7 +1157,7 @@ def _prov_with_port(conn: _ProvConn, *, free_port: Callable[[], int]) -> LocalLi
             overlay_virtual_size=lambda _overlay: 1 << 60,
             resize_overlay=lambda _overlay, _gb: None,
         ),
-        materialize_rootfs=lambda rootfs, _system_id, _arch: rootfs.path,
+        materialize_rootfs=lambda rootfs, _system_id, _arch, *, job_id=None: rootfs.path,
         free_port=free_port,
         extract_baseline_kernel=_fake_extract,
     )
@@ -1369,7 +1369,9 @@ def test_provision_prepares_console_log_before_define() -> None:
             overlay_virtual_size=lambda _overlay: 1 << 60,
             resize_overlay=lambda _overlay, _gb: None,
         ),
-        materialize_rootfs=lambda _rootfs, _system_id, _arch: "/var/lib/kdive/rootfs/base.qcow2",
+        materialize_rootfs=(
+            lambda _rootfs, _system_id, _arch, *, job_id=None: "/var/lib/kdive/rootfs/base.qcow2"
+        ),
         extract_baseline_kernel=_fake_extract,
     ).provision(_SYS, _profile())
 
@@ -1865,7 +1867,7 @@ def test_provision_console_log_failure_removes_the_overlay() -> None:
                 overlay_virtual_size=lambda _overlay: 1 << 60,
                 resize_overlay=lambda _overlay, _gb: None,
             ),
-            materialize_rootfs=lambda _rootfs, _system_id, _arch: (
+            materialize_rootfs=lambda _rootfs, _system_id, _arch, *, job_id=None: (
                 "/var/lib/kdive/rootfs/base.qcow2"
             ),
             extract_baseline_kernel=_fake_extract,
@@ -1997,7 +1999,9 @@ def test_provision_upload_materialize_failure_reclaims_nothing() -> None:
     removed_overlay: list[str] = []
     removed_baseline: list[str] = []
 
-    def fail_materialize(_rootfs: object, _system_id: UUID, _arch: str) -> str:
+    def fail_materialize(
+        _rootfs: object, _system_id: UUID, _arch: str, *, job_id: UUID | None = None
+    ) -> str:
         raise CategorizedError(
             "upload-kind rootfs was never uploaded", category=ErrorCategory.CONFIGURATION_ERROR
         )
@@ -2128,7 +2132,7 @@ def test_provision_passes_real_system_id_to_materialize_and_define() -> None:
             overlay_virtual_size=lambda _overlay: 1 << 60,
             resize_overlay=lambda _overlay, _gb: None,
         ),
-        materialize_rootfs=lambda rootfs, system_id, _arch: (
+        materialize_rootfs=lambda rootfs, system_id, _arch, *, job_id=None: (
             seen.append(system_id) or rootfs.path  # type: ignore[func-returns-value]
         ),
         extract_baseline_kernel=_fake_extract,

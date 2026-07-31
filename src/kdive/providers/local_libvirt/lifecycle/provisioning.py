@@ -147,7 +147,16 @@ def _parse_recorded_domain_xml(xml: str, *, domain_name: str, port_name: str) ->
         ) from exc
 
 
-type MaterializeRootfs = Callable[[RootfsSource, UUID, str], str]
+# The rootfs resolution seam. ``job_id`` is the provision job the resolution runs under, threaded
+# through so the ``upload`` lane's fetch lease can be fenced on its holder (ADR-0522, #1740); it is
+# ``None`` on the admission-time validation lane, which owns no job.
+class MaterializeRootfs(Protocol):
+    # Positional-only for the first three: they were a bare ``Callable`` before ``job_id`` forced a
+    # Protocol, and every existing call site (and test double) passes them by position under its own
+    # parameter names. Naming them here would newly bind those names into the contract.
+    def __call__(
+        self, rootfs: RootfsSource, system_id: UUID, arch: str, /, *, job_id: UUID | None
+    ) -> str: ...
 
 
 def _materializable_rootfs(rootfs: RootfsSource) -> MaterializableRootfsRef:
@@ -236,6 +245,7 @@ class LocalLibvirtProvisioning:
         *,
         overlay_customizers: tuple[OverlayCustomizer, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         """Define and start the tagged domain; return its name.
 
@@ -277,7 +287,7 @@ class LocalLibvirtProvisioning:
         # investigation-owned artifact (ADR-0441) and is deliberately NOT in this per-call reclaim.
         baseline_created = overlay_created = False
         try:
-            base = self._materialize_rootfs(section.rootfs, system_id, profile.arch)
+            base = self._materialize_rootfs(section.rootfs, system_id, profile.arch, job_id=job_id)
             baseline_created = not pre_existing.baseline
             baseline = self._prepare_baseline_kernel(system_id, base, section.baseline_kernel)
             overlay_created = not pre_existing.overlay
@@ -573,7 +583,7 @@ class LocalLibvirtProvisioning:
         if isinstance(rootfs, CatalogComponentRef):
             validate_rootfs_reference(rootfs)
             return
-        self._materialize_rootfs_base(rootfs, UUID(int=0))
+        self._materialize_rootfs_base(rootfs, UUID(int=0), job_id=None)
 
     def reprovision(
         self,
@@ -582,6 +592,7 @@ class LocalLibvirtProvisioning:
         *,
         overlay_customizers: tuple[OverlayCustomizer, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         """Wipe the System's current install and define+start the new profile in place.
 
@@ -602,7 +613,9 @@ class LocalLibvirtProvisioning:
         """
         del bootstrap_pubkey  # local injects pre-boot via overlay_customizers (ADR-0291)
         self.teardown(domain_name_for(system_id))
-        return self.provision(system_id, profile, overlay_customizers=overlay_customizers)
+        return self.provision(
+            system_id, profile, overlay_customizers=overlay_customizers, job_id=job_id
+        )
 
     def teardown(self, domain_name: str) -> None:
         """Destroy+undefine the domain and reclaim its per-System overlay and baseline dir.
@@ -622,12 +635,19 @@ class LocalLibvirtProvisioning:
         self._files.remove_baseline_for_domain(domain_name)
 
     def _materialize_rootfs_base(
-        self, rootfs: RootfsSource, system_id: UUID, arch: str = "x86_64"
+        self,
+        rootfs: RootfsSource,
+        system_id: UUID,
+        arch: str = "x86_64",
+        *,
+        job_id: UUID | None = None,
     ) -> str:
         rootfs = _materializable_rootfs(rootfs)
         # The upload context carries the profile's content checksum; it is consumed only on the
         # upload lane (a non-upload rootfs never reads it). Investigation resolution happens in the
-        # connectionless fetch (ADR-0441 §4).
+        # connectionless fetch (ADR-0441 §4). ``job_id`` travels the same way and for the same
+        # reason it exists at all (ADR-0522): the fetch's lease has to name a holder the reclaim can
+        # test for liveness, and this seam is the only place that holder is known.
         checksum = rootfs.checksum_sha256 if isinstance(rootfs, _UploadRootfs) else ""
         return str(
             materialize_rootfs_base(
@@ -635,7 +655,9 @@ class LocalLibvirtProvisioning:
                 context=RootfsMaterializationContext(
                     allowed_roots=self._allowed_roots,
                     arch=arch,
-                    upload=RootfsUploadContext("local", system_id, Path(UPLOADS_DIR), checksum),
+                    upload=RootfsUploadContext(
+                        "local", system_id, Path(UPLOADS_DIR), checksum, job_id
+                    ),
                     catalog_fetch=self._catalog_fetch,
                     upload_fetch=self._upload_fetch,
                 ),

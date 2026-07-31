@@ -27,10 +27,12 @@ class FaultInjectProvisioning:
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         # No real overlay or guest exists for a synthetic domain (ADR-0289, #963; ADR-0291): the
-        # customizers and bootstrap key accepted for Provisioner-call-site parity are never used.
-        del profile, overlay_customizers, bootstrap_pubkey
+        # customizers and bootstrap key accepted for Provisioner-call-site parity are never used,
+        # and neither is the holding job (ADR-0522) — nothing here stages anything to fence.
+        del profile, overlay_customizers, bootstrap_pubkey, job_id
         domain = domain_name(system_id)
         self._inventory.record(system_id, domain)
         return domain
@@ -50,6 +52,7 @@ class FaultInjectProvisioning:
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         self._inventory.forget(domain_name(system_id))
         return self.provision(
@@ -57,4 +60,5 @@ class FaultInjectProvisioning:
             profile,
             overlay_customizers=overlay_customizers,
             bootstrap_pubkey=bootstrap_pubkey,
+            job_id=job_id,
         )

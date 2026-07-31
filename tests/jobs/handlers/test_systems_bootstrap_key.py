@@ -61,11 +61,13 @@ class _RecordingProvisioner:
         *,
         overlay_customizers: tuple[Any, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         self.recorded["system_id"] = system_id
         self.recorded["profile"] = profile
         self.recorded["overlay_customizers"] = overlay_customizers
         self.recorded["bootstrap_pubkey"] = bootstrap_pubkey
+        self.recorded["job_id"] = job_id
         if self.fail:
             raise CategorizedError(
                 "simulated provision failure",
@@ -84,11 +86,13 @@ class _RecordingProvisioner:
         *,
         overlay_customizers: tuple[Any, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         self.recorded["system_id"] = system_id
         self.recorded["profile"] = profile
         self.recorded["overlay_customizers"] = overlay_customizers
         self.recorded["bootstrap_pubkey"] = bootstrap_pubkey
+        self.recorded["job_id"] = job_id
         if self.fail:
             raise CategorizedError(
                 "simulated reprovision failure",
@@ -238,6 +242,7 @@ def test_provision_handler_ensures_key_and_passes_one_customizer(migrated_url: s
                 "billing": await _billing_started(pool, system.allocation_id),
                 "audit": await _audit_rows(pool, system_id),
                 "system_id": system_id,
+                "job_id": job.id,
             }
 
     out = asyncio.run(_run())
@@ -254,6 +259,10 @@ def test_provision_handler_ensures_key_and_passes_one_customizer(migrated_url: s
     # The provider is called with this System's id and the parsed (non-None) profile.
     assert prov.recorded["system_id"] == system_id
     assert isinstance(prov.recorded["profile"], ProvisioningProfile)
+    # ...and with THIS job's id (ADR-0522, #1740). local-libvirt writes it to the
+    # rootfs_fetch_leases row whose liveness the reclaim then tests, so a handler that dropped it
+    # would leave every uploaded-rootfs download unfenced with nothing raising.
+    assert prov.recorded["job_id"] == out["job_id"]
     # The System reaches READY with the provider-returned domain name and persisted resolved CPU.
     assert out["result"] == str(system_id)
     assert out["system"].state is SystemState.READY
@@ -336,11 +345,15 @@ def test_reprovision_handler_ensures_key_and_passes_one_customizer(migrated_url:
                 "prov": prov,
                 "audit": await _audit_rows(pool, system_id),
                 "system_id": system_id,
+                "job_id": job.id,
             }
 
     out = asyncio.run(_run())
     system_id = out["system_id"]
     assert len(out["prov"].recorded["overlay_customizers"]) == 1
+    # The reprovision seam carries the holder too (ADR-0522): local-libvirt's reprovision
+    # re-materializes the rootfs, so it stages under the same fetch lease a provision does.
+    assert out["prov"].recorded["job_id"] == out["job_id"]
     assert out["count"] == 1
     assert out["result"] == str(system_id)
     assert out["kind"] == "local-libvirt"

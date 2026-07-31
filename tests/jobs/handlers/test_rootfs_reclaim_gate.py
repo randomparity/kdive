@@ -17,6 +17,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from kdive.artifacts.content_address import rootfs_object_token
 from kdive.jobs.handlers.artifacts.rootfs_reclaim import rootfs_base_reclaimable
@@ -235,8 +236,9 @@ def test_the_state_classifier_is_not_widened_by_the_fetch_lease(
     # pinning. That is the one shape AC-8 forbids: `failed` is terminal with no transition out of
     # it, nothing removes a failed System's overlay, and `torn_down` is the achieved post-state — so
     # a state-keyed pin on either has nothing that can ever release it, and the base leaks until an
-    # operator intervenes. ADR-0515 therefore puts the new evidence in a deadline-bounded
-    # rootfs_fetch_leases row read by the per-checksum gate, and leaves this classifier alone.
+    # operator intervenes. ADR-0515 therefore puts the new evidence in a rootfs_fetch_leases row
+    # read by the per-checksum gate — fenced on its holding job since ADR-0522 — and leaves this
+    # classifier alone.
     #
     # This pins that separation of duties. A live fetch lease exists for the very token this failed
     # System references, and `rootfs_base_reclaimable` still says "reclaimable" — because answering
@@ -255,11 +257,17 @@ def test_the_state_classifier_is_not_widened_by_the_fetch_lease(
                 state="failed",
                 profile=_upload_profile(_CHECKSUM_X),
             )
+            job_id = uuid4()
+            await conn.execute(
+                "INSERT INTO jobs (id, kind, state, max_attempts, authorizing, dedup_key, "
+                "lease_expires_at) VALUES (%s, 'provision', 'running', 3, %s, %s, "
+                "now() + interval '5 minutes')",
+                (job_id, Jsonb({"principal": "p", "project": "proj"}), f"lease-{job_id}"),
+            )
             await conn.execute(
                 "INSERT INTO rootfs_fetch_leases "
-                "(id, investigation_id, token, system_id, expires_at) "
-                "VALUES (%s, %s, %s, %s, now() + interval '6 hours')",
-                (uuid4(), inv, _TOKEN_X, system_id),
+                "(id, investigation_id, token, system_id, job_id) VALUES (%s, %s, %s, %s, %s)",
+                (uuid4(), inv, _TOKEN_X, system_id, job_id),
             )
             return inv
         finally:

@@ -204,7 +204,9 @@ def fetch_uploaded_rootfs(
     # under, and it then waits on the session advisory lock below — behind a sibling's entire
     # multi-GiB transfer — before it creates the partial ADR-0495's probe looks for. Taking the
     # lease one line later would leave exactly that window open while looking correct.
-    lease_id = acquire_fetch_lease(conn, investigation_id, token, system_id=upload.system_id)
+    lease_id = acquire_fetch_lease(
+        conn, investigation_id, token, system_id=upload.system_id, job_id=upload.job_id
+    )
     try:
         return _fetch_under_lease(
             conn, store, upload, investigation_id=investigation_id, token=token

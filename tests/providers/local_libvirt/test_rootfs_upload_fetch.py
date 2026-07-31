@@ -1377,8 +1377,12 @@ class _FakeConn:
             self.trace.append("lease-release")
 
 
-def _upload(tmp_path: Path, system_id: UUID | None = None) -> RootfsUploadContext:
-    return RootfsUploadContext("local", system_id or uuid4(), tmp_path, _CHECKSUM)
+def _upload(
+    tmp_path: Path, system_id: UUID | None = None, job_id: UUID | None = None
+) -> RootfsUploadContext:
+    return RootfsUploadContext(
+        "local", system_id or uuid4(), tmp_path, _CHECKSUM, job_id or uuid4()
+    )
 
 
 def _owned_key(inv: UUID) -> str:
@@ -1961,19 +1965,27 @@ class _CountingStore:
 
 
 def _fetch_child(
-    url: str, upload_dir: str, system_id: str, checksum: str, counter: str, barrier: Any
+    url: str,
+    upload_dir: str,
+    system_id: str,
+    checksum: str,
+    counter: str,
+    barrier: Any,
+    job_id: str,
 ) -> None:  # pragma: no cover - runs in a child process
     # A spawned child re-imports the module fresh, so the parent's autouse free-space pin does not
     # reach it. Pin it here too, or this test would depend on the runner's real free disk (#1525).
     rootfs_upload_fetch.disk_usage = _ample_free_space  # ty: ignore[invalid-assignment]  # a stub
     store = _CountingStore(_QCOW2, Path(counter))
-    upload = RootfsUploadContext("local", UUID(system_id), Path(upload_dir), checksum)
+    upload = RootfsUploadContext("local", UUID(system_id), Path(upload_dir), checksum, UUID(job_id))
     barrier.wait(timeout=30)  # both children reach the fetch together, racing for the lock
     with psycopg.connect(url, autocommit=True) as conn:
         fetch_uploaded_rootfs(conn, store, upload)
 
 
-async def _seed_bound_systems(url: str, inv: UUID, sys_a: UUID, sys_b: UUID, key: str) -> None:
+async def _seed_bound_systems(
+    url: str, inv: UUID, sys_a: UUID, sys_b: UUID, key: str, job_id: UUID
+) -> None:
     from tests.mcp.systems_support import granted_allocation, pool
 
     async with pool(url) as conn_pool:
@@ -1995,6 +2007,14 @@ async def _seed_bound_systems(url: str, inv: UUID, sys_a: UUID, sys_b: UUID, key
                 "retention_class) VALUES ('investigations', %s, %s, 'e', 'sensitive', 'rootfs')",
                 (inv, key),
             )
+            # The holder both children's fetch leases are fenced on (ADR-0522): a running job with
+            # an un-lapsed lease, which is what jobs.dequeue leaves behind and heartbeat renews.
+            await conn.execute(
+                "INSERT INTO jobs (id, kind, state, max_attempts, authorizing, dedup_key, "
+                "lease_expires_at) VALUES (%s, 'provision', 'running', 3, %s, %s, "
+                "now() + interval '5 minutes')",
+                (job_id, Jsonb({"principal": "p", "project": "proj"}), f"dedup-{job_id}"),
+            )
 
 
 def test_two_processes_share_one_download(migrated_url: str, tmp_path: Path) -> None:
@@ -2004,9 +2024,9 @@ def test_two_processes_share_one_download(migrated_url: str, tmp_path: Path) -> 
     # would derive a different key, no serialization, two downloads).
     import asyncio
 
-    inv, sys_a, sys_b = uuid4(), uuid4(), uuid4()
+    inv, sys_a, sys_b, job_id = uuid4(), uuid4(), uuid4(), uuid4()
     key = artifact_key("local", "investigations", str(inv), rootfs_object_name(_TOKEN))
-    asyncio.run(_seed_bound_systems(migrated_url, inv, sys_a, sys_b, key))
+    asyncio.run(_seed_bound_systems(migrated_url, inv, sys_a, sys_b, key, job_id))
 
     counter = tmp_path / "downloads.log"
     counter.write_text("")
@@ -2015,7 +2035,15 @@ def test_two_processes_share_one_download(migrated_url: str, tmp_path: Path) -> 
     procs = [
         ctx.Process(
             target=_fetch_child,
-            args=(migrated_url, str(tmp_path), str(sid), _CHECKSUM, str(counter), barrier),
+            args=(
+                migrated_url,
+                str(tmp_path),
+                str(sid),
+                _CHECKSUM,
+                str(counter),
+                barrier,
+                str(job_id),
+            ),
         )
         for sid in (sys_a, sys_b)
     ]

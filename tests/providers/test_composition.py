@@ -120,8 +120,9 @@ class _ProvisionProvider:
         *,
         overlay_customizers: tuple[object, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
-        del overlay_customizers, bootstrap_pubkey
+        del overlay_customizers, bootstrap_pubkey, job_id
         return f"domain-{system_id}"
 
     def teardown(self, domain_name: str) -> None:
@@ -138,8 +139,9 @@ class _ProvisionProvider:
         *,
         overlay_customizers: tuple[object, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
-        del overlay_customizers, bootstrap_pubkey
+        del overlay_customizers, bootstrap_pubkey, job_id
         return f"domain-{system_id}"
 
 

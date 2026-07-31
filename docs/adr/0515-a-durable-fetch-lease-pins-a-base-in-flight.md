@@ -124,6 +124,37 @@ lease for a failed System's own token and asserts `rootfs_base_reclaimable` stil
 "reclaimable", because answering the liveness question is not the classifier's job. A later
 "simplification" that adds `FAILED` to the pre-overlay set now reddens next to AC-8.
 
+**Superseded above, on §3 and §4 — the deadline and its derivation:**
+[ADR-0522](0522-the-rootfs-fetch-pin-is-fenced-on-its-holding-job.md) (2026-07-30, #1740) discharges
+the "Fence on the holding job instead of a deadline" deferral in `## Considered & rejected` below,
+which this record named as its own natural follow-up and said "would delete §4 rather than tune it".
+Appended rather than struck through: this record is merged, and the records gate's `E-REWRITE` rule
+counts every line a section had and no longer has, so the strikethrough form
+`docs/adr/README.md` describes for a partial supersession is not available here. Nothing above is
+edited; read §3 and §4 as history.
+
+§3's premise no longer holds. "There is nothing to fence on without plumbing a job id through the
+provider seam" was a statement about the seam, and #1740 plumbed it: `Provisioner.provision` and
+`.reprovision` carry a `job_id`, the job handler supplies `job.id`, and it reaches the fetch through
+`RootfsUploadContext`. Migration 0088 therefore drops `expires_at` and adds
+`job_id uuid NOT NULL REFERENCES jobs (id) ON DELETE CASCADE`, and the pin probe reuses
+`object_write_leases`' own `LIVE_HOLDER_SQL` — `jobs.state = 'running' AND
+jobs.lease_expires_at > now()`. §4's whole table goes with it: there is no derived constant left,
+no 50 GiB numerator, no 5 MiB/s floor rate, and nothing to tune.
+
+§3's *last* paragraph survives the swap intact — both halves of the new predicate are still
+evaluated in Postgres `now()`, so no worker clock enters the comparison, for exactly the reason
+stated there.
+
+The residual in `## Consequences` — "a fetcher killed by `SIGKILL` pins its base for up to 6 hours"
+— is closed, not narrowed. A killed fetcher still releases nothing, but its pin lapses when the
+worker stops heartbeating that job's lease rather than after a worst-case transfer estimate. The
+"Amendment (2026-07-30): the flock lease" section below argued that a leak window is what a
+cross-topology answer costs; that argument was right about *where* the evidence must live and wrong
+that a deadline is the price. The evidence still lives in the database and is still answerable from
+either side of a host boundary — it is now fenced on a row that already lives there and that a
+worker already renews. §1, §2, §5 and §6 are unchanged and in force.
+
 ## Consequences
 
 The substantive residual ADR-0495 recorded is closed: a reclaim can no longer delete a staged base
