@@ -1,14 +1,16 @@
-"""Project-private upload registration (ADR-0093, issue #286).
+"""Project-private upload registration (ADR-0093, ADR-0520, issue #286).
 
-``register_private_upload`` runs under the project advisory lock: it enforces the per-project
-count/bytes quota fail-closed, validates the quarantined object's guest contract, then delegates
-to ``publish_image`` with ``visibility='private'``/``owner=project``. These tests pin: a
-non-conforming image is rejected with a named reason while still quarantined (never registered);
-an over-cap upload is denied fail-closed and audited; two concurrent uploads cannot both pass the
-cap (held PROJECT lock); a registered private image resolves only within its owning project and
-shadows a same-identity public image there; and the publish refuses a connection that already
-opened a transaction, which would demote its lock to a savepoint held across the object-store
-PUT (ADR-0516).
+``register_private_upload`` validates the quarantined object's guest contract, then — under the
+project advisory lock — enforces the per-project count/bytes quota fail-closed and commits a
+``pending`` row reserving this upload's bytes. The lock is released before the object-store write
+(ADR-0520). These tests pin: a non-conforming image is rejected with a named reason while still
+quarantined (never registered); an over-cap upload is denied fail-closed and audited; two
+concurrent uploads cannot both pass either cap, on the committed reservation rather than a held
+lock; **no advisory lock is held while the PUT runs**; an abandoned reservation holds quota only
+until the reconciler's dangling sweep reclaims it; a registered private image resolves only within
+its owning project and shadows a same-identity public image there; and the publish refuses a
+connection that already opened a transaction, which would demote its transaction to a savepoint
+that neither commits the reservation nor releases the lock (ADR-0516 §1).
 """
 
 from __future__ import annotations
@@ -167,6 +169,32 @@ async def _register(
     )
 
 
+def _publish_request(*, name: str = "myrootfs", payload: bytes = b"unused"):
+    """A private ``PublishRequest`` for the project, for tests driving the publish steps."""
+    from kdive.services.images.publish import PublishRequest
+
+    return PublishRequest(
+        provider="local-libvirt",
+        name=name,
+        arch="x86_64",
+        format="qcow2",
+        root_device="/dev/vda",
+        digest="sha256:" + hashlib.sha256(payload).hexdigest(),
+        capabilities=(),
+        provenance={},
+        visibility=ImageVisibility.PRIVATE,
+        owner="proj",
+        expires_at=_DT + timedelta(days=3),
+    )
+
+
+async def _row_state(conn: psycopg.AsyncConnection, row_id) -> str | None:
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT state FROM image_catalog WHERE id = %s", (row_id,))
+        row = await cur.fetchone()
+    return None if row is None else str(row[0])
+
+
 _UPLOAD_TOOL = "images.upload"
 
 
@@ -244,7 +272,7 @@ def test_reject_oversize_upload_rejects_and_respects_boundary(
     asyncio.run(_run())
 
 
-def test_project_usage_counts_rows_and_sums_object_bytes(
+def test_project_usage_counts_rows_and_sums_reserved_bytes(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(IMAGE_PRIVATE_MAX_COUNT.name, "10")
@@ -258,11 +286,39 @@ def test_project_usage_counts_rows_and_sums_object_bytes(
         async with await _connect(migrated_url) as conn:
             await _register(conn, store, name="img-a", quarantine_key="uploads/q/proj/a.qcow2")
             await _register(conn, store, name="img-b", quarantine_key="uploads/q/proj/b.qcow2")
-            count, total = await _project_usage(conn, "proj", store)
-        # Two live private rows, and the byte total is the sum of both objects (not a last-wins
-        # overwrite and not an off-by-one initial accumulator).
+            count, total = await _project_usage(conn, "proj")
+            # Another project's rows are not this project's usage.
+            assert await _project_usage(conn, "other") == (0, 0)
+        # Two live private rows, and the byte total is the sum of both rows' recorded sizes (not a
+        # last-wins overwrite and not an off-by-one initial accumulator).
         assert count == 2
         assert total == len(payload_a) + len(payload_b)
+
+    asyncio.run(_run())
+
+
+def test_reserved_pending_row_occupies_quota_before_its_object_exists(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The invariant the shortened lock span rests on: the `pending` row committed under the lock
+    # already carries its bytes, so a concurrent reader sees the claim even though the object has
+    # not been written. Before ADR-0520 the row's bytes came from a HEAD of an object that does
+    # not yet exist, so a pending row contributed 0 and could not serve as a reservation.
+    from kdive.services.images.publish import reserve_publish
+
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_COUNT.name, "10")
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "1000000")
+    store = _quarantine(b"unused")
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            reservation = await reserve_publish(
+                conn, _publish_request(name="reserved"), size_bytes=4096
+            )
+            # Nothing was written to the store, and the row is `pending`, not `registered`.
+            assert store.puts == []
+            assert await _row_state(conn, reservation.row_id) == ImageState.PENDING.value
+            assert await _project_usage(conn, "proj") == (1, 4096)
 
     asyncio.run(_run())
 
@@ -496,6 +552,191 @@ def test_concurrent_uploads_cannot_both_pass_the_cap(
             assert len(registered) == 1
 
     asyncio.run(_run())
+
+
+def test_no_advisory_lock_is_held_while_the_object_is_written(migrated_url: str) -> None:
+    # The property #1726 exists for, asserted at the only moment it can be observed: inside the
+    # PUT. The store probes pg_locks from a *second* connection filtered to the publishing
+    # backend's pid (probing the connection under test would itself open a transaction, ADR-0506)
+    # and records what it saw. Before ADR-0520 the PROJECT lock was held here; after it, the
+    # reservation transaction has committed and released it.
+    observed: list[int] = []
+    publishing_pid: list[int] = []
+    publishing_loop: list[asyncio.AbstractEventLoop] = []
+
+    class _ProbingStore(_FakeStore):
+        def put_artifact(
+            self, request: artifact_types.ArtifactWriteRequest
+        ) -> artifact_types.StoredArtifact:
+            observed.append(
+                asyncio.run_coroutine_threadsafe(
+                    _advisory_locks_held_by(migrated_url, publishing_pid[0]),
+                    publishing_loop[0],
+                ).result()
+            )
+            return super().put_artifact(request)
+
+    store = _ProbingStore({"uploads/q/proj/rootfs.qcow2": b"conforming-rootfs"})
+
+    async def _run() -> None:
+        publishing_loop.append(asyncio.get_running_loop())
+        async with await _connect(migrated_url) as conn:
+            publishing_pid.append(conn.info.backend_pid)
+            entry = await _register(conn, store)
+            assert entry.state is ImageState.REGISTERED
+        # The PUT happened, and the publishing backend held zero advisory locks while it ran.
+        assert store.puts != []
+        assert observed == [0]
+
+    asyncio.run(_run())
+
+
+def test_concurrent_uploads_cannot_both_pass_the_bytes_cap(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The bytes half of the fail-closed invariant, which is the half that now rests on the
+    # reservation's recorded `size_bytes` rather than on a HEAD of an object written under the
+    # lock. Each image is 12 bytes and the cap admits 20, so exactly one may pass.
+    from kdive.db.repositories import IMAGE_CATALOG
+
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "20")
+
+    async def _run() -> None:
+        store_a = _quarantine(b"twelve-bytes", key="uploads/q/proj/a.qcow2")
+        store_b = _quarantine(b"twelve-bytes", key="uploads/q/proj/b.qcow2")
+        # Share one object namespace so each sees the other's published image.
+        store_b._objects.update(store_a._objects)  # noqa: SLF001 - test seam
+        store_a._objects.update(store_b._objects)  # noqa: SLF001 - test seam
+
+        async def _one(store: _FakeStore, name: str, key: str) -> object:
+            conn = await _connect(migrated_url)
+            try:
+                return await _register(conn, store, name=name, quarantine_key=key)
+            except CategorizedError as exc:
+                return exc
+            finally:
+                await conn.close()
+
+        results = await asyncio.gather(
+            _one(store_a, "alpha", "uploads/q/proj/a.qcow2"),
+            _one(store_b, "beta", "uploads/q/proj/b.qcow2"),
+        )
+        denials = [r for r in results if isinstance(r, CategorizedError)]
+        assert len(denials) == 1
+        assert denials[0].category is ErrorCategory.QUOTA_EXCEEDED
+        assert str(denials[0]) == "project 'proj' would exceed its private-image bytes cap"
+
+        async with await _connect(migrated_url) as conn:
+            rows = await IMAGE_CATALOG.list_all(conn)
+            assert len([r for r in rows if r.state is ImageState.REGISTERED]) == 1
+            # The one that passed recorded its real size, so the next reader sees 12, not 0.
+            assert await _project_usage(conn, "proj") == (1, 12)
+
+    asyncio.run(_run())
+
+
+def test_a_failed_put_leaves_a_reservation_the_dangling_sweep_reclaims(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The worker-dies-mid-upload path, which is the cost of committing the reservation before the
+    # write. The reservation must (a) still hold quota — otherwise the cap is fail-open between
+    # reserve and write — and (b) not hold it forever. Reclamation is the existing ADR-0092
+    # dangling sweep on `pending_since + grace`, not a bespoke rollback (ADR-0520 §4).
+    from kdive.reconciler.cleanup.images import repair_dangling_images
+
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "20")
+
+    class _DyingStore(_FakeStore):
+        def put_artifact(
+            self, request: artifact_types.ArtifactWriteRequest
+        ) -> artifact_types.StoredArtifact:
+            raise CategorizedError(
+                "object store is unreachable",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={},
+            )
+
+    dying = _DyingStore({"uploads/q/proj/a.qcow2": b"twelve-bytes"})
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            with pytest.raises(CategorizedError) as err:
+                await _register(conn, dying, name="doomed", quarantine_key="uploads/q/proj/a.qcow2")
+            assert err.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+            # (a) The reservation survived the failed write and still occupies its bytes, so a
+            # second upload that would jointly breach the cap is denied rather than admitted.
+            assert await _project_usage(conn, "proj") == (1, 12)
+            healthy = _quarantine(b"twelve-bytes", key="uploads/q/proj/b.qcow2")
+            with pytest.raises(CategorizedError) as blocked:
+                await _register(
+                    conn, healthy, name="next", quarantine_key="uploads/q/proj/b.qcow2"
+                )
+            assert blocked.value.category is ErrorCategory.QUOTA_EXCEEDED
+
+            # (b) Past its publish deadline the reconciler removes the row — object missing, grace
+            # elapsed — and the project's quota is released.
+            removed = await repair_dangling_images(conn, _SweepStore(), timedelta(seconds=0))
+            assert removed == 1
+            assert await _project_usage(conn, "proj") == (0, 0)
+            # With the quota released the previously-blocked upload now succeeds.
+            entry = await _register(
+                conn, healthy, name="next", quarantine_key="uploads/q/proj/b.qcow2"
+            )
+            assert entry.state is ImageState.REGISTERED
+
+    asyncio.run(_run())
+
+
+def test_retrying_an_abandoned_reservation_re_reserves_the_new_size(migrated_url: str) -> None:
+    # Publish adopts this identity's in-flight `pending` row rather than colliding with it
+    # (ADR-0092), so a retry after a failed write reuses the abandoned reservation. The adopted
+    # row must re-reserve *this* attempt's size: leaving the previous attempt's bytes on it makes
+    # the project's usage a lie in whichever direction the two sizes differ.
+    class _DyingStore(_FakeStore):
+        def put_artifact(
+            self, request: artifact_types.ArtifactWriteRequest
+        ) -> artifact_types.StoredArtifact:
+            raise CategorizedError(
+                "object store is unreachable",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={},
+            )
+
+    first = _DyingStore({"uploads/q/proj/a.qcow2": b"twelve-bytes"})
+    retry = _quarantine(b"four", key="uploads/q/proj/b.qcow2")
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            with pytest.raises(CategorizedError):
+                await _register(conn, first, quarantine_key="uploads/q/proj/a.qcow2")
+            assert await _project_usage(conn, "proj") == (1, 12)
+            # Same identity (provider/name/arch/visibility/owner), smaller image.
+            entry = await _register(conn, retry, quarantine_key="uploads/q/proj/b.qcow2")
+            assert entry.state is ImageState.REGISTERED
+            # One row still — adopted, not duplicated — carrying the retry's size, not the
+            # abandoned attempt's.
+            assert await _project_usage(conn, "proj") == (1, 4)
+
+    asyncio.run(_run())
+
+
+class _SweepStore:
+    """The ``ImageSweepStore`` shape for the dangling sweep: every image object is absent."""
+
+    def list_image_objects(self) -> list[artifact_types.ObjectListing]:
+        return []
+
+    def head_present(self, key: str) -> bool:
+        return False
+
+    def delete(self, key: str) -> None:
+        raise AssertionError(f"the dangling sweep must not delete objects (got {key!r})")
+
+    def put_artifact(
+        self, request: artifact_types.ArtifactWriteRequest
+    ) -> artifact_types.StoredArtifact:
+        raise AssertionError("the dangling sweep must not write objects")
 
 
 def test_publish_refuses_a_connection_that_already_opened_a_transaction(migrated_url: str) -> None:

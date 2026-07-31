@@ -16,6 +16,13 @@ The recovery path for a crash mid-publish is the reconciler, not a bespoke rollb
 
 The blocking object-store calls (boto3) are offloaded via ``asyncio.to_thread`` so the worker
 event loop never stalls behind a multi-GiB upload.
+
+``publish_image`` is the composition of three steps that are also callable separately —
+``reserve_publish`` (commit the ``pending`` row, recording the object's ``size_bytes``),
+``write_publish_object`` (the object-store write, no DB access), and ``finish_publish`` (the flip
+to ``registered``). The seam exists for the private-upload path, which holds the PROJECT advisory
+lock across the reservation only and releases it before the PUT (ADR-0520, #1726): the committed
+``pending`` row is the quota claim, so the lock does not have to span the write.
 """
 
 from __future__ import annotations
@@ -99,6 +106,27 @@ class PublishRequest:
             raise ValueError("expires_at must be set iff visibility is private")
 
 
+@dataclass(frozen=True, slots=True)
+class PublishReservation:
+    """A committed ``pending`` row claiming its object keys and its quota bytes (ADR-0520).
+
+    Handed from :func:`reserve_publish` to :func:`write_publish_object` and
+    :func:`finish_publish` so the three steps share the row identity and the keys derived once at
+    reservation, rather than re-deriving them per step.
+
+    Attributes:
+        row_id: The ``image_catalog`` row this publish owns.
+        object_key: The qcow2's object-store key, already persisted on the row.
+        config_key: The kernel-config sibling's key, or ``None`` when no config was captured.
+        request: The originating :class:`PublishRequest`.
+    """
+
+    row_id: UUID
+    object_key: str
+    config_key: str | None
+    request: PublishRequest
+
+
 def _write_request(
     request: PublishRequest, data: bytes, *, suffix: str
 ) -> artifact_types.ArtifactWriteRequest:
@@ -139,7 +167,11 @@ def kernel_config_object_key(request: PublishRequest) -> str:
 
 
 async def _adopt_or_insert_pending(
-    conn: AsyncConnection, request: PublishRequest, object_key: str, config_key: str | None
+    conn: AsyncConnection,
+    request: PublishRequest,
+    object_key: str,
+    config_key: str | None,
+    size_bytes: int,
 ) -> UUID:
     """Adopt this scope's existing non-registered row, or insert a fresh ``pending`` row.
 
@@ -150,6 +182,10 @@ async def _adopt_or_insert_pending(
     baseline and a crashed ``pending`` attempt are both adopted in place and moved to ``pending``
     with ``object_key`` set and ``pending_since`` re-armed; resolution never returns either, so an
     adopted row is never visible mid-publish.
+
+    ``size_bytes`` is the size of the object this publish is about to write. It lands on the row
+    *before* the object exists so the row is a durable quota claim (ADR-0520); an adopted row's
+    stale size is overwritten by this attempt's.
     """
     select_q = sql.SQL(
         "SELECT id FROM image_catalog "
@@ -174,16 +210,21 @@ async def _adopt_or_insert_pending(
         if existing is not None:
             await cur.execute(
                 "UPDATE image_catalog "
-                "SET state = %s, object_key = %s, kernel_config_key = %s, pending_since = now() "
+                "SET state = %s, object_key = %s, kernel_config_key = %s, size_bytes = %s, "
+                "    pending_since = now() "
                 "WHERE id = %s",
-                (ImageState.PENDING.value, object_key, config_key, existing["id"]),
+                (ImageState.PENDING.value, object_key, config_key, size_bytes, existing["id"]),
             )
             return existing["id"]
-        return await _insert_pending(cur, request, object_key, config_key)
+        return await _insert_pending(cur, request, object_key, config_key, size_bytes)
 
 
 async def _insert_pending(
-    cur: AsyncCursor[DictRow], request: PublishRequest, object_key: str, config_key: str | None
+    cur: AsyncCursor[DictRow],
+    request: PublishRequest,
+    object_key: str,
+    config_key: str | None,
+    size_bytes: int,
 ) -> UUID:
     """Insert a fresh ``pending`` row from ``request`` and return its id.
 
@@ -192,10 +233,11 @@ async def _insert_pending(
     insert_q = (
         "INSERT INTO image_catalog "
         "(provider, name, arch, format, root_device, object_key, kernel_config_key, digest, "
-        " capabilities, provenance, visibility, owner, expires_at, state, pending_since) "
+        " capabilities, provenance, visibility, owner, expires_at, state, size_bytes, "
+        " pending_since) "
         "VALUES (%(provider)s, %(name)s, %(arch)s, %(format)s, %(root_device)s, %(object_key)s, "
         " %(kernel_config_key)s, %(digest)s, %(capabilities)s, %(provenance)s, %(visibility)s, "
-        " %(owner)s, %(expires_at)s, %(state)s, now()) RETURNING id"
+        " %(owner)s, %(expires_at)s, %(state)s, %(size_bytes)s, now()) RETURNING id"
     )
     params = {
         "provider": request.provider,
@@ -212,6 +254,7 @@ async def _insert_pending(
         "owner": request.owner,
         "expires_at": request.expires_at,
         "state": ImageState.PENDING.value,
+        "size_bytes": size_bytes,
     }
     await cur.execute(insert_q, params)
     row = await cur.fetchone()
@@ -291,6 +334,87 @@ async def _registered(
     return ImageCatalogEntry.model_validate(row)
 
 
+async def reserve_publish(
+    conn: AsyncConnection, request: PublishRequest, *, size_bytes: int
+) -> PublishReservation:
+    """Commit this publish's ``pending`` row — the object's claim on its key and its quota bytes.
+
+    The first of the three steps :func:`publish_image` composes. Split out so a caller that must
+    enforce a quota can hold its lock across *this* step alone and release it before
+    :func:`write_publish_object` (ADR-0520): the committed row already counts toward the
+    per-project caps, so a concurrent upload's aggregate read sees the claim without the lock
+    being held over the write.
+
+    Args:
+        conn: An async Postgres connection; the adopt/insert opens its own transaction.
+        request: The image identity, layout, digest, and scope.
+        size_bytes: The size of the object about to be written — recorded on the row before the
+            object exists, which is what makes the row a quota claim rather than a placeholder.
+
+    Returns:
+        The :class:`PublishReservation` naming the committed row and its object keys.
+    """
+    object_key = image_object_key(request)
+    config_key = kernel_config_object_key(request) if request.kernel_config is not None else None
+    row_id = await _adopt_or_insert_pending(conn, request, object_key, config_key, size_bytes)
+    return PublishReservation(
+        row_id=row_id, object_key=object_key, config_key=config_key, request=request
+    )
+
+
+async def write_publish_object(
+    store: ImageObjectStore, reservation: PublishReservation, source: Path
+) -> bool:
+    """Write the reserved row's qcow2 (and best-effort config sibling); return config presence.
+
+    The second of the three steps, and the only one that touches the object store. It issues **no
+    database statement at all**, which is what lets a quota-enforcing caller run it with no lock
+    held (ADR-0520). Verifies the source bytes against the row's declared digest, PUTs the qcow2,
+    HEAD-gates it, then writes the config sibling best-effort.
+
+    A failure here leaves the reserved ``pending`` row behind holding its quota bytes; that row is
+    reclaimed by the reconciler's ``repair_dangling_images`` on its ``pending_since`` deadline
+    (ADR-0092's recovery path, not a bespoke rollback).
+
+    Returns:
+        Whether the config sibling object is present, for :func:`finish_publish`.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` if ``source`` bytes do not hash to the reserved
+            row's ``digest``; ``INFRASTRUCTURE_FAILURE`` if the qcow2 write or HEAD gate fails.
+    """
+    request = reservation.request
+    data = await asyncio.to_thread(source.read_bytes)
+    _verify_source_digest(data, request.digest)
+    await _write_object(store, request, data)
+
+    head = await asyncio.to_thread(store.head, reservation.object_key)
+    if head is None:
+        raise CategorizedError(
+            "published image object is not present after write (HEAD gate failed)",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"object_key": reservation.object_key},
+        )
+    return await _write_config_best_effort(store, request, reservation.config_key)
+
+
+async def finish_publish(
+    conn: AsyncConnection, reservation: PublishReservation, *, config_written: bool
+) -> ImageCatalogEntry:
+    """Flip the reserved row to ``registered`` and return it.
+
+    The third of the three steps. It opens no transaction of its own, so a caller can compose it
+    with whatever else must land atomically with the registration — the private-upload path
+    composes it with its audit row, which :func:`kdive.security.audit.record_system` likewise
+    leaves to the caller to wrap.
+    """
+    return await _registered(
+        conn,
+        reservation.row_id,
+        clear_config_key=reservation.config_key is not None and not config_written,
+    )
+
+
 async def publish_image(
     conn: AsyncConnection, store: ImageObjectStore, *, request: PublishRequest, source: Path
 ) -> ImageCatalogEntry:
@@ -326,22 +450,7 @@ async def publish_image(
             ``INFRASTRUCTURE_FAILURE`` if the object write or HEAD gate fails (the row stays
             ``pending`` for the reconciler to recover).
     """
-    object_key = image_object_key(request)
-    config_key = kernel_config_object_key(request) if request.kernel_config is not None else None
-    row_id = await _adopt_or_insert_pending(conn, request, object_key, config_key)
-
-    data = await asyncio.to_thread(source.read_bytes)
-    _verify_source_digest(data, request.digest)
-    await _write_object(store, request, data)
-
-    head = await asyncio.to_thread(store.head, object_key)
-    if head is None:
-        raise CategorizedError(
-            "published image object is not present after write (HEAD gate failed)",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"object_key": object_key},
-        )
-    config_written = await _write_config_best_effort(store, request, config_key)
-    return await _registered(
-        conn, row_id, clear_config_key=config_key is not None and not config_written
-    )
+    stat = await asyncio.to_thread(source.stat)
+    reservation = await reserve_publish(conn, request, size_bytes=stat.st_size)
+    config_written = await write_publish_object(store, reservation, source)
+    return await finish_publish(conn, reservation, config_written=config_written)

@@ -1669,6 +1669,52 @@ def test_migration_0076_artifacts_encoding_columns_are_nullable(
     assert row == (None, None)
 
 
+def test_migration_0089_adds_image_size_bytes_not_null_default_zero(
+    pg_conn: psycopg.Connection,
+) -> None:
+    # The column the per-project private-image quota sums (ADR-0520). NOT NULL so the aggregate
+    # needs no per-row NULL branch, defaulting to 0 because a `defined` baseline has no object.
+    migrate.apply_migrations(pg_conn)
+    assert _columns(pg_conn, "image_catalog").get("size_bytes") == "bigint"
+    assert _nullable(pg_conn, "image_catalog").get("size_bytes") == "NO"
+    _insert_public_image(pg_conn, name="sized", state="defined", object_key=None, volume=None)
+    row = pg_conn.execute(
+        "SELECT size_bytes FROM image_catalog WHERE name = 'sized'"
+    ).fetchone()
+    assert row is not None and row[0] == 0
+
+
+def test_migration_0089_check_rejects_a_negative_size(pg_conn: psycopg.Connection) -> None:
+    # A negative reservation would subtract from the project's usage, admitting an upload the cap
+    # should deny. The CHECK makes that unrepresentable rather than a quota bug.
+    migrate.apply_migrations(pg_conn)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        pg_conn.execute(
+            "INSERT INTO image_catalog (provider, name, arch, format, root_device, "
+            "visibility, state, object_key, size_bytes) VALUES ('local-libvirt', 'neg', "
+            "'x86_64', 'qcow2', '/dev/vda', 'public', 'registered', 'rootfs/neg.qcow2', -1)"
+        )
+
+
+def test_migration_0089_leaves_pre_existing_rows_at_zero(pg_conn: psycopg.Connection) -> None:
+    # The disclosed residual (ADR-0520 Consequences): a private row that pre-dates the migration
+    # contributes 0 to its project's bytes total, because its size lives in the object store and
+    # a migration cannot reach it. Pinned here so the residual is a recorded fact rather than a
+    # surprise, and so a later backfill has a test to change.
+    _apply_through(pg_conn, "0088")
+    pg_conn.execute(
+        "INSERT INTO image_catalog (provider, name, arch, format, root_device, "
+        "visibility, state, object_key, owner, expires_at) VALUES ('local-libvirt', "
+        "'legacy', 'x86_64', 'qcow2', '/dev/vda', 'private', 'registered', "
+        "'rootfs/legacy.qcow2', 'projX', now())"
+    )
+    migrate.apply_migrations(pg_conn)  # applies only the pending 0089
+    row = pg_conn.execute(
+        "SELECT size_bytes FROM image_catalog WHERE name = 'legacy'"
+    ).fetchone()
+    assert row is not None and row[0] == 0
+
+
 def _apply_through(conn: psycopg.Connection, last_version: str) -> None:
     """Apply migrations up to and including last_version, recording each as the runner would.
 

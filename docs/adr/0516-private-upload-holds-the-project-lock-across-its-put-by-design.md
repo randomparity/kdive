@@ -78,17 +78,22 @@ it: this is one of the few where the property is load-bearing and currently unpi
 
 ### 2. The lock spans the PUT by design, not by oversight
 
-The fix is to *pin* the current behaviour, not to shorten the critical section. Holding PROJECT
+*Superseded by [ADR-0520](0520-quota-reservation-releases-the-project-lock-before-the-put.md) —
+#1726 took the first of the two alternatives named below. The quota is now claimed by a committed
+`pending` row carrying `size_bytes`, so the lock spans the reservation only and the PUT runs
+unlocked. §1's `require_top_level_transaction` assertion is unchanged and load-bearing for it.*
+
+~~The fix is to *pin* the current behaviour, not to shorten the critical section. Holding PROJECT
 across the object-store write is what makes the per-project quota fail-closed: `_project_usage`
 counts live rows and sums their object bytes, and `publish_image` adds the row and the object.
 Release the lock between them and two concurrent uploads both read the pre-write total and both
 pass a cap they jointly breach. `test_concurrent_uploads_cannot_both_pass_the_cap` pins that
-outcome today.
+outcome today.~~
 
-The alternative shapes — reserve the bytes in a row first and publish outside the lock, or admit
+~~The alternative shapes — reserve the bytes in a row first and publish outside the lock, or admit
 optimistic over-admission and reconcile — are real designs, and each is a larger change to the
 quota model than #1712 scopes. The lock *duration* concern they answer is filed separately as
-#1726, which this record leaves as the open question rather than pre-empting.
+#1726, which this record leaves as the open question rather than pre-empting.~~
 
 ### 3. The presign site records why it is not guarded
 
@@ -143,9 +148,11 @@ top-level.
   cannot distinguish a commit from a savepoint.
 - No schema, migration, config, tool schema, RBAC rule or agent-visible string changes. No new
   dependency.
-- The PROJECT lock still spans N `store.head` calls plus a multi-GiB PUT. That is accepted here
+- *Superseded by [ADR-0520](0520-quota-reservation-releases-the-project-lock-before-the-put.md) —
+  the span was changed, as this bullet anticipated.*
+  ~~The PROJECT lock still spans N `store.head` calls plus a multi-GiB PUT. That is accepted here
   and tracked as #1726; this record makes the span deliberate and pinned, which is the
-  precondition for changing it safely later.
+  precondition for changing it safely later.~~
 
 ## Considered & rejected
 

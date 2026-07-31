@@ -95,6 +95,12 @@ class ImageCatalogEntry(DomainModel):
     path: str | None = None
     description: str | None = None
     kernel_config_key: str | None = None
+    #: Size in bytes of the row's qcow2 object, recorded when the ``pending`` row is reserved and
+    #: **before** the object is written (ADR-0520). This is what makes the row a durable quota
+    #: claim: the per-project private-image bytes cap sums this column over live rows, so a publish
+    #: in flight already occupies its share and the PROJECT lock need not be held across the PUT.
+    #: 0 for a ``defined`` baseline, which has no object.
+    size_bytes: int = 0
 
 
 __all__ = ["Capability", "ImageCatalogEntry", "ImageState", "ImageVisibility"]
