@@ -101,7 +101,16 @@ moves. That cost was judged larger than the staleness it removes.
 
 The residual risk is the one stated above, and it is accepted rather than mitigated: a PR whose
 green check was computed before a sibling migration merged can still merge past this guard. The
-ordering rule is a strong gate, not an airtight one.
+ordering rule is a strong gate, not an airtight one. It is also the only PR gate with that shape:
+the immutability guard pins `pull_request.base.sha` (ADR-0518) and no other required check reads
+`origin/main`, so #1734's wider concern — that the same reasoning applies to every check comparing
+against a moving base — has no second instance here today.
+
+A merge queue is the option this decision did not weigh. It would recompute checks against the
+prospective merge result and remove the staleness without the per-PR churn strict mode imposes,
+at the cost of serializing merges and of wiring `merge_group` into every required workflow — a
+`pull_request`-only workflow does not run in the queue, so the guard would stop gating rather
+than fail. Neither evaluated nor rejected here; tracked in #1753. Non-strict stands either way.
 
 What the gate does still hold, which is more than nothing:
 
@@ -116,16 +125,21 @@ What the gate does still hold, which is more than nothing:
   what the per-PR "Update branch" control does), or re-running the job all produce a fresh
   verdict. Non-strict makes that optional, not unavailable.
 - **The exposure is narrow.** It needs two open PRs that each add a migration, merging in the
-  wrong order, with no head change to the second between the first merge and its own.
+  wrong order, with no head change to the second between the first merge and its own. Narrow is
+  not the same as unprecedented: `## Context` above records the first two conditions occurring in
+  #1553 / #1718, before any guard existed. The third condition is what narrows it.
 
 Two things are deliberately *not* claimed as backstops. The runtime assertion is rejected below,
 so `apply_migrations` still applies an out-of-order pair without complaint on a database that has
 already recorded the higher version (ADR-0015) — nothing catches this after the merge. And the
 immutability guard ([ADR-0518](0518-the-immutability-guard-compares-against-the-base-branch.md))
 answers a different question: it compares the branch against its own base to find an *already
-applied* migration that was modified, deleted, or renamed. It does shape the remedy, though —
-once the lower-numbered file is on `main`, renumbering it is itself a violation, so the correction
-is a new migration above the maximum rather than a rename.
+applied* migration that was modified, deleted, or renamed. It does shape the remedy, though, and
+the shape depends on when the mistake is caught. While the file is still an addition on a branch,
+renaming it is what this guard's own message tells the author to do and the immutability guard
+sees a plain `A`. Once the lower-numbered file is on `main`, the same rename is an `R` against the
+base and is itself a violation — so the *post-merge* correction is a new migration above the
+maximum, never a renumber.
 
 ## Considered & rejected
 
