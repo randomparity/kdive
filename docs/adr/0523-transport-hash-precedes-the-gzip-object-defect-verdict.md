@@ -133,6 +133,27 @@ This does not weaken §5's first paragraph. Absence of the *line* still means th
 verification never ran — a reusable staged base, the free-space precheck, the missing-checksum
 branch and a `get_range` fault all exit before a digest exists, on either path.
 
+### 6. An empty range is the store failing to serve, not a truncated object
+
+Both read loops now raise a retryable `_short_read_error` when `get_range` answers a range below
+`compressed_size` with nothing. `compressed_size` is the size the store's own `HEAD` reported, so a
+store that will not serve a range under it is internally inconsistent — a fault on the read,
+indistinguishable from the connection resets `get_range` raises for itself.
+
+This is §1's principle applied to the one place the old code got it backwards *because* of the
+drain. The decode pass used to end a short read with a bare `break`, which reached the truncated
+branch; the drain then re-read the same tail, and if the store served it that time the digest
+**agreed** — so the object was proven intact and the agent was still told, terminally, to re-upload
+a multi-GiB object that was never wrong. The evidence disproving the claim was produced by the very
+read this ADR added, and then discarded. Raising at the empty range makes the honest claim instead
+and never reaches a verdict about the object at all.
+
+It also removes an asymmetry: the same store signal used to mean "truncated object, terminal" in
+one loop and "digest comes up short, retryable" in the other. A genuinely truncated *upload* is
+untouched — `HEAD` reports the short length, so the pass reaches `compressed_size` with no empty
+range and the truncated branch fires as before. The error carries no gate marker, so it is never
+logged as stored-object damage.
+
 ## Consequences
 
 - Damaged stored bytes under a gzip upload now report `retryable: true` with the transport
@@ -165,9 +186,16 @@ branch and a `get_range` fault all exit before a digest exists, on either path.
   store's own retryable error propagates and a genuinely defective object is reported as a transport
   fault rather than as the defect it is. That verdict is honest — nothing at that point can prove
   what the stored bytes were — but the decode's diagnosis would otherwise die with the frame, so it
-  is chained onto the store's error and survives on the traceback. The gate-keyed WARNING
+  is attached to the store's error as a **note** and survives on the traceback. A note rather than
+  `raise ... from`: the store already chained its own botocore cause onto that error, and taking
+  that over would suppress the real root cause and render the causality backwards. The gate-keyed
+  WARNING
   deliberately does **not** fire there: a store fault is not stored-object damage, which is the
   discrimination ADR-0445 §4 built that keying for.
+- A store that answers a ranged read below `compressed_size` with an empty body now reports a
+  retryable read failure naming the offset, where it previously reported a terminal "truncated,
+  re-upload" (§6). No caller distinguished the two, and the new message is the one an operator
+  can act on.
 - No schema change, no migration, no MCP tool-surface change. The only externally visible changes
   are the `retryable` boolean and the message text on the four branches, in the subset where the
   digest disagrees.

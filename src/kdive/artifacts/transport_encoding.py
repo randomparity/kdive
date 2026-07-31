@@ -93,6 +93,32 @@ def _object_error(detail: str) -> CategorizedError:
     return CategorizedError(detail, category=ErrorCategory.CONFIGURATION_ERROR)
 
 
+def _short_read_error(request: StripDecodeRequest, offset: int) -> CategorizedError:
+    """The store served no bytes for a range inside the object: its failure, not the agent's.
+
+    ``compressed_size`` is the size the store's own ``HEAD`` reported, so a store that answers a
+    range below it with nothing is internally inconsistent — a fault on the read, indistinguishable
+    from the connection resets ``get_range`` raises for itself, and equally retryable. Both loops
+    raise it, so the same signal cannot mean two things depending on which one saw it.
+
+    It is emphatically *not* the truncated branch. That branch says the stored object ends before
+    its gzip trailer, which is a claim about the object; here the object is exactly as long as the
+    store says and the store simply did not hand it over. Reporting this as a defect would demand a
+    re-upload of an object that may be perfectly intact — the failure ADR-0523 §1 exists to remove,
+    reappearing on the one branch where the drain's own evidence can disprove it. It carries no
+    gate marker, so it is never logged as stored-object damage (ADR-0445 §4).
+
+    A *genuinely* truncated upload does not come through here: ``HEAD`` reports the short length,
+    so the pass reaches ``compressed_size`` with no empty read and the truncated branch fires as
+    before.
+    """
+    return CategorizedError(
+        f"the object store returned no bytes for a range of {request.key} at offset {offset} of "
+        f"{request.compressed_size}: the stored object could not be read in full; retry",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+    )
+
+
 def _transport_error(detail: str) -> CategorizedError:
     """The bytes read back are not the bytes the signed PUT bound: retryable (ADR-0445).
 
@@ -207,12 +233,13 @@ def strip_gzip_to_writer(
         # The drain reads uncaught, so the store's own faults propagate — and this frame is the
         # only one that ever held ``decoded.defect``, which would otherwise die with it. A fault
         # here leaves the digest unknowable, so the store's retryable verdict is the honest one and
-        # passes through unchanged; only the decode diagnosis is chained on, so a postmortem can
-        # still see the object did not decode. This window is why ADR-0523 §4's terminal guarantee
-        # is conditional on the drain completing, and the branch that widened it records that.
-        if decoded.defect is None:
-            raise
-        raise fault from decoded.defect
+        # passes through untouched — a NOTE, not ``raise ... from``, because the store already
+        # chained its own botocore cause onto it and taking that over would render the causality
+        # backwards. This window is why ADR-0523 §4's terminal guarantee is conditional on the
+        # drain completing, and the branch that widened it records that.
+        if decoded.defect is not None:
+            fault.add_note(f"the decode had already failed: {decoded.defect}")
+        raise
 
     actual = base64.b64encode(hasher.digest()).decode("ascii")
     if actual != request.expected_sha256:
@@ -241,8 +268,10 @@ def _decode_pass(
     """Read the stored object in ranges, hashing every byte and gunzipping it into ``writer``.
 
     Returns at the first defect rather than raising, so the caller can finish the digest before
-    deciding whether the defect is the agent's or the store's. A short read (an empty range) ends
-    the pass too: the tail is then unread, which the digest catches as a mismatch.
+    deciding whether the defect is the agent's or the store's. A short read is the one thing it does
+    raise on directly: an empty range inside the object is the store failing to serve, not a claim
+    about the object, so it must not fall through to the truncated branch
+    (:func:`_short_read_error`).
     """
     decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)  # 16 + MAX_WBITS selects gzip framing
     written = 0
@@ -251,7 +280,7 @@ def _decode_pass(
         length = min(_RANGE_CHUNK_BYTES, request.compressed_size - offset)
         chunk = store.get_range(request.key, start=offset, length=length)
         if not chunk:
-            break
+            raise _short_read_error(request, offset)
         offset += len(chunk)
         hasher.update(chunk)
         try:
@@ -314,7 +343,7 @@ def _hash_remaining(
         length = min(_RANGE_CHUNK_BYTES, request.compressed_size - offset)
         chunk = store.get_range(request.key, start=offset, length=length)
         if not chunk:
-            return
+            raise _short_read_error(request, offset)
         offset += len(chunk)
         hasher.update(chunk)
 
