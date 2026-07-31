@@ -259,6 +259,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - State precisely why the flock lease was not taken
 - Record the base-branch comparison as ADR-0518
 - Be fair to the rejection this record overturns
+- State the KDIVE_WORKER_COUNT ceiling and bind it to lib.sh
+- Note the remedy indent is load-bearing, not incidental
 
 ### Fixed
 
@@ -458,6 +460,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record no lease on a non-autocommit connection
 - Diff the schema-immutability guard against origin/main
 - Compare against the PR's base commit, not main's tip
+- Test the surplus pids against the caller's uid, not for root
+- Sweep the same ownership gap in stop_daemons
 
 ### Build
 
@@ -471,6 +475,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rewrap docstring paragraphs left ragged by the reflow
 - Reflow the stop_daemons poll comment
 - Let ruff format the git argv
+- Apply ruff format to the new surplus-remedy test
 
 ## [0.4.0] - 2026-07-23
 
