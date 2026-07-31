@@ -22,7 +22,9 @@ event loop never stalls behind a multi-GiB upload.
 ``write_publish_object`` (the object-store write, no DB access), and ``finish_publish`` (the flip
 to ``registered``). The seam exists for the private-upload path, which holds the PROJECT advisory
 lock across the reservation only and releases it before the PUT (ADR-0520, #1726): the committed
-``pending`` row is the quota claim, so the lock does not have to span the write.
+``pending`` row is the quota claim, so no PROJECT or transaction-scoped lock spans the write. The
+IMAGE_PUBLISH session lock remains held through the PUT, finish, and private registration audit
+(ADR-0526).
 """
 
 from __future__ import annotations
@@ -416,13 +418,12 @@ async def _registered(
     """Flip the reserved row to ``registered``, fenced on the reservation still owning it.
 
     The predicate is the reservation's identity — ``id`` **and** the ``digest``/``object_key`` it
-    wrote — not ``id`` alone. `id` alone is not enough once the lock no longer spans the write
-    (ADR-0520 §7): a concurrent publish of the same identity adopts this very row under
-    :func:`_adopt_or_insert_pending`'s ``FOR UPDATE``, overwriting ``digest`` with its own, and
-    both attempts then race to PUT the same key. Whichever object survives, at most one attempt's
-    digest is still on the row, so registering on ``id`` alone lets the loser publish a row whose
-    digest can never match its object — a live, quota-consuming, permanently unfetchable image,
-    with both callers told they succeeded.
+    wrote — not ``id`` alone. `id` alone is not enough once the PROJECT lock no longer spans the
+    write (ADR-0520 §7): the IMAGE_PUBLISH session fence orders recovery, but another publisher's
+    reservation phase can still adopt this row while the first publisher holds that fence. The
+    adoption overwrites the row's attempt, digest, and attempt-specific key. Registering on ``id``
+    alone would then let the superseded publisher claim success for an object the row no longer
+    names.
 
     Raises:
         CategorizedError: ``CONFLICT`` when the row no longer carries this reservation — a later
@@ -468,10 +469,11 @@ async def reserve_publish(
     """Commit this publish's ``pending`` row — the object's claim on its key and its quota bytes.
 
     The first of the three steps :func:`publish_image` composes. Split out so a caller that must
-    enforce a quota can hold its lock across *this* step alone and release it before
+    enforce a quota can hold its PROJECT lock across *this* step alone and release it before
     :func:`write_publish_object` (ADR-0520): the committed row already counts toward the
-    per-project caps, so a concurrent upload's aggregate read sees the claim without the lock
-    being held over the write.
+    per-project caps, so a concurrent upload's aggregate read sees the claim without the PROJECT
+    lock being held over the write. The composed publish path acquires IMAGE_PUBLISH after this
+    reservation and holds that row-scoped session lock through write and finish (ADR-0526).
 
     Args:
         conn: An async Postgres connection; the adopt/insert opens its own transaction.
@@ -518,9 +520,11 @@ async def write_publish_object(
     """Write the reserved row's qcow2 (and best-effort config sibling); return config presence.
 
     The second of the three steps, and the only one that touches the object store. It issues **no
-    database statement at all**, which is what lets a quota-enforcing caller run it with no lock
-    held (ADR-0520). Verifies the source bytes against the row's declared digest, PUTs the qcow2,
-    HEAD-gates it, then writes the config sibling best-effort.
+    database statement at all**, so no transaction-scoped lock is needed across the PUT. The
+    composed public and private publish paths still hold the IMAGE_PUBLISH session lock through
+    this write and their committed finish (plus the private registration audit), while the PROJECT
+    lock is absent (ADR-0520, ADR-0526). Verifies the source bytes against the row's declared
+    digest, PUTs the qcow2, HEAD-gates it, then writes the config sibling best-effort.
 
     A failure here leaves the reserved ``pending`` row behind holding its quota bytes; that row is
     reclaimed by the reconciler's ``repair_dangling_images`` on its ``pending_since`` deadline
