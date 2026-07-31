@@ -206,10 +206,11 @@ def strip_gzip_to_writer(
     uploaded-rootfs fetch attaches its ``system_id``) annotates them on the way out.
 
     Note that ``store.get_range`` is called **uncaught** in both read loops, so the store's own
-    faults propagate through unchanged — including ``INFRASTRUCTURE_FAILURE`` for a connection
-    reset on any of the hundreds of ranged GETs a multi-GiB object takes. That is why the gate
-    marker exists: a consumer that distinguished the checksum rejection by *category* would report
-    every transport blip as stored-object damage.
+    faults propagate through unreclassified — including ``INFRASTRUCTURE_FAILURE`` for a connection
+    reset on any of the hundreds of ranged GETs a multi-GiB object takes. (One during the drain
+    picks up a *note* naming the decode diagnosis that would otherwise be lost, and nothing else.)
+    That is why the gate marker exists: a consumer that distinguished the checksum rejection by
+    *category* would report every transport blip as stored-object damage.
 
     Args:
         store: A ranged-read store over the compressed object.
@@ -221,9 +222,12 @@ def strip_gzip_to_writer(
 
     Raises:
         CategorizedError: ``INFRASTRUCTURE_FAILURE`` (with the ``TRANSPORT_CHECKSUM_GATE`` marker)
-            on a transport-checksum mismatch; ``CONFIGURATION_ERROR`` on a gzip bomb or a corrupt,
-            truncated, or multi-member gzip stream whose stored bytes *do* match that checksum. The
-            store's own errors from ``get_range`` propagate unchanged, and carry no marker.
+            on a transport-checksum mismatch; ``INFRASTRUCTURE_FAILURE`` with no marker when a
+            ranged read comes back empty below ``compressed_size`` (the store failed to serve, not a
+            claim about the object — ADR-0523 §6); ``CONFIGURATION_ERROR`` on a gzip bomb or a
+            corrupt, truncated, or multi-member gzip stream whose stored bytes *do* match that
+            checksum. The store's own errors from ``get_range`` propagate unreclassified and carry
+            no marker either.
     """
     hasher = hashlib.sha256()
     decoded = _decode_pass(store, request, writer, hasher)
