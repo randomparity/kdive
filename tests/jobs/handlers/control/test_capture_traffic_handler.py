@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import shutil
 import struct
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -24,7 +25,12 @@ import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.storage import ArtifactWriteRequest, FetchedArtifact, StoredArtifact
+from kdive.artifacts.storage import (
+    ArtifactWriteRequest,
+    FetchedArtifact,
+    HeadResult,
+    StoredArtifact,
+)
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -35,6 +41,7 @@ from kdive.jobs.provider_context import clear_provider_kind, take_provider_kind
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.audit import args_digest
 from kdive.store.objectstore import ObjectStore
+from tests.clock import STORE_MTIME
 from tests.integration._seed import seed_granted_allocation, seed_running_run, seed_system
 from tests.mcp.systems_support import provider_resolver
 
@@ -57,6 +64,19 @@ class _FakeStore:
     def get_artifact(self, key: str, _etag: str | None) -> FetchedArtifact:
         data, sensitivity, retention = self.objects[key]
         return FetchedArtifact(data, sensitivity, retention)
+
+    def head(self, key: str) -> HeadResult | None:
+        """Serve the etag ``put_artifact`` derived, so ADR-0519's delete fence is testable."""
+        if key not in self.objects:
+            return None
+        data, sensitivity, _retention = self.objects[key]
+        return HeadResult(
+            size_bytes=len(data),
+            checksum_sha256=None,
+            etag=hashlib.sha256(data).hexdigest(),
+            sensitivity=sensitivity,
+            last_modified=STORE_MTIME,
+        )
 
 
 class _FakeCapturer:
@@ -780,3 +800,97 @@ def test_discard_failure_does_not_mask_the_cancel_outcome(
     assert ref is None  # ...and its failure did not become the handler's result
     assert rows == []
     assert capturer.reclaimed  # the host-side pcap is still reclaimed
+
+
+# --- Two concurrent attempts of one job (#1725 H2) -------------------------------------
+
+_PCAP_TWO = _PCAP_HEADER + struct.pack("<IIII", 0, 0, 4, 4) + b"\xff\xff\xff\xff"
+
+
+class _StallingStore(_FakeStore):
+    """Parks the FIRST ``put_artifact`` until released, so a peer attempt can overtake it.
+
+    This is the shape a lapsed lease produces: two attempts of one job in flight at once, which
+    ``jobs/worker.py`` guards against but explicitly cannot rule out ("risks mid-job reclaim and
+    double-run"). Both attempts pass their phase-1 probe, both PUT the same deterministic key,
+    and the PUT that lands last decides what the object holds.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_put_arrived = threading.Event()
+        self.release_first_put = threading.Event()
+        self._stalled = False
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        if not self._stalled:
+            self._stalled = True
+            self.first_put_arrived.set()
+            self.release_first_put.wait(timeout=30)
+        return super().put_artifact(request)
+
+
+async def _run_attempt(pool, store, capturer, job, *, monkeypatch=None):
+    """One worker-shaped attempt, on its own connection (autocommit, as the worker dispatches)."""
+    resolver = provider_resolver(traffic_capturer=capturer)
+    async with pool.connection() as conn:
+        await conn.set_autocommit(True)
+        try:
+            return await capture_traffic.capture_traffic_handler(
+                conn, job, resolver=resolver, artifact_store=cast(ObjectStore, store)
+            )
+        finally:
+            await conn.set_autocommit(False)
+
+
+def test_concurrent_attempt_overwriting_the_object_repairs_the_rows_etag(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
+    """When a peer registers the key and this attempt's PUT then lands, the row is repaired.
+
+    Attempt A parks inside its PUT; B runs to completion and commits ``row_B`` describing B's
+    bytes; A's PUT then overwrites the object with A's bytes. Phase 1's probe cannot prevent
+    this — both attempts passed it before either wrote — so phase 3 refreshes ``row_B``'s etag
+    to what the object actually holds. Without that repair the row describes bytes that are
+    gone, which ``handlers/artifacts/vmcore.py`` treats as a job-failing corruption.
+    """
+    store = _StallingStore()
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    capturer_a = _FakeCapturer(tmp_path / "a", pcap=_PCAP_ONE)
+    capturer_b = _FakeCapturer(tmp_path / "b", pcap=_PCAP_TWO)
+    monkeypatch.setattr(
+        capture_traffic,
+        "run_capture_loop",
+        _LoopSpy(capture_traffic.LoopResult(truncated=False, canceled=False)),
+    )
+
+    async def _go():
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4, open=False) as pool:
+            await pool.open()
+            run_id, _ = await _seed_ready_run(pool)
+            job = _job(run_id)
+            await _insert_job(pool, job, JobState.RUNNING)
+            task_a = asyncio.create_task(_run_attempt(pool, store, capturer_a, job))
+            await asyncio.to_thread(store.first_put_arrived.wait, 30)
+            ref_b = await _run_attempt(pool, store, capturer_b, job)
+            store.release_first_put.set()
+            ref_a = await task_a
+            return ref_a, ref_b, await _artifact_rows(pool, run_id), run_id, job
+
+    ref_a, ref_b, rows, run_id, job = asyncio.run(_go())
+    key = f"local/runs/{run_id}/pcap-{job.id}"
+    assert len(rows) == 1  # insert-if-absent held across the two concurrent attempts
+    assert ref_a == ref_b  # both attempts report the one artifact
+    # A's PUT landed last, so the object holds A's bytes...
+    assert store.objects[key][0] == _PCAP_ONE
+
+    # ...and the committed row was repaired to describe them rather than B's.
+    async def _row_etag():
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn, conn.cursor() as c:
+            await c.execute("SELECT etag FROM artifacts WHERE object_key = %s", (key,))
+            row = await c.fetchone()
+            assert row is not None
+            return row[0]
+
+    assert asyncio.run(_row_etag()) == hashlib.sha256(_PCAP_ONE).hexdigest()

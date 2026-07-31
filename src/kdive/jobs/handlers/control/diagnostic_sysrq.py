@@ -58,8 +58,11 @@ _OWNER_KIND = "systems"
 _RETENTION_CLASS = "console"
 
 _ARTIFACT_ROW_SQL: LiteralString = (
-    "SELECT id FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
+    "SELECT id, etag FROM artifacts "
+    "WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
 )
+
+_REFRESH_ETAG_SQL: LiteralString = "UPDATE artifacts SET etag = %s WHERE id = %s"
 
 # Bounded, count-driven capture window (no wall-clock, so the poll is deterministic under test).
 SEAM_OVERLAP = 4 * 1024
@@ -233,13 +236,25 @@ def _put_artifact(store: ObjectStore, system_id: UUID, name: str, data: bytes) -
     )
 
 
-async def _existing_artifact_id(
+class _ExistingRow(NamedTuple):
+    """A committed capture row for this object key: its id, and the object etag it describes."""
+
+    id: UUID
+    etag: str
+
+
+async def _existing_artifact_row(
     conn: AsyncConnection, system_id: UUID, object_key: str
-) -> UUID | None:
+) -> _ExistingRow | None:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_ARTIFACT_ROW_SQL, (system_id, object_key))
         row = await cur.fetchone()
-    return row["id"] if row is not None else None
+    return None if row is None else _ExistingRow(row["id"], str(row["etag"]))
+
+
+async def _key_unregistered(conn: AsyncConnection, system_id: UUID, object_key: str) -> bool:
+    """Whether no committed row claims ``object_key`` — the discard's row fence, run unlocked."""
+    return await _existing_artifact_row(conn, system_id, object_key) is None
 
 
 async def _store_capture(
@@ -258,10 +273,14 @@ async def _store_capture(
     console rotation all serialize on it — so both locked phases stay short and database-only.
 
     Insert-if-absent on the object key: jobs are at-least-once, so a retry that re-runs the
-    handler returns the existing artifact id rather than duplicating the row. The *first*
-    phase's probe is load-bearing rather than an optimization: a retry that skipped it would PUT
-    its fresh capture over the key while the committed row still carried the first attempt's
-    etag and size, leaving the row describing bytes the object no longer holds.
+    handler returns the existing artifact id rather than duplicating the row. The first phase's
+    probe short-circuits the *sequential* retry before it writes anything. It does not close the
+    concurrent case: two attempts of one job can both pass phase 1 and both PUT (the lease can
+    lapse mid-job, ``jobs/worker.py``), and whichever PUT lands last leaves the other's row
+    describing bytes the object no longer holds. Phase 3 repairs that by refreshing the row's
+    etag whenever this attempt wrote and found a peer's row — the same repair
+    ``jobs/handlers/runs/boot_evidence.py`` makes, and the drift ``handlers/artifacts/vmcore.py``
+    fails a job over.
     """
     name = f"sysrq-diagnostic-{job.id}"
     object_key = artifact_key(_TENANT, _OWNER_KIND, str(system_id), name)
@@ -269,18 +288,24 @@ async def _store_capture(
         system = await SYSTEMS.get(conn, system_id)
         if system is None or system.state is not SystemState.READY:
             raise _changed_state_error(system_id)
-        existing = await _existing_artifact_id(conn, system_id, object_key)
+        existing = await _existing_artifact_row(conn, system_id, object_key)
     if existing is not None:
-        return existing
+        return existing.id
 
     stored = await asyncio.to_thread(_put_artifact, store, system_id, name, redacted)
 
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
-        existing = await _existing_artifact_id(conn, system_id, object_key)
+        existing = await _existing_artifact_row(conn, system_id, object_key)
+        if existing is not None:
+            # A peer attempt registered the key while this PUT was in flight, and this PUT then
+            # overwrote the object its row describes. Point the row at what the object holds.
+            if existing.etag != stored.etag:
+                await conn.execute(_REFRESH_ETAG_SQL, (stored.etag, existing.id))
+            if system is None or system.state is not SystemState.READY:
+                raise _changed_state_error(system_id)
+            return existing.id
         if system is not None and system.state is SystemState.READY:
-            if existing is not None:
-                return existing
             artifact = register_artifact_row(
                 stored, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=None
             )
@@ -299,10 +324,16 @@ async def _store_capture(
             )
             return artifact.id
     # The System left READY while the object was in flight. Reclaim is row-driven, so the object
-    # would be a permanent orphan — delete it, but only when no row claims the key (a peer that
-    # registered it between the two phases owns that object, and this attempt does not).
-    if existing is None:
-        await discard_unregistered_objects(store, [stored.key])
+    # would be a permanent orphan — delete it. READY is NOT monotonic: PAUSED and RESTORING are
+    # ordinary states a System returns to READY from (ADR-0378), so a peer attempt of this job
+    # can register this key after the refusal above and before the delete below. That is why the
+    # discard re-probes the row and compares the etag immediately before deleting, rather than
+    # trusting the probe this transaction just made.
+    await discard_unregistered_objects(
+        store,
+        [stored],
+        still_unregistered=lambda key: _key_unregistered(conn, system_id, key),
+    )
     raise _changed_state_error(system_id)
 
 
