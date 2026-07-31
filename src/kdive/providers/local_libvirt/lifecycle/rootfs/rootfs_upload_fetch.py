@@ -911,10 +911,11 @@ def _log_checksum_mismatch(key: str, *, system_id: UUID, encoding: str) -> None:
     first observable consequence of real damage would otherwise be a silent extra multi-GiB
     download and a second dead-lettered job, with nothing in the host logs naming the condition.
 
-    **Reach, on the gzip path only** (ADR-0445 §6): this fires exactly where the checksum gate
-    fires, so the framing-first damage that never reaches that gate logs nothing here either.
-    Absence of this line is not evidence of an intact object for a gzip upload; #1548 widens both
-    together.
+    **Reach** (ADR-0523, closing ADR-0445 §6): this fires exactly where the checksum gate fires,
+    and since that gate now runs ahead of the gzip path's framing and bound checks, the two paths
+    log the same damage. Under ADR-0445 §6 framing-first damage raised an object-defect error and
+    logged nothing, so absence of this line was not evidence of an intact object for a gzip upload;
+    it is now.
     """
     _log.warning(
         "uploaded rootfs object %s failed checksum verification while staging for system %s "

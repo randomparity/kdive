@@ -193,6 +193,28 @@ of cases, which #1523's brief ruled out. **#1548** carries it, and
 `test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual` pins both the `zlib.error`
 and bomb shapes so the gap is visible rather than silent.
 
+### 7. §6's residual is closed by ADR-0523 (2026-07-30)
+
+Appended after the fact, so §6 above reads as the state of the tree between 2026-07-25 and
+2026-07-30 rather than as current behaviour.
+
+[ADR-0523](0523-transport-hash-precedes-the-gzip-object-defect-verdict.md) (#1548) does what §6's
+closing paragraph sketched: `strip_gzip_to_writer` now compares the transport digest **before** any
+object-defect branch raises. The three-way table in §6 collapses — every shape of stored-byte
+damage reaches the digest and reports `infrastructure_failure`, matching the identity path, and an
+object-defect category is only reported once the stored bytes have been proven to be the bytes
+signed at PUT. The bomb branch no longer blames a correct `uncompressed_size`, so the ADR-0450
+compounding §6 names is closed for the rotted-bytes case.
+
+The reach caveat in the Consequences below moves with it: the gzip path's stored-object-damage
+WARNING is keyed on the gate, and the gate moved, so it now fires for the widened set with no
+change to `_stage_gzip`. Absence of that line **is** now evidence of an intact object on either
+path.
+
+§1–§5 are unaffected. ADR-0523 changes when the object-defect constructor is reachable, not the
+split §2 made or the categories §1 assigned; the residual test §6 names is retired there, its flip
+probe surviving inverted.
+
 ## Consequences
 
 - An agent that hits a rootfs checksum mismatch on a gzip-encoded upload is now told

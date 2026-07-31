@@ -316,6 +316,10 @@ NULL_IO = cast(IO[bytes], io.BytesIO())
 def _flip_reaching(message: str) -> tuple[int, int]:
     """Find the first (byte, xor-mask) in the deflate body whose damage raises ``message``.
 
+    Probed with the checksum of the *damaged* candidate, so the transport gate passes and the
+    object-defect branch under test is what raises — the probe is looking for a flip that reaches a
+    branch, not for a verdict.
+
     The offsets are **derived, not pinned**. Which branch a given flip reaches is a property of the
     exact deflate encoding, and that is chosen by the linked compressor — this interpreter links
     zlib-ng, and a stock-zlib build can emit a different (even differently sized) stream for the
@@ -330,7 +334,7 @@ def _flip_reaching(message: str) -> tuple[int, int]:
             request = StripDecodeRequest(
                 key="k",
                 compressed_size=len(candidate),
-                expected_sha256=_sha256_b64(pristine),  # the checksum of the UNdamaged object
+                expected_sha256=_sha256_b64(bytes(candidate)),  # the DAMAGED object's own checksum
                 uncompressed_size=len(_RESIDUAL_CANONICAL),
             )
             try:
@@ -342,42 +346,74 @@ def _flip_reaching(message: str) -> tuple[int, int]:
 
 
 @pytest.mark.parametrize(
-    "expected_message",
+    "branch_message",
     # Two shapes of deflate-body damage reaching two different object-defect branches: one fails the
     # deflate CRC, one desynchronises the Huffman decode so the output cap trips first. Which branch
     # fires is a property of the damage, not of anything the agent did. An exhaustive single-bit
     # sweep of this fixture's deflate body under zlib-ng 1.3.1 splits 225 corrupt-stream / 13 bomb
     # bound / 10 checksum gate of 248 flips -- so the bomb branch is a real share of stored-byte
-    # corruption rather than a curiosity, and it is the shape whose message is affirmatively WRONG:
-    # it blames a declared uncompressed_size that was correct. ADR-0450 reads that same field as the
-    # gzip path's free-space budget, so an agent that follows the advice and re-declares upward can
-    # have its next provision refused for a base the volume can hold.
+    # corruption rather than a curiosity, and it is the shape whose message was affirmatively WRONG:
+    # it blamed a declared uncompressed_size that was correct. ADR-0450 reads that same field as the
+    # gzip path's free-space budget, so an agent that followed the advice and re-declared upward
+    # could have its next provision refused for a base the volume can hold.
     ["corrupt", "exceeds the declared uncompressed_size bound"],
     ids=["deflate-crc", "bomb-bound"],
 )
-def test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual(
-    tmp_path: Path, expected_message: str
+def test_stage_gzip_damaged_stored_bytes_report_the_identity_verdict(
+    tmp_path: Path, branch_message: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # ADR-0445 §6 / #1548 — pins the LIMIT of the convergence above, so it is visible rather than
-    # silent. The test above declares a wrong checksum over a *well-formed* gzip, which reaches the
-    # end-of-stream hash comparison. Damage the STORED BYTES instead and zlib's own framing trips
-    # first, so an object-defect branch fires before the digest is ever compared. The identity path
-    # reports this same damage as INFRASTRUCTURE_FAILURE (see the corrupt-object test below), so the
-    # codec still decides the verdict here. #1523 could not close this — its brief forbade changing
-    # the bomb and corrupt-stream categories — so #1548 carries it.
-    index, mask = _flip_reaching(expected_message)
+    # ADR-0523 / #1548 closes ADR-0445 §6's residual, and this is where that used to be pinned open.
+    # The test above declares a wrong checksum over a *well-formed* gzip. Damage the STORED BYTES
+    # instead and zlib's framing still notices first — but the defect no longer decides: the unread
+    # ranges are drained hash-only and the transport digest overrules it, so both branches now give
+    # the same retryable verdict the identity path gives for the same damage. The WARNING widens
+    # with the category (ADR-0445's Consequences promised the two move together), so this fixture's
+    # damage is now visible to an operator where it used to log nothing at all.
+    index, mask = _flip_reaching(branch_message)
     stored = bytearray(gzip.compress(_RESIDUAL_CANONICAL))
     pristine_checksum = _sha256_b64(bytes(stored))
     stored[index] ^= mask  # damaged post-PUT; the declared checksum is still the pristine one
 
     store = _FakeStore(bytes(stored), checksum=pristine_checksum)
 
-    with pytest.raises(CategorizedError) as error:
+    with pytest.raises(CategorizedError) as error, caplog.at_level(logging.WARNING):
         _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(_RESIDUAL_CANONICAL))
 
-    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR  # NOT yet the identity verdict
-    assert expected_message in str(error.value)
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "transport checksum mismatch" in str(error.value)
+    assert branch_message not in str(error.value)  # not the message that blamed the agent
     assert error.value.details["system_id"]
+    assert "failed checksum verification while staging" in caplog.text
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+@pytest.mark.parametrize(
+    "branch_message",
+    ["corrupt", "exceeds the declared uncompressed_size bound"],
+    ids=["deflate-crc", "bomb-bound"],
+)
+def test_stage_gzip_defective_upload_keeps_the_terminal_verdict(
+    tmp_path: Path, branch_message: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The other half of ADR-0523, and the assertion that keeps the convergence honest. Same two
+    # branches, same damage — but here the agent uploaded and SIGNED the broken object, so the
+    # digest agrees and the object-defect claim is true. Widening the retryable constructor over
+    # these would tell an agent to retry a key that re-reads the same defect forever, and would
+    # also fire the stored-object-damage WARNING for an object the store never damaged.
+    index, mask = _flip_reaching(branch_message)
+    stored = bytearray(gzip.compress(_RESIDUAL_CANONICAL))
+    stored[index] ^= mask
+
+    store = _FakeStore(bytes(stored), checksum=_sha256_b64(bytes(stored)))
+
+    with pytest.raises(CategorizedError) as error, caplog.at_level(logging.WARNING):
+        _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(_RESIDUAL_CANONICAL))
+
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert branch_message in str(error.value)
+    assert error.value.details["system_id"]
+    assert "failed checksum verification" not in caplog.text
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
