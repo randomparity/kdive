@@ -84,8 +84,11 @@ _LIVE_STATES: frozenset[SystemState] = frozenset(
 )
 
 _PART_ROW_SQL: LiteralString = (
-    "SELECT id FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
+    "SELECT id, etag FROM artifacts "
+    "WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
 )
+
+_REFRESH_ETAG_SQL: LiteralString = "UPDATE artifacts SET etag = %s WHERE id = %s"
 
 _SYSTEM_STATE_SQL: LiteralString = "SELECT state FROM systems WHERE id = %s"
 
@@ -116,10 +119,25 @@ async def _system_is_live(conn: AsyncConnection, system_id: UUID) -> bool:
     return row is not None and SystemState(row[0]) in _LIVE_STATES
 
 
-async def _existing_part_row(conn: AsyncConnection, system_id: UUID, object_key: str) -> bool:
+class _ExistingRow(NamedTuple):
+    """A committed part row for this object key: its id, and the object etag it describes."""
+
+    id: UUID
+    etag: str
+
+
+async def _existing_part_row(
+    conn: AsyncConnection, system_id: UUID, object_key: str
+) -> _ExistingRow | None:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_PART_ROW_SQL, (system_id, object_key))
-        return await cur.fetchone() is not None
+        row = await cur.fetchone()
+    return None if row is None else _ExistingRow(row["id"], str(row["etag"]))
+
+
+async def _key_unregistered(conn: AsyncConnection, system_id: UUID, object_key: str) -> bool:
+    """Whether no committed row claims ``object_key`` — the discard's row fence, run unlocked."""
+    return await _existing_part_row(conn, system_id, object_key) is None
 
 
 def _put_part(store: ObjectStore, system_id: UUID, part: SealedPart) -> StoredArtifact:
@@ -129,7 +147,12 @@ def _put_part(store: ObjectStore, system_id: UUID, part: SealedPart) -> StoredAr
             owner_kind=_OWNER_KIND,
             owner_id=str(system_id),
             name=part_object_name(part.gen, part.index),
-            data=gzip.compress(part.redacted),
+            # mtime=0 is pinned rather than assumed: a re-derived part must compress to the same
+            # bytes, or its etag stops being a stable identity for the ``(gen, index)`` key that
+            # insert-if-absent is built on. CPython's default for this argument was the current
+            # time before 3.13 and is 0 from 3.13 on, so the value this repository depends on has
+            # already moved once; stating it keeps the invariant ours rather than the runtime's.
+            data=gzip.compress(part.redacted, mtime=0),
             sensitivity=Sensitivity.REDACTED,
             retention_class=_RETENTION_CLASS,
             content_encoding="gzip",
@@ -197,7 +220,7 @@ async def _plan_rotation(
         result = rotate(state, file_bytes, boot_id, redact)
         pending = []
         for part in result.parts:
-            if not await _existing_part_row(conn, system_id, _part_key(system_id, part)):
+            if await _existing_part_row(conn, system_id, _part_key(system_id, part)) is None:
                 pending.append(part)
         return _Plan(result=result, pending=tuple(pending), run_id=run_id)
 
@@ -209,10 +232,12 @@ async def _seal_pending(
 
     Returns ``False`` when the locked re-verify finds the System no longer live — teardown ran
     while the objects were in flight, so its row-driven reclaim has already passed them by and
-    nothing else would ever reach them. Every object this attempt wrote is deleted in that case,
-    including any key a peer rotation registered: a peer's row can only have committed *before*
-    teardown's terminal-state write, because both take this same lock, so teardown's reclaim
-    covers that row and the delete is at worst redundant on an already-absent object.
+    nothing else would ever reach them. Every object this attempt wrote is discarded in that
+    case. The ordering that makes this safe is teardown's own: ``jobs/handlers/systems.py``
+    writes ``TORN_DOWN`` **under this same SYSTEM lock** and runs ``_reclaim_console_artifacts``
+    only afterwards, so a peer rotation's row can only have committed before that write and is
+    therefore covered by the reclaim. The discard still re-probes each row and compares each
+    etag immediately before deleting, so the delete cannot destroy an object a peer's row owns.
 
     ``plan.run_id`` is the System's most-recently-booted Run (ADR-0279), stamped as a correlation
     attribute; ownership stays ``owner_kind='systems'``. ``None`` leaves the part uncorrelated.
@@ -226,7 +251,11 @@ async def _seal_pending(
             for obj in stored:
                 # Re-check under the lock: another rotation may have sealed this exact
                 # ``(gen, index)`` while the object was in flight, and its row owns the key.
-                if await _existing_part_row(conn, system_id, obj.key):
+                # This attempt's PUT overwrote that object, so point the row at what is there.
+                existing = await _existing_part_row(conn, system_id, obj.key)
+                if existing is not None:
+                    if existing.etag != obj.etag:
+                        await conn.execute(_REFRESH_ETAG_SQL, (obj.etag, existing.id))
                     continue
                 await ARTIFACTS.insert(
                     conn,
@@ -241,7 +270,9 @@ async def _seal_pending(
             system_id,
             len(stored),
         )
-        await discard_unregistered_objects(store, [obj.key for obj in stored])
+        await discard_unregistered_objects(
+            store, stored, still_unregistered=lambda key: _key_unregistered(conn, system_id, key)
+        )
     return live
 
 

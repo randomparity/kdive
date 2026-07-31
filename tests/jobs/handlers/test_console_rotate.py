@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import hashlib
+import struct
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -73,8 +74,11 @@ class _FakeStore:
         data, sensitivity, _retention, enc = self.objects[key]
         return HeadResult(
             size_bytes=len(data),
+            # The real store's etag identifies the bytes, and ADR-0519's compensating delete
+            # compares it against what the attempt wrote — a constant here would make that
+            # fence untestable, so derive it the same way ``put_artifact`` does.
             checksum_sha256=None,
-            etag="etag",
+            etag=hashlib.sha256(data).hexdigest(),
             sensitivity=sensitivity,
             content_encoding=enc,
             last_modified=STORE_MTIME,
@@ -625,3 +629,44 @@ def test_discard_failure_does_not_mask_the_teardown_outcome(
     assert store.deleted  # the compensating delete was attempted on every part
     assert result is None  # ...and its failure did not become the handler's result
     assert rows == []
+
+
+def test_part_objects_are_byte_deterministic(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-derived part must compress to the same bytes, so its etag is a stable identity.
+
+    A wall-clock stamp in the gzip header would give the same ``(gen, index)`` a different object
+    and a different etag on every rotation — defeating the insert-if-absent identity these parts
+    are keyed on, and manufacturing the etag drift ADR-0519's repair exists to correct.
+
+    CPython's ``gzip.compress`` default for ``mtime`` is 0 from 3.13 on (it was the current time
+    before), and this project pins ``requires-python = "==3.14.*"``, so today the handler would
+    be deterministic even without pinning it. That is exactly why this assertion is on the object
+    rather than on the call: it holds the property whoever supplies it, and it is the thing that
+    notices if the call or the runtime default moves again.
+
+    Asserted on the header's MTIME field rather than by compressing twice — two calls inside one
+    wall-clock second agree even when the stamp is live, so a "compress twice" test would pass
+    vacuously.
+    """
+    system_id = uuid4()
+    log = _write_console(tmp_path, system_id, _CONSOLE)
+    monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
+
+    async def _run() -> _FakeStore:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            await _seed_system(pool, system_id, "ready")
+            store = _FakeStore()
+            await _run_handler(pool, store, _job(system_id, "boot-A"))
+            return store
+
+    store = asyncio.run(_run())
+    part_keys = store.part_puts()
+    assert part_keys, "the fixture console must seal at least one part"
+    for key in part_keys:
+        data = store.objects[key][0]
+        assert data[:2] == b"\x1f\x8b", f"{key} is not a gzip member"
+        # Bytes 4..8 of a gzip member are its MTIME field, little-endian (RFC 1952 §2.3.1).
+        assert struct.unpack("<I", data[4:8])[0] == 0, f"{key} carries a wall-clock gzip stamp"
