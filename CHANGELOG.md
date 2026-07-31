@@ -265,6 +265,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-run the mutation set against the final tree and state its selection
 - Document the short-read outcome in the utility's Raises
 - Name the module's real consumer, not a future one
+- Record the non-strict required-checks decision
+- Tighten the amendment after review
+- Point the stale deferral sentence at the amendment
+- Correct the merge-queue failure mode
 
 ### Fixed
 
