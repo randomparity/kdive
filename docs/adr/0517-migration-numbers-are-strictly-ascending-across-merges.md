@@ -90,8 +90,8 @@ stale clone can report a pass that CI turns into a failure. CI is the authority.
 ### Amendment (2026-07-30): required checks stay non-strict, and what carries the gap (#1734)
 
 Appended rather than substituted, because this record is merged and append-only outside
-`## Status`. The paragraph above defers the up-to-date question to #1734. That issue is now
-decided, so the deferral no longer points anywhere; this is the decision it was waiting on.
+`## Status`. The paragraph above defers the up-to-date question to #1734, which is now decided —
+read that sentence as pointing here. This is the decision it was waiting on.
 
 **Required status checks on the "protect main" ruleset stay non-strict.**
 `strict_required_status_checks_policy` remains `false` and no repository setting changes. Strict
