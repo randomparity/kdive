@@ -43,7 +43,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReclaimInvestigationRootfsPayload, load_payload
 from kdive.providers.shared.rootfs_fetch_leases import (
     fetch_lease_pins_base,
-    reap_expired_fetch_leases,
+    reap_dead_fetch_leases,
 )
 from kdive.providers.shared.runtime_paths import (
     ROOTFS_DIR,
@@ -697,9 +697,10 @@ async def _reclaim_one_checksum(
     proceeds as it did before ADR-0495: deferring there would strand the checksum permanently and
     silently, per :func:`_live_writer_holds_a_partial`.
 
-    ADR-0515 adds one of its own, and it is the price of keeping the evidence in the database: a
-    fetcher killed by ``SIGKILL`` releases nothing, so its lease pins this base until the row
-    expires (``ROOTFS_FETCH_LEASE_TTL``). Bounded and visible, not silent.
+    ADR-0515 added one of its own, which ADR-0522 (#1740) then closed: a fetcher killed by
+    ``SIGKILL`` still releases nothing, but its lease is now fenced on its holding job rather than
+    on a 6-hour deadline, so the pin lapses when the worker stops heartbeating that job's lease
+    instead of when a worst-case transfer estimate runs out.
     """
     async with (
         conn.transaction(),
@@ -722,10 +723,10 @@ async def _reclaim_one_checksum(
             # overlapping it. Logged as its own line because it retains a base, an object and a row,
             # and the job still succeeds, so nothing else records that the reclaim fired at all.
             _log.warning(
-                "deferring the reclaim of %s: an unexpired rootfs fetch lease says a download of "
-                "its checksum is in flight, so its staged base, its object and its artifacts row "
-                "are all retained; the next sweep retries it once that fetch releases the lease or "
-                "the lease expires",
+                "deferring the reclaim of %s: a rootfs fetch lease held by a live job says a "
+                "download of its checksum is in flight, so its staged base, its object and its "
+                "artifacts row are all retained; the next sweep retries it once that fetch "
+                "releases the lease or its holding job stops being a live claim",
                 object_key,
             )
             return None
@@ -836,11 +837,11 @@ async def _finish_drained_investigation(
         conn.transaction(),
         advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
     ):
-        # Hygiene, not correctness: an expired lease is already inert to the gate above. Done here
-        # because this frame already holds the INVESTIGATION lock, so a host that repeatedly kills
-        # fetchers does not accumulate dead rows for the life of the investigation, and no
-        # reconciler lane has to exist for it.
-        await reap_expired_fetch_leases(conn, investigation_id)
+        # Hygiene, not correctness: a lease whose holding job is no longer a live claim is already
+        # inert to the gate above. Done here because this frame already holds the INVESTIGATION
+        # lock, so a host that repeatedly kills fetchers does not accumulate dead rows for the life
+        # of the investigation, and no reconciler lane has to exist for it.
+        await reap_dead_fetch_leases(conn, investigation_id)
         owned = await _owned_rootfs_tokens(conn, investigation_id)
         pinned = await pinned_rootfs_tokens(conn, investigation_id, rootfs_dir=rootfs_dir)
         deferred = await asyncio.to_thread(

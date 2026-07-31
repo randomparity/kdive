@@ -46,12 +46,20 @@ class RootfsUploadContext:
     ``checksum_sha256`` (the content address). The fetch resolves the System's own
     ``investigation_id`` from the DB — the provision seam is connectionless, so investigation and
     object-key resolution happen inside the fetch's short-lived sync connection, not here.
+
+    ``job_id`` is the provision job the fetch runs under (ADR-0522, #1740). It is the one field here
+    that is not an *input* to the download: the fetch records it on the ``rootfs_fetch_leases`` row
+    that pins this base while it stages, and the reclaim honours that row exactly while the job is
+    a live claim. ADR-0515 §3 had to derive a 6-hour deadline instead, because this context did not
+    carry it. ``None`` on a lane with no owning job (the admission-time validator), where the fetch
+    degrades to staging unleased and says so.
     """
 
     tenant: str
     system_id: UUID
     upload_dir: Path
     checksum_sha256: str
+    job_id: UUID | None
 
 
 @dataclass(frozen=True, slots=True)

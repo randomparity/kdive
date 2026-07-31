@@ -77,6 +77,7 @@ class FaultedProvisioning:
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         self._draw(system_id, FaultPlane.PROVISION)
         return self._inner.provision(
@@ -84,6 +85,7 @@ class FaultedProvisioning:
             profile,
             overlay_customizers=overlay_customizers,
             bootstrap_pubkey=bootstrap_pubkey,
+            job_id=job_id,
         )
 
     def reprovision(
@@ -93,6 +95,7 @@ class FaultedProvisioning:
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         self._draw(system_id, FaultPlane.PROVISION)
         return self._inner.reprovision(
@@ -100,6 +103,7 @@ class FaultedProvisioning:
             profile,
             overlay_customizers=overlay_customizers,
             bootstrap_pubkey=bootstrap_pubkey,
+            job_id=job_id,
         )
 
     def teardown(self, domain_name: str) -> None:

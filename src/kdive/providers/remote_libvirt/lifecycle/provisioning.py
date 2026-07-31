@@ -203,6 +203,7 @@ class RemoteLibvirtProvisioning:
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         """Define and start the System's disk-image domain; wait for its guest agent.
 
@@ -218,6 +219,12 @@ class RemoteLibvirtProvisioning:
         guest agent connects, ``bootstrap_pubkey`` is injected into the guest's authorized_keys
         over the guest-agent channel. Both are no-ops when SSH parity is inactive.
 
+        ``job_id`` (ADR-0522, #1740) is likewise accepted for call-site parity and ignored. It
+        fences durable in-flight provisioning state on its holding job, and this provider records
+        none: the ``upload`` rootfs lane and its ``rootfs_fetch_leases`` row are local-libvirt's
+        (ADR-0441), and a remote base volume is staged by the operator ahead of provisioning
+        (``stage_base_volume``) rather than downloaded inside this call.
+
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for a profile without a remote
                 section, missing operator config (incl. the gdbstub listen address),
@@ -227,7 +234,7 @@ class RemoteLibvirtProvisioning:
                 ``INFRASTRUCTURE_FAILURE`` for other provider control-plane faults;
                 ``TRANSPORT_FAILURE`` when the TLS connect fails.
         """
-        del overlay_customizers
+        del overlay_customizers, job_id
         section = self._remote_section(profile)
         require_concrete_sizing(profile)
         config = self._connections.config()
@@ -289,6 +296,7 @@ class RemoteLibvirtProvisioning:
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         """Wipe the System's domain + overlay and provision the new profile in place.
 
@@ -301,6 +309,7 @@ class RemoteLibvirtProvisioning:
             profile,
             overlay_customizers=overlay_customizers,
             bootstrap_pubkey=bootstrap_pubkey,
+            job_id=job_id,
         )
 
     def teardown(self, domain_name: str) -> None:

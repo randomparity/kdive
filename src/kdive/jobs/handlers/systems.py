@@ -87,6 +87,7 @@ class _ProviderLifecycleCall(Protocol):
         *,
         overlay_customizers: tuple[Callable[[str], None], ...],
         bootstrap_pubkey: str,
+        job_id: UUID | None,
     ) -> str: ...
 
 
@@ -270,7 +271,16 @@ async def _provider_lifecycle_call(
     *,
     customizers: tuple[Callable[[str], None], ...],
     pubkey: str,
+    job_id: UUID,
 ) -> str:
+    """Run the provider's (re)provision off the event loop, naming the job that owns it.
+
+    ``job_id`` is threaded rather than left to a contextvar (ADR-0522, #1740). It is not diagnostic
+    context: local-libvirt writes it to a ``rootfs_fetch_leases`` row whose liveness the reclaim
+    then tests, so a caller that fails to supply it silently unfences a multi-GiB download. An
+    argument the type checker requires is the only form of that obligation a future call site
+    cannot forget.
+    """
     return await asyncio.to_thread(
         functools.partial(
             provider_call,
@@ -278,6 +288,7 @@ async def _provider_lifecycle_call(
             profile,
             overlay_customizers=customizers,
             bootstrap_pubkey=pubkey,
+            job_id=job_id,
         )
     )
 
@@ -308,6 +319,7 @@ async def _execute_system_lifecycle_call(
             profile,
             customizers=customizers,
             pubkey=pubkey,
+            job_id=job.id,
         )
     except CategorizedError as exc:
         await _record_system_failure(

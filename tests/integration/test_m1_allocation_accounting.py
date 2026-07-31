@@ -501,8 +501,9 @@ class _FakeProvisioner:
         *,
         overlay_customizers: tuple[object, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
-        del overlay_customizers, bootstrap_pubkey
+        del overlay_customizers, bootstrap_pubkey, job_id
         return domain_name_for(system_id)
 
     def read_resolved_cpu(self, system_id: object) -> None:
@@ -516,8 +517,9 @@ class _FakeProvisioner:
         *,
         overlay_customizers: tuple[object, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
-        del overlay_customizers, bootstrap_pubkey
+        del overlay_customizers, bootstrap_pubkey, job_id
         return domain_name_for(system_id)
 
     def teardown(self, domain_name: str) -> None:
@@ -1068,8 +1070,9 @@ class _RecordingProvisioner:
         *,
         overlay_customizers: tuple[object, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
-        del overlay_customizers, bootstrap_pubkey
+        del overlay_customizers, bootstrap_pubkey, job_id
         return domain_name_for(system_id)
 
     def read_resolved_cpu(self, system_id: object) -> None:
@@ -1083,8 +1086,9 @@ class _RecordingProvisioner:
         *,
         overlay_customizers: tuple[object, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
-        del overlay_customizers, bootstrap_pubkey
+        del overlay_customizers, bootstrap_pubkey, job_id
         self.reprovisioned.append(system_id)
         return domain_name_for(system_id)
 

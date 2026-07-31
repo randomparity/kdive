@@ -91,6 +91,7 @@ class Provisioner(Protocol):
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         """Create and start a System, returning the provider domain name.
 
@@ -104,6 +105,16 @@ class Provisioner(Protocol):
         remote-libvirt injects it into the running guest over the guest agent when its SSH-parity
         forward is configured. The two carriers coexist because the injection phases differ
         (overlay file before boot vs. running guest after agent-ready).
+
+        ``job_id`` (ADR-0522, #1740) is the provision job this call runs under. It is the *holder*
+        a provider's durable in-flight state is fenced on: local-libvirt's uploaded-rootfs fetch
+        records a ``rootfs_fetch_leases`` row naming it, and the reclaim honours that row exactly
+        while ``jobs.state = 'running' AND jobs.lease_expires_at > now()``, so a worker killed
+        mid-download stops pinning its base on the job-lease interval rather than on a deadline
+        nothing renews. Providers with no such state ignore it. ``None`` means "no job owns this
+        call" — the admission-time validator's lane — and a provider that needs a holder degrades
+        rather than failing, because a lane with no job to fence on is not an error, it just has no
+        fence.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for invalid provider-specific profile
@@ -132,11 +143,12 @@ class Provisioner(Protocol):
         *,
         overlay_customizers: tuple[Callable[[str], None], ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         """Replace a System's provider state, returning the new provider domain name.
 
-        ``overlay_customizers`` (ADR-0289, #963) and ``bootstrap_pubkey`` (ADR-0291, #966) are
-        forwarded the same as :meth:`provision`.
+        ``overlay_customizers`` (ADR-0289, #963), ``bootstrap_pubkey`` (ADR-0291, #966) and
+        ``job_id`` (ADR-0522, #1740) are forwarded the same as :meth:`provision`.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for invalid provider-specific profile

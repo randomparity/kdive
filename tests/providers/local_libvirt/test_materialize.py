@@ -121,7 +121,7 @@ def test_materialize_uploaded_rootfs_delegates_to_injected_fetch(tmp_path: Path)
         seen.append(upload)
         return staged
 
-    upload = RootfsUploadContext("local", system_id, tmp_path, "c")
+    upload = RootfsUploadContext("local", system_id, tmp_path, "c", uuid4())
     result = materialize_rootfs_base(
         _UploadRootfs(kind="upload", checksum_sha256="c"),
         context=RootfsMaterializationContext(
@@ -139,7 +139,7 @@ def test_materialize_uploaded_rootfs_unwired_lane_is_config_error(tmp_path: Path
             _UploadRootfs(kind="upload", checksum_sha256="c"),
             context=RootfsMaterializationContext(
                 allowed_roots=[tmp_path],
-                upload=RootfsUploadContext("local", uuid4(), tmp_path, "c"),
+                upload=RootfsUploadContext("local", uuid4(), tmp_path, "c", uuid4()),
             ),
         )
 

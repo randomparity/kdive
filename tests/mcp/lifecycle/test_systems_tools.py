@@ -981,6 +981,7 @@ def test_provision_handler_failure_when_already_terminal_preserves_category(
             *,
             overlay_customizers: tuple[Any, ...] = (),
             bootstrap_pubkey: str | None = None,
+            job_id: UUID | None = None,
         ) -> str:
             with psycopg.connect(self._url, autocommit=True) as c:
                 c.execute("UPDATE systems SET state = 'torn_down' WHERE id = %s", (system_id,))
@@ -1045,6 +1046,7 @@ def test_provision_handler_failed_compensation_retries_reap_on_requeue(migrated_
             *,
             overlay_customizers: tuple[Any, ...] = (),
             bootstrap_pubkey: str | None = None,
+            job_id: UUID | None = None,
         ) -> str:
             name = super().provision(system_id, profile, overlay_customizers=overlay_customizers)
             with psycopg.connect(self._url, autocommit=True) as c:
@@ -1113,6 +1115,7 @@ def test_provision_handler_superseded_midflight_tears_down_created_domain(
             *,
             overlay_customizers: tuple[Any, ...] = (),
             bootstrap_pubkey: str | None = None,
+            job_id: UUID | None = None,
         ) -> str:
             name = super().provision(system_id, profile, overlay_customizers=overlay_customizers)
             with psycopg.connect(self._url, autocommit=True) as c:
@@ -1154,6 +1157,7 @@ def test_provision_handler_concurrent_same_job_ready_does_not_tear_down(migrated
             *,
             overlay_customizers: tuple[Any, ...] = (),
             bootstrap_pubkey: str | None = None,
+            job_id: UUID | None = None,
         ) -> str:
             name = super().provision(system_id, profile, overlay_customizers=overlay_customizers)
             with psycopg.connect(self._url, autocommit=True) as c:
@@ -2002,6 +2006,7 @@ def test_reprovision_handler_superseded_midflight_tears_down_domain(
             *,
             overlay_customizers: tuple[Any, ...] = (),
             bootstrap_pubkey: str | None = None,
+            job_id: UUID | None = None,
         ) -> str:
             name = super().reprovision(system_id, profile, overlay_customizers=overlay_customizers)
             with psycopg.connect(self._url, autocommit=True) as c:

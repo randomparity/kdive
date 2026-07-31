@@ -28,6 +28,7 @@ from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvi
 from kdive.providers.ports.lifecycle import InstallRequest
 
 _SYSTEM = UUID("00000000-0000-0000-0000-0000000000aa")
+_JOB = UUID("00000000-0000-0000-0000-0000000000bb")
 _RUN = UUID("00000000-0000-0000-0000-0000000000bb")
 _PROFILE = cast(ProvisioningProfile, object())
 _INSTALL_REQUEST = InstallRequest(
@@ -55,8 +56,8 @@ class _SpyEngine:
 
 class _SpyProvisioningInner:
     def __init__(self) -> None:
-        self.provision_calls: list[tuple[UUID, object]] = []
-        self.reprovision_calls: list[tuple[UUID, object]] = []
+        self.provision_calls: list[tuple[UUID, object, UUID | None]] = []
+        self.reprovision_calls: list[tuple[UUID, object, UUID | None]] = []
         self.teardown_calls: list[str] = []
 
     def provision(
@@ -66,9 +67,10 @@ class _SpyProvisioningInner:
         *,
         overlay_customizers: tuple[object, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         del overlay_customizers, bootstrap_pubkey
-        self.provision_calls.append((system_id, profile))
+        self.provision_calls.append((system_id, profile, job_id))
         return "spy-domain"
 
     def read_resolved_cpu(self, system_id: object) -> None:
@@ -82,9 +84,10 @@ class _SpyProvisioningInner:
         *,
         overlay_customizers: tuple[object, ...] = (),
         bootstrap_pubkey: str | None = None,
+        job_id: UUID | None = None,
     ) -> str:
         del overlay_customizers, bootstrap_pubkey
-        self.reprovision_calls.append((system_id, profile))
+        self.reprovision_calls.append((system_id, profile, job_id))
         return "spy-domain"
 
     def teardown(self, domain_name: str) -> None:
@@ -299,10 +302,13 @@ def test_provision_threads_exact_args_to_engine_and_inner() -> None:
         sleep_s=_noop_sleep,
     )
 
-    result = wrapper.provision(_SYSTEM, _PROFILE)
+    result = wrapper.provision(_SYSTEM, _PROFILE, job_id=_JOB)
 
     assert result == "spy-domain"
-    assert inner.provision_calls == [(_SYSTEM, _PROFILE)]
+    # job_id included deliberately (ADR-0522): this wrapper is a pass-through, so silently dropping
+    # the holder here would unfence the wrapped provider's rootfs fetch lease under fault injection
+    # — the pin would still be recorded, with nothing to test its liveness against.
+    assert inner.provision_calls == [(_SYSTEM, _PROFILE, _JOB)]
     assert attempt_seen == [_SYSTEM]
     assert engine.calls == [{"system_id": _SYSTEM, "plane": FaultPlane.PROVISION, "attempt": 4}]
 
@@ -317,9 +323,9 @@ def test_reprovision_threads_exact_args_to_engine_and_inner() -> None:
         sleep_s=_noop_sleep,
     )
 
-    wrapper.reprovision(_SYSTEM, _PROFILE)
+    wrapper.reprovision(_SYSTEM, _PROFILE, job_id=_JOB)
 
-    assert inner.reprovision_calls == [(_SYSTEM, _PROFILE)]
+    assert inner.reprovision_calls == [(_SYSTEM, _PROFILE, _JOB)]
     assert engine.calls == [{"system_id": _SYSTEM, "plane": FaultPlane.PROVISION, "attempt": 4}]
 
 
