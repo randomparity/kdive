@@ -287,6 +287,7 @@ def _decode_pass(
         chunk = store.get_range(request.key, start=offset, length=length)
         if not chunk:
             raise _short_read_error(request, offset)
+        chunk = chunk[:length]
         offset += len(chunk)
         hasher.update(chunk)
         try:
@@ -350,6 +351,7 @@ def _hash_remaining(
         chunk = store.get_range(request.key, start=offset, length=length)
         if not chunk:
             raise _short_read_error(request, offset)
+        chunk = chunk[:length]
         offset += len(chunk)
         hasher.update(chunk)
 
