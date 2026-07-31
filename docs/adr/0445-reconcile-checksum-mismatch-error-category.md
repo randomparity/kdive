@@ -206,10 +206,16 @@ object-defect category is only reported once the stored bytes have been proven t
 signed at PUT. The bomb branch no longer blames a correct `uncompressed_size`, so the ADR-0450
 compounding §6 names is closed for the rotted-bytes case.
 
-The reach caveat in the Consequences below moves with it: the gzip path's stored-object-damage
-WARNING is keyed on the gate, and the gate moved, so it now fires for the widened set with no
-change to `_stage_gzip`. Absence of that line **is** now evidence of an intact object on either
-path.
+The reach caveat in the Consequences below moves with it, but only as far as the gate goes. The
+gzip path's stored-object-damage WARNING is keyed on the gate, and the gate moved, so it now fires
+for the widened set with no change to `_stage_gzip`, and the two paths log the same damage. It does
+**not** follow that absence of the line proves an intact object — that inference was unsound before
+and stays unsound, on both paths, because staging can exit before a digest exists at all: a
+reusable staged base short-circuits before any fetch, the free-space precheck and the
+missing-checksum branch raise before the first read, and a `get_range` fault aborts mid-object.
+Silence means the digest agreed *or* verification never ran. What changed is that the gzip path no
+longer adds a fourth case in which the object **was** read through, **was** damaged, and logged
+nothing anyway.
 
 §1–§5 are unaffected. ADR-0523 changes when the object-defect constructor is reachable, not the
 split §2 made or the categories §1 assigned; the residual test §6 names is retired there, its flip
