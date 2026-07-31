@@ -62,16 +62,20 @@ No schema, migration, MCP-surface, config or dependency change.
 | An empty range inside the object (ADR-0523 §6) | `test_strip_gzip_empty_range_inside_the_object_is_the_store_s_failure`, parametrised over both read loops, asserts a retryable read failure with no gate marker and no "truncated" claim — the verdict the bare `break` inverted once the drain re-read the tail and the digest agreed. |
 | The decode diagnosis reaches the operator (ADR-0523 §5) | `test_stage_gzip_damaged_stored_bytes_report_the_identity_verdict` asserts the branch's own message is *absent* from the error and from `details`, and *present* in the WARNING behind "the decode also failed". The clean-hash test asserts that clause is absent when there was no decode failure to report. |
 
-Mutation-verified, `__pycache__` cleared between every run and the restored tree re-confirmed green
-(115 passed) at the end:
+Mutation-verified. Every row below was **re-run as one set against the final tree**, not carried
+forward from the round that added it — the review loop added a test and a row three times, so a
+figure taken at the first commit would attest coverage for tests that did not yet exist. The
+selection is `tests/artifacts/test_transport_encoding.py` plus
+`tests/providers/local_libvirt/test_rootfs_upload_fetch.py`: **118 passed** on the restored tree,
+before and after the set, with `__pycache__` cleared between every run.
 
-| Mutation | Reddened |
+| Mutation | Reddened (of 118) |
 |---|---|
-| Digest compared *last* again — the pre-ADR-0523 order | 6 tests, including both staging-seam parametrisations and the bomb tiling test |
-| `_hash_remaining` made a no-op | 4 tests — every one of them a *converse* assertion, which is the point: an unhashed tail shows up as a false transport mismatch, not as a missing one |
-| A second full pass added to `_hash_remaining` | the tiling test, on both the read-length sum and the no-repeat check |
-| `_framing_defect`'s `offset < compressed_size` clause deleted | the boundary-aligned trailing-member test, and *only* it — the review pass that surfaced this found the pre-fix suite green under the same mutation |
-| The `from decoded.defect` chain dropped | both staging-seam parametrisations, on the carried-diagnosis assertion |
-| The `add_note` around `_hash_remaining` dropped | the store-fault test |
-| Either loop's short read reverted to `break`/`return` | the matching parametrisation of the empty-range test, and only it |
-| `_drain` stops writing entirely | both bomb tests, on the `0 < len(...)` lower bound the review pass added — under the bare `<=` only a sibling test would have caught it |
+| Digest compared *last* again — the pre-ADR-0523 order | 6, including both staging-seam parametrisations, the exhaustive sweep, and the truncated- and trailing-data transport tests |
+| `_hash_remaining` made a no-op | 6 — every one a *converse* assertion, which is the point: an unhashed tail shows up as a false transport mismatch, not as a missing one |
+| A second full pass added to `_hash_remaining` | 2, on the read-length sum and the no-repeat check |
+| `_framing_defect`'s `offset < compressed_size` clause deleted | 1 — the boundary-aligned trailing-member test, and *only* it. The review pass that surfaced this found the pre-fix suite fully green under the same mutation |
+| The `add_note` on the drain's store fault dropped | 1 — the store-fault test |
+| The decode pass's short read reverted to `break` | 1 — the `decode-pass` parametrisation of the empty-range test, and only it |
+| The drain's short read reverted to `return` | 1 — the `drain` parametrisation, and only it |
+| `_drain` stops writing entirely | 7, including both bomb tests via the `0 < len(...)` lower bound a review pass added — under the bare `<=` only unrelated siblings would have caught it |
