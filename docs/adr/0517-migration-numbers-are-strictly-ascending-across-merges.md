@@ -87,6 +87,46 @@ Because the comparison needs `origin/main`, the guard is one of the few that is 
 with respect to the checkout. Local runs use whatever `origin/main` was last fetched, so a
 stale clone can report a pass that CI turns into a failure. CI is the authority.
 
+### Amendment (2026-07-30): required checks stay non-strict, and what carries the gap (#1734)
+
+Appended rather than substituted, because this record is merged and append-only outside
+`## Status`. The paragraph above defers the up-to-date question to #1734. That issue is now
+decided, so the deferral no longer points anywhere; this is the decision it was waiting on.
+
+**Required status checks on the "protect main" ruleset stay non-strict.**
+`strict_required_status_checks_policy` remains `false` and no repository setting changes. Strict
+mode would require every open PR to be current with `main` before it can merge, so on a repository
+that merges as often as this one every open PR would need updating and re-running each time `main`
+moves. That cost was judged larger than the staleness it removes.
+
+The residual risk is the one stated above, and it is accepted rather than mitigated: a PR whose
+green check was computed before a sibling migration merged can still merge past this guard. The
+ordering rule is a strong gate, not an airtight one.
+
+What the gate does still hold, which is more than nothing:
+
+- **A verdict always exists, and it is required.** `just migration-order-check` is a step of its
+  own in the `lint-type-test` job (`.github/workflows/ci.yml`), and `lint · type · test` is a
+  required status check on the ruleset. No PR merges without the guard having run and passed.
+- **The verdict is computed against `main`'s tip, not the merge base.** The step before it
+  force-fetches `+refs/heads/main:refs/remotes/origin/main` at depth 1, and
+  `scripts/migration_ordering_guard.py` compares the schema directory on disk against that ref. A
+  verdict computed *after* the sibling merged is correct; only one computed before it is stale.
+- **Any head change recomputes it.** A push, a rebase, merging `main` into the branch (which is
+  what the per-PR "Update branch" control does), or re-running the job all produce a fresh
+  verdict. Non-strict makes that optional, not unavailable.
+- **The exposure is narrow.** It needs two open PRs that each add a migration, merging in the
+  wrong order, with no head change to the second between the first merge and its own.
+
+Two things are deliberately *not* claimed as backstops. The runtime assertion is rejected below,
+so `apply_migrations` still applies an out-of-order pair without complaint on a database that has
+already recorded the higher version (ADR-0015) — nothing catches this after the merge. And the
+immutability guard ([ADR-0518](0518-the-immutability-guard-compares-against-the-base-branch.md))
+answers a different question: it compares the branch against its own base to find an *already
+applied* migration that was modified, deleted, or renamed. It does shape the remedy, though —
+once the lower-numbered file is on `main`, renumbering it is itself a violation, so the correction
+is a new migration above the maximum rather than a rename.
+
 ## Considered & rejected
 
 **Assert ascending order inside `apply_migrations`.** Fails loudly rather than proceeding, and
