@@ -261,7 +261,7 @@ git commit -m "docs(images): expose duplicate upload recovery"
 
 **Acceptance criteria:** Focused sequential/concurrent/MCP proofs pass, tests bite when the registered-name check is removed, and the repository PR gate is green.
 
-- [ ] **Step 1: Prove the sequential test bites**
+- [x] **Step 1: Prove the sequential test bites**
 
 Temporarily bypass the `_registered_private_name_conflict` result at its call site, run:
 
@@ -276,7 +276,7 @@ receive the same store instance and its post-race digest assertion reads the sol
 exact `object_key`; copied dictionaries or a digest check against a caller-selected key do not
 satisfy the proof.
 
-- [ ] **Step 2: Re-run the focused contract suite**
+- [x] **Step 2: Re-run the focused contract suite**
 
 Run:
 
@@ -289,7 +289,7 @@ uv run python -m pytest \
 
 Expected: 3 passed.
 
-- [ ] **Step 3: Run the complete repository guardrail**
+- [x] **Step 3: Run the complete repository guardrail**
 
 Run bare:
 
@@ -299,6 +299,6 @@ just ci
 
 Expected: exit 0 with lint, type, shell/workflow/doc/config/schema/generated guards and the non-live test suite green. Environment-gated live tiers remain outside this issue.
 
-- [ ] **Step 4: Re-read the complete diff and commit any required generated update separately**
+- [x] **Step 4: Re-read the complete diff and commit any required generated update separately**
 
 Run `git diff --check`, `git status --short --untracked-files=all`, and `git diff main...HEAD`. Confirm the branch changes only the frozen surface, the wrapper docstring is agent-visible, no migration or dependency changed, and no Node/Python environment artifact is tracked. If a guardrail required a generated artifact, stage that explicit path and commit it with an imperative Conventional Commit subject; otherwise create no empty commit.
