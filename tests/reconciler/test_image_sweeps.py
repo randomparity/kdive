@@ -25,7 +25,7 @@ import base64
 import hashlib
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -35,6 +35,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.reconciler.cleanup.images as image_cleanup
 from kdive.artifacts.storage import ArtifactWriteRequest, HeadResult, StoredArtifact
+from kdive.db import migrate
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.images import (
     ImageMtime,
@@ -267,6 +268,34 @@ async def _set_catalog_rootfs(
 
 def _grace() -> timedelta:
     return timedelta(hours=1)
+
+
+def _apply_migrations_through(conn: psycopg.Connection, version: str) -> None:
+    for migration in migrate.discover_migrations():
+        if migration.version <= version:
+            conn.execute(migration.sql.encode())
+
+
+def _seed_legacy_pending_image(
+    conn: psycopg.Connection,
+    *,
+    name: str,
+    key: str,
+    data: bytes,
+    visibility: str = "public",
+    owner: str | None = None,
+) -> UUID:
+    row = conn.execute(
+        "INSERT INTO image_catalog "
+        "(provider, name, arch, format, root_device, object_key, digest, visibility, owner, "
+        "expires_at, state, size_bytes, pending_since) "
+        "VALUES ('local-libvirt', %s, 'x86_64', 'qcow2', '/dev/vda', %s, %s, %s, %s, "
+        "CASE WHEN %s = 'private' THEN now() + interval '1 hour' ELSE NULL END, "
+        "'pending', %s, now() - interval '2 hours') RETURNING id",
+        (name, key, _digest(data), visibility, owner, visibility, len(data)),
+    ).fetchone()
+    assert row is not None
+    return row[0]
 
 
 def _digest(data: bytes) -> str:
@@ -591,6 +620,91 @@ def test_abandoned_matching_publication_is_registered(migrated_url: str) -> None
             )
             assert await cur.fetchone() == ("registered", None, None)
         assert store.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_normalized_legacy_publication_is_registered(
+    pg_conn: psycopg.Connection, postgres_url: str
+) -> None:
+    data = b"normalized-legacy-public"
+    key = "images/local-libvirt/legacy-public/x86_64/attempt.qcow2"
+    _apply_migrations_through(pg_conn, "0092")
+    row_id = _seed_legacy_pending_image(pg_conn, name="legacy-public", key=key, data=data)
+    assert pg_conn.execute(
+        "SELECT publication_attempt_id FROM image_catalog WHERE id = %s", (row_id,)
+    ).fetchone() == (None,)
+    migration = next(item for item in migrate.discover_migrations() if item.version == "0093")
+    pg_conn.execute(migration.sql.encode())
+    pg_conn.commit()
+
+    async def _run() -> None:
+        store = _FakeImageStore(
+            {key: timedelta(hours=2)}, heads={key: _head(data, checksum=_checksum(data))}
+        )
+        async with AsyncConnectionPool(postgres_url, min_size=1, max_size=4) as pool:
+            assert (
+                await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace())) == 1
+            )
+        async with await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as check:
+            cur = await check.execute(
+                "SELECT state, publication_attempt_id FROM image_catalog WHERE id = %s", (row_id,)
+            )
+            assert await cur.fetchone() == ("registered", None)
+        assert store.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_normalized_legacy_private_publication_releases_quota(
+    pg_conn: psycopg.Connection, postgres_url: str
+) -> None:
+    data = b"normalized-legacy-private"
+    key = "images/local-libvirt__proj/legacy-private/x86_64/attempt.qcow2"
+    _apply_migrations_through(pg_conn, "0092")
+    row_id = _seed_legacy_pending_image(
+        pg_conn,
+        name="legacy-private",
+        key=key,
+        data=data,
+        visibility="private",
+        owner="proj",
+    )
+    migration = next(item for item in migrate.discover_migrations() if item.version == "0093")
+    pg_conn.execute(migration.sql.encode())
+    pg_conn.commit()
+
+    async def _run() -> None:
+        store = _FakeImageStore(
+            {key: timedelta(hours=2)}, heads={key: _head(data, checksum=_checksum(data))}
+        )
+        async with await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as check:
+            assert await _project_usage(check, "proj", adopting=None) == (1, len(data))
+        async with AsyncConnectionPool(postgres_url, min_size=1, max_size=4) as pool:
+            assert (
+                await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace())) == 1
+            )
+        async with await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as check:
+            assert await _project_usage(check, "proj", adopting=None) == (0, 0)
+            cur = await check.execute("SELECT 1 FROM image_catalog WHERE id = %s", (row_id,))
+            assert await cur.fetchone() is None
+        assert store.deleted == [key]
+
+    asyncio.run(_run())
+
+
+def test_terminal_pending_removal_uses_direct_delete() -> None:
+    class _RecordingCursor:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        async def execute(self, query: str, params: object) -> None:
+            self.statements.append(query)
+
+    async def _run() -> None:
+        cur = _RecordingCursor()
+        await image_cleanup._delete_pending(cast("Any", cur), uuid4())
+        assert cur.statements == ["DELETE FROM image_catalog WHERE id = %s"]
 
     asyncio.run(_run())
 

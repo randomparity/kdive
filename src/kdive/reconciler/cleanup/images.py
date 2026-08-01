@@ -111,8 +111,8 @@ async def repair_dangling_images(
         await cur.execute(
             "SELECT id, state, publication_attempt_id, object_key FROM image_catalog "
             "WHERE object_key IS NOT NULL AND state <> %s AND pending_since < now() - %s "
-            "AND (state <> %s OR publication_attempt_id IS NOT NULL) ORDER BY object_key, id",
-            (_DEFINED_STATE, grace, ImageState.PENDING.value),
+            "ORDER BY object_key, id",
+            (_DEFINED_STATE, grace),
         )
         candidates = await cur.fetchall()
     terminal = 0
@@ -192,7 +192,7 @@ async def _repair_pending_candidate(
 ) -> bool:
     """Apply the abandoned-pending decision table under the caller's locks."""
     if head is None:
-        await _disarm_and_delete_pending(cur, entry.id)
+        await _delete_pending(cur, entry.id)
         _log.info("reconciler: pending image row %s removed (object missing)", entry.id)
         return True
 
@@ -210,7 +210,7 @@ async def _repair_pending_candidate(
         await asyncio.to_thread(store.delete_version, object_key, head.version_id)
         if await asyncio.to_thread(store.head, object_key) is not None:
             return False
-        await _disarm_and_delete_pending(cur, entry.id)
+        await _delete_pending(cur, entry.id)
         _log.info("reconciler: pending image row %s reclaimed (object invalid)", entry.id)
         return True
 
@@ -236,13 +236,8 @@ async def _repair_pending_candidate(
     return True
 
 
-async def _disarm_and_delete_pending(cur: AsyncCursor[DictRow], row_id: UUID) -> None:
-    """Clear attempt state under the fence, then pass the expand-phase delete trigger."""
-    await cur.execute(
-        "UPDATE image_catalog SET publication_attempt_id = NULL, publication_principal = NULL "
-        "WHERE id = %s AND state = %s",
-        (row_id, ImageState.PENDING.value),
-    )
+async def _delete_pending(cur: AsyncCursor[DictRow], row_id: UUID) -> None:
+    """Delete terminal pending state directly under the caller's publication fence."""
     await cur.execute("DELETE FROM image_catalog WHERE id = %s", (row_id,))
 
 
