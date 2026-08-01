@@ -390,6 +390,26 @@ def test_delete_project_operator_removes_row_and_audits(migrated_url: str) -> No
     asyncio.run(_run())
 
 
+def test_delete_attempt_aware_pending_image_conflicts_without_audit(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            image_id = await _insert_private_image(pool, name="publishing")
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE image_catalog SET state = 'pending', publication_attempt_id = %s, "
+                    "publication_principal = 'publisher' WHERE id = %s",
+                    (uuid4(), image_id),
+                )
+            resp = await image_delete.delete(
+                pool, _member_ctx(role=Role.OPERATOR), image_id=str(image_id)
+            )
+        assert resp.error_category == ErrorCategory.CONFLICT.value
+        assert await _image_exists(migrated_url, image_id) is True
+        assert await _audit_log_rows(migrated_url) == []
+
+    asyncio.run(_run())
+
+
 def test_delete_rejects_invalid_or_missing_image(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

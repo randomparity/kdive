@@ -119,9 +119,10 @@ def _register_images_delete(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         """Delete a private image catalog entry (project-scoped). Irreversible.
 
-        Removes the catalog row immediately; there is no undo. The backing object is
-        reclaimed asynchronously by the leaked-object sweep, not at delete time. A shared
-        reference guard rejects deletion while the image is still referenced by a live system.
+        Removes the catalog row immediately; there is no undo. The backing object is reclaimed
+        asynchronously by the leaked-object sweep, not at delete time. Returns ``conflict`` while
+        publication is in progress or the row changes before deletion. A shared reference guard
+        rejects deletion while the image is still referenced by a live system.
         """
         return await delete(pool, current_context(), image_id=image_id)
 

@@ -9,7 +9,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import IMAGE_CATALOG
-from kdive.domain.catalog.images import ImageVisibility
+from kdive.domain.catalog.images import ImageState, ImageVisibility
 from kdive.domain.errors import ErrorCategory
 from kdive.images.cataloging.read_model import image_referenced_by_live_system
 from kdive.log import bind_context
@@ -69,18 +69,35 @@ async def _delete_owned(
         conn.cursor(row_factory=dict_row) as cur,
     ):
         await cur.execute(
-            "SELECT id FROM image_catalog WHERE id = %s AND visibility = %s FOR UPDATE",
+            "SELECT id, state, publication_attempt_id FROM image_catalog "
+            "WHERE id = %s AND visibility = %s FOR UPDATE",
             (uid, ImageVisibility.PRIVATE.value),
         )
-        if await cur.fetchone() is None:
+        locked = await cur.fetchone()
+        if locked is None:
             return ToolResponse.success(str(uid), "deleted")
+        if (
+            locked["state"] == ImageState.PENDING.value
+            and locked["publication_attempt_id"] is not None
+        ):
+            return ToolResponse.failure(
+                str(uid),
+                ErrorCategory.CONFLICT,
+                data={"reason": "image publication is still in progress"},
+            )
         if await image_referenced_by_live_system(cur, uid):
             return ToolResponse.failure(
                 str(uid),
                 ErrorCategory.CONFIGURATION_ERROR,
                 data={"reason": "image is referenced by a non-terminal System"},
             )
-        await cur.execute("DELETE FROM image_catalog WHERE id = %s", (uid,))
+        await cur.execute("DELETE FROM image_catalog WHERE id = %s RETURNING id", (uid,))
+        if await cur.fetchone() is None:
+            return ToolResponse.failure(
+                str(uid),
+                ErrorCategory.CONFLICT,
+                data={"reason": "image changed before deletion completed"},
+            )
         await audit.record(
             conn,
             ctx,
