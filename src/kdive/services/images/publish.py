@@ -24,7 +24,7 @@ to ``registered``). The seam exists for the private-upload path, which holds the
 lock across the reservation only and releases it before the PUT (ADR-0520, #1726): the committed
 ``pending`` row is the quota claim, so no PROJECT or transaction-scoped lock spans the write. The
 IMAGE_PUBLISH session lock remains held through the PUT, finish, and private registration audit
-(ADR-0526).
+(ADR-0525).
 """
 
 from __future__ import annotations
@@ -473,7 +473,7 @@ async def reserve_publish(
     :func:`write_publish_object` (ADR-0520): the committed row already counts toward the
     per-project caps, so a concurrent upload's aggregate read sees the claim without the PROJECT
     lock being held over the write. The composed publish path acquires IMAGE_PUBLISH after this
-    reservation and holds that row-scoped session lock through write and finish (ADR-0526).
+    reservation and holds that row-scoped session lock through write and finish (ADR-0525).
 
     Args:
         conn: An async Postgres connection; the adopt/insert opens its own transaction.
@@ -523,7 +523,7 @@ async def write_publish_object(
     database statement at all**, so no transaction-scoped lock is needed across the PUT. The
     composed public and private publish paths still hold the IMAGE_PUBLISH session lock through
     this write and their committed finish (plus the private registration audit), while the PROJECT
-    lock is absent (ADR-0520, ADR-0526). Verifies the source bytes against the row's declared
+    lock is absent (ADR-0520, ADR-0525). Verifies the source bytes against the row's declared
     digest, PUTs the qcow2, HEAD-gates it, then writes the config sibling best-effort.
 
     A failure here leaves the reserved ``pending`` row behind holding its quota bytes; that row is

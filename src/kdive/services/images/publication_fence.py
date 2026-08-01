@@ -1,4 +1,4 @@
-"""Database-session fence for active image publication attempts (ADR-0526)."""
+"""Database-session fence for active image publication attempts (ADR-0525)."""
 
 from __future__ import annotations
 

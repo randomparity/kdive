@@ -17,7 +17,7 @@ scope-lock space so leadership never collides with a per-object op.
 
 `scoped_session_advisory_lock` is different from the leadership helper: it uses the exact
 same scoped key as the transaction helper so a multi-transaction publisher can contend
-with a reconciler transaction on one image-publication fence (ADR-0526).
+with a reconciler transaction on one image-publication fence (ADR-0525).
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class LockScope(StrEnum):
     reconcile / ``inventory.clear_override`` per-identity lock: a ``RESOURCE``-scope lock keyed by a
     ``"{kind}:{name}"`` string and always held alone, outside the co-hold total order.
     ``IMAGE_PUBLISH`` is keyed by the image row UUID and is likewise held alone: its session form
-    spans object publication while its transaction form fences reconciliation (ADR-0526).
+    spans object publication while its transaction form fences reconciliation (ADR-0525).
     """
 
     PROJECT = "project"
