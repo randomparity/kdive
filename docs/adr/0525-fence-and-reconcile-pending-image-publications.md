@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (2026-08-01)
 
 - **Narrowly supersedes:** [ADR-0317](0317-image-kernel-config-offer.md) §2 and
   [ADR-0336](0336-staged-kernel-config-offer.md)'s shared deterministic config-key rule for the
