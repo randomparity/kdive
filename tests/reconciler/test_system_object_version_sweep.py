@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import threading
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -16,7 +18,7 @@ from kdive.artifacts.storage import ObjectVersion, VersionBatch, VersionPage
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.infra.console_hosting import CollectorRegistry
+from kdive.providers.infra.console_hosting import CollectorRegistry, ConsoleHostingLoop
 from kdive.reconciler.cleanup import system_object_versions as sweep
 from kdive.reconciler.cleanup.gc import reap_console_collectors
 from tests.reconciler.conftest import connect, run_repair, seed_system
@@ -130,6 +132,10 @@ class _Gate:
     @property
     def is_leader(self) -> bool:
         return self.leader
+
+    @asynccontextmanager
+    async def reserve_system_object_cleanup(self, system_id: UUID) -> AsyncIterator[bool]:
+        yield self.leader and not self.registry.has(system_id)
 
 
 def _local_key(system_id: UUID) -> str:
@@ -255,7 +261,7 @@ def test_cursor_crosses_more_than_one_page_of_ineligible_history(migrated_url: s
             f"local/systems/{UUID(int=index + 1)}/console": [
                 _version(f"local/systems/{UUID(int=index + 1)}/console")
             ]
-            for index in range(1000)
+            for index in range(2001)
         }
         async with await connect(migrated_url) as seed:
             system_id = await seed_system(seed, system_state=SystemState.FAILED)
@@ -264,7 +270,17 @@ def test_cursor_crosses_more_than_one_page_of_ineligible_history(migrated_url: s
 
         assert await _run_local(migrated_url, store) == 0
         first_cursor = await _cursor(migrated_url, "local")
-        assert first_cursor == sorted(ineligible)[-1]
+        ordered_ineligible = sorted(ineligible)
+        assert first_cursor == ordered_ineligible[999]
+        assert first_cursor is not None
+        assert ordered_ineligible[1000] > first_cursor
+        assert store.capture_calls == []
+
+        assert await _run_local(migrated_url, store) == 0
+        second_cursor = await _cursor(migrated_url, "local")
+        assert second_cursor == ordered_ineligible[1999]
+        assert second_cursor is not None
+        assert second_cursor > ordered_ineligible[1000]
         assert store.capture_calls == []
 
         assert await _run_local(migrated_url, store) == 1
@@ -272,7 +288,9 @@ def test_cursor_crosses_more_than_one_page_of_ineligible_history(migrated_url: s
         assert store.page_calls == [
             (sweep.LOCAL_SYSTEM_ROOT, None, None, 1000),
             (sweep.LOCAL_SYSTEM_ROOT, first_cursor, None, 1000),
+            (sweep.LOCAL_SYSTEM_ROOT, second_cursor, None, 1000),
         ]
+        assert store.capture_calls == [(eligible, 20)]
         assert eligible not in store.histories
 
     asyncio.run(go())
@@ -499,6 +517,71 @@ def test_remote_sweep_rechecks_leadership_after_capture(migrated_url: str) -> No
     asyncio.run(go())
 
 
+def test_remote_sweep_rechecks_leadership_after_database_fence(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def go() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed, system_state=SystemState.TORN_DOWN)
+        gate = _Gate(True, CollectorRegistry())
+        key = _remote_key(system_id)
+        store = _Store({key: [_version(key)]})
+        original = sweep._system_key_is_retired
+
+        async def lose_leadership_during_fence(
+            conn: psycopg.AsyncConnection, fenced_system_id: UUID, fenced_key: str
+        ) -> bool:
+            retired = await original(conn, fenced_system_id, fenced_key)
+            gate.leader = False
+            return retired
+
+        monkeypatch.setattr(sweep, "_system_key_is_retired", lose_leadership_during_fence)
+
+        assert await _run_remote(migrated_url, store, gate) == 0
+        assert store.deleted == []
+
+    asyncio.run(go())
+
+
+def test_remote_sweep_rechecks_registry_after_database_fence(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Collector:
+        def __init__(self, system_id: UUID) -> None:
+            self.system_id = system_id
+
+        def pump_once(self) -> bool:
+            return True
+
+        def finalize(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    async def go() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed, system_state=SystemState.TORN_DOWN)
+        gate = _Gate(True, CollectorRegistry())
+        key = _remote_key(system_id)
+        store = _Store({key: [_version(key)]})
+        original = sweep._system_key_is_retired
+
+        async def register_during_fence(
+            conn: psycopg.AsyncConnection, fenced_system_id: UUID, fenced_key: str
+        ) -> bool:
+            retired = await original(conn, fenced_system_id, fenced_key)
+            gate.registry.add(Collector(system_id))
+            return retired
+
+        monkeypatch.setattr(sweep, "_system_key_is_retired", register_during_fence)
+
+        assert await _run_remote(migrated_url, store, gate) == 0
+        assert store.deleted == []
+
+    asyncio.run(go())
+
+
 def test_registered_remote_collector_fences_internal_parts(migrated_url: str) -> None:
     class Collector:
         def __init__(self, system_id: UUID) -> None:
@@ -538,6 +621,90 @@ def test_leader_deletes_remote_parts_only_after_registry_absence(migrated_url: s
 
         assert await _run_remote(migrated_url, store, gate) == 1
         assert store.deleted == [(key, "v1")]
+
+    asyncio.run(go())
+
+
+def test_hosting_transition_waits_for_reserved_remote_delete(migrated_url: str) -> None:
+    class LeaderLock:
+        def __init__(self) -> None:
+            self.held = False
+
+        async def try_acquire(self) -> bool:
+            self.held = True
+            return True
+
+        async def is_held(self) -> bool:
+            return self.held
+
+        async def release(self) -> None:
+            self.held = False
+
+    class RunningSystems:
+        def __init__(self) -> None:
+            self.systems: set[UUID] = set()
+
+        async def list_running(self) -> set[UUID]:
+            return set(self.systems)
+
+    @dataclass
+    class LoopGate:
+        loop: ConsoleHostingLoop
+        registry: CollectorRegistry
+
+        @property
+        def is_leader(self) -> bool:
+            return self.loop.is_leader
+
+        def reserve_system_object_cleanup(
+            self, system_id: UUID
+        ) -> AbstractAsyncContextManager[bool]:
+            return self.loop.reserve_system_object_cleanup(system_id)
+
+    async def go() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed, system_state=SystemState.TORN_DOWN)
+        leader_lock = LeaderLock()
+        running = RunningSystems()
+        registry = CollectorRegistry()
+        loop = ConsoleHostingLoop(
+            leader_lock=leader_lock,
+            running_systems=running,
+            collector_factory=_FinalizingCollector,
+            registry=registry,
+        )
+        await loop.tick()
+        gate = LoopGate(loop, registry)
+        key = _remote_key(system_id)
+        store = _Store({key: [_version(key)]})
+        delete_started = threading.Event()
+        release_delete = threading.Event()
+
+        def block_delete() -> None:
+            delete_started.set()
+            assert release_delete.wait(timeout=5)
+
+        store.before_delete = block_delete
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            delete_task = asyncio.create_task(
+                run_repair(
+                    pool,
+                    lambda conn: sweep.sweep_remote_system_object_versions(conn, store, gate),
+                )
+            )
+            assert await asyncio.to_thread(delete_started.wait, 5)
+            running.systems.add(system_id)
+            transition = asyncio.create_task(loop.tick())
+            await asyncio.sleep(0)
+            transition_waited = not transition.done()
+            collector_absent_during_delete = not registry.has(system_id)
+            release_delete.set()
+            assert await delete_task == 1
+            await transition
+
+        assert transition_waited
+        assert collector_absent_during_delete
+        assert registry.has(system_id)
 
     asyncio.run(go())
 

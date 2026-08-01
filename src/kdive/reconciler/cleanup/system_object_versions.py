@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -54,6 +55,10 @@ class SystemObjectHostingGate(Protocol):
 
     @property
     def registry(self) -> CollectorRegistry: ...
+
+    def reserve_system_object_cleanup(
+        self, system_id: UUID
+    ) -> AbstractAsyncContextManager[bool]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +254,15 @@ async def _delete_if_fenced(
             return 0
         if not await _system_key_is_retired(conn, system_id, batch.key):
             return 0
+    if gate is None:
+        return await _delete_batch(store, batch)
+    async with gate.reserve_system_object_cleanup(system_id) as permitted:
+        if not permitted:
+            return 0
+        return await _delete_batch(store, batch)
+
+
+async def _delete_batch(store: SystemObjectVersionStore, batch: VersionBatch) -> int:
     complete = await asyncio.to_thread(store.delete_batch, batch)
     deleted = batch.targets if complete else tuple(t for t in batch.targets if not t.is_latest)
     return len(deleted)

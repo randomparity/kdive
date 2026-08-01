@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Protocol
 from uuid import UUID
 
@@ -109,6 +109,13 @@ class CollectorRegistry:
     def __init__(self, pump_runner: PumpRunner | None = None) -> None:
         self._collectors: dict[UUID, Collector] = {}
         self._pump_runner = pump_runner
+        self._hosting_state = asyncio.Lock()
+
+    @contextlib.asynccontextmanager
+    async def reserve_hosting_state(self) -> AsyncIterator[None]:
+        """Serialize async leadership, registry, and cleanup state transitions."""
+        async with self._hosting_state:
+            yield
 
     def has(self, system_id: UUID) -> bool:
         return system_id in self._collectors
@@ -138,13 +145,14 @@ class CollectorRegistry:
 
     async def finalize_and_drop_async(self, system_id: UUID) -> None:
         """Event-loop-safe :meth:`finalize_and_drop`."""
-        collector = self._collectors.get(system_id)
-        if collector is None:
-            return
-        self._cancel_pump(system_id)
-        await asyncio.to_thread(collector.finalize)
-        if self._collectors.get(system_id) is collector:
-            self._collectors.pop(system_id)
+        async with self.reserve_hosting_state():
+            collector = self._collectors.get(system_id)
+            if collector is None:
+                return
+            self._cancel_pump(system_id)
+            await asyncio.to_thread(collector.finalize)
+            if self._collectors.get(system_id) is collector:
+                self._collectors.pop(system_id)
 
     def drop_all(self) -> None:
         """Close and forget every collector without finalizing."""
@@ -182,11 +190,19 @@ class ConsoleHostingLoop:
     async def tick(self) -> None:
         """Reconcile leadership, then host or stop hosting."""
         try:
-            if not await self._reconcile_leadership():
-                return
-            await self._host_running_systems()
+            async with self._registry.reserve_hosting_state():
+                if not await self._reconcile_leadership():
+                    return
+                await self._host_running_systems()
         except Exception:  # noqa: BLE001 - durable hosting loop survives transient errors
             _log.warning("console hosting tick failed; retrying next tick", exc_info=True)
+
+    @contextlib.asynccontextmanager
+    async def reserve_system_object_cleanup(self, system_id: UUID) -> AsyncIterator[bool]:
+        """Hold current leadership and collector absence through one remote object delete."""
+        async with self._registry.reserve_hosting_state():
+            leader_is_current = self._is_leader and await self._lock_still_held()
+            yield leader_is_current and not self._registry.has(system_id)
 
     async def _reconcile_leadership(self) -> bool:
         if self._is_leader:
@@ -260,11 +276,12 @@ class ConsoleHostingLoop:
 
     async def stop(self) -> None:
         """Release leadership and close all streams."""
-        self._stop_all_pumps()
-        self._registry.drop_all()
-        if self._is_leader:
-            await self._leader_lock.release()
-            self._is_leader = False
+        async with self._registry.reserve_hosting_state():
+            self._stop_all_pumps()
+            self._registry.drop_all()
+            if self._is_leader:
+                await self._leader_lock.release()
+                self._is_leader = False
 
 
 class AsyncioPumpRunner:
@@ -330,6 +347,12 @@ class ConsoleHosting:
     def is_leader(self) -> bool:
         """Whether this process currently owns console-hosting leadership."""
         return self.loop.is_leader
+
+    @contextlib.asynccontextmanager
+    async def reserve_system_object_cleanup(self, system_id: UUID) -> AsyncIterator[bool]:
+        """Reserve the loop's current hosting state for one remote object delete."""
+        async with self.loop.reserve_system_object_cleanup(system_id) as permitted:
+            yield permitted
 
     async def run(self, stop: asyncio.Event) -> None:
         """Run the attach watcher until ``stop`` is set."""
