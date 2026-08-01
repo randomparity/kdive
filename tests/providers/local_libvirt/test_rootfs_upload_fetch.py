@@ -136,12 +136,14 @@ class _RecordingReader:
         max_chunk: int | None = None,
         fail: tuple[int, BaseException] | None = None,
         on_first_read: Callable[[], None] | None = None,
+        on_read: Callable[[], None] | None = None,
     ) -> None:
         self._data = data
         self._offset = 0
         self._max_chunk = max_chunk
         self._fail = fail
         self._on_first_read = on_first_read
+        self._on_read = on_read
         self.largest_read = 0
 
     @property
@@ -156,6 +158,8 @@ class _RecordingReader:
             )
         if self._offset == 0 and self._on_first_read is not None:
             self._on_first_read()
+        if self._on_read is not None:
+            self._on_read()
         if self._fail is not None:
             at, error = self._fail
             if self._offset >= at:
@@ -182,6 +186,7 @@ class _FakeStore:
         fail: tuple[int, BaseException] | None = None,
         head_size: int | None = None,
         on_first_read: Callable[[], None] | None = None,
+        on_read: Callable[[], None] | None = None,
         on_first_range: Callable[[], None] | None = None,
     ) -> None:
         self._data = data
@@ -190,6 +195,7 @@ class _FakeStore:
         self._fail = fail
         self._head_size = head_size
         self._on_first_read = on_first_read
+        self._on_read = on_read
         self._on_first_range = on_first_range
         self.head_calls = 0
         self.range_calls = 0
@@ -219,6 +225,7 @@ class _FakeStore:
             max_chunk=self._max_chunk,
             fail=self._fail,
             on_first_read=self._on_first_read,
+            on_read=self._on_read,
         )
         self.readers.append(reader)
         try:
@@ -580,6 +587,8 @@ def test_stage_identity_writes_without_truncating_the_guarded_inode(tmp_path: Pa
             key="k",
             checksum=_sha256_b64(_QCOW2),
             partial_fd=fd,
+            expected_bytes=len(_QCOW2),
+            dest=partial,
             system_id=uuid4(),
         )
     finally:
@@ -603,6 +612,34 @@ def test_stage_identity_rejects_a_get_shorter_than_head(tmp_path: Path) -> None:
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert error.value.details["expected_bytes"] == len(_QCOW2) + 8
     assert error.value.details["actual_bytes"] == len(_QCOW2)
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_identity_rejects_before_a_get_writes_past_head(tmp_path: Path) -> None:
+    payload = _QCOW2 + b"larger-than-the-head-response"
+    reserved = 8
+    observed_sizes: list[int] = []
+
+    def _record_partial_size() -> None:
+        observed_sizes.append(next(tmp_path.glob(f"{_TOKEN}.*.partial")).stat().st_size)
+
+    store = _FakeStore(
+        payload,
+        checksum=_sha256_b64(payload),
+        head_size=reserved,
+        max_chunk=8,
+        on_read=_record_partial_size,
+    )
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert error.value.details["expected_bytes"] == reserved
+    assert error.value.details["actual_bytes"] == 16
+    assert observed_sizes
+    assert max(observed_sizes) <= reserved
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 

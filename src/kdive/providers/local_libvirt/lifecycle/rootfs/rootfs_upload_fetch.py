@@ -870,25 +870,15 @@ def stage_uploaded_rootfs(
                 system_id=system_id,
             )
             if effective is None:
-                actual = _stage_identity(
+                _stage_identity(
                     store,
                     key=object_key,
                     checksum=head.checksum_sha256,
                     partial_fd=guard_fd,
+                    expected_bytes=head.size_bytes,
+                    dest=dest,
                     system_id=system_id,
                 )
-                if budget is not None and actual != budget.required:
-                    raise CategorizedError(
-                        "uploaded rootfs object length changed between HEAD and GET; retry, and "
-                        "if it persists repair the object-store boundary",
-                        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                        details={
-                            "system_id": str(system_id),
-                            "dest": str(dest),
-                            "expected_bytes": budget.required,
-                            "actual_bytes": actual,
-                        },
-                    )
             elif effective == GZIP_ENCODING:
                 actual = _stage_gzip(
                     store,
@@ -944,6 +934,8 @@ def _stage_identity(
     key: str,
     checksum: str,
     partial_fd: int,
+    expected_bytes: int,
+    dest: Path,
     system_id: UUID,
 ) -> int:
     """Stream an unencoded upload verbatim into the partial, verifying its SHA-256.
@@ -969,9 +961,22 @@ def _stage_identity(
     with store.get_artifact_stream(key, None) as fetched, os.fdopen(writer_fd, "wb") as writer:
         os.lseek(writer.fileno(), 0, os.SEEK_SET)
         while chunk := fetched.reader.read(_STREAM_CHUNK_BYTES):
+            next_written = written + len(chunk)
+            if next_written > expected_bytes:
+                raise CategorizedError(
+                    "uploaded rootfs object length changed between HEAD and GET; retry, and if "
+                    "it persists repair the object-store boundary",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={
+                        "system_id": str(system_id),
+                        "dest": str(dest),
+                        "expected_bytes": expected_bytes,
+                        "actual_bytes": next_written,
+                    },
+                )
             hasher.update(chunk)
             writer.write(chunk)
-            written += len(chunk)
+            written = next_written
     if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
         _log_checksum_mismatch(key, system_id=system_id, encoding="identity")
         raise CategorizedError(
@@ -980,6 +985,18 @@ def _stage_identity(
             "damaged and must be re-uploaded",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
+        )
+    if written != expected_bytes:
+        raise CategorizedError(
+            "uploaded rootfs object length changed between HEAD and GET; retry, and if it "
+            "persists repair the object-store boundary",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={
+                "system_id": str(system_id),
+                "dest": str(dest),
+                "expected_bytes": expected_bytes,
+                "actual_bytes": written,
+            },
         )
     return written
 

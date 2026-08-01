@@ -54,11 +54,11 @@ owned by the guard's open file description through verify and durable publish.
 
 Mode-zero native fallocate makes the partial's logical length equal the budget. Identity's budget
 comes from the exact HEAD size, but a digest alone cannot prove the later GET returned that many
-bytes: a replacement or faulty store could provide a shorter body and its matching checksum while
-the reservation retains a zero-filled tail. `_stage_identity` therefore returns its written byte
-count, and the caller requires equality with the exact budget before format verification and
-publish. A mismatch is an attributable infrastructure failure and the existing `finally` discards
-the padded partial.
+bytes: a replacement or faulty store could provide a different-length body and its matching
+checksum. `_stage_identity` receives the exact budget, rejects the first chunk that would make the
+written count exceed it before writing that chunk, and requires equality at EOF. A mismatch is an
+attributable infrastructure failure and the existing `finally` discards the partial, so a longer
+GET cannot consume unreserved blocks and a shorter GET cannot publish a zero-filled tail.
 
 Gzip's budget is only an upper bound. `strip_gzip_to_writer` already returns the actual
 decompressed byte count; `_stage_gzip` returns that count to its caller, which `ftruncate`s the
@@ -144,8 +144,8 @@ unchanged and do not invalidate the issue's two-stager acceptance criterion.
    and never calls `os.posix_fallocate`.
 3. Identity and gzip writers write through the guarded inode without pathname `O_TRUNC`; gzip
    releases the unused reservation tail before format verification and publish.
-4. Identity requires the GET byte count to equal the exact HEAD budget, and the native binding
-   carries reservation sizes above 2 GiB without truncation.
+4. Identity rejects before writing beyond the exact HEAD budget and requires equality at EOF; the
+   native binding carries reservation sizes above 2 GiB without truncation.
 5. Allocation and writer failures leave no partial or published base; successful stages preserve
    the existing checksum, qcow2, fsync, marker, and sibling-publish gates.
 6. Different bases remain parallel. No schema, migration, dependency, setting, or MCP contract is

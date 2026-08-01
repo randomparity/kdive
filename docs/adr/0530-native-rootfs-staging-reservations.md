@@ -50,8 +50,9 @@ unlinks the orphan. No migration or operator setting is added.
   can provide; one wins and the other fails before reading its object.
 - The existing one-GiB advisory floor remains a single-stager admission policy, not a globally
   reserved floor. Other volume writers can still consume free space after a reservation succeeds.
-- Identity verifies the streamed byte count against the exact HEAD size as well as checking the
-  digest, so a changed or faulty object-store response cannot publish a zero-padded reservation.
+- Identity bounds the writer by the exact HEAD size and rejects the first chunk that would cross
+  it before writing that chunk; it also rejects a shorter final byte count. A changed or faulty
+  object-store response therefore cannot consume unreserved blocks or publish a padded reservation.
 - Gzip temporarily reserves its declared upper bound and releases the unused tail before publish.
   An overstated bound can therefore lose a race for capacity even when the eventual image is small.
 - Filesystems without native allocation support keep the pre-0530 behavior, with a warning that
