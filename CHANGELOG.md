@@ -78,6 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gate PRs on strictly ascending migration numbers
 - Carry the decode diagnosis to the operator checksum warning
 - Fence the fetch pin on its holding job, not a 6-hour TTL
+- Require versioned bucket identities
+- Delete bounded immutable versions
+- Persist system version sweep progress
 
 ### Changed
 
@@ -274,6 +277,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct two overstated claims in the 0519 rationale
 - State the etag repair's real guarantee, not a stronger one
 - Annotate the superseded section by appending, not striking
+- Fence unlocked object deletes
+- Record object delete blocker
+- Require versioned object-store deletes
+- Harden versioned deletion contract
+- Bind deletion to observed versions
+- Bound version cleanup fairness
+- Reject MFA-protected deletion
+- Make rowless cleanup durable
+- Fence rowless system cleanup
+- Persist system sweep progress
+- Clarify sweep store surface
+- Require versioned bucket provisioning
+- Accept versioned store deletion
 
 ### Fixed
 
@@ -485,6 +501,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refresh the adopted row's digest; disclose the reclaim gaps
 - Fence the registration flip on the reservation, not the row id
 - Clamp over-serving ranged reads
+- Reject malformed MFA delete states
+- Fence compensation by version identity
+- Commit before chunk cleanup
+- Retain rows through version purge
+- Require retired-key store capability
+- Unlock versioned object cleanup
+- Bound orphan failure work
+- Report orphan failure units accurately
+- Reserve remote system cleanup
+- Make system sweep cancellation safe
+- Gate apps on versioned bucket
+- Pass bucket configuration as data
+- Keep schema generation offline
+- Require object store injection
+- Derive reconcile cleanup limits
+- Keep coverage census offline
+- Bound expired upload inventory
+- Retry gone system artifact cleanup
+- Preserve gone system evidence
+- Bound system artifact retries
 
 ### Build
 
