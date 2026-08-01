@@ -153,7 +153,12 @@ unchanged and do not invalidate the issue's two-stager acceptance criterion.
 
 ## Verification
 
-The focused proof runs `uv run python -m pytest tests/providers/local_libvirt/test_rootfs_upload_fetch.py -q`.
-Repository verification runs `just ci`. The concurrency mutation replaces the native reservation
-with an unconditional success: both stages then consume their streams and the exactly-one assertion
-fails. The degrade mutation calls `os.posix_fallocate`: the sentinel test fails immediately.
+Verified on 2026-08-01: the focused module passed 108 tests, including a successful real-filesystem
+native allocation smoke. `just ci` passed with 11,693 tests and 16 skips: six absent live-stack
+OIDC fixtures, six Docker/image smoke prerequisites, absent `promtool` in compose and Helm checks,
+one required CLI-option case, and one live-stack skew test that deliberately skips on an
+uncommitted source tree. The concurrency mutation replaced native reservation with unconditional
+success and the deterministic race failed before either caller reached its allocator barrier. The
+identity-length, gzip-shrink, and 64-bit-prototype mutations each reddened their focused test. The
+degrade test replaces `os.posix_fallocate` with a sentinel that fails immediately if the unsupported
+native-allocation path ever calls it.

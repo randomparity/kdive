@@ -27,12 +27,13 @@ witnesses *completion*, not *integrity*, and says nothing about damage arriving 
 rejection is logged — the re-stage succeeds, so the log line is the only evidence it ever fired —
 while a base that is present but *unreadable* is an ``INFRASTRUCTURE_FAILURE``, never a cache miss.
 
-Capacity (#1525): a stage the staging filesystem plainly cannot hold is refused before its first
-byte (:func:`_require_staging_free_space`). Since the identity path started streaming (#1520) a
-*rejected* object is written in full and only then rejected, onto a filesystem that by default also
-holds every live System's overlay — so the cost of a bad upload was paid by running guests. The
-check is advisory, not a reservation: concurrent siblings each pass their own, and free space can
-vanish before the write, so the real ENOSPC guard is still :func:`_staging_fault`.
+Capacity (ADR-0450/0530): a stage the staging filesystem plainly cannot hold is refused before its
+first byte (:func:`_require_staging_free_space`), then the guarded partial reserves the base's
+budget with native ``fallocate(2)``. Different-base siblings remain parallel, while the filesystem
+admits only reservations whose blocks fit. A filesystem without native allocation support degrades
+loudly to ADR-0450's advisory precheck; KDIVE never invokes an emulated ``posix_fallocate``. The
+one-GiB floor remains advisory against unrelated writers, and mid-write faults still flow through
+:func:`_staging_fault`.
 
 Concurrency (ADR-0441 §5): the shared per-(investigation, checksum) staging path means two sibling
 Systems can provision at once. Each fetcher writes a **unique** ``<token>.<uuid>.partial`` and
@@ -136,6 +137,47 @@ def _native_fallocate(fd: int, length: int) -> None:
         return
     error_number = ctypes.get_errno()
     raise OSError(error_number, os.strerror(error_number))
+
+
+def _reserve_staging_space(
+    fd: int,
+    *,
+    partial: Path,
+    dest: Path,
+    budget: _StagingBudget | None,
+    system_id: UUID,
+) -> bool:
+    """Reserve the base's blocks atomically, or degrade when native allocation is unsupported."""
+    if budget is None:
+        return False
+    try:
+        _native_fallocate(fd, budget.required)
+    except OSError as error:
+        if error.errno in {errno.ENOSYS, errno.EOPNOTSUPP}:
+            _log.warning(
+                "the filesystem holding %s does not support native rootfs staging reservations "
+                "(%s); continuing with only the advisory free-space precheck, so concurrent "
+                "different-base stages can still overcommit this volume",
+                partial,
+                error.strerror,
+            )
+            return False
+        if error.errno in {errno.ENOSPC, errno.EDQUOT}:
+            raise CategorizedError(
+                f"could not reserve {budget.required} bytes for the uploaded rootfs at "
+                f"{str(dest)!r} ({error.strerror}); free capacity on that filesystem and "
+                "re-issue the provision",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "system_id": str(system_id),
+                    "dest": str(dest),
+                    "requested_bytes": budget.required,
+                    "budget_source": budget.source,
+                    "errno": error.errno,
+                },
+            ) from error
+        raise
+    return True
 
 
 class UploadObjectStore(Protocol):
@@ -820,6 +862,13 @@ def stage_uploaded_rootfs(
         # and before the partial is created, so a refused stage leaves nothing at all behind.
         _require_staging_free_space(dest, budget=budget, system_id=system_id)
         with _flocked_partial(partial) as guard_fd:
+            _reserve_staging_space(
+                guard_fd,
+                partial=partial,
+                dest=dest,
+                budget=budget,
+                system_id=system_id,
+            )
             if effective is None:
                 actual = _stage_identity(
                     store,
