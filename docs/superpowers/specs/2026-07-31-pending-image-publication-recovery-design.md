@@ -6,7 +6,8 @@ Make every expired `pending` image publication converge without reclaiming an ob
 publisher is still writing. A complete object is registered only when it matches the catalog row;
 an absent or invalid object and its row are reclaimed so private-image quota is released.
 
-This design implements issue #1757 and [ADR-0526](../../adr/0526-fence-and-reconcile-pending-image-publications.md).
+This design implements campaign phase #1789 of #1757 and
+[ADR-0525](../../adr/0525-fence-and-reconcile-pending-image-publications.md).
 
 ## Current failure
 
@@ -44,7 +45,7 @@ survives transaction boundaries, and PostgreSQL releases it on backend death. Th
 keeps a late PUT isolated if the database session dies before its blocking store thread. A row lock
 would require a long transaction during the PUT. A persisted heartbeat lease would add a renewal
 deadline that can expire independently of a still-running store call. Both were rejected in
-ADR-0526.
+ADR-0525.
 
 ## Publication flow
 

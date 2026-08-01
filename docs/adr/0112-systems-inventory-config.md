@@ -3,7 +3,7 @@
 - **Status:** Accepted
 
 > **Pending-image update/prune ownership partially superseded by
-> [0526](0526-fence-and-reconcile-pending-image-publications.md)** (2026-07-31).
+> [0525](0525-fence-and-reconcile-pending-image-publications.md)** (2026-08-01).
 
 - **Date:** 2026-06-14
 - **Depends on:** [ADR-0087](0087-config-registry.md) (the `KDIVE_*` operational-config

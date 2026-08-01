@@ -1,4 +1,4 @@
-# 0526 — Fence and reconcile pending image publications
+# 0525 — Fence and reconcile pending image publications
 
 ## Status
 
