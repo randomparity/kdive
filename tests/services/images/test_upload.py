@@ -448,6 +448,66 @@ def test_registers_private_image_resolving_only_within_owning_project(migrated_u
     asyncio.run(_run())
 
 
+def test_registered_private_name_reupload_conflicts_before_publish(migrated_url: str) -> None:
+    from kdive.db.repositories import IMAGE_CATALOG
+
+    payload = b"first-rootfs"
+    replacement = b"replacement-rootfs"
+    store = _quarantine(payload)
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            first = await _register(conn, store)
+            puts_after_first = list(store.puts)
+            store._objects["uploads/q/proj/replacement.qcow2"] = replacement  # noqa: SLF001 - test seam
+
+            with pytest.raises(CategorizedError) as err:
+                await _register(
+                    conn,
+                    store,
+                    name="myrootfs",
+                    quarantine_key="uploads/q/proj/replacement.qcow2",
+                )
+            assert err.value.category is ErrorCategory.CONFLICT
+            assert "images.delete" in str(err.value)
+            assert "images.upload" in str(err.value)
+            assert store.puts == puts_after_first
+
+            still_registered = await IMAGE_CATALOG.get(conn, first.id)
+            assert still_registered == first
+            assert first.object_key is not None
+            registered_bytes = store._objects[first.object_key]  # noqa: SLF001 - integrity test seam
+            assert "sha256:" + hashlib.sha256(registered_bytes).hexdigest() == first.digest
+            assert len(await IMAGE_CATALOG.list_all(conn)) == 1
+
+    asyncio.run(_run())
+
+
+def test_registered_private_name_conflict_is_owner_scoped(migrated_url: str) -> None:
+    from kdive.db.repositories import IMAGE_CATALOG
+
+    store = _quarantine(b"project-rootfs", key="uploads/q/proj/shared.qcow2")
+    store._objects["uploads/q/other/shared.qcow2"] = b"other-rootfs"  # noqa: SLF001 - test seam
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            project_entry = await _register(
+                conn, store, name="shared", quarantine_key="uploads/q/proj/shared.qcow2"
+            )
+            other_entry = await _register(
+                conn,
+                store,
+                project="other",
+                name="shared",
+                quarantine_key="uploads/q/other/shared.qcow2",
+            )
+            assert project_entry.owner == "proj"
+            assert other_entry.owner == "other"
+            assert len(await IMAGE_CATALOG.list_all(conn)) == 2
+
+    asyncio.run(_run())
+
+
 def test_private_shadows_public_on_same_provider_name(migrated_url: str) -> None:
     from kdive.services.images.publish import PublishRequest, publish_image
 
@@ -706,10 +766,12 @@ def test_concurrent_same_identity_uploads_cannot_both_register(migrated_url: str
                     ).result(timeout=10)
             return super().put_artifact(request)
 
-    store_a = _ContendedStore({"uploads/q/proj/a.qcow2": b"alpha-bytes"})
-    store_b = _ContendedStore({"uploads/q/proj/b.qcow2": b"beta-bytes-differ"})
-    store_b._objects.update(store_a._objects)  # noqa: SLF001 - one shared object namespace
-    store_a._objects.update(store_b._objects)  # noqa: SLF001 - test seam
+    store = _ContendedStore(
+        {
+            "uploads/q/proj/a.qcow2": b"alpha-bytes",
+            "uploads/q/proj/b.qcow2": b"beta-bytes-differ",
+        }
+    )
 
     async def _run() -> None:
         publishing_loop.append(asyncio.get_running_loop())
@@ -729,8 +791,8 @@ def test_concurrent_same_identity_uploads_cannot_both_register(migrated_url: str
 
         results = await _run_both_contending(
             migrated_url,
-            _one(store_a, "uploads/q/proj/a.qcow2"),
-            _one(store_b, "uploads/q/proj/b.qcow2"),
+            _one(store, "uploads/q/proj/a.qcow2"),
+            _one(store, "uploads/q/proj/b.qcow2"),
         )
         conflicts = [r for r in results if isinstance(r, CategorizedError)]
         registered = [r for r in results if not isinstance(r, CategorizedError)]
@@ -746,6 +808,9 @@ def test_concurrent_same_identity_uploads_cannot_both_register(migrated_url: str
             assert len(rows) == 1
             assert rows[0].state is ImageState.REGISTERED
             assert rows[0].id == registered[0].id  # ty: ignore[unresolved-attribute]
+            assert rows[0].object_key is not None
+            registered_bytes = store._objects[rows[0].object_key]  # noqa: SLF001 - integrity test seam
+            assert "sha256:" + hashlib.sha256(registered_bytes).hexdigest() == rows[0].digest
 
     asyncio.run(_run())
 

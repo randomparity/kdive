@@ -1,4 +1,4 @@
-"""Project-private upload registration (ADR-0093, ADR-0516, ADR-0520, issue #286).
+"""Project-private upload registration (ADR-0093, ADR-0516, ADR-0520, ADR-0526, issue #286).
 
 A developer uploads a custom rootfs through the ADR-0048 ingest, which lands the bytes as a
 *quarantined* object (its guest contract unverified, its scope not yet owner-bound).
@@ -8,9 +8,9 @@ image:
 1. Read the quarantined object's bytes (its size and content digest).
 2. Validate the image's guest contract; a non-conforming image is rejected *while still
    quarantined* (never registered, never promoted out of the quarantine prefix).
-3. Under the project advisory lock, enforce the per-project count/bytes quota fail-closed and
-   commit a ``pending`` row reserving this upload's bytes. A denial is audited and raises before
-   any write.
+3. Under the project advisory lock, reject an already-registered private name for that project,
+   then enforce the per-project count/bytes quota fail-closed and commit or adopt a ``pending``
+   row reserving this upload's bytes. A rejection or denial raises before any write.
 4. Release the PROJECT lock, then take the row-scoped IMAGE_PUBLISH session fence across the object
    write, registration flip, and audit — the shared row-first publish steps with
    ``visibility='private'`` and ``owner=project``, no second implementation.
@@ -98,6 +98,39 @@ class PrivateUploadRequest:
     quarantine_key: str
     expires_at: datetime
     required: tuple[str, ...]
+
+
+class RegisteredPrivateNameConflict(CategorizedError):
+    """A private upload collided with its project's registered name."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"private image {name!r} is already registered in this project; "
+            "delete it with images.delete, wait for deletion, then retry images.upload",
+            category=ErrorCategory.CONFLICT,
+        )
+
+
+async def _registered_private_name_conflict(
+    conn: AsyncConnection, request: PublishRequest
+) -> RegisteredPrivateNameConflict | None:
+    """Return the registered private-name conflict, before pending-row adoption (ADR-0526)."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT 1 FROM image_catalog "
+            "WHERE owner = %s AND provider = %s AND name = %s "
+            "AND visibility = %s AND state = %s LIMIT 1",
+            (
+                request.owner,
+                request.provider,
+                request.name,
+                ImageVisibility.PRIVATE.value,
+                ImageState.REGISTERED.value,
+            ),
+        )
+        if await cur.fetchone() is None:
+            return None
+    return RegisteredPrivateNameConflict(request.name)
 
 
 def _clamp_expiry(expires_at: datetime, *, now: datetime) -> datetime:
@@ -341,11 +374,13 @@ async def _reserve_under_quota(
 ) -> PublishReservation:
     """Enforce the quota fail-closed under the PROJECT lock and return the committed reservation.
 
-    The lock spans exactly this: one aggregate read of the project's live private rows, the cap
-    decision, and the ``pending`` row that claims ``new_bytes``. It holds no object-store call and
-    no unbounded loop, and it is released by the ``return`` committing the transaction — which is
-    what lets the caller run the PUT without the PROJECT or any transaction-scoped lock. The
-    caller separately holds the row-scoped IMAGE_PUBLISH session lock (ADR-0520, ADR-0525).
+    The lock first rejects a registered private row with this project's provider/name (ADR-0526),
+    then spans one aggregate read of the project's live private rows, the cap decision, and the
+    ``pending`` row that claims ``new_bytes``. A matching pending row remains adoptable; only a
+    registered row rejects the re-upload. It holds no object-store call and no unbounded loop, and
+    it is released by the ``return`` committing the transaction — which is what lets the caller
+    run the PUT without the PROJECT or any transaction-scoped lock. The caller separately holds
+    the row-scoped IMAGE_PUBLISH session lock (ADR-0520, ADR-0525).
 
     The transaction must be a real one and not a savepoint: releasing a savepoint commits neither
     the reservation nor the lock, so the claim would be invisible to a concurrent upload *and* the
@@ -354,12 +389,15 @@ async def _reserve_under_quota(
     asserted (ADR-0516 §1, ADR-0506).
 
     Raises:
-        CategorizedError: ``QUOTA_EXCEEDED``. The denial reserves nothing and the locked
-            transaction rolls back having written nothing, so it is audited durably on a fresh
-            transaction before raising — an over-cap upload is both denied and audited.
+        CategorizedError: ``CONFLICT`` for an already-registered private name; ``QUOTA_EXCEEDED``
+            for an over-cap upload. Both reserve nothing and roll back having written nothing;
+            quota denials are audited durably on a fresh transaction before raising.
     """
     require_top_level_transaction(conn, "the private-upload quota reservation")
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.PROJECT, project):
+        conflict = await _registered_private_name_conflict(conn, request)
+        if conflict is not None:
+            raise conflict
         count, used_bytes = await _project_usage(conn, project, adopting=request)
         denial = _quota_denial(
             project=project, count=count, used_bytes=used_bytes, new_bytes=new_bytes
