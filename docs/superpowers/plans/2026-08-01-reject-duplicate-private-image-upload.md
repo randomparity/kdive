@@ -107,6 +107,20 @@ Call it as the first operation inside `_reserve_under_quota`'s existing PROJECT-
 
 - [ ] **Step 4: Run the sequential and concurrency service tests**
 
+Before running them, strengthen `test_concurrent_same_identity_uploads_cannot_both_register` so
+both contenders use one `_ContendedStore` seeded with both quarantine keys rather than two stores
+whose dictionaries are copied. Pass that same store to both `_one` calls. After the race, read the
+sole registered row's `object_key`, fetch its bytes from the shared store, and assert:
+
+```python
+assert rows[0].object_key is not None
+registered_bytes = store._objects[rows[0].object_key]  # noqa: SLF001 - integrity test seam
+assert "sha256:" + hashlib.sha256(registered_bytes).hexdigest() == rows[0].digest
+```
+
+This assertion is the concurrent acceptance proof: cardinality and row identity alone do not catch
+a registered winner whose object contains a losing attempt's bytes.
+
 Run:
 
 ```bash
@@ -116,7 +130,9 @@ uv run python -m pytest \
   tests/services/images/test_upload.py::test_private_shadows_public_on_same_provider_name -q
 ```
 
-Expected: 3 passed. The public-shadow test is the control that public visibility does not trigger the private-name conflict.
+Expected: 3 passed. The concurrent test uses a genuinely shared namespace and proves the row/object
+digest invariant; the public-shadow test is the control that public visibility does not trigger the
+private-name conflict.
 
 - [ ] **Step 5: Add a cross-owner control if the regression does not already exercise one**
 
@@ -136,7 +152,9 @@ Expected: all pass with zero warnings.
 
 - [ ] **Step 7: Commit the service behavior**
 
-Stage only `src/kdive/services/images/upload.py` and `tests/services/images/test_upload.py`, then commit:
+Stage only `src/kdive/services/images/upload.py` and `tests/services/images/test_upload.py`, then
+commit. The test file includes both the sequential regression and the strengthened concurrent
+integrity proof:
 
 ```bash
 git commit -m "fix(images): reject registered private image names"
@@ -252,6 +270,11 @@ uv run python -m pytest tests/services/images/test_upload.py::test_registered_pr
 ```
 
 Expected: FAIL because the second upload reaches a write or registration conflict. Restore the implementation using `git restore -p` or an inverse patch; do not leave the mutation in the worktree.
+
+Inspect the strengthened concurrent test before final verification and confirm both `_one` calls
+receive the same store instance and its post-race digest assertion reads the sole registered row's
+exact `object_key`; copied dictionaries or a digest check against a caller-selected key do not
+satisfy the proof.
 
 - [ ] **Step 2: Re-run the focused contract suite**
 
