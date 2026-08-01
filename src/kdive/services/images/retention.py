@@ -26,8 +26,9 @@ class ImageSweepStore(Protocol):
     The sweeps use ``list_image_objects``/``head``/``head_present``/``delete``/``delete_version``;
     the inventory reconcile
     additionally uploads a staged image's captured kernel ``.config`` via ``put_artifact``
-    (ADR-0336). The real :class:`~kdive.store.objectstore.ObjectStore` satisfies all four, and the
-    reconcile loop holds that store, so the shared port keeps one type flowing to both consumers.
+    (ADR-0336). The real :class:`~kdive.store.objectstore.ObjectStore` satisfies this combined
+    surface, and the reconcile loop holds that store, so the shared port keeps one type flowing to
+    both consumers.
     """
 
     def list_image_objects(self) -> list[ObjectListing]: ...
