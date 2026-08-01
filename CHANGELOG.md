@@ -84,6 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist publication attempts
 - Bind publishes to object checksums
 - Fence active publication attempts
+- Bind native staging allocation
+- Reserve staging capacity atomically
 
 ### Changed
 
@@ -122,6 +124,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Share one expiry predicate across both finalize lanes
 - Replace the flock fetch lease with durable DB state
 - Renumber the fetch-lease fence migration 0088 -> 0090
+- Keep reservations through writers
+- Simplify reservation helper
 
 ### Documentation
 
@@ -327,6 +331,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Design artifact ownership uniqueness
 - Harden artifact conflict design
 - Define artifact conflict recovery
+- Design native rootfs staging reservations
+- Harden rootfs reservation design
+- Plan native rootfs staging reservations
+- Strengthen rootfs reservation proof plan
+- Run native allocation smoke before build
+- Correct rootfs allocator mutation proof
 
 ### Fixed
 
@@ -578,6 +588,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enforce unique artifact ownership claims
 - Adopt concurrent artifact claims
 - Satisfy decision record guard
+- Bound identity writes by reservation
 
 ### Build
 
