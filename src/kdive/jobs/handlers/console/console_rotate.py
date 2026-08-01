@@ -33,7 +33,7 @@ from kdive.artifacts.etag_repair import reconcile_row_etag
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ARTIFACTS
+from kdive.db.repositories import ARTIFACTS, ArtifactClaimConflict
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError
@@ -245,22 +245,32 @@ async def _seal_pending(
         return True
     stored = [await asyncio.to_thread(_put_part, store, system_id, part) for part in plan.pending]
     claimed: list[tuple[_ExistingRow, str]] = []
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        live = await _system_is_live(conn, system_id)
-        if live:
-            for obj in stored:
-                # Re-check under the lock: another rotation may have sealed this exact
-                # ``(gen, index)`` while the object was in flight, and its row owns the key.
-                existing = await _existing_part_row(conn, system_id, obj.key)
-                if existing is not None:
-                    claimed.append((existing, obj.key))
-                    continue
-                await ARTIFACTS.insert(
-                    conn,
-                    register_artifact_row(
-                        obj, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=plan.run_id
-                    ),
-                )
+    try:
+        async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+            live = await _system_is_live(conn, system_id)
+            if live:
+                for obj in stored:
+                    # Re-check under the lock: another rotation may have sealed this exact
+                    # ``(gen, index)`` while the object was in flight, and its row owns the key.
+                    existing = await _existing_part_row(conn, system_id, obj.key)
+                    if existing is not None:
+                        claimed.append((existing, obj.key))
+                        continue
+                    row, inserted = await ARTIFACTS.claim(
+                        conn,
+                        register_artifact_row(
+                            obj, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=plan.run_id
+                        ),
+                    )
+                    if not inserted:
+                        claimed.append((_ExistingRow(row.id, row.etag), obj.key))
+    except ArtifactClaimConflict:
+        await discard_unregistered_objects(
+            store,
+            stored,
+            still_unregistered=lambda key: _key_unregistered(conn, system_id, key),
+        )
+        raise
     # A peer rotation owns these keys, and this attempt's PUT overwrote the objects its rows
     # describe. Re-point each row at what its object actually holds — by stat, not by assuming
     # this attempt's etag, since landing last in the store and last at the lock are independent.
