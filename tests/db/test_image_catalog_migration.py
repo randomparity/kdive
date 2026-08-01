@@ -90,6 +90,19 @@ def test_nullable_columns(pg_conn: psycopg.Connection) -> None:
         assert nullable.get(col) == "NO", col
 
 
+def test_publication_attempt_columns_are_nullable_for_predecessor_writers(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    columns = _columns(pg_conn, "image_catalog")
+    nullable = _nullable(pg_conn, "image_catalog")
+
+    assert columns["publication_attempt_id"] == "uuid"
+    assert columns["publication_principal"] == "text"
+    assert nullable["publication_attempt_id"] == "YES"
+    assert nullable["publication_principal"] == "YES"
+
+
 def test_visibility_check_rejects_unknown(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
     with pytest.raises(psycopg.errors.CheckViolation):
