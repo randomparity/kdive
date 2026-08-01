@@ -26,12 +26,19 @@ This call is atomic with filesystem allocation accounting. The first concurrent 
 its blocks; a second caller that cannot reserve its full requirement receives `ENOSPC` or `EDQUOT`
 before it opens an object stream.
 
-The allocation seam calls the process libc's native `fallocate` symbol directly with `ctypes` and
-reads `errno` on `-1`. It does not call `os.posix_fallocate`. Missing native support (`ENOSYS`,
-`EOPNOTSUPP`, or the mode-zero interface rejected with `EINVAL`) returns an explicit degraded
-result. Staging logs that the volume has only ADR-0450's advisory protection and continues. Other
-errors flow through `_staging_fault`; capacity errors retain `INFRASTRUCTURE_FAILURE` and add
-reservation-specific scalar details so the losing System and destination are attributable.
+The allocation seam loads the process libc with `ctypes.CDLL(None, use_errno=True)` and binds
+`fallocate` with `restype=c_int` and argument types `(c_int, c_int, c_long, c_long)`. KDIVE's
+supported local-libvirt hosts are x86_64 and ppc64le LP64 systems, where `c_long` is the native
+64-bit `off_t`; module initialization fails loudly if that width is not eight bytes rather than
+silently truncating the supported 50 GiB budget. The helper clears errno before the call and reads
+it only when the result is `-1`. It does not call `os.posix_fallocate`.
+
+Missing native support (`ENOSYS` or `EOPNOTSUPP`) returns an explicit degraded result. `EINVAL` is
+not treated as an unsupported-filesystem signal: for mode zero on the regular writable partial it
+means KDIVE supplied an invalid range and is a staging failure. Staging logs that a degraded volume
+has only ADR-0450's advisory protection and continues. Other errors flow through `_staging_fault`;
+capacity errors retain `INFRASTRUCTURE_FAILURE` and add reservation-specific scalar details so the
+losing System and destination are attributable.
 
 This is preferable to a volume-wide KDIVE lock, which would serialize unrelated bases without
 covering guest overlays or external writers. It is also preferable to `posix_fallocate`, whose
@@ -45,13 +52,19 @@ duplicate as its writer. `fdopen` does not reopen the pathname and does not appl
 preallocated extents remain. Closing the duplicate cannot release the BSD `flock`, which remains
 owned by the guard's open file description through verify and durable publish.
 
-Mode-zero native fallocate makes the partial's logical length equal the budget. This is safe for
-identity because the budget is the exact stored-object length and checksum verification rejects an
-early or corrupt stream. Gzip's budget is only an upper bound. `strip_gzip_to_writer` already
-returns the actual decompressed byte count; `_stage_gzip` returns that count to its caller, which
-`ftruncate`s the guard descriptor to the actual count immediately after successful decode and
-transport checksum verification. The shared qcow2 magic check and `_durable_replace` therefore see
-only verified canonical bytes, never the zero-filled reservation tail.
+Mode-zero native fallocate makes the partial's logical length equal the budget. Identity's budget
+comes from the exact HEAD size, but a digest alone cannot prove the later GET returned that many
+bytes: a replacement or faulty store could provide a shorter body and its matching checksum while
+the reservation retains a zero-filled tail. `_stage_identity` therefore returns its written byte
+count, and the caller requires equality with the exact budget before format verification and
+publish. A mismatch is an attributable infrastructure failure and the existing `finally` discards
+the padded partial.
+
+Gzip's budget is only an upper bound. `strip_gzip_to_writer` already returns the actual
+decompressed byte count; `_stage_gzip` returns that count to its caller, which `ftruncate`s the
+guard descriptor to the actual count immediately after successful decode and transport checksum
+verification. The shared qcow2 magic check and `_durable_replace` therefore see only verified
+canonical bytes, never the zero-filled reservation tail.
 
 Any exception before publish reaches the existing `finally` discard. Unlinking the partial releases
 its blocks. Process death leaves a visible reserved orphan under the existing partial name; the
@@ -63,7 +76,7 @@ they unlink it.
 - `ENOSPC` and `EDQUOT` from native allocation are attributable reservation failures. The error
   identifies the System, destination, requested bytes, budget source, and operating-system errno,
   and tells the operator to free capacity and re-issue provisioning.
-- `ENOSYS`, `EOPNOTSUPP`, and interface-level `EINVAL` log one warning and stage under the existing
+- `ENOSYS` and `EOPNOTSUPP` log one warning and stage under the existing
   advisory precheck. A later write-side `ENOSPC` retains `_staging_fault`'s current behavior.
 - KDIVE never tries `os.posix_fallocate` after native allocation reports unsupported. This is the
   executable guard against glibc's emulated zero-writing path.
@@ -89,6 +102,10 @@ than merely asserting a helper return value.
 Focused writer tests additionally prove that an identity stage does not truncate a preallocation,
 gzip shrinks an over-reservation to the decoder's actual length before the qcow2 gate, allocation
 failure leaves no partial, and the existing flock remains held after the writer duplicate closes.
+An identity test gives HEAD a larger size than a checksum-valid shorter GET and requires an
+attributable length failure plus cleanup, proving the reservation tail cannot publish. The native
+binding test passes a budget above 2 GiB through an injected C-call seam without allocating it,
+asserts the 64-bit argument arrives unchanged, and separately proves errno capture on `-1`.
 
 ## Threat model
 
@@ -127,9 +144,11 @@ unchanged and do not invalidate the issue's two-stager acceptance criterion.
    and never calls `os.posix_fallocate`.
 3. Identity and gzip writers write through the guarded inode without pathname `O_TRUNC`; gzip
    releases the unused reservation tail before format verification and publish.
-4. Allocation and writer failures leave no partial or published base; successful stages preserve
+4. Identity requires the GET byte count to equal the exact HEAD budget, and the native binding
+   carries reservation sizes above 2 GiB without truncation.
+5. Allocation and writer failures leave no partial or published base; successful stages preserve
    the existing checksum, qcow2, fsync, marker, and sibling-publish gates.
-5. Different bases remain parallel. No schema, migration, dependency, setting, or MCP contract is
+6. Different bases remain parallel. No schema, migration, dependency, setting, or MCP contract is
    added.
 
 ## Verification
