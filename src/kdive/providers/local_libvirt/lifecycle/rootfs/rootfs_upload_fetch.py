@@ -53,6 +53,7 @@ no timeout to wait out.
 from __future__ import annotations
 
 import base64
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -118,6 +119,23 @@ _STREAM_CHUNK_BYTES = 4 * 1024 * 1024
 # size. It is a judgment call sized to keep a volume usable, not a measured overlay growth rate,
 # and it is not a reservation — see :func:`_require_staging_free_space`.
 _STAGING_FREE_SPACE_MARGIN_BYTES = 1024**3
+
+if ctypes.sizeof(ctypes.c_long) != 8:
+    raise RuntimeError("local-libvirt rootfs staging requires a 64-bit native off_t")
+
+_libc = ctypes.CDLL(None, use_errno=True)
+_fallocate = _libc.fallocate
+_fallocate.restype = ctypes.c_int
+_fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_long, ctypes.c_long]
+
+
+def _native_fallocate(fd: int, length: int) -> None:
+    """Allocate ``length`` bytes with Linux ``fallocate(2)``, preserving native errno."""
+    ctypes.set_errno(0)
+    if _fallocate(fd, 0, 0, length) == 0:
+        return
+    error_number = ctypes.get_errno()
+    raise OSError(error_number, os.strerror(error_number))
 
 
 class UploadObjectStore(Protocol):
