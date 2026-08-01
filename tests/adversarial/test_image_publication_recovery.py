@@ -1,4 +1,4 @@
-"""Crash and reverse-fence proofs for image publication recovery (ADR-0526)."""
+"""Crash and reverse-fence proofs for image publication recovery (ADR-0525)."""
 
 from __future__ import annotations
 
@@ -70,6 +70,7 @@ class _BlockingPutStore:
                 etag="etag",
                 sensitivity=request.sensitivity,
                 retention_class=request.retention_class,
+                version_id="test-version",
             )
         finally:
             if should_block:
@@ -86,12 +87,22 @@ class _BlockingPutStore:
             checksum_sha256=checksum,
             etag="etag",
             last_modified=datetime.now(UTC),
+            version_id="test-version",
         )
 
     def delete(self, key: str) -> None:
         with self._lock:
             self._objects.pop(key, None)
             self.deleted.append(key)
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        assert version_id == "test-version"
+        self.delete(key)
+
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
+        self.delete(key)
+        return True
 
     def list_image_objects(self) -> list[ObjectListing]:
         with self._lock:

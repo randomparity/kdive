@@ -298,6 +298,11 @@ def test_publication_fence_revalidates_complete_reservation_before_write(
         async with await _connect(migrated_url) as conn:
             reservation = await reserve_publish(conn, _PUBLIC_REQUEST, size_bytes=len(_QCOW2))
             if changed_field == "row":
+                await conn.execute(
+                    "UPDATE image_catalog SET publication_attempt_id = NULL, "
+                    "publication_principal = NULL WHERE id = %s",
+                    (reservation.row_id,),
+                )
                 await conn.execute("DELETE FROM image_catalog WHERE id = %s", (reservation.row_id,))
             elif changed_field == "state":
                 await conn.execute(
