@@ -162,9 +162,12 @@ PUT loop for a bounded GET rather than moving both.
   CONFLICT DO NOTHING`.** This is the shape the database would normally enforce, and it would let
   phase 3 drop its probe. It needs a migration, it needs every existing row in `artifacts` to be
   conflict-free under the new key first, and it still would not decide what happens to the object
-  when the PUT wins and the insert loses — which is the actual question. ADR-0528 resolves that
-  separate decision with a database backstop and explicit adoption of the winning row; it does not
-  replace this record's lock-span and compensation decision.
+  when the PUT wins and the insert loses — which is the actual question. Worth filing separately;
+  it does not replace this decision.
+
+  Resolution: [ADR-0528](0528-artifact-ownership-triple-uniqueness.md) adds the database backstop
+  and explicitly adopts the winning row without replacing this record's lock-span and compensation
+  decision.
 - **Skip the compensating delete and let the object leak.** Cheapest, and defensible under a
   prefix-driven sweep. It is not defensible here: reclaim reads the rows, so the leak is
   permanent rather than deferred, and for `capture_traffic` the leaked object is `SENSITIVE`.
