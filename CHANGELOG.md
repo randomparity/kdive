@@ -337,6 +337,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Strengthen rootfs reservation proof plan
 - Run native allocation smoke before build
 - Correct rootfs allocator mutation proof
+- Reject merge queue for ordering guard
+- Mark merge queue evaluation implemented
 
 ### Fixed
 
