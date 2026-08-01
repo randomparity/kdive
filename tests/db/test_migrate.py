@@ -194,6 +194,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0091",
         "0092",
         "0093",
+        "0094",
     ]
     assert second == []
 
@@ -707,6 +708,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0091",
         "0092",
         "0093",
+        "0094",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1077,6 +1079,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0091",
         "0092",
         "0093",
+        "0094",
     ]
 
 
@@ -1648,7 +1651,10 @@ def test_migration_0076_artifacts_object_key_unique_only_for_investigations(
 
 def test_migration_0076_artifacts_partial_index_ignores_other_owner_kinds(
     pg_conn: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    through_0076 = [m for m in migrate.discover_migrations() if m.version <= "0076"]
+    monkeypatch.setattr(migrate, "discover_migrations", lambda: through_0076)
     migrate.apply_migrations(pg_conn)
     system_id = _seed_system(pg_conn)
     # Two 'systems'-owned rows sharing an object_key are unaffected by the partial index.

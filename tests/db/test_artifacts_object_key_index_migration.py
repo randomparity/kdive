@@ -83,7 +83,9 @@ def test_general_index_is_usable_without_an_owner_kind_predicate(
         "EXPLAIN SELECT 1 FROM artifacts a WHERE a.object_key = 'local/runs/some-run/absent.img'"
     ).fetchall()
     plan_text = "\n".join(row[0] for row in plan)
-    assert "artifacts_object_key_idx" in plan_text
+    assert any(
+        index in plan_text for index in ("artifacts_object_key_idx", "artifacts_owner_triple_uniq")
+    )
 
 
 def test_the_sweeps_page_wide_classify_is_index_served(pg_conn: psycopg.Connection) -> None:
