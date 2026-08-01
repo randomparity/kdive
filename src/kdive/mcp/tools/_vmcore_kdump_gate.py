@@ -18,6 +18,7 @@ from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisi
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
 from kdive.images.cataloging.capability_signals import render_kdump_signal
+from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
 from kdive.images.kdump_support import DEFAULT_KERNEL_BASIS
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.serialization import JsonValue
@@ -31,8 +32,8 @@ _REFUSING_STATUSES: frozenset[str] = frozenset({"incapable", "not_applicable"})
 # Mirrors ``catalog.resolve_public_rootfs_sync``: the local-libvirt catalog rootfs lane boots the
 # one registered, public, arch-matched image (ADR-0228), so the gate reads the same image that
 # booted rather than a private shadow the provision would never have selected.
-_RESOLVE_PUBLIC_ARCH_SQL = """
-    SELECT *
+_RESOLVE_PUBLIC_ARCH_SQL = f"""
+    SELECT {IMAGE_CATALOG_ENTRY_PROJECTION}
     FROM image_catalog
     WHERE provider = %(provider)s
       AND name = %(name)s

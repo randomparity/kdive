@@ -13,12 +13,13 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
+from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
 
 # Order by visibility so the project's private row (if any) sorts before the public one; the
 # resolver takes the first. `private` < `public` lexically, so the explicit CASE keeps the
 # intent legible and independent of the enum spelling.
-_RESOLVE_SQL = """
-    SELECT *
+_RESOLVE_SQL = f"""
+    SELECT {IMAGE_CATALOG_ENTRY_PROJECTION}
     FROM image_catalog
     WHERE provider = %(provider)s
       AND name = %(name)s
@@ -61,8 +62,8 @@ async def resolve_rootfs(
     return None if row is None else ImageCatalogEntry.model_validate(row)
 
 
-_RESOLVE_PUBLIC_SYNC_SQL = """
-    SELECT *
+_RESOLVE_PUBLIC_SYNC_SQL = f"""
+    SELECT {IMAGE_CATALOG_ENTRY_PROJECTION}
     FROM image_catalog
     WHERE provider = %(provider)s
       AND name = %(name)s

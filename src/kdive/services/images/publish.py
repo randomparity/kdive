@@ -46,6 +46,7 @@ from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.cataloging.object_keys import config_object_key, object_write_request
+from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
 
 _log = logging.getLogger(__name__)
 
@@ -356,7 +357,8 @@ async def _registered(
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             f"UPDATE image_catalog SET {set_clause} "
-            "WHERE id = %s AND digest = %s AND object_key = %s RETURNING *",
+            "WHERE id = %s AND digest = %s AND object_key = %s "
+            f"RETURNING {IMAGE_CATALOG_ENTRY_PROJECTION}",
             (
                 ImageState.REGISTERED.value,
                 reservation.row_id,

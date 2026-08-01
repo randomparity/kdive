@@ -16,6 +16,7 @@ from psycopg import sql
 from kdive.db.repositories import IMAGE_CATALOG
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.images.cataloging.catalog import resolve_public_rootfs_sync, resolve_rootfs
+from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _FUTURE = datetime.now(UTC) + timedelta(days=365)
@@ -57,6 +58,38 @@ def test_resolves_registered_public(migrated_url: str) -> None:
             assert result is not None
             assert result.visibility is ImageVisibility.PUBLIC
             assert result.object_key == "images/local-libvirt/base/x86_64.qcow2"
+
+    asyncio.run(_run())
+
+
+def test_projection_ignores_future_additive_column(migrated_url: str) -> None:
+    projected_fields = {
+        field.strip()
+        for line in IMAGE_CATALOG_ENTRY_PROJECTION.splitlines()
+        for field in line.split(",")
+        if field.strip()
+    }
+    assert projected_fields == set(ImageCatalogEntry.model_fields)
+
+    async def _run() -> None:
+        async with (
+            await _connect(migrated_url) as conn,
+            conn.transaction(force_rollback=True),
+        ):
+            await IMAGE_CATALOG.insert(conn, _entry())
+            await conn.execute(
+                "ALTER TABLE image_catalog ADD COLUMN future_publication_attempt text"
+            )
+            result = await resolve_rootfs(conn, "local-libvirt", "base", project="proj")
+            assert result is not None
+            inserted = await IMAGE_CATALOG.insert(conn, _entry(name="second"))
+            assert await IMAGE_CATALOG.get(conn, inserted.id) == inserted
+            listed = await IMAGE_CATALOG.list_all(conn)
+            assert {entry.id: entry for entry in listed} == {
+                result.id: result,
+                inserted.id: inserted,
+            }
+            assert "future_publication_attempt" not in IMAGE_CATALOG_ENTRY_PROJECTION
 
     asyncio.run(_run())
 

@@ -26,6 +26,7 @@ from pydantic import Field
 
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageVisibility
 from kdive.images.cataloging.capability_signals import REGISTERED_SIGNALS
+from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
 from kdive.images.kdump_support import (
     DEFAULT_KERNEL_BASIS,
     KernelVersion,
@@ -77,8 +78,8 @@ class ImageListScope(StrEnum):
 # and the ``image_private_owner`` CHECK in ``0023_image_catalog.sql`` asserts
 # ``(visibility = 'private') = (owner IS NOT NULL)``, so the public rows are exactly the
 # owner-less rows and ``visibility = 'public'`` already excludes every project-scoped image.
-_LIST_SQL_HEAD = """
-    SELECT *
+_LIST_SQL_HEAD = f"""
+    SELECT {IMAGE_CATALOG_ENTRY_PROJECTION}
     FROM image_catalog
     WHERE """
 _LIST_SQL_TAIL = """
