@@ -155,7 +155,14 @@ class CompleteBuildHandlers:
         """
         warning = await rootfs_mount_warning(conn, uid)
         nudge = None if warning is not None else await missing_effective_config_nudge(conn, uid)
-        return _complete_envelope(uid, result, warning=warning, nudge=nudge)
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT now()")
+            row = await cur.fetchone()
+        if row is None:  # Invariant: SELECT now() returns exactly one row.
+            raise RuntimeError("SELECT now() returned no row")
+        return _complete_envelope(
+            uid, result, server_time=row[0].isoformat(), warning=warning, nudge=nudge
+        )
 
 
 def _remint_error(run_id: str, detail: str, data: dict[str, JsonValue]) -> ToolResponse:
@@ -192,10 +199,15 @@ def _complete_envelope(
     run_id: UUID,
     result: BuildStepResult,
     *,
+    server_time: str,
     warning: dict[str, JsonValue] | None = None,
     nudge: dict[str, JsonValue] | None = None,
 ) -> ToolResponse:
-    data: dict[str, JsonValue] = {}
+    data: dict[str, JsonValue] = {"server_time": server_time}
+    if result.build_ref is not None:
+        data["build_ref"] = result.build_ref
+    if result.expires_at is not None:
+        data["expires_at"] = result.expires_at
     actions = ["runs.get"]
     refs = dict(result.refs())
     if warning is not None:

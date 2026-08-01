@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, LiteralString, NoReturn
 
@@ -107,6 +108,49 @@ class _PeerPutChunkedStore(_ChunkedStore):
     def delete_version(self, key: str, version_id: str) -> None:
         self.current_versions[key] = "peer-version-2"
         super().delete_version(key, version_id)
+
+
+class _VersionDeleteStore:
+    """Records exact post-commit convergence deletes for single-PUT candidates."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.deleted: list[tuple[str, str]] = []
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.deleted.append((key, version_id))
+        if self.fail:
+            raise CategorizedError("delete failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    def head(self, key: str) -> HeadResult | None:
+        del key
+        raise AssertionError("single-PUT cleanup never reads objects")
+
+    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+        del key, start, length
+        raise AssertionError("single-PUT cleanup never reads objects")
+
+    def create_multipart_upload(
+        self, key: str, *, sensitivity: Sensitivity, retention_class: str
+    ) -> str:
+        del key, sensitivity, retention_class
+        raise AssertionError("single-PUT cleanup never reassembles")
+
+    def upload_part_copy(
+        self, key: str, upload_id: str, *, part_number: int, source_key: str
+    ) -> str:
+        del key, upload_id, part_number, source_key
+        raise AssertionError("single-PUT cleanup never reassembles")
+
+    def complete_multipart_upload(
+        self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
+    ) -> str:
+        del key, upload_id, parts
+        raise AssertionError("single-PUT cleanup never reassembles")
+
+    def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        del key, upload_id
+        raise AssertionError("single-PUT cleanup never reassembles")
 
 
 async def _run_by_id(pool: AsyncConnectionPool, run_id: Any):
@@ -397,7 +441,10 @@ def test_complete_build_finalizer_recovers_on_remint_without_reupload(migrated_u
                 )
             result = await _complete(pool, run_id, finalizer)
             keys = await _fetchall(
-                pool, "SELECT object_key FROM artifacts WHERE owner_id = %s", (run_id,)
+                pool,
+                "SELECT object_key FROM artifacts WHERE owner_kind = 'investigations' "
+                "AND owner_id = (SELECT investigation_id FROM runs WHERE id = %s)",
+                (run_id,),
             )
             run = await _run_by_id(pool, run_id)
 
@@ -705,14 +752,18 @@ def test_complete_build_success_persists_run_step_artifacts_and_audit(migrated_u
     the run_steps result JSON, both artifact rows (owner_kind/retention/sensitivity/key), the
     complete_build audit event, and manifest deletion.
     """
-    entries = [ManifestEntry("kernel", "ck", 1), ManifestEntry("initrd", "ci", 1)]
+    entries = [
+        ManifestEntry("kernel", "ck", 1),
+        ManifestEntry("vmlinux", "cv", 1),
+        ManifestEntry("initrd", "ci", 1),
+    ]
     provenance: dict[str, str | bool | list[str]] = {"source_url": "https://x", "verified": True}
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=entries)
             kernel = f"{_prefix(run_id)}kernel"
-            debuginfo = f"{_prefix(run_id)}debuginfo"
+            debuginfo = f"{_prefix(run_id)}vmlinux"
             output = BuildOutput(kernel, debuginfo, "build-id")
             run = await _run_by_id(pool, run_id)
             async with pool.connection() as conn:
@@ -735,7 +786,9 @@ def test_complete_build_success_persists_run_step_artifacts_and_audit(migrated_u
             artifacts = await _fetchall(
                 pool,
                 "SELECT owner_kind, retention_class, sensitivity, object_key "
-                "FROM artifacts WHERE owner_id = %s ORDER BY object_key",
+                "FROM artifacts WHERE owner_kind = 'investigations' "
+                "AND owner_id = (SELECT investigation_id FROM runs WHERE id = %s) "
+                "ORDER BY object_key",
                 (run_id,),
             )
             audit = await _fetchone(
@@ -756,11 +809,11 @@ def test_complete_build_success_persists_run_step_artifacts_and_audit(migrated_u
         assert run_kernel == kernel
         assert run_debuginfo == debuginfo
         assert step_result[0] == result.dump()
-        # Only the two uploaded manifest entries become artifact rows (debuginfo is a
-        # validator-reported ref, not an uploaded object), ordered by object_key.
+        # Every reusable uploaded build artifact becomes Investigation-owned.
         assert artifacts == [
-            ("runs", "build", "sensitive", f"{_prefix(run_id)}initrd"),
-            ("runs", "build", "sensitive", kernel),
+            ("investigations", "build", "sensitive", f"{_prefix(run_id)}initrd"),
+            ("investigations", "build", "sensitive", kernel),
+            ("investigations", "build", "sensitive", debuginfo),
         ]
         assert audit == (
             "runs.complete_build",
@@ -769,6 +822,157 @@ def test_complete_build_success_persists_run_step_artifacts_and_audit(migrated_u
             args_digest({"run_id": str(run_id)}),
         )
         assert manifest_gone
+
+    asyncio.run(_run())
+
+
+def test_complete_build_publishes_winner_under_investigation_then_run_lock(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reusable artifact set is published atomically under the ordered locks."""
+    entries = [
+        ManifestEntry("kernel", "ck", 1),
+        ManifestEntry("vmlinux", "cv", 1),
+        ManifestEntry("initrd", "ci", 1),
+    ]
+    trace: list[str] = []
+    original_lock = complete_build.advisory_xact_lock
+
+    @asynccontextmanager
+    async def traced_lock(conn, scope, key):
+        trace.append(scope.value)
+        async with original_lock(conn, scope, key):
+            yield
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=entries)
+            prefix = _prefix(run_id)
+            result = await _complete(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(
+                    validate_complete_build=FakeValidator(
+                        BuildOutput(f"{prefix}kernel", f"{prefix}vmlinux", "build-id")
+                    )
+                ),
+            )
+            run_build_ref = await _fetchone(
+                pool, "SELECT build_ref FROM runs WHERE id = %s", (run_id,)
+            )
+            catalog = await _fetchone(
+                pool,
+                "SELECT artifacts FROM investigation_builds "
+                "WHERE investigation_id = (SELECT investigation_id FROM runs WHERE id = %s)",
+                (run_id,),
+            )
+            artifacts = await _fetchall(
+                pool,
+                "SELECT owner_kind, object_key FROM artifacts ORDER BY object_key",
+                (),
+            )
+
+        assert result.build_ref is not None
+        assert result.expires_at is not None
+        assert run_build_ref == (result.build_ref,)
+        assert catalog == (
+            {
+                "initrd": {"key": f"{prefix}initrd", "version_id": "test-version"},
+                "kernel": {"key": f"{prefix}kernel", "version_id": "test-version"},
+                "vmlinux": {"key": f"{prefix}vmlinux", "version_id": "test-version"},
+            },
+        )
+        assert artifacts == [
+            ("investigations", f"{prefix}initrd"),
+            ("investigations", f"{prefix}kernel"),
+            ("investigations", f"{prefix}vmlinux"),
+        ]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(complete_build, "advisory_xact_lock", traced_lock)
+        asyncio.run(_run())
+    assert trace == ["investigation", "run"]
+
+
+def test_concurrent_identical_completions_reuse_winner_and_delete_loser_versions(
+    migrated_url: str,
+) -> None:
+    """A converged Run stores winner refs and removes only its own validated version."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            first_id = await seed_external_run_with_manifest(pool)
+            second_id = await seed_external_run_with_manifest(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET investigation_id = "
+                    "(SELECT investigation_id FROM runs WHERE id = %s) WHERE id = %s",
+                    (first_id, second_id),
+                )
+            store = _VersionDeleteStore()
+            first = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(first_id)),
+                object_store_factory=lambda: store,
+            )
+            second = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(second_id)),
+                object_store_factory=lambda: store,
+            )
+            results = await asyncio.gather(
+                _complete(pool, first_id, first), _complete(pool, second_id, second)
+            )
+            artifacts = await _fetchall(
+                pool,
+                "SELECT object_key FROM artifacts WHERE owner_kind = 'investigations' "
+                "AND owner_id = (SELECT investigation_id FROM runs WHERE id = %s)",
+                (first_id,),
+            )
+
+        assert results[0].build_ref == results[1].build_ref
+        assert results[0].kernel_ref == results[1].kernel_ref
+        assert artifacts == [(results[0].kernel_ref,)]
+        candidates = {f"{_prefix(first_id)}kernel", f"{_prefix(second_id)}kernel"}
+        assert store.deleted == [(next(iter(candidates - {results[0].kernel_ref})), "test-version")]
+
+    asyncio.run(_run())
+
+
+def test_loser_delete_failure_leaves_the_version_for_orphan_repair(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Delete errors do not roll back a completed loser or target the winning object."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            winner_id = await seed_external_run_with_manifest(pool)
+            loser_id = await seed_external_run_with_manifest(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET investigation_id = "
+                    "(SELECT investigation_id FROM runs WHERE id = %s) WHERE id = %s",
+                    (winner_id, loser_id),
+                )
+            await _complete(
+                pool,
+                winner_id,
+                CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(winner_id))),
+            )
+            store = _VersionDeleteStore(fail=True)
+            with caplog.at_level(logging.WARNING, logger=complete_build.__name__):
+                result = await _complete(
+                    pool,
+                    loser_id,
+                    CompleteBuildFinalizer(
+                        validate_complete_build=FakeValidator(_output(loser_id)),
+                        object_store_factory=lambda: store,
+                    ),
+                )
+
+        assert result.kernel_ref == f"{_prefix(winner_id)}kernel"
+        assert store.deleted == [(f"{_prefix(loser_id)}kernel", "test-version")]
+        assert any(
+            "losing build cleanup failed" in record.getMessage() for record in caplog.records
+        )
 
     asyncio.run(_run())
 
