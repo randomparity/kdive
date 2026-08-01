@@ -49,6 +49,7 @@ class _ChunkedStore:
         self.bad_head = bad_head
         self.delete_raises = delete_raises
         self.events: list[tuple[str, object]] = []
+        self.deleted_versions: list[tuple[str, str]] = []
 
     def head(self, key: str) -> HeadResult | None:
         if key.endswith(".part0001"):
@@ -64,9 +65,13 @@ class _ChunkedStore:
         del key
         return (b"x" * 8)[start : start + length]
 
-    def delete(self, key: str) -> None:
+    def delete_version(self, key: str, version_id: str) -> None:
         if self.delete_raises is not None and key.endswith(self.delete_raises):
             raise CategorizedError("delete failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+        self.events.append(("delete_version", key))
+        self.deleted_versions.append((key, version_id))
+
+    def delete(self, key: str) -> None:
         self.events.append(("delete", key))
 
     def create_multipart_upload(
@@ -93,6 +98,18 @@ class _ChunkedStore:
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         del upload_id
         self.events.append(("abort", key))
+
+
+class _PeerPutChunkedStore(_ChunkedStore):
+    """Writes replacement chunk versions immediately before exact cleanup runs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.current_versions: dict[str, str] = {}
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.current_versions[key] = "peer-version-2"
+        super().delete_version(key, version_id)
 
 
 async def _run_by_id(pool: AsyncConnectionPool, run_id: Any):
@@ -789,8 +806,10 @@ def test_complete_build_defaults_missing_arch_to_x86_64(migrated_url: str) -> No
     asyncio.run(_run())
 
 
-def test_complete_build_chunked_cleanup_deletes_chunks_and_manifest(migrated_url: str) -> None:
-    """After a chunked finalize, every chunk key is deleted and the manifest is removed."""
+def test_complete_build_chunked_cleanup_deletes_selected_chunk_versions_and_manifest(
+    migrated_url: str,
+) -> None:
+    """A peer replacement cannot turn post-commit cleanup into a delete of new chunks."""
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -814,9 +833,32 @@ def test_complete_build_chunked_cleanup_deletes_chunks_and_manifest(migrated_url
         assert ("create", final_key) in store.events
         copied = sorted(str(src) for op, src in store.events if op == "copy")
         assert copied == sorted(part_keys)
-        # Cleanup then deletes every chunk key and removes the manifest.
-        deleted = sorted(str(key) for op, key in store.events if op == "delete")
-        assert deleted == sorted(part_keys)
+        # Cleanup then deletes the HEAD identities verified before the commit fence.
+        assert sorted(store.deleted_versions) == sorted((key, "test-version") for key in part_keys)
         assert manifest_gone
+
+    asyncio.run(_run())
+
+
+def test_complete_build_chunk_cleanup_does_not_target_peer_chunk_versions(
+    migrated_url: str,
+) -> None:
+    """The post-commit delete targets the pre-fence HEAD, not a peer replacement."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
+            store = _PeerPutChunkedStore()
+            await _complete(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(
+                    validate_complete_build=FakeValidator(_output(run_id)),
+                    object_store_factory=lambda: store,
+                ),
+            )
+
+        assert {version for _, version in store.deleted_versions} == {"test-version"}
+        assert set(store.current_versions.values()) == {"peer-version-2"}
 
     asyncio.run(_run())

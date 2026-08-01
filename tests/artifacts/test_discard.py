@@ -31,14 +31,19 @@ class _RecordingStore:
     def __init__(
         self,
         etags: dict[str, str] | None = None,
+        version_ids: dict[str, str] | None = None,
         fails_on: frozenset[str] = frozenset(),
     ) -> None:
         self.etags = {} if etags is None else dict(etags)
+        self.version_ids = {} if version_ids is None else dict(version_ids)
         self.attempted: list[str] = []
         self.deleted: list[str] = []
+        self.deleted_versions: list[tuple[str, str]] = []
+        self.events: list[str] = []
         self._fails_on = fails_on
 
     def head(self, key: str) -> HeadResult | None:
+        self.events.append("head")
         if key not in self.etags:
             return None
         return HeadResult(
@@ -46,16 +51,18 @@ class _RecordingStore:
             checksum_sha256=None,
             etag=self.etags[key],
             last_modified=STORE_MTIME,
-            version_id="test-version",
+            version_id=self.version_ids.get(key, "test-version"),
         )
 
-    def delete(self, key: str) -> None:
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.events.append("delete_version")
         self.attempted.append(key)
         if key in self._fails_on:
             raise CategorizedError(
                 "delete_object failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE
             )
         self.deleted.append(key)
+        self.deleted_versions.append((key, version_id))
         self.etags.pop(key, None)
 
 
@@ -73,6 +80,27 @@ def _discard(
             cast(ObjectStore, store), written, still_unregistered=_still_unregistered
         )
     )
+
+
+def test_discard_selects_its_version_before_the_row_fence_and_deletes_only_that_version() -> None:
+    """A peer PUT after the selected HEAD must survive the compensating delete."""
+    store = _RecordingStore({"a/1": "etag-1"})
+
+    async def _still_unregistered(key: str) -> bool:
+        store.events.append("row")
+        store.etags[key] = "etag-peer"  # peer PUT after HEAD, before the final row fence returns
+        return True
+
+    asyncio.run(
+        discard_unregistered_objects(
+            cast(ObjectStore, store),
+            [_written("a/1", "etag-1")],
+            still_unregistered=_still_unregistered,
+        )
+    )
+
+    assert store.events == ["head", "row", "delete_version"]
+    assert store.deleted_versions == [("a/1", "test-version")]
 
 
 def test_an_object_this_attempt_still_owns_is_deleted() -> None:
@@ -110,6 +138,13 @@ def test_an_object_another_writer_replaced_is_left_alone() -> None:
     _discard(store, [_written("a/1", "etag-mine")])
     assert store.attempted == []
     assert store.etags == {"a/1": "etag-peer"}
+
+
+def test_an_object_with_a_matching_etag_but_replaced_version_is_left_alone() -> None:
+    store = _RecordingStore({"a/1": "etag-1"}, {"a/1": "peer-version"})
+    _discard(store, [_written("a/1", "etag-1")])
+
+    assert store.attempted == []
 
 
 def test_an_already_absent_object_is_not_deleted_again() -> None:

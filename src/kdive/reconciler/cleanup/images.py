@@ -21,12 +21,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
+from typing import Protocol, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.artifacts.storage import ObjectListing
+from kdive.artifacts.storage import HeadResult, ObjectListing
 from kdive.domain.catalog.images import ImageState
 from kdive.services.images.retention import ImageSweepStore
 
@@ -66,6 +67,10 @@ async def _delete_if_leaked(
     conn: AsyncConnection, store: ImageSweepStore, obj: ImageMtime, grace: timedelta
 ) -> bool:
     """Delete ``obj`` iff no catalog row references it and it is older than the grace window."""
+    versioned_store = cast(_VersionedImageStore, store)
+    head = await asyncio.to_thread(versioned_store.head, obj.key)
+    if head is None or head.last_modified != obj.last_modified:
+        return False
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT EXISTS (SELECT 1 FROM image_catalog "
@@ -76,9 +81,16 @@ async def _delete_if_leaked(
     protected = bool(row[0]) if row is not None else True
     if protected:
         return False
-    await asyncio.to_thread(store.delete, obj.key)
+    await asyncio.to_thread(versioned_store.delete_version, obj.key, head.version_id)
     _log.info("reconciler: leaked image object %s deleted (no row, past grace)", obj.key)
     return True
+
+
+class _VersionedImageStore(Protocol):
+    """Image sweep operations needed to select and delete one immutable object version."""
+
+    def head(self, key: str) -> HeadResult | None: ...
+    def delete_version(self, key: str, version_id: str) -> None: ...
 
 
 async def repair_dangling_images(
