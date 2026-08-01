@@ -44,7 +44,11 @@ class _StatStore:
         if self._etag is None:
             return None
         return HeadResult(
-            size_bytes=1, checksum_sha256=None, etag=self._etag, last_modified=STORE_MTIME
+            size_bytes=1,
+            checksum_sha256=None,
+            etag=self._etag,
+            last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
 

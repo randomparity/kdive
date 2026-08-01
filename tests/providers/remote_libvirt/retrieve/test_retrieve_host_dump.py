@@ -258,7 +258,11 @@ class FakeStore:
         with request.path.open("rb") as fh:
             fh.read(1)
         return StoredArtifact(
-            request.key(), "etag-raw", request.sensitivity, request.retention_class
+            request.key(),
+            "etag-raw",
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
         )
 
     def presign_put(self, request: PresignPutRequest) -> PresignedUpload:
@@ -272,7 +276,11 @@ class FakeStore:
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         self.put_requests.append(request)
         return StoredArtifact(
-            request.key(), "etag-red", request.sensitivity, request.retention_class
+            request.key(),
+            "etag-red",
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
         )
 
 
@@ -333,6 +341,7 @@ def _head_ok(payload: bytes = b"CORE-BYTES", *, checksum: str | None = None) -> 
         checksum_sha256=checksum,
         etag="etag-raw",
         last_modified=STORE_MTIME,
+        version_id="test-version",
     )
 
 

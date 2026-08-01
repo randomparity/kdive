@@ -60,10 +60,18 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
 
 def _core(run_id: str, method: CaptureMethod = CaptureMethod.HOST_DUMP) -> CaptureOutput:
     raw = StoredArtifact(
-        f"local/runs/{run_id}/vmcore-{method.value}", "e1", Sensitivity.SENSITIVE, "vmcore"
+        f"local/runs/{run_id}/vmcore-{method.value}",
+        "e1",
+        Sensitivity.SENSITIVE,
+        "vmcore",
+        version_id="test-version",
     )
     red = StoredArtifact(
-        f"local/runs/{run_id}/vmcore-{method.value}-redacted", "e2", Sensitivity.REDACTED, "vmcore"
+        f"local/runs/{run_id}/vmcore-{method.value}-redacted",
+        "e2",
+        Sensitivity.REDACTED,
+        "vmcore",
+        version_id="test-version",
     )
     return CaptureOutput(raw=raw, redacted=red, vmcore_build_id="deadbeef", raw_size_bytes=512)
 

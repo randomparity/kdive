@@ -99,9 +99,6 @@ class _FakeImageStore:
         # this fake is used as the full ImageSweepStore in the loop-config tests.
         return []
 
-    def delete(self, key: str) -> None:  # pragma: no cover - asserted never called
-        self.deleted.append(key)
-
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         if self._put_fails:
             raise CategorizedError(
@@ -116,6 +113,7 @@ class _FakeImageStore:
             etag="etag",
             sensitivity=request.sensitivity,
             retention_class=request.retention_class,
+            version_id="test-version",
         )
 
 

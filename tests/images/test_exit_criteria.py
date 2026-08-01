@@ -62,7 +62,6 @@ from kdive.reconciler.cleanup.images import (
 from kdive.services.images.publish import PublishRequest, publish_image
 from kdive.services.images.retention import repair_expired_private_images
 from kdive.services.images.upload import PrivateUploadRequest, register_private_upload
-from tests.clock import STORE_MTIME
 from tests.reconciler.conftest import connect, run_repair, seed_system
 
 _REQUIRED = ("kdump", "drgn")
@@ -80,11 +79,14 @@ class _FakeImageStore:
 
     ``objects`` maps key -> (bytes, age): ``head``/``get_artifact`` serve the bytes,
     ``list_image_objects`` reports each key with a Postgres-relative ``ObjectListing`` so the
-    leaked-grace compare stays on the DB clock, ``head_present``/``delete`` back the sweeps.
+    leaked-grace compare stays on the DB clock, and ``head_present``/version deletion back the
+    sweeps.
     """
 
     def __init__(self, objects: dict[str, tuple[bytes, timedelta]] | None = None) -> None:
         self._objects: dict[str, tuple[bytes, timedelta]] = dict(objects or {})
+        now = datetime.now(UTC)
+        self._mtimes = {key: now - age for key, (_data, age) in self._objects.items()}
         self.puts: list[str] = []
         self.deleted: list[str] = []
 
@@ -95,9 +97,14 @@ class _FakeImageStore:
         key = request.key()
         self.puts.append(key)
         self._objects[key] = (request.data, timedelta())
+        self._mtimes[key] = datetime.now(UTC)
         etag = hashlib.md5(request.data).hexdigest()  # noqa: S324 - etag stand-in, not security
         return artifact_types.StoredArtifact(
-            key, etag, request.sensitivity, request.retention_class
+            key,
+            etag,
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
         )
 
     def head(self, key: str) -> artifact_types.HeadResult | None:
@@ -105,7 +112,11 @@ class _FakeImageStore:
         if entry is None or key in self.deleted:
             return None
         return artifact_types.HeadResult(
-            size_bytes=len(entry[0]), checksum_sha256=None, etag="e", last_modified=STORE_MTIME
+            size_bytes=len(entry[0]),
+            checksum_sha256=None,
+            etag="e",
+            last_modified=self._mtimes.setdefault(key, datetime.now(UTC) - entry[1]),
+            version_id="test-version",
         )
 
     def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact:
@@ -120,9 +131,11 @@ class _FakeImageStore:
 
     # --- sweep port ---
     def list_image_objects(self) -> list[ObjectListing]:
-        now = datetime.now(UTC)
         return [
-            ObjectListing(key=key, last_modified=now - age)
+            ObjectListing(
+                key=key,
+                last_modified=self._mtimes.setdefault(key, datetime.now(UTC) - age),
+            )
             for key, (_data, age) in self._objects.items()
             if key not in self.deleted
         ]
@@ -130,7 +143,12 @@ class _FakeImageStore:
     def head_present(self, key: str) -> bool:
         return key in self._objects and key not in self.deleted
 
-    def delete(self, key: str) -> None:
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
+        self.deleted.append(key)
+        return True
+
+    def delete_version(self, key: str, version_id: str) -> None:
         self.deleted.append(key)
 
 
@@ -278,6 +296,7 @@ async def _insert_row(
     owner: str | None = None,
     expires_in_seconds: float | None = None,
     volume: str | None = None,
+    kernel_config_key: str | None = None,
 ):
     expires = (
         "now() + make_interval(secs => %(expires_secs)s)"
@@ -286,16 +305,18 @@ async def _insert_row(
     )
     cur = await conn.execute(
         "INSERT INTO image_catalog "
-        "(provider, name, arch, format, root_device, volume, object_key, digest, "
+        "(provider, name, arch, format, root_device, volume, object_key, kernel_config_key, "
+        "digest, "
         " visibility, owner, expires_at, state, pending_since) "
         "VALUES (%(provider)s, %(name)s, 'x86_64', 'qcow2', '/dev/vda', %(volume)s, "
-        " %(object_key)s, %(digest)s, %(visibility)s, %(owner)s, "
+        " %(object_key)s, %(kernel_config_key)s, %(digest)s, %(visibility)s, %(owner)s, "
         f"{expires}, %(state)s, now() - make_interval(secs => %(pending_secs)s)) RETURNING id",
         {
             "provider": provider,
             "name": name,
             "volume": volume,
             "object_key": object_key,
+            "kernel_config_key": kernel_config_key,
             "digest": None if object_key is None else "sha256:abc",
             "visibility": visibility,
             "owner": owner,
@@ -354,6 +375,64 @@ def test_expired_private_image_is_auto_pruned(migrated_url: str) -> None:
         assert store.deleted == [key]
         async with await connect(migrated_url) as check:
             assert await _row_count(check, row_id) == 0
+
+    asyncio.run(_run())
+
+
+def test_expired_private_image_row_waits_for_both_retired_key_batches(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        object_key = "images/local-libvirt__proj/retired/x86_64.qcow2"
+        config_key = "images/local-libvirt__proj/retired/x86_64.config"
+        async with await connect(migrated_url) as seed:
+            row_id = await _insert_row(
+                seed,
+                name="retired",
+                state="registered",
+                object_key=object_key,
+                kernel_config_key=config_key,
+                pending_age_hours=2,
+                visibility="private",
+                owner=_PROJECT,
+                expires_in_seconds=-1,
+            )
+
+        class _SequencedStore(_FakeImageStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.outcomes: dict[str, list[bool | Exception]] = {
+                    object_key: [True, True, True],
+                    config_key: [
+                        False,
+                        CategorizedError(
+                            "delete failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+                        ),
+                        True,
+                    ],
+                }
+                self.calls: list[tuple[str, int]] = []
+
+            def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+                self.calls.append((key, limit))
+                outcome = self.outcomes[key].pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        store = _SequencedStore()
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, lambda c: repair_expired_private_images(c, store)) == 0
+            async with await connect(migrated_url) as check:
+                assert await _row_count(check, row_id) == 1
+            assert await run_repair(pool, lambda c: repair_expired_private_images(c, store)) == 0
+            async with await connect(migrated_url) as check:
+                assert await _row_count(check, row_id) == 1
+            assert await run_repair(pool, lambda c: repair_expired_private_images(c, store)) == 1
+
+        async with await connect(migrated_url) as check:
+            assert await _row_count(check, row_id) == 0
+        assert store.calls == [(object_key, 20), (config_key, 20)] * 3
 
     asyncio.run(_run())
 

@@ -77,7 +77,11 @@ class _FakeStore:
     ) -> artifact_types.StoredArtifact:
         self._objects[request.key()] = request.data
         return artifact_types.StoredArtifact(
-            request.key(), "etag", request.sensitivity, request.retention_class
+            request.key(),
+            "etag",
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
         )
 
     def head(self, key: str) -> artifact_types.HeadResult | None:
@@ -85,7 +89,11 @@ class _FakeStore:
         if data is None:
             return None
         return artifact_types.HeadResult(
-            size_bytes=len(data), checksum_sha256=None, etag="etag", last_modified=STORE_MTIME
+            size_bytes=len(data),
+            checksum_sha256=None,
+            etag="etag",
+            last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
 

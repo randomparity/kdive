@@ -28,6 +28,7 @@ from psycopg.rows import dict_row
 
 from kdive.artifacts.storage import ObjectListing
 from kdive.domain.catalog.images import ImageState
+from kdive.domain.errors import CategorizedError
 from kdive.services.images.retention import ImageSweepStore
 
 _log = logging.getLogger(__name__)
@@ -57,8 +58,11 @@ async def repair_leaked_images(
     objects = await asyncio.to_thread(store.list_image_objects)
     deleted = 0
     for obj in objects:
-        if await _delete_if_leaked(conn, store, obj, grace):
-            deleted += 1
+        try:
+            if await _delete_if_leaked(conn, store, obj, grace):
+                deleted += 1
+        except CategorizedError as exc:
+            _log.warning("reconciler: leaked image object %s cleanup failed: %s", obj.key, exc)
     return deleted
 
 
@@ -66,6 +70,9 @@ async def _delete_if_leaked(
     conn: AsyncConnection, store: ImageSweepStore, obj: ImageMtime, grace: timedelta
 ) -> bool:
     """Delete ``obj`` iff no catalog row references it and it is older than the grace window."""
+    head = await asyncio.to_thread(store.head, obj.key)
+    if head is None or head.last_modified != obj.last_modified:
+        return False
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT EXISTS (SELECT 1 FROM image_catalog "
@@ -76,7 +83,7 @@ async def _delete_if_leaked(
     protected = bool(row[0]) if row is not None else True
     if protected:
         return False
-    await asyncio.to_thread(store.delete, obj.key)
+    await asyncio.to_thread(store.delete_version, obj.key, head.version_id)
     _log.info("reconciler: leaked image object %s deleted (no row, past grace)", obj.key)
     return True
 

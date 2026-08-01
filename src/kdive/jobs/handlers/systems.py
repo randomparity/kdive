@@ -53,7 +53,7 @@ from kdive.providers.ports.lifecycle import Snapshotter
 from kdive.providers.shared.runtime_paths import domain_name_for, pcap_dir
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import ObjectStore, artifact_key, object_store_from_env
+from kdive.store.objectstore import artifact_key
 
 _log = logging.getLogger(__name__)
 
@@ -65,18 +65,22 @@ _CONSOLE_TENANT = "local"
 # ``console-parts-<n>`` keys lack the trailing hyphen after ``part`` and are intentionally excluded.
 _CONSOLE_PART_LIKE: LiteralString = "%console-part-%"
 
-_DELETE_PART_ROWS_SQL: LiteralString = (
-    "DELETE FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s AND object_key LIKE %s"
-)
-
-_SELECT_PART_KEYS_SQL: LiteralString = (
-    "SELECT object_key FROM artifacts WHERE owner_kind = 'systems' "
+_SELECT_ARTIFACT_ROWS_SQL: LiteralString = (
+    "SELECT id, object_key FROM artifacts WHERE owner_kind = 'systems' "
     "AND owner_id = %s AND object_key LIKE %s"
 )
+
+_DELETE_ARTIFACT_ROW_SQL: LiteralString = "DELETE FROM artifacts WHERE id = %s"
 
 # System-owned diagnostic SysRq captures (ADR-0285); reclaimed at teardown like console parts,
 # since no gc expiry sweep touches owner_kind='systems'.
 _SYSRQ_DIAGNOSTIC_LIKE: LiteralString = "%sysrq-diagnostic-%"
+
+
+class RetiredKeyBatchDeleter(Protocol):
+    """Bounded object-store retirement surface for System teardown artifacts."""
+
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool: ...
 
 
 class _ProviderLifecycleCall(Protocol):
@@ -650,47 +654,74 @@ async def snapshot_delete_handler(
     return str(system_id)
 
 
-async def _console_part_keys(conn: AsyncConnection, system_id: UUID) -> list[str]:
+async def _system_artifact_rows(
+    conn: AsyncConnection, system_id: UUID, object_key_like: LiteralString
+) -> list[tuple[UUID, str]]:
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(_SELECT_PART_KEYS_SQL, (system_id, _CONSOLE_PART_LIKE))
-        return [row["object_key"] for row in await cur.fetchall()]
+        await cur.execute(_SELECT_ARTIFACT_ROWS_SQL, (system_id, object_key_like))
+        return [(row["id"], row["object_key"]) for row in await cur.fetchall()]
+
+
+async def _reclaim_system_artifact_rows(
+    conn: AsyncConnection,
+    store: RetiredKeyBatchDeleter,
+    system_id: UUID,
+    object_key_like: LiteralString,
+) -> None:
+    for artifact_id, key in await _system_artifact_rows(conn, system_id, object_key_like):
+        try:
+            complete = await asyncio.to_thread(store.delete_retired_key_batch, key, 20)
+        except Exception:  # noqa: BLE001 - teardown must preserve every retryable row
+            _log.warning(
+                "best-effort retired-key batch for System artifact %s failed; retaining its row",
+                key,
+                exc_info=True,
+            )
+            continue
+        if not complete:
+            _log.info(
+                "System artifact %s has more retired versions; retaining its row for retry",
+                key,
+            )
+            continue
+        async with conn.transaction():
+            await conn.execute(_DELETE_ARTIFACT_ROW_SQL, (artifact_id,))
 
 
 async def _reclaim_console_artifacts(
-    conn: AsyncConnection, store: ObjectStore, system_id: UUID
+    conn: AsyncConnection, store: RetiredKeyBatchDeleter, system_id: UUID
 ) -> None:
-    """Delete the System's console-rotation part objects + rows and the sidecar object (#892).
+    """Retire console-part rows and give the rowless sidecar one bounded attempt (#892).
 
-    Part objects are deleted before their ``artifacts`` rows so a mid-cleanup store failure leaves
-    the rows for the artifact-expiry reconciler (#768) to reclaim. The rotation-state sidecar has no
-    ``artifacts`` row, so #768 never reaps it; deleting it here is the only thing that reclaims it.
+    Each part row remains until its own 20-version batch completes. The rotation-state sidecar has
+    no row, so a false or failed best-effort batch is deliberately left to the System-object sweep.
     """
-    part_keys = await _console_part_keys(conn, system_id)
-    for key in part_keys:
-        await asyncio.to_thread(store.delete, key)
-    if part_keys:
-        async with conn.transaction():
-            await conn.execute(_DELETE_PART_ROWS_SQL, (system_id, _CONSOLE_PART_LIKE))
+    await _reclaim_system_artifact_rows(conn, store, system_id, _CONSOLE_PART_LIKE)
     sidecar_key = artifact_key(_CONSOLE_TENANT, "systems", str(system_id), sidecar_object_name())
-    await asyncio.to_thread(store.delete, sidecar_key)
+    try:
+        complete = await asyncio.to_thread(store.delete_retired_key_batch, sidecar_key, 20)
+    except Exception:  # noqa: BLE001 - the System-object sweep owns durable sidecar continuation
+        _log.warning(
+            "best-effort retired-key batch for System sidecar %s failed",
+            sidecar_key,
+            exc_info=True,
+        )
+    else:
+        if not complete:
+            _log.info(
+                "System sidecar %s has more retired versions; System sweep will retry", sidecar_key
+            )
 
 
 async def _reclaim_sysrq_artifacts(
-    conn: AsyncConnection, store: ObjectStore, system_id: UUID
+    conn: AsyncConnection, store: RetiredKeyBatchDeleter, system_id: UUID
 ) -> None:
-    """Delete the System's diagnostic SysRq capture objects + rows (ADR-0285).
+    """Retire each System diagnostic SysRq capture row independently (ADR-0285).
 
-    Objects are deleted before their ``artifacts`` rows so a mid-cleanup store failure leaves the
-    rows for the artifact-expiry reconciler (#768) to reclaim, mirroring the console-part reclaim.
+    A failed or incomplete 20-version batch leaves only its matching row, so later artifacts can
+    still progress during the same teardown invocation.
     """
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(_SELECT_PART_KEYS_SQL, (system_id, _SYSRQ_DIAGNOSTIC_LIKE))
-        keys = [row["object_key"] for row in await cur.fetchall()]
-    for key in keys:
-        await asyncio.to_thread(store.delete, key)
-    if keys:
-        async with conn.transaction():
-            await conn.execute(_DELETE_PART_ROWS_SQL, (system_id, _SYSRQ_DIAGNOSTIC_LIKE))
+    await _reclaim_system_artifact_rows(conn, store, system_id, _SYSRQ_DIAGNOSTIC_LIKE)
 
 
 async def _reclaim_snapshots(
@@ -722,11 +753,10 @@ async def teardown_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
-    artifact_store: ObjectStore | None = None,
+    artifact_store: RetiredKeyBatchDeleter,
 ) -> str | None:
     """Destroy the domain, reclaim console artifacts, and drive the System ``-> torn_down``."""
     system_id = UUID(load_payload(job, SystemPayload).system_id)
-    artifact_store = artifact_store or object_store_from_env()
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
@@ -784,7 +814,7 @@ def register_handlers(
     *,
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
-    artifact_store: ObjectStore | None = None,
+    artifact_store: RetiredKeyBatchDeleter,
 ) -> None:
     """Bind the provision/teardown/reprovision/authorize_ssh_key/check_ssh_reachable handlers."""
     registry.register(

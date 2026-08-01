@@ -86,7 +86,11 @@ class _FakeStore:
         key = request.key()
         self.puts.append((key, request.name, request.sensitivity, request.data))
         return StoredArtifact(
-            key, "etag-" + request.name, request.sensitivity, request.retention_class
+            key,
+            "etag-" + request.name,
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
         )
 
     def put_stream(self, request: ArtifactStreamRequest) -> StoredArtifact:
@@ -102,9 +106,14 @@ class _FakeStore:
             etag="etag-" + request.name,
             sensitivity=request.sensitivity,
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
         return StoredArtifact(
-            key, "etag-" + request.name, request.sensitivity, request.retention_class
+            key,
+            "etag-" + request.name,
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
         )
 
     def head(self, key: str) -> HeadResult | None:
@@ -244,6 +253,7 @@ def test_capture_verifies_stored_checksum(tmp_path: Path) -> None:
                 etag=base.etag,
                 sensitivity=base.sensitivity,
                 last_modified=STORE_MTIME,
+                version_id="test-version",
             )
 
     with pytest.raises(CategorizedError) as exc:
@@ -450,6 +460,7 @@ def test_capture_host_dump_verifies_stored_checksum(tmp_path: Path) -> None:
                 etag=base.etag,
                 sensitivity=base.sensitivity,
                 last_modified=STORE_MTIME,
+                version_id="test-version",
             )
 
     with pytest.raises(CategorizedError) as exc:

@@ -34,14 +34,12 @@ class _RecordingStore:
             etag="etag",
             sensitivity=request.sensitivity,
             retention_class=request.retention_class,
+            version_id="test-version",
         )
 
     def presign_get(self, key: str, *, expires_in: int) -> str:
         self.presigns.append((key, expires_in))
         return f"https://signed.test/{key}?exp={expires_in}"
-
-    def delete(self, key: str) -> None:  # pragma: no cover - unused here
-        pass
 
 
 @asynccontextmanager

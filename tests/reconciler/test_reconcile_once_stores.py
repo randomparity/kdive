@@ -30,7 +30,13 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import upload_manifest
-from kdive.artifacts.storage import HeadResult, ObjectListing
+from kdive.artifacts.storage import (
+    HeadResult,
+    ObjectListing,
+    ObjectVersion,
+    VersionBatch,
+    VersionPage,
+)
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.domain.capacity.state import RunState
 from kdive.providers.infra.reaping import NullReaper
@@ -56,23 +62,38 @@ class _RecordingImageStore:
 
     def __init__(self, objects: dict[str, timedelta]) -> None:
         self._objects = dict(objects)
+        now = datetime.now(UTC)
+        self._mtimes = {key: now - age for key, age in self._objects.items()}
         self.deleted: list[str] = []
 
     def list_image_objects(self) -> list[ImageMtime]:
-        from datetime import UTC, datetime
-
-        now = datetime.now(UTC)
         return [
-            ImageMtime(key=key, last_modified=now - age)
-            for key, age in self._objects.items()
+            ImageMtime(key=key, last_modified=self._mtimes[key])
+            for key in self._objects
             if key not in self.deleted
         ]
 
     def head_present(self, key: str) -> bool:
         return key in self._objects and key not in self.deleted
 
-    def delete(self, key: str) -> None:
+    def head(self, key: str) -> HeadResult | None:
+        if not self.head_present(key):
+            return None
+        return HeadResult(
+            size_bytes=1,
+            checksum_sha256=None,
+            etag="e",
+            last_modified=self._mtimes[key],
+            version_id="test-version",
+        )
+
+    def delete_version(self, key: str, _version_id: str) -> None:
         self.deleted.append(key)
+
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
+        self.deleted.append(key)
+        return True
 
     def put_artifact(self, request: object) -> object:  # pragma: no cover - sweeps never upload
         raise NotImplementedError("recording image store does not upload artifacts")
@@ -87,6 +108,43 @@ class _RecordingUploadStore:
 
     def list_prefix(self, prefix: str) -> list[str]:
         return list(self._prefixed.get(prefix, []))
+
+    def list_version_page(
+        self,
+        prefix: str,
+        *,
+        key_marker: str | None = None,
+        version_id_marker: str | None = None,
+        max_keys: int = 1000,
+    ) -> VersionPage:
+        assert version_id_marker is None
+        entries = self._versions_under(prefix, key_marker=key_marker)[:max_keys]
+        return VersionPage(tuple(entries), False, None, None)
+
+    def iter_prefix_version_pages(self, prefix: str) -> Iterator[VersionPage]:
+        yield self.list_version_page(prefix)
+
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch:
+        entries = self._versions_under(key)
+        exact = tuple(entry for entry in entries if entry.key == key)[:limit]
+        return VersionBatch(key, exact, len(entries) <= limit)
+
+    def delete_batch(self, batch: VersionBatch) -> bool:
+        for entry in batch.targets:
+            self.deleted.append(entry.key)
+            for keys in self._prefixed.values():
+                if entry.key in keys:
+                    keys.remove(entry.key)
+        return batch.history_complete
+
+    def _versions_under(self, prefix: str, *, key_marker: str | None = None) -> list[ObjectVersion]:
+        now = datetime.now(UTC)
+        return [
+            ObjectVersion(key, "test-version", now, "e", True, False)
+            for keys in self._prefixed.values()
+            for key in keys
+            if key.startswith(prefix) and (key_marker is None or key > key_marker)
+        ]
 
     def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[ObjectListing]]:
         # Freshly written, so the ADR-0455 grace protects every object from the orphan sweep and
@@ -105,11 +163,17 @@ class _RecordingUploadStore:
         if not any(key in keys for keys in self._prefixed.values()):
             return None
         return HeadResult(
-            size_bytes=1, checksum_sha256=None, etag="e", last_modified=datetime.now(UTC)
+            size_bytes=1,
+            checksum_sha256=None,
+            etag="e",
+            last_modified=datetime.now(UTC),
+            version_id="test-version",
         )
 
-    def delete(self, key: str) -> None:
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
         self.deleted.append(key)
+        return True
 
 
 async def _seed_artifact(

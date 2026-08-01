@@ -302,6 +302,47 @@ def test_object_store_assembly_preserves_configured_store_error(
     assert caught.value is error
 
 
+def test_build_app_default_propagates_object_store_assembly_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = CategorizedError(
+        "bucket versioning unavailable",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+    )
+
+    def _raise_store() -> object:
+        raise error
+
+    monkeypatch.setattr("kdive.store.assembly.object_store_from_env", _raise_store)
+    monkeypatch.setattr(app_module, "build_object_store_assembly", build_object_store_assembly)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    with pytest.raises(CategorizedError) as caught:
+        build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+    assert caught.value is error
+
+
+def test_worker_registry_default_propagates_object_store_assembly_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = CategorizedError(
+        "bucket versioning unavailable",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+    )
+
+    def _raise_store() -> object:
+        raise error
+
+    monkeypatch.setattr("kdive.store.assembly.object_store_from_env", _raise_store)
+    monkeypatch.setattr(handler_module, "build_object_store_assembly", build_object_store_assembly)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_handler_registry(secret_registry=SecretRegistry())
+
+    assert caught.value is error
+
+
 def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     # The provisioning plane (#16) registers provision/teardown, the install + boot plane (#19)
     # registers install/boot, and the retrieve plane (#24) registers capture_vmcore — each

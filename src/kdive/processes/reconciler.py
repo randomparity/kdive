@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from kdive.observability.facade import Telemetry
     from kdive.providers.assembly.composition import ProviderComposition
     from kdive.providers.core.resolver import ProviderResolver
-    from kdive.providers.infra.console_hosting import CollectorRegistry
+    from kdive.providers.infra.console_hosting import ConsoleHosting
     from kdive.reconciler.loop import ReconcileConfig
     from kdive.security.secrets.secret_registry import SecretRegistry
     from kdive.store.objectstore import ObjectStore
@@ -117,7 +117,7 @@ async def run_reconciler_with_composition(
         config=build_reconcile_config(
             provider_composition,
             upload_store=upload_store,
-            console_registry=console_hosting.registry if console_hosting else None,
+            system_object_hosting_gate=console_hosting,
             heartbeat=heartbeat,
             telemetry=telemetry,
         ),
@@ -135,7 +135,7 @@ def build_reconcile_config(
     provider_composition: ProviderComposition,
     *,
     upload_store: ObjectStore,
-    console_registry: CollectorRegistry | None,
+    system_object_hosting_gate: ConsoleHosting | None,
     heartbeat: Heartbeat,
     telemetry: Telemetry,
 ) -> ReconcileConfig:
@@ -154,7 +154,7 @@ def build_reconcile_config(
             days=config.require(INVESTIGATION_CLEANUP_GRACE_DAYS)
         ),
         build_artifact_retention=timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS)),
-        console_registry=console_registry,
+        system_object_hosting_gate=system_object_hosting_gate,
         resetter=provider_composition.build_reconciler_transport_resetter(),
         dump_volume_reaper=provider_composition.build_reconciler_dump_volume_reaper(),
         heartbeat=heartbeat,

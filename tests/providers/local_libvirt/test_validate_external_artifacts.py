@@ -156,6 +156,7 @@ def test_checksum_mismatch_is_build_failure() -> None:
                 checksum_sha256="OTHER",
                 etag="e",
                 last_modified=STORE_MTIME,
+                version_id="test-version",
             )
         },
     )
@@ -184,6 +185,7 @@ def test_absent_stored_checksum_names_the_bypass_cause() -> None:
                 checksum_sha256=None,
                 etag="e",
                 last_modified=STORE_MTIME,
+                version_id="test-version",
             )
         },
     )
@@ -205,7 +207,12 @@ def test_absent_stored_checksum_names_the_bypass_cause() -> None:
 def _validate_kernel_blob(blob: bytes, *, arch: str = "x86_64") -> None:
     """Wire a `kernel` blob through validate_external_artifacts to reach the content check."""
     store = _FakeStore(
-        {"k": blob}, {"k": HeadResult(len(blob), "csum", "e", last_modified=STORE_MTIME)}
+        {"k": blob},
+        {
+            "k": HeadResult(
+                len(blob), "csum", "e", last_modified=STORE_MTIME, version_id="test-version"
+            )
+        },
     )
     validate_external_artifacts(
         store,
@@ -306,7 +313,11 @@ def test_kernel_tar_corrupt_gzip_trailer_is_build_failure() -> None:
 def test_happy_path_kernel_only_returns_build_output() -> None:
     store = _FakeStore(
         {"k": _KERNEL_TAR},
-        {"k": HeadResult(len(_KERNEL_TAR), "csum", "e", last_modified=STORE_MTIME)},
+        {
+            "k": HeadResult(
+                len(_KERNEL_TAR), "csum", "e", last_modified=STORE_MTIME, version_id="test-version"
+            )
+        },
     )
     out = validate_external_artifacts(
         store,
@@ -327,8 +338,12 @@ def test_build_id_mismatch_is_build_failure() -> None:
     store = _FakeStore(
         {"k": _KERNEL_TAR, "v": blob},
         {
-            "k": HeadResult(len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME),
-            "v": HeadResult(len(blob), "cv", "e", last_modified=STORE_MTIME),
+            "k": HeadResult(
+                len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
+            "v": HeadResult(
+                len(blob), "cv", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
         },
     )
     with pytest.raises(CategorizedError) as e:
@@ -349,8 +364,12 @@ def test_vmlinux_without_declared_build_id_is_configuration_error() -> None:
     store = _FakeStore(
         {"k": _KERNEL_TAR, "v": blob},
         {
-            "k": HeadResult(len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME),
-            "v": HeadResult(len(blob), "cv", "e", last_modified=STORE_MTIME),
+            "k": HeadResult(
+                len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
+            "v": HeadResult(
+                len(blob), "cv", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
         },
     )
     with pytest.raises(CategorizedError) as e:
@@ -371,8 +390,12 @@ def test_matching_build_id_passes_and_pairs_vmlinux() -> None:
     store = _FakeStore(
         {"k": _KERNEL_TAR, "v": blob},
         {
-            "k": HeadResult(len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME),
-            "v": HeadResult(len(blob), "cv", "e", last_modified=STORE_MTIME),
+            "k": HeadResult(
+                len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
+            "v": HeadResult(
+                len(blob), "cv", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
         },
     )
     out = validate_external_artifacts(
@@ -392,8 +415,10 @@ def test_initrd_is_validated_and_returned_in_keys() -> None:
     store = _FakeStore(
         {"k": _KERNEL_TAR, "i": b"\x1f\x8b" + b"\x00" * 40},
         {
-            "k": HeadResult(len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME),
-            "i": HeadResult(42, "ci", "e", last_modified=STORE_MTIME),
+            "k": HeadResult(
+                len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
+            "i": HeadResult(42, "ci", "e", last_modified=STORE_MTIME, version_id="test-version"),
         },
     )
     out = validate_external_artifacts(
@@ -416,8 +441,12 @@ def test_effective_config_accepted_without_validation() -> None:
     store = _FakeStore(
         {"k": _KERNEL_TAR, "c": config},
         {
-            "k": HeadResult(len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME),
-            "c": HeadResult(len(config), "cc", "ec", last_modified=STORE_MTIME),
+            "k": HeadResult(
+                len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
+            "c": HeadResult(
+                len(config), "cc", "ec", last_modified=STORE_MTIME, version_id="test-version"
+            ),
         },
     )
 
@@ -439,7 +468,11 @@ def test_effective_config_accepted_without_validation() -> None:
 def test_vmlinux_without_upload_key_is_configuration_error() -> None:
     store = _FakeStore(
         {"k": _KERNEL_TAR},
-        {"k": HeadResult(len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME)},
+        {
+            "k": HeadResult(
+                len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME, version_id="test-version"
+            )
+        },
     )
     with pytest.raises(CategorizedError) as e:
         validate_external_artifacts(
@@ -459,8 +492,12 @@ def _validate_vmlinux_blob(blob: bytes) -> None:
     store = _FakeStore(
         {"k": _KERNEL_TAR, "v": blob},
         {
-            "k": HeadResult(len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME),
-            "v": HeadResult(len(blob), "cv", "e", last_modified=STORE_MTIME),
+            "k": HeadResult(
+                len(_KERNEL_TAR), "ck", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
+            "v": HeadResult(
+                len(blob), "cv", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
         },
     )
     validate_external_artifacts(
@@ -719,8 +756,12 @@ def test_ppc64le_vmlinux_build_id_pairs() -> None:
     store = _FakeStore(
         {"k": kernel, "v": bytes(blob)},
         {
-            "k": HeadResult(len(kernel), "ck", "e", last_modified=STORE_MTIME),
-            "v": HeadResult(len(blob), "cv", "e", last_modified=STORE_MTIME),
+            "k": HeadResult(
+                len(kernel), "ck", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
+            "v": HeadResult(
+                len(blob), "cv", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
         },
     )
     out = validate_external_artifacts(
@@ -753,8 +794,12 @@ def test_verify_chunks_passes_when_each_chunk_matches() -> None:
     store = _FakeStore(
         {},
         {
-            f"{_PREFIX}vmlinux.part0001": HeadResult(6, "c0", "e", last_modified=STORE_MTIME),
-            f"{_PREFIX}vmlinux.part0002": HeadResult(4, "c1", "e", last_modified=STORE_MTIME),
+            f"{_PREFIX}vmlinux.part0001": HeadResult(
+                6, "c0", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
+            f"{_PREFIX}vmlinux.part0002": HeadResult(
+                4, "c1", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
         },
     )
     verify_chunks(store, _PREFIX, _chunked_entry())  # does not raise
@@ -762,7 +807,12 @@ def test_verify_chunks_passes_when_each_chunk_matches() -> None:
 
 def test_verify_chunks_missing_chunk_is_configuration_error() -> None:
     store = _FakeStore(
-        {}, {f"{_PREFIX}vmlinux.part0001": HeadResult(6, "c0", "e", last_modified=STORE_MTIME)}
+        {},
+        {
+            f"{_PREFIX}vmlinux.part0001": HeadResult(
+                6, "c0", "e", last_modified=STORE_MTIME, version_id="test-version"
+            )
+        },
     )
     with pytest.raises(CategorizedError) as e:
         verify_chunks(store, _PREFIX, _chunked_entry())
@@ -784,8 +834,12 @@ def test_verify_chunks_checksum_mismatch_is_build_failure() -> None:
     store = _FakeStore(
         {},
         {
-            f"{_PREFIX}vmlinux.part0001": HeadResult(6, "WRONG", "e", last_modified=STORE_MTIME),
-            f"{_PREFIX}vmlinux.part0002": HeadResult(4, "c1", "e", last_modified=STORE_MTIME),
+            f"{_PREFIX}vmlinux.part0001": HeadResult(
+                6, "WRONG", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
+            f"{_PREFIX}vmlinux.part0002": HeadResult(
+                4, "c1", "e", last_modified=STORE_MTIME, version_id="test-version"
+            ),
         },
     )
     with pytest.raises(CategorizedError) as e:
@@ -799,7 +853,12 @@ def test_chunked_entry_skips_whole_object_checksum_on_final_object() -> None:
     final = _KERNEL_TAR
     entry = ManifestEntry("kernel", "whole", len(final), chunks=(ChunkEntry("c0", len(final)),))
     store = _FakeStore(
-        {"k": final}, {"k": HeadResult(len(final), None, "e", last_modified=STORE_MTIME)}
+        {"k": final},
+        {
+            "k": HeadResult(
+                len(final), None, "e", last_modified=STORE_MTIME, version_id="test-version"
+            )
+        },
     )
     out = validate_external_artifacts(
         store, manifest=[entry], keys={"kernel": "k"}, declared_build_id=None
@@ -811,7 +870,12 @@ def test_chunked_entry_final_size_mismatch_is_build_failure() -> None:
     final = _KERNEL_TAR
     entry = ManifestEntry("kernel", "whole", 9999, chunks=(ChunkEntry("c0", 9999),))
     store = _FakeStore(
-        {"k": final}, {"k": HeadResult(len(final), None, "e", last_modified=STORE_MTIME)}
+        {"k": final},
+        {
+            "k": HeadResult(
+                len(final), None, "e", last_modified=STORE_MTIME, version_id="test-version"
+            )
+        },
     )
     with pytest.raises(CategorizedError) as e:
         validate_external_artifacts(

@@ -14,6 +14,7 @@ Gated ``platform_operator`` (a cross-project control action) and audited to
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from fastmcp import FastMCP
@@ -29,11 +30,15 @@ from kdive.providers.infra.reaping import (
     InfraReaper,
     NullDumpVolumeReaper,
 )
+from kdive.reconciler.cleanup.system_object_versions import (
+    MAX_TARGETS_PER_KEY,
+    MAX_TARGETS_PER_LANE,
+)
 from kdive.reconciler.loop import (
     ALL_REPAIR_KINDS,
     ReconcileConfig,
     ReconcileReport,
-    UploadOrphanStore,
+    ReconcileUploadStore,
     reconcile_once,
 )
 from kdive.security import audit
@@ -51,12 +56,25 @@ _RECONCILE_OBJECT_ID = "reconcile"
 _RECONCILE_SCOPE = "all-projects"
 
 
+def _with_system_object_limits(
+    func: Callable[[], Awaitable[ToolResponse]],
+) -> Callable[[], Awaitable[ToolResponse]]:
+    """Interpolate enforced sweep limits before FastMCP reads the wrapper docstring."""
+    if func.__doc__ is None:
+        raise AssertionError("ops.reconcile_now wrapper must have a docstring")
+    func.__doc__ = func.__doc__.format(
+        max_targets_per_lane=MAX_TARGETS_PER_LANE,
+        max_targets_per_key=MAX_TARGETS_PER_KEY,
+    )
+    return func
+
+
 @dataclass(frozen=True, slots=True)
 class ReconcileRepairPorts:
     """Repair dependencies used by one on-demand reconcile pass."""
 
     reaper: InfraReaper
-    upload_store: UploadOrphanStore
+    upload_store: ReconcileUploadStore
     image_store: ImageSweepStore
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
 
@@ -69,6 +87,8 @@ async def reconcile_now(
 ) -> ToolResponse:
     """Run one on-demand reconcile pass and return per-repair counts.
 
+    The on-demand config includes local System-object version cleanup but deliberately has no
+    console-hosting gate, so the remote System-object lane is absent.
     Denials are audited before repair dependencies touch the database.
     """
     with bind_context(principal=ctx.principal):
@@ -158,16 +178,26 @@ def register(
         annotations=_docmeta.mutating(),
         meta={"maturity": "implemented"},
     )
+    @_with_system_object_limits
     async def ops_reconcile_now() -> ToolResponse:
         """Run reconciler cleanup once (platform_operator).
 
-        Repairs runtime drift — expired leases, orphaned allocations, and the like — without
-        touching the inventory catalog; it never prunes rows or deletes objects. Returns
-        `data.repair_counts`, keyed by every cataloged repair kind, plus the human-readable
-        scalar summary fields and comma-joined `data.failures`.
+        Repairs runtime drift such as expired leases and orphaned allocations. Among its repairs,
+        the local System-object sweep can permanently delete at most {max_targets_per_lane} rowless
+        local System object version identities per call and at most {max_targets_per_key} per exact
+        key. It first takes the System lock and confirms a present gone System and that no artifact
+        row names the exact key, then releases the database transaction before the object-store
+        deletion. If eligible versions remain, call `ops.reconcile_now` again. Confirmed deletions
+        appear in
+        `data.repair_counts.local_system_object_versions_deleted`.
 
-        This is the runtime-state pass. To reconcile `systems.toml` into the catalog (which
-        **can prune** rows and free their object-store bytes), use `ops.reconcile_systems`.
+        The remote System-object version lane is skipped because this on-demand configuration has
+        no console-hosting gate; that lane runs only in the periodic reconciler. Returns
+        `data.repair_counts`, keyed by every cataloged repair kind, plus the human-readable scalar
+        summary fields and comma-joined `data.failures`.
+
+        This does not reconcile `systems.toml` into the catalog. For that pass, which can prune
+        rows and free their object-store bytes, use `ops.reconcile_systems`.
         """
         return await reconcile_now(
             pool,

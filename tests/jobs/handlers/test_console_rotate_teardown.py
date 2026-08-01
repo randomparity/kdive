@@ -45,7 +45,7 @@ _CONSOLE = b"console-line payload bytes\n" * 6000  # ~158 KiB -> several 64 KiB 
 
 
 class _FakeStore:
-    """In-memory object store with put/get/head/delete for the rotation + reclaim seam."""
+    """In-memory object store with rotation and bounded retired-key reclaim support."""
 
     def __init__(self, *, fail_delete: bool = False) -> None:
         self.objects: dict[str, tuple[bytes, Sensitivity, str, str | None]] = {}
@@ -61,7 +61,9 @@ class _FakeStore:
             request.content_encoding,
         )
         etag = hashlib.sha256(request.data).hexdigest()
-        return StoredArtifact(key, etag, request.sensitivity, request.retention_class)
+        return StoredArtifact(
+            key, etag, request.sensitivity, request.retention_class, version_id="test-version"
+        )
 
     def get_artifact(self, key: str, _etag: str | None) -> FetchedArtifact:
         if key not in self.objects:
@@ -80,17 +82,20 @@ class _FakeStore:
             sensitivity=sensitivity,
             content_encoding=enc,
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
-    def delete(self, key: str) -> None:
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
         if self._fail_delete:
             raise CategorizedError(
-                f"object-store delete for {key!r} failed: simulated outage",
+                f"retired-key batch for {key!r} failed: simulated outage",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"key": key},
             )
         self.deleted.append(key)
         self.objects.pop(key, None)
+        return True
 
 
 def _console_job(system_id: UUID, boot_id: str) -> Job:
@@ -210,7 +215,7 @@ def test_teardown_reclaims_console_parts_and_sidecar(
 
     assert any("console-part-" in key for key in before), "rotation must seal at least one part row"
     assert [k for k in after if "console-part-" in k] == [], "console-part rows must be reclaimed"
-    # The part OBJECTS (not just their rows) are deleted by key — a wrong-key delete leaks them.
+    # The part objects (not just their rows) are removed once their complete retired-key batch ends.
     assert objects_after == [], "console-part objects must be deleted from the store"
     assert not sidecar_present, "sidecar object must be deleted at teardown"
 
@@ -257,6 +262,98 @@ def test_teardown_reclaims_sysrq_diagnostic_artifacts(migrated_url: str) -> None
     assert any("sysrq-diagnostic-" in key for key in before), "fixture must seed a sysrq artifact"
     assert [k for k in after if "sysrq-diagnostic-" in k] == [], "sysrq rows must be reclaimed"
     assert not still_present, "sysrq object must be deleted at teardown"
+
+
+def test_teardown_retains_only_incomplete_console_and_sysrq_rows(migrated_url: str) -> None:
+    async def _run() -> list[tuple[str, int]]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool)
+            store = _FakeStore()
+            console_key = f"local/systems/{system_id}/console-part-retained"
+            sysrq_key = await _seed_sysrq_artifact(pool, store, system_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+                    "retention_class) VALUES ('systems', %s, %s, 'etag', 'redacted', 'console')",
+                    (system_id, console_key),
+                )
+            store.objects[console_key] = (b"console", Sensitivity.REDACTED, "console", None)
+
+            class _SequencedStore(_FakeStore):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.outcomes: dict[str, list[bool | Exception]] = {
+                        console_key: [
+                            False,
+                            CategorizedError(
+                                "delete failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+                            ),
+                            True,
+                        ],
+                        sysrq_key: [True],
+                    }
+                    self.calls: list[tuple[str, int]] = []
+
+                def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+                    self.calls.append((key, limit))
+                    outcome = self.outcomes.get(key, [True]).pop(0)
+                    if isinstance(outcome, Exception):
+                        raise outcome
+                    if outcome:
+                        self.objects.pop(key, None)
+                    return outcome
+
+            retained = _SequencedStore()
+            retained.objects = store.objects
+            for expected_rows in ([console_key], [console_key], []):
+                assert await _teardown(pool, retained, system_id) is not None
+                assert await _part_rows(pool, system_id) == expected_rows
+            return retained.calls
+
+    calls = asyncio.run(_run())
+    assert calls.count((calls[0][0], 20)) == 3
+    assert all(limit == 20 for _key, limit in calls)
+
+
+def test_teardown_retains_sysrq_row_until_retired_key_batch_completes(migrated_url: str) -> None:
+    async def _run() -> tuple[str, list[tuple[str, int]]]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool)
+            base = _FakeStore()
+            sysrq_key = await _seed_sysrq_artifact(pool, base, system_id)
+
+            class _SequencedStore(_FakeStore):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.outcomes: list[bool | Exception] = [
+                        False,
+                        CategorizedError(
+                            "delete failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+                        ),
+                        True,
+                    ]
+                    self.calls: list[tuple[str, int]] = []
+
+                def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+                    self.calls.append((key, limit))
+                    if key != sysrq_key:
+                        return True
+                    outcome = self.outcomes.pop(0)
+                    if isinstance(outcome, Exception):
+                        raise outcome
+                    return outcome
+
+            store = _SequencedStore()
+            store.objects = base.objects
+            for expected_rows in ([sysrq_key], [sysrq_key], []):
+                assert await _teardown(pool, store, system_id) is not None
+                assert await _part_rows(pool, system_id) == expected_rows
+            return sysrq_key, store.calls
+
+    key, calls = asyncio.run(_run())
+    assert [call for call in calls if call[0] == key] == [(key, 20)] * 3
 
 
 def test_teardown_does_not_reclaim_the_shared_uploaded_rootfs(migrated_url: str) -> None:

@@ -59,7 +59,13 @@ class _FakeStore:
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         self.objects[request.key()] = (request.data, request.sensitivity, request.retention_class)
         etag = hashlib.sha256(request.data).hexdigest()
-        return StoredArtifact(request.key(), etag, request.sensitivity, request.retention_class)
+        return StoredArtifact(
+            request.key(),
+            etag,
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
+        )
 
     def get_artifact(self, key: str, _etag: str | None) -> FetchedArtifact:
         data, sensitivity, retention = self.objects[key]
@@ -76,6 +82,7 @@ class _FakeStore:
             etag=hashlib.sha256(data).hexdigest(),
             sensitivity=sensitivity,
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
 
@@ -661,14 +668,16 @@ class _LockProbingStore(_FakeStore):
         self.backend_pid: int | None = None
         self.locks_at_put: list[int] = []
         self.deleted: list[str] = []
+        self.deleted_versions: list[tuple[str, str]] = []
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         assert self.backend_pid is not None, "the test must publish the handler's backend pid"
         self.locks_at_put.append(_advisory_locks_held_by(self._url, self.backend_pid))
         return super().put_artifact(request)
 
-    def delete(self, key: str) -> None:
+    def delete_version(self, key: str, version_id: str) -> None:
         self.deleted.append(key)
+        self.deleted_versions.append((key, version_id))
         self.objects.pop(key, None)
 
 
@@ -778,8 +787,9 @@ def test_discard_failure_does_not_mask_the_cancel_outcome(
     capturer = _FakeCapturer(tmp_path)
 
     class _UndeletableStore(_CancelingStore):
-        def delete(self, key: str) -> None:
+        def delete_version(self, key: str, version_id: str) -> None:
             self.deleted.append(key)
+            self.deleted_versions.append((key, version_id))
             raise CategorizedError(
                 "delete_object failed",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,

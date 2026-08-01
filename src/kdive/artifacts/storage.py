@@ -80,6 +80,7 @@ class StoredArtifact(NamedTuple):
     etag: str
     sensitivity: Sensitivity
     retention_class: str
+    version_id: str
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -168,6 +169,7 @@ class HeadResult(NamedTuple):
     checksum_sha256: str | None
     etag: str
     last_modified: datetime
+    version_id: str
     sensitivity: Sensitivity | None = None
     content_encoding: str | None = None
 
@@ -177,6 +179,37 @@ class ObjectListing(NamedTuple):
 
     key: str
     last_modified: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectVersion:
+    """One immutable S3 data-version or delete-marker identity."""
+
+    key: str
+    version_id: str
+    last_modified: datetime
+    etag: str | None
+    is_latest: bool
+    is_delete_marker: bool
+
+
+@dataclass(frozen=True, slots=True)
+class VersionPage:
+    """One bounded ``ListObjectVersions`` response."""
+
+    entries: tuple[ObjectVersion, ...]
+    is_truncated: bool
+    next_key_marker: str | None
+    next_version_id_marker: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class VersionBatch:
+    """A bounded exact-key capture that may retain older history for a later pass."""
+
+    key: str
+    targets: tuple[ObjectVersion, ...]
+    history_complete: bool
 
 
 class PresignedUpload(NamedTuple):

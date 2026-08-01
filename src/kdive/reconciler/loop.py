@@ -21,7 +21,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -35,7 +35,6 @@ from kdive.config.core_settings import (
 )
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
-from kdive.providers.infra.console_hosting import CollectorRegistry
 from kdive.providers.infra.reaping import (
     DumpVolumeReaper,
     InfraReaper,
@@ -57,6 +56,12 @@ from kdive.reconciler.cleanup.provider_reaping import (
 from kdive.reconciler.cleanup.runtime_resources import ResourceProbe
 from kdive.reconciler.cleanup.runtime_resources import (
     reap_expired_runtime_resources as _reap_expired_runtime_resources,
+)
+from kdive.reconciler.cleanup.system_object_versions import (
+    SystemObjectHostingGate,
+    SystemObjectVersionStore,
+    sweep_local_system_object_versions,
+    sweep_remote_system_object_versions,
 )
 from kdive.reconciler.cleanup.upload_orphans import (
     UploadOrphanStore,
@@ -104,6 +109,7 @@ DEFAULT_INVESTIGATION_ROOTFS_RETENTION = gc_repairs.DEFAULT_INVESTIGATION_ROOTFS
 _expire_one = allocation_repairs._expire_one
 _gc_idempotency_keys = gc_repairs.gc_idempotency_keys
 _gc_report_artifacts = gc_repairs.gc_report_artifacts
+_gc_system_artifacts = gc_repairs.gc_system_artifacts
 _gc_investigation_artifacts = gc_repairs.gc_investigation_artifacts
 _gc_expired_build_artifacts = gc_repairs.gc_expired_build_artifacts
 _sweep_investigation_rootfs_reclaim = gc_repairs.sweep_investigation_rootfs_reclaim
@@ -127,7 +133,9 @@ __all__ = [
     "ALL_REPAIR_KINDS",
     "ReconcileConfig",
     "ReconcileReport",
+    "ReconcileUploadStore",
     "Reconciler",
+    "SystemObjectHostingGate",
     "UploadOrphanStore",
     "UploadStore",
     "reconcile_once",
@@ -140,6 +148,17 @@ _NULL_RESETTER: TransportResetter = NullResetter()
 # The default dump-volume reaper (ADR-0094): a module-level singleton so it can be a
 # stateless default argument without a per-call construction (ruff B008).
 _NULL_DUMP_VOLUME_REAPER: DumpVolumeReaper = NullDumpVolumeReaper()
+
+
+class ReconcileUploadStore(
+    UploadOrphanStore,
+    UploadStore,
+    SystemObjectVersionStore,
+    gc_repairs.ArtifactObjectDeleter,
+    Protocol,
+):
+    """Object-store surface required by the upload and artifact-retention reconciler lanes."""
+
 
 # The default (no-op) admission metrics (ADR-0190 D): a module-level singleton so it is a
 # stateless default field without a per-call construction (ruff B008).
@@ -204,6 +223,8 @@ class ReconcileReport:
     dangling_images: int = 0
     expired_private_images: int = 0
     console_collectors_reaped: int = 0
+    local_system_object_versions_deleted: int = 0
+    remote_system_object_versions_deleted: int = 0
     reaped_dump_volumes: int = 0
     reaped_runtime_resources: int = 0
     investigation_artifacts_gc_count: int = 0
@@ -237,12 +258,12 @@ class ReconcileConfig:
     ADR-0337) without reordering the defaulted fields.
     """
 
-    upload_store: UploadOrphanStore
+    upload_store: ReconcileUploadStore
     image_store: ImageSweepStore
     resetter: TransportResetter = _NULL_RESETTER
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
     resource_probe: ResourceProbe | None = None
-    console_registry: CollectorRegistry | None = None
+    system_object_hosting_gate: SystemObjectHostingGate | None = None
     interval: timedelta = DEFAULT_INTERVAL
     debug_session_stale_after: timedelta = DEFAULT_DEBUG_SESSION_STALE_AFTER
     idempotency_retention: timedelta = DEFAULT_IDEMPOTENCY_RETENTION
@@ -309,7 +330,9 @@ def _report_artifacts_gc_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
     return lambda conn: _gc_report_artifacts(
-        conn, config.upload_store, config.report_artifact_retention
+        conn,
+        config.upload_store,
+        config.report_artifact_retention,
     )
 
 
@@ -317,7 +340,9 @@ def _investigation_artifacts_gc_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
     return lambda conn: _gc_investigation_artifacts(
-        conn, config.upload_store, config.investigation_cleanup_grace
+        conn,
+        config.upload_store,
+        config.investigation_cleanup_grace,
     )
 
 
@@ -325,7 +350,9 @@ def _expired_build_artifacts_gc_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
     return lambda conn: _gc_expired_build_artifacts(
-        conn, config.upload_store, config.build_artifact_retention
+        conn,
+        config.upload_store,
+        config.build_artifact_retention,
     )
 
 
@@ -356,10 +383,31 @@ def _unowned_investigation_rootfs_staging_repair(
 def _console_collectors_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
-    console_registry = config.console_registry
-    if console_registry is None:
+    gate = config.system_object_hosting_gate
+    if gate is None:
         return None
-    return lambda conn: _reap_console_collectors(conn, console_registry)
+    return lambda conn: _reap_console_collectors(conn, gate.registry)
+
+
+def _local_system_object_versions_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    return lambda conn: sweep_local_system_object_versions(conn, config.upload_store)
+
+
+def _system_artifact_rows_gc_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    return lambda conn: _gc_system_artifacts(conn, config.upload_store)
+
+
+def _remote_system_object_versions_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    gate = config.system_object_hosting_gate
+    if gate is None:
+        return None
+    return lambda conn: sweep_remote_system_object_versions(conn, config.upload_store, gate)
 
 
 _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
@@ -458,6 +506,13 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         _unowned_investigation_rootfs_staging_repair,
     ),
     _RepairCatalogEntry("console_collectors_reaped", _console_collectors_repair),
+    _RepairCatalogEntry("system_artifact_rows_gc_count", _system_artifact_rows_gc_repair),
+    _RepairCatalogEntry(
+        "local_system_object_versions_deleted", _local_system_object_versions_repair
+    ),
+    _RepairCatalogEntry(
+        "remote_system_object_versions_deleted", _remote_system_object_versions_repair
+    ),
     _RepairCatalogEntry("reconcile_inventory", _reconcile_inventory_repair, "reconciled_inventory"),
     _RepairCatalogEntry("leaked_images", _leaked_images_repair),
     _RepairCatalogEntry("dangling_images", _dangling_images_repair),
@@ -505,6 +560,8 @@ _REPORT_FIELDS: tuple[str, ...] = (
     "dangling_images",
     "expired_private_images",
     "console_collectors_reaped",
+    "local_system_object_versions_deleted",
+    "remote_system_object_versions_deleted",
     "reaped_dump_volumes",
     "reaped_runtime_resources",
     "investigation_artifacts_gc_count",

@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
 from tests.reconciler.conftest import connect
 
@@ -20,8 +21,10 @@ class _RecordingStore:
     def __init__(self) -> None:
         self.deleted: list[str] = []
 
-    def delete(self, key: str) -> None:
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
         self.deleted.append(key)
+        return True
 
 
 async def _seed_artifact(
@@ -116,10 +119,12 @@ def test_per_object_failure_isolated(migrated_url: str) -> None:
                 self.bad = bad
                 self.deleted: list[str] = []
 
-            def delete(self, key: str) -> None:
+            def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+                assert limit == 20
                 if key == self.bad:
                     raise RuntimeError("object store unavailable")
                 self.deleted.append(key)
+                return True
 
         store = _FlakyStore(fail_key)
         conn = await connect(migrated_url)
@@ -136,5 +141,55 @@ def test_per_object_failure_isolated(migrated_url: str) -> None:
             assert not await _exists(check, ok_id)
         finally:
             await check.close()
+
+    asyncio.run(_run())
+
+
+def test_gc_retains_expired_build_row_until_retired_key_batch_completes(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            artifact_id, key = await _seed_artifact(
+                seed,
+                owner_kind="runs",
+                retention_class="build",
+                age=timedelta(days=40),
+            )
+        finally:
+            await seed.close()
+
+        class _SequencedStore:
+            def __init__(self) -> None:
+                self.outcomes: list[bool | Exception] = [
+                    False,
+                    CategorizedError(
+                        "delete failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+                    ),
+                    True,
+                ]
+                self.calls: list[tuple[str, int]] = []
+
+            def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+                self.calls.append((key, limit))
+                outcome = self.outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+        store = _SequencedStore()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+            assert await _exists(conn, artifact_id)
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+            assert await _exists(conn, artifact_id)
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
+            assert not await _exists(conn, artifact_id)
+        finally:
+            await conn.close()
+
+        assert store.calls == [(key, 20)] * 3
 
     asyncio.run(_run())

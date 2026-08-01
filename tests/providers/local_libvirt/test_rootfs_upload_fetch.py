@@ -141,6 +141,7 @@ class _FakeStore:
             checksum_sha256=self._checksum,
             etag="e",
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
     @contextmanager
@@ -1948,6 +1949,7 @@ class _CountingStore:
             checksum_sha256=_sha256_b64(self._data),
             etag="e",
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
     @contextmanager
@@ -2211,6 +2213,7 @@ class _StallingStore:
             checksum_sha256=_sha256_b64(self._data),
             etag="e",
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
     @contextmanager

@@ -30,7 +30,13 @@ class _Capturer:
 
     def capture(self, system_id: UUID, run_id: UUID) -> CaptureOutput:
         self.calls.append((system_id, run_id))
-        artifact = StoredArtifact(f"{self.label}/{run_id}", "etag", Sensitivity.SENSITIVE, "vmcore")
+        artifact = StoredArtifact(
+            f"{self.label}/{run_id}",
+            "etag",
+            Sensitivity.SENSITIVE,
+            "vmcore",
+            version_id="test-version",
+        )
         return CaptureOutput(
             raw=artifact, redacted=artifact, vmcore_build_id=self.label, raw_size_bytes=0
         )

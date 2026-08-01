@@ -47,4 +47,10 @@ class WrittenObjects:
         etag = self._written.get(key)
         if etag is None:
             return None
-        return HeadResult(size_bytes=1, checksum_sha256=None, etag=etag, last_modified=STORE_MTIME)
+        return HeadResult(
+            size_bytes=1,
+            checksum_sha256=None,
+            etag=etag,
+            last_modified=STORE_MTIME,
+            version_id="test-version",
+        )

@@ -43,8 +43,8 @@ async def discard_unregistered_objects(
 
     Two fences guard each delete, evaluated per key as late as possible:
 
-    1. The object still carries the etag this attempt wrote. A peer that replaced the bytes owns
-       what is there now, so deleting it would destroy another attempt's object.
+    1. The object still carries the ETag and VersionId this attempt wrote. A peer that replaced
+       the bytes owns what is there now, so deleting it would destroy another attempt's object.
     2. ``still_unregistered`` — the caller's own ``artifacts`` row probe, re-run *outside* the
        lock. A row that appeared since the locked phase belongs to a peer attempt, and the
        object belongs to that row rather than to this attempt.
@@ -67,7 +67,7 @@ async def discard_unregistered_objects(
 
     Args:
         store: The object store this attempt wrote to.
-        written: What this attempt stored — the key to delete and the etag identifying it.
+        written: What this attempt stored — the key, ETag, and VersionId identifying it.
         still_unregistered: Returns whether no committed ``artifacts`` row references the key.
     """
     for obj in written:
@@ -77,7 +77,7 @@ async def discard_unregistered_objects(
             head = await asyncio.to_thread(store.head, obj.key)
             if head is None:
                 continue  # already gone; nothing left to reclaim
-            if head.etag != obj.etag:
+            if head.etag != obj.etag or head.version_id != obj.version_id:
                 _log.info(
                     "object %s was replaced after this attempt wrote it; leaving it alone",
                     obj.key,
@@ -90,7 +90,7 @@ async def discard_unregistered_objects(
                     obj.key,
                 )
                 continue
-            await asyncio.to_thread(store.delete, obj.key)
+            await asyncio.to_thread(store.delete_version, obj.key, obj.version_id)
         except CategorizedError:
             _log.warning(
                 "deleting unregistered object %s failed; it has no artifacts row, so no "

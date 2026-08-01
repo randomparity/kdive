@@ -33,7 +33,7 @@ class ReassemblyStore(Protocol):
 
 def reassemble_chunked(
     store: ReassemblyStore, *, prefix: str, final_key: str, entry: ManifestEntry
-) -> None:
+) -> dict[str, HeadResult]:
     """HEAD-verify each chunk, then ``Create``/``UploadPartCopy``/``Complete`` the final object.
 
     The chunks are copied server-side (no bytes transit the process) in declared order into
@@ -53,7 +53,7 @@ def reassemble_chunked(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"name": entry.name},
         )
-    verify_chunks(store, prefix, entry)
+    chunk_heads = verify_chunks(store, prefix, entry)
     upload_id = store.create_multipart_upload(
         final_key, sensitivity=Sensitivity.SENSITIVE, retention_class="build"
     )
@@ -79,3 +79,4 @@ def reassemble_chunked(
                 exc_info=True,
             )
         raise
+    return chunk_heads

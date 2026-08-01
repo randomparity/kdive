@@ -109,7 +109,13 @@ class _FakeStore:
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         self.writes.append(request)
-        return StoredArtifact(request.key(), "etag", request.sensitivity, request.retention_class)
+        return StoredArtifact(
+            request.key(),
+            "etag",
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
+        )
 
 
 class _FakeConn:

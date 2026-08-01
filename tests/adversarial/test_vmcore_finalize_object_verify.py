@@ -1,25 +1,8 @@
-"""Adversarial: finalize refuses to reference an object the orphan sweep destroyed (ADR-0497).
+"""Adversarial vmcore identity checks across upload-orphan exact-version cleanup (ADR-0524).
 
-The falsifying case is issue #1574, and it needs no re-mint. The vmcore lane's keys are
-deterministic per ``(run, method)`` and mint **no** upload window, so a first ``capture_vmcore``
-attempt that wrote the core and died before ``finalize_capture`` leaves
-``local/runs/<run>/vmcore-<method>`` rowless *and* manifest-less indefinitely. Past
-``orphan_grace + upload_ttl`` it is a live candidate for the ADR-0455 sweep, which re-reads and
-re-classifies immediately before deleting — and a retried capture's write landing inside that last
-gap is deleted anyway (ADR-0455 §3).
-
-The keys here are the **local-libvirt** shape on purpose: the sweep's roots derive from
-``UPLOAD_TENANT = "local"``, and local-libvirt is constructed with ``tenant="local"``, so its
-``put_stream`` core and ``put`` redacted sibling are the vmcore objects the sweep can reach.
-Remote-libvirt's presigned guest PUT writes under ``remote-libvirt/`` and is outside every swept
-root. Neither write is fenced by a lock the sweep contends on — ``precheck_run`` releases the Run
-lock before the capture by design (ADR-0244), and the sweep takes none.
-
-ADR-0497 does not stop the delete: the conditional delete that would have is inert on the MinIO
-releases this repo pins, so the sweep still destroys the bytes. What these tests pin is that the
-loss stops being *silent* — the retry's ``finalize_capture`` heads both objects it is about to
-reference, refuses to commit any row when the store no longer holds them at the captured etag, and
-so the Run fails loudly instead of reporting success behind a dangling ``artifacts`` row.
+The local vmcore key is deterministic and can have an abandoned rowless version when a retry PUTs
+new bytes. These tests prove orphan cleanup removes only the captured old VersionId, allowing the
+peer PUT to survive and finalize, while finalize still rejects unrelated identity replacement.
 """
 
 from __future__ import annotations
@@ -27,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -34,7 +18,14 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.storage import HeadResult, ObjectListing, StoredArtifact
+from kdive.artifacts.storage import (
+    HeadResult,
+    ObjectListing,
+    ObjectVersion,
+    StoredArtifact,
+    VersionBatch,
+    VersionPage,
+)
 from kdive.db.repositories import RUNS
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -67,6 +58,10 @@ class _VerifyStore:
 
     def __init__(self, objects: dict[str, tuple[str, timedelta]]) -> None:
         self._objects = dict(objects)
+        self._next_version = 1
+        self._versions: dict[str, list[ObjectVersion]] = {}
+        for key, (etag, age) in objects.items():
+            self._append_version(key, etag, age)
         self.headed_keys: list[str] = []
         self.deleted: list[str] = []
         self.deleted_etags: list[str] = []
@@ -77,6 +72,20 @@ class _VerifyStore:
 
     def put(self, key: str, etag: str, age: timedelta = timedelta(0)) -> None:
         self._objects[key] = (etag, age)
+        self._append_version(key, etag, age)
+
+    def _append_version(self, key: str, etag: str, age: timedelta) -> None:
+        prior = [replace(version, is_latest=False) for version in self._versions.get(key, ())]
+        version = ObjectVersion(
+            key=key,
+            version_id=f"v{self._next_version}",
+            last_modified=datetime.now(UTC) - age,
+            etag=etag,
+            is_latest=True,
+            is_delete_marker=False,
+        )
+        self._next_version += 1
+        self._versions[key] = [*prior, version]
 
     def head(self, key: str) -> HeadResult | None:
         self.headed_keys.append(key)
@@ -89,6 +98,7 @@ class _VerifyStore:
             checksum_sha256=None,
             etag=etag,
             last_modified=datetime.now(UTC) - age,
+            version_id="test-version",
         )
 
     def list_prefix(self, prefix: str) -> list[str]:
@@ -102,34 +112,83 @@ class _VerifyStore:
             if key.startswith(prefix)
         ]
 
-    def delete(self, key: str) -> None:
+    def list_version_page(
+        self,
+        prefix: str,
+        *,
+        key_marker: str | None = None,
+        version_id_marker: str | None = None,
+        max_keys: int = 1000,
+    ) -> VersionPage:
+        entries = tuple(
+            version
+            for key in sorted(self._versions)
+            if key.startswith(prefix) and (key_marker is None or key > key_marker)
+            for version in self._versions[key]
+        )
+        return VersionPage(entries[:max_keys], False, None, None)
+
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch:
+        versions = list(self._versions.get(key, ()))
+        complete = len(versions) <= limit
+        if not complete:
+            latest = [version for version in versions if version.is_latest]
+            versions = [*latest, *(version for version in versions if not version.is_latest)]
+        return VersionBatch(key, tuple(versions[:limit]), complete)
+
+    def delete_batch(self, batch: VersionBatch) -> bool:
+        for target in batch.targets:
+            if not target.is_latest:
+                self._delete_version(target)
+        if not batch.history_complete:
+            return False
+        for target in batch.targets:
+            if target.is_latest:
+                self._delete_version(target)
+        return True
+
+    def _delete_version(self, target: ObjectVersion) -> None:
+        versions = self._versions.get(target.key, [])
+        if not any(version.version_id == target.version_id for version in versions):
+            return
+        survivors = [version for version in versions if version.version_id != target.version_id]
+        self.deleted.append(target.key)
+        if target.etag is not None:
+            self.deleted_etags.append(target.etag)
+        if not survivors:
+            self._versions.pop(target.key, None)
+            self._objects.pop(target.key, None)
+            return
+        latest = next(version for version in survivors if version.is_latest)
+        assert latest.etag is not None
+        self._versions[target.key] = survivors
+        self._objects[target.key] = (
+            latest.etag,
+            datetime.now(UTC) - latest.last_modified,
+        )
+
+    def remove_object_for_test(self, key: str) -> None:
+        """Simulate out-of-band byte loss without exposing a store delete operation."""
         entry = self._objects.pop(key, None)
         if entry is not None:
             self.deleted_etags.append(entry[0])
         self.deleted.append(key)
+        self._versions.pop(key, None)
 
 
 class _SweepInTheGapStore(_VerifyStore):
-    """Runs the real orphan sweep's same-key re-read→delete gap: re-PUT, then delete anyway.
-
-    ``before_delete`` fires from inside ``delete``, on the ``to_thread`` worker, once — which is
-    exactly the window between the sweep's per-key re-check and its ``delete_object``. Every
-    pre-existing test of this hook fires it before a *different* key's delete, so the same-key gap
-    — the one #1574 is about — was never exercised.
-    """
+    """PUT a peer version immediately before the captured exact batch is deleted."""
 
     def __init__(self, objects: dict[str, tuple[str, timedelta]], *, put_in_gap: str) -> None:
         super().__init__(objects)
         self._put_in_gap = put_in_gap
         self._fired = False
 
-    def delete(self, key: str) -> None:
+    def delete_batch(self, batch: VersionBatch) -> bool:
         if not self._fired:
             self._fired = True
-            # The retried capture's put_stream completes here, at the very key about to be
-            # deleted. Its artifacts row is still minutes away, so nothing protects these bytes.
             self.put(self._put_in_gap, _RAW_ETAG, timedelta(0))
-        super().delete(key)
+        return super().delete_batch(batch)
 
 
 class _FakeRetriever:
@@ -154,9 +213,19 @@ def _redacted_key(run_id: str, method: CaptureMethod = _METHOD) -> str:
 
 def _capture_output(run_id: str, method: CaptureMethod = _METHOD) -> CaptureOutput:
     return CaptureOutput(
-        raw=StoredArtifact(_raw_key(run_id, method), _RAW_ETAG, Sensitivity.SENSITIVE, "vmcore"),
+        raw=StoredArtifact(
+            _raw_key(run_id, method),
+            _RAW_ETAG,
+            Sensitivity.SENSITIVE,
+            "vmcore",
+            version_id="test-version",
+        ),
         redacted=StoredArtifact(
-            _redacted_key(run_id, method), _REDACTED_ETAG, Sensitivity.REDACTED, "vmcore"
+            _redacted_key(run_id, method),
+            _REDACTED_ETAG,
+            Sensitivity.REDACTED,
+            "vmcore",
+            version_id="test-version",
         ),
         vmcore_build_id="deadbeef",
         raw_size_bytes=512,
@@ -216,23 +285,8 @@ async def _seeded_capture_job(pool: AsyncConnectionPool) -> tuple[str, Job]:
     return run_id, job
 
 
-def test_the_sweep_destroys_a_put_landing_in_its_own_key_s_gap(migrated_url: str) -> None:
-    """ADR-0455 §3's residual, asserted rather than assumed, for the **same** key.
-
-    This is the loss ADR-0497 mitigates but does not close, pinned as a *fact about the sweep*
-    rather than as a fix: the re-PUT lands between the per-key re-check and the delete, and the
-    delete runs unconditionally, so the fresh bytes are destroyed. It is unconditional because the
-    etag fence that would have stopped it — S3 ``If-Match`` on ``DeleteObject`` — is accepted and
-    ignored by both MinIO releases this repo pins (ADR-0497 §1), so shipping it would have made
-    this assertion pass while the object still went. If this test ever starts failing because the
-    object survived, the conditional delete has become viable and ADR-0497 §1 should be revisited.
-
-    ADR-0502 closes the race for a writer that declares itself, and no lease is minted here — this
-    module drives the sweep directly against an abandoned attempt's leftovers, with no capture in
-    flight. So the loss below is still the correct behaviour, and it is the *unleased* residual it
-    now pins. The leased path, where a claimed capture's in-flight write survives this same sweep,
-    is proven in ``tests/adversarial/test_vmcore_capture_write_lease.py``.
-    """
+def test_the_sweep_preserves_a_put_landing_after_its_exact_capture(migrated_url: str) -> None:
+    """The peer VersionId is absent from the immutable deletion batch."""
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -243,25 +297,17 @@ def test_the_sweep_destroys_a_put_landing_in_its_own_key_s_gap(migrated_url: str
             async with pool.connection() as conn:
                 assert await repair_leaked_upload_objects(conn, store, _GRACE, _NO_TTL) == 1
             assert store.deleted == [raw]
-            # The identity is the point, not the absence: an aged rowless orphan being deleted is
-            # what the sweep is *for*. What this pins is that the bytes destroyed are the ones the
-            # gap PUT wrote, which the sweep never re-read and never decided on.
-            assert store.deleted_etags == [_RAW_ETAG]
-            assert raw not in store.present
+            assert store.deleted_etags == [_ABANDONED_ETAG]
+            assert raw in store.present
+            current = store.head(raw)
+            assert current is not None
+            assert current.etag == _RAW_ETAG
 
     asyncio.run(_run())
 
 
-def test_a_capture_whose_object_the_sweep_deleted_commits_no_row(migrated_url: str) -> None:
-    """#1574 end to end: the sweep destroys the re-PUT, and the finalize must not paper over it.
-
-    The sweep runs for real, with the concurrent PUT fired inside its own key's re-read→delete gap,
-    and then the retried capture finalizes. Before ADR-0497 this committed two ``artifacts`` rows
-    and an audit row against bytes that no longer existed, and the job returned a result reference —
-    a dangling reference on a Run reporting success, with nothing raised. The sequencing here is a
-    simplification of the true interleaving (the real PUT is inside the gap and the finalize follows
-    it); the state handed to the finalize is identical either way.
-    """
+def test_a_capture_whose_peer_version_survives_can_finalize(migrated_url: str) -> None:
+    """End to end, exact orphan cleanup leaves the retry's observed bytes referenceable."""
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -276,23 +322,21 @@ def test_a_capture_whose_object_the_sweep_deleted_commits_no_row(migrated_url: s
             )
             async with pool.connection() as conn:
                 await repair_leaked_upload_objects(conn, store, _GRACE, _NO_TTL)
-            # The retried capture's bytes went, not the abandoned attempt's the sweep re-read.
-            assert store.deleted_etags[0] == _RAW_ETAG
-            assert raw not in store.present
+            assert store.deleted_etags[0] == _ABANDONED_ETAG
+            assert raw in store.present
+            store.put(_redacted_key(run_id), _REDACTED_ETAG)
 
             retriever = _FakeRetriever(run_id)
             async with pool.connection() as conn:
-                with pytest.raises(CategorizedError) as caught:
-                    await vmcore_plane.capture_handler(
-                        conn,
-                        job,
-                        resolver=provider_resolver(retriever=retriever),
-                        artifact_store=store,
-                    )
-            assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-            assert caught.value.details["object_key"] == raw
-            assert await _artifact_count(pool, run_id) == 0
-            assert await _audit_count(pool, run_id) == 0
+                result = await vmcore_plane.capture_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=retriever),
+                    artifact_store=store,
+                )
+            assert isinstance(result, str)
+            assert await _artifact_count(pool, run_id) == 2
+            assert await _audit_count(pool, run_id) == 1
 
     asyncio.run(_run())
 
@@ -403,7 +447,8 @@ def test_the_idempotent_replay_needs_no_verify(migrated_url: str) -> None:
                     conn, job, resolver=resolver, artifact_store=store
                 )
             store.headed_keys.clear()
-            store.delete(_raw_key(run_id))  # the object is gone; the row still references it
+            # Simulate out-of-band loss: the object is gone while the row still references it.
+            store.remove_object_for_test(_raw_key(run_id))
             async with pool.connection() as conn:
                 replay = await vmcore_plane.capture_handler(
                     conn, job, resolver=resolver, artifact_store=store

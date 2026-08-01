@@ -142,6 +142,7 @@ class _SearchStore:
             etag="e",
             sensitivity=self.head_sensitivity,
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
     def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:

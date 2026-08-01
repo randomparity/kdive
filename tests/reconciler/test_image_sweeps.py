@@ -21,16 +21,21 @@ windows are set in SQL against the Postgres clock, so there is no test-vs-DB ske
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID
 
 import psycopg
+import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.artifacts.storage import ArtifactWriteRequest, HeadResult, StoredArtifact
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.images import (
     ImageMtime,
+    _delete_if_leaked,
 )
 from kdive.reconciler.cleanup.images import (
     repair_dangling_images as _repair_dangling_images,
@@ -55,15 +60,19 @@ class _FakeImageStore:
     ``ImageMtime`` so the leaked-grace comparison stays on the DB clock.
     """
 
-    def __init__(self, objects: dict[str, timedelta]) -> None:
+    def __init__(
+        self, objects: dict[str, timedelta], *, fails_on: frozenset[str] = frozenset()
+    ) -> None:
         # objects maps key -> age; the absolute mtime is now - age.
         self._objects = dict(objects)
+        self._now = datetime.now(UTC)
         self.deleted: list[str] = []
+        self.deleted_versions: list[tuple[str, str]] = []
+        self._fails_on = fails_on
 
     def list_image_objects(self) -> list[ImageMtime]:
-        now = datetime.now(UTC)
         return [
-            ImageMtime(key=key, last_modified=now - age)
+            ImageMtime(key=key, last_modified=self._now - age)
             for key, age in self._objects.items()
             if key not in self.deleted
         ]
@@ -71,8 +80,27 @@ class _FakeImageStore:
     def head_present(self, key: str) -> bool:
         return key in self._objects and key not in self.deleted
 
-    def delete(self, key: str) -> None:
+    def head(self, key: str) -> HeadResult | None:
+        if not self.head_present(key):
+            return None
+        return HeadResult(
+            1,
+            None,
+            "etag",
+            last_modified=self._now - self._objects[key],
+            version_id="test-version",
+        )
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        if key in self._fails_on:
+            raise CategorizedError("delete failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
         self.deleted.append(key)
+        self.deleted_versions.append((key, version_id))
+
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
+        self.deleted.append(key)
+        return True
 
     def put_artifact(
         self, request: ArtifactWriteRequest
@@ -82,7 +110,57 @@ class _FakeImageStore:
             etag="etag",
             sensitivity=request.sensitivity,
             retention_class=request.retention_class,
+            version_id="test-version",
         )
+
+
+class _PeerPutImageStore(_FakeImageStore):
+    """Records a selected HEAD and exact deletion around a simulated peer replacement."""
+
+    def __init__(self, objects: dict[str, timedelta]) -> None:
+        super().__init__(objects)
+        self.events: list[str] = []
+        self.current_versions: dict[str, str] = {}
+
+    def head(self, key: str) -> HeadResult | None:
+        head = super().head(key)
+        if head is None:
+            return None
+        self.events.append("head")
+        return head
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.events.append("delete_version")
+        super().delete_version(key, version_id)
+
+
+class _FenceCursor:
+    def __init__(self, store: _PeerPutImageStore, key: str) -> None:
+        self._store = store
+        self._key = key
+
+    async def __aenter__(self) -> _FenceCursor:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+    async def execute(self, *_: object) -> None:
+        return None
+
+    async def fetchone(self) -> tuple[bool]:
+        self._store.events.append("row")
+        self._store.current_versions[self._key] = "peer-version-2"
+        return (False,)
+
+
+class _FenceConnection:
+    def __init__(self, store: _PeerPutImageStore, key: str) -> None:
+        self._store = store
+        self._key = key
+
+    def cursor(self) -> _FenceCursor:
+        return _FenceCursor(self._store, self._key)
 
 
 async def _insert_image_row(
@@ -210,8 +288,48 @@ def test_leaked_sweep_reclaims_orphaned_config(migrated_url: str) -> None:
             count = await run_repair(pool, lambda c: _repair_leaked_images(c, store, _grace()))
         assert count == 1
         assert store.deleted == [orphan_config]
+        assert store.deleted_versions == [(orphan_config, "test-version")]
 
     asyncio.run(_run())
+
+
+def test_leaked_sweep_continues_after_one_object_store_failure(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def _run() -> None:
+        failed = "images/local-libvirt/gone/x86_64.qcow2"
+        later = "images/local-libvirt/later/x86_64.qcow2"
+        store = _FakeImageStore(
+            {failed: timedelta(hours=2), later: timedelta(hours=2)}, fails_on=frozenset({failed})
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: _repair_leaked_images(c, store, _grace()))
+
+        assert count == 1
+        assert store.deleted_versions == [(later, "test-version")]
+
+    with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.images"):
+        asyncio.run(_run())
+    assert any("gone/x86_64.qcow2" in record.getMessage() for record in caplog.records)
+
+
+def test_leaked_sweep_deletes_the_pre_fence_head_version_after_a_peer_put(
+    migrated_url: str,
+) -> None:
+    del migrated_url
+    key = "images/local-libvirt/gone/x86_64.qcow2"
+    store = _PeerPutImageStore({key: timedelta(hours=2)})
+    obj = store.list_image_objects()[0]
+    deleted = asyncio.run(
+        _delete_if_leaked(
+            cast(psycopg.AsyncConnection, _FenceConnection(store, key)), store, obj, _grace()
+        )
+    )
+
+    assert deleted is True
+    assert store.events == ["head", "row", "delete_version"]
+    assert store.deleted_versions == [(key, "test-version")]
+    assert store.current_versions[key] == "peer-version-2"
 
 
 def test_pending_row_inside_deadline_protects_its_object(migrated_url: str) -> None:

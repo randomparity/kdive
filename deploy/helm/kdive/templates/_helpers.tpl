@@ -203,6 +203,60 @@ prometheus.io/port: "{{ . }}"
 {{- end -}}
 
 {{/*
+Validate the complete compact JSON schema emitted by the pinned mc client. Its /bin/sh is Bash
+5.1, so [[ =~ ]] gives an anchored whole-document match without adding a parser binary to the
+minimal image. The caller must set version_info from a successful `mc version info --json` call.
+*/}}
+{{- define "kdive.minioVersioningPolicyCheck" -}}
+# The pinned mc image's /bin/sh is Bash 5.1; match the entire compact reply.
+versioning_pattern='^\{"Op":"info","status":"success",'
+versioning_pattern+='"url":"[^"[:space:]]+",'
+versioning_pattern+='"versioning":\{"status":"Enabled","MFADelete":""'
+versioning_pattern+='(,"ExcludedPrefixes":\[\])?\}\}$'
+if [[ ! "$version_info" =~ $versioning_pattern ]]; then
+  echo "MinIO bucket versioning is incompatible." >&2
+  echo "Require Enabled, MFA Delete off, and no excluded prefixes." >&2
+  exit 1
+fi
+{{- end -}}
+
+{{/*
+Bundled app Pods must not start before the ordinary minio-init Job has created and configured the
+bucket. Every workload includes this one helper, keeping the endpoint, credentials, writable mc
+config path, and policy parser identical. External-backend Pods rely on runtime S3 validation and
+render no MinIO-specific init container.
+*/}}
+{{- define "kdive.minioVersioningBarrier" -}}
+{{- if .Values.bundledBackends }}
+initContainers:
+  - name: verify-minio-versioning
+    image: {{ .Values.demo.mc.image }}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        bucket="local/$MC_BUCKET"
+        until mc alias set local http://{{ include "kdive.fullname" . }}-minio:9000 "$MC_USER" "$MC_PASS"; do
+          echo "waiting for minio..."; sleep 3
+        done
+        until version_info=$(mc version info --json "$bucket"); do
+          echo "waiting for MinIO bucket..."; sleep 3
+        done
+        {{- include "kdive.minioVersioningPolicyCheck" . | nindent 8 }}
+    env:
+      - name: MC_CONFIG_DIR
+        value: /tmp/.mc
+      - name: MC_BUCKET
+        value: {{ .Values.config.KDIVE_S3_BUCKET | quote }}
+      - name: MC_USER
+        value: {{ .Values.demoCredentials.minio.rootUser | quote }}
+      - name: MC_PASS
+        value: {{ .Values.demoCredentials.minio.rootPassword | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
 Render gate: bundledBackends is ephemeral/demo-only, so it must be co-set with
 demoAcknowledged. A free-standing fail in this partial would never execute (Helm
 only renders define blocks from _*.tpl when included), so the check lives in a

@@ -60,7 +60,9 @@ class _FakeStore:
         )
         self.put_calls.append(key)
         etag = hashlib.sha256(request.data).hexdigest()
-        return StoredArtifact(key, etag, request.sensitivity, request.retention_class)
+        return StoredArtifact(
+            key, etag, request.sensitivity, request.retention_class, version_id="test-version"
+        )
 
     def get_artifact(self, key: str, _etag: str | None) -> FetchedArtifact:
         if key not in self.objects:
@@ -82,6 +84,7 @@ class _FakeStore:
             sensitivity=sensitivity,
             content_encoding=enc,
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
     def part_puts(self) -> list[str]:
@@ -483,6 +486,7 @@ class _LockProbingStore(_FakeStore):
         self.backend_pid: int | None = None
         self.locks_at_part_put: list[int] = []
         self.deleted: list[str] = []
+        self.deleted_versions: list[tuple[str, str]] = []
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         if "console-part-" in request.key():
@@ -490,8 +494,9 @@ class _LockProbingStore(_FakeStore):
             self.locks_at_part_put.append(_advisory_locks_held_by(self._url, self.backend_pid))
         return super().put_artifact(request)
 
-    def delete(self, key: str) -> None:
+    def delete_version(self, key: str, version_id: str) -> None:
         self.deleted.append(key)
+        self.deleted_versions.append((key, version_id))
         self.objects.pop(key, None)
 
 
@@ -611,8 +616,9 @@ def test_discard_failure_does_not_mask_the_teardown_outcome(
     monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
 
     class _UndeletableStore(_TearingDownStore):
-        def delete(self, key: str) -> None:
+        def delete_version(self, key: str, version_id: str) -> None:
             self.deleted.append(key)
+            self.deleted_versions.append((key, version_id))
             raise CategorizedError(
                 "delete_object failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE
             )

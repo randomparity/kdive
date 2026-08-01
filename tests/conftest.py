@@ -20,12 +20,11 @@ every host regardless of configuration — a gated tier that could never run (#1
 
 The autouse ``s3_backend_env`` fixture re-pins the ``KDIVE_S3_*`` configuration around every
 test, so a case that mutates it cannot leak into the next. S3 is a required backend
-(ADR-0337): ``build_object_store_assembly`` / ``build_app`` / ``build_handler_registry``
-construct a live object store and raise without it, so the default test environment supplies
-a dummy one (constructing the boto3 client is offline and never connects). It re-pins the
-*resolved* configuration, so a real ``KDIVE_S3_*`` in the environment — as the live_vm CI jobs
-export for the running stack — wins over the dummy. A test that exercises S3-absence builds its
-own ``Registry`` or ``delenv``s the vars explicitly.
+(ADR-0337), so the default test environment supplies dummy configuration for direct boundary
+tests. MCP and worker registry tests inject inert store wiring because they inspect registration
+without invoking object I/O. The *resolved* configuration still yields to real ``KDIVE_S3_*``
+values exported by live_vm jobs. A test that exercises S3 absence builds its own ``Registry`` or
+``delenv``s the vars explicitly.
 
 The session-scoped autouse ``session_owned_tempdir`` fixture repoints the default temp root at
 pytest's base temp directory, so an unnamed ``tempfile`` destination is bounded by pytest's
@@ -41,16 +40,18 @@ import os
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 import kdive.config as config
+import kdive.jobs.assembly as job_assembly_module
+import kdive.mcp.assembly.app as mcp_app_module
+from kdive.store.assembly import ObjectStoreAssembly, ObjectStoreFactory
+from kdive.store.objectstore import ObjectStore
 
-# S3 is a required backend (ADR-0337). Several test modules build the app / handler
-# registry at import time (collection), before any fixture runs, so a default S3
-# configuration must exist at the process level too — not only via the function-scoped
-# ``s3_backend_env`` fixture. ``setdefault`` yields to a real ``KDIVE_S3_*`` in the
-# developer's shell. Constructing the boto3 client is offline and never connects.
+# Direct object-store boundary tests still need a complete configuration at collection time.
+# ``setdefault`` yields to a real ``KDIVE_S3_*`` in the developer's shell.
 _DUMMY_S3_ENDPOINT_URL = "http://minio.test:9000"
 _DUMMY_S3_BUCKET = "kdive-test"
 os.environ.setdefault("KDIVE_S3_ENDPOINT_URL", _DUMMY_S3_ENDPOINT_URL)
@@ -62,6 +63,26 @@ os.environ.setdefault("KDIVE_S3_BUCKET", _DUMMY_S3_BUCKET)
 # ``minio.test`` placeholder makes every live object-store call fail name resolution.
 _S3_ENDPOINT_URL = os.environ["KDIVE_S3_ENDPOINT_URL"]
 _S3_BUCKET = os.environ["KDIVE_S3_BUCKET"]
+
+
+def _offline_object_store_assembly(
+    store_factory: ObjectStoreFactory | None = None,
+) -> ObjectStoreAssembly:
+    """Return inert store wiring for app-schema tests that never invoke object I/O."""
+    if store_factory is not None:
+        return ObjectStoreAssembly(store=store_factory())
+    return ObjectStoreAssembly(store=cast(ObjectStore, object()))
+
+
+# Several MCP contract modules build the app during collection, before fixtures can patch its
+# infrastructure boundary. Keep those schema-only builds offline; tests of production store
+# assembly call ``build_object_store_assembly`` directly or replace this seam explicitly.
+mcp_app_module.build_object_store_assembly = (  # ty: ignore[invalid-assignment]
+    _offline_object_store_assembly
+)
+job_assembly_module.build_object_store_assembly = (  # ty: ignore[invalid-assignment]
+    _offline_object_store_assembly
+)
 
 
 # The operator's real inventory path, captured before any fixture runs (same reasoning as

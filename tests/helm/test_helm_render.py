@@ -12,6 +12,7 @@ index both kinds — see :func:`_workloads`.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -24,6 +25,110 @@ import yaml
 pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 
 CHART = str(Path(__file__).resolve().parents[2] / "deploy" / "helm" / "kdive")
+
+_VERSIONING_REPLIES = (
+    (
+        "enabled-omitted-exclusions",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}',
+        0,
+    ),
+    (
+        "enabled-explicit-empty-exclusions",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":[]}}',
+        0,
+    ),
+    (
+        "suspended",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Suspended","MFADelete":""}}',
+        1,
+    ),
+    (
+        "excluded-prefix",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":"",'
+        '"ExcludedPrefixes":["tmp/"]}}',
+        1,
+    ),
+    (
+        "excluded-folders",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":"","ExcludeFolders":true}}',
+        1,
+    ),
+    (
+        "missing-status",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"MFADelete":""}}',
+        1,
+    ),
+    (
+        "mfa-delete-enabled",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":"Enabled"}}',
+        1,
+    ),
+    (
+        "missing-mfa-delete",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled"}}',
+        1,
+    ),
+    (
+        "malformed-exclusions",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":null}}',
+        1,
+    ),
+    (
+        "compatible-decoy-before-suspended-real-state",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"decoy":{"versioning":{"status":"Enabled","MFADelete":""}},'
+        '"versioning":{"status":"Suspended","MFADelete":""}}',
+        1,
+    ),
+    (
+        "duplicate-versioning-keys",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""},'
+        '"versioning":{"status":"Suspended","MFADelete":""}}',
+        1,
+    ),
+    (
+        "trailing-junk",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}not-json',
+        1,
+    ),
+    (
+        "error-status-decoy",
+        '{"Op":"info","status":"error","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}',
+        1,
+    ),
+    (
+        "reordered-fields",
+        '{"status":"success","Op":"info","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}',
+        1,
+    ),
+    (
+        "extra-top-level-field",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""},"extra":true}',
+        1,
+    ),
+)
+
+_SHELL_BUCKET_CASES = (
+    ("command-substitution", "custom$(touch {sentinel})"),
+    ("semicolon", "custom;touch {sentinel}"),
+    ("whitespace", "custom bucket"),
+    ("quotes", "custom'\"quoted"),
+    ("other-metacharacters", "custom&touch {sentinel}"),
+)
 
 # Per-process aux health/metrics ports (ADR-0090 §5), matching the registry defaults.
 _AUX_PORTS = {"server": 9464, "worker": 9465, "reconciler": 9466}
@@ -38,6 +143,106 @@ def _template(*set_args: str) -> subprocess.CompletedProcess[str]:
     for s in set_args:
         args += ["--set", s]
     return subprocess.run(args, capture_output=True, text=True, check=False)
+
+
+def _template_bundled_bucket(bucket: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "helm",
+            "template",
+            "kdive",
+            CHART,
+            "--set",
+            "bundledBackends=true",
+            "--set",
+            "demoAcknowledged=true",
+            "--set-json",
+            f"config.KDIVE_S3_BUCKET={json.dumps(bucket)}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _minio_init_container_from_render(
+    res: subprocess.CompletedProcess[str],
+) -> dict[str, Any]:
+    assert res.returncode == 0, res.stderr
+    for doc in yaml.safe_load_all(res.stdout):
+        if not (isinstance(doc, dict) and doc.get("kind") == "Job"):
+            continue
+        if str(doc.get("metadata", {}).get("name", "")).endswith("-minio-init"):
+            return doc["spec"]["template"]["spec"]["containers"][0]
+    raise AssertionError("bundled chart rendered no MinIO initializer Job")
+
+
+def _minio_init_container(*set_args: str) -> dict[str, Any]:
+    res = _template("bundledBackends=true", "demoAcknowledged=true", *set_args)
+    return _minio_init_container_from_render(res)
+
+
+def _minio_init_script(*set_args: str) -> str:
+    command = _minio_init_container(*set_args)["command"]
+    assert command[:2] == ["/bin/sh", "-c"]
+    return command[2]
+
+
+def _literal_env(container: dict[str, Any]) -> dict[str, str]:
+    return {entry["name"]: entry["value"] for entry in container["env"]}
+
+
+def _fake_mc(tmp_path: Path) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    calls = tmp_path / "mc-calls"
+    executable = tmp_path / "mc"
+    executable.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'printf \'%s\\n\' "$*" >>"$MC_CALLS"\n'
+        "last_argument=\n"
+        'for argument in "$@"; do last_argument=$argument; done\n'
+        'case "$1 ${2:-}" in\n'
+        '  "mb --ignore-existing"|"version enable"|"version info")\n'
+        '    printf \'%s\\n\' "$last_argument" >>"$MC_BUCKET_ARGS"\n'
+        "    ;;\n"
+        "esac\n"
+        'case "$*" in\n'
+        '  "version info --json "*)\n'
+        '    [ "${MC_INFO_FAIL:-0}" = 0 ] || exit 23\n'
+        "    printf '%s\\n' \"$MC_VERSION_INFO\"\n"
+        "    ;;\n"
+        "esac\n"
+    )
+    executable.chmod(0o755)
+    return calls
+
+
+def _run_minio_init(
+    tmp_path: Path,
+    reply: str,
+    *,
+    info_fails: bool = False,
+    container: dict[str, Any] | None = None,
+) -> tuple[int, list[str]]:
+    calls = _fake_mc(tmp_path)
+    rendered_container = container or _minio_init_container()
+    command = rendered_container["command"]
+    assert command[:2] == ["/bin/sh", "-c"]
+    result = subprocess.run(
+        ["/bin/bash", "-c", command[2]],
+        capture_output=True,
+        text=True,
+        env={
+            **_literal_env(rendered_container),
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "MC_CALLS": str(calls),
+            "MC_BUCKET_ARGS": str(tmp_path / "mc-buckets"),
+            "MC_VERSION_INFO": reply,
+            "MC_INFO_FAIL": "1" if info_fails else "0",
+        },
+    )
+    return result.returncode, calls.read_text().splitlines()
 
 
 def _minio_ext_cidrs(res: subprocess.CompletedProcess[str]) -> list[str] | None:
@@ -251,7 +456,18 @@ def _workloads(*set_args: str) -> dict[str, dict[str, Any]]:
     Covers both workload kinds: server/reconciler are Deployments, the worker is a
     StatefulSet (ADR-0514). Extra ``--set`` args layer onto the external-backend base.
     """
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+    return _rendered_app_workloads("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+
+
+def _rendered_app_workloads(*set_args: str) -> dict[str, dict[str, Any]]:
+    """Render and index each app workload without assuming a backend mode."""
+    res = _template(*set_args)
+    return _rendered_app_workloads_from_render(res)
+
+
+def _rendered_app_workloads_from_render(
+    res: subprocess.CompletedProcess[str],
+) -> dict[str, dict[str, Any]]:
     assert res.returncode == 0, res.stderr
     out: dict[str, dict[str, Any]] = {}
     for doc in yaml.safe_load_all(res.stdout):
@@ -264,8 +480,119 @@ def _workloads(*set_args: str) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _bundled_workloads(*set_args: str) -> dict[str, dict[str, Any]]:
+    return _rendered_app_workloads("bundledBackends=true", "demoAcknowledged=true", *set_args)
+
+
+def _minio_barrier(workload: dict[str, Any]) -> dict[str, Any]:
+    init_containers = workload["spec"]["template"]["spec"].get("initContainers", [])
+    matches = [item for item in init_containers if item["name"] == "verify-minio-versioning"]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _run_minio_barrier(
+    tmp_path: Path, workload: dict[str, Any], reply: str
+) -> tuple[int, list[str]]:
+    calls = _fake_mc(tmp_path)
+    barrier = _minio_barrier(workload)
+    assert barrier["command"][:2] == ["/bin/sh", "-c"]
+    result = subprocess.run(
+        ["/bin/bash", "-c", barrier["command"][2]],
+        capture_output=True,
+        text=True,
+        env={
+            **_literal_env(barrier),
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "MC_CALLS": str(calls),
+            "MC_BUCKET_ARGS": str(tmp_path / "mc-buckets"),
+            "MC_VERSION_INFO": reply,
+            "MC_INFO_FAIL": "0",
+        },
+    )
+    return result.returncode, calls.read_text().splitlines()
+
+
 def _container(workload: dict[str, Any]) -> dict[str, Any]:
     return workload["spec"]["template"]["spec"]["containers"][0]
+
+
+def test_bundled_app_workloads_share_minio_versioning_startup_barrier() -> None:
+    barriers = {proc: _minio_barrier(workload) for proc, workload in _bundled_workloads().items()}
+    assert set(barriers) == set(_WORKLOAD_KINDS)
+    assert len({barrier["command"][2] for barrier in barriers.values()}) == 1
+    for proc, barrier in barriers.items():
+        assert barrier["image"].startswith("minio/mc:"), proc
+        env = {entry["name"]: entry["value"] for entry in barrier["env"]}
+        assert env["MC_CONFIG_DIR"] == "/tmp/.mc", proc
+        assert env["MC_BUCKET"] == "kdive-artifacts", proc
+        assert set(env) == {"MC_CONFIG_DIR", "MC_USER", "MC_PASS", "MC_BUCKET"}, proc
+
+
+def test_external_app_workloads_omit_minio_versioning_startup_barrier() -> None:
+    for proc, workload in _workloads().items():
+        names = {
+            item["name"] for item in workload["spec"]["template"]["spec"].get("initContainers", [])
+        }
+        assert "verify-minio-versioning" not in names, proc
+
+
+@pytest.mark.parametrize("proc", list(_WORKLOAD_KINDS))
+def test_bundled_minio_barrier_allows_only_compatible_policy(tmp_path: Path, proc: str) -> None:
+    workload = _bundled_workloads()[proc]
+    barrier_env = _literal_env(_minio_barrier(workload))
+    compatible = (
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}'
+    )
+    returncode, calls = _run_minio_barrier(tmp_path / "ok", workload, compatible)
+    assert returncode == 0
+    assert calls == [
+        "alias set local http://kdive-kdive-minio:9000 "
+        f"{barrier_env['MC_USER']} {barrier_env['MC_PASS']}",
+        "version info --json local/kdive-artifacts",
+    ]
+
+    incompatible = (
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Suspended","MFADelete":""}}'
+    )
+    returncode, calls = _run_minio_barrier(tmp_path / "bad", workload, incompatible)
+    assert returncode != 0
+    assert calls[-1] == "version info --json local/kdive-artifacts"
+
+
+def test_bundled_minio_barrier_uses_configured_bucket(tmp_path: Path) -> None:
+    workload = _bundled_workloads("config.KDIVE_S3_BUCKET=custom-artifacts")["server"]
+    reply = (
+        '{"Op":"info","status":"success","url":"local/custom-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":[]}}'
+    )
+    returncode, calls = _run_minio_barrier(tmp_path, workload, reply)
+    assert returncode == 0
+    assert calls[-1] == "version info --json local/custom-artifacts"
+
+
+@pytest.mark.parametrize(("_case", "bucket_pattern"), _SHELL_BUCKET_CASES)
+def test_bundled_minio_barrier_passes_bucket_as_literal_data(
+    tmp_path: Path, _case: str, bucket_pattern: str
+) -> None:
+    sentinel = tmp_path / "shell-executed"
+    bucket_value = bucket_pattern.format(sentinel=sentinel)
+    rendered = _template_bundled_bucket(bucket_value)
+    workload = _rendered_app_workloads_from_render(rendered)["server"]
+    barrier = _minio_barrier(workload)
+    assert bucket_value not in barrier["command"][2]
+    assert _literal_env(barrier)["MC_BUCKET"] == bucket_value
+
+    reply = (
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}'
+    )
+    returncode, _calls = _run_minio_barrier(tmp_path, workload, reply)
+    assert returncode == 0
+    assert not sentinel.exists()
+    assert (tmp_path / "mc-buckets").read_text().splitlines() == [f"local/{bucket_value}"]
 
 
 @pytest.mark.parametrize("proc", list(_AUX_PORTS))
@@ -500,6 +827,61 @@ def test_bundled_renders_demo_backends() -> None:
     # worker is the one StatefulSet (ADR-0514).
     assert res.stdout.count("kind: Deployment") == 5
     assert res.stdout.count("kind: StatefulSet") == 1
+
+
+@pytest.mark.parametrize(("_case", "reply", "expected"), _VERSIONING_REPLIES)
+def test_bundled_minio_init_fails_closed_on_bucket_versioning(
+    tmp_path: Path, _case: str, reply: str, expected: int
+) -> None:
+    returncode, calls = _run_minio_init(tmp_path, reply)
+    assert (returncode == 0) is (expected == 0), _case
+    bucket = "local/kdive-artifacts"
+    assert calls[1:] == [
+        f"mb --ignore-existing {bucket}",
+        f"version enable {bucket}",
+        f"version info --json {bucket}",
+    ]
+
+
+def test_bundled_minio_init_uses_configured_bucket(tmp_path: Path) -> None:
+    container = _minio_init_container("config.KDIVE_S3_BUCKET=custom-artifacts")
+    reply = (
+        '{"Op":"info","status":"success","url":"local/custom-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}'
+    )
+    returncode, calls = _run_minio_init(tmp_path, reply, container=container)
+    assert returncode == 0
+    assert calls[1:] == [
+        "mb --ignore-existing local/custom-artifacts",
+        "version enable local/custom-artifacts",
+        "version info --json local/custom-artifacts",
+    ]
+
+
+@pytest.mark.parametrize(("_case", "bucket_pattern"), _SHELL_BUCKET_CASES)
+def test_bundled_minio_init_passes_bucket_as_literal_data(
+    tmp_path: Path, _case: str, bucket_pattern: str
+) -> None:
+    sentinel = tmp_path / "shell-executed"
+    bucket_value = bucket_pattern.format(sentinel=sentinel)
+    container = _minio_init_container_from_render(_template_bundled_bucket(bucket_value))
+    assert bucket_value not in container["command"][2]
+    assert _literal_env(container)["MC_BUCKET"] == bucket_value
+
+    reply = (
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}'
+    )
+    returncode, _calls = _run_minio_init(tmp_path, reply, container=container)
+    assert returncode == 0
+    assert not sentinel.exists()
+    assert (tmp_path / "mc-buckets").read_text().splitlines() == [f"local/{bucket_value}"] * 3
+
+
+def test_bundled_minio_init_propagates_version_info_command_failure(tmp_path: Path) -> None:
+    returncode, calls = _run_minio_init(tmp_path, "", info_fails=True)
+    assert returncode != 0
+    assert calls[-1] == "version info --json local/kdive-artifacts"
 
 
 def test_external_path_has_no_demo_backends() -> None:

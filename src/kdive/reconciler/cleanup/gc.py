@@ -117,12 +117,18 @@ ROOTFS_STAGING_DRAIN_BACKOFF = timedelta(hours=6)
 #: ``console``/``vmcore`` (system-owned crash evidence). Both sweeps also pin ``owner_kind='runs'``,
 #: so operator base-image uploads (system-owned) are out of scope.
 _BUILD_RETENTION_CLASSES: tuple[str, ...] = ("build", "kernel-build")
+_SYSTEM_TEARDOWN_ARTIFACT_PATTERNS: tuple[str, ...] = (
+    "%console-part-%",
+    "%sysrq-diagnostic-%",
+)
+_SYSTEM_ARTIFACT_KEYS_PER_PASS = 10
+_SYSTEM_ARTIFACT_CURSOR_LANE = "row-backed"
 
 
 class ArtifactObjectDeleter(Protocol):
-    """The object-store delete surface the report-artifact reaper needs."""
+    """The bounded retired-key delete surface the artifact reapers need."""
 
-    def delete(self, key: str) -> None: ...
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool: ...
 
 
 async def gc_idempotency_keys(conn: AsyncConnection, retention: timedelta) -> int:
@@ -157,12 +163,18 @@ async def gc_report_artifacts(
     deleted = 0
     for artifact_id, object_key in candidates:
         try:
-            await asyncio.to_thread(store.delete, object_key)
+            complete = await asyncio.to_thread(store.delete_retired_key_batch, object_key, 20)
         except Exception:  # noqa: BLE001 - one object failure must not starve the rest
             _log.warning(
                 "reconciler: deleting report artifact object %s failed; retry next pass",
                 object_key,
                 exc_info=True,
+            )
+            continue
+        if not complete:
+            _log.info(
+                "reconciler: report artifact object %s has more retired versions; retry next pass",
+                object_key,
             )
             continue
         async with conn.transaction(), conn.cursor() as cur:
@@ -171,6 +183,76 @@ async def gc_report_artifacts(
     if deleted:
         _log.info("reconciler: GC'd %d report artifact(s) past retention", deleted)
     return deleted
+
+
+async def gc_system_artifacts(conn: AsyncConnection, store: ArtifactObjectDeleter) -> int:
+    """Finish bounded retirement for artifact rows retained on gone Systems.
+
+    Teardown gives each console-part and diagnostic SysRq key one bounded attempt. An incomplete
+    history or store fault retains its row, and this recurring repair retries one bounded batch per
+    row on every pass. The row is removed only after the store reports the retired key complete.
+    """
+    async with conn.transaction():
+        observed = await _read_system_artifact_cursor(conn)
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT a.id, a.object_key FROM artifacts a JOIN systems s ON s.id = a.owner_id "
+            "WHERE a.owner_kind = 'systems' AND s.state = ANY(%s) "
+            "AND a.object_key LIKE ANY(%s) "
+            "ORDER BY CASE WHEN %s::uuid IS NOT NULL AND a.id <= %s::uuid THEN 1 ELSE 0 END, "
+            "a.id LIMIT %s",
+            (
+                list(gone_system_state_values()),
+                list(_SYSTEM_TEARDOWN_ARTIFACT_PATTERNS),
+                observed,
+                observed,
+                _SYSTEM_ARTIFACT_KEYS_PER_PASS,
+            ),
+        )
+        candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
+    deleted = 0
+    for artifact_id, object_key in candidates:
+        try:
+            complete = await asyncio.to_thread(store.delete_retired_key_batch, object_key, 20)
+        except Exception:  # noqa: BLE001 - one object failure must not starve sibling rows
+            _log.warning(
+                "reconciler: deleting gone-System artifact object %s failed; retry next pass",
+                object_key,
+                exc_info=True,
+            )
+            continue
+        if not complete:
+            _log.info(
+                "reconciler: gone-System artifact object %s has more retired versions; "
+                "retry next pass",
+                object_key,
+            )
+            continue
+        async with conn.transaction():
+            await conn.execute("DELETE FROM artifacts WHERE id = %s", (artifact_id,))
+        deleted += 1
+    if deleted:
+        _log.info("reconciler: GC'd %d gone-System artifact(s)", deleted)
+    next_cursor = str(candidates[-1][0]) if candidates else None
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE system_object_sweep_cursors SET after_key = %s, updated_at = now() "
+            "WHERE lane = %s AND after_key IS NOT DISTINCT FROM %s",
+            (next_cursor, _SYSTEM_ARTIFACT_CURSOR_LANE, observed),
+        )
+    return deleted
+
+
+async def _read_system_artifact_cursor(conn: AsyncConnection) -> str | None:
+    row = await (
+        await conn.execute(
+            "SELECT after_key FROM system_object_sweep_cursors WHERE lane = %s",
+            (_SYSTEM_ARTIFACT_CURSOR_LANE,),
+        )
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("system_object_sweep_cursors has no row-backed lane")
+    return row[0]
 
 
 async def gc_investigation_artifacts(
@@ -205,12 +287,20 @@ async def gc_investigation_artifacts(
         drained = True
         for artifact_id, object_key in candidates:
             try:
-                await asyncio.to_thread(store.delete, object_key)
+                complete = await asyncio.to_thread(store.delete_retired_key_batch, object_key, 20)
             except Exception:  # noqa: BLE001 - one object failure must not starve the rest
                 _log.warning(
                     "reconciler: deleting investigation artifact object %s failed; retry next pass",
                     object_key,
                     exc_info=True,
+                )
+                drained = False
+                continue
+            if not complete:
+                _log.info(
+                    "reconciler: investigation artifact object %s has more retired versions; "
+                    "retry next pass",
+                    object_key,
                 )
                 drained = False
                 continue
@@ -248,12 +338,19 @@ async def gc_expired_build_artifacts(
     deleted = 0
     for artifact_id, object_key in candidates:
         try:
-            await asyncio.to_thread(store.delete, object_key)
+            complete = await asyncio.to_thread(store.delete_retired_key_batch, object_key, 20)
         except Exception:  # noqa: BLE001 - one object failure must not starve the rest
             _log.warning(
                 "reconciler: deleting expired build artifact object %s failed; retry next pass",
                 object_key,
                 exc_info=True,
+            )
+            continue
+        if not complete:
+            _log.info(
+                "reconciler: expired build artifact object %s has more retired versions; "
+                "retry next pass",
+                object_key,
             )
             continue
         async with conn.transaction(), conn.cursor() as cur:

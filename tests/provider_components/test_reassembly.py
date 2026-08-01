@@ -32,7 +32,11 @@ class _FakeStore:
         if key in sizes:
             size, sha = sizes[key]
             return HeadResult(
-                size_bytes=size, checksum_sha256=sha, etag="e", last_modified=STORE_MTIME
+                size_bytes=size,
+                checksum_sha256=sha,
+                etag="e",
+                last_modified=STORE_MTIME,
+                version_id="test-version",
             )
         return None
 
@@ -68,11 +72,19 @@ def _entry() -> ManifestEntry:
 
 def test_reassemble_verifies_copies_in_order_completes() -> None:
     store = _FakeStore()
-    reassemble_chunked(store, prefix=_PREFIX, final_key=_FINAL, entry=_entry())
+    heads = reassemble_chunked(store, prefix=_PREFIX, final_key=_FINAL, entry=_entry())
     assert [e[0] for e in store.events] == ["create", "copy", "copy", "complete"]
     assert store.events[1][1] == 1
     assert store.events[2][1] == 2
     assert store.events[3][1] == ((1, "etag-1"), (2, "etag-2"))
+    assert heads == {
+        f"{_PREFIX}vmlinux.part0001": HeadResult(
+            6, "c0", "e", last_modified=STORE_MTIME, version_id="test-version"
+        ),
+        f"{_PREFIX}vmlinux.part0002": HeadResult(
+            4, "c1", "e", last_modified=STORE_MTIME, version_id="test-version"
+        ),
+    }
 
 
 def test_reassemble_passes_expected_arguments_to_store() -> None:

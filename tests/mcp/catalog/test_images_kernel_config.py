@@ -53,7 +53,11 @@ class _FakeStore:
         if key not in self._present:
             return None
         return HeadResult(
-            size_bytes=self._size, checksum_sha256=None, etag="etag", last_modified=STORE_MTIME
+            size_bytes=self._size,
+            checksum_sha256=None,
+            etag="etag",
+            last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
     def presign_get(self, key: str, *, expires_in: int) -> str:

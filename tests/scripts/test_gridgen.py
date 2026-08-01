@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
+
+import scripts.coverage_campaign.gridgen as gridgen
+from kdive.store.assembly import ObjectStoreAssembly
 from scripts.coverage_campaign.gridgen import generate_rows
 
 
@@ -20,3 +26,22 @@ def test_generate_rows_is_nonempty_and_unique() -> None:
     names = [r.tool for r in rows]
     assert len(names) > 50
     assert len(names) == len(set(names))
+
+
+def test_grid_generation_injects_an_offline_object_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _App:
+        async def list_tools(self) -> list[Any]:
+            return []
+
+    def _build_app(*args: Any, **kwargs: Any) -> _App:
+        captured.update(kwargs)
+        return _App()
+
+    monkeypatch.setattr(gridgen, "build_app", _build_app)
+
+    assert gridgen._build_tools() == []
+    assert isinstance(captured["object_store_assembly"], ObjectStoreAssembly)

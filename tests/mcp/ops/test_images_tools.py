@@ -74,7 +74,15 @@ class _FakeImageStore:
     def head_present(self, key: str) -> bool:
         return key not in self.deleted
 
-    def delete(self, key: str) -> None:
+    def head(self, key: str) -> None:
+        return None
+
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
+        self.deleted.append(key)
+        return True
+
+    def delete_version(self, key: str, version_id: str) -> None:
         self.deleted.append(key)
 
     def put_artifact(
@@ -85,6 +93,7 @@ class _FakeImageStore:
             etag="etag",
             sensitivity=request.sensitivity,
             retention_class=request.retention_class,
+            version_id="test-version",
         )
 
 

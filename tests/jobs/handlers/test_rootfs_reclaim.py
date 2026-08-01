@@ -3,8 +3,8 @@
 The reclaim's filesystem half moved from the reconciler to the worker because a root-owned staging
 tree is not writable by an unprivileged reconciler. These cover the regression that motivated the
 move, the ADR-0441 §6 pin gate and the ADR-0495 in-flight-download gate the handler enforces ahead
-of it, the flipped file -> object -> row order, and the drain/marker bookkeeping that replaced the
-sweep's per-pass ``drained`` flag.
+of it, capture before the staged-base/row retirement transaction, post-commit exact-version
+deletion, and the drain/marker bookkeeping that replaced the sweep's per-pass ``drained`` flag.
 
 Async-DB tests follow the in-repo pattern: a sync ``def test_(migrated_url)`` with an inner
 ``async def _run()`` driven by ``asyncio.run``.
@@ -19,9 +19,7 @@ import fcntl
 import hashlib
 import json
 import os
-import threading
-import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,8 +31,9 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.artifacts.content_address import rootfs_object_token
+from kdive.artifacts.storage import ObjectVersion, VersionBatch
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job, JobKind, JobState
 from kdive.jobs.handlers.artifacts import rootfs_reclaim
 from kdive.jobs.handlers.artifacts.rootfs_reclaim import (
@@ -60,16 +59,49 @@ _CHECKSUM_Y = _checksum(b"rootfs-y")
 
 
 class _RecordingStore:
-    """An object store that records deletes, optionally failing on a chosen key."""
+    """A version-aware object store that records one complete version per key."""
 
-    def __init__(self, fail_on: str | None = None) -> None:
+    def __init__(
+        self,
+        fail_on: str | None = None,
+        *,
+        before_delete: Callable[[], None] | None = None,
+    ) -> None:
         self.deleted: list[str] = []
+        self.capture_limits: list[tuple[str, int]] = []
         self._fail_on = fail_on
+        self._before_delete = before_delete
 
-    def delete(self, key: str) -> None:
-        if key == self._fail_on:
-            raise RuntimeError(f"store delete of {key} failed")
-        self.deleted.append(key)
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch:
+        self.capture_limits.append((key, limit))
+        target = ObjectVersion(
+            key=key,
+            version_id=f"version-of-{key}",
+            last_modified=_FROZEN,
+            etag=f"etag-of-{key}",
+            is_latest=True,
+            is_delete_marker=False,
+        )
+        return VersionBatch(key=key, targets=(target,), history_complete=True)
+
+    def delete_batch(self, batch: VersionBatch) -> bool:
+        if self._before_delete is not None:
+            self._before_delete()
+        if batch.key == self._fail_on:
+            raise RuntimeError(f"store version-batch delete of {batch.key} failed")
+        self.deleted.append(batch.key)
+        return batch.history_complete
+
+
+def _advisory_locks_held_by(url: str, backend_pid: int) -> int:
+    """Count advisory locks held by ``backend_pid`` from a second connection."""
+    with psycopg.connect(url, autocommit=True) as observer:
+        row = observer.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = %s AND granted",
+            (backend_pid,),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 def _object_key(inv: UUID) -> str:
@@ -224,7 +256,9 @@ def _dirs(tmp_path: Path) -> tuple[Path, Path]:
 
 def test_reclaims_base_object_row_and_marker(migrated_url: str, tmp_path: Path) -> None:
     # The path #1522 had no working version of: a closed investigation past grace whose only
-    # referencer is torn_down drains completely — staged base, object, row, marker, staging dir.
+    # referencer is torn_down drains completely — immutable history captured first, staged base and
+    # row retired together, captured version exact-deleted after commit, then marker and staging
+    # directory cleared.
     inv = uuid4()
 
     async def _run() -> None:
@@ -256,6 +290,55 @@ def test_reclaims_base_object_row_and_marker(migrated_url: str, tmp_path: Path) 
     asyncio.run(_run())
 
 
+def test_rootfs_delete_runs_after_row_commit_and_investigation_unlock(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    """The exact-version delete starts only after the retirement transaction commits."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+        rootfs_dir, uploads = _dirs(tmp_path)
+        _stage(uploads, inv)
+        observations: list[tuple[int, bool]] = []
+        handler = await connect(migrated_url)
+
+        def _observe_delete() -> None:
+            with psycopg.connect(migrated_url, autocommit=True) as observer:
+                row = observer.execute(
+                    "SELECT EXISTS (SELECT 1 FROM artifacts WHERE id = %s)",
+                    (artifact_id,),
+                ).fetchone()
+            assert row is not None
+            observations.append(
+                (
+                    _advisory_locks_held_by(migrated_url, handler.info.backend_pid),
+                    bool(row[0]),
+                )
+            )
+
+        store = _RecordingStore(before_delete=_observe_delete)
+        try:
+            assert (
+                await reclaim_investigation_rootfs_handler(
+                    handler,
+                    _job(inv, [artifact_id]),
+                    artifact_store=store,
+                    rootfs_dir=str(rootfs_dir),
+                    uploads_dir=str(uploads),
+                )
+                == "1"
+            )
+        finally:
+            await handler.close()
+
+        assert store.capture_limits == [(_object_key(inv), 1000)]
+        assert observations == [(0, False)]
+
+    asyncio.run(_run())
+
+
 @pytest.mark.skipif(
     os.geteuid() == 0, reason="a root process ignores directory write bits, so EPERM cannot be set"
 )
@@ -265,8 +348,9 @@ def test_unlink_permission_fault_never_deletes_the_object_or_row(
     # #1522's regression, with the real EPERM the live proof hit (dropping the staging dir's write
     # bit blocks unlink even for the file's owner) rather than root. The harm was that the object
     # was ALREADY gone by the time the unlink failed, stranding a bootable SENSITIVE base with no
-    # recoverable copy. Under ADR-0442's file -> object -> row order that is structurally
-    # impossible: nothing is deleted, and the job fails loudly instead of warning every 30 s.
+    # recoverable copy. The current order captures immutable history first, then attempts the base
+    # unlink before row retirement; a failed unlink rolls back that transaction and prevents the
+    # post-commit exact delete, so the job fails loudly with both copies still owned.
     inv = uuid4()
 
     async def _run() -> None:
@@ -355,11 +439,11 @@ def test_a_marker_unlink_fault_defers_the_whole_checksum(migrated_url: str, tmp_
     asyncio.run(_run())
 
 
-def test_unlinks_the_staged_base_before_deleting_the_object(
+def test_delete_failure_leaves_a_rowless_version_for_orphan_repair(
     migrated_url: str, tmp_path: Path
 ) -> None:
-    # ADR-0442 §4: file -> object -> row. A store fault must therefore find the local SENSITIVE
-    # base already gone (the copy worth losing first) and leave the row for the retry.
+    # ADR-0524: the base and row retire under the owner lock before exact deletion. A store fault
+    # therefore leaves a rowless immutable version for the upload orphan sweep, not a restored row.
     inv = uuid4()
 
     async def _run() -> None:
@@ -380,21 +464,10 @@ def test_unlinks_the_staged_base_before_deleting_the_object(
         assert not staged.exists()  # the local base went first
         check = await connect(migrated_url)
         try:
-            assert await _row_exists(check, artifact_id)  # row kept: the object survives
-            assert await _marker(check, inv) is not None
+            assert not await _row_exists(check, artifact_id)
+            assert await _marker(check, inv) is None
         finally:
             await check.close()
-
-        # The retry converges: the unlink is now ENOENT (success) and the delete succeeds.
-        ok_store = _RecordingStore()
-        assert await _run_handler(migrated_url, inv, [artifact_id], ok_store, rootfs_dir, uploads)
-        assert ok_store.deleted == [_object_key(inv)]
-        check2 = await connect(migrated_url)
-        try:
-            assert not await _row_exists(check2, artifact_id)
-            assert await _marker(check2, inv) is None
-        finally:
-            await check2.close()
 
     asyncio.run(_run())
 
@@ -601,10 +674,11 @@ def test_marker_survives_a_partially_drained_investigation(
 def test_the_first_fault_stops_the_loop_and_fails_the_job(
     migrated_url: str, tmp_path: Path
 ) -> None:
-    # A refusing store is a store-wide condition and the delete budget is per-call, so pressing on
-    # through the worklist would multiply that budget by its length while the worker slot and the
-    # INVESTIGATION lock stay held. The loop stops at the first real fault; the untouched checksums
-    # keep their rows and are re-attempted by the next sweep, and the job fails so it is visible.
+    # A refusing store is a store-wide condition, so pressing on through the worklist would multiply
+    # the store client's retry budget while occupying the worker. Exact deletion happens after the
+    # owner transaction, with no INVESTIGATION lock held. The loop still stops at the first real
+    # fault: the failed checksum's row is already retired for version-orphan recovery, untouched
+    # checksums keep their rows for the next row-driven sweep, and the job fails so it is visible.
     inv = uuid4()
 
     async def _run() -> None:
@@ -628,7 +702,7 @@ def test_the_first_fault_stops_the_loop_and_fails_the_job(
         assert store.deleted == []  # the second checksum was never attempted
         check = await connect(migrated_url)
         try:
-            assert await _row_exists(check, faulting)  # deferred before its row delete
+            assert not await _row_exists(check, faulting)  # committed before the exact-delete fault
             assert await _row_exists(check, untouched)
             assert await _marker(check, inv) is not None
         finally:
@@ -687,64 +761,18 @@ def test_investigation_lock_serializes_a_concurrent_bind(migrated_url: str, tmp_
     asyncio.run(_run())
 
 
-def test_a_hung_store_delete_is_bounded_and_defers_the_checksum(
-    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The delete runs inside the transaction holding the INVESTIGATION lock, and the TTL backstop
-    # reclaims live open/active investigations — so an unbounded store call would stall a bind, a
-    # close, or a runs.create. The budget must fire, the checksum must defer with its row kept, and
-    # the TimeoutError must surface as the handler's INFRASTRUCTURE_FAILURE rather than escaping.
-    monkeypatch.setattr(rootfs_reclaim, "_STORE_DELETE_TIMEOUT_S", 0.2)
-    released = threading.Event()
-    inv = uuid4()
-
-    class _HangingStore:
-        def __init__(self) -> None:
-            self.deleted: list[str] = []
-
-        def delete(self, key: str) -> None:
-            released.wait(timeout=30)
-            self.deleted.append(key)
-
-    async def _run() -> None:
-        nonlocal inv
-        seed = await connect(migrated_url)
-        try:
-            inv = await _seed_investigation(seed, state="open", closed=False)
-            artifact_id = await _seed_rootfs_row(seed, inv)
-        finally:
-            await seed.close()
-        rootfs_dir, uploads = _dirs(tmp_path)
-        staged = _stage(uploads, inv)
-        store = _HangingStore()
-
-        try:
-            started = time.monotonic()
-            with pytest.raises(CategorizedError) as excinfo:
-                await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads)
-            assert time.monotonic() - started < 10  # bounded well inside the real 10 s budget
-            assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-        finally:
-            # Release before the loop shuts its executor down, or asyncio.run waits out the thread.
-            released.set()
-
-        assert not staged.exists()  # the local base went first, as ordered
-        check = await connect(migrated_url)
-        try:
-            assert await _row_exists(check, artifact_id)  # deferred before the row delete
-        finally:
-            await check.close()
-
-    asyncio.run(_run())
+def test_rootfs_reclaim_has_no_application_store_timeout() -> None:
+    """Store I/O uses its client budget and exact deletion holds no owner transaction or lock."""
+    assert not hasattr(rootfs_reclaim, "_STORE_DELETE_TIMEOUT_S")
 
 
 def test_reclaim_reconverges_when_both_targets_are_already_absent(
     migrated_url: str, tmp_path: Path
 ) -> None:
-    # The property the file->object->row order, the fault contract, and the "a worker that dies
-    # mid-reclaim resumes" claim all rest on: an already-unlinked base (ENOENT) and an already-gone
-    # object (a 404 the store no-ops) are SUCCESS, so a re-attempt after a partial run completes
-    # the row delete instead of wedging.
+    # The property the capture -> staged-base/row commit -> exact-delete order and the "a worker
+    # that dies mid-reclaim resumes" claim rest on: an already-unlinked base (ENOENT) and an
+    # already-gone captured version (a 404 the store no-ops) are success, so a re-attempt after a
+    # partial run reconverges instead of wedging.
     inv = uuid4()
 
     async def _run() -> None:
@@ -794,11 +822,11 @@ def test_a_live_held_partial_defers_its_own_checksum_whole(
     # that requested this base is torn_down, so _ROOTFS_REFERENCERS_SQL does not even consider it
     # and the ADR-0441 §6 gate calls the base reclaimable — while the detached, uncancellable
     # download is still writing its partial. ADR-0452 stopped the drain *sweep* from destroying that
-    # partial, but _reclaim_one_checksum still ran first and unlinked the staged base, deleted the
-    # object and deleted the row out from under the download, which on the ranged-GET path turns the
-    # rest of that download into 404s. ADR-0495 asks the kernel the same question one step earlier,
-    # so the checksum defers whole: base, object and row all survive, and the surviving row is what
-    # keeps the investigation on the row-driven worklist for the next pass.
+    # partial, but _reclaim_one_checksum could otherwise unlink the staged base, retire the row, and
+    # exact-delete the captured versions after commit. On the ranged-GET path that turns the rest of
+    # the download into 404s. ADR-0495 asks the kernel the same question before retirement, so the
+    # checksum defers whole: base, object and row all survive, and the surviving row is what keeps
+    # the investigation on the row-driven worklist for the next pass.
     inv = uuid4()
 
     async def _run() -> None:
@@ -1242,15 +1270,13 @@ def _orphan_base(uploads: Path, inv: UUID) -> tuple[Path, Path]:
     return orphan, marker
 
 
-def test_an_orphan_base_is_collected_even_though_a_faulting_checksum_keeps_its_row(
+def test_an_orphan_base_is_collected_after_a_faulting_checksum_retires_its_row(
     migrated_url: str, tmp_path: Path
 ) -> None:
-    # Residual (c) of #1559. A store that refuses the delete keeps the checksum's row, and
-    # ADR-0442's drain tail returned early on any surviving row -- so the staging directory was
-    # never swept again and an orphan base beside it was collected by nothing, indefinitely.
-    # ADR-0494 keys the
-    # collection on each file's own token, so the orphan goes while the faulting row's own base and
-    # marker (already unlinked here, ahead of the failed store delete) are untouched.
+    # The current order captures first, commits the staged-base unlink and row retirement, then
+    # attempts exact delete; a store fault therefore leaves a rowless version for orphan repair.
+    # ADR-0494's token-keyed staging sweep also collects the neighbouring orphan before the handler
+    # reports that post-commit fault.
     inv = uuid4()
 
     async def _run() -> None:
@@ -1274,8 +1300,8 @@ def test_an_orphan_base_is_collected_even_though_a_faulting_checksum_keeps_its_r
         assert not orphan_marker.exists()
         check = await connect(migrated_url)
         try:
-            assert await _row_exists(check, artifact_id)  # the faulting row is still retained ...
-            assert await _marker(check, inv) is not None  # ... and so is the drain marker
+            assert not await _row_exists(check, artifact_id)
+            assert await _marker(check, inv) is None
         finally:
             await check.close()
 
@@ -1445,8 +1471,9 @@ def test_a_live_held_fetch_lease_pins_the_base_with_no_partial_yet(
     # is in a pin-dropping terminal state. Neither older gate sees the download —
     # _ROOTFS_REFERENCERS_SQL excludes torn_down outright and FAILED is outside
     # ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES, so the ADR-0441 §6 classifier calls the base
-    # reclaimable, and there is no partial for the ADR-0495 flock probe to find. Before ADR-0515
-    # the base, the object and the row were all deleted out from under a live download.
+    # reclaimable, and there is no partial for the ADR-0495 flock probe to find. Before ADR-0515 the
+    # handler could capture versions, commit the staged-base unlink and row retirement, then
+    # exact-delete the captured versions out from under a live download.
     #
     # Both terminal states are parametrized because the issue names both and they defeat the
     # classifier for *different* reasons; a fix closing only one would pass a single-state test.

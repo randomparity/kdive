@@ -59,13 +59,11 @@ class _FakeStore:
             etag="etag",
             sensitivity=request.sensitivity,
             retention_class=request.retention_class,
+            version_id="test-version",
         )
 
     def presign_get(self, key: str, *, expires_in: int) -> str:
         return f"https://signed.test/{key}"
-
-    def delete(self, key: str) -> None:  # pragma: no cover - unused in these tests
-        pass
 
 
 def _store_factory() -> ReportArtifactStore:

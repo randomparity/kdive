@@ -32,7 +32,13 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import upload_manifest
-from kdive.artifacts.storage import HeadResult, ObjectListing
+from kdive.artifacts.storage import (
+    HeadResult,
+    ObjectListing,
+    ObjectVersion,
+    VersionBatch,
+    VersionPage,
+)
 from kdive.artifacts.upload_manifest import (
     INVESTIGATION_UPLOAD_OWNER,
     RUN_UPLOAD_OWNER,
@@ -84,6 +90,41 @@ class _LeaseFakeStore:
     def list_prefix(self, prefix: str) -> list[str]:
         return sorted(k for k in self._objects if k.startswith(prefix))
 
+    def list_version_page(
+        self,
+        prefix: str,
+        *,
+        key_marker: str | None = None,
+        version_id_marker: str | None = None,
+        max_keys: int = 1000,
+    ) -> VersionPage:
+        del version_id_marker
+        keys = [key for key in self.list_prefix(prefix) if key_marker is None or key > key_marker]
+        keys = keys[:max_keys]
+        entries = tuple(
+            ObjectVersion(
+                key=key,
+                version_id=f"version-of-{key}",
+                last_modified=self._mtime(self._objects[key]),
+                etag=f"etag-of-{key}",
+                is_latest=True,
+                is_delete_marker=False,
+            )
+            for key in keys
+        )
+        return VersionPage(entries, False, None, None)
+
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch:
+        del limit
+        page = self.list_version_page(key)
+        exact = tuple(version for version in page.entries if version.key == key)
+        return VersionBatch(key, exact, True)
+
+    def delete_batch(self, batch: VersionBatch) -> bool:
+        self.deleted.append(batch.key)
+        self._objects.pop(batch.key, None)
+        return batch.history_complete
+
     def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[ObjectListing]]:
         listing = [
             ObjectListing(key=key, last_modified=self._mtime(self._objects[key]))
@@ -101,11 +142,8 @@ class _LeaseFakeStore:
             size_bytes=1,
             last_modified=self._mtime(age),
             checksum_sha256=None,
+            version_id="test-version",
         )
-
-    def delete(self, key: str) -> None:
-        self.deleted.append(key)
-        self._objects.pop(key, None)
 
     @staticmethod
     def _mtime(age: timedelta) -> datetime:

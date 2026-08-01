@@ -167,6 +167,13 @@ class _StoreReply:
             return None
         return self.required(field, expected)
 
+    def required_nonempty_string(self, field: str) -> str:
+        """Return a required nonempty string field from a successful store response."""
+        value = self.required(field, str)
+        if not value:
+            raise self._malformed(field, f"returned {field!r} as an empty string")
+        return value
+
     def _malformed(self, field: str, problem: str) -> CategorizedError:
         return CategorizedError(
             f"object-store {self.op} for {self.subject!r} in bucket {self.bucket!r} {problem}; "
@@ -219,7 +226,7 @@ class ObjectStore:
     def put_artifact(
         self, request: artifact_types.ArtifactWriteRequest
     ) -> artifact_types.StoredArtifact:
-        """Write ``data`` under the key scheme; return its key, etag, and class.
+        """Write ``data`` under the key scheme; return its key, etag, class, and VersionId.
 
         The object carries the request's ``sensitivity`` and ``retention_class`` as user metadata.
         Async callers must offload this call via ``asyncio.to_thread``.
@@ -245,11 +252,13 @@ class ObjectStore:
             )
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("put_object", key, err) from err
+        reply = _StoreReply("put_object", self._bucket, key, resp)
         return artifact_types.StoredArtifact(
             key,
-            _normalize_etag(resp["ETag"]),
+            _normalize_etag(reply.required_nonempty_string("ETag")),
             request.sensitivity,
             request.retention_class,
+            reply.required_nonempty_string("VersionId"),
         )
 
     def put_stream(
@@ -259,7 +268,8 @@ class ObjectStore:
 
         Used by callers holding a large artifact on local disk (the spooled host_dump core,
         ADR-0094): the open file handle is the PUT body, so boto3 streams it in chunks rather
-        than the whole object being read into RAM. The object carries the request's
+        than the whole object being read into RAM. The returned value carries the observed
+        immutable VersionId. The object carries the request's
         ``sensitivity``/``retention_class`` as user metadata, matching :meth:`put_artifact`,
         and ``request.sha256_b64`` is sent as ``ChecksumSHA256`` so S3 rejects the PUT if the
         streamed body does not hash to it (the end-to-end integrity binding) and a later
@@ -288,11 +298,13 @@ class ObjectStore:
             raise _infrastructure_error("put_object", key, err) from err
         except OSError as err:
             raise _local_stream_error(key, str(request.path), err) from err
+        reply = _StoreReply("put_object", self._bucket, key, resp)
         return artifact_types.StoredArtifact(
             key,
-            _normalize_etag(resp["ETag"]),
+            _normalize_etag(reply.required_nonempty_string("ETag")),
             request.sensitivity,
             request.retention_class,
+            reply.required_nonempty_string("VersionId"),
         )
 
     def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact:
@@ -393,13 +405,51 @@ class ObjectStore:
 
         Raises:
             CategorizedError: the bucket is unreachable or absent
-                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`). Async callers offload via
-                ``asyncio.to_thread``.
+                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`), or its versioning is unsuitable
+                for immutable deletion (:attr:`ErrorCategory.CONFIGURATION_ERROR`). Async callers
+                offload via ``asyncio.to_thread``.
         """
         try:
             self._client.head_bucket(Bucket=self._bucket)
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("head_bucket", self._bucket, err) from err
+        self.validate_versioning()
+
+    def validate_versioning(self) -> None:
+        """Require a bucket that supports unattended immutable-version deletion."""
+        try:
+            response = self._client.get_bucket_versioning(Bucket=self._bucket)
+        except (BotoCoreError, ClientError) as err:
+            raise _infrastructure_error("get_bucket_versioning", self._bucket, err) from err
+
+        reply = _StoreReply("get_bucket_versioning", self._bucket, self._bucket, response)
+        status = reply.optional("Status", str)
+        if status != "Enabled":
+            observed = status if status is not None else "missing"
+            raise CategorizedError(
+                f"object-store bucket {self._bucket!r} reports versioning {observed!r}; "
+                "KDIVE requires Status='Enabled'. Enable versioning on a dedicated compatible "
+                "bucket before starting KDIVE.",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "bucket": self._bucket,
+                    "observed_status": observed,
+                    "required_status": "Enabled",
+                },
+            )
+        mfa_delete = reply.optional("MFADelete", str)
+        if mfa_delete == "Enabled":
+            raise CategorizedError(
+                f"object-store bucket {self._bucket!r} has MFA Delete enabled; KDIVE requires "
+                "MFA Delete disabled because unattended version deletion cannot provide an MFA "
+                "proof. Use a dedicated bucket without MFA Delete.",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"bucket": self._bucket, "observed_mfa_delete": mfa_delete},
+            )
+        if mfa_delete not in {None, "Disabled"}:
+            raise reply._malformed(
+                "MFADelete", f"returned unsupported MFADelete state {mfa_delete!r}"
+            )
 
     def head(self, key: str) -> artifact_types.HeadResult | None:
         """Return the object's size/checksum/etag/mtime/sensitivity, or ``None`` if it is absent.
@@ -409,7 +459,8 @@ class ObjectStore:
         uninterpretable), so a caller can gate on the object's own class without fetching
         the body. ``last_modified`` makes this the single-object stat the ADR-0455 orphan
         sweep re-reads a candidate's mtime with, in one round trip whatever else sits under
-        that key's prefix (#1575).
+        that key's prefix (#1575). The result also includes the observed immutable VersionId,
+        including the legacy literal ``"null"``.
 
         Raises:
             CategorizedError: any non-404 store error, or a reply that omits or mistypes one of the
@@ -439,6 +490,7 @@ class ObjectStore:
             checksum_sha256=reply.optional("ChecksumSHA256", str),
             etag=_normalize_etag(reply.required("ETag", str)),
             last_modified=reply.required("LastModified", datetime),
+            version_id=reply.required_nonempty_string("VersionId"),
             sensitivity=sensitivity,
             content_encoding=metadata.get("content-encoding"),
         )
@@ -608,6 +660,169 @@ class ObjectStore:
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("abort_multipart_upload", key, err) from err
 
+    def list_version_page(
+        self,
+        prefix: str,
+        *,
+        key_marker: str | None = None,
+        version_id_marker: str | None = None,
+        max_keys: int = _LIST_PAGE_SIZE,
+    ) -> artifact_types.VersionPage:
+        """Return exactly one bounded page of data versions and delete markers under ``prefix``.
+
+        ``max_keys`` is a count of returned version entries or markers, bounded inclusively from
+        1 through 1,000. A continuation names both S3 markers when advancing within a key; callers
+        resuming after a key's complete history pass only ``key_marker``. A malformed or
+        non-advancing truncated response is an infrastructure failure because a caller cannot
+        safely guess whether it skipped or repeated immutable identities.
+        """
+        if type(max_keys) is not int or not 1 <= max_keys <= _LIST_PAGE_SIZE:
+            raise ValueError(
+                f"max_keys must be an integer from 1 to {_LIST_PAGE_SIZE}, got {max_keys!r}"
+            )
+        request: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Prefix": prefix,
+            "MaxKeys": max_keys,
+        }
+        if key_marker is not None:
+            request["KeyMarker"] = key_marker
+        if version_id_marker is not None:
+            request["VersionIdMarker"] = version_id_marker
+        try:
+            response = self._client.list_object_versions(**request)
+        except (BotoCoreError, ClientError) as err:
+            raise _infrastructure_error("list_object_versions", prefix, err) from err
+        if not isinstance(response, Mapping):
+            malformed = _StoreReply("list_object_versions", self._bucket, prefix, {})
+            raise malformed._malformed(
+                "response", f"returned a {type(response).__name__}, not an object"
+            )
+
+        reply = _StoreReply("list_object_versions", self._bucket, prefix, response)
+        versions = self._version_entries(reply, "Versions", is_delete_marker=False)
+        markers = self._version_entries(reply, "DeleteMarkers", is_delete_marker=True)
+        is_truncated = reply.required("IsTruncated", bool)
+        if not is_truncated:
+            return artifact_types.VersionPage(
+                entries=tuple(sorted([*versions, *markers], key=self._version_sort_key)),
+                is_truncated=False,
+                next_key_marker=None,
+                next_version_id_marker=None,
+            )
+
+        next_key_marker = reply.required_nonempty_string("NextKeyMarker")
+        next_version_id_marker = reply.required_nonempty_string("NextVersionIdMarker")
+        if (next_key_marker, next_version_id_marker) == (key_marker, version_id_marker):
+            raise reply._malformed("NextKeyMarker", "returned a non-advancing truncated page")
+        return artifact_types.VersionPage(
+            entries=tuple(sorted([*versions, *markers], key=self._version_sort_key)),
+            is_truncated=True,
+            next_key_marker=next_key_marker,
+            next_version_id_marker=next_version_id_marker,
+        )
+
+    def _version_entries(
+        self, reply: _StoreReply, field: str, *, is_delete_marker: bool
+    ) -> list[artifact_types.ObjectVersion]:
+        """Parse one version-list collection through the same strict store boundary as HEAD."""
+        raw_entries = reply.optional(field, list) or []
+        entries: list[artifact_types.ObjectVersion] = []
+        for raw_entry in raw_entries:
+            if not isinstance(raw_entry, Mapping):
+                raise reply._malformed(
+                    field, f"returned a non-object entry of type {type(raw_entry).__name__}"
+                )
+            entry = _StoreReply("list_object_versions", self._bucket, reply.subject, raw_entry)
+            etag = None
+            if not is_delete_marker:
+                etag = _normalize_etag(entry.required_nonempty_string("ETag"))
+            entries.append(
+                artifact_types.ObjectVersion(
+                    key=entry.required_nonempty_string("Key"),
+                    version_id=entry.required_nonempty_string("VersionId"),
+                    last_modified=entry.required("LastModified", datetime),
+                    etag=etag,
+                    is_latest=entry.required("IsLatest", bool),
+                    is_delete_marker=is_delete_marker,
+                )
+            )
+        return entries
+
+    @staticmethod
+    def _version_sort_key(entry: artifact_types.ObjectVersion) -> tuple[str, datetime, str]:
+        return entry.key, entry.last_modified, entry.version_id
+
+    def iter_prefix_version_pages(
+        self,
+        prefix: str,
+        *,
+        key_marker: str | None = None,
+        version_id_marker: str | None = None,
+    ) -> Iterator[artifact_types.VersionPage]:
+        """Yield ``prefix`` version pages lazily, resuming only with validated markers."""
+        while True:
+            page = self.list_version_page(
+                prefix, key_marker=key_marker, version_id_marker=version_id_marker
+            )
+            yield page
+            if not page.is_truncated:
+                return
+            key_marker = page.next_key_marker
+            version_id_marker = page.next_version_id_marker
+
+    def capture_exact_versions(self, key: str, limit: int) -> artifact_types.VersionBatch:
+        """Capture at most ``limit`` exact-key identities and whether their history is complete."""
+        if type(limit) is not int or limit < 1:
+            raise ValueError(f"limit must be a positive integer, got {limit!r}")
+
+        targets: list[artifact_types.ObjectVersion] = []
+        for page in self.iter_prefix_version_pages(key):
+            exact_entries = [entry for entry in page.entries if entry.key == key]
+            remaining = limit - len(targets)
+            history_complete = not (
+                len(exact_entries) > remaining
+                or (page.is_truncated and page.next_key_marker == key)
+            )
+            capture_order = exact_entries
+            if not history_complete:
+                capture_order = [entry for entry in exact_entries if entry.is_latest]
+                capture_order.extend(entry for entry in exact_entries if not entry.is_latest)
+            targets.extend(capture_order[:remaining])
+            if len(targets) == limit:
+                return artifact_types.VersionBatch(key, tuple(targets), history_complete)
+            if not page.is_truncated or page.next_key_marker != key:
+                return artifact_types.VersionBatch(key, tuple(targets), True)
+        raise AssertionError("version iterator must return or yield a page")
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        """Permanently delete exactly one observed S3 version identity, including ``"null"``."""
+        try:
+            self._client.delete_object(Bucket=self._bucket, Key=key, VersionId=version_id)
+        except (BotoCoreError, ClientError) as err:
+            raise _infrastructure_error("delete_object", key, err) from err
+
+    def delete_batch(self, batch: artifact_types.VersionBatch) -> bool:
+        """Delete a bounded retired-key batch, retaining latest until history completes."""
+        if any(target.key != batch.key for target in batch.targets):
+            raise ValueError("a version batch may contain only its declared key")
+        latest = [target for target in batch.targets if target.is_latest]
+        if len(latest) > 1:
+            raise ValueError("a version batch may contain at most one latest entry")
+        for target in batch.targets:
+            if not target.is_latest:
+                self.delete_version(target.key, target.version_id)
+        if not batch.history_complete:
+            return False
+        if latest:
+            target = latest[0]
+            self.delete_version(target.key, target.version_id)
+        return True
+
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        """Capture and delete one bounded retired-key batch without a key-only delete."""
+        return self.delete_batch(self.capture_exact_versions(key, limit))
+
     def list_prefix(self, prefix: str) -> list[str]:
         """Return every object key under ``prefix`` (paginated), or ``[]``.
 
@@ -625,18 +840,6 @@ class ObjectStore:
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("list_objects_v2", prefix, err) from err
         return keys
-
-    def delete(self, key: str) -> None:
-        """Delete ``key`` (idempotent — deleting an absent key is not an error).
-
-        Raises:
-            CategorizedError: the delete fails
-                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
-        """
-        try:
-            self._client.delete_object(Bucket=self._bucket, Key=key)
-        except (BotoCoreError, ClientError) as err:
-            raise _infrastructure_error("delete_object", key, err) from err
 
     def iter_prefix_pages_with_mtime(
         self, prefix: str
@@ -738,7 +941,8 @@ def object_store_from_env() -> ObjectStore:
     come from boto3's default chain (the standard ``AWS_*`` vars).
 
     Raises:
-        CategorizedError: ``KDIVE_S3_ENDPOINT_URL`` or ``KDIVE_S3_BUCKET`` is unset
+        CategorizedError: ``KDIVE_S3_ENDPOINT_URL`` or ``KDIVE_S3_BUCKET`` is unset, or the
+            configured bucket lacks compatible versioning
             (:attr:`ErrorCategory.CONFIGURATION_ERROR`).
     """
     endpoint_url = config.get(S3_ENDPOINT_URL)
@@ -755,4 +959,6 @@ def object_store_from_env() -> ObjectStore:
         )
     region = config.get(S3_REGION) or _DEFAULT_REGION
     client = boto3.client("s3", endpoint_url=endpoint_url, region_name=region)
-    return ObjectStore(client, bucket)
+    store = ObjectStore(client, bucket)
+    store.validate_versioning()
+    return store

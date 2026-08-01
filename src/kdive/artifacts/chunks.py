@@ -23,7 +23,7 @@ def _build_failure(message: str, **details: object) -> CategorizedError:
     )
 
 
-def verify_chunks(store: HeadStore, prefix: str, entry: ManifestEntry) -> None:
+def verify_chunks(store: HeadStore, prefix: str, entry: ManifestEntry) -> dict[str, HeadResult]:
     """HEAD-verify each declared chunk's stored ``(size, sha256)`` before reassembly.
 
     For a chunked artifact the per-chunk SHA-256 pins are the integrity anchor (ADR-0104 §4):
@@ -41,6 +41,7 @@ def verify_chunks(store: HeadStore, prefix: str, entry: ManifestEntry) -> None:
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"name": entry.name},
         )
+    heads: dict[str, HeadResult] = {}
     for part_number, chunk in enumerate(entry.chunks, start=1):
         key = chunk_key(prefix, entry.name, part_number)
         head = store.head(key)
@@ -56,3 +57,5 @@ def verify_chunks(store: HeadStore, prefix: str, entry: ManifestEntry) -> None:
                 name=entry.name,
                 part_number=part_number,
             )
+        heads[key] = head
+    return heads

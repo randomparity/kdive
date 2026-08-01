@@ -37,6 +37,7 @@ from kdive.jobs.handlers.control import control as control_plane
 from kdive.jobs.payloads import PowerPayload, SystemPayload
 from tests.adversarial.conftest import seed_allocation, seed_resource
 from tests.mcp.systems_support import provider_resolver
+from tests.support.object_store import INERT_OBJECT_STORE
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -222,7 +223,9 @@ async def _race_once(pool: AsyncConnectionPool, *, provision_first: bool) -> tup
     async def run_teardown() -> None:
         async with pool.connection() as conn:
             await conn.set_autocommit(True)  # the worker runs handlers in autocommit
-            await systems_handlers.teardown_handler(conn, tjob, resolver=resolver)
+            await systems_handlers.teardown_handler(
+                conn, tjob, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+            )
 
     tasks = (
         [run_provision(), run_teardown()] if provision_first else [run_teardown(), run_provision()]
@@ -313,7 +316,9 @@ def test_concurrent_force_crash_and_teardown_end_torn_down_no_stale_nmi(migrated
                 ) -> None:
                     del prov
                     async with pool.connection() as conn:
-                        await systems_handlers.teardown_handler(conn, job, resolver=resolver)
+                        await systems_handlers.teardown_handler(
+                            conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                        )
 
                 order = [run_crash(), run_teardown()] if i % 2 else [run_teardown(), run_crash()]
                 await asyncio.gather(*order)
@@ -344,7 +349,9 @@ def test_concurrent_double_teardown_is_idempotent(migrated_url: str) -> None:
                 ) -> str | None:
                     del prov
                     async with pool.connection() as conn:
-                        return await systems_handlers.teardown_handler(conn, j, resolver=resolver)
+                        return await systems_handlers.teardown_handler(
+                            conn, j, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                        )
 
                 results = await asyncio.gather(run(), run())
                 assert all(r == system_id for r in results)

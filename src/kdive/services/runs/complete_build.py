@@ -18,7 +18,7 @@ import kdive.config as config
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.reassembly import reassemble_chunked
 from kdive.artifacts.registration import register_artifact_row
-from kdive.artifacts.storage import HeadResult, StoredArtifact, chunk_key
+from kdive.artifacts.storage import HeadResult, StoredArtifact
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.build_artifacts.validation import validate_external_artifacts
@@ -44,7 +44,7 @@ class ExternalBuildStore(Protocol):
 
     def head(self, key: str) -> HeadResult | None: ...
     def get_range(self, key: str, *, start: int, length: int) -> bytes: ...
-    def delete(self, key: str) -> None: ...
+    def delete_version(self, key: str, version_id: str) -> None: ...
     def create_multipart_upload(
         self, key: str, *, sensitivity: Sensitivity, retention_class: str
     ) -> str: ...
@@ -186,9 +186,11 @@ class CompleteBuildFinalizer:
     ) -> _ExternalBuildFinalization:
         window_deadline = prepared.manifest_row.deadline
         if prepared.store is not None:
-            window_deadline = await _reassemble_chunked_artifacts(
+            window_deadline, chunk_heads = await _reassemble_chunked_artifacts(
                 conn, uid, run_id, prepared.manifest_row, prepared.store
             )
+        else:
+            chunk_heads = {}
 
         try:
             validated = await asyncio.to_thread(
@@ -207,9 +209,8 @@ class CompleteBuildFinalizer:
             keys=prepared.keys,
             heads=validated.heads,
             store=prepared.store,
-            entries=prepared.manifest_row.entries,
-            prefix=prepared.manifest_row.prefix,
             chunked=prepared.has_chunks,
+            chunk_heads=chunk_heads,
             window_deadline=window_deadline,
         )
 
@@ -247,9 +248,8 @@ class _ExternalBuildFinalization:
     keys: dict[str, str]
     heads: dict[str, HeadResult]
     store: ExternalBuildStore | None
-    entries: Sequence[ManifestEntry]
-    prefix: str
     chunked: bool
+    chunk_heads: dict[str, HeadResult]
     window_deadline: datetime
     """The deadline of the manifest these artifacts were validated against — the window's identity.
 
@@ -298,14 +298,15 @@ async def _reassemble_chunked_artifacts(
     run_id: str,
     manifest_row: upload_manifest.UploadManifest,
     store: ExternalBuildStore,
-) -> datetime:
-    """Extend the window, reassemble the chunked artifacts, and return the extended deadline.
+) -> tuple[datetime, dict[str, HeadResult]]:
+    """Extend the window, reassemble chunked artifacts, and return their deadline and HEADs.
 
     The ``RUN`` lock taken here is transaction-scoped and this ``conn.transaction()`` is a
     savepoint (the request's transaction is already open), so ``RELEASE SAVEPOINT`` does *not*
-    drop it: the lock is held for the rest of the request. That is deliberate — it is what keeps
-    the reaper off the chunk objects for the whole reassembly — and it is why the unlocked stretch
-    ``_require_unreaped_window`` guards exists only on the single-PUT path.
+    drop it: the lock is held until successful finalization's explicit commit. That is deliberate
+    — it keeps the reaper off the chunk objects through reassembly and row registration, then the
+    commit releases the lock before the post-commit exact chunk deletes. It is why the unlocked
+    stretch ``_require_unreaped_window`` guards exists only on the single-PUT path.
 
     The savepoint also commits the extension independently of the rest of the finalize, which is
     why the extension has to be bounded here rather than unwound later. Every failure past this
@@ -342,28 +343,32 @@ async def _reassemble_chunked_artifacts(
             max_window,
         )
     try:
-        await _reassemble_artifacts(manifest_row, store)
+        chunk_heads = await _reassemble_artifacts(manifest_row, store)
     except CategorizedError as exc:
         recorded = await _existing_build_result(conn, uid)
         if recorded is not None:
             raise _CompleteBuildAlreadyRecorded(recorded) from exc
         raise
-    return refreshed.deadline
+    return refreshed.deadline, chunk_heads
 
 
 async def _reassemble_artifacts(
     manifest_row: upload_manifest.UploadManifest,
     store: ExternalBuildStore,
-) -> None:
+) -> dict[str, HeadResult]:
+    chunk_heads: dict[str, HeadResult] = {}
     for entry in manifest_row.entries:
         if entry.chunks is not None:
-            await asyncio.to_thread(
-                reassemble_chunked,
-                store,
-                prefix=manifest_row.prefix,
-                final_key=f"{manifest_row.prefix}{entry.name}",
-                entry=entry,
+            chunk_heads.update(
+                await asyncio.to_thread(
+                    reassemble_chunked,
+                    store,
+                    prefix=manifest_row.prefix,
+                    final_key=f"{manifest_row.prefix}{entry.name}",
+                    entry=entry,
+                )
             )
+    return chunk_heads
 
 
 def _require_created_run(run: Run) -> None:
@@ -424,12 +429,12 @@ async def _finalize_external_build(
         if not finalization.chunked:
             await upload_manifest.delete_manifest(conn, "runs", run.id)
     if finalization.chunked and finalization.store is not None:
+        await conn.commit()
         await _cleanup_chunks_and_manifest(
             conn,
             finalization.store,
             run.id,
-            finalization.entries,
-            finalization.prefix,
+            finalization.chunk_heads,
         )
     return result
 
@@ -476,7 +481,9 @@ async def _insert_artifact_rows(
     finalization: _ExternalBuildFinalization,
 ) -> None:
     for name, head in finalization.heads.items():
-        stored = StoredArtifact(finalization.keys[name], head.etag, Sensitivity.SENSITIVE, "build")
+        stored = StoredArtifact(
+            finalization.keys[name], head.etag, Sensitivity.SENSITIVE, "build", head.version_id
+        )
         row = register_artifact_row(stored, owner_kind="runs", owner_id=run_id)
         await ARTIFACTS.insert(conn, row)
 
@@ -534,19 +541,14 @@ async def _cleanup_chunks_and_manifest(
     conn: AsyncConnection,
     store: ExternalBuildStore,
     run_id: UUID,
-    entries: Sequence[ManifestEntry],
-    prefix: str,
+    chunk_heads: Mapping[str, HeadResult],
 ) -> None:
-    for entry in entries:
-        if entry.chunks is None:
-            continue
-        for part_number in range(1, len(entry.chunks) + 1):
-            key = chunk_key(prefix, entry.name, part_number)
-            try:
-                await asyncio.to_thread(store.delete, key)
-            except CategorizedError as exc:
-                _log.warning("chunk cleanup failed for %s: %s", key, exc)
-                return
+    for key, head in chunk_heads.items():
+        try:
+            await asyncio.to_thread(store.delete_version, key, head.version_id)
+        except CategorizedError as exc:
+            _log.warning("chunk cleanup failed for %s: %s", key, exc)
+            return
     try:
         await upload_manifest.delete_manifest(conn, "runs", run_id)
     except CategorizedError as exc:

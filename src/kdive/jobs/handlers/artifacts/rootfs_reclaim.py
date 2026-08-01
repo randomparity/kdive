@@ -1,24 +1,26 @@
 """Worker handler for the internal ``reclaim_investigation_rootfs`` job (ADR-0442, #1522).
 
-Reclaims an investigation's committed uploaded-rootfs bases: for each due ``artifacts`` row, the
-ADR-0441 §6 pin gate and then the ADR-0495 in-flight-download gate, then the staged base unlink, the
-object delete, and the row delete — in that order (ADR-0442 §4). The work runs on the worker rather
-than the reconciler because the worker created the staging tree: on a host-process local-libvirt
-deployment it runs as root while the reconciler runs as the invoking user, so a reconciler-side
-unlink raises ``PermissionError`` after the object is already gone (#1522). Co-location is
-structural here — the worker that claims a local-libvirt job is the libvirt host, the same
-assumption ``provision``'s staging already makes — so the removed stat-based probe has nothing left
-to answer.
+Reclaims an investigation's committed uploaded-rootfs bases. For each due ``artifacts`` row it
+captures a bounded immutable object history without a database transaction, then re-reads the row,
+runs the ADR-0441 §6 pin gate and ADR-0495 in-flight-download gate, unlinks the staged base, and
+retires the row in one transaction. Only after that transaction commits does it exact-delete the
+captured versions (ADR-0442 §4, ADR-0524). The work runs on the worker rather than the reconciler
+because the worker created the staging tree: on a host-process local-libvirt deployment it runs as
+root while the reconciler runs as the invoking user, so a reconciler-side unlink raises
+``PermissionError`` (#1522). Co-location is structural here — the worker that claims a
+local-libvirt job is the libvirt host, the same assumption ``provision``'s staging already makes —
+so the removed stat-based probe has nothing left to answer.
 
-Each checksum's gate-and-reclaim runs in one transaction under the ``INVESTIGATION`` advisory lock
-that System bind holds transaction-scoped until its row commits, so a bind either is seen as a
-pre-overlay referencer (pinning the base) or waits behind the reclaim. The *fetch* is not serialized
-by that lock at all, which is why the later gates exist: they ask whether a download of this base is
-in flight instead of inferring it from a System state column. ADR-0515 (#1702) asks it of the
-``rootfs_fetch_leases`` row a fetcher holds from before it resolves its ``artifacts`` row until it
-returns; ADR-0495 asks the kernel about an ``flock`` on the fetcher's partial. The first brackets
-the second, and together they are #1558's option 2 — satisfied by durable state rather than by
-widening the state classifier, which could not be bounded.
+Only the final gates, staged-base unlink, and row retirement run under the ``INVESTIGATION``
+advisory lock that System bind holds transaction-scoped until its row commits. A bind either is
+seen as a pre-overlay referencer (pinning the base) or waits behind that retirement; object-store
+capture and exact deletion hold neither the lock nor a database connection. The *fetch* is not
+serialized by that lock at all, which is why the later gates exist: they ask whether a download of
+this base is in flight instead of inferring it from a System state column. ADR-0515 (#1702) asks it
+of the ``rootfs_fetch_leases`` row a fetcher holds from before it resolves its ``artifacts`` row
+until it returns; ADR-0495 asks the kernel about an ``flock`` on the fetcher's partial. The first
+brackets the second, and together they are #1558's option 2 — satisfied by durable state rather
+than by widening the state classifier, which could not be bounded.
 """
 
 from __future__ import annotations
@@ -35,7 +37,8 @@ from uuid import UUID
 from psycopg import AsyncConnection
 
 from kdive.artifacts.content_address import rootfs_object_token
-from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.artifacts.storage import VersionBatch
+from kdive.db.locks import LockScope, advisory_xact_lock, require_top_level_transaction
 from kdive.domain.capacity.state import ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
@@ -60,15 +63,6 @@ from kdive.providers.shared.staging_partials import (
 
 _log = logging.getLogger(__name__)
 
-#: Wall-clock budget for one object-store delete. The delete runs inside the transaction holding the
-#: ``INVESTIGATION`` advisory lock, and the TTL backstop reclaims **live** ``open``/``active``
-#: investigations, so an untimed store call could stall a bind, a close, or a ``runs.create`` for as
-#: long as the client's own retry budget. A timeout is treated like any other real fault: defer the
-#: checksum and keep its row, so the row-last contract holds. The abandoned request may still land,
-#: leaving a row whose object *and* staged base are both gone until the next reclaim drains it — a
-#: bounded residual, recorded in ADR-0442, not a silently-benign case.
-_STORE_DELETE_TIMEOUT_S = 10.0
-
 #: The state values of the pre-overlay/re-materialize referencer states — condition (b) of the
 #: investigation-rootfs reclaim gate (ADR-0441 §6). A referencer in one of these pins the base even
 #: with its overlay file momentarily absent.
@@ -91,9 +85,10 @@ _INV_ROOTFS_KEYS_SQL = (
 
 
 class ArtifactObjectDeleter(Protocol):
-    """The object-store delete surface the rootfs reclaim needs."""
+    """The bounded exact-version surface investigation-rootfs reclaim needs."""
 
-    def delete(self, key: str) -> None: ...
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch: ...
+    def delete_batch(self, batch: VersionBatch) -> bool: ...
 
 
 def _overlay_pins_base(system_id: object, *, rootfs_dir: str) -> bool:
@@ -188,8 +183,9 @@ def _unlink_staged_base(uploads_dir: str, investigation_id: UUID, token: str) ->
     """Unlink the staged base and its completion marker; ``ENOENT`` is the achieved post-state.
 
     Any **other** ``OSError`` propagates — from either unlink, which is why they share one region —
-    so the caller defers the whole checksum before deleting the object or the row (ADR-0442 §4):
-    neither SENSITIVE copy may be dropped while the local base survives.
+    so the caller defers the whole checksum before retiring the row and therefore before the later
+    exact-version delete (ADR-0442 §4): neither SENSITIVE copy may be dropped while the local base
+    survives.
 
     The marker (ADR-0451) goes **first**, which is the conservative order. Interrupted after it,
     this leaves "base without marker", which the reuse gate rejects and the next fetch re-stages:
@@ -221,10 +217,10 @@ def sweep_investigation_staging_dir(
     Keying the collection on the token rather than on ``drained`` is ADR-0494's whole change
     (#1559). The precondition the ungated unlink used to rest on — "no rootfs row remains, so every
     file here is unowned" — is unreachable for the three states that leak: a checksum whose unlink
-    or object delete faults permanently keeps its row and so kept the directory out of every sweep;
-    a never-closed investigation whose rows all drained is selected by no row-keyed worklist at all;
-    and a base published after this pass's own enumeration outlives the ``rmdir``. Deciding each
-    file against the owned/pinned set instead makes the collection independent of all three.
+    fault permanently keeps its row and so kept the directory out of every sweep; a never-closed
+    investigation whose rows all drained is selected by no row-keyed worklist at all; and a base
+    published after this pass's own enumeration outlives the ``rmdir``. Deciding each file against
+    the owned/pinned set instead makes the collection independent of all three.
 
     Args:
         uploads_dir: The staging root (``<uploads>/<investigation_id>/`` is swept).
@@ -285,10 +281,10 @@ def sweep_investigation_staging_dir(
     ADR-0495 narrows the window rather than removing it, so the re-pass stays. A doomed fetcher that
     holds an ``flock`` on its partial now defers its checksum in :func:`_reclaim_one_checksum`,
     which keeps that row and turns this tail back at its ``drained`` test before either ``rmdir``.
-    What is left is a fetcher that had not yet *created* its partial when the reclaim probed, and
-    whose download then completes anyway because the object delete landed behind its reads — the
-    timed-out delete ADR-0442 records as still landing later, or a store that serves a deleted key.
-    Narrower than before and not empty.
+    What is left at this filesystem boundary is any publisher that creates a base between this
+    pass's globs and its ``rmdir``. The row-driven fetch-lease gate narrows the normal fetch path,
+    but this helper deliberately retains its bounded retry instead of depending on its caller's
+    ordering assumptions.
     """
     inv_dir = Path(uploads_dir) / str(investigation_id)
     if not drained:
@@ -546,9 +542,9 @@ def _unlink_unowned_base(base: Path) -> None:
     file. What remains conditional is the instant between the pin read and the unlink. ADR-0495
     narrows the publish-after-reclaim shape that produces such a System — a fetcher holding its
     partial's ``flock`` now defers the whole checksum, so its row is never reclaimed under it — down
-    to a fetcher that had not created its partial yet when the reclaim probed and whose download
-    outlived the object delete anyway. #1558's remaining half is the classifier itself, which still
-    cannot tell that a ``torn_down`` System was mid-provision.
+    to a fetcher that had not created its partial yet when the reclaim probed. ADR-0515 later closed
+    that normal fetch path with the durable fetch lease. The filesystem sweep still treats a
+    published unowned base as input rather than relying on the caller's ordering.
 
     It should also rarely fire. :func:`_unlink_staged_base` removes each base as its own row drains,
     so a base surviving to here means one was published *without* a row — the shape the ``flock``
@@ -662,14 +658,14 @@ async def _reclaim_one_checksum(
     rootfs_dir: str,
     uploads_dir: str,
 ) -> bool | None:
-    """Gate and reclaim one due row under the investigation lock (ADR-0442 §3/§4, ADR-0495).
+    """Capture one due key, retire its row under lock, then exact-delete after commit.
 
-    Returns ``True`` when the checksum drained, ``False`` on a real fault (the caller fails the job
-    once every other checksum has been attempted), and ``None`` when there was nothing to do — the
-    row already drained, the gate pins the base, or a live writer provably holds one of this token's
-    staging partials. All three are expected steady states, not errors. Order is staged base ->
-    object -> row, so a fault leaves the re-downloadable copy rather than an unreclaimable local
-    base, and the row (the worklist anchor) outlives both.
+    Returns ``True`` when the database retirement committed, ``False`` on a real capture, unlink, or
+    exact-delete fault, and ``None`` when there was nothing to do. Version inventory is captured
+    before the owner transaction. The staged base and row are then removed under the investigation
+    lock, and only the captured immutable identities are deleted after that transaction commits.
+    An incomplete batch is progress rather than a fault: its survivors are rowless and remain
+    discoverable by the upload-version orphan sweep.
 
     **Two gates, in this order, and neither can stand in for the other.** The ADR-0441 §6 pin gate
     asks whether a System's *overlay* is backed by this base; it reads rows and one ``stat``, and it
@@ -702,6 +698,23 @@ async def _reclaim_one_checksum(
     on a 6-hour deadline, so the pin lapses when the worker stops heartbeating that job's lease
     instead of when a worst-case transfer estimate runs out.
     """
+    require_top_level_transaction(conn, "investigation rootfs version capture")
+    async with conn.transaction(), conn.cursor() as cur:
+        await cur.execute(_DUE_ROOTFS_ROW_SQL, (artifact_id, investigation_id))
+        candidate_row = await cur.fetchone()
+    if candidate_row is None:
+        return None
+    object_key = str(candidate_row[0])
+    try:
+        batch = await asyncio.to_thread(store.capture_exact_versions, object_key, 1000)
+    except Exception:  # noqa: BLE001 - the store boundary owns dependency exception mapping
+        _log.warning(
+            "capturing investigation rootfs versions for %s failed; nothing reclaimed for it",
+            object_key,
+            exc_info=True,
+        )
+        return False
+
     async with (
         conn.transaction(),
         advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
@@ -711,7 +724,8 @@ async def _reclaim_one_checksum(
             row = await cur.fetchone()
         if row is None:
             return None
-        object_key = str(row[0])
+        if str(row[0]) != object_key:
+            return None
         token = _rootfs_token_from_key(object_key)
         if not await rootfs_base_reclaimable(conn, investigation_id, token, rootfs_dir=rootfs_dir):
             return None
@@ -754,18 +768,23 @@ async def _reclaim_one_checksum(
                 exc_info=True,
             )
             return False
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(store.delete, object_key), timeout=_STORE_DELETE_TIMEOUT_S
-            )
-        except Exception:  # noqa: BLE001 - a real store fault or timeout defers before the row
-            _log.warning(
-                "deleting the investigation rootfs object %s failed or timed out; its row is kept",
-                object_key,
-                exc_info=True,
-            )
-            return False
         await conn.execute("DELETE FROM artifacts WHERE id = %s", (artifact_id,))
+    try:
+        complete = await asyncio.to_thread(store.delete_batch, batch)
+    except Exception:  # noqa: BLE001 - report the dependency fault after durable row retirement
+        _log.warning(
+            "deleting captured investigation rootfs versions for %s failed; the row is already "
+            "retired and the upload orphan sweep will rediscover every survivor",
+            object_key,
+            exc_info=True,
+        )
+        return False
+    if not complete:
+        _log.info(
+            "investigation rootfs %s retained the captured latest version because its 1000-target "
+            "history batch was incomplete; the upload orphan sweep will continue it",
+            object_key,
+        )
     return True
 
 
@@ -786,9 +805,9 @@ async def _finish_drained_investigation(
     and a concurrent finalize. ADR-0442 read that post-state as one bit ("are there rows left?") and
     ran the staging sweep only when the answer was no. ADR-0494 reads it as two **sets** — the
     tokens rows own, and the tokens live Systems pin — and always runs the sweep, because the
-    zero-row form starved exactly the case that leaks: a checksum whose unlink or object delete
-    faults permanently keeps its row, so its investigation's staging directory was never swept
-    again and a base orphaned beside it was collected by nothing (#1559).
+    zero-row form starved exactly the case that leaks: a checksum whose unlink fault permanently
+    keeps its row, so its investigation's staging directory was never swept again and a base
+    orphaned beside it was collected by nothing (#1559).
 
     Clearing is still keyed on the drain rather than on which sweep enqueued the job — a TTL job
     only runs against an ``open``/``active`` investigation, whose marker is already NULL.
@@ -896,11 +915,11 @@ async def reclaim_investigation_rootfs_handler(
     surfacing durably in the ``jobs`` table instead of as a log line that repeats every pass
     (#1522).
 
-    The first real fault **ends the loop** rather than attempting the remaining checksums. A store
-    that is refusing or timing out is a store-wide condition, and the object-delete budget is a
-    per-call one, so pressing on would burn that budget once per remaining checksum while the worker
-    slot — and the ``INVESTIGATION`` lock — stay held. Nothing is lost: the surviving checksums keep
-    their rows and are re-attempted by the next sweep, which is the retry loop.
+    The first real fault **ends the loop** rather than attempting the remaining checksums. Pressing
+    on through a store-wide refusal would multiply the store client's retry budget by the remaining
+    worklist while occupying the worker. No owner lock is held during capture or exact deletion.
+    An untouched checksum keeps its row for the next row-driven sweep; an exact-delete fault happens
+    after its row commits retired, so the upload-version orphan sweep rediscovers every survivor.
 
     Returns the number of drained checksums as the job's ``result_ref``.
 

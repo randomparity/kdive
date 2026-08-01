@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterator
 from datetime import timedelta
 from typing import NamedTuple, Protocol, cast, runtime_checkable
 from uuid import UUID
@@ -13,6 +14,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.artifacts import upload_manifest
+from kdive.artifacts.storage import VersionBatch, VersionPage
 from kdive.artifacts.upload_manifest import UPLOAD_OWNER_KINDS, lock_scope_for
 from kdive.db.locks import require_top_level_transaction, try_advisory_xact_lock
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -25,8 +27,12 @@ _log = logging.getLogger(__name__)
 class UploadStore(Protocol):
     """The narrow object-store port the upload reaper consumes."""
 
-    def list_prefix(self, prefix: str) -> list[str]: ...
-    def delete(self, key: str) -> None: ...
+    def iter_prefix_version_pages(self, prefix: str) -> Iterator[VersionPage]: ...
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch: ...
+    def delete_batch(self, batch: VersionBatch) -> bool: ...
+
+
+_REAP_VERSIONS_PER_KEY = 20
 
 
 async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) -> int:
@@ -41,15 +47,9 @@ async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) ->
     *finalized* rootfs stays safe on the per-key committed-object skip in
     :func:`reap_one_owner`, not on the owner's state.
 
-    A failed delete is tolerated but bounded twice over (ADR-0453 §3). It is reported by a raise at
-    the end of the pass, because ``_run_repair_plan`` puts only a repair that raises into
-    ``failures``, which is the only input to the ADR-0190 group-E error counter — swallowing it
-    would make a store rejecting every delete report as N successful reaps and zero errors. And a
-    whole owner's sweep failing stops the pass claiming further candidates, because each candidate
-    claimed under a systemic delete fault costs an irreversible row delete over bytes nothing will
-    reclaim (#1556). The candidate select is unbounded, so without that brake one misconfigured
-    bucket policy would orphan the entire past-deadline backlog in a single pass, and again every
-    30 seconds after.
+    Store failures are reported by one raise after the pass so the ADR-0190 group-E error counter
+    observes them. A whole owner refusing every attempted batch still stops new claims for that
+    pass; already-retired prefixes remain durable input to version-aware orphan repair.
 
     A **deferred** owner — one whose advisory lock was held when :func:`_claim_abandoned_prefix`
     reached it — is skipped, not waited on (ADR-0510). It is neither a reap nor a failure: it does
@@ -66,7 +66,7 @@ async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) ->
     candidate select, so a starved owner shows up as an age that grows pass over pass.
 
     Raises:
-        CategorizedError: At least one object could not be deleted this pass
+        CategorizedError: At least one key batch could not be inventoried or deleted this pass
             (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`). Raised after the loop, so a partial
             failure never costs a later owner its reap.
     """
@@ -105,8 +105,9 @@ async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) ->
         )
     if undeleted:
         raise CategorizedError(
-            f"upload reap could not delete {undeleted} object(s) across {reaped} reaped owner(s); "
-            "their manifest rows are already gone, so nothing will rediscover them (ADR-0453). "
+            f"upload reap could not delete {undeleted} key batch(es) across {reaped} reaped "
+            "owner(s); "
+            "their manifest rows are already gone, so upload orphan repair must rediscover them. "
             f"Left {unclaimed} candidate(s) unclaimed for the next pass.",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         )
@@ -148,37 +149,51 @@ async def reap_one_owner(
 ) -> ReapOutcome:
     """Commit the manifest-row delete under the owner's lock, then sweep the window's objects.
 
-    Row-first, and the order is the decision (ADR-0453 §1): deleting objects inside the transaction
-    that deletes the row let an abort mid-loop roll the *row* back with the *bytes* already gone,
-    restoring a window ADR-0448 §2's deadline-identity check cannot tell from the one a finalize
-    validated. The phases split on that commit — :func:`_claim_abandoned_prefix` makes every
-    decision that needs the database, under the lock a finalize also takes, and
-    :func:`_sweep_uncommitted_objects` then re-makes the one decision that can have changed since,
-    per key, under that same lock (ADR-0509). What the split cost before that guard existed is
-    disclosed in ADR-0453 §Consequences and was filed as #1556 and #1557.
+    Phase 1 removes only the manifest row under the owner lock. After that commit, phase 2
+    inventories exact versions and captures one bounded batch per key. It rechecks each captured
+    key under a fresh short owner transaction, commits, and only then deletes the immutable batch.
+    A crash or store failure after phase 1 leaves the prefix visible to upload orphan repair.
 
     Returns:
         The :class:`ReapOutcome`. ``reaped`` is ``False`` for the two ways phase 1 produces no
         claim, which are distinguished by ``deferred``: the locked re-read *declined* the owner
         (``deferred`` false — the manifest was gone, or its deadline had been renewed since the
         candidate select), or the owner's lock was held and phase 1 *deferred* it to the next pass
-        (``deferred`` true). ``reaped`` is ``True`` however many objects the sweep failed to delete
-        or declined, because the row is durably gone and there is nothing left to retry.
+        (``deferred`` true). ``reaped`` is ``True`` however many batches failed or were declined,
+        because the row is durably gone and the orphan sweep owns every survivor.
         ``attempted``, ``declined`` and ``undeleted`` carry the sweep's fate up to
         :func:`repair_abandoned_uploads`, which reports it once the pass is over and stops claiming
         candidates if a whole owner's sweep was refused.
     """
-    claim = await _claim_abandoned_prefix(conn, store, owner_kind, owner_id)
-    if claim.keys is None:
+    claim = await _claim_abandoned_prefix(conn, owner_kind, owner_id)
+    if claim.prefix is None:
         return ReapOutcome(
             reaped=False, deferred=claim.deferred, attempted=0, declined=0, undeleted=0
         )
-    doomed = claim.keys
+    try:
+        doomed = await _first_page_version_keys(store, claim.prefix)
+    except CategorizedError as exc:
+        _log.warning(
+            "reconciler: upload reap could not list versions under %s for owner %s/%s: %s; "
+            "the manifest row is already gone and orphan repair will retry the prefix",
+            claim.prefix,
+            owner_kind,
+            owner_id,
+            exc,
+        )
+        return ReapOutcome(reaped=True, deferred=False, attempted=1, declined=0, undeleted=1)
+    _log.info(
+        "reconciler: abandoned upload owner %s/%s claimed; sweeping %d key(s) under %s",
+        owner_kind,
+        owner_id,
+        len(doomed),
+        claim.prefix,
+    )
     sweep = await _sweep_uncommitted_objects(conn, store, owner_kind, owner_id, doomed)
     if sweep.undeleted:
         _log.error(
-            "reconciler: upload reap left %d of %d object(s) for owner %s/%s undeleted; the "
-            "manifest row is already gone, so nothing will rediscover them (ADR-0453)",
+            "reconciler: upload reap left %d of %d key batch(es) for owner %s/%s undeleted; the "
+            "manifest row is already gone and upload orphan repair will rediscover them",
             sweep.undeleted,
             len(doomed),
             owner_kind,
@@ -186,7 +201,7 @@ async def reap_one_owner(
         )
     if sweep.declined:
         _log.info(
-            "reconciler: upload reap spared %d of %d object(s) for owner %s/%s; a row, a live "
+            "reconciler: upload reap spared %d of %d key(s) for owner %s/%s; a row, a live "
             "write lease or a held owner lock protects them, so they are the orphan sweep's to "
             "collect (ADR-0509)",
             sweep.declined,
@@ -205,26 +220,25 @@ async def reap_one_owner(
 
 
 class _Claim(NamedTuple):
-    """Phase 1's three outcomes, two of which produce no keys.
+    """Phase 1's three outcomes, two of which produce no prefix.
 
-    ``keys`` non-``None`` is a claim — the manifest row is committed gone and these objects are
-    phase 2's to re-decide. ``keys`` ``None`` with ``deferred`` false is a *decline*: the locked
-    re-read found no past-deadline row, so there is nothing to reap. ``keys`` ``None`` with
+    ``prefix`` non-``None`` is a claim — the manifest row is committed gone and its versions are
+    phase 2's to enumerate. ``prefix`` ``None`` with ``deferred`` false is a *decline*: the locked
+    re-read found no past-deadline row, so there is nothing to reap. ``prefix`` ``None`` with
     ``deferred`` true is a *deferral*: the owner's lock was held, nothing was read or written, and
     the row is still there for the next pass.
     """
 
-    keys: list[str] | None
+    prefix: str | None
     deferred: bool
 
 
 async def _claim_abandoned_prefix(
     conn: AsyncConnection,
-    store: UploadStore,
     owner_kind: upload_manifest.UploadOwnerKind,
     owner_id: UUID,
 ) -> _Claim:
-    """Delete the past-deadline manifest row and return the keys its deletion abandoned.
+    """Delete the past-deadline manifest row and return its prefix after commit.
 
     The locked re-read is what declines a manifest whose deadline was renewed since the candidate
     select, and the per-owner lock is the one a finalize also takes — so a reap and a finalize
@@ -245,32 +259,12 @@ async def _claim_abandoned_prefix(
     lock is never free, so the deferral is reported: here per owner, and once per pass with the
     oldest age in :func:`repair_abandoned_uploads`.
 
-    The committed-object exemption is computed here, before the objects are deleted, and the row
-    delete this commits is what keeps it valid **against the two finalizes**: they are the writers
-    the reaped window's own keys have, and both require the manifest row that is gone by the time
-    this returns (ADR-0453 §2). The barrier reaches no further, and this is the whole of it:
-
-    - a **re-mint** creates a *new* manifest row, lifting the barrier for the window it opens —
-      the keys are owner-addressed, so that window reuses these key names;
-    - the listed prefix is the **owner** prefix, not an upload-only namespace, so other run-scoped
-      writers (``control.capture_traffic``'s pcap, the vmcore rows) put objects here and commit
-      ``artifacts`` rows for them under no manifest at all.
-
-    Both are ADR-0453's second residual (#1557), and neither is this function's to catch: the keys
-    it returns are a *proposal*. :func:`_sweep_uncommitted_objects` re-decides each one under this
-    same lock immediately before deleting it (ADR-0509), which is where a writer that arrived after
-    this commit is seen.
-
-    The claim is logged once the transaction has committed, which is the only record an abort that
-    never reaches the sweep leaves behind. It carries the count and the prefix — not because the
-    prefix would otherwise be lost (it is ``owner_prefix(_TENANT, owner_kind, owner_id)`` from the
-    single mint site, so a leaked window stays enumerable from the owner tables) but because
-    *when* and *how many* are not recoverable any other way.
+    This phase deliberately performs no store I/O. The row delete commits before version inventory,
+    so a crash or listing fault leaves every survivor visible to upload orphan repair. Committed
+    object, re-mint, and live-lease exemptions are rechecked per captured key in phase 2.
 
     Returns:
-        The :class:`_Claim`: the keys proposed for deletion — every object under the window's prefix
-        holding no committed ``artifacts`` row — or no keys, either declined or deferred. An empty
-        key list is a reap with nothing to sweep, which is neither of those.
+        The :class:`_Claim`: the committed rowless prefix, or no prefix when declined or deferred.
     """
     async with conn.transaction():
         if not await try_advisory_xact_lock(conn, lock_scope_for(owner_kind), owner_id):
@@ -280,7 +274,7 @@ async def _claim_abandoned_prefix(
                 owner_kind,
                 owner_id,
             )
-            return _Claim(keys=None, deferred=True)
+            return _Claim(prefix=None, deferred=True)
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT prefix FROM upload_manifests "
@@ -289,33 +283,34 @@ async def _claim_abandoned_prefix(
             )
             row = await cur.fetchone()
         if row is None:
-            return _Claim(keys=None, deferred=False)
+            return _Claim(prefix=None, deferred=False)
         prefix = cast(str, row["prefix"])
-        keys = await asyncio.to_thread(store.list_prefix, prefix)
-        doomed = await _uncommitted_keys(conn, keys)
         await upload_manifest.delete_manifest(conn, owner_kind, owner_id)
-    _log.info(
-        "reconciler: abandoned upload owner %s/%s claimed; sweeping %d object(s) under %s",
-        owner_kind,
-        owner_id,
-        len(doomed),
-        prefix,
-    )
-    return _Claim(keys=doomed, deferred=False)
+    return _Claim(prefix=prefix, deferred=False)
 
 
-async def _uncommitted_keys(conn: AsyncConnection, keys: list[str]) -> list[str]:
-    """Return ``keys`` minus those holding a committed ``artifacts`` row, preserving order.
+async def _first_page_version_keys(store: UploadStore, prefix: str) -> list[str]:
+    """Return unique keys from one bounded version page after the manifest commit.
 
-    One set-valued query rather than one per key: the same verdict in a single round trip, which
-    keeps the locked phase short now that it is the only phase holding the lock.
+    The version-aware orphan sweep owns every later page. Keeping this serial phase to one store
+    page prevents a version-heavy expired owner from delaying unrelated owners in the same pass.
     """
-    if not keys:
+    pages = store.iter_prefix_version_pages(prefix)
+    page = await asyncio.to_thread(_next_version_page, pages)
+    if page is None:
         return []
-    async with conn.cursor() as cur:
-        await cur.execute("SELECT object_key FROM artifacts WHERE object_key = ANY(%s)", (keys,))
-        committed = {row[0] for row in await cur.fetchall()}
-    return [key for key in keys if key not in committed]
+    seen: set[str] = set()
+    keys: list[str] = []
+    for entry in page.entries:
+        if entry.key not in seen:
+            seen.add(entry.key)
+            keys.append(entry.key)
+    return keys
+
+
+def _next_version_page(pages: Iterator[VersionPage]) -> VersionPage | None:
+    """Advance one blocking version iterator outside the event loop."""
+    return next(pages, None)
 
 
 class _SweepOutcome(NamedTuple):
@@ -333,19 +328,14 @@ async def _sweep_uncommitted_objects(
     owner_id: UUID,
     keys: list[str],
 ) -> _SweepOutcome:
-    """Delete the abandoned window's objects, re-deciding each key under the owner's lock.
+    """Capture abandoned versions, fence each key briefly, then exact-delete after unlock.
 
-    ``keys`` was decided in :func:`_claim_abandoned_prefix`, and it stops being true the instant
-    that phase commits. These are keys under the owner's *whole* prefix, not an upload-only
-    namespace, so a re-mint, a ``control.capture_traffic`` retry or a vmcore finalize can write one
-    of them before this loop reaches it — and deleting the list unconditionally destroyed those
-    bytes (#1557). Each key is therefore re-checked here against committed state
-    (:func:`~kdive.reconciler.cleanup.upload_fences.owner_key_is_fenced`) **inside the transaction
-    that holds the owner's advisory lock and issues the delete**, which is ADR-0509 §1 and the same
-    shape ADR-0502 gave the orphan sweep's per-key delete. The lock is the half that makes it a
-    closure rather than a narrower window: ``hold_write_lease`` mints under it and
-    ``capture_traffic`` holds it across its whole PUT-plus-insert, so a writer either precedes the
-    re-check — which then sees its row or its lease — or waits until the delete is already done.
+    These are keys under the owner's whole prefix, so a re-mint, capture retry, or vmcore finalize
+    can publish one before this loop reaches it. Each captured key is rechecked against committed
+    state (:func:`~kdive.reconciler.cleanup.upload_fences.owner_key_is_fenced`) inside a short
+    owner-locked transaction. That transaction commits before :meth:`UploadStore.delete_batch`
+    runs, so store latency never extends the owner lock. Exact immutable identities make that
+    unlock safe: a peer PUT after capture receives a different VersionId and cannot enter the batch.
 
     The lock is attempted, not waited on. A held owner lock means a writer or another reaper is
     active on this owner, so the key is left alone: a reconciler pass has no deadline, and waiting
@@ -370,25 +360,35 @@ async def _sweep_uncommitted_objects(
             still binds — one connection per concurrent worker (a shared one degrades each
             ``transaction()`` to a savepoint that releases no advisory lock), and fan-out across
             *owners*, since every key of one owner contends on the same lock.
-        store: The object store to delete through.
+        store: The version-aware object store to capture and exact-delete through.
         owner_kind: The owner kind whose lock serialises these deletes.
         owner_id: The owner id.
-        keys: The keys phase 1 doomed, in listing order.
+        keys: Unique keys enumerated after phase 1 committed, in store order.
 
     Returns:
-        The three counts. ``undeleted`` non-zero means those bytes are now unreferenced and, per
-        ADR-0453 §Consequences, unswept until the orphan sweep reaches them (#1556).
+        Completed or progressing batches, database-fenced declines, and failed batches.
     """
     deleted = declined = undeleted = 0
     for key in keys:
         try:
-            went = await _delete_unless_fenced(conn, store, owner_kind, owner_id, key)
+            batch = await asyncio.to_thread(
+                store.capture_exact_versions, key, _REAP_VERSIONS_PER_KEY
+            )
+            complete = await _delete_unless_fenced(conn, store, owner_kind, owner_id, batch)
         except (CategorizedError, psycopg.Error) as exc:
             undeleted += 1
             _log.warning("reconciler: upload reap could not delete %s: %s", key, exc)
         else:
-            deleted += int(went)
-            declined += int(not went)
+            if complete is None:
+                declined += 1
+            else:
+                deleted += 1
+                if not complete:
+                    _log.info(
+                        "reconciler: upload reap processed a bounded version batch for %s; its "
+                        "latest and uncaptured history remain for upload orphan repair",
+                        key,
+                    )
     return _SweepOutcome(deleted=deleted, declined=declined, undeleted=undeleted)
 
 
@@ -397,14 +397,17 @@ async def _delete_unless_fenced(
     store: UploadStore,
     owner_kind: upload_manifest.UploadOwnerKind,
     owner_id: UUID,
-    key: str,
-) -> bool:
-    """Take the owner's lock, re-check ``key`` against committed state, and delete it under both.
+    batch: VersionBatch,
+) -> bool | None:
+    """Fence one captured batch under the owner lock, commit, then exact-delete it.
 
     Returns:
-        Whether the object was deleted. ``False`` means the owner lock was held by someone else, or
-        a row or a live write lease landed on this key after phase 1 doomed it.
+        ``None`` when the key is declined before deletion; otherwise whether the captured history
+        was complete. ``False`` therefore records bounded progress, not a fence decline.
     """
+    key = batch.key
+    if not batch.targets:
+        return None
     # A savepoint here would hold the owner lock for the rest of the pass instead of for this one
     # delete, and would release no ``pg_advisory_xact_lock`` at all. ``_run_repair_plan`` hands each
     # repair a freshly pooled connection and every earlier block here commits, so this holds today;
@@ -419,13 +422,12 @@ async def _delete_unless_fenced(
                 owner_kind,
                 owner_id,
             )
-            return False
+            return None
         if await owner_key_is_fenced(conn, owner_kind, owner_id, key):
             _log.info(
                 "reconciler: upload reap spared %s; an artifacts row, a re-minted upload window or "
                 "a live write lease landed on it after the claim (ADR-0509)",
                 key,
             )
-            return False
-        await asyncio.to_thread(store.delete, key)
-    return True
+            return None
+    return await asyncio.to_thread(store.delete_batch, batch)

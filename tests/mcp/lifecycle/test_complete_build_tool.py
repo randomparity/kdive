@@ -120,7 +120,7 @@ class _ValidationStore:
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
         return self._blobs[key][start : start + length]
 
-    def delete(self, key: str) -> None:
+    def delete_version(self, key: str, version_id: str) -> None:
         raise AssertionError("single-PUT path must not delete")
 
     def create_multipart_upload(
@@ -540,9 +540,19 @@ def test_complete_build_omits_nudge_when_effective_config_present(migrated_url: 
                 {kernel_key: _KERNEL_TAR, config_key: config},
                 {
                     kernel_key: HeadResult(
-                        len(_KERNEL_TAR), "ck", "e-k", last_modified=STORE_MTIME
+                        len(_KERNEL_TAR),
+                        "ck",
+                        "e-k",
+                        last_modified=STORE_MTIME,
+                        version_id="test-version",
                     ),
-                    config_key: HeadResult(len(config), "cc", "e-c", last_modified=STORE_MTIME),
+                    config_key: HeadResult(
+                        len(config),
+                        "cc",
+                        "e-c",
+                        last_modified=STORE_MTIME,
+                        version_id="test-version",
+                    ),
                 },
             )
             resp = await CompleteBuildHandlers(
@@ -652,9 +662,19 @@ def test_complete_build_writes_effective_config_artifact(
                 {kernel_key: _KERNEL_TAR, config_key: config},
                 {
                     kernel_key: HeadResult(
-                        len(_KERNEL_TAR), "ck", "e-k", last_modified=STORE_MTIME
+                        len(_KERNEL_TAR),
+                        "ck",
+                        "e-k",
+                        last_modified=STORE_MTIME,
+                        version_id="test-version",
                     ),
-                    config_key: HeadResult(len(config), "cc", "e-c", last_modified=STORE_MTIME),
+                    config_key: HeadResult(
+                        len(config),
+                        "cc",
+                        "e-c",
+                        last_modified=STORE_MTIME,
+                        version_id="test-version",
+                    ),
                 },
             )
 
@@ -700,12 +720,16 @@ class _ReassemblyStore:
 
     def head(self, key: str) -> HeadResult | None:
         if key.endswith(".part0001"):
-            return HeadResult(5, "c0", "e", last_modified=STORE_MTIME)
+            return HeadResult(5, "c0", "e", last_modified=STORE_MTIME, version_id="test-version")
         if key.endswith(".part0002"):
-            return HeadResult(3, "c1", "e", last_modified=STORE_MTIME)
+            return HeadResult(3, "c1", "e", last_modified=STORE_MTIME, version_id="test-version")
         if key.endswith("/kernel"):
             return HeadResult(
-                8, None, "final-etag", last_modified=STORE_MTIME
+                8,
+                None,
+                "final-etag",
+                last_modified=STORE_MTIME,
+                version_id="test-version",
             )  # reassembled: composite/None checksum
         return None
 
@@ -733,10 +757,10 @@ class _ReassemblyStore:
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         self.events.append(("abort", key))
 
-    def delete(self, key: str) -> None:
+    def delete_version(self, key: str, version_id: str) -> None:
         if self._delete_raises is not None and key.endswith(self._delete_raises):
             raise CategorizedError("delete boom", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
-        self.events.append(("delete", key))
+        self.events.append(("delete_version", key))
 
 
 def _chunked_handlers(store: _ReassemblyStore, output: BuildOutput) -> CompleteBuildHandlers:
@@ -956,7 +980,7 @@ def test_chunked_finalize_deletes_chunks_and_manifest(migrated_url: str) -> None
                 store, BuildOutput(f"local/runs/{run_id}/kernel", "", "")
             ).complete_build(pool, _ctx(), str(run_id), build_id=None, cmdline="x")
             assert resp.status == "succeeded"
-            deleted = {e[1] for e in store.events if e[0] == "delete"}
+            deleted = {e[1] for e in store.events if e[0] == "delete_version"}
             present = await _manifest_present(pool, run_id)
         assert deleted == {
             f"local/runs/{run_id}/kernel.part0001",

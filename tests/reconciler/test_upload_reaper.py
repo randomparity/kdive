@@ -22,9 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -33,6 +33,7 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import upload_manifest
+from kdive.artifacts.storage import ObjectVersion, VersionBatch, VersionPage
 from kdive.artifacts.upload_manifest import lock_scope_for as _lock_scope_for
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.db.locks import advisory_xact_lock
@@ -56,14 +57,34 @@ class _FakeStore:
     def list_prefix(self, prefix: str) -> list[str]:
         return list(self._objects.get(prefix, []))
 
-    def delete(self, key: str) -> None:
-        self.deleted.append(key)
+    def iter_prefix_version_pages(self, prefix: str) -> Iterator[VersionPage]:
+        entries = tuple(self._version(key) for key in self._objects.get(prefix, []))
+        yield VersionPage(entries, False, None, None)
+
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch:
+        assert limit > 0
+        return VersionBatch(key, (self._version(key),), True)
+
+    def delete_batch(self, batch: VersionBatch) -> bool:
+        self.deleted.append(batch.key)
+        return batch.history_complete
+
+    @staticmethod
+    def _version(key: str) -> ObjectVersion:
+        return ObjectVersion(
+            key=key,
+            version_id=f"version-of-{key}",
+            last_modified=datetime(2026, 7, 1, tzinfo=UTC),
+            etag=f"etag-of-{key}",
+            is_latest=True,
+            is_delete_marker=False,
+        )
 
 
 class _FailingStore(_FakeStore):
-    """A store whose ``delete`` raises for the named keys, as a real store outage would.
+    """A store whose version-batch delete fails for named keys, as a real outage would.
 
-    ``ObjectStore.delete`` wraps every ``BotoCoreError``/``ClientError`` in a
+    ``ObjectStore.delete_batch`` surfaces exact-delete faults as a
     ``CategorizedError``, so that is the exception a mid-sweep failure actually presents.
     """
 
@@ -87,18 +108,26 @@ class _FailingStore(_FakeStore):
             )
         return super().list_prefix(prefix)
 
-    def delete(self, key: str) -> None:
-        self.attempted.append(key)
-        if key in self._fail_keys:
+    def iter_prefix_version_pages(self, prefix: str) -> Iterator[VersionPage]:
+        if prefix in self._fail_list_prefixes:
             raise CategorizedError(
-                f"delete_object failed for {key}",
+                f"list_object_versions failed for {prefix}",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             )
-        super().delete(key)
+        yield from super().iter_prefix_version_pages(prefix)
+
+    def delete_batch(self, batch: VersionBatch) -> bool:
+        self.attempted.append(batch.key)
+        if batch.key in self._fail_keys:
+            raise CategorizedError(
+                f"delete_object failed for {batch.key}",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        return super().delete_batch(batch)
 
 
 class _HookedStore(_FakeStore):
-    """A store that runs ``before_delete`` from inside its own ``delete``.
+    """A store that runs ``before_delete`` from inside its version-batch delete.
 
     The hook lands in the gap phase 2 leaves open: after the manifest-row delete has committed and
     the owner lock has been released, before the object is actually gone. It runs on the
@@ -120,11 +149,36 @@ class _HookedStore(_FakeStore):
         self._once = once
         self._fired = False
 
-    def delete(self, key: str) -> None:
+    def delete_batch(self, batch: VersionBatch) -> bool:
         if not (self._once and self._fired):
             self._fired = True
             self._before_delete()
-        super().delete(key)
+        return super().delete_batch(batch)
+
+
+class _SecondPageForbiddenStore(_FakeStore):
+    """Expose one useful page and fail if the reaper tries to drain the whole prefix."""
+
+    def __init__(self, objects: dict[str, list[str]]) -> None:
+        super().__init__(objects)
+        self.pages_requested: dict[str, int] = {}
+
+    def iter_prefix_version_pages(self, prefix: str) -> Iterator[VersionPage]:
+        self.pages_requested[prefix] = self.pages_requested.get(prefix, 0) + 1
+        entries = tuple(self._version(key) for key in self._objects.get(prefix, []))
+        yield VersionPage(entries, True, "next-key", "next-version")
+        raise AssertionError("expired-upload reaping must leave later pages to orphan repair")
+
+
+def _advisory_locks_held_by(url: str, backend_pid: int) -> int:
+    """Count granted advisory locks held by a backend from a second connection."""
+    with psycopg.connect(url, autocommit=True) as observer:
+        row = observer.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = %s AND granted",
+            (backend_pid,),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 def _manifest_is_gone(
@@ -523,7 +577,7 @@ def test_a_totally_failed_sweep_is_reported_as_a_failed_pass(migrated_url: str) 
             with pytest.raises(CategorizedError) as caught:
                 await run_repair(pool, _reap(store))
         assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-        assert "1 object(s) across 1 reaped owner(s)" in str(caught.value)
+        assert "1 key batch(es) across 1 reaped owner(s)" in str(caught.value)
 
     asyncio.run(_run())
 
@@ -572,7 +626,7 @@ def test_undeleted_objects_are_reported_at_error(
             f"{prefix}b",
         ]
         assert len(errors) == 1  # one summary, naming the counts and the owner
-        assert f"left 2 of 2 object(s) for owner runs/{run_id}" in errors[0].getMessage()
+        assert f"left 2 of 2 key batch(es) for owner runs/{run_id}" in errors[0].getMessage()
 
     asyncio.run(_run())
 
@@ -604,23 +658,15 @@ def test_the_prefix_is_logged_before_the_sweep_starts(
         claimed = [m for m in seen_at_first_delete if "claimed; sweeping" in m]
         assert len(claimed) == 1  # already logged when the first delete ran
         assert prefix in claimed[0]
-        assert "2 object(s)" in claimed[0]
+        assert "2 key(s)" in claimed[0]
 
     asyncio.run(_run())
 
 
-def test_a_failing_list_prefix_aborts_the_pass_without_deleting_the_row(
+def test_a_failing_version_list_leaves_the_claimed_row_gone_for_orphan_repair(
     migrated_url: str,
 ) -> None:
-    """A store outage during phase 1 is benign, and this pins that it stays benign.
-
-    ``ObjectStore.list_prefix`` raises ``CategorizedError`` on any client or transport fault, and
-    phase 1 does not catch it — so the pass ends and later candidates are dropped. That asymmetry
-    with the sweep's per-key tolerance (ADR-0453 §3) is deliberate: phase 1 aborts *before* the
-    row delete commits, so the transaction rolls back with nothing deleted and the next 30-second
-    pass retries the same candidates. Nothing is lost, which is precisely what is not true once
-    the row delete has committed.
-    """
+    """Inventory happens after the DB-only claim; a fault leaves an orphan-discoverable prefix."""
 
     async def _run() -> None:
         run_id, prefix = await _seed_expired_run(migrated_url)
@@ -630,8 +676,7 @@ def test_a_failing_list_prefix_aborts_the_pass_without_deleting_the_row(
                 await run_repair(pool, _reap(store))
         assert store.attempted == []
         async with await connect(migrated_url) as check:
-            # The window survives intact: nothing was deleted, so the retry loses nothing.
-            assert await upload_manifest.get_manifest(check, "runs", run_id) is not None
+            assert await upload_manifest.get_manifest(check, "runs", run_id) is None
 
     asyncio.run(_run())
 
@@ -678,12 +723,37 @@ def test_mid_sweep_delete_failure_does_not_abandon_later_owners(migrated_url: st
             with pytest.raises(CategorizedError) as caught:
                 await run_repair(pool, _reap(store))
         # Both owners reaped despite a failed key each; the report names both, none left unclaimed.
-        assert "2 object(s) across 2 reaped owner(s)" in str(caught.value)
+        assert "2 key batch(es) across 2 reaped owner(s)" in str(caught.value)
         assert "Left 0 candidate(s) unclaimed" in str(caught.value)
         assert sorted(store.deleted) == sorted(f"{p}stray" for p in prefixes)
         async with await connect(migrated_url) as check:
             for run_id in run_ids:
                 assert await upload_manifest.get_manifest(check, "runs", run_id) is None
+
+    asyncio.run(_run())
+
+
+def test_reaper_reads_one_version_page_per_owner_and_progresses_later_owners(
+    migrated_url: str,
+) -> None:
+    """The recurring orphan sweep, not the serial reaper, owns later prefix pages."""
+
+    async def _run() -> None:
+        prefixes: list[str] = []
+        async with await connect(migrated_url) as seed:
+            for _ in range(2):
+                system_id = await seed_system(seed)
+                run_id = await seed_run(seed, system_id, run_state=RunState.CREATED)
+                prefix, request = _run_manifest(run_id, timedelta(seconds=-1))
+                await upload_manifest.replace_manifest(seed, request)
+                prefixes.append(prefix)
+        store = _SecondPageForbiddenStore({p: [f"{p}first-page"] for p in prefixes})
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _reap(store)) == 2
+
+        assert store.pages_requested == {prefix: 1 for prefix in prefixes}
+        assert sorted(store.deleted) == sorted(f"{prefix}first-page" for prefix in prefixes)
 
     asyncio.run(_run())
 
@@ -719,7 +789,7 @@ def test_a_wholly_refused_sweep_stops_the_pass_claiming_more_owners(migrated_url
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             with pytest.raises(CategorizedError) as caught:
                 await run_repair(pool, _reap(store))
-        assert "1 object(s) across 1 reaped owner(s)" in str(caught.value)
+        assert "1 key batch(es) across 1 reaped owner(s)" in str(caught.value)
         assert "Left 2 candidate(s) unclaimed" in str(caught.value)
         assert len(store.attempted) == 1  # the brake tripped after the first owner
         async with await connect(migrated_url) as check:
@@ -756,6 +826,35 @@ def test_manifest_row_is_already_committed_gone_when_the_first_object_is_deleted
         assert count == 1
         assert store.deleted == keys
         assert gone_at_each_delete == [True, True]
+
+    asyncio.run(_run())
+
+
+def test_reap_exact_delete_runs_after_owner_unlock(migrated_url: str) -> None:
+    """Every exact-version deletion callback observes the manifest commit and no owner lock."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        observations: list[tuple[int, bool]] = []
+        sweeper = await psycopg.AsyncConnection.connect(migrated_url)
+
+        def _observe_delete() -> None:
+            probe = _manifest_is_gone(migrated_url, "runs", run_id)
+            observations.append(
+                (
+                    _advisory_locks_held_by(migrated_url, sweeper.info.backend_pid),
+                    probe(),
+                )
+            )
+
+        store = _HookedStore({prefix: [f"{prefix}a", f"{prefix}b"]}, before_delete=_observe_delete)
+        try:
+            outcome = await _reap_one_owner(sweeper, store, "runs", run_id)
+        finally:
+            await sweeper.close()
+
+        assert outcome.reaped is True
+        assert observations == [(0, True), (0, True)]
 
     asyncio.run(_run())
 

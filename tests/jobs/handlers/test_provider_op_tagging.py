@@ -28,6 +28,7 @@ from kdive.jobs.provider_context import clear_provider_kind
 from kdive.jobs.worker_telemetry import WorkerTelemetry
 from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
+from tests.support.object_store import INERT_OBJECT_STORE
 from tests.support.otel import tracer_provider
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -149,7 +150,11 @@ def test_teardown_handler_tags_provider_kind_and_metric_is_emitted() -> None:
             patch.object(SYSTEMS, "get", new=get_mock),
             telem.job_span("teardown") as span,
         ):
-            result.append(await teardown_handler(fake_conn, job, resolver=resolver))
+            result.append(
+                await teardown_handler(
+                    fake_conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                )
+            )
             span.set_outcome("ok")
 
     asyncio.run(_run())
@@ -203,7 +208,9 @@ def test_teardown_handler_falls_back_to_derived_domain_when_unnamed() -> None:
         from kdive.db.repositories import SYSTEMS
 
         with patch.object(SYSTEMS, "get", new=AsyncMock(return_value=system)):
-            return await teardown_handler(fake_conn, job, resolver=resolver)
+            return await teardown_handler(
+                fake_conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+            )
 
     result = asyncio.run(_run())
 
@@ -224,7 +231,9 @@ def test_teardown_handler_returns_none_when_system_missing() -> None:
         from kdive.db.repositories import SYSTEMS
 
         with patch.object(SYSTEMS, "get", new=AsyncMock(return_value=None)):
-            return await teardown_handler(fake_conn, job, resolver=resolver)
+            return await teardown_handler(
+                fake_conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+            )
 
     result = asyncio.run(_run())
 

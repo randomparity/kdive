@@ -26,7 +26,7 @@ from kdive.mcp.schema.tool_index import build_instructions
 from kdive.mcp.verbosity import compact_responses_enabled
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.assembly import build_object_store_assembly
+from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
 
 _log = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ def build_app(
     *,
     verifier: JWTVerifier | None = None,
     provider_composition: ProviderComposition | None = None,
+    object_store_assembly: ObjectStoreAssembly | None = None,
     secret_registry: SecretRegistry,
     tracer: Tracer | None = None,
     meter: Meter | None = None,
@@ -46,6 +47,8 @@ def build_app(
         pool: The Postgres pool the recording middlewares and tool handlers write through.
         verifier: Token verifier; defaults to the configured one.
         provider_composition: Provider wiring; defaults to one built over ``secret_registry``.
+        object_store_assembly: Object-store wiring; defaults to the validated production store.
+            Offline schema consumers may inject wiring that they never invoke.
         secret_registry: The app-owned registry redaction and providers read through.
         tracer: Span emitter for ``TelemetryMiddleware``; defaults to the process-global
             tracer. Injectable per ADR-0487 so telemetry can be observed for one app.
@@ -86,7 +89,11 @@ def build_app(
         secret_registry=composition.secret_registry,
         reaper=composition.build_reconciler_reaper(),
         dump_volume_reaper=composition.build_reconciler_dump_volume_reaper(),
-        object_stores=build_object_store_assembly(),
+        object_stores=(
+            object_store_assembly
+            if object_store_assembly is not None
+            else build_object_store_assembly()
+        ),
     )
     for register in build_plane_registrars(assembly):
         register(app, pool)
