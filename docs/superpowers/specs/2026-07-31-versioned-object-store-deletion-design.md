@@ -17,9 +17,10 @@ and advisory-lock spans:
 
 Making versioning an object-store contract also owns the direct dependencies needed to keep every
 existing delete effective: the shared store/value types, all production key-delete consumers,
-runtime validation, Compose and Helm demo provisioning, test bucket lifecycle, IAM/operator docs,
-and focused contract/concurrency tests. Retention durations, object-key formats, authorization,
-provider selection, and MCP schemas do not change. No database migration or dependency is added.
+upload and System-object orphan repair, runtime validation, Compose and Helm demo provisioning,
+test bucket lifecycle, IAM/operator docs, and focused contract/concurrency tests. Retention
+durations, object-key formats, authorization, provider selection, and MCP schemas do not change. No
+database migration or dependency is added.
 
 ## Required behavior
 
@@ -157,18 +158,41 @@ before the final fence that licenses cleanup and never re-observe the key before
   deletes those exact identities; and
 - leaked-image repair HEADs before its final row-absence query and deletes that HEAD's VersionId.
 
-Consumers whose lifecycle decision permanently retires the key use bounded capture/delete batches:
+Row-backed consumers whose lifecycle decision permanently retires the key use bounded
+capture/delete batches:
 
 - report, closed-investigation, and expired-build artifact garbage collection;
 - expired private-image object/config retirement;
-- System console-part, SysRq, and rotation-sidecar teardown;
-- remote-libvirt sealed console-part retirement; and
+- System console-part and SysRq teardown; and
 - the three #1751 paths described above.
 
 These callers remove their database row only after a complete retired-key purge, except the #1751
 row-first paths whose version-aware orphan sweep is the durable continuation. A source search for
 store-like `.delete(` calls and raw `delete_object(` calls is a release gate; the only raw call may
 be `ObjectStore.delete_version`, and it must include `VersionId`.
+
+### Rowless System-object continuation
+
+Local console-rotation sidecars and remote collector-internal console parts have no artifact row.
+System teardown gives the local sidecar one 20-target capture/delete attempt. Whether that attempt
+is incomplete, fails, or is skipped, a recurring System-object sweep owns the continuation. The
+remote part store's unused `delete_part` protocol and implementation are removed; retirement is
+owned by this sweep instead of an undriven key-delete method.
+
+The sweep walks `local/systems/` and `remote/systems/` through version inventory after
+`reap_console_collectors` in each reconciler pass. It uses a 200-target per-root budget, a 20-target
+per-key sub-budget, and the same key-marker skip behavior as the upload-orphan sweep. For each
+candidate key it parses the System UUID, captures at most 20 exact versions, then takes
+`LockScope.SYSTEM` and confirms the row still has a state in `gone_system_state_values()`. A live,
+missing, malformed, or lock-contended System protects every version. The transaction ends before
+`delete_batch` begins.
+
+The catalog ordering is part of the fence: gone remote collectors finalize and stop before their
+rowless versions become eligible in that pass. Local rotation already rechecks System state under
+the same lock and publishes nothing after a gone state. An incomplete batch or any failed exact
+delete is not terminal success; version inventory presents it again on a later pass. The sweep
+reports deleted and failed targets independently, so one failed key does not hide sibling progress.
+No database deletion row, re-enqueued teardown job, or unbounded teardown loop is added.
 
 ## Failure and concurrency contract
 
@@ -184,6 +208,7 @@ be `ObjectStore.delete_version`, and it must include `VersionId`.
 | nonlatest exact delete fails | captured latest remains current | later sweep retries without resurrection |
 | latest exact delete is ambiguous | all captured older versions are already absent | retry latest; no older captured bytes can reappear |
 | Object Lock/per-version deny | target remains stored and pass reports failure | skip the key after 20 targets; operator removes hold/deny; a later pass retries |
+| rowless System batch is incomplete or fails | surviving versions remain in inventory | the post-collector System-object sweep retries a later pass |
 
 No safety argument depends on a wall-clock lease, process liveness, PostgreSQL backend identity, ETag
 delete preconditions, or cancellation of a boto3 thread.
@@ -234,6 +259,8 @@ than trusted data.
 - Existing database fences and owner advisory locks decide reachability before cleanup.
 - Page, per-root, and per-key work bounds are 1,000 listed entries, 200 examined versions, and 20
   targets charged to one key. Key-only listing markers skip a capped history for the current pass.
+- Rowless System-object deletion requires a parsed System UUID, a gone state under the System lock,
+  and prior remote-collector finalization in the reconciler repair order.
 - Errors expose operation, bucket/key, and VersionId only; standard secret/URL redaction still
   governs logs and operator output.
 
@@ -263,6 +290,9 @@ Tests follow red-green-refactor and mutation-check every changed guard:
   memory/work remain bounded, and prove repeated passes converge without deleting latest early;
 - starvation tests deny more than 200 versions on the first key, prove the sweep caps that key at 20
   targets by advancing with `KeyMarker` only, and reclaim a later sibling in the same pass;
+- rowless continuation tests create more than one batch of local sidecar and remote internal-part
+  versions, inject a mid-purge fault, then prove a later post-collector sweep removes the remainder
+  and latest; live/missing/malformed/lock-contended Systems remain untouched;
 - failure/crash tests leave a captured version behind and prove the next orphan sweep deletes it;
 - the real MinIO fixture proves bucket validation, VersionId replies, legacy `null` handling where
   supported, marker/noncurrent enumeration, exact deletion, and test teardown of all versions;

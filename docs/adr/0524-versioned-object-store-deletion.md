@@ -88,8 +88,20 @@ There is no key-only convenience operation. Existing consumers are assigned expl
   PUT or HEAD VersionId before their final ETag/database fence, then delete only that selected
   VersionId after the fence without re-observing the key;
 - the three issue paths, row-driven report/build/investigation garbage collection, private-image
-  retirement, System console/SysRq/sidecar teardown, and remote-console part retirement use bounded
-  batches only after their existing lifecycle decision proves the logical key retired.
+  retirement, and row-backed System console/SysRq teardown use bounded batches only after their
+  existing lifecycle decision proves the logical key retired; and
+- rowless local console-rotation sidecars and remote collector-internal console parts receive one
+  bounded teardown attempt, then remain discoverable by a recurring System-object version sweep.
+
+The System-object sweep walks the known `local/systems/` and `remote/systems/` roots after remote
+console collectors for gone Systems have finalized. It applies the same 200-target per-root and
+20-target per-key bounds as upload-orphan cleanup. For each exact key it parses the System UUID,
+takes `LockScope.SYSTEM`, and confirms the System is still in a gone state before releasing the
+transaction and deleting captured VersionIds. A live, missing, malformed, or lock-contended System
+declines deletion. The terminal state and repair ordering prove no local rotation or remote
+collector can publish another version; incomplete and failed batches remain in version inventory
+for a later reconciler pass. The remote collector's unused key-delete port is removed instead of
+retaining a cleanup path no caller drives.
 
 The raw client must never issue key-only `DeleteObject` in KDIVE production code.
 
@@ -126,6 +138,8 @@ failure.
   keys in the root.
 - A live database reference protects all versions of its key. This may temporarily retain obsolete
   versions, but avoids guessing which version a legacy key-only row intended.
+- Rowless System console state has a recurring, bounded version sweep after collector finalization,
+  so teardown failure or an incomplete history does not strand versions permanently.
 - The standard S3 API validates bucket status but not provider-specific prefix exclusions. External
   operators own that verification; managed KDIVE MinIO never configures exclusions.
 - MFA Delete is rejected during runtime validation because unattended cleanup cannot provide the
