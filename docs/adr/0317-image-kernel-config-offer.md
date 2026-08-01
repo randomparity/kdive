@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 
-> **Publish-key rule partially superseded by [0526](0526-fence-and-reconcile-pending-image-publications.md)**
+> **Publish-key rule partially superseded by [0525](0525-fence-and-reconcile-pending-image-publications.md)**
 > (2026-07-31). Staged-image keys remain deterministic.
 
 - **Date:** 2026-07-08
