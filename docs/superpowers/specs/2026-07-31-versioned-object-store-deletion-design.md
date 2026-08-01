@@ -25,17 +25,19 @@ provider selection, and MCP schemas do not change. No database migration or depe
 
 ### Bucket contract
 
-The configured bucket must report `Status=Enabled` from `GetBucketVersioning`. Missing status and
-`Suspended` fail with `configuration_error`; the message names the bucket, observed state, required
-state, and recovery action. The check runs before server, worker, or reconciler work begins and
-remains part of object-store readiness.
+The configured bucket must report `Status=Enabled` from `GetBucketVersioning` and must not report
+`MFADelete=Enabled`. Missing/suspended versioning and enabled MFA Delete fail with
+`configuration_error`; the message names the bucket, observed state, required state, and recovery
+action. For MFA Delete the recovery is a dedicated bucket without that setting, because permanent
+version deletion otherwise requires root credentials and a fresh interactive MFA proof. The check
+runs before server, worker, or reconciler work begins and remains part of object-store readiness.
 
-The standard response exposes only bucket status and MFA Delete. It cannot report MinIO's
-non-standard excluded-prefix configuration, so KDIVE does not claim to fail fast on that state.
-External endpoints are supported only when `Enabled` applies bucket-wide; their operator verifies
-that provider-specific prerequisite. Managed MinIO is enabled without exclusions. Prefix exclusion
-under any KDIVE key is a contract violation because a mutable `null` identity can make a delayed
-delete unsafe.
+The standard response exposes only bucket status and MFA Delete. KDIVE rejects enabled MFA Delete,
+but it cannot report MinIO's non-standard excluded-prefix configuration and does not claim to fail
+fast on that state. External endpoints are supported only when `Enabled` applies bucket-wide and
+MFA Delete is off; their operator verifies the provider-specific no-exclusions prerequisite.
+Managed MinIO is enabled without exclusions or MFA Delete. Prefix exclusion under any KDIVE key is
+a contract violation because a mutable `null` identity can make a delayed delete unsafe.
 
 Compose `minio-init`, the Helm bundled-backend initializer, and the live MinIO test fixture enable
 versioning immediately after bucket creation. External deployments enable it outside KDIVE before
@@ -190,7 +192,8 @@ delete preconditions, or cancellation of a boto3 thread.
 
 1. Quiesce and stop every old server, worker, and reconciler so no KDIVE PUT or DELETE is in flight.
 2. Grant and verify version inspection, listing, and exact-delete permissions.
-3. Enable versioning; verify `Status=Enabled` and the provider-specific no-exclusions prerequisite.
+3. Confirm MFA Delete is off, enable versioning, then verify `Status=Enabled` and the
+   provider-specific no-exclusions prerequisite.
 4. Wait the provider's activation barrier before any application write. Amazon S3's documented
    first-enable propagation interval applies; managed MinIO initialization waits for `mc version
    enable` and verifies status before completing.
@@ -222,9 +225,9 @@ than trusted data.
 
 ### Controls
 
-- Standard bucket state is validated before work; runtime credentials cannot enable external
-  versioning. Provider-specific no-exclusion verification remains an operator prerequisite because
-  the standard API does not expose it.
+- Standard bucket state and MFA Delete are validated before work; runtime credentials cannot enable
+  external versioning. Provider-specific no-exclusion verification remains an operator prerequisite
+  because the standard API does not expose it.
 - Exact-key filtering prevents a prefix such as `key` from selecting sibling `key-extra` versions.
 - Every reply field is type-checked at the store boundary.
 - Permanent deletion always includes a service-issued VersionId; tenant input never supplies one.
@@ -236,19 +239,20 @@ than trusted data.
 
 ### Out of scope
 
-Compromise of operator/object-store credentials, an administrator suspending versioning or adding
-an excluded prefix after validation, an undeclared writer bypassing KDIVE publication fences, and
-stores that falsely claim S3 versioning compatibility are operator trust failures. Object Lock
-retention and lifecycle policies remain operator-owned; KDIVE reports their refusal rather than
-bypassing them.
+Compromise of operator/object-store credentials, an administrator suspending versioning, enabling
+MFA Delete, or adding an excluded prefix after validation, an undeclared writer bypassing KDIVE
+publication fences, and stores that falsely claim S3 versioning compatibility are operator trust
+failures. Object Lock retention and lifecycle policies remain operator-owned; KDIVE reports their
+refusal rather than bypassing them.
 
 ## Verification
 
 Tests follow red-green-refactor and mutation-check every changed guard:
 
-- unit contract tests prove missing/suspended versioning fails, enabled passes, malformed replies
-  are categorized, `null` is accepted, exact-key filtering excludes siblings, pagination includes
-  data versions plus markers, and no delete omits `VersionId`;
+- unit contract tests prove missing/suspended versioning and enabled MFA Delete fail, compatible
+  enabled state passes, malformed replies are categorized, `null` is accepted, exact-key filtering
+  excludes siblings, pagination includes data versions plus markers, and no delete omits
+  `VersionId`;
 - focused cleanup tests inspect `pg_locks` from the delete callback and prove all three callbacks run
   with no transaction-scoped owner lock;
 - identity-race tests select the first attempt's PUT/HEAD VersionId before its database fence, PUT a

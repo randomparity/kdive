@@ -24,17 +24,20 @@ snapshot, build, garbage-collection, and remote-console cleanup into marker crea
 ## Decision
 
 The configured artifact bucket must have versioning fully `Enabled`. `Suspended`, an absent status,
-and prefix exclusions are unsupported. KDIVE-provisioned development and demo buckets enable
-versioning with no exclusions when they are created. Operator-provisioned buckets remain
-operator-owned; every KDIVE runtime that uses the store validates the standard bucket status before
-accepting work and fails with an actionable configuration error rather than changing external
-bucket policy.
+`MFADelete=Enabled`, and prefix exclusions are unsupported. Permanent version deletion from an
+MFA-Delete bucket requires the root user's current MFA proof, which background cleanup does not and
+must not possess. KDIVE-provisioned development and demo buckets enable versioning with no
+exclusions or MFA Delete when they are created. Operator-provisioned buckets remain operator-owned;
+every KDIVE runtime that uses the store validates the standard bucket status and MFA Delete state
+before accepting work. It fails with an actionable configuration error that directs the operator to
+a dedicated compatible bucket rather than changing external bucket policy.
 
-The standard `GetBucketVersioning` response cannot report MinIO's non-standard prefix exclusions.
-An external endpoint is supported only when `Enabled` applies to the whole bucket. The operator must
-verify that provider-specific condition; KDIVE cannot claim to detect it through the S3 API. A
-configured endpoint that assigns mutable `null` versions under an excluded prefix violates the
-contract and can invalidate version-specific deletion.
+The standard `GetBucketVersioning` response reports MFA Delete but cannot report MinIO's
+non-standard prefix exclusions. An external endpoint is supported only when `Enabled` applies to
+the whole bucket and MFA Delete is not enabled. The operator must verify the provider-specific
+no-exclusions condition; KDIVE cannot claim to detect it through the S3 API. A configured endpoint
+that assigns mutable `null` versions under an excluded prefix violates the contract and can
+invalidate version-specific deletion.
 
 The object-store port exposes immutable version inventory and deletion:
 
@@ -92,11 +95,11 @@ The raw client must never issue key-only `DeleteObject` in KDIVE production code
 
 The first rollout is an explicit stop-old-first maintenance window, not an ordinary rolling update.
 The operator quiesces every KDIVE writer and deleter, installs and verifies the new version
-inspection/list/delete permissions, enables bucket versioning, and waits for the provider's
-documented activation barrier. For Amazon S3 this includes its documented propagation interval;
-managed MinIO initialization completes `mc version enable` and verifies the resulting status before
-starting KDIVE. Only the version-aware image then starts. This prevents old key-delete callers from
-creating markers over writes during mixed-version service.
+inspection/list/delete permissions, confirms MFA Delete is not enabled, enables bucket versioning,
+and waits for the provider's documented activation barrier. For Amazon S3 this includes its
+documented propagation interval; managed MinIO initialization completes `mc version enable` and
+verifies the resulting status before starting KDIVE. Only the version-aware image then starts. This
+prevents old key-delete callers from creating markers over writes during mixed-version service.
 
 Once the contract is active, deployments may roll between versions that implement ADR-0524.
 Rolling back to a pre-ADR image is unsupported while the service is live: the old image would turn
@@ -125,6 +128,8 @@ failure.
   versions, but avoids guessing which version a legacy key-only row intended.
 - The standard S3 API validates bucket status but not provider-specific prefix exclusions. External
   operators own that verification; managed KDIVE MinIO never configures exclusions.
+- MFA Delete is rejected during runtime validation because unattended cleanup cannot provide the
+  root-user MFA proof required for every permanent version deletion.
 - Externally managed deployments gain a pre-deploy prerequisite and IAM permissions:
   `GetBucketVersioning`, `ListBucketVersions`, and `DeleteObjectVersion`.
 - The first adoption needs downtime and cannot be rolled back to the prior image while accepting
@@ -150,6 +155,9 @@ failure.
 - **Treat standard bucket status as proof that MinIO has no exclusions.** `GetBucketVersioning`
   exposes only status and MFA Delete. Provider-specific exclusions are an explicit external
   prerequisite, not something the standard client can fail fast on honestly.
+- **Support MFA Delete.** It requires root credentials and a fresh MFA proof on every permanent
+  version delete. Interactive root authority is incompatible with unattended cleanup; operators use
+  a dedicated bucket without MFA Delete instead.
 - **Continue key-only delete after enabling versioning.** It creates markers, does not reclaim
   bytes, and makes the contract appear successful while storage grows.
 - **Recapture every version after an identity fence.** A peer PUT can enter that later inventory and
