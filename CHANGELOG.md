@@ -322,6 +322,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Regenerate upload contract references
 - Complete duplicate upload plan
 - Document append-only amendments
+- Design forced teardown path
+- Record forced teardown threat model
 
 ### Fixed
 
@@ -568,6 +570,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Align private pending identity
 - Refresh adopted private metadata
 - Preserve public retry metadata
+- Add forced daemon teardown
+- Revalidate forced teardown targets
 
 ### Build
 
