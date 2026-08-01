@@ -449,15 +449,8 @@ def test_bring_up_fails_on_a_surplus_worker_too(tmp_path: Path) -> None:
 def test_the_surplus_remedy_is_one_that_actually_clears_the_surplus(tmp_path: Path) -> None:
     """The remedy must use forced teardown, which can end the worker this message is about.
 
-    `down.sh` calls the same `stop_daemons` that just let the survivor through: one SIGTERM, a
-    ten-second poll, a WARN, `return 0` — there is no escalation past SIGTERM anywhere. So a
-    worker parked in a long job (the message's own scenario, and the one the contention arm
-    manufactures deliberately) survives `down.sh` exactly as it survived bring-up, and the
-    compose backends get torn down for nothing. `--yes` does not change that either: it gates
-    only the `--wipe` confirmation prompt, so `down.sh --yes` is `down.sh`.
-
-    The two remedies that do work are waiting for the job to end, and ending the pids the
-    message already prints. Both must be named, and the ineffective one must be gone.
+    Plain teardown remains graceful-only. The explicit force option escalates after that grace
+    period without asking the operator to reproduce pid discovery and privilege handling.
     """
     surplus = _lib(
         f'py="{tmp_path}/no-such-python"\nworker_pids() {{ echo 111; echo 222; }}\n'
@@ -605,6 +598,50 @@ def test_down_force_is_teardown_only_and_runs_after_the_graceful_stop() -> None:
     assert down.index("stop_daemons\n") < down.index("force_stop_daemons\n")
     assert '[[ "$force" == "1" ]]' in down
     assert "force_stop_daemons" not in up
+
+
+def test_down_force_stops_backends_only_after_forced_daemon_stop(tmp_path: Path) -> None:
+    """The CLI executes the supported force path before compose teardown."""
+    script_dir = tmp_path / "scripts" / "live-stack"
+    script_dir.mkdir(parents=True)
+    shutil.copy(ROOT / "scripts/live-stack/down.sh", script_dir / "down.sh")
+    events = tmp_path / "events"
+    (script_dir / "lib.sh").write_text(
+        f'repo_root="{tmp_path}"\n'
+        f'stop_daemons() {{ echo graceful >>"{events}"; }}\n'
+        f'force_stop_daemons() {{ echo force >>"{events}"; }}\n'
+        f'docker() {{ echo docker >>"{events}"; }}\n'
+    )
+    result = subprocess.run(
+        ["bash", str(script_dir / "down.sh"), "--force"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert events.read_text().splitlines() == ["graceful", "force", "docker"]
+
+
+def test_down_force_keeps_backends_up_when_forced_daemon_stop_fails(tmp_path: Path) -> None:
+    """A failed SIGKILL path must not dismantle dependencies under a live worker."""
+    script_dir = tmp_path / "scripts" / "live-stack"
+    script_dir.mkdir(parents=True)
+    shutil.copy(ROOT / "scripts/live-stack/down.sh", script_dir / "down.sh")
+    events = tmp_path / "events"
+    (script_dir / "lib.sh").write_text(
+        f'repo_root="{tmp_path}"\n'
+        f'stop_daemons() {{ echo graceful >>"{events}"; }}\n'
+        f'force_stop_daemons() {{ echo force >>"{events}"; return 1; }}\n'
+        f'docker() {{ echo docker >>"{events}"; }}\n'
+    )
+    result = subprocess.run(
+        ["bash", str(script_dir / "down.sh"), "--force"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert events.read_text().splitlines() == ["graceful", "force"]
 
 
 def test_surplus_report_distinguishes_a_pid_that_was_not_signalled(tmp_path: Path) -> None:
