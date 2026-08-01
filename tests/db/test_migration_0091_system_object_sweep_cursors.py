@@ -14,9 +14,9 @@ def test_0091_is_discovered_after_0090() -> None:
     migrations = migrate.discover_migrations()
 
     assert [(item.version, item.filename) for item in migrations[-3:]] == [
-        ("0091", "0091_system_object_sweep_cursors.sql"),
         ("0092", "0092_image_publication_attempt.sql"),
         ("0093", "0093_image_publication_attempt_contract.sql"),
+        ("0094", "0094_artifact_owner_triple_unique.sql"),
     ]
 
 
