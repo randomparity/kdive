@@ -47,9 +47,11 @@ provenance. Canonical JSON uses sorted keys and compact separators; SHA-256 over
 the `build_ref`. Object keys and etags are excluded because they describe storage placement rather
 than content. Finalization already requires the object store's SHA-256 for every artifact.
 
-The record is immutable and stores the exact selected artifact keys and versions. Under the
+The record's content is immutable and stores the exact selected artifact keys and versions. Under the
 Investigation lock, `INSERT ... ON CONFLICT DO NOTHING` chooses a candidate. A conflict reloads the
 winner and requires equality of the canonical document; inequality is an infrastructure failure.
+If that winner is expired, the fully validated conflicting completion renews `expires_at` from the
+current Postgres clock and records the renewal in the complete-build audit. Reuse reads never renew.
 Only the winner's artifact set gets new rows with `owner_kind='investigations'` and the
 Investigation id. The existing owner-triple uniqueness constraint makes its registration
 replay-safe.
@@ -97,8 +99,10 @@ The existing `KDIVE_BUILD_ARTIFACT_RETENTION_DAYS` applies in days per build. Co
 `expires_at` from the Postgres clock as `server_time + retention`; it never refreshes on reuse.
 Create at or after that instant returns `reason: build_ref_expired` with `expires_at`, a fresh
 `server_time` from the same database clock, and `artifacts.create_run_upload` as the recovery tool.
-This preserves ADR-0234's storage backstop while giving an agent the full limit contract before it
-plans reuse.
+Uploading and completing identical content revalidates it and atomically renews the existing
+record's deadline even while live Runs retain its artifact set; the losing duplicate upload is
+cleaned by the convergence protocol. This preserves ADR-0234's storage backstop while giving an
+agent a terminating recovery path and the full limit contract before it plans reuse.
 
 Creation writes the Run with state `succeeded`, `kernel_ref`, `debuginfo_ref`, and `build_ref`, plus
 a succeeded `build` run step copied from the immutable record. It does not create an upload
@@ -169,7 +173,7 @@ class within that boundary.
 4. Malformed, missing, cross-Investigation, target-kind-mismatched, and build-profile-mismatched
    references fail without a Run, System hold, audit transition, or tenancy disclosure.
 5. Concurrent identical completions converge; create racing close or reclaim cannot produce a
-   dangling build reference.
+   dangling build reference; a validated identical completion after expiry renews the deadline.
 6. Close-plus-grace and absolute-deadline collection reclaim new investigation-owned build objects
    only after no live Run references them; expiry is reported with database-clock timestamps and a
    re-upload recovery action, and legacy run-owned build collection remains green.
