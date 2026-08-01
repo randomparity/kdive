@@ -19,9 +19,19 @@ docker compose up -d --wait postgres minio oidc
 docker compose run --rm minio-init
 ```
 
+`minio-init` creates the configured bucket, enables versioning for the whole bucket, and fails
+unless MinIO reports `Enabled`, MFA Delete off, and no prefix/folder exclusions. Do not bypass the
+initializer: KDIVE permanently deletes immutable object versions and has no key-only cleanup path.
+
 Production-like deployments may replace these containers with managed Postgres, managed
 S3-compatible object storage, and a real OIDC issuer. The KDIVE processes only require the
 environment variables documented in [the config reference](../guide/reference/config.md).
+An external bucket must provide the same bucket-wide state and grant
+`s3:GetBucketVersioning`, `s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. Adopt it in a
+stop-old-first window: quiesce old processes, grant and verify IAM and the no-exclusions/MFA-off
+policy, enable versioning, wait for activation, migrate, then start only the new image. Suspending
+versioning or rolling back live to a pre-ADR-0524 image is unsupported; see
+[Installing KDIVE](install.md) for the full procedure.
 
 ## Environment
 

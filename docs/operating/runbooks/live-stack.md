@@ -55,12 +55,20 @@ just stack-up
 
 This waits for the three long-running backends — Postgres, MinIO, and the mock OIDC issuer
 — to be **healthy**, runs the one-shot `minio-init` to completion (creating the
-`kdive-artifacts` bucket), and applies database migrations.
+`kdive-artifacts` bucket, enabling bucket-wide versioning, and verifying `Enabled`, MFA Delete
+off, and no MinIO prefix/folder exclusions), and applies database migrations.
 
 > The recipe scopes `docker compose up --wait` to the long-running backends and runs
 > `minio-init` separately, because `--wait` treats a run-to-completion service's exit as a
-> wait failure. `minio-init`'s exit code still propagates, so a genuine bucket-creation
-> failure fails `just stack-up`.
+> wait failure. `minio-init`'s exit code still propagates, so a bucket creation, version enable,
+> or version-policy verification failure fails `just stack-up` before any KDIVE process starts.
+
+For an external bucket, the runtime identity also needs `s3:GetBucketVersioning`,
+`s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. First adoption is stop-old-first: quiesce
+all old processes, grant and verify IAM, verify whole-bucket/no-exclusions/MFA-off policy, enable
+versioning, wait for activation, migrate, and start only the version-aware image. Suspending
+versioning and live rollback to a pre-ADR-0524 image are unsupported. The complete procedure is in
+[Installing KDIVE](../install.md).
 
 ### Required: abort-incomplete-multipart-upload lifecycle rule
 

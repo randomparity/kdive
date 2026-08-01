@@ -24,9 +24,6 @@ class _NullImageStore:
     def head_present(self, key: str) -> bool:
         return True
 
-    def delete(self, key: str) -> None:
-        return None
-
     def put_artifact(self, request: Any) -> Any:
         raise NotImplementedError("null image store does not upload artifacts")
 
@@ -39,9 +36,6 @@ class _NullUploadStore:
         yield []  # one empty page, as list_objects_v2 replies for a prefix matching nothing
 
     def head(self, key: str) -> Any:
-        return None
-
-    def delete(self, key: str) -> None:
         return None
 
     def list_version_page(

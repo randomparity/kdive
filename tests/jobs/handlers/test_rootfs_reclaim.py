@@ -87,16 +87,10 @@ class _RecordingStore:
     def delete_batch(self, batch: VersionBatch) -> bool:
         if self._before_delete is not None:
             self._before_delete()
-        self.delete(batch.key)
-        return True
-
-    def delete(self, key: str) -> None:
-        if self._before_delete is not None and not self.capture_limits:
-            # Compatibility with the pre-ADR implementation during the required red run.
-            self._before_delete()
-        if key == self._fail_on:
-            raise RuntimeError(f"store delete of {key} failed")
-        self.deleted.append(key)
+        if batch.key == self._fail_on:
+            raise RuntimeError(f"store version-batch delete of {batch.key} failed")
+        self.deleted.append(batch.key)
+        return batch.history_complete
 
 
 def _advisory_locks_held_by(url: str, backend_pid: int) -> int:

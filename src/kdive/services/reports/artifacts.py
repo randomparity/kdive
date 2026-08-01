@@ -29,11 +29,10 @@ _OWNER_KIND = "reports"
 
 
 class ReportArtifactStore(Protocol):
-    """The object-store surface the report write/reap paths need."""
+    """The object-store surface the report write path needs."""
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact: ...
     def presign_get(self, key: str, *, expires_in: int) -> str: ...
-    def delete(self, key: str) -> None: ...
 
 
 def _rendered_files(report: Report, formats: tuple[str, ...]) -> list[tuple[str, str, bytes]]:

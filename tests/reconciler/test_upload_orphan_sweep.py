@@ -309,29 +309,14 @@ class _FakeUploadStore:
             version_id="test-version",
         )
 
-    def delete(self, key: str) -> None:
-        if key in self._objects:
-            self.deleted_etags.append(self._etag(key))
-        self._objects.pop(key, None)
-        self.deleted.append(key)
-        self.events.append(f"delete:{key}")
-
 
 class _FailingDeleteStore(_FakeUploadStore):
-    """Raises ``CategorizedError`` from ``delete`` for the named keys, as a store outage does."""
+    """Raises ``CategorizedError`` from exact deletion for named keys."""
 
     def __init__(self, objects: dict[str, timedelta], *, fail_keys: set[str]) -> None:
         super().__init__(objects)
         self._fail_keys = fail_keys
         self.attempted: list[str] = []
-
-    def delete(self, key: str) -> None:
-        self.attempted.append(key)
-        if key in self._fail_keys:
-            raise CategorizedError(
-                f"delete_object failed for {key}", category=ErrorCategory.INFRASTRUCTURE_FAILURE
-            )
-        super().delete(key)
 
     def delete_version(self, key: str, version_id: str) -> None:
         self.attempted.append(key)
@@ -467,7 +452,7 @@ class _EmptyCaptureStore(_FakeUploadStore):
 
 
 class _HookedStore(_FakeUploadStore):
-    """Runs ``before_delete`` from inside ``delete``, once, on the ``to_thread`` worker.
+    """Runs ``before_delete`` from exact deletion, once, on the ``to_thread`` worker.
 
     That lands the hook in the gap between the per-key re-check and the delete, which is the only
     place a concurrent committer can still lose its object.
@@ -477,12 +462,6 @@ class _HookedStore(_FakeUploadStore):
         super().__init__(objects)
         self._before_delete = before_delete
         self._fired = False
-
-    def delete(self, key: str) -> None:
-        if not self._fired:
-            self._fired = True
-            self._before_delete()
-        super().delete(key)
 
     def delete_version(self, key: str, version_id: str) -> None:
         if not self._fired:

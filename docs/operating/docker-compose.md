@@ -24,9 +24,19 @@ Configuration is read from `KDIVE_*` variables; see
 The app services declare `depends_on: migrate` with
 `condition: service_completed_successfully`, so no process reaches the database before the
 schema is rolled forward. The `migrate` one-shot itself waits on a healthy Postgres, and the
-`minio-init` bucket-creation one-shot completes before any app process starts, so the
-worker's first artifact write never races a missing bucket. A non-zero `migrate` exit blocks
-app start. You do not order these services by hand — Compose does it from the graph.
+`minio-init` bucket initializer completes before any app process starts, so the worker's first
+artifact write never races a missing bucket. After creating the configured bucket, it enables
+bucket-wide versioning and verifies `Enabled`, MFA Delete off, and no MinIO prefix/folder
+exclusions. A suspended, malformed, or excluded state makes the one-shot fail and blocks app
+start. A non-zero `migrate` exit also blocks app start. You do not order these services by hand —
+Compose does it from the graph.
+
+The Compose-managed bucket supplies the ADR-0524 store contract. When replacing it with an
+external store, follow the stop-old-first adoption order and IAM requirements in
+[Installing KDIVE](install.md): quiesce old processes, grant and verify
+`s3:GetBucketVersioning`/`s3:ListBucketVersions`/`s3:DeleteObjectVersion`, verify bucket policy,
+enable versioning without exclusions or MFA Delete, wait for activation, migrate, and start only
+the version-aware image. Suspension and live rollback to a pre-ADR-0524 image are unsupported.
 
 That graph orders the first bring-up only. Each app process also waits up to ten seconds at
 start for its own first database connection and exits if Postgres is unreachable, so every

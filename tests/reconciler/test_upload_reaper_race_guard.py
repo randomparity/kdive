@@ -122,12 +122,6 @@ class _HookedStore:
             is_delete_marker=False,
         )
 
-    def delete(self, key: str) -> None:
-        if not self._fired:
-            self._fired = True
-            self._before_delete()
-        self.deleted.append(key)
-
 
 def _noop() -> None:
     return None

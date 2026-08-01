@@ -66,8 +66,8 @@ class _FakeStore:
         return VersionBatch(key, (self._version(key),), True)
 
     def delete_batch(self, batch: VersionBatch) -> bool:
-        self.delete(batch.key)
-        return True
+        self.deleted.append(batch.key)
+        return batch.history_complete
 
     @staticmethod
     def _version(key: str) -> ObjectVersion:
@@ -80,14 +80,11 @@ class _FakeStore:
             is_delete_marker=False,
         )
 
-    def delete(self, key: str) -> None:
-        self.deleted.append(key)
-
 
 class _FailingStore(_FakeStore):
-    """A store whose ``delete`` raises for the named keys, as a real store outage would.
+    """A store whose version-batch delete fails for named keys, as a real outage would.
 
-    ``ObjectStore.delete`` wraps every ``BotoCoreError``/``ClientError`` in a
+    ``ObjectStore.delete_batch`` surfaces exact-delete faults as a
     ``CategorizedError``, so that is the exception a mid-sweep failure actually presents.
     """
 
@@ -119,18 +116,18 @@ class _FailingStore(_FakeStore):
             )
         yield from super().iter_prefix_version_pages(prefix)
 
-    def delete(self, key: str) -> None:
-        self.attempted.append(key)
-        if key in self._fail_keys:
+    def delete_batch(self, batch: VersionBatch) -> bool:
+        self.attempted.append(batch.key)
+        if batch.key in self._fail_keys:
             raise CategorizedError(
-                f"delete_object failed for {key}",
+                f"delete_object failed for {batch.key}",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             )
-        super().delete(key)
+        return super().delete_batch(batch)
 
 
 class _HookedStore(_FakeStore):
-    """A store that runs ``before_delete`` from inside its own ``delete``.
+    """A store that runs ``before_delete`` from inside its version-batch delete.
 
     The hook lands in the gap phase 2 leaves open: after the manifest-row delete has committed and
     the owner lock has been released, before the object is actually gone. It runs on the
@@ -152,11 +149,11 @@ class _HookedStore(_FakeStore):
         self._once = once
         self._fired = False
 
-    def delete(self, key: str) -> None:
+    def delete_batch(self, batch: VersionBatch) -> bool:
         if not (self._once and self._fired):
             self._fired = True
             self._before_delete()
-        super().delete(key)
+        return super().delete_batch(batch)
 
 
 def _advisory_locks_held_by(url: str, backend_pid: int) -> int:

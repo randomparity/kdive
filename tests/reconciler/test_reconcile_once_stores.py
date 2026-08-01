@@ -170,9 +170,6 @@ class _RecordingUploadStore:
             version_id="test-version",
         )
 
-    def delete(self, key: str) -> None:
-        self.deleted.append(key)
-
     def delete_retired_key_batch(self, key: str, limit: int) -> bool:
         assert limit == 20
         self.deleted.append(key)

@@ -841,18 +841,6 @@ class ObjectStore:
             raise _infrastructure_error("list_objects_v2", prefix, err) from err
         return keys
 
-    def delete(self, key: str) -> None:
-        """Delete ``key`` (idempotent — deleting an absent key is not an error).
-
-        Raises:
-            CategorizedError: the delete fails
-                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
-        """
-        try:
-            self._client.delete_object(Bucket=self._bucket, Key=key)
-        except (BotoCoreError, ClientError) as err:
-            raise _infrastructure_error("delete_object", key, err) from err
-
     def iter_prefix_pages_with_mtime(
         self, prefix: str
     ) -> Iterator[list[artifact_types.ObjectListing]]:

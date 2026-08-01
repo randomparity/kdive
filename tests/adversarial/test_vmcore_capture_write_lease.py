@@ -414,10 +414,6 @@ class _SweepableCaptureStore:
     def list_prefix(self, prefix: str) -> list[str]:
         return sorted(k for k in self._objects if k.startswith(prefix))
 
-    def delete(self, key: str) -> None:
-        self.deleted.append(key)
-        self._objects.pop(key, None)
-
     def _mtime(self, key: str) -> datetime:
         return datetime.now(UTC) - self._objects[key][1]
 

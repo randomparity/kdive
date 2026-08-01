@@ -52,6 +52,64 @@ pytestmark = pytest.mark.skipif(
 _COMPOSE_FILE = Path(__file__).resolve().parents[2] / "docker-compose.yml"
 _APP_SERVICES = ("server", "worker", "reconciler")
 
+_VERSIONING_REPLIES = (
+    (
+        "enabled-omitted-exclusions",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}',
+        0,
+    ),
+    (
+        "enabled-explicit-empty-exclusions",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":[]}}',
+        0,
+    ),
+    (
+        "suspended",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Suspended","MFADelete":""}}',
+        1,
+    ),
+    (
+        "excluded-prefix",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":"",'
+        '"ExcludedPrefixes":["tmp/"]}}',
+        1,
+    ),
+    (
+        "excluded-folders",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":"","ExcludeFolders":true}}',
+        1,
+    ),
+    (
+        "missing-status",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"MFADelete":""}}',
+        1,
+    ),
+    (
+        "mfa-delete-enabled",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":"Enabled"}}',
+        1,
+    ),
+    (
+        "missing-mfa-delete",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled"}}',
+        1,
+    ),
+    (
+        "malformed-exclusions",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":null}}',
+        1,
+    ),
+)
+
 
 def _config(env_overrides: dict[str, str] | None = None, *, obs: bool = False) -> dict[str, Any]:
     # `docker compose config` drops profile-gated services (prometheus/grafana) unless the profile
@@ -73,6 +131,51 @@ def _services() -> dict[str, Any]:
     return _config()["services"]
 
 
+def _minio_init_script() -> str:
+    entrypoint = _services()["minio-init"]["entrypoint"]
+    assert entrypoint[:2] == ["/bin/sh", "-c"]
+    # ``docker compose config`` preserves the source escape as ``$$``; Compose converts it to
+    # one dollar when it creates the container. Mirror that final argv here before executing it.
+    return entrypoint[2].replace("$$", "$")
+
+
+def _fake_mc(tmp_path: Path) -> Path:
+    calls = tmp_path / "mc-calls"
+    executable = tmp_path / "mc"
+    executable.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'printf \'%s\\n\' "$*" >>"$MC_CALLS"\n'
+        'case "$*" in\n'
+        '  "version info --json "*)\n'
+        '    [ "${MC_INFO_FAIL:-0}" = 0 ] || exit 23\n'
+        "    printf '%s\\n' \"$MC_VERSION_INFO\"\n"
+        "    ;;\n"
+        "esac\n"
+    )
+    executable.chmod(0o755)
+    return calls
+
+
+def _run_minio_init(
+    tmp_path: Path, reply: str, *, info_fails: bool = False
+) -> tuple[int, list[str]]:
+    calls = _fake_mc(tmp_path)
+    result = subprocess.run(
+        ["/bin/sh", "-c", _minio_init_script()],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "MC_CALLS": str(calls),
+            "MC_VERSION_INFO": reply,
+            "MC_INFO_FAIL": "1" if info_fails else "0",
+        },
+    )
+    return result.returncode, calls.read_text().splitlines()
+
+
 def _published_ports(service: dict[str, Any]) -> set[str]:
     return {str(p.get("published")) for p in service.get("ports", [])}
 
@@ -81,6 +184,26 @@ def test_compose_config_is_valid() -> None:
     # `docker compose config -q` is the issue's acceptance gate; rendering to JSON
     # exercises the same parse and gives us the model the rest of the file asserts on.
     assert _services()  # non-empty → parsed
+
+
+@pytest.mark.parametrize(("_case", "reply", "expected"), _VERSIONING_REPLIES)
+def test_minio_init_fails_closed_on_bucket_versioning(
+    tmp_path: Path, _case: str, reply: str, expected: int
+) -> None:
+    returncode, calls = _run_minio_init(tmp_path, reply)
+    assert (returncode == 0) is (expected == 0), _case
+    assert calls[:3] == [
+        "alias set local http://minio:9000 minioadmin minioadmin",
+        "mb --ignore-existing local/kdive-artifacts",
+        "version enable local/kdive-artifacts",
+    ]
+    assert calls[3:] == ["version info --json local/kdive-artifacts"]
+
+
+def test_minio_init_propagates_version_info_command_failure(tmp_path: Path) -> None:
+    returncode, calls = _run_minio_init(tmp_path, "", info_fails=True)
+    assert returncode != 0
+    assert calls[-1] == "version info --json local/kdive-artifacts"
 
 
 def test_migrate_one_shot_runs_command_and_waits_for_postgres() -> None:

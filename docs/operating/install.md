@@ -10,6 +10,26 @@ vmcore retrieval, debuginfo staging, console parts, and artifact egress.
 `server`/`worker`/`reconciler` fail startup validation with an actionable
 `configuration_error` when `KDIVE_S3_ENDPOINT_URL` or `KDIVE_S3_BUCKET` is unset or blank.
 
+The configured bucket must have bucket-wide versioning `Enabled`, with MFA Delete off and no
+MinIO prefix or folder exclusions. The runtime credential needs its existing object permissions
+plus `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. The standard
+S3 versioning response does not expose MinIO's prefix/folder exclusions, so the operator must
+verify that provider-specific policy separately for an external store.
+
+The first upgrade to a version-aware image is a stop-old-first maintenance operation:
+
+1. Quiesce every old server, worker, reconciler, writer, and deleter; wait until no object-store
+   request is in flight.
+2. Grant and verify the version-inspection, version-listing, and exact-version-delete IAM actions,
+   then verify that MFA Delete is off and no provider-specific exclusion policy applies.
+3. Enable versioning for the whole bucket and wait for the provider's documented activation
+   barrier.
+4. Run database migrations, then start only the new version-aware image and verify readiness.
+
+Do not run an old and new image together during this adoption. Suspending bucket versioning and a
+live rollback to an image from before ADR-0524 are unsupported; recover forward with a
+version-aware image. A diagnostic run of an old image must remain quiesced.
+
 ## Install paths
 
 ### From source

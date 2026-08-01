@@ -167,7 +167,8 @@ class _VerifyStore:
             datetime.now(UTC) - latest.last_modified,
         )
 
-    def delete(self, key: str) -> None:
+    def remove_object_for_test(self, key: str) -> None:
+        """Simulate out-of-band byte loss without exposing a store delete operation."""
         entry = self._objects.pop(key, None)
         if entry is not None:
             self.deleted_etags.append(entry[0])
@@ -446,7 +447,8 @@ def test_the_idempotent_replay_needs_no_verify(migrated_url: str) -> None:
                     conn, job, resolver=resolver, artifact_store=store
                 )
             store.headed_keys.clear()
-            store.delete(_raw_key(run_id))  # the object is gone; the row still references it
+            # Simulate out-of-band loss: the object is gone while the row still references it.
+            store.remove_object_for_test(_raw_key(run_id))
             async with pool.connection() as conn:
                 replay = await vmcore_plane.capture_handler(
                     conn, job, resolver=resolver, artifact_store=store

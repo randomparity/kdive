@@ -71,9 +71,6 @@ class _ChunkedStore:
         self.events.append(("delete_version", key))
         self.deleted_versions.append((key, version_id))
 
-    def delete(self, key: str) -> None:
-        self.events.append(("delete", key))
-
     def create_multipart_upload(
         self, key: str, *, sensitivity: Sensitivity, retention_class: str
     ) -> str:

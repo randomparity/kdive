@@ -49,9 +49,6 @@ class RecordingObjectStore:
     def list_prefix(self, prefix: str) -> list[str]:
         return [k for k in self.objects if k.startswith(prefix)]
 
-    def delete(self, key: str) -> None:
-        self.objects.pop(key, None)
-
 
 def _observable_key(system_id: UUID, index: int) -> str:
     return f"{_TENANT}/systems/{system_id}/{part_object_name(0, index)}"

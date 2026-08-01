@@ -41,9 +41,6 @@ class _RecordingStore:
         self.presigns.append((key, expires_in))
         return f"https://signed.test/{key}?exp={expires_in}"
 
-    def delete(self, key: str) -> None:  # pragma: no cover - unused here
-        pass
-
 
 @asynccontextmanager
 async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:

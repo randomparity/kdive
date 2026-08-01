@@ -121,8 +121,9 @@ class _LeaseFakeStore:
         return VersionBatch(key, exact, True)
 
     def delete_batch(self, batch: VersionBatch) -> bool:
-        self.delete(batch.key)
-        return True
+        self.deleted.append(batch.key)
+        self._objects.pop(batch.key, None)
+        return batch.history_complete
 
     def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[ObjectListing]]:
         listing = [
@@ -143,10 +144,6 @@ class _LeaseFakeStore:
             checksum_sha256=None,
             version_id="test-version",
         )
-
-    def delete(self, key: str) -> None:
-        self.deleted.append(key)
-        self._objects.pop(key, None)
 
     @staticmethod
     def _mtime(age: timedelta) -> datetime:

@@ -32,6 +32,19 @@ already exists, so migrations apply before the app rollout. Migrations must be
 backward-compatible (expand-contract); the runner is forward-only (ADR-0015), so
 rollback is image-only and the prior image must tolerate the newer schema.
 
+The external artifact bucket must have bucket-wide versioning `Enabled`, MFA Delete off, and no
+provider-specific prefix or folder exclusions. Grant the runtime identity its existing object
+permissions plus `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and
+`s3:DeleteObjectVersion`. The standard S3 response cannot expose MinIO exclusions, so verify that
+provider policy separately.
+
+For the first ADR-0524 deployment, do not use an ordinary rolling upgrade. Quiesce and stop all old
+processes, grant and verify the IAM actions, verify the no-exclusions/MFA-off policy, enable
+versioning, wait for the provider activation barrier, run the migration, and start only the new
+version-aware image. Suspending versioning and live rollback to a pre-ADR-0524 image are
+unsupported; recovery is a forward deployment. Later upgrades between ADR-0524-aware images may
+use the normal rolling path.
+
 ## Upgrade
 
 **Do not upgrade with bare `helm upgrade --reuse-values`.** `--reuse-values` carries the
@@ -148,6 +161,10 @@ helm test kdive    # mints a token, asserts tools/list returns tools
 `values-demo.yaml` pins `image.tag=edge` (the rolling published image); without a published
 image the demo cannot pull. The demo migrate Job runs `post-install` behind a DB-readiness
 init container.
+
+The bundled `minio-init` Job creates the configured bucket, enables bucket-wide versioning, then
+fails closed unless MinIO reports `Enabled`, MFA Delete off, and no prefix/folder exclusions. App
+workloads cannot become ready against an incompatible bundled bucket.
 
 ### Single object store (remote-libvirt & external uploads)
 
