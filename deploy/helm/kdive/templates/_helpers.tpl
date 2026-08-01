@@ -236,7 +236,7 @@ initContainers:
       - -c
       - |
         set -eu
-        bucket=local/{{ .Values.config.KDIVE_S3_BUCKET }}
+        bucket="local/$MC_BUCKET"
         until mc alias set local http://{{ include "kdive.fullname" . }}-minio:9000 "$MC_USER" "$MC_PASS"; do
           echo "waiting for minio..."; sleep 3
         done
@@ -247,6 +247,8 @@ initContainers:
     env:
       - name: MC_CONFIG_DIR
         value: /tmp/.mc
+      - name: MC_BUCKET
+        value: {{ .Values.config.KDIVE_S3_BUCKET | quote }}
       - name: MC_USER
         value: {{ .Values.demoCredentials.minio.rootUser | quote }}
       - name: MC_PASS
