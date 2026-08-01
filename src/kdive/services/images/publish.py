@@ -257,11 +257,12 @@ async def _adopt_or_insert_pending(
     ``(owner, provider, name)`` without arch, exactly like the registered-private uniqueness key;
     adopting a private row replaces all request-owned durable fields, including its arch, format,
     layout, capabilities, provenance, expiry, digest, size, keys, and publication attempt. A public
-    publish never adopts a project's private row and one project never adopts another's, so
-    cross-tenant isolation holds. A ``defined`` baseline remains arch-scoped and preserves its
-    declared metadata while gaining the realized object fields. Both cases move the row to
-    ``pending`` and re-arm ``pending_since``; resolution never returns either, so an adopted row is
-    never visible mid-publish (ADR-0526).
+    pending retry preserves its configuration-owned metadata while refreshing the attempted
+    object's fields. A public publish never adopts a project's private row and one project never
+    adopts another's, so cross-tenant isolation holds. A ``defined`` baseline remains arch-scoped
+    and likewise preserves its declared metadata while gaining the realized object fields. All
+    cases move the row to ``pending`` and re-arm ``pending_since``; resolution never returns either,
+    so an adopted row is never visible mid-publish (ADR-0526).
 
     ``size_bytes`` is the size of the object this publish is about to write. It lands on the row
     *before* the object exists so the row is a durable quota claim (ADR-0520); an adopted row's
@@ -279,7 +280,10 @@ async def _adopt_or_insert_pending(
         )
         existing = await cur.fetchone()
         if existing is not None:
-            if existing["state"] == ImageState.PENDING.value:
+            if (
+                existing["state"] == ImageState.PENDING.value
+                and request.visibility is ImageVisibility.PRIVATE
+            ):
                 await _refresh_pending(
                     cur,
                     existing["id"],
@@ -291,7 +295,7 @@ async def _adopt_or_insert_pending(
                     publication_principal,
                 )
             else:
-                await _realize_defined(
+                await _refresh_publish_fields(
                     cur,
                     existing["id"],
                     request,
@@ -350,7 +354,7 @@ async def _refresh_pending(
     )
 
 
-async def _realize_defined(
+async def _refresh_publish_fields(
     cur: AsyncCursor[DictRow],
     row_id: UUID,
     request: PublishRequest,
@@ -360,7 +364,7 @@ async def _realize_defined(
     publication_attempt_id: UUID,
     publication_principal: str | None,
 ) -> None:
-    """Realize a defined baseline without replacing its declared metadata."""
+    """Refresh attempted-object fields without replacing configuration-owned metadata."""
     await cur.execute(
         "UPDATE image_catalog "
         "SET state = %s, object_key = %s, kernel_config_key = %s, digest = %s, "
@@ -712,9 +716,10 @@ async def publish_image(
     HEAD-gates, then flips the row to ``registered`` and returns it. Public pending identity is
     ``(provider, name, arch)``. Private pending identity is ``(owner, provider, name)`` without
     arch, matching registered-name uniqueness; a cross-arch retry supersedes the earlier pending
-    attempt and refreshes all request-owned fields. A seeded ``defined`` baseline remains
-    arch-scoped and preserves its declared metadata when realized. Public and private rows, and
-    private rows for different owners, intentionally do not adopt each other.
+    attempt and refreshes all request-owned fields. A public pending retry and a seeded ``defined``
+    baseline preserve their configuration-owned metadata while refreshing attempted-object fields.
+    The defined baseline remains arch-scoped. Public and private rows, and private rows for
+    different owners, intentionally do not adopt each other.
 
     Each reservation mints attempt-specific object keys. If overlapping reservations target the
     same pending identity, only the newest reservation can finish; an older attempt raises an

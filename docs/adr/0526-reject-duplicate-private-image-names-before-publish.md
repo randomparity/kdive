@@ -39,8 +39,9 @@ uniqueness, without architecture. A concurrent first upload under another archit
 adopts and supersedes the existing pending attempt instead of inserting a second row that cannot
 register. Adoption replaces every request-owned durable field: architecture, format, root device,
 capabilities, provenance, expiry, digest, size, attempt-specific keys, attempt id, and principal.
-This replacement is specific to `pending` rows; realizing an arch-scoped `defined` baseline
-preserves its declared metadata. Candidate selection is deterministic: pending rows sort before a
+This replacement is specific to private `pending` rows. A public pending retry and realization of
+an arch-scoped `defined` baseline preserve configuration-owned metadata while refreshing the
+attempted object's fields. Candidate selection is deterministic: pending rows sort before a
 defined baseline, then by `created_at` and id. Quota accounting locks and excludes exactly the
 pending row selected by that order before replacing its recorded size. Any other live row remains
 counted, including a malformed duplicate pending row, so accounting fails closed under repair

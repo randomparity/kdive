@@ -24,7 +24,8 @@ keys and recovery unchanged.
 - Private pending identity is `(owner, provider, name)` without architecture, matching
   `image_catalog_one_private`; public pending identity remains `(provider, name, arch)`.
 - A private pending adoption refreshes all request-owned durable metadata. A defined baseline
-  remains arch-scoped and preserves its declared metadata when realized.
+  remains arch-scoped and preserves its declared metadata when realized. A public pending retry
+  likewise preserves configuration-owned metadata while refreshing attempted-object fields.
 - Adoption candidates are deterministic by pending state, `created_at`, and id. Quota excludes
   exactly the locked pending row the reservation selects; every other live row remains counted.
 - Private finish holds `IMAGE_PUBLISH → PROJECT` only across registration + audit. Reservation

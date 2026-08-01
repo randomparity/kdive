@@ -31,8 +31,9 @@ lifecycle; the rejected attempt does not delete it.
 Private pending adoption uses that same `(owner, provider, name)` identity. A concurrent first
 upload with another architecture adopts the pending row and replaces its architecture, format,
 root device, capabilities, provenance, expiry, digest, size, attempt-specific keys, attempt id, and
-principal. This complete metadata refresh applies only to pending attempts; a defined baseline
-remains architecture-scoped and keeps its declared metadata when realized. The adoptable pending
+principal. This complete metadata refresh applies only to private pending attempts. Public pending
+retries and defined baselines keep their configuration-owned metadata while refreshing the
+attempted object's fields. A defined baseline remains architecture-scoped. The adoptable pending
 candidate is selected deterministically by `created_at` then id. Quota accounting locks and
 excludes exactly that row, regardless of architecture, before reserving the winner's size; every
 other live row remains counted so malformed duplicates or repair races fail closed. Public pending
