@@ -821,23 +821,36 @@ def stage_uploaded_rootfs(
         _require_staging_free_space(dest, budget=budget, system_id=system_id)
         with _flocked_partial(partial) as guard_fd:
             if effective is None:
-                _stage_identity(
+                actual = _stage_identity(
                     store,
                     key=object_key,
                     checksum=head.checksum_sha256,
-                    partial=partial,
+                    partial_fd=guard_fd,
                     system_id=system_id,
                 )
+                if budget is not None and actual != budget.required:
+                    raise CategorizedError(
+                        "uploaded rootfs object length changed between HEAD and GET; retry, and "
+                        "if it persists repair the object-store boundary",
+                        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                        details={
+                            "system_id": str(system_id),
+                            "dest": str(dest),
+                            "expected_bytes": budget.required,
+                            "actual_bytes": actual,
+                        },
+                    )
             elif effective == GZIP_ENCODING:
-                _stage_gzip(
+                actual = _stage_gzip(
                     store,
                     key=object_key,
                     compressed_size=head.size_bytes,
                     checksum=head.checksum_sha256,
                     uncompressed_size=uncompressed_size,
-                    partial=partial,
+                    partial_fd=guard_fd,
                     system_id=system_id,
                 )
+                os.ftruncate(guard_fd, actual)
             else:
                 # Defence in depth: the declaration validator (ADR-0437) rejects an unknown codec,
                 # so this is unreachable with valid data — but naming the codec beats silently
@@ -881,9 +894,9 @@ def _stage_identity(
     *,
     key: str,
     checksum: str,
-    partial: Path,
+    partial_fd: int,
     system_id: UUID,
-) -> None:
+) -> int:
     """Stream an unencoded upload verbatim into the partial, verifying its SHA-256.
 
     The object is read in ``_STREAM_CHUNK_BYTES`` windows off a single unconditional GET (``etag``
@@ -902,10 +915,14 @@ def _stage_identity(
     in the same words ``strip_gzip_to_writer`` uses.
     """
     hasher = hashlib.sha256()
-    with store.get_artifact_stream(key, None) as fetched, partial.open("wb") as writer:
+    written = 0
+    writer_fd = os.dup(partial_fd)
+    with store.get_artifact_stream(key, None) as fetched, os.fdopen(writer_fd, "wb") as writer:
+        os.lseek(writer.fileno(), 0, os.SEEK_SET)
         while chunk := fetched.reader.read(_STREAM_CHUNK_BYTES):
             hasher.update(chunk)
             writer.write(chunk)
+            written += len(chunk)
     if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
         _log_checksum_mismatch(key, system_id=system_id, encoding="identity")
         raise CategorizedError(
@@ -915,6 +932,7 @@ def _stage_identity(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
+    return written
 
 
 def _log_checksum_mismatch(
@@ -971,9 +989,9 @@ def _stage_gzip(
     compressed_size: int,
     checksum: str,
     uncompressed_size: int | None,
-    partial: Path,
+    partial_fd: int,
     system_id: UUID,
-) -> None:
+) -> int:
     """Stream-gunzip a gzip transport object to the partial, bounded and transport-hash verified.
 
     ``strip_gzip_to_writer`` is consumer-agnostic and raises with empty ``details``, so its errors
@@ -995,8 +1013,10 @@ def _stage_gzip(
         uncompressed_size=uncompressed_size,
     )
     try:
-        with partial.open("wb") as writer:
-            strip_gzip_to_writer(store, request, writer)
+        writer_fd = os.dup(partial_fd)
+        with os.fdopen(writer_fd, "wb") as writer:
+            os.lseek(writer.fileno(), 0, os.SEEK_SET)
+            result = strip_gzip_to_writer(store, request, writer)
     except CategorizedError as exc:
         exc.details.setdefault("system_id", str(system_id))
         # Keyed on the gate marker, NOT on the category. ``strip_gzip_to_writer`` calls
@@ -1016,6 +1036,7 @@ def _stage_gzip(
                 decode_detail=None if exc.__cause__ is None else str(exc.__cause__),
             )
         raise
+    return result.uncompressed_bytes
 
 
 def _starts_with_qcow2_magic(staged: Path) -> bool:
