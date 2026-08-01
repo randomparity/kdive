@@ -33,8 +33,9 @@ records the decoder's actual output count and truncates the partial to that coun
 decode and transport-checksum verification, before the shared qcow2 and durability gates. A failed
 stage unlinks the partial and thereby releases every reserved block.
 
-The native call is made directly rather than through `posix_fallocate`. `ENOSYS`, `EOPNOTSUPP`, and
-an interface-level `EINVAL` mean native reservation is unavailable and log one warning before
+The native call is made directly rather than through `posix_fallocate`, with an explicit `ctypes`
+prototype whose `off_t` arguments are 64-bit on KDIVE's supported x86_64 and ppc64le hosts.
+`ENOSYS` and `EOPNOTSUPP` mean native reservation is unavailable and log one warning before
 continuing under ADR-0450's advisory precheck and mid-write `ENOSPC` handling. Other allocation
 errors are staging failures. KDIVE never falls back to `posix_fallocate`, so an unsupported
 filesystem cannot trigger glibc's zero-writing emulation.
@@ -49,6 +50,8 @@ unlinks the orphan. No migration or operator setting is added.
   can provide; one wins and the other fails before reading its object.
 - The existing one-GiB advisory floor remains a single-stager admission policy, not a globally
   reserved floor. Other volume writers can still consume free space after a reservation succeeds.
+- Identity verifies the streamed byte count against the exact HEAD size as well as checking the
+  digest, so a changed or faulty object-store response cannot publish a zero-padded reservation.
 - Gzip temporarily reserves its declared upper bound and releases the unused tail before publish.
   An overstated bound can therefore lose a race for capacity even when the eventual image is small.
 - Filesystems without native allocation support keep the pre-0530 behavior, with a warning that
