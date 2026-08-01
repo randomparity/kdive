@@ -521,6 +521,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retry gone system artifact cleanup
 - Preserve gone system evidence
 - Bound system artifact retries
+- Tolerate additive catalog columns
 
 ### Build
 
