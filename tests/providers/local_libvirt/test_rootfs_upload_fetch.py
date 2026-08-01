@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import errno
 import fcntl
 import gzip
@@ -54,6 +55,61 @@ _QCOW2 = b"QFI\xfb" + b"canonical-qcow2-body"
 # A valid canonical base64 SHA-256 (32 bytes); the profile's content-address handle.
 _CHECKSUM = base64.b64encode(bytes(range(32))).decode("ascii")
 _TOKEN = rootfs_object_token(_CHECKSUM)
+
+
+def test_native_fallocate_preserves_lengths_above_two_gib(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native = rootfs_upload_fetch._fallocate
+    assert native.restype is ctypes.c_int
+    assert native.argtypes == [
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_long,
+        ctypes.c_long,
+    ]
+    calls: list[tuple[int, int, int, int]] = []
+
+    def _call(fd: int, mode: int, offset: int, length: int) -> int:
+        calls.append((fd, mode, offset, length))
+        return 0
+
+    monkeypatch.setattr(rootfs_upload_fetch, "_fallocate", _call)
+    rootfs_upload_fetch._native_fallocate(17, 3 * 1024**3)
+
+    assert calls == [(17, 0, 0, 3 * 1024**3)]
+
+
+def test_native_fallocate_captures_errno(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _call(_fd: int, _mode: int, _offset: int, _length: int) -> int:
+        ctypes.set_errno(errno.ENOSPC)
+        return -1
+
+    monkeypatch.setattr(rootfs_upload_fetch, "_fallocate", _call)
+
+    with pytest.raises(OSError) as error:
+        rootfs_upload_fetch._native_fallocate(17, 4096)
+
+    assert error.value.errno == errno.ENOSPC
+
+
+def test_native_fallocate_allocates_a_real_temporary_file(tmp_path: Path) -> None:
+    partial = tmp_path / "native-allocation.partial"
+    requested = 1024**2
+    fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        try:
+            rootfs_upload_fetch._native_fallocate(fd, requested)
+        except OSError as error:
+            if error.errno in {errno.ENOSYS, errno.EOPNOTSUPP}:
+                pytest.skip(f"native fallocate unsupported on test filesystem: errno={error.errno}")
+            raise
+        allocated = os.fstat(fd)
+        assert allocated.st_size == requested
+        assert allocated.st_blocks * 512 >= requested
+    finally:
+        os.close(fd)
+        partial.unlink(missing_ok=True)
 
 
 def _sha256_b64(data: bytes) -> str:
