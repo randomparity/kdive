@@ -311,6 +311,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expose publication delete conflict
 - Date publication recovery acceptance
 - Specify publication attempt contract
+- Reject duplicate private image names
+- Bound concurrent publication guarantee
+- Plan duplicate upload rejection
+- Scope destructive conflict recovery
+- Require concurrent digest proof
+- Mark service task complete
+- Expose duplicate upload recovery
+- Mark MCP task complete
+- Regenerate upload contract references
+- Complete duplicate upload plan
 
 ### Fixed
 
@@ -551,6 +561,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reject deletion during publication
 - Contract image publication attempts
 - Activate legacy image recovery
+- Reject registered private image names
+- Order private publish registration
+- Reject incompatible pending uploads
+- Align private pending identity
+- Refresh adopted private metadata
+- Preserve public retry metadata
 
 ### Build
 
