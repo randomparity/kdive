@@ -9,6 +9,7 @@ timestamps (they are omitted from inserts and read back through the repository p
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 from uuid import UUID
@@ -39,6 +40,7 @@ from kdive.domain.lifecycle.records import (
     Allocation,
     DebugSession,
     Investigation,
+    InvestigationBuild,
     Run,
     Snapshot,
     System,
@@ -57,6 +59,64 @@ class ObjectNotFound(RuntimeError):
 
 class ArtifactClaimConflict(RuntimeError):
     """A conflicting artifact claim repeatedly disappeared before it could be adopted."""
+
+
+class InvestigationBuildRepository:
+    """Persistence boundary for composite-key Investigation build generations."""
+
+    async def insert(self, conn: AsyncConnection, build: InvestigationBuild) -> InvestigationBuild:
+        """Insert one immutable generation and return database-authoritative timestamps."""
+        params = build.model_dump()
+        params["canonical_document"] = Jsonb(build.canonical_document)
+        params["build_result"] = Jsonb(build.build_result)
+        params["artifacts"] = Jsonb(build.artifacts)
+        params["build_profile"] = Jsonb(dict(build.build_profile))
+        query = """
+            INSERT INTO investigation_builds (
+                investigation_id, generation, build_ref, content_digest, canonical_document,
+                build_result, artifacts, target_kind, build_profile, state, expires_at
+            ) VALUES (
+                %(investigation_id)s, %(generation)s, %(build_ref)s, %(content_digest)s,
+                %(canonical_document)s, %(build_result)s, %(artifacts)s, %(target_kind)s,
+                %(build_profile)s, %(state)s, %(expires_at)s
+            ) RETURNING *
+        """
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(query, params)
+            row = await cur.fetchone()
+        if row is None:  # Invariant: INSERT ... RETURNING always yields one row.
+            raise RuntimeError("INSERT into investigation_builds returned no row")
+        return InvestigationBuild.model_validate(row)
+
+    async def get(
+        self, conn: AsyncConnection, investigation_id: UUID, build_ref: str
+    ) -> InvestigationBuild | None:
+        """Resolve a public build reference within its owning Investigation."""
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT * FROM investigation_builds WHERE investigation_id = %s AND build_ref = %s",
+                (investigation_id, build_ref),
+            )
+            row = await cur.fetchone()
+        return None if row is None else InvestigationBuild.model_validate(row)
+
+    async def active_by_digest(
+        self, conn: AsyncConnection, investigation_id: UUID, content_digest: str, now: datetime
+    ) -> InvestigationBuild | None:
+        """Return the active unexpired generation for one content digest, if any."""
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                """
+                SELECT * FROM investigation_builds
+                WHERE investigation_id = %s AND content_digest = %s
+                  AND state = 'active' AND expires_at > %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (investigation_id, content_digest, now),
+            )
+            row = await cur.fetchone()
+        return None if row is None else InvestigationBuild.model_validate(row)
 
 
 class Repository[M: BaseModel]:
@@ -442,6 +502,7 @@ JOBS = StatefulRepository(
     json_columns=frozenset({"payload", "authorizing", "failure_context"}),
 )
 ARTIFACTS = ArtifactRepository(Artifact, "artifacts")
+INVESTIGATION_BUILDS = InvestigationBuildRepository()
 
 # The image catalog (ADR-0092). A plain `Repository`: the publish/register state machine
 # (defined → pending → registered, re-arming `pending_since`) is owned by the images publish

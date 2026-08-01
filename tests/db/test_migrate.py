@@ -195,6 +195,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0092",
         "0093",
         "0094",
+        "0095",
     ]
     assert second == []
 
@@ -203,6 +204,55 @@ def test_unique_constraints_present(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
     assert frozenset({"run_id", "step"}) in _unique_constraints(pg_conn, "run_steps")
     assert frozenset({"dedup_key"}) in _unique_constraints(pg_conn, "jobs")
+
+
+def test_investigation_build_catalog_schema(pg_conn: psycopg.Connection) -> None:
+    """Migration 0095 persists immutable, generation-scoped build records."""
+    migrate.apply_migrations(pg_conn)
+
+    assert "investigation_builds" in _tables(pg_conn)
+    columns = _columns(pg_conn, "investigation_builds")
+    assert columns == {
+        "investigation_id": "uuid",
+        "generation": "uuid",
+        "build_ref": "text",
+        "content_digest": "text",
+        "canonical_document": "jsonb",
+        "build_result": "jsonb",
+        "artifacts": "jsonb",
+        "target_kind": "text",
+        "build_profile": "jsonb",
+        "state": "text",
+        "expires_at": "timestamp with time zone",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone",
+    }
+    primary_key = pg_conn.execute(
+        """
+        SELECT array_agg(a.attname ORDER BY key.ordinality)
+        FROM pg_constraint c
+        CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS key(attnum, ordinality)
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = key.attnum
+        WHERE c.conrelid = 'investigation_builds'::regclass AND c.contype = 'p'
+        """
+    ).fetchone()
+    assert primary_key == (["investigation_id", "generation"],)
+    assert frozenset({"investigation_id", "build_ref"}) in _unique_constraints(
+        pg_conn, "investigation_builds"
+    )
+    checks = {
+        row[0]: row[1]
+        for row in pg_conn.execute(
+            "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = 'investigation_builds'::regclass AND contype = 'c'"
+        ).fetchall()
+    }
+    assert "^[0-9a-f]{64}$" in checks["investigation_builds_content_digest_check"]
+    assert "active" in checks["investigation_builds_state_check"]
+    assert "reclaiming" in checks["investigation_builds_state_check"]
+    assert _nullable(pg_conn, "runs").get("build_ref") == "YES"
+    indexed = _indexed_columns(pg_conn, "investigation_builds")
+    assert {"investigation_id", "content_digest", "expires_at"} <= indexed
 
 
 def test_dedup_key_not_null(pg_conn: psycopg.Connection) -> None:
@@ -709,6 +759,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0092",
         "0093",
         "0094",
+        "0095",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1080,6 +1131,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0092",
         "0093",
         "0094",
+        "0095",
     ]
 
 
