@@ -20,7 +20,8 @@ existing delete effective: the shared store/value types, all production key-dele
 upload and System-object orphan repair, runtime validation, Compose and Helm demo provisioning,
 test bucket lifecycle, IAM/operator docs, and focused contract/concurrency tests. Retention
 durations, object-key formats, authorization, provider selection, and MCP schemas do not change. No
-database migration or dependency is added.
+write-path VersionId or deletion target is persisted. One two-row scan-cursor migration is added;
+no dependency is added.
 
 ## Required behavior
 
@@ -188,9 +189,9 @@ finalized `console`, observable `console-part-*`, SysRq, and future row-backed S
 match. Under `LockScope.SYSTEM`, both arms also require no `artifacts.object_key` row for the exact
 candidate as a collision backstop.
 
-Each arm uses a 200-target per-root budget, a 20-target per-key sub-budget, and the same key-marker
-skip behavior as the upload-orphan sweep. For each eligible key it captures at most 20 exact
-versions, then takes the System lock and confirms the row still has a state in
+Each arm uses a 200-target per-root budget, a 20-target per-key sub-budget, and a one-page scan
+budget of at most 1,000 listed versions/markers per pass. For each eligible key it captures at most
+20 exact versions, then takes the System lock and confirms the row still has a state in
 `gone_system_state_values()`. A live, missing, malformed, row-backed, or lock-contended candidate
 protects every version. The transaction ends before `delete_batch` begins. Local rotation already
 uses the same lock and publishes nothing after a gone state, so the local arm may run from periodic,
@@ -211,6 +212,31 @@ it again on a later eligible pass. Both sweeps report deleted and failed targets
 one failed key does not hide sibling progress. No database deletion row, re-enqueued teardown job,
 or unbounded teardown loop is added.
 
+### System-root scan cursors
+
+Migration `0091_system_object_sweep_cursors.sql` creates the table
+`system_object_sweep_cursors` with a text primary-key `lane`, nullable text `after_key`, and
+non-null timestamp `updated_at`. A check restricts the lane to `local` and `remote`, and the
+migration seeds exactly those two rows. This is scan position, not a deletion queue: it stores no
+object identity beyond the last fully considered key and no VersionId.
+
+A lane reads its `after_key` without holding a transaction across store I/O, then requests one
+`ListObjectVersions` page with `MaxKeys=1000` and that value as `KeyMarker` when non-NULL. Entries
+are grouped in service key order. Ineligible keys charge the scan budget but not the target budget.
+An eligible key is considered once in the page and charges at most 20 captured targets. If the
+200-target allowance is exhausted, the page stops after that key. The lane never persists a
+`VersionIdMarker`: a key-only marker resumes after the key's final version, so a hot or denied key
+cannot monopolize the next pass. A later full-root cycle rediscovers its surviving history.
+
+After bounded page work, the lane compare-and-sets `after_key` from the value it observed to the
+last fully considered key. It sets `after_key=NULL` only when it consumed every entry returned and
+the service reported end-of-root; stopping inside the returned page always persists the last
+considered key. A concurrent winner makes the compare-and-set affect zero rows; the loser keeps its
+already-completed exact deletes but does not overwrite newer scan progress. A list failure or an
+unisolated database failure performs no cursor update. Per-key lock contention and isolated delete
+failure still count the key as considered, advance past it, and retry only after the cursor wraps,
+preserving sibling progress.
+
 ## Failure and concurrency contract
 
 | Position | Durable outcome | Recovery |
@@ -227,6 +253,8 @@ or unbounded teardown loop is added.
 | Object Lock/per-version deny | target remains stored and pass reports failure | skip the key after 20 targets; operator removes hold/deny; a later pass retries |
 | rowless System batch is incomplete or fails | surviving versions remain in inventory | an eligible System-object sweep retries a later pass |
 | remote collector finalization fails | collector remains registered and internal parts survive | hosting leader retries finalization before remote cleanup |
+| System-root listing or cursor update fails | cursor does not advance | next pass safely repeats the page and exact deletes |
+| concurrent cursor update wins | stale pass cannot overwrite its position | keep completed idempotent deletes; follow the winning cursor next pass |
 
 No safety argument depends on a wall-clock lease, process liveness, PostgreSQL backend identity, ETag
 delete preconditions, or cancellation of a boto3 thread.
@@ -276,7 +304,8 @@ than trusted data.
 - Permanent deletion always includes a service-issued VersionId; tenant input never supplies one.
 - Existing database fences and owner advisory locks decide reachability before cleanup.
 - Page, per-root, and per-key work bounds are 1,000 listed entries, 200 examined versions, and 20
-  targets charged to one key. Key-only listing markers skip a capped history for the current pass.
+  targets charged to one key. Durable key-only System-lane cursors and transient upload markers skip
+  capped histories while guaranteeing later keys are eventually scanned.
 - Rowless System-object deletion requires an exact allowlisted key grammar, artifact-row absence, a
   parsed System UUID, and a gone state under the System lock. Remote deletion additionally requires
   local hosting leadership and registry absence after successful collector finalization.
@@ -316,6 +345,9 @@ Tests follow red-green-refactor and mutation-check every changed guard:
 - hosting tests prove server-triggered and non-leader passes skip remote parts, finalization failure
   retains the registry entry and parts, and only the hosting leader deletes after successful
   finalize-and-drop;
+- cursor tests place more than 1,000 ineligible row-backed versions before an eligible rowless key,
+  prove each lane makes one bounded LIST call, advance across passes to reclaim the eligible key,
+  wrap to retry a failed early key, and reject a stale compare-and-set regression;
 - failure/crash tests leave a captured version behind and prove the next orphan sweep deletes it;
 - the real MinIO fixture proves bucket validation, VersionId replies, legacy `null` handling where
   supported, marker/noncurrent enumeration, exact deletion, and test teardown of all versions;

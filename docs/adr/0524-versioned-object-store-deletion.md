@@ -115,6 +115,20 @@ reconcile and non-leader replicas skip remote internal parts. Incomplete and fai
 in version inventory for a later leader pass. The remote collector's unused key-delete port is
 removed instead of retaining a cleanup path no caller drives.
 
+Broad System roots also contain deliberately ineligible row-backed history, so deletion-target
+budgets alone cannot bound listing work. Migration 0091 adds `system_object_sweep_cursors`, exactly
+two rows keyed by the local and remote lane, each holding a nullable `after_key`. A lane reads at
+most one 1,000-entry `ListObjectVersions` page per pass. When a page or deletion budget stops work,
+it persists the last fully considered key and the next pass supplies that value as `KeyMarker`
+without `VersionIdMarker`, beginning after every version of that key. At end-of-root it resets the
+cursor to NULL, so later cycles retry skipped, incomplete, and failed histories.
+
+Cursor advancement happens after the page's bounded work through a compare-and-set against the
+observed `after_key`. Concurrent reconcile calls may repeat exact idempotent deletes, but a stale
+call cannot move a lane backward over a newer cursor. Listing or unisolated database failure leaves
+the cursor unchanged. The cursor records only scan position; object versions remain the durable
+deletion worklist, and no deletion target or VersionId is persisted in PostgreSQL.
+
 The raw client must never issue key-only `DeleteObject` in KDIVE production code.
 
 The first rollout is an explicit stop-old-first maintenance window, not an ordinary rolling update.
@@ -152,6 +166,8 @@ failure.
   versions, but avoids guessing which version a legacy key-only row intended.
 - Rowless System console state has a recurring, bounded version sweep after collector finalization,
   so teardown failure or an incomplete history does not strand versions permanently.
+- Each System-object lane scans at most one 1,000-entry page per pass and durably advances by exact
+  key, so ineligible history cannot make a pass unbounded or starve later rowless keys.
 - The standard S3 API validates bucket status but not provider-specific prefix exclusions. External
   operators own that verification; managed KDIVE MinIO never configures exclusions.
 - MFA Delete is rejected during runtime validation because unattended cleanup cannot provide the
@@ -160,8 +176,8 @@ failure.
   `GetBucketVersioning`, `ListBucketVersions`, and `DeleteObjectVersion`.
 - The first adoption needs downtime and cannot be rolled back to the prior image while accepting
   work. Subsequent ADR-0524-aware releases retain the normal rolling contract.
-- No database migration, write-path VersionId column, compatibility shim, or new dependency is
-  introduced.
+- One two-row scan-cursor migration is introduced. No write-path VersionId column, deletion-target
+  queue, compatibility shim, or new dependency is introduced.
 
 ## Considered & rejected
 
@@ -175,6 +191,9 @@ failure.
 - **Add a PostgreSQL deletion-obligation queue.** `ListObjectVersions` durably enumerates every
   surviving target, including hidden noncurrent versions and markers. A second inventory would add
   reconciliation states without closing another race.
+- **Restart broad System-root scans at the prefix every pass.** Row-backed history can fill every
+  page without charging the deletion budget and permanently starve later rowless keys. A durable
+  key cursor bounds each pass and guarantees a full-root cycle without duplicating deletion state.
 - **Automatically enable external buckets.** It widens runtime credentials to bucket-policy
   mutation and changes operator-owned state during startup. Provisioning owns mutation; runtime
   assembly owns validation.
