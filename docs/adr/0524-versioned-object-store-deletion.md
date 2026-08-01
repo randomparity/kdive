@@ -40,18 +40,19 @@ The object-store port exposes immutable version inventory and deletion:
 
 - exact-key and paged-prefix listings return data versions and delete markers with their VersionId,
   store mtime, and latest/marker flags;
-- `delete_version(key, version_id)` sends `DeleteObject` with `VersionId`, including the reserved
-  `null` value for objects that predate versioning;
-- the key-oriented convenience delete first captures the complete exact-key history across all
-  pages. It deletes captured nonlatest versions and markers first, and deletes the captured latest
-  entry only after every prerequisite delete succeeds. It never sends key-only `DeleteObject`.
+- PUT and HEAD results expose the observed VersionId without persisting it in PostgreSQL;
+- `delete_version(key, version_id)` deletes only a caller-selected identity, including the reserved
+  `null` value for objects that predate versioning; and
+- a bounded exact-key capture returns at most the caller's remaining version budget plus whether
+  older exact-key entries remain. Deleting that batch removes nonlatest entries first and removes
+  its latest entry only when the capture reached the end of the key history.
 
 Keeping the latest entry until last is failure-atomic for visibility: a partial failure leaves the
 same current data or delete marker in place instead of exposing older bytes. A later PUT has a new
-VersionId and is not targeted by an already completed capture. A write concurrent with paginated
-capture may or may not enter the captured set, so concurrency-sensitive callers must retain their
-database publication fences through the capture decision; pagination is not described as an atomic
-store snapshot.
+VersionId and cannot be targeted by a caller holding an earlier PUT or HEAD result. A write
+concurrent with paginated key-history capture may or may not enter a batch, so only a key proven
+permanently retired may use that operation. Identity-sensitive compensation always deletes the
+VersionId selected by the observation and database fence that licensed it.
 
 The three issue paths split their work around the advisory lock. They capture immutable deletion
 targets without a database transaction, re-check their existing database fences and commit their
@@ -60,14 +61,24 @@ released. An ambiguous response is safe to retry because it can affect only the 
 version.
 
 The upload-orphan sweep enumerates `ListObjectVersions`, not only the current logical objects. It
-groups work by exact key so a history split across pages still uses the latest-last rule. It
+groups work by exact key and spends the existing 200-target per-root budget on captured versions.
+When a history exceeds the remaining budget, the sweep deletes only captured nonlatest entries and
+leaves the latest entry for a later pass. Peak memory remains one 1,000-entry store page and one
+bounded batch, preserving ADR-0498; no operation buffers a complete unbounded history. The sweep
 therefore rediscovers failed deletes, noncurrent versions, legacy `null` versions, and delete markers
 under the upload roots. The object store is the durable worklist; no PostgreSQL deletion queue is
 added. Database artifact/manifest/write-lease fences remain key-scoped, so a live key conservatively
 protects all of its versions until the key is no longer reachable.
 
-All other production object deletes use the shared version-aware convenience operation. The raw
-client must never issue key-only `DeleteObject` in KDIVE production code.
+There is no key-only convenience operation. Existing consumers are assigned explicitly:
+
+- `discard_unregistered_objects`, chunk-upload compensation, and leaked-image repair delete the
+  VersionId returned by the PUT or final HEAD whose ETag and row fence they already check;
+- the three issue paths, row-driven report/build/investigation garbage collection, private-image
+  retirement, System console/SysRq/sidecar teardown, and remote-console part retirement use bounded
+  batches only after their existing lifecycle decision proves the logical key retired.
+
+The raw client must never issue key-only `DeleteObject` in KDIVE production code.
 
 The first rollout is an explicit stop-old-first maintenance window, not an ordinary rolling update.
 The operator quiesces every KDIVE writer and deleter, installs and verifies the new version
@@ -94,6 +105,9 @@ failure.
   sites, and delayed deletes cannot target a later PUT.
 - Every stored version is a full billable object until version-aware cleanup removes it. Cleanup
   and test-bucket teardown must enumerate versions and markers rather than current keys alone.
+- Version-history cleanup retains at most one store page plus the caller's explicit version budget
+  and may take several reconciler passes for a hot key. A fault or exhausted budget leaves the
+  latest entry untouched.
 - A live database reference protects all versions of its key. This may temporarily retain obsolete
   versions, but avoids guessing which version a legacy key-only row intended.
 - The standard S3 API validates bucket status but not provider-specific prefix exclusions. External
@@ -111,9 +125,9 @@ failure.
   defect.
 - **Database-owned deletion claims.** Backend death and claim takeover cannot prove an earlier
   key-only request is quiescent, so publication can reopen before that request lands.
-- **Persist a VersionId on every artifact row.** It would require schema and every write/finalize
-  path to change, including presigned PUTs whose VersionId is known only after upload. Version
-  inventory already supplies the immutable deletion identity and crash-retry worklist.
+- **Persist a VersionId on every artifact row.** It would require a schema migration. Ephemeral PUT
+  and HEAD results give compensating callers the identity they need, while version inventory gives
+  retired-key cleanup its crash-retry worklist.
 - **Add a PostgreSQL deletion-obligation queue.** `ListObjectVersions` durably enumerates every
   surviving target, including hidden noncurrent versions and markers. A second inventory would add
   reconciliation states without closing another race.
@@ -125,3 +139,9 @@ failure.
   prerequisite, not something the standard client can fail fast on honestly.
 - **Continue key-only delete after enabling versioning.** It creates markers, does not reclaim
   bytes, and makes the contract appear successful while storage grows.
+- **Recapture every version after an identity fence.** A peer PUT can enter that later inventory and
+  be deleted even though the caller approved only its own VersionId. Selected-version deletion
+  preserves the identity fence.
+- **Buffer a complete hot-key history.** A deterministic key can have arbitrarily many versions.
+  Bounded batches remove nonlatest entries incrementally and never delete latest until a batch
+  proves no older entry remains.

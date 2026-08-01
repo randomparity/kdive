@@ -57,44 +57,49 @@ Add an immutable `ObjectVersion` value carrying:
 - `is_latest: bool`;
 - `is_delete_marker: bool`.
 
+`StoredArtifact` and `HeadResult` also carry the observed `version_id`. This value is ephemeral: it
+lets compensation delete the same identity that a PUT or ETag/row-fenced HEAD selected, but it is
+not added to an artifact row or public response.
+
 `iter_prefix_version_pages(prefix)` lazily paginates `ListObjectVersions` with the existing
 1,000-entry page bound. It validates fields through the store boundary and combines `Versions` and
 `DeleteMarkers` into a deterministic key/mtime/VersionId order; boto3 exposes those collections
-separately, so no cross-collection service order is claimed. `list_exact_versions(key)` consumes
-all pages with `Prefix=key`, retains only entries whose key equals `key`, and returns every data
-version and marker for the exact key.
+separately, so no cross-collection service order is claimed.
+
+`capture_exact_versions(key, limit)` retains only exact-key entries and returns a `VersionBatch`
+containing at most positive integer `limit` targets plus `history_complete: bool`. The unit is
+object versions/delete markers, the scope is one capture call, and there is no clock. Reaching the
+limit leaves `history_complete=False`; deletion may remove captured nonlatest targets but must leave
+the captured latest target. Recovery is another capture in a later cleanup pass. Peak memory is one
+service page plus `limit` targets.
 
 `delete_version(key, version_id)` always supplies `VersionId` to `DeleteObject`. Deleting an absent
-version is idempotent. A malformed reply or client/transport fault maps to
-`infrastructure_failure` and names the key and VersionId without exposing credentials.
+version is idempotent. `delete_batch(batch)` deletes nonlatest targets first. It attempts the
+captured latest target only when `history_complete=True` and every nonlatest delete succeeded. A
+malformed reply or client/transport fault maps to `infrastructure_failure` and names the key and
+VersionId without exposing credentials.
 
-The existing key-oriented `delete(key)` remains as a convenience for callers that do not need a
-database split. It captures `list_exact_versions(key)` completely before issuing any delete. It
-then deletes every captured nonlatest data version and marker before deleting the captured latest
-entry. If any prerequisite deletion fails, it does not attempt the latest entry. This makes a
-partial operation leave the same key-visible version or marker in place instead of resurrecting
-older bytes. It never sends key-only `DeleteObject`.
-
-`ListObjectVersions` pagination is not an atomic snapshot. A PUT after capture completes has a new
-VersionId outside the captured set and survives; a PUT concurrent with pagination may appear in the
-captured set. Callers with concurrent publishers must pair capture with their existing database
-manifest/write-lease/owner-lock fences rather than infer a store transaction from pagination.
+There is no `delete(key)` operation. Identity-sensitive callers pass the VersionId selected by
+their PUT or HEAD directly to `delete_version`. A permanently retired key may loop over bounded
+capture/delete batches; incomplete batches make progress only on nonlatest entries and keep the
+current data or marker visible. `ListObjectVersions` is not an atomic snapshot, so a caller may use
+key-history batches only after its lifecycle/database fences prove no publisher can make that key
+live again.
 
 Current-object APIs (`head`, `get`, `list_prefix`) retain their logical-key behavior. This avoids
 leaking versioning concerns into readers and callers that do not delete.
 
 ### Rootfs reclaim
 
-Before opening its reclaim transaction, rootfs reclaim snapshots the exact versions of its object
-key. Under `LockScope.INVESTIGATION`, it re-reads the due row, referencer/fetch-lease/staging-partial
-fences, unlinks the staged base, and removes the artifact row. It commits before deleting any
-captured version.
+Before opening its reclaim transaction, rootfs reclaim captures at most one 1,000-target exact-key
+batch. Under `LockScope.INVESTIGATION`, it re-reads the due row,
+referencer/fetch-lease/staging-partial fences, unlinks the staged base, and removes the artifact row.
+It commits before deleting any captured version.
 
-It then deletes captured nonlatest targets followed by the captured latest target without an open
-transaction or advisory lock. A failed or ambiguous prerequisite delete stops before the latest;
-the artifact row stays retired and every surviving version is discoverable under
-`local/investigations/` by the version-aware orphan sweep. There is no application timeout around
-an uncancellable blocking thread.
+It then calls `delete_batch` without an open transaction or advisory lock. An incomplete batch or a
+failed/ambiguous prerequisite delete leaves the latest target; the artifact row stays retired and
+every surviving version is discoverable under `local/investigations/` by the version-aware orphan
+sweep. There is no application timeout around an uncancellable blocking thread.
 
 A later PUT to the same key is a different VersionId and cannot be hit by the captured deletes. A
 fetch that began first still has a durable lease and blocks row retirement; one that begins later
@@ -104,10 +109,10 @@ cannot resolve the removed row.
 
 The reaper claims and removes the expired manifest under the existing owner lock without listing or
 deleting from the store in that transaction. After commit it enumerates the prefix's version pages,
-groups entries by exact key, and captures each complete key history. For each key, a short
-owner-locked transaction re-runs `owner_key_is_fenced`; it then releases the transaction and deletes
-the captured nonlatest entries before the captured latest entry. Contention or a new artifact,
-manifest, or live write lease declines the key for a later pass.
+groups entries by exact key, and captures bounded key batches. For each key, a short owner-locked
+transaction re-runs `owner_key_is_fenced`; it then releases the transaction and calls
+`delete_batch`. Contention or a new artifact, manifest, or live write lease declines the key for a
+later pass. An incomplete batch retains latest and leaves the remainder to the orphan sweep.
 
 Store/list/delete failures count as undeleted. Since the manifest is already gone, surviving
 versions remain candidates for the version-aware orphan sweep.
@@ -115,40 +120,57 @@ versions remain candidates for the version-aware orphan sweep.
 ### Upload-orphan sweep
 
 The sweep walks `local/runs/` and `local/investigations/` through
-`iter_prefix_version_pages`. Its 200-unit per-root budget counts exact keys selected for re-check,
-not individual versions. It attributes entries by key, deduplicates a key across page boundaries,
-and delegates an eligible key to the complete exact-key capture/delete primitive. Immutable
-version mtimes replace the current-key HEAD rewrite check.
+`iter_prefix_version_pages`. Its existing 200-unit per-root budget now counts captured versions and
+markers. The reference clock is PostgreSQL `now()` for the unchanged grace deadline; exhausting the
+per-pass/per-root budget stops listing and leaves every unexamined version for the next reconciler
+pass. It attributes entries by key, deduplicates a key across page boundaries within the bounded
+work set, and captures at most that root's remaining budget. Immutable version mtimes replace the
+current-key HEAD rewrite check.
 
-For a candidate key it captures the complete exact history, then attempts the owner lock and
-re-runs the existing key-scoped artifact, manifest, write-lease, and grace fences. The transaction
-ends before exact deletion begins. A key with any live database reference conservatively protects
-all versions. Eligible nonlatest entries are removed first; the captured latest entry is attempted
-only when all captured older entries are eligible and their deletes succeed. A new PUT after capture
-has a different VersionId. Failed exact deletes, noncurrent versions, legacy `null` versions, and
-delete markers are all re-enumerated by later passes.
+For a candidate key it captures a bounded batch, then attempts the owner lock and re-runs the
+existing key-scoped artifact, manifest, write-lease, and grace fences. The transaction ends before
+exact deletion begins. A key with any live database reference conservatively protects all versions.
+`delete_batch` removes nonlatest entries first and attempts latest only for a complete history. A
+new PUT after capture has a different VersionId. Failed exact deletes, incomplete histories,
+noncurrent versions, legacy `null` versions, and delete markers are all re-enumerated later.
 
 The sweep logs the key, VersionId, and whether the target was a data version or marker. It never
 logs credentials or presigned URLs.
 
 ### Other delete consumers
 
-Every other production object delete continues to call the shared key convenience and therefore
-deletes a captured exact-version set rather than issuing key-only `DeleteObject`. The sweep must
-include image/report/build/snapshot garbage collection and compensation plus remote-libvirt console
-parts. A source search for store-like `.delete(` calls and raw `delete_object(` calls is a release
-gate; the only raw call may be `ObjectStore.delete_version`, and it must include `VersionId`.
+Remove the shared key-only `delete` surface. Identity-sensitive consumers use the VersionId selected
+by the same observation that licenses cleanup:
+
+- `discard_unregistered_objects` compares the current HEAD to the `StoredArtifact` written by this
+  attempt, rechecks row absence, and deletes that stored VersionId;
+- external-build chunk cleanup deletes the VersionIds captured by its validated HEAD results; and
+- leaked-image repair HEADs before its final row-absence query and deletes that HEAD's VersionId.
+
+Consumers whose lifecycle decision permanently retires the key use bounded capture/delete batches:
+
+- report, closed-investigation, and expired-build artifact garbage collection;
+- expired private-image object/config retirement;
+- System console-part, SysRq, and rotation-sidecar teardown;
+- remote-libvirt sealed console-part retirement; and
+- the three #1751 paths described above.
+
+These callers remove their database row only after a complete retired-key purge, except the #1751
+row-first paths whose version-aware orphan sweep is the durable continuation. A source search for
+store-like `.delete(` calls and raw `delete_object(` calls is a release gate; the only raw call may
+be `ObjectStore.delete_version`, and it must include `VersionId`.
 
 ## Failure and concurrency contract
 
 | Position | Durable outcome | Recovery |
 |---|---|---|
-| version snapshot fails | database state unchanged | caller reports/counts failure; later pass retries |
+| bounded version capture fails | database state unchanged | caller reports/counts failure; later pass retries |
+| capture reaches its version budget | latest target is retained | later pass captures the remaining history |
 | database re-check declines | no delete begins | the current owner remains authoritative |
 | database commit fails | no delete begins | transaction rollback retains the prior state |
 | crash after row retirement | captured and older versions survive | version orphan sweep enumerates them |
 | delete response is ambiguous | only the named VersionId may have changed | retrying that VersionId is idempotent |
-| later PUT races delete | later VersionId is outside the captured set | later bytes survive |
+| peer PUT follows an identity observation | exact delete still names the observed VersionId | peer bytes survive |
 | nonlatest exact delete fails | captured latest remains current | later sweep retries without resurrection |
 | latest exact delete is ambiguous | all captured older versions are already absent | retry latest; no older captured bytes can reappear |
 | Object Lock/per-version deny | target remains stored and pass reports failure | operator removes hold/deny; later pass retries |
@@ -220,10 +242,12 @@ Tests follow red-green-refactor and mutation-check every changed guard:
   data versions plus markers, and no delete omits `VersionId`;
 - focused cleanup tests inspect `pg_locks` from the delete callback and prove all three callbacks run
   with no transaction-scoped owner lock;
-- race tests PUT a later version between snapshot and delete and prove its VersionId and bytes
-  survive, while all captured versions and markers are removed;
+- identity-race tests PUT a peer version after the first attempt's PUT/HEAD and row probe, then prove
+  exact deletion removes only the first VersionId;
 - failure-order tests split one key's history across pages, fail immediately before the latest
   deletion, and prove the same latest data/marker remains current;
+- budget tests give one key more versions than both a page and the per-root pass allowance, prove
+  memory/work remain bounded, and prove repeated passes converge without deleting latest early;
 - failure/crash tests leave a captured version behind and prove the next orphan sweep deletes it;
 - the real MinIO fixture proves bucket validation, VersionId replies, legacy `null` handling where
   supported, marker/noncurrent enumeration, exact deletion, and test teardown of all versions;
