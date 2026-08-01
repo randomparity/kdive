@@ -197,7 +197,12 @@ class CompleteBuildFinalizer:
         window_deadline = prepared.manifest_row.deadline
         if prepared.store is not None:
             window_deadline, chunk_heads = await _reassemble_chunked_artifacts(
-                conn, uid, run_id, prepared.manifest_row, prepared.store
+                conn,
+                uid,
+                run_id,
+                prepared.run.investigation_id,
+                prepared.manifest_row,
+                prepared.store,
             )
         else:
             chunk_heads = {}
@@ -306,6 +311,7 @@ async def _reassemble_chunked_artifacts(
     conn: AsyncConnection,
     uid: UUID,
     run_id: str,
+    investigation_id: UUID,
     manifest_row: upload_manifest.UploadManifest,
     store: ExternalBuildStore,
 ) -> tuple[datetime, dict[str, HeadResult]]:
@@ -327,7 +333,11 @@ async def _reassemble_chunked_artifacts(
     """
     ttl = timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
     max_window = ttl * config.require(UPLOAD_WINDOW_MAX_TTL_MULTIPLE)
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, uid):
+    async with (
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
+        advisory_xact_lock(conn, LockScope.RUN, uid),
+    ):
         refreshed = await upload_manifest.refresh_deadline(
             conn, "runs", uid, ttl, max_window=max_window
         )
@@ -455,8 +465,12 @@ async def _finalize_external_build(
         await _record_complete_build_audit(conn, ctx, run)
         if not finalization.chunked:
             await upload_manifest.delete_manifest(conn, "runs", run.id)
-    if finalization.chunked and finalization.store is not None:
+    try:
         await conn.commit()
+    except Exception:
+        await conn.rollback()
+        raise
+    if finalization.chunked and finalization.store is not None:
         await _cleanup_chunks_and_manifest(
             conn,
             finalization.store,

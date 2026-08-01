@@ -79,10 +79,10 @@ async def publish_or_reuse_build(
     artifact_versions = _artifact_versions(result, heads)
 
     async with conn.cursor() as cur:
-        await cur.execute("SELECT now()")
+        await cur.execute("SELECT clock_timestamp()")
         row = await cur.fetchone()
-    if row is None:  # Invariant: SELECT now() returns exactly one row.
-        raise RuntimeError("SELECT now() returned no row")
+    if row is None:  # Invariant: SELECT clock_timestamp() returns exactly one row.
+        raise RuntimeError("SELECT clock_timestamp() returned no row")
     now = row[0]
 
     existing = await INVESTIGATION_BUILDS.active_by_digest(conn, run.investigation_id, digest, now)

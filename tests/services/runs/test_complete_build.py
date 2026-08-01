@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, LiteralString, NoReturn
 
 import psycopg
@@ -14,11 +15,12 @@ import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import HeadResult, chunk_key
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
-from kdive.config.core_settings import UPLOAD_WINDOW_MAX_TTL_MULTIPLE
+from kdive.config.core_settings import BUILD_ARTIFACT_RETENTION_DAYS, UPLOAD_WINDOW_MAX_TTL_MULTIPLE
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -151,6 +153,14 @@ class _VersionDeleteStore:
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         del key, upload_id
         raise AssertionError("single-PUT cleanup never reassembles")
+
+
+class _DelayedValidator(FakeValidator):
+    """Makes the arrival-to-publication interval visible to PostgreSQL clock tests."""
+
+    def __call__(self, manifest, keys, declared_build_id, *, arch: str = "x86_64"):
+        time.sleep(0.5)
+        return super().__call__(manifest, keys, declared_build_id, arch=arch)
 
 
 async def _run_by_id(pool: AsyncConnectionPool, run_id: Any):
@@ -892,6 +902,113 @@ def test_complete_build_publishes_winner_under_investigation_then_run_lock(
         patched.setattr(complete_build, "advisory_xact_lock", traced_lock)
         asyncio.run(_run())
     assert trace == ["investigation", "run"]
+
+
+def test_chunked_completion_acquires_investigation_before_retained_run_lock(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retained chunk-reassembly lock observes the global Investigation → Run order."""
+    trace: list[str] = []
+    original_lock = complete_build.advisory_xact_lock
+
+    @asynccontextmanager
+    async def traced_lock(conn, scope, key):
+        trace.append(scope.value)
+        async with original_lock(conn, scope, key):
+            yield
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
+            store = _ChunkedStore()
+            await _complete(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(
+                    validate_complete_build=FakeValidator(_output(run_id)),
+                    object_store_factory=lambda: store,
+                ),
+            )
+
+    with monkeypatch.context() as patched:
+        patched.setattr(complete_build, "advisory_xact_lock", traced_lock)
+        asyncio.run(_run())
+    assert trace[:2] == ["investigation", "run"]
+
+
+def test_loser_bytes_are_retained_when_single_put_commit_fails(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A loser deletes no exact version until its Run finalization durably commits."""
+
+    async def _reject_commit(_: psycopg.AsyncConnection) -> None:
+        raise psycopg.OperationalError("commit failed")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            winner_id = await seed_external_run_with_manifest(pool)
+            loser_id = await seed_external_run_with_manifest(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET investigation_id = "
+                    "(SELECT investigation_id FROM runs WHERE id = %s) WHERE id = %s",
+                    (winner_id, loser_id),
+                )
+            await _complete(
+                pool,
+                winner_id,
+                CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(winner_id))),
+            )
+            store = _VersionDeleteStore()
+            finalizer = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(loser_id)),
+                object_store_factory=lambda: store,
+            )
+            run = await _run_by_id(pool, loser_id)
+            async with pool.connection() as conn:
+                with monkeypatch.context() as patched:
+                    patched.setattr(psycopg.AsyncConnection, "commit", _reject_commit)
+                    with pytest.raises(psycopg.OperationalError, match="commit failed"):
+                        await finalizer.complete(
+                            conn, _ctx(), run, build_id=None, cmdline="console=ttyS0"
+                        )
+            state = await _fetchone(pool, "SELECT state FROM runs WHERE id = %s", (loser_id,))
+            steps = await _fetchall(
+                pool,
+                "SELECT result FROM run_steps WHERE run_id = %s AND step = 'build'",
+                (loser_id,),
+            )
+
+        assert state == (RunState.CREATED.value,)
+        assert steps == []
+        assert store.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_completion_stamps_generation_from_postgres_wall_clock(
+    migrated_url: str,
+) -> None:
+    """Long validation cannot shorten the catalog generation's advertised retention."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool)
+            result = await _complete(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(validate_complete_build=_DelayedValidator(_output(run_id))),
+            )
+            async with pool.connection() as conn:
+                row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+            assert row is not None
+
+        expires_at = datetime.fromisoformat(str(result.expires_at))
+        observed = row[0]
+        retention = timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS))
+        assert expires_at - observed >= retention - timedelta(milliseconds=250)
+
+    asyncio.run(_run())
 
 
 def test_concurrent_identical_completions_reuse_winner_and_delete_loser_versions(
