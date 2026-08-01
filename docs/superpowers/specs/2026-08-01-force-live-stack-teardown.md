@@ -43,6 +43,34 @@ destructive to in-flight work. PID discovery remains constrained by the existing
 matcher, and ownership-aware signalling avoids requiring sudo for caller-owned processes. A failed
 SIGKILL is surfaced rather than swallowed.
 
+## Threat model
+
+### Boundary inventory and actors
+
+- The local operator supplies CLI flags to `down.sh`; no remote or tenant-controlled entry point is
+  added. The operator is trusted to administer the development host.
+- Process-table data crosses from mutable host state into a privileged signal destination. Other
+  local processes may exit or reuse a pid while teardown is running.
+- `sudo` crosses from the invoking user to host-level process control when a matched daemon belongs
+  to another uid.
+
+### Controls
+
+- Only the literal `--force` flag enables escalation; unknown arguments fail before signalling.
+- Targets come only from the existing command-and-argv daemon matcher. Immediately before each
+  SIGKILL, the helper rescans and requires the pid to remain in that matched set. Portable shell
+  cannot make that check and signal atomic, so ADR-0527 records the remaining narrow reuse window.
+- Ownership determines whether signalling uses `sudo`; signal-delivery failures name only numeric
+  pids and fail before backend teardown. Polling is bounded to twenty half-second iterations.
+- Error output contains process ids and lifecycle state but no environment, credentials, or daemon
+  output.
+
+### Out of scope
+
+This local operator command does not defend against a malicious local account deliberately shaping
+process argv to match kdive. Host account isolation owns that threat. It also does not introduce a
+second pidfd-based process-control implementation solely to close the portable-shell reuse residual.
+
 ## Tests
 
 Shell-script tests stub daemon discovery, sleep, kill, sudo, and Docker to prove:
