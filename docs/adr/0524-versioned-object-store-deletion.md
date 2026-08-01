@@ -93,15 +93,27 @@ There is no key-only convenience operation. Existing consumers are assigned expl
 - rowless local console-rotation sidecars and remote collector-internal console parts receive one
   bounded teardown attempt, then remain discoverable by a recurring System-object version sweep.
 
-The System-object sweep walks the known `local/systems/` and `remote/systems/` roots after remote
-console collectors for gone Systems have finalized. It applies the same 200-target per-root and
-20-target per-key bounds as upload-orphan cleanup. For each exact key it parses the System UUID,
-takes `LockScope.SYSTEM`, and confirms the System is still in a gone state before releasing the
-transaction and deleting captured VersionIds. A live, missing, malformed, or lock-contended System
-declines deletion. The terminal state and repair ordering prove no local rotation or remote
-collector can publish another version; incomplete and failed batches remain in version inventory
-for a later reconciler pass. The remote collector's unused key-delete port is removed instead of
-retaining a cleanup path no caller drives.
+The System-object sweep allowlists only the exact local sidecar grammar
+`local/systems/<uuid>/console-rotation-state.json` and remote internal-part grammar
+`remote-libvirt/systems/<uuid>/console-parts-<canonical-nonnegative-index>`. Extra path components,
+other object names, malformed UUIDs or indices, and every other System artifact are ineligible. It
+also rechecks that no `artifacts.object_key` row names the candidate, defending current and future
+row-backed collisions.
+
+The local arm may run in any reconcile invocation. It applies the same 200-target per-root and
+20-target per-key bounds as upload-orphan cleanup, takes `LockScope.SYSTEM`, and confirms the System
+is still in a gone state plus the artifact-row absence before releasing the transaction and
+deleting captured VersionIds. Local rotation uses the same lock and refuses to publish after the
+gone state. A live, missing, malformed, row-backed, or lock-contended candidate is retained.
+
+The remote arm runs only in the process that currently holds console-hosting leadership. For a gone
+System, that process first cancels its pump and completes `finalize`; only successful finalization
+removes the System from the collector registry. A failed finalization retains the registry entry for
+retry. After that repair, the remote sweep requires both continued local leadership and registry
+absence before applying the same System-lock/state/row fences and exact deletion. Server-triggered
+reconcile and non-leader replicas skip remote internal parts. Incomplete and failed batches remain
+in version inventory for a later leader pass. The remote collector's unused key-delete port is
+removed instead of retaining a cleanup path no caller drives.
 
 The raw client must never issue key-only `DeleteObject` in KDIVE production code.
 

@@ -179,20 +179,37 @@ is incomplete, fails, or is skipped, a recurring System-object sweep owns the co
 remote part store's unused `delete_part` protocol and implementation are removed; retirement is
 owned by this sweep instead of an undriven key-delete method.
 
-The sweep walks `local/systems/` and `remote/systems/` through version inventory after
-`reap_console_collectors` in each reconciler pass. It uses a 200-target per-root budget, a 20-target
-per-key sub-budget, and the same key-marker skip behavior as the upload-orphan sweep. For each
-candidate key it parses the System UUID, captures at most 20 exact versions, then takes
-`LockScope.SYSTEM` and confirms the row still has a state in `gone_system_state_values()`. A live,
-missing, malformed, or lock-contended System protects every version. The transaction ends before
-`delete_batch` begins.
+The local arm lists only `local/systems/` and accepts exactly
+`local/systems/<uuid>/console-rotation-state.json`. The remote arm lists only
+`remote-libvirt/systems/` and accepts exactly
+`remote-libvirt/systems/<uuid>/console-parts-<canonical-nonnegative-index>`. The parser rejects extra
+components, every other object name, noncanonical indices, and malformed UUIDs. In particular,
+finalized `console`, observable `console-part-*`, SysRq, and future row-backed System objects do not
+match. Under `LockScope.SYSTEM`, both arms also require no `artifacts.object_key` row for the exact
+candidate as a collision backstop.
 
-The catalog ordering is part of the fence: gone remote collectors finalize and stop before their
-rowless versions become eligible in that pass. Local rotation already rechecks System state under
-the same lock and publishes nothing after a gone state. An incomplete batch or any failed exact
-delete is not terminal success; version inventory presents it again on a later pass. The sweep
-reports deleted and failed targets independently, so one failed key does not hide sibling progress.
-No database deletion row, re-enqueued teardown job, or unbounded teardown loop is added.
+Each arm uses a 200-target per-root budget, a 20-target per-key sub-budget, and the same key-marker
+skip behavior as the upload-orphan sweep. For each eligible key it captures at most 20 exact
+versions, then takes the System lock and confirms the row still has a state in
+`gone_system_state_values()`. A live, missing, malformed, row-backed, or lock-contended candidate
+protects every version. The transaction ends before `delete_batch` begins. Local rotation already
+uses the same lock and publishes nothing after a gone state, so the local arm may run from periodic,
+server-triggered, or non-leader reconciliation.
+
+Remote cleanup has a stronger execution gate because collectors are in-memory and leader-owned.
+`ReconcileConfig` carries an optional gate exposing the local `ConsoleHostingLoop.is_leader` and
+`CollectorRegistry`. The remote arm is absent when that gate is absent and returns no work when the
+local process is not the current hosting leader. In the leader's repair order,
+`reap_console_collectors` runs first. `finalize_and_drop_async` cancels the pump but retains the
+registry entry until `collector.finalize` returns successfully; a failure leaves the entry for a
+later retry. The remote sweep then rechecks leadership and requires registry absence for the exact
+System before applying its database fences. Thus `ops.reconcile_now`, non-leader replicas, and a
+failed/in-progress finalization cannot delete internal parts.
+
+An incomplete batch or any failed exact delete is not terminal success; version inventory presents
+it again on a later eligible pass. Both sweeps report deleted and failed targets independently, so
+one failed key does not hide sibling progress. No database deletion row, re-enqueued teardown job,
+or unbounded teardown loop is added.
 
 ## Failure and concurrency contract
 
@@ -208,7 +225,8 @@ No database deletion row, re-enqueued teardown job, or unbounded teardown loop i
 | nonlatest exact delete fails | captured latest remains current | later sweep retries without resurrection |
 | latest exact delete is ambiguous | all captured older versions are already absent | retry latest; no older captured bytes can reappear |
 | Object Lock/per-version deny | target remains stored and pass reports failure | skip the key after 20 targets; operator removes hold/deny; a later pass retries |
-| rowless System batch is incomplete or fails | surviving versions remain in inventory | the post-collector System-object sweep retries a later pass |
+| rowless System batch is incomplete or fails | surviving versions remain in inventory | an eligible System-object sweep retries a later pass |
+| remote collector finalization fails | collector remains registered and internal parts survive | hosting leader retries finalization before remote cleanup |
 
 No safety argument depends on a wall-clock lease, process liveness, PostgreSQL backend identity, ETag
 delete preconditions, or cancellation of a boto3 thread.
@@ -259,8 +277,9 @@ than trusted data.
 - Existing database fences and owner advisory locks decide reachability before cleanup.
 - Page, per-root, and per-key work bounds are 1,000 listed entries, 200 examined versions, and 20
   targets charged to one key. Key-only listing markers skip a capped history for the current pass.
-- Rowless System-object deletion requires a parsed System UUID, a gone state under the System lock,
-  and prior remote-collector finalization in the reconciler repair order.
+- Rowless System-object deletion requires an exact allowlisted key grammar, artifact-row absence, a
+  parsed System UUID, and a gone state under the System lock. Remote deletion additionally requires
+  local hosting leadership and registry absence after successful collector finalization.
 - Errors expose operation, bucket/key, and VersionId only; standard secret/URL redaction still
   governs logs and operator output.
 
@@ -292,7 +311,11 @@ Tests follow red-green-refactor and mutation-check every changed guard:
   targets by advancing with `KeyMarker` only, and reclaim a later sibling in the same pass;
 - rowless continuation tests create more than one batch of local sidecar and remote internal-part
   versions, inject a mid-purge fault, then prove a later post-collector sweep removes the remainder
-  and latest; live/missing/malformed/lock-contended Systems remain untouched;
+  and latest; live/missing/malformed/lock-contended Systems and row-backed System keys remain
+  untouched;
+- hosting tests prove server-triggered and non-leader passes skip remote parts, finalization failure
+  retains the registry entry and parts, and only the hosting leader deletes after successful
+  finalize-and-drop;
 - failure/crash tests leave a captured version behind and prove the next orphan sweep deletes it;
 - the real MinIO fixture proves bucket validation, VersionId replies, legacy `null` handling where
   supported, marker/noncurrent enumeration, exact deletion, and test teardown of all versions;
