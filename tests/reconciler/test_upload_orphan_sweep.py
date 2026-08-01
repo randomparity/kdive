@@ -351,8 +351,9 @@ class _FailingVersionStore(_FakeUploadStore):
         objects: dict[str, timedelta],
         *,
         fail_versions: set[tuple[str, str]],
+        page_size: int = _PAGE_SIZE,
     ) -> None:
-        super().__init__(objects)
+        super().__init__(objects, page_size=page_size)
         self._fail_versions = fail_versions
         self.attempted_versions: list[tuple[str, str]] = []
 
@@ -448,6 +449,20 @@ class _FailingCaptureStore(_FakeUploadStore):
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             )
         self.capture_limits.pop()
+        return super().capture_exact_versions(key, limit)
+
+
+class _EmptyCaptureStore(_FakeUploadStore):
+    """Model keys disappearing between broad inventory and exact capture."""
+
+    def __init__(self, objects: dict[str, timedelta], *, empty_keys: set[str]) -> None:
+        super().__init__(objects)
+        self._empty_keys = empty_keys
+
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch:
+        if key in self._empty_keys:
+            self.capture_limits.append((key, limit))
+            return VersionBatch(key, (), True)
         return super().capture_exact_versions(key, limit)
 
 
@@ -1174,7 +1189,7 @@ def test_one_undeletable_key_does_not_starve_the_keys_behind_it(migrated_url: st
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             with pytest.raises(CategorizedError) as caught:  # still reported, once
                 await run_repair(pool, _sweep(store))
-        assert "could not reclaim 1 target(s); 2 were reclaimed" in str(caught.value)
+        assert "could not reclaim 1 target(s); 2 were confirmed reclaimed" in str(caught.value)
         assert sorted(store.deleted) == sorted([behind, other_root])
 
     asyncio.run(_run())
@@ -1291,6 +1306,66 @@ def test_a_capture_denied_hot_history_uses_a_key_only_marker_before_its_sibling(
     asyncio.run(_run())
 
 
+def test_many_capture_denials_spend_the_root_budget_without_starving_the_other_root(
+    migrated_url: str,
+) -> None:
+    """Ten denied 20-target requests consume the runs allowance; investigations still run."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        inv_id, inv_prefix = await _seed_investigation_with_window(
+            migrated_url, timedelta(seconds=-1)
+        )
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+            await upload_manifest.delete_manifest(seed, "investigations", inv_id)
+        denied = [f"{prefix}denied-{number:02d}" for number in range(15)]
+        sibling_root = f"{inv_prefix}rootfs"
+        store = _FailingCaptureStore(
+            dict.fromkeys([*denied, sibling_root], _GRACE * 2), fail_keys=set(denied)
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError) as caught:
+                await run_repair(pool, _sweep(store))
+        run_captures = [call for call in store.capture_limits if call[0].startswith(prefix)]
+        assert run_captures == [(key, MAX_VERSIONS_PER_KEY) for key in denied[:10]]
+        assert store.capture_limits[-1] == (sibling_root, MAX_VERSIONS_PER_KEY)
+        assert store.deleted_versions == [(sibling_root, "v1")]
+        assert "could not reclaim 10 target(s)" in str(caught.value)
+
+    asyncio.run(_run())
+
+
+def test_many_empty_capture_races_charge_one_listed_identity_each(
+    migrated_url: str,
+) -> None:
+    """Disappearing exact histories cannot evade the 200-unit root work brake."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        inv_id, inv_prefix = await _seed_investigation_with_window(
+            migrated_url, timedelta(seconds=-1)
+        )
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+            await upload_manifest.delete_manifest(seed, "investigations", inv_id)
+        raced = [f"{prefix}raced-{number:04d}" for number in range(MAX_RECLAIMS_PER_ROOT + 5)]
+        sibling_root = f"{inv_prefix}rootfs"
+        store = _EmptyCaptureStore(
+            dict.fromkeys([*raced, sibling_root], _GRACE * 2), empty_keys=set(raced)
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _sweep(store)) == 1
+        run_captures = [call for call in store.capture_limits if call[0].startswith(prefix)]
+        assert run_captures == [
+            (key, min(MAX_VERSIONS_PER_KEY, MAX_RECLAIMS_PER_ROOT - index))
+            for index, key in enumerate(raced[:MAX_RECLAIMS_PER_ROOT])
+        ]
+        assert store.deleted_versions == [(sibling_root, "v1")]
+
+    asyncio.run(_run())
+
+
 def test_a_latest_version_delete_failure_leaves_it_discoverable_and_sweeps_sibling(
     migrated_url: str,
 ) -> None:
@@ -1317,6 +1392,50 @@ def test_a_latest_version_delete_failure_leaves_it_discoverable_and_sweeps_sibli
         assert store.attempted_versions[:2] == [(key, "old"), (key, "latest")]
         assert store.version_ids(key) == {"latest"}
         assert store.deleted_versions[-1] == (sibling, "v1")
+
+    asyncio.run(_run())
+
+
+def test_complete_latest_failure_resumes_after_key_when_page_ends_inside_its_history(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Deleted page-marker identities cannot poison continuation after a complete-batch fault."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        key, sibling = f"{prefix}a-history", f"{prefix}b-sibling"
+        store = _FailingVersionStore(
+            {key: _GRACE * 2, sibling: _GRACE * 2},
+            fail_versions={(key, "v0004")},
+            page_size=3,
+        )
+        store.seed_versions(key, _data_history(store, key, 4))
+        with caplog.at_level(logging.INFO, logger="kdive.reconciler.cleanup.upload_orphans"):
+            async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+                with pytest.raises(CategorizedError) as caught:
+                    await run_repair(pool, _sweep(store))
+        assert store.version_page_calls[:2] == [
+            ("local/runs/", None, None, 1000),
+            ("local/runs/", key, None, 1000),
+        ]
+        assert store.version_ids(key) == {"v0004"}
+        assert store.deleted_versions == [
+            (key, "v0001"),
+            (key, "v0002"),
+            (key, "v0003"),
+            (sibling, "v1"),
+        ]
+        confirmed = [
+            record.getMessage()
+            for record in caplog.records
+            if "leaked upload object" in record.getMessage()
+        ]
+        assert len(confirmed) == 1
+        assert sibling in confirmed[0]
+        assert key not in confirmed[0]
+        assert "could not reclaim 1 target(s); 1 were confirmed reclaimed" in str(caught.value)
 
     asyncio.run(_run())
 
@@ -1372,7 +1491,7 @@ def test_a_wholly_stuck_first_root_does_not_starve_the_second(migrated_url: str)
                 await run_repair(pool, _sweep(store))
         # The stuck root spent its own budget; the investigations root still got swept.
         assert store.deleted == [rootfs]
-        assert f"{MAX_RECLAIMS_PER_ROOT} target(s); 1 were reclaimed" in str(caught.value)
+        assert f"{MAX_RECLAIMS_PER_ROOT} target(s); 1 were confirmed reclaimed" in str(caught.value)
 
     asyncio.run(_run())
 
@@ -1508,7 +1627,7 @@ def test_a_classify_failure_on_the_first_root_does_not_starve_the_second(
                 await run_repair(pool, _sweep(store))
         # The root whose classify raised was skipped; the sibling still drained.
         assert store.deleted == [rootfs]
-        assert "could not reclaim 1 target(s); 1 were reclaimed" in str(caught.value)
+        assert "could not reclaim 1 target(s); 1 were confirmed reclaimed" in str(caught.value)
 
     asyncio.run(_run())
 
@@ -1540,7 +1659,7 @@ def test_a_listing_failure_on_the_first_root_does_not_starve_the_second(
         # The unlistable root did not stop the sibling from draining...
         assert store.deleted == [rootfs]
         # ...and the fault is still reported, counted as the one failure of the pass.
-        assert "could not reclaim 1 target(s); 1 were reclaimed" in str(caught.value)
+        assert "could not reclaim 1 target(s); 1 were confirmed reclaimed" in str(caught.value)
 
     asyncio.run(_run())
 
@@ -1713,8 +1832,8 @@ def test_a_listing_fault_partway_through_a_root_keeps_the_pages_it_already_swept
     page 1 has already deleted irreversibly, and unwinding is not an option: the objects are gone.
     So the root is abandoned from the failed page on, the fault is counted, and the pass raises once
     at the end — the same skip-and-count ADR-0455 §5 chose, now reached by a path that has already
-    done work. It is safe for the reason a budget-truncated root is: nothing is committed, so the
-    next pass re-derives the same candidates from where this one stopped.
+    done work. It is safe for the reason a budget-truncated root is: every survivor stays in version
+    inventory, so the next pass re-derives it from where this one stopped.
     """
 
     async def _run() -> None:
@@ -1731,7 +1850,7 @@ def test_a_listing_fault_partway_through_a_root_keeps_the_pages_it_already_swept
                 await run_repair(pool, _sweep(store))
         # Page 1's three keys are gone and stay gone; the fault is the pass's one failure.
         assert store.deleted == sorted(keys)[:_PAGE_SIZE]
-        assert "could not reclaim 1 target(s); 3 were reclaimed" in str(caught.value)
+        assert "could not reclaim 1 target(s); 3 were confirmed reclaimed" in str(caught.value)
         assert store.present == set(sorted(keys)[_PAGE_SIZE:])
 
     asyncio.run(_run())
@@ -1762,6 +1881,6 @@ def test_a_listing_failure_on_the_second_root_still_records_the_first_root_s_del
         assert store.deleted == [f"{prefix}orphan"]  # the first root's delete really happened
         errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
         assert len(errors) == 1
-        assert "reclaimed 1 version target(s)" in errors[0]
+        assert "confirmed 1 version target(s) reclaimed by completed batches" in errors[0]
 
     asyncio.run(_run())

@@ -1,24 +1,26 @@
 """Worker handler for the internal ``reclaim_investigation_rootfs`` job (ADR-0442, #1522).
 
-Reclaims an investigation's committed uploaded-rootfs bases: for each due ``artifacts`` row, the
-ADR-0441 §6 pin gate and then the ADR-0495 in-flight-download gate, then the staged base unlink, the
-object delete, and the row delete — in that order (ADR-0442 §4). The work runs on the worker rather
-than the reconciler because the worker created the staging tree: on a host-process local-libvirt
-deployment it runs as root while the reconciler runs as the invoking user, so a reconciler-side
-unlink raises ``PermissionError`` after the object is already gone (#1522). Co-location is
-structural here — the worker that claims a local-libvirt job is the libvirt host, the same
-assumption ``provision``'s staging already makes — so the removed stat-based probe has nothing left
-to answer.
+Reclaims an investigation's committed uploaded-rootfs bases. For each due ``artifacts`` row it
+captures a bounded immutable object history without a database transaction, then re-reads the row,
+runs the ADR-0441 §6 pin gate and ADR-0495 in-flight-download gate, unlinks the staged base, and
+retires the row in one transaction. Only after that transaction commits does it exact-delete the
+captured versions (ADR-0442 §4, ADR-0524). The work runs on the worker rather than the reconciler
+because the worker created the staging tree: on a host-process local-libvirt deployment it runs as
+root while the reconciler runs as the invoking user, so a reconciler-side unlink raises
+``PermissionError`` (#1522). Co-location is structural here — the worker that claims a
+local-libvirt job is the libvirt host, the same assumption ``provision``'s staging already makes —
+so the removed stat-based probe has nothing left to answer.
 
-Each checksum's gate-and-reclaim runs in one transaction under the ``INVESTIGATION`` advisory lock
-that System bind holds transaction-scoped until its row commits, so a bind either is seen as a
-pre-overlay referencer (pinning the base) or waits behind the reclaim. The *fetch* is not serialized
-by that lock at all, which is why the later gates exist: they ask whether a download of this base is
-in flight instead of inferring it from a System state column. ADR-0515 (#1702) asks it of the
-``rootfs_fetch_leases`` row a fetcher holds from before it resolves its ``artifacts`` row until it
-returns; ADR-0495 asks the kernel about an ``flock`` on the fetcher's partial. The first brackets
-the second, and together they are #1558's option 2 — satisfied by durable state rather than by
-widening the state classifier, which could not be bounded.
+Only the final gates, staged-base unlink, and row retirement run under the ``INVESTIGATION``
+advisory lock that System bind holds transaction-scoped until its row commits. A bind either is
+seen as a pre-overlay referencer (pinning the base) or waits behind that retirement; object-store
+capture and exact deletion hold neither the lock nor a database connection. The *fetch* is not
+serialized by that lock at all, which is why the later gates exist: they ask whether a download of
+this base is in flight instead of inferring it from a System state column. ADR-0515 (#1702) asks it
+of the ``rootfs_fetch_leases`` row a fetcher holds from before it resolves its ``artifacts`` row
+until it returns; ADR-0495 asks the kernel about an ``flock`` on the fetcher's partial. The first
+brackets the second, and together they are #1558's option 2 — satisfied by durable state rather
+than by widening the state classifier, which could not be bounded.
 """
 
 from __future__ import annotations
@@ -181,8 +183,9 @@ def _unlink_staged_base(uploads_dir: str, investigation_id: UUID, token: str) ->
     """Unlink the staged base and its completion marker; ``ENOENT`` is the achieved post-state.
 
     Any **other** ``OSError`` propagates — from either unlink, which is why they share one region —
-    so the caller defers the whole checksum before deleting the object or the row (ADR-0442 §4):
-    neither SENSITIVE copy may be dropped while the local base survives.
+    so the caller defers the whole checksum before retiring the row and therefore before the later
+    exact-version delete (ADR-0442 §4): neither SENSITIVE copy may be dropped while the local base
+    survives.
 
     The marker (ADR-0451) goes **first**, which is the conservative order. Interrupted after it,
     this leaves "base without marker", which the reuse gate rejects and the next fetch re-stages:
@@ -214,10 +217,10 @@ def sweep_investigation_staging_dir(
     Keying the collection on the token rather than on ``drained`` is ADR-0494's whole change
     (#1559). The precondition the ungated unlink used to rest on — "no rootfs row remains, so every
     file here is unowned" — is unreachable for the three states that leak: a checksum whose unlink
-    or object delete faults permanently keeps its row and so kept the directory out of every sweep;
-    a never-closed investigation whose rows all drained is selected by no row-keyed worklist at all;
-    and a base published after this pass's own enumeration outlives the ``rmdir``. Deciding each
-    file against the owned/pinned set instead makes the collection independent of all three.
+    fault permanently keeps its row and so kept the directory out of every sweep; a never-closed
+    investigation whose rows all drained is selected by no row-keyed worklist at all; and a base
+    published after this pass's own enumeration outlives the ``rmdir``. Deciding each file against
+    the owned/pinned set instead makes the collection independent of all three.
 
     Args:
         uploads_dir: The staging root (``<uploads>/<investigation_id>/`` is swept).
@@ -278,10 +281,10 @@ def sweep_investigation_staging_dir(
     ADR-0495 narrows the window rather than removing it, so the re-pass stays. A doomed fetcher that
     holds an ``flock`` on its partial now defers its checksum in :func:`_reclaim_one_checksum`,
     which keeps that row and turns this tail back at its ``drained`` test before either ``rmdir``.
-    What is left is a fetcher that had not yet *created* its partial when the reclaim probed, and
-    whose download then completes anyway because the object delete landed behind its reads — the
-    timed-out delete ADR-0442 records as still landing later, or a store that serves a deleted key.
-    Narrower than before and not empty.
+    What is left at this filesystem boundary is any publisher that creates a base between this
+    pass's globs and its ``rmdir``. The row-driven fetch-lease gate narrows the normal fetch path,
+    but this helper deliberately retains its bounded retry instead of depending on its caller's
+    ordering assumptions.
     """
     inv_dir = Path(uploads_dir) / str(investigation_id)
     if not drained:
@@ -539,9 +542,9 @@ def _unlink_unowned_base(base: Path) -> None:
     file. What remains conditional is the instant between the pin read and the unlink. ADR-0495
     narrows the publish-after-reclaim shape that produces such a System — a fetcher holding its
     partial's ``flock`` now defers the whole checksum, so its row is never reclaimed under it — down
-    to a fetcher that had not created its partial yet when the reclaim probed and whose download
-    outlived the object delete anyway. #1558's remaining half is the classifier itself, which still
-    cannot tell that a ``torn_down`` System was mid-provision.
+    to a fetcher that had not created its partial yet when the reclaim probed. ADR-0515 later closed
+    that normal fetch path with the durable fetch lease. The filesystem sweep still treats a
+    published unowned base as input rather than relying on the caller's ordering.
 
     It should also rarely fire. :func:`_unlink_staged_base` removes each base as its own row drains,
     so a base surviving to here means one was published *without* a row — the shape the ``flock``
@@ -802,9 +805,9 @@ async def _finish_drained_investigation(
     and a concurrent finalize. ADR-0442 read that post-state as one bit ("are there rows left?") and
     ran the staging sweep only when the answer was no. ADR-0494 reads it as two **sets** — the
     tokens rows own, and the tokens live Systems pin — and always runs the sweep, because the
-    zero-row form starved exactly the case that leaks: a checksum whose unlink or object delete
-    faults permanently keeps its row, so its investigation's staging directory was never swept
-    again and a base orphaned beside it was collected by nothing (#1559).
+    zero-row form starved exactly the case that leaks: a checksum whose unlink fault permanently
+    keeps its row, so its investigation's staging directory was never swept again and a base
+    orphaned beside it was collected by nothing (#1559).
 
     Clearing is still keyed on the drain rather than on which sweep enqueued the job — a TTL job
     only runs against an ``open``/``active`` investigation, whose marker is already NULL.
@@ -912,11 +915,11 @@ async def reclaim_investigation_rootfs_handler(
     surfacing durably in the ``jobs`` table instead of as a log line that repeats every pass
     (#1522).
 
-    The first real fault **ends the loop** rather than attempting the remaining checksums. A store
-    that is refusing or timing out is a store-wide condition, and the object-delete budget is a
-    per-call one, so pressing on would burn that budget once per remaining checksum while the worker
-    slot — and the ``INVESTIGATION`` lock — stay held. Nothing is lost: the surviving checksums keep
-    their rows and are re-attempted by the next sweep, which is the retry loop.
+    The first real fault **ends the loop** rather than attempting the remaining checksums. Pressing
+    on through a store-wide refusal would multiply the store client's retry budget by the remaining
+    worklist while occupying the worker. No owner lock is held during capture or exact deletion.
+    An untouched checksum keeps its row for the next row-driven sweep; an exact-delete fault happens
+    after its row commits retired, so the upload-version orphan sweep rediscovers every survivor.
 
     Returns the number of drained checksums as the job's ``result_ref``.
 

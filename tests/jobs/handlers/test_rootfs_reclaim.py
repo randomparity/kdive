@@ -677,10 +677,11 @@ def test_marker_survives_a_partially_drained_investigation(
 def test_the_first_fault_stops_the_loop_and_fails_the_job(
     migrated_url: str, tmp_path: Path
 ) -> None:
-    # A refusing store is a store-wide condition and the delete budget is per-call, so pressing on
-    # through the worklist would multiply that budget by its length while the worker slot and the
-    # INVESTIGATION lock stay held. The loop stops at the first real fault; the untouched checksums
-    # keep their rows and are re-attempted by the next sweep, and the job fails so it is visible.
+    # A refusing store is a store-wide condition, so pressing on through the worklist would multiply
+    # the store client's retry budget while occupying the worker. Exact deletion happens after the
+    # owner transaction, with no INVESTIGATION lock held. The loop still stops at the first real
+    # fault: the failed checksum's row is already retired for version-orphan recovery, untouched
+    # checksums keep their rows for the next row-driven sweep, and the job fails so it is visible.
     inv = uuid4()
 
     async def _run() -> None:
@@ -764,17 +765,17 @@ def test_investigation_lock_serializes_a_concurrent_bind(migrated_url: str, tmp_
 
 
 def test_rootfs_reclaim_has_no_application_store_timeout() -> None:
-    """An uncancellable boto thread is governed by its client, never an asyncio timeout wrapper."""
+    """Store I/O uses its client budget and exact deletion holds no owner transaction or lock."""
     assert not hasattr(rootfs_reclaim, "_STORE_DELETE_TIMEOUT_S")
 
 
 def test_reclaim_reconverges_when_both_targets_are_already_absent(
     migrated_url: str, tmp_path: Path
 ) -> None:
-    # The property the file->object->row order, the fault contract, and the "a worker that dies
-    # mid-reclaim resumes" claim all rest on: an already-unlinked base (ENOENT) and an already-gone
-    # object (a 404 the store no-ops) are SUCCESS, so a re-attempt after a partial run completes
-    # the row delete instead of wedging.
+    # The property the capture -> staged-base/row commit -> exact-delete order and the "a worker
+    # that dies mid-reclaim resumes" claim rest on: an already-unlinked base (ENOENT) and an
+    # already-gone captured version (a 404 the store no-ops) are success, so a re-attempt after a
+    # partial run reconverges instead of wedging.
     inv = uuid4()
 
     async def _run() -> None:
@@ -824,11 +825,11 @@ def test_a_live_held_partial_defers_its_own_checksum_whole(
     # that requested this base is torn_down, so _ROOTFS_REFERENCERS_SQL does not even consider it
     # and the ADR-0441 §6 gate calls the base reclaimable — while the detached, uncancellable
     # download is still writing its partial. ADR-0452 stopped the drain *sweep* from destroying that
-    # partial, but _reclaim_one_checksum still ran first and unlinked the staged base, deleted the
-    # object and deleted the row out from under the download, which on the ranged-GET path turns the
-    # rest of that download into 404s. ADR-0495 asks the kernel the same question one step earlier,
-    # so the checksum defers whole: base, object and row all survive, and the surviving row is what
-    # keeps the investigation on the row-driven worklist for the next pass.
+    # partial, but _reclaim_one_checksum could otherwise unlink the staged base, retire the row, and
+    # exact-delete the captured versions after commit. On the ranged-GET path that turns the rest of
+    # the download into 404s. ADR-0495 asks the kernel the same question before retirement, so the
+    # checksum defers whole: base, object and row all survive, and the surviving row is what keeps
+    # the investigation on the row-driven worklist for the next pass.
     inv = uuid4()
 
     async def _run() -> None:

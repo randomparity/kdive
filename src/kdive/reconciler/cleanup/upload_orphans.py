@@ -47,9 +47,11 @@ UPLOAD_ORPHAN_ROOTS: tuple[str, ...] = tuple(
     f"{UPLOAD_TENANT}/{kind}/" for kind in UPLOAD_OWNER_KINDS
 )
 
-#: Maximum immutable versions or markers captured per root and pass. The reconciler runs repairs
-#: serially, so the cap keeps a historical backlog from delaying unrelated repair groups. A later
-#: pass restarts at the root and rediscovers every survivor.
+#: Maximum inventory/deletion work charged per root and pass. Successful captures charge their
+#: immutable target count, a denied capture charges its requested allowance, and an empty capture
+#: race charges the identity broad inventory observed. The reconciler runs repairs serially, so the
+#: cap keeps a historical backlog or repeated denial from delaying unrelated repair groups. A
+#: later pass restarts at the root and rediscovers every survivor.
 MAX_RECLAIMS_PER_ROOT = 200
 
 #: Maximum immutable versions or markers one key may charge in a root pass. Reaching the cap
@@ -88,8 +90,10 @@ async def repair_leaked_upload_objects(
     """Delete unreachable upload versions after their database fences commit.
 
     Walks both upload roots with public version pages, attributes entries to exact owner keys, and
-    captures at most 200 immutable identities per root and 20 per key. A capped or capture-faulted
-    key is skipped with a key-only continuation marker so its history cannot starve later keys.
+    charges at most 200 inventory/deletion work units per root and 20 per key. A capped or
+    capture-faulted key is skipped with a key-only continuation marker so its history cannot starve
+    later keys. A denied capture pessimistically charges its requested allowance, while a broad-list
+    to empty-capture race charges one unit, so neither failure shape can evade the root brake.
     Each batch is captured before the final artifact, manifest, live-write-lease, and grace recheck
     under the owner's advisory lock. The transaction commits before exact VersionId deletion;
     therefore store latency holds no owner lock and a later PUT cannot enter the captured batch.
@@ -105,10 +109,11 @@ async def repair_leaked_upload_objects(
     code cannot see — a reconciler provisioned without ``KDIVE_UPLOAD_TTL_SECONDS`` while the
     minting server raises it — which is the one way the margin can still go negative (ADR-0455 §2).
 
-    A live key protects all of its versions. Incomplete batches retain latest, while failed exact
-    deletes, legacy ``null`` versions, markers, and uncaptured history remain in version inventory.
-    Listing, capture, database, and delete faults are logged and counted without starving the
-    sibling root; the pass raises once at the end so the reconciler error counter observes them.
+    A live key protects all of its versions. Incomplete batches retain latest, while every survivor
+    of a failed exact delete, legacy ``null`` versions, markers, and uncaptured history remain in
+    version inventory. Listing, capture, database, and delete faults are logged and counted without
+    starving the sibling root; the pass raises once at the end so the reconciler error counter
+    observes them.
 
     Args:
         conn: An async connection. Each query runs in its own short transaction so no snapshot is
@@ -118,7 +123,10 @@ async def repair_leaked_upload_objects(
         upload_ttl: The configured upload-window TTL, added to ``orphan_grace``.
 
     Returns:
-        The number of immutable versions or markers deleted; one INFO line per identity.
+        The number of immutable versions or markers confirmed deleted by completed
+        :meth:`UploadOrphanStore.delete_batch` calls; one INFO line per confirmed identity. A
+        raised batch may have deleted nonlatest targets before failing, but that partial progress
+        is deliberately neither counted nor logged because the batch API reports no partial count.
 
     Raises:
         CategorizedError: at least one root or key could not be swept
@@ -145,7 +153,12 @@ async def repair_leaked_upload_objects(
 
 @dataclass
 class _Tally:
-    """One pass's outcome counts, accumulated across every root it reaches."""
+    """Completed-batch confirmations and failures across every root reached by one pass.
+
+    ``deleted`` excludes any nonlatest identities a batch removed before raising. The narrow store
+    API reports only completion or failure, so claiming a partial count would invent knowledge the
+    caller does not have; version inventory remains the durable record of survivors.
+    """
 
     deleted: int = 0
     failed: int = 0
@@ -159,10 +172,11 @@ class _Tally:
         of what happened — at least one root was never swept at all.
         """
         _log.error(
-            "reconciler: upload orphan sweep aborted before its last root; it had reclaimed %d "
-            "version target(s) and counted %d it could not reclaim. Neither count reaches the "
-            "repairs "
-            "counter because this pass raises, and a root it had not reached was not swept.",
+            "reconciler: upload orphan sweep aborted before its last root; it had confirmed %d "
+            "version target(s) reclaimed by completed batches and counted %d it could not "
+            "reclaim. A failed batch may have made uncounted partial progress. Neither count "
+            "reaches the repairs counter because this pass raises, and a root it had not reached "
+            "was not swept.",
             self.deleted,
             self.failed,
         )
@@ -177,9 +191,10 @@ class _Tally:
         rather than being lost with the exception.
         """
         _log.error(
-            "reconciler: upload orphan sweep reclaimed %d version target(s) and could not reclaim "
-            "%d; the "
-            "reclaimed count is not reported to the repairs counter because this pass raises",
+            "reconciler: upload orphan sweep confirmed %d version target(s) reclaimed by completed "
+            "batches and could not reclaim %d; a failed batch may have made uncounted partial "
+            "progress. The confirmed count is not reported to the repairs counter because this "
+            "pass raises",
             self.deleted,
             self.failed,
         )
@@ -191,9 +206,10 @@ class _Tally:
         self.log()
         raise CategorizedError(
             f"upload orphan sweep could not reclaim {self.failed} target(s); {self.deleted} were "
-            "reclaimed this pass. Nothing is lost — the next pass re-derives the same candidates "
-            "— but a key that fails every pass (an object-lock hold, a per-key deny) leaks until "
-            "it is cleared.",
+            "confirmed reclaimed by completed batches this pass. A failed batch may have made "
+            "uncounted partial progress. Every survivor remains discoverable in version inventory "
+            "for the next pass, but a key that fails every pass (an object-lock hold, a per-key "
+            "deny) leaks until it is cleared.",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         )
 
@@ -203,20 +219,20 @@ class _RootSweep:
     """One root's version budget, page-boundary de-duplication, and drift counts."""
 
     root: str
-    captured: int = 0
+    charged: int = 0
     listed: int = 0
     attributed: int = 0
     seen_keys: set[str] = field(default_factory=set)
 
     @property
     def budget_spent(self) -> bool:
-        """Whether this root captured its 200-version allowance."""
-        return self.captured >= MAX_RECLAIMS_PER_ROOT
+        """Whether this root charged its 200-version allowance."""
+        return self.charged >= MAX_RECLAIMS_PER_ROOT
 
     @property
     def remaining(self) -> int:
-        """Version or marker targets left in this root's pass allowance."""
-        return MAX_RECLAIMS_PER_ROOT - self.captured
+        """Inventory/deletion work units left in this root's pass allowance."""
+        return MAX_RECLAIMS_PER_ROOT - self.charged
 
 
 async def _sweep_root(
@@ -308,14 +324,19 @@ async def _reclaim_page(
         try:
             batch = await asyncio.to_thread(store.capture_exact_versions, attributed.key, limit)
         except CategorizedError as exc:
+            sweep.charged += limit
             tally.failed += 1
             _log.warning(
                 "reconciler: upload orphan sweep could not capture %s: %s", attributed.key, exc
             )
             return attributed.key
         if not batch.targets:
+            # Broad inventory observed at least one identity for this key. Charge that observed
+            # work even when a concurrent exact delete makes the capture empty, or repeated races
+            # could evade the root brake indefinitely.
+            sweep.charged += 1
             return attributed.key
-        sweep.captured += len(batch.targets)
+        sweep.charged += len(batch.targets)
         candidate = UploadOrphanCandidate(
             key=attributed.key,
             last_modified=max(target.last_modified for target in batch.targets),
@@ -331,6 +352,7 @@ async def _reclaim_page(
             _log.warning(
                 "reconciler: upload orphan sweep could not reclaim %s: %s", candidate.key, exc
             )
+            return batch.key
         if not batch.history_complete:
             return batch.key
     return None
@@ -355,7 +377,11 @@ async def _delete_if_still_reclaimable(
     batch: VersionBatch,
     grace: timedelta,
 ) -> int:
-    """Recheck a captured key under its owner lock, commit, then delete exact versions."""
+    """Fence, unlock, and return only identities confirmed by a completed delete batch.
+
+    A raised batch may already have deleted nonlatest targets. It propagates without per-identity
+    logs because this narrow API cannot report which prefix of those deletes completed.
+    """
     # A savepoint here would hold the owner lock for the rest of the pass instead of for this one
     # key, so the transaction has to be a real one. ``_run_repair_plan`` hands each repair a
     # freshly pooled connection and every prior per-key transaction commits, so this holds
