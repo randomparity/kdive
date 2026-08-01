@@ -136,6 +136,24 @@ class Investigation(DomainModel, Attribution):
     rootfs_cleanup_pending_at: datetime | None = None
 
 
+class InvestigationBuild(DomainBase):
+    """One immutable, Investigation-owned external kernel build generation (ADR-0531)."""
+
+    investigation_id: UUID
+    generation: UUID
+    build_ref: str
+    content_digest: str
+    canonical_document: dict[str, JsonValue]
+    build_result: dict[str, JsonValue]
+    artifacts: dict[str, dict[str, str]]
+    target_kind: ResourceKind
+    build_profile: SerializedBuildProfile
+    state: Literal["active", "reclaiming"]
+    expires_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
 class ExpectedBootFailure(DomainBase):
     """Run-scoped expected boot failure metadata (ADR-0064, ADR-0266).
 
@@ -199,6 +217,8 @@ class Run(DomainModel, Attribution):
     expected_boot_failure: SerializedExpectedBootFailure | None = None
     kernel_ref: str | None = None
     debuginfo_ref: str | None = None
+    #: The immutable Investigation build generation selected for this Run (ADR-0531).
+    build_ref: str | None = None
     failure_category: ErrorCategory | None = None
     failing_job_id: UUID | None = None
     #: Optional client-supplied human handle, set at create (ADR-0264, #867). Validated by
