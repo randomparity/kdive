@@ -21,21 +21,21 @@ object checksum cannot identify that complete set.
 
 Finalizing an external build creates an investigation-owned build record with immutable content.
 Its public
-`build_ref` is the SHA-256 of a versioned canonical document containing the validated artifact
-checksums and build metadata. The artifact catalog rows use `owner_kind='investigations'` and the
-Investigation id. A uniqueness constraint on `(investigation_id, build_ref)` makes concurrent or
-replayed finalization converge on one record.
+`build_ref` is `<content_digest>.<generation>`. `content_digest` is the lowercase hexadecimal
+SHA-256 of a versioned canonical document containing the validated artifact checksums and build
+metadata; `generation` is an opaque UUID minted for one publication lifetime. The artifact catalog
+rows use `owner_kind='investigations'` and the Investigation id.
 
-The record stores one exact validated artifact set. A finalizer first attempts to publish its
-candidate record under the Investigation lock. On uniqueness conflict it reloads the winner and
-verifies that the canonical document matches before using the winner's references for its source
-Run. If the winner is expired, this fully validated identical upload renews `expires_at` from the
-current Postgres clock and records that renewal in the complete-build audit; ordinary reuse never
-refreshes it. Only the winner registers investigation-owned artifact rows. A loser retains its
-uploaded objects as uncommitted Run-prefix objects, deletes their exact versions after commit, and
-leaves a failed delete to the existing prefix-orphan sweep. It never registers or deletes the
-winner's objects. The lock spans catalog selection, optional renewal, and database registration,
-so collection cannot race a partially published winner.
+The record stores one exact validated artifact set. Under the Investigation lock, a finalizer first
+looks for an active, unexpired record with the same `content_digest`. If one exists it verifies the
+canonical document and converges on that winner. Otherwise it mints a new generation and publishes
+its candidate, even when an expired or reclaiming generation has the same digest. Only the selected
+generation registers investigation-owned artifact rows. A convergence loser retains its uploaded
+objects as uncommitted Run-prefix objects, deletes their exact versions after commit, and leaves a
+failed delete to the existing prefix-orphan sweep. It never registers or deletes a selected
+generation's objects. Reclaim marks one generation `reclaiming` before object deletion and deletes
+the record only if that generation remains reclaiming; a new generation has distinct rows and
+objects. The lock spans selection, publication, and the reclaim state transition.
 
 `runs.complete_build` still completes its source Run and additionally returns the `build_ref`.
 `runs.create` accepts an optional `build_ref`. Under the Investigation lock it resolves only a
@@ -52,7 +52,7 @@ the build record, not that Run, is the reuse authority.
 Investigation-close-plus-grace garbage collection deletes the build's investigation-owned artifacts
 and then its build record. ADR-0234's independent TTL backstop also applies: the build record stores
 an absolute `expires_at` stamped from the Postgres clock at completion using
-`KDIVE_BUILD_ARTIFACT_RETENTION_DAYS` (days, per build). `runs.complete_build` returns that deadline
+`KDIVE_BUILD_ARTIFACT_RETENTION_DAYS` (days, per generation). `runs.complete_build` returns that deadline
 and `server_time`. `runs.create` rejects a reference at or after the deadline with
 `reason='build_ref_expired'`, the same two timestamps, and `artifacts.create_run_upload` as the
 recovery path. Reclaim locks the Investigation and rechecks the deadline and that no live Run
@@ -70,7 +70,7 @@ versus reclaim is serialized and the reference remains auditable.
   durable build; losing object versions are best-effort deleted and remain covered by orphan repair.
 - Investigation ownership permits reuse within the advertised absolute deadline; it does not waive
   ADR-0234's never-closed-Investigation storage bound.
-- Re-uploading and completing the identical build after expiry revalidates the bytes and renews the
+- Re-uploading and completing identical content after expiry publishes a new generation and
   deadline. Looking up or reusing a build does not extend retention.
 - Reuse bypasses build upload and validation because it selects an already validated immutable
   record. Install, boot, and debug behavior remain unchanged.

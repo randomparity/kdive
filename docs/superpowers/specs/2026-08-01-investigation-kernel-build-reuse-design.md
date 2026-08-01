@@ -19,7 +19,7 @@ user's explicit answer in the active interactive run.
 
 ## Approaches
 
-The selected approach adds an immutable investigation-build catalog and exposes its
+The selected approach adds an immutable-content investigation-build catalog and exposes its
 content-derived `build_ref`. This preserves a single validated build set and makes ownership and
 reclaim explicit.
 
@@ -33,8 +33,10 @@ create-time resolution avoids.
 Migration 0095 adds `investigation_builds` with:
 
 - `investigation_id` referencing `investigations(id)`;
-- `build_ref`, a lowercase hexadecimal SHA-256 string;
+- `content_digest`, a lowercase hexadecimal SHA-256 string, and opaque UUID `generation`;
+- `build_ref`, the unique `<content_digest>.<generation>` public handle;
 - `target_kind`, `build_profile`, and the complete serialized `BuildStepResult`;
+- state (`active` or `reclaiming`);
 - `created_at` and absolute `expires_at` timestamps, plus a primary key on
   `(investigation_id, build_ref)`.
 
@@ -44,14 +46,15 @@ key to a composite owner whose deletion timing differs from Run retention.
 The canonical build document is versioned and includes the target kind, normalized build profile,
 kernel checksum, optional initrd and debuginfo checksums, build id, cmdline, and normalized
 provenance. Canonical JSON uses sorted keys and compact separators; SHA-256 over its UTF-8 bytes is
-the `build_ref`. Object keys and etags are excluded because they describe storage placement rather
-than content. Finalization already requires the object store's SHA-256 for every artifact.
+the `content_digest`. Object keys and etags are excluded because they describe storage placement
+rather than content. Finalization already requires the object store's SHA-256 for every artifact.
+The generation suffix prevents an expired or partially reclaimed physical set from being mistaken
+for a fresh publication of the same content.
 
-The record's content is immutable and stores the exact selected artifact keys and versions. Under the
-Investigation lock, `INSERT ... ON CONFLICT DO NOTHING` chooses a candidate. A conflict reloads the
-winner and requires equality of the canonical document; inequality is an infrastructure failure.
-If that winner is expired, the fully validated conflicting completion renews `expires_at` from the
-current Postgres clock and records the renewal in the complete-build audit. Reuse reads never renew.
+The record's content is immutable and stores the exact selected artifact keys and versions. Under
+the Investigation lock, completion queries for an active, unexpired matching digest. A match must
+have an equal canonical document and becomes the winner. With no match, completion mints a UUID
+generation and inserts a new active record. An expired or reclaiming matching digest never wins.
 Only the winner's artifact set gets new rows with `owner_kind='investigations'` and the
 Investigation id. The existing owner-triple uniqueness constraint makes its registration
 replay-safe.
@@ -68,13 +71,13 @@ lock, so garbage collection cannot observe or delete a half-published winner.
 final transaction it:
 
 1. derives the canonical build document and `build_ref` from validated HEAD data and build result;
-2. selects or verifies the immutable investigation-build record;
+2. selects an active matching generation or publishes a new investigation-build record;
 3. registers artifact rows against the Investigation only when this candidate won;
 4. records the source Run's succeeded build step and `runs.build_ref`;
 5. marks the source Run succeeded and records the existing audit event.
 
 All five database effects commit together. Object uploads precede the transaction as today. After
-commit, a uniqueness loser deletes only its own exact uploaded versions; the existing orphan sweep
+commit, a convergence loser deletes only its own exact uploaded versions; the existing orphan sweep
 remains the retry owner if that cleanup or the transaction fails. The successful tool response
 includes `data.build_ref`, `data.expires_at`, and `data.server_time`; `runs.get`/`runs.list` expose
 the reference and deadline.
@@ -89,7 +92,8 @@ SELECT ... FROM investigation_builds
 WHERE investigation_id = $requested_investigation AND build_ref = $requested_ref
 ```
 
-The reference must be 64 lowercase hexadecimal characters. Missing and cross-Investigation values
+The reference must contain a 64-character lowercase hexadecimal digest, a dot, and a canonical
+lowercase UUID generation. Missing and cross-Investigation values
 share `configuration_error` with `reason: build_ref_not_found`, so another tenant's catalog is not
 an oracle. The record's target kind and normalized build profile must equal the new Run's resolved
 values; mismatch returns `reason: build_ref_incompatible` and safe expected/actual target-kind and
@@ -99,10 +103,10 @@ The existing `KDIVE_BUILD_ARTIFACT_RETENTION_DAYS` applies in days per build. Co
 `expires_at` from the Postgres clock as `server_time + retention`; it never refreshes on reuse.
 Create at or after that instant returns `reason: build_ref_expired` with `expires_at`, a fresh
 `server_time` from the same database clock, and `artifacts.create_run_upload` as the recovery tool.
-Uploading and completing identical content revalidates it and atomically renews the existing
-record's deadline even while live Runs retain its artifact set; the losing duplicate upload is
-cleaned by the convergence protocol. This preserves ADR-0234's storage backstop while giving an
-agent a terminating recovery path and the full limit contract before it plans reuse.
+Uploading and completing identical content after expiry revalidates it and atomically publishes a
+new generation with a new deadline; the expired generation and any live Run references to it remain
+isolated. This preserves ADR-0234's storage backstop while giving an agent a terminating recovery
+path and the full limit contract before it plans reuse.
 
 Creation writes the Run with state `succeeded`, `kernel_ref`, `debuginfo_ref`, and `build_ref`, plus
 a succeeded `build` run step copied from the immutable record. It does not create an upload
@@ -112,8 +116,8 @@ in the same transaction. Idempotent replay returns the same `build_ref` and next
 Without `build_ref`, behavior is unchanged: the Run starts `created` and the response points to
 the external-build contract and upload tools. With it, the wrapper docstring states same-
 Investigation scope, compatibility requirements, failure reasons, and that the next action is
-`runs.install`. The optional field description names the 64-hex unit and source (`data.build_ref`
-from `runs.complete_build` or `runs.get`).
+`runs.install`. The optional field description names the digest-plus-UUID format and source
+(`data.build_ref` from `runs.complete_build` or `runs.get`).
 
 ## Garbage collection and concurrency
 
@@ -123,13 +127,15 @@ artifact rows. The latter uses each record's stored absolute deadline. Legacy
 `owner_kind='runs'` build artifacts keep their current close and age-based TTL paths.
 
 Create and reclaim take the Investigation advisory lock. Reclaim rechecks for non-terminal Runs
-whose `build_ref` selects the candidate. A live reference defers deletion. After object versions
-are deleted, reclaim removes artifact rows and the build record in one database transaction. A
-partial object-store failure keeps the catalog record for retry and does not manufacture a dangling
-successful Run.
+whose `build_ref` selects the generation. A live reference defers deletion. Otherwise it marks the
+generation `reclaiming` before deleting its exact object versions. A partial object-store failure
+keeps that state for retry. After deletion it removes only that generation's artifact rows and
+record, rechecking the state under the lock. A fresh publication of identical content uses a new
+generation and cannot be deleted or selected through the old record.
 
 The Investigation lock makes create-versus-reclaim deterministic. Concurrent source completions
-of identical content converge through the composite key and artifact owner-triple uniqueness.
+of identical content converge through the active-digest query under that lock and artifact
+owner-triple uniqueness.
 Different builds within one Investigation serialize only for their short database commit, not
 during upload or validation.
 
@@ -150,8 +156,8 @@ sensitive artifacts and widens artifact lifetime from one Run to its Investigati
 - The server derives `build_ref`; callers cannot register an arbitrary content set.
 - Exact build-profile and target-kind equality prevents installing a validated build under an
   incompatible Run contract.
-- The Investigation lock serializes create, close, and reclaim; the database uniqueness guards
-  replay and concurrent completion.
+- The Investigation lock serializes create, completion, close, and reclaim; database uniqueness
+  guards generation identity and artifact-row replay.
 - Responses expose references and scalar reasons, never artifact bytes, object-store credentials,
   or another Investigation's existence.
 
@@ -173,7 +179,8 @@ class within that boundary.
 4. Malformed, missing, cross-Investigation, target-kind-mismatched, and build-profile-mismatched
    references fail without a Run, System hold, audit transition, or tenancy disclosure.
 5. Concurrent identical completions converge; create racing close or reclaim cannot produce a
-   dangling build reference; a validated identical completion after expiry renews the deadline.
+   dangling build reference; a validated identical completion after expiry publishes a distinct
+   generation that survives partial cleanup of the old one.
 6. Close-plus-grace and absolute-deadline collection reclaim new investigation-owned build objects
    only after no live Run references them; expiry is reported with database-clock timestamps and a
    re-upload recovery action, and legacy run-owned build collection remains green.
@@ -184,7 +191,8 @@ class within that boundary.
 
 Start with focused failing service tests for `runs.create` reuse and complete-build ownership.
 Cover bound and unbound success, every rejection in criterion 4, idempotent replay, and a
-barrier-controlled create/reclaim race. Add migration shape and garbage-collection tests, then MCP
+barrier-controlled create/reclaim race. Fault injection pauses after each old-generation artifact
+deletion and proves a fresh same-content generation stays usable. Add migration shape and garbage-collection tests, then MCP
 wrapper/schema tests proving the agent-visible contract and suggested next actions. Mutate the
 Investigation ownership predicate and profile compatibility check to confirm those tests fail.
 
