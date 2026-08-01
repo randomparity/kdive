@@ -150,7 +150,13 @@ point for promoting an already-realized ``defined`` baseline. Re-issuing it for 
 
 `implemented`
 
-Create an image upload request.
+Register a quarantined upload as a project-private image.
+
+An already registered private image with the same project and name returns ``CONFLICT``
+before a published object write. The response identifies the requested name, not the
+existing image UUID: use ``images.list`` to find the authorized existing image ID, call
+``images.delete`` with that ID, wait for deletion to complete, then retry
+``images.upload``.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

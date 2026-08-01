@@ -36,7 +36,7 @@ from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.config.core_settings import IMAGE_PRIVATE_LIFETIME_MAX
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.jobs.payloads import ImageBuildPayload
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops.images import build_publish as image_build_publish
@@ -54,7 +54,11 @@ from kdive.mcp.tools.ops.images.build_publish import PUBLISH_TOOL
 from kdive.reconciler.cleanup.images import ImageMtime
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
-from kdive.services.images.upload import PrivateUploadRequest, UploadObjectStore
+from kdive.services.images.upload import (
+    PrivateUploadRequest,
+    RegisteredPrivateNameConflict,
+    UploadObjectStore,
+)
 from tests.reconciler.conftest import connect, seed_system
 
 _TARGET_PROJECT = "tenant-x"
@@ -629,6 +633,75 @@ def test_upload_operator_registers_private_upload(
         assert request.required == image_upload.DEFAULT_REQUIRED_CONTRACT
 
     asyncio.run(_run())
+
+
+def test_upload_conflict_exposes_delete_then_retry(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def registered_name_conflict(
+        conn: object, store: object, *, request: object
+    ) -> ImageCatalogEntry:
+        raise RegisteredPrivateNameConflict("custom")
+
+    async def publication_superseded(
+        conn: object, store: object, *, request: object
+    ) -> ImageCatalogEntry:
+        raise CategorizedError("publication superseded", category=ErrorCategory.CONFLICT)
+
+    async def _run() -> tuple[ToolResponse, ToolResponse]:
+        request = image_upload.ImageUploadRequest(
+            project=_TARGET_PROJECT,
+            name="custom",
+            arch="x86_64",
+            quarantine_key="quarantine/custom.qcow2",
+        )
+        async with _pool(migrated_url) as pool:
+            monkeypatch.setattr(image_upload, "register_private_upload", registered_name_conflict)
+            registered_conflict = await image_upload.upload(
+                pool,
+                _member_ctx(role=Role.OPERATOR),
+                cast(UploadObjectStore, _UnusedUploadStore()),
+                request,
+            )
+            monkeypatch.setattr(image_upload, "register_private_upload", publication_superseded)
+            publication_conflict = await image_upload.upload(
+                pool,
+                _member_ctx(role=Role.OPERATOR),
+                cast(UploadObjectStore, _UnusedUploadStore()),
+                request,
+            )
+        return registered_conflict, publication_conflict
+
+    registered_conflict, publication_conflict = asyncio.run(_run())
+
+    assert registered_conflict.error_category == ErrorCategory.CONFLICT.value
+    assert registered_conflict.object_id == "custom"
+    assert registered_conflict.suggested_next_actions == ["images.list"]
+    assert "image_id" not in registered_conflict.data
+    assert publication_conflict.suggested_next_actions == []
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = FastMCP("images-upload-description-test")
+    images_registrar.register(
+        app,
+        pool,
+        image_store=_FakeImageStore(),
+        upload_store=cast(UploadObjectStore, _UnusedUploadStore()),
+    )
+
+    async def _description() -> str:
+        tools = {tool.name: tool for tool in await app.list_tools()}
+        return tools[UPLOAD_TOOL].description or ""
+
+    description = asyncio.run(_description())
+    assert "CONFLICT" in description
+    assert "images.list" in description
+    assert "authorized" in description.lower()
+    assert "image id" in description.lower()
+    assert description.index("images.list") < description.index("images.delete")
+    assert description.index("images.delete") < description.lower().index("wait")
+    assert "wait" in description.lower()
+    assert description.lower().index("wait") < description.index("images.upload")
 
 
 def test_upload_rejects_quarantine_key_in_published_prefix(migrated_url: str) -> None:
