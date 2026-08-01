@@ -5,17 +5,21 @@ from __future__ import annotations
 import asyncio
 import io
 import tarfile
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest
-from kdive.artifacts.uploads import ManifestEntry
+from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.results import BuildOutput
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
@@ -32,6 +36,7 @@ from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.clock import STORE_MTIME
 from tests.mcp.complete_build_support import (
     FakeValidator as _FakeValidator,
 )
@@ -196,6 +201,33 @@ def test_complete_build_finalizes_external_run(migrated_url: str) -> None:
                 run = await RUNS.get(conn, run_id)
         assert run is not None and run.state is RunState.SUCCEEDED
         assert run.kernel_ref is not None and run.kernel_ref.endswith("/kernel")
+
+    asyncio.run(_run())
+
+
+def test_complete_build_returns_reusable_build_deadline_contract(migrated_url: str) -> None:
+    """Completion and replay expose the persisted generation and database-clock deadline."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            first = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None
+            )
+            replay = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None
+            )
+
+        for response in (first, replay):
+            assert isinstance(response.data["build_ref"], str)
+            expires_at = datetime.fromisoformat(str(response.data["expires_at"]))
+            server_time = datetime.fromisoformat(str(response.data["server_time"]))
+            assert expires_at.tzinfo is UTC
+            assert server_time.tzinfo is UTC
+            assert expires_at > server_time
+        assert first.data["build_ref"] == replay.data["build_ref"]
+        assert first.data["expires_at"] == replay.data["expires_at"]
 
     asyncio.run(_run())
 
@@ -625,7 +657,8 @@ def test_complete_build_writes_artifact_rows_and_deletes_manifest(migrated_url: 
             async with pool.connection() as conn:
                 async with conn.cursor(row_factory=dict_row) as cur:
                     await cur.execute(
-                        "SELECT object_key FROM artifacts WHERE owner_kind='runs' AND owner_id=%s",
+                        "SELECT object_key FROM artifacts WHERE owner_kind = 'investigations' "
+                        "AND owner_id = (SELECT investigation_id FROM runs WHERE id = %s)",
                         (run_id,),
                     )
                     rows = await cur.fetchall()
@@ -690,21 +723,12 @@ def test_complete_build_writes_effective_config_artifact(
             keys = await _artifact_keys(pool, run_id)
 
         assert resp.status == "succeeded", resp
-        assert keys == {kernel_key, config_key}
+        assert keys == {config_key}
 
     asyncio.run(_run())
 
 
 # --- Chunked reassembly at finalize (ADR-0104) ------------------------------------------
-
-from collections.abc import Sequence  # noqa: E402
-from datetime import UTC, datetime, timedelta  # noqa: E402
-
-import psycopg  # noqa: E402
-
-from kdive.artifacts.uploads import ChunkEntry  # noqa: E402
-from kdive.domain.catalog.artifacts import Sensitivity  # noqa: E402
-from tests.clock import STORE_MTIME  # noqa: E402
 
 _CHUNKED_KERNEL = ManifestEntry(
     "kernel", "whole", 8, chunks=(ChunkEntry("c0", 5), ChunkEntry("c1", 3))
@@ -790,7 +814,7 @@ def test_chunked_complete_build_reassembles_and_succeeds(migrated_url: str) -> N
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, run_id)
         assert run is not None and run.state is RunState.SUCCEEDED
-        assert keys == {f"local/runs/{run_id}/kernel"}
+        assert keys == set()
 
     asyncio.run(_run())
 

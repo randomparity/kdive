@@ -88,6 +88,8 @@ class BuildStepResult:
     initrd_ref: str | None = None
     cmdline: str | None = None
     build_provenance: dict[str, str | bool | list[str]] | None = None
+    build_ref: str | None = None
+    expires_at: str | None = None
 
     @classmethod
     def load(cls, value: object) -> BuildStepResult | None:
@@ -101,6 +103,8 @@ class BuildStepResult:
             initrd_ref=_optional_str(result.get("initrd_ref")),
             cmdline=_optional_str(result.get("cmdline")),
             build_provenance=_optional_provenance_map(result.get("build_provenance")),
+            build_ref=_optional_str(result.get("build_ref")),
+            expires_at=_optional_str(result.get("expires_at")),
         )
 
     def dump(self) -> dict[str, str | dict[str, str | bool | list[str]]]:
@@ -117,15 +121,19 @@ class BuildStepResult:
             result["cmdline"] = self.cmdline
         if self.build_provenance is not None:
             result["build_provenance"] = dict(self.build_provenance)
+        if self.build_ref is not None:
+            result["build_ref"] = self.build_ref
+        if self.expires_at is not None:
+            result["expires_at"] = self.expires_at
         return result
 
     def refs(self) -> dict[str, str]:
         refs: dict[str, str] = {}
-        if self.kernel_ref is not None:
+        if self.kernel_ref:
             refs["kernel"] = self.kernel_ref
-        if self.debuginfo_ref is not None:
+        if self.debuginfo_ref:
             refs["vmlinux"] = self.debuginfo_ref
-        if self.initrd_ref is not None:
+        if self.initrd_ref:
             refs["initrd"] = self.initrd_ref
         return refs
 
