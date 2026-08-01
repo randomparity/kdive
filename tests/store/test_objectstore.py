@@ -39,7 +39,7 @@ from kdive.store.objectstore import (
 )
 from tests.clock import STORE_MTIME
 
-_UNSUPPORTED_VERSIONING_SUSPEND_CODES = frozenset(
+_UNSUPPORTED_VERSIONING_CODES = frozenset(
     {"MethodNotAllowed", "NotImplemented", "UnsupportedOperation"}
 )
 
@@ -47,7 +47,7 @@ _UNSUPPORTED_VERSIONING_SUSPEND_CODES = frozenset(
 def _versioning_suspension_is_unsupported(error: ClientError) -> bool:
     code = error.response.get("Error", {}).get("Code")
     status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-    return code in _UNSUPPORTED_VERSIONING_SUSPEND_CODES or status in {405, 501}
+    return code in _UNSUPPORTED_VERSIONING_CODES or status in {405, 501}
 
 
 @contextmanager
@@ -68,6 +68,20 @@ def _suspend_versioning_or_skip(store: ObjectStore) -> Iterator[None]:
         store._client.put_bucket_versioning(
             Bucket=store._bucket, VersioningConfiguration={"Status": "Enabled"}
         )
+
+
+def _legacy_inventory_ids_or_skip(store: ObjectStore, key: str) -> tuple[str, ...]:
+    """Return suspended-write identities, or skip when inventory lacks them."""
+    try:
+        page = store.list_version_page(key)
+    except CategorizedError as error:
+        if error.details.get("s3_error_code") in _UNSUPPORTED_VERSIONING_CODES:
+            pytest.skip("object-store endpoint does not support version inventory")
+        raise
+    version_ids = tuple(entry.version_id for entry in page.entries if entry.key == key)
+    if not version_ids:
+        pytest.skip("object-store version inventory does not expose a suspended legacy identity")
+    return version_ids
 
 
 def test_normalize_etag_strips_surrounding_quotes() -> None:
@@ -1401,20 +1415,21 @@ def test_minio_suspended_versioning_exposes_legacy_null_when_supported(
 ) -> None:
     key = f"{key_ns}/runs/run-1/legacy-null-version"
     wrote_legacy_version = False
+    deleted_legacy_version = False
+    observed_version_ids: tuple[str, ...] = ()
     try:
         with _suspend_versioning_or_skip(minio_store):
             minio_store._client.put_object(Bucket=minio_store._bucket, Key=key, Body=b"payload")
             wrote_legacy_version = True
-            raw_head = minio_store._client.head_object(Bucket=minio_store._bucket, Key=key)
-            version_id = raw_head.get("VersionId")
-            if not isinstance(version_id, str) or not version_id:
-                pytest.skip("object-store endpoint does not expose legacy suspended VersionIds")
-            assert version_id == "null"
-            head = minio_store.head(key)
-            assert head is not None
-            assert head.version_id == "null"
+            observed_version_ids = _legacy_inventory_ids_or_skip(minio_store, key)
+            assert observed_version_ids == ("null",)
+            minio_store.delete_version(key, "null")
+            deleted_legacy_version = True
+            observed_version_ids = ()
     finally:
-        if wrote_legacy_version:
+        for version_id in observed_version_ids:
+            minio_store.delete_version(key, version_id)
+        if wrote_legacy_version and not observed_version_ids and not deleted_legacy_version:
             minio_store.delete_version(key, "null")
 
 
