@@ -167,6 +167,8 @@ failure.
   versions, but avoids guessing which version a legacy key-only row intended.
 - Rowless System console state has a recurring, bounded version sweep after collector finalization,
   so teardown failure or an incomplete history does not strand versions permanently.
+- Row-backed System console-part and SysRq cleanup retains its row through incomplete or failed
+  teardown batches; a recurring gone-System artifact repair retries those rows to completion.
 - Each System-object lane scans at most one 1,000-entry page per pass and durably advances by exact
   key, so ineligible history cannot make a pass unbounded or starve later rowless keys.
 - The standard S3 API validates bucket status but not provider-specific prefix exclusions. External

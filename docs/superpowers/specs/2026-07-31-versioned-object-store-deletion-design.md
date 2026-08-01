@@ -172,6 +172,11 @@ row-first paths whose version-aware orphan sweep is the durable continuation. A 
 store-like `.delete(` calls and raw `delete_object(` calls is a release gate; the only raw call may
 be `ObjectStore.delete_version`, and it must include `VersionId`.
 
+System teardown gives each console-part and SysRq row one bounded attempt. A recurring
+`system_artifact_rows_gc_count` repair selects rows owned by gone Systems, retries one bounded batch
+per row, and removes a row only after its key history is complete. A store fault or incomplete
+batch therefore cannot strand the retained row after the teardown job succeeds.
+
 ### Rowless System-object continuation
 
 Local console-rotation sidecars and remote collector-internal console parts have no artifact row.

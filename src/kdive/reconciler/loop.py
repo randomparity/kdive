@@ -109,6 +109,7 @@ DEFAULT_INVESTIGATION_ROOTFS_RETENTION = gc_repairs.DEFAULT_INVESTIGATION_ROOTFS
 _expire_one = allocation_repairs._expire_one
 _gc_idempotency_keys = gc_repairs.gc_idempotency_keys
 _gc_report_artifacts = gc_repairs.gc_report_artifacts
+_gc_system_artifacts = gc_repairs.gc_system_artifacts
 _gc_investigation_artifacts = gc_repairs.gc_investigation_artifacts
 _gc_expired_build_artifacts = gc_repairs.gc_expired_build_artifacts
 _sweep_investigation_rootfs_reclaim = gc_repairs.sweep_investigation_rootfs_reclaim
@@ -394,6 +395,12 @@ def _local_system_object_versions_repair(
     return lambda conn: sweep_local_system_object_versions(conn, config.upload_store)
 
 
+def _system_artifact_rows_gc_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    return lambda conn: _gc_system_artifacts(conn, config.upload_store)
+
+
 def _remote_system_object_versions_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
@@ -499,6 +506,7 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         _unowned_investigation_rootfs_staging_repair,
     ),
     _RepairCatalogEntry("console_collectors_reaped", _console_collectors_repair),
+    _RepairCatalogEntry("system_artifact_rows_gc_count", _system_artifact_rows_gc_repair),
     _RepairCatalogEntry(
         "local_system_object_versions_deleted", _local_system_object_versions_repair
     ),

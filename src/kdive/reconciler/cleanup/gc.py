@@ -179,6 +179,46 @@ async def gc_report_artifacts(
     return deleted
 
 
+async def gc_system_artifacts(conn: AsyncConnection, store: ArtifactObjectDeleter) -> int:
+    """Finish bounded retirement for artifact rows retained on gone Systems.
+
+    Teardown gives each console-part and diagnostic SysRq key one bounded attempt. An incomplete
+    history or store fault retains its row, and this recurring repair retries one bounded batch per
+    row on every pass. The row is removed only after the store reports the retired key complete.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT a.id, a.object_key FROM artifacts a JOIN systems s ON s.id = a.owner_id "
+            "WHERE a.owner_kind = 'systems' AND s.state = ANY(%s)",
+            (list(gone_system_state_values()),),
+        )
+        candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
+    deleted = 0
+    for artifact_id, object_key in candidates:
+        try:
+            complete = await asyncio.to_thread(store.delete_retired_key_batch, object_key, 20)
+        except Exception:  # noqa: BLE001 - one object failure must not starve sibling rows
+            _log.warning(
+                "reconciler: deleting gone-System artifact object %s failed; retry next pass",
+                object_key,
+                exc_info=True,
+            )
+            continue
+        if not complete:
+            _log.info(
+                "reconciler: gone-System artifact object %s has more retired versions; "
+                "retry next pass",
+                object_key,
+            )
+            continue
+        async with conn.transaction():
+            await conn.execute("DELETE FROM artifacts WHERE id = %s", (artifact_id,))
+        deleted += 1
+    if deleted:
+        _log.info("reconciler: GC'd %d gone-System artifact(s)", deleted)
+    return deleted
+
+
 async def gc_investigation_artifacts(
     conn: AsyncConnection, store: ArtifactObjectDeleter, grace: timedelta
 ) -> int:

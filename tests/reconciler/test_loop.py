@@ -1342,6 +1342,10 @@ def test_system_object_sweeps_are_named_and_ordered_after_collector_reaping() ->
 
     assert "local_system_object_versions_deleted" in loop.ALL_REPAIR_KINDS
     assert "remote_system_object_versions_deleted" in loop.ALL_REPAIR_KINDS
+    assert "system_artifact_rows_gc_count" in loop.ALL_REPAIR_KINDS
+    assert names.index("system_artifact_rows_gc_count") < names.index(
+        "local_system_object_versions_deleted"
+    )
     assert names.index("console_collectors_reaped") < names.index(
         "remote_system_object_versions_deleted"
     )
