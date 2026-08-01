@@ -67,8 +67,9 @@ lock, so garbage collection cannot observe or delete a half-published winner.
 
 ## Completion flow
 
-`runs.complete_build` retains its upload-window, validation, and Run lock behavior. During its
-final transaction it:
+`runs.complete_build` retains its upload-window and validation behavior. Its final transaction
+acquires the Investigation lock before the Run lock (the repository's global order), then rechecks
+the Run state and upload-window identity under both before it:
 
 1. derives the canonical build document and `build_ref` from validated HEAD data and build result;
 2. selects an active matching generation or publishes a new investigation-build record;
@@ -81,6 +82,12 @@ commit, a convergence loser deletes only its own exact uploaded versions; the ex
 remains the retry owner if that cleanup or the transaction fails. The successful tool response
 includes `data.build_ref`, `data.expires_at`, and `data.server_time`; `runs.get`/`runs.list` expose
 the reference and deadline.
+
+No path may acquire Investigation while already holding Run. The existing bind, cancel, and upload
+reaper paths remain Run-only and must not call the new publication/reclaim helpers. Completion,
+install admission, and generation reclaim are the only dual-scope paths and all use Investigation
+→ Run. A barrier-controlled complete-build-versus-install test proves neither waits cyclically and
+that install observes either the pre-completion rejection or the completed generation.
 
 ## Reuse flow
 
@@ -207,7 +214,8 @@ class within that boundary.
 
 Start with focused failing service tests for `runs.create` reuse and complete-build ownership.
 Cover bound and unbound success, every rejection in criterion 4, idempotent replay, and a
-barrier-controlled create/reclaim and install/reclaim races. A queued install delayed past expiry
+barrier-controlled create/reclaim, install/reclaim, and complete-build/install races. A queued
+install delayed past expiry
 pins all objects through provider consumption; a first install after expiry fails before enqueue;
 an unchanged installed variant remains an idempotent no-op. Fault injection pauses after each
 old-generation artifact deletion and proves a fresh same-content generation stays usable. Add

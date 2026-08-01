@@ -41,6 +41,12 @@ generation's objects. Reclaim marks one generation `reclaiming` before object de
 the record only if that generation remains reclaiming; a new generation has distinct rows and
 objects. The lock spans selection, publication, and the reclaim state transition.
 
+Every path that takes both scopes follows the repository order Investigation → Run.
+`runs.complete_build` changes its final transaction to that order and rechecks the Run state and
+upload-window identity under both locks before publication. `runs.install` and generation reclaim
+use the same order. Run-only bind, cancel, and upload-reaper paths do not call an
+Investigation-locked helper while holding the Run lock.
+
 `runs.complete_build` still completes its source Run and additionally returns the `build_ref`.
 `runs.create` accepts an optional `build_ref`. Under the Investigation lock it resolves only a
 record owned by the requested Investigation, requires its target architecture and build profile to
