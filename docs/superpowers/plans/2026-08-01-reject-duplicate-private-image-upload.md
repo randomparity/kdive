@@ -23,6 +23,10 @@ keys and recovery unchanged.
   mutation, and published-prefix object writes.
 - Private pending identity is `(owner, provider, name)` without architecture, matching
   `image_catalog_one_private`; public pending identity remains `(provider, name, arch)`.
+- A private pending adoption refreshes all request-owned durable metadata. A defined baseline
+  remains arch-scoped and preserves its declared metadata when realized.
+- Adoption candidates are deterministic by pending state, `created_at`, and id. Quota excludes
+  exactly the locked pending row the reservation selects; every other live row remains counted.
 - Private finish holds `IMAGE_PUBLISH → PROJECT` only across registration + audit. Reservation
   never attempts IMAGE_PUBLISH while holding PROJECT, and no PROJECT lock spans object I/O.
 - The conflict lookup is owner- and private-visibility-scoped, parameterized, and discloses no row id, object key, digest, principal, or other tenant.
@@ -93,7 +97,8 @@ class RegisteredPrivateNameConflict(CategorizedError):
     def __init__(self, name: str) -> None:
         super().__init__(
             f"private image {name!r} is already registered in this project; "
-            "delete it with images.delete, wait for deletion, then retry images.upload",
+            "use images.list to find its authorized image ID, delete it with images.delete, "
+            "wait for deletion, then retry images.upload",
             category=ErrorCategory.CONFLICT,
         )
 
@@ -123,9 +128,11 @@ Call it as the first operation inside `_reserve_under_quota`'s existing PROJECT-
 Raise the returned conflict before `_project_usage`, `_quota_denial`, or `reserve_publish`. Update
 the module and function docstrings to distinguish registered-name rejection from pending-row
 adoption and cite ADR-0526. In `_adopt_or_insert_pending`, omit arch only when matching a private
-pending row, update the adopted row's arch to the new attempt, and keep private `defined` and all
-public rows arch-scoped. Exclude the same private pending identity from quota accounting regardless
-of arch because reservation will replace, not add, that row.
+pending row; replace its architecture, format, root device, capabilities, provenance, expiry,
+digest, size, keys, attempt id, and principal. Keep private `defined` and all public rows
+arch-scoped, and preserve a defined baseline's declared metadata. Select candidates
+deterministically by pending state, `created_at`, and id. Pass the locked candidate UUID to quota
+accounting so exactly that row is excluded and every other live row remains counted.
 
 - [x] **Step 4: Run the sequential and concurrency service tests**
 
@@ -166,6 +173,9 @@ identity under another architecture. The second reservation must adopt and super
 returns one generic actionless supersession `CONFLICT` and one digest-consistent registration whose
 row carries the winner's architecture. Both attempts may write distinct attempt-specific keys; the
 catalog and quota retain one row with the winner's size, and no raw uniqueness exception escapes.
+Assert the winner's capabilities, provenance (including its quarantine key), expiry, and
+registration-audit principal. Seed two schema-valid cross-architecture pending rows separately and
+prove only the deterministic selected row is excluded from quota.
 
 - [x] **Step 5: Add a cross-owner control if the regression does not already exercise one**
 
@@ -202,12 +212,15 @@ git commit -m "fix(images): reject registered private image names"
 **Interfaces:**
 - Consumes: `RegisteredPrivateNameConflict` from `register_private_upload`, other
   `CategorizedError` failures, and `ToolResponse.failure_from_error`.
-- Produces: a failure envelope with `suggested_next_actions == ["images.delete", "images.upload"]` for upload conflicts, plus wrapper docstring text naming the outcome and ordered recovery.
+- Produces: a failure envelope with `suggested_next_actions == ["images.list"]` for a
+  registered-name conflict, plus wrapper docstring text naming the complete ordered recovery. The
+  envelope identifies the requested name and does not disclose the existing image UUID.
 
-**Acceptance criteria:** The registered-name conflict maps to a `CONFLICT` envelope, the next
-actions are literal tool names in recovery order, and the FastMCP-visible wrapper docstring tells
-an agent to delete, wait for deletion, then upload again. Publication-supersession conflicts and
-other error categories retain their existing empty action list.
+**Acceptance criteria:** The registered-name conflict maps to a `CONFLICT` envelope, the only
+immediate action is the literal `images.list` tool name, and the FastMCP-visible wrapper docstring
+tells an agent to find the authorized image ID in that result, delete it with `images.delete`, wait
+for deletion, then upload again. Publication-supersession conflicts and other error categories
+retain their existing empty action list.
 
 - [x] **Step 1: Write the MCP mapping test**
 
@@ -221,12 +234,15 @@ Call `image_upload.upload` as a project operator and assert:
 
 ```python
 assert response.error_category == ErrorCategory.CONFLICT.value
-assert response.suggested_next_actions == ["images.delete", "images.upload"]
+assert response.object_id == "custom"
+assert response.suggested_next_actions == ["images.list"]
+assert "image_id" not in response.data
 ```
 
 Also inspect the registered `images.upload` tool description (using the existing FastMCP registrar
-pattern) and assert it contains `CONFLICT`, `images.delete`, the wait requirement, and
-`images.upload`. Add a control that monkeypatches the service to raise a plain
+pattern) and assert it contains `CONFLICT`, `images.list`, the authorized-ID lookup,
+`images.delete`, the wait requirement, and `images.upload`, in order. Add a control that
+monkeypatches the service to raise a plain
 `CategorizedError(..., category=ErrorCategory.CONFLICT)` representing publication supersession and
 assert its `suggested_next_actions` is empty.
 
@@ -250,7 +266,7 @@ except RegisteredPrivateNameConflict as exc:
     return ToolResponse.failure_from_error(
         request.name,
         exc,
-        suggested_next_actions=["images.delete", "images.upload"],
+        suggested_next_actions=["images.list"],
     )
 except CategorizedError as exc:
     return ToolResponse.failure_from_error(request.name, exc)
@@ -258,8 +274,9 @@ except CategorizedError as exc:
 
 Update the decorated/wrapper-facing `upload` docstring, not only the inner helper, to state that an
 already registered private project/name returns `CONFLICT` before a published object write; the
-caller deletes with `images.delete`, waits for deletion to complete, then retries `images.upload`.
-Keep the parameter descriptions accurate and avoid adding a new field or tool.
+response names only the requested name, so the caller lists authorized images with `images.list`,
+uses the returned ID with `images.delete`, waits for deletion to complete, then retries
+`images.upload`. Keep the parameter descriptions accurate and avoid adding a new field or tool.
 
 - [x] **Step 4: Run focused MCP and service tests**
 

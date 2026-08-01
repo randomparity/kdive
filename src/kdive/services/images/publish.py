@@ -192,6 +192,55 @@ def kernel_config_object_key(request: PublishRequest, attempt_id: UUID | None = 
     )
 
 
+def _adoption_candidate_query(*, pending_only: bool) -> sql.Composed:
+    """Build the one deterministic, row-locking adoption-candidate query (ADR-0526)."""
+    state_predicate = (
+        sql.SQL("state = %(pending)s")
+        if pending_only
+        else sql.SQL("state IN (%(defined)s, %(pending)s)")
+    )
+    return sql.SQL(
+        "SELECT id, state FROM image_catalog "
+        "WHERE provider = %(provider)s AND name = %(name)s "
+        "AND visibility = %(visibility)s AND owner IS NOT DISTINCT FROM %(owner)s "
+        "AND {state_predicate} "
+        "AND (arch = %(arch)s OR (visibility = %(private)s AND state = %(pending)s)) "
+        "ORDER BY CASE WHEN state = %(pending)s THEN 0 ELSE 1 END, created_at, id "
+        "FOR UPDATE LIMIT 1"
+    ).format(state_predicate=state_predicate)
+
+
+def _adoption_candidate_params(request: PublishRequest) -> dict[str, object]:
+    """Return parameters shared by quota selection and publish adoption."""
+    return {
+        "provider": request.provider,
+        "name": request.name,
+        "arch": request.arch,
+        "visibility": request.visibility.value,
+        "owner": request.owner,
+        "private": ImageVisibility.PRIVATE.value,
+        "defined": ImageState.DEFINED.value,
+        "pending": ImageState.PENDING.value,
+    }
+
+
+async def lock_pending_adoption_candidate(
+    conn: AsyncConnection, request: PublishRequest
+) -> UUID | None:
+    """Lock and return the exact pending row a reservation would adopt, if any.
+
+    The caller owns the surrounding transaction. Holding this row lock through quota accounting
+    keeps a reconciler from changing the selected claim before reservation; if no row is selected,
+    quota counts every current claim and therefore remains fail-closed if a candidate appears later.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            _adoption_candidate_query(pending_only=True), _adoption_candidate_params(request)
+        )
+        candidate = await cur.fetchone()
+    return None if candidate is None else candidate["id"]
+
+
 async def _adopt_or_insert_pending(
     conn: AsyncConnection,
     request: PublishRequest,
@@ -206,12 +255,13 @@ async def _adopt_or_insert_pending(
     Runs in one transaction so concurrent re-runs of the same image serialize on the adopted row.
     Public pending rows match ``(provider, name, arch)``. Private pending rows match
     ``(owner, provider, name)`` without arch, exactly like the registered-private uniqueness key;
-    adopting a private row updates its arch to the current attempt's. A public publish never adopts
-    a project's private row and one project never adopts another's, so cross-tenant isolation
-    holds. A ``defined`` baseline remains arch-scoped. It and a crashed ``pending`` attempt are
-    adopted in place and moved to ``pending`` with ``object_key`` set and ``pending_since``
-    re-armed; resolution never returns either, so an adopted row is never visible mid-publish
-    (ADR-0526).
+    adopting a private row replaces all request-owned durable fields, including its arch, format,
+    layout, capabilities, provenance, expiry, digest, size, keys, and publication attempt. A public
+    publish never adopts a project's private row and one project never adopts another's, so
+    cross-tenant isolation holds. A ``defined`` baseline remains arch-scoped and preserves its
+    declared metadata while gaining the realized object fields. Both cases move the row to
+    ``pending`` and re-arm ``pending_since``; resolution never returns either, so an adopted row is
+    never visible mid-publish (ADR-0526).
 
     ``size_bytes`` is the size of the object this publish is about to write. It lands on the row
     *before* the object exists so the row is a durable quota claim (ADR-0520); an adopted row's
@@ -223,47 +273,34 @@ async def _adopt_or_insert_pending(
     permanent-unfetchability :func:`_verify_source_digest` exists to prevent, arrived at from the
     other side. A ``defined`` baseline's ``NULL`` digest is filled in by the same assignment.
     """
-    select_q = sql.SQL(
-        "SELECT id FROM image_catalog "
-        "WHERE provider = %(provider)s AND name = %(name)s "
-        "AND visibility = %(visibility)s AND owner IS NOT DISTINCT FROM %(owner)s "
-        "AND state IN (%(defined)s, %(pending)s) "
-        "AND (arch = %(arch)s OR (visibility = %(private)s AND state = %(pending)s)) "
-        "ORDER BY CASE WHEN state = %(pending)s THEN 0 ELSE 1 END "
-        "FOR UPDATE LIMIT 1"
-    )
-    params = {
-        "provider": request.provider,
-        "name": request.name,
-        "arch": request.arch,
-        "visibility": request.visibility.value,
-        "owner": request.owner,
-        "private": ImageVisibility.PRIVATE.value,
-        "defined": ImageState.DEFINED.value,
-        "pending": ImageState.PENDING.value,
-    }
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(select_q, params)
+        await cur.execute(
+            _adoption_candidate_query(pending_only=False), _adoption_candidate_params(request)
+        )
         existing = await cur.fetchone()
         if existing is not None:
-            await cur.execute(
-                "UPDATE image_catalog "
-                "SET state = %s, arch = %s, object_key = %s, kernel_config_key = %s, digest = %s, "
-                "    size_bytes = %s, pending_since = now(), publication_attempt_id = %s, "
-                "    publication_principal = %s "
-                "WHERE id = %s",
-                (
-                    ImageState.PENDING.value,
-                    request.arch,
+            if existing["state"] == ImageState.PENDING.value:
+                await _refresh_pending(
+                    cur,
+                    existing["id"],
+                    request,
                     object_key,
                     config_key,
-                    request.digest,
                     size_bytes,
                     publication_attempt_id,
                     publication_principal,
+                )
+            else:
+                await _realize_defined(
+                    cur,
                     existing["id"],
-                ),
-            )
+                    request,
+                    object_key,
+                    config_key,
+                    size_bytes,
+                    publication_attempt_id,
+                    publication_principal,
+                )
             return existing["id"]
         return await _insert_pending(
             cur,
@@ -274,6 +311,73 @@ async def _adopt_or_insert_pending(
             publication_attempt_id,
             publication_principal,
         )
+
+
+async def _refresh_pending(
+    cur: AsyncCursor[DictRow],
+    row_id: UUID,
+    request: PublishRequest,
+    object_key: str,
+    config_key: str | None,
+    size_bytes: int,
+    publication_attempt_id: UUID,
+    publication_principal: str | None,
+) -> None:
+    """Replace every request-owned field on a superseded pending attempt."""
+    await cur.execute(
+        "UPDATE image_catalog "
+        "SET state = %s, arch = %s, format = %s, root_device = %s, object_key = %s, "
+        "    kernel_config_key = %s, digest = %s, capabilities = %s, provenance = %s, "
+        "    expires_at = %s, size_bytes = %s, pending_since = now(), "
+        "    publication_attempt_id = %s, publication_principal = %s "
+        "WHERE id = %s",
+        (
+            ImageState.PENDING.value,
+            request.arch,
+            request.format,
+            request.root_device,
+            object_key,
+            config_key,
+            request.digest,
+            list(request.capabilities),
+            Jsonb(request.provenance),
+            request.expires_at,
+            size_bytes,
+            publication_attempt_id,
+            publication_principal,
+            row_id,
+        ),
+    )
+
+
+async def _realize_defined(
+    cur: AsyncCursor[DictRow],
+    row_id: UUID,
+    request: PublishRequest,
+    object_key: str,
+    config_key: str | None,
+    size_bytes: int,
+    publication_attempt_id: UUID,
+    publication_principal: str | None,
+) -> None:
+    """Realize a defined baseline without replacing its declared metadata."""
+    await cur.execute(
+        "UPDATE image_catalog "
+        "SET state = %s, object_key = %s, kernel_config_key = %s, digest = %s, "
+        "    size_bytes = %s, pending_since = now(), publication_attempt_id = %s, "
+        "    publication_principal = %s "
+        "WHERE id = %s",
+        (
+            ImageState.PENDING.value,
+            object_key,
+            config_key,
+            request.digest,
+            size_bytes,
+            publication_attempt_id,
+            publication_principal,
+            row_id,
+        ),
+    )
 
 
 async def _insert_pending(
@@ -605,11 +709,16 @@ async def publish_image(
 
     Adopts the identity's existing ``defined``/``pending`` row (or inserts a ``pending`` row from
     ``request``), sets its ``object_key``, writes the object at ``source`` to the image prefix,
-    HEAD-gates, then flips the row to ``registered`` and returns it. Idempotent on the scoped
-    identity ``(provider, name, arch, visibility, owner)``: a re-run adopts that scope's in-flight
-    ``pending`` row and re-arms its ``pending_since``. Public and private rows, and private rows
-    for different owners, intentionally do not adopt each other. Realizing a seeded ``defined``
-    baseline is this same path.
+    HEAD-gates, then flips the row to ``registered`` and returns it. Public pending identity is
+    ``(provider, name, arch)``. Private pending identity is ``(owner, provider, name)`` without
+    arch, matching registered-name uniqueness; a cross-arch retry supersedes the earlier pending
+    attempt and refreshes all request-owned fields. A seeded ``defined`` baseline remains
+    arch-scoped and preserves its declared metadata when realized. Public and private rows, and
+    private rows for different owners, intentionally do not adopt each other.
+
+    Each reservation mints attempt-specific object keys. If overlapping reservations target the
+    same pending identity, only the newest reservation can finish; an older attempt raises an
+    actionless ``CONFLICT`` after its isolated object write rather than registering stale metadata.
 
     When ``request.kernel_config`` is present its attempt-specific config key is set on the
     ``pending`` row before any object is written (so the leaked-sweep protects it the instant the
@@ -632,7 +741,8 @@ async def publish_image(
         CategorizedError: ``CONFIGURATION_ERROR`` if ``source`` bytes do not hash to
             ``request.digest`` (the catalog identity the materialization fetch verifies against);
             ``INFRASTRUCTURE_FAILURE`` if the object write or HEAD gate fails (the row stays
-            ``pending`` for the reconciler to recover).
+            ``pending`` for the reconciler to recover); ``CONFLICT`` if another reservation
+            superseded this attempt or the reconciler reclaimed it.
     """
     stat = await asyncio.to_thread(source.stat)
     reservation = await reserve_publish(conn, request, size_bytes=stat.st_size, principal=principal)

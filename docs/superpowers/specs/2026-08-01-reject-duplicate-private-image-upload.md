@@ -22,15 +22,21 @@ private images is `(owner, provider, name)`.
 
 When the row exists, the service raises `ErrorCategory.CONFLICT` before quota calculation,
 pending-row mutation, or any published-prefix object write. The error identifies the existing
-image and tells the caller to use `images.delete`, wait for deletion, and then retry
-`images.upload`. The MCP wrapper documents the conflict and recovery sequence. The quarantined
-source remains available under its existing lifecycle; the rejected attempt does not delete it.
+image by the caller-supplied name, not by its row UUID. Its only immediate suggested action is
+`images.list`: the caller finds the authorized image ID in that result, uses it with
+`images.delete`, waits for deletion, and then retries `images.upload`. The MCP wrapper documents
+that complete recovery sequence. The quarantined source remains available under its existing
+lifecycle; the rejected attempt does not delete it.
 
 Private pending adoption uses that same `(owner, provider, name)` identity. A concurrent first
-upload with another architecture adopts the pending row, replaces its architecture, digest, size,
-attempt-specific keys, attempt id, and principal, and follows ADR-0525's existing supersession
-behavior. Quota accounting excludes the one adoptable pending claim regardless of architecture
-before reserving the winner's size. Public pending adoption remains architecture-scoped.
+upload with another architecture adopts the pending row and replaces its architecture, format,
+root device, capabilities, provenance, expiry, digest, size, attempt-specific keys, attempt id, and
+principal. This complete metadata refresh applies only to pending attempts; a defined baseline
+remains architecture-scoped and keeps its declared metadata when realized. The adoptable pending
+candidate is selected deterministically by `created_at` then id. Quota accounting locks and
+excludes exactly that row, regardless of architecture, before reserving the winner's size; every
+other live row remains counted so malformed duplicates or repair races fail closed. Public pending
+adoption remains architecture-scoped.
 
 The existing registered row is byte-for-byte unchanged: its id, digest, object key, expiry, and
 metadata remain as they were, and the object at its key still matches its digest. No object is
@@ -70,15 +76,20 @@ Tests must cover these cases:
 5. Block one first upload's PUT, start the same owner/provider/name under another architecture,
    and assert one registration plus one generic supersession `CONFLICT`, two distinct
    attempt-specific PUT keys, no raw database exception or deletion advice, one quota claim, and a
-   digest-consistent winner whose row carries the winning architecture.
+   digest-consistent winner whose row carries the winning architecture, capabilities, provenance,
+   expiry, and registration-audit principal.
+6. Seed two cross-architecture pending rows for one private identity, prove deterministic adoption
+   of the oldest `(created_at, id)` row, and prove quota excludes only that selected claim while the
+   other row's count and bytes remain.
 
 ## Failure contract and observability
 
 The conflicts are normal tool failures, not database uniqueness exceptions. A dedicated service
-error subtype retains `ErrorCategory.CONFLICT` while letting the MCP handler attach
-delete-then-upload actions only to the registered-name case. Concurrent publication-supersession
-conflicts stay generic and must not suggest deleting the winner. The errors carry no secret or
-cross-project metadata. The lookup is owner-scoped and parameterized. Quota denial stays
+error subtype retains `ErrorCategory.CONFLICT` while letting the MCP handler suggest `images.list`
+only for the registered-name case. The failure exposes no row id; the authorized list result is
+the source of the UUID required by `images.delete`. Concurrent publication-supersession conflicts
+stay generic and must not suggest deleting the winner. The errors carry no secret or cross-project
+metadata. The lookup is owner-scoped and parameterized. Quota denial stays
 `QUOTA_EXCEEDED`; guest-contract and source-object failures retain their current categories and
 precedence because validation still precedes reservation.
 
@@ -105,15 +116,21 @@ superseded attempt retains ADR-0525's attempt-key cleanup path.
 ## Acceptance checks
 
 - A duplicate registered private name returns `CONFLICT` before a published object write or catalog
-  mutation and names `images.delete` followed by `images.upload` as recovery.
+  mutation. Its failure identifies the requested name without exposing a UUID, suggests only
+  `images.list` immediately, and documents
+  `images.list → authorized image ID → images.delete → wait → images.upload` as recovery.
 - The registered row remains unchanged and its stored object SHA-256 equals the persisted digest.
 - Same-identity concurrent first uploads leave exactly one registered row whose object matches its
   digest. A losing attempt can only write to its isolated attempt-specific key, cannot register it,
   and remains covered by existing leaked-object recovery.
 - Different-architecture concurrent first uploads adopt one pending row. The loser returns a
   generic supersession `CONFLICT` without raw database failure or delete advice; both attempts may
-  write distinct attempt keys, while the winner's row carries its architecture and names bytes
-  matching its persisted digest. Quota records one row and the winner's size.
+  write distinct attempt keys, while the winner's row carries its complete request-owned metadata
+  and names bytes matching its persisted digest. Its registration audit names the winning
+  principal. Quota records one row and the winner's size.
+- With multiple legacy pending rows for one private identity, candidate selection is deterministic
+  by `created_at` then id; quota excludes only that selected row and continues to count every other
+  live row and byte.
 - A forced duplicate precheck-to-reservation interleaving returns a typed supersession rather than
   leaking a database uniqueness exception; PROJECT remains absent during each object PUT.
 - Registered private-name rejection intentionally ignores architecture, matching the database

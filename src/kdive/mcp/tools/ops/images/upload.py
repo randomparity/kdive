@@ -125,7 +125,7 @@ async def _register_upload(
             return ToolResponse.failure_from_error(
                 request.name,
                 exc,
-                suggested_next_actions=["images.delete", "images.upload"],
+                suggested_next_actions=["images.list"],
             )
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(request.name, exc)

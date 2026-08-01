@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
@@ -62,6 +63,7 @@ from kdive.services.images.publish import (
     PublishRequest,
     PublishReservation,
     finish_publish,
+    lock_pending_adoption_candidate,
     reserve_publish,
     write_publish_object,
 )
@@ -108,7 +110,8 @@ class RegisteredPrivateNameConflict(CategorizedError):
     def __init__(self, name: str) -> None:
         super().__init__(
             f"private image {name!r} is already registered in this project; "
-            "delete it with images.delete, wait for deletion, then retry images.upload",
+            "use images.list to find its authorized image ID, delete it with images.delete, "
+            "wait for deletion, then retry images.upload",
             category=ErrorCategory.CONFLICT,
         )
 
@@ -142,7 +145,7 @@ def _clamp_expiry(expires_at: datetime, *, now: datetime) -> datetime:
 
 
 async def _project_usage(
-    conn: AsyncConnection, project: str, *, adopting: PublishRequest | None
+    conn: AsyncConnection, project: str, *, adopting: UUID | None
 ) -> tuple[int, int]:
     """Return the project's live private image count and reserved bytes, under the PROJECT lock.
 
@@ -156,9 +159,9 @@ async def _project_usage(
     that is the point of the reservation. An abandoned one is released by the reconciler's
     ``repair_dangling_images`` on its ``pending_since`` deadline.
 
-    ``adopting`` is the registered-private identity the caller's reservation is about to publish,
-    or ``None`` for a caller only measuring the project. Its in-flight ``pending`` row is
-    **excluded**, regardless of architecture, because
+    ``adopting`` is the id of the exact locked ``pending`` row the caller's reservation will adopt,
+    or ``None`` for a caller only measuring the project or inserting a new row. Only that row is
+    **excluded**, because
     :func:`~kdive.services.images.publish.reserve_publish` will *adopt* that row and overwrite its
     ``size_bytes`` rather than adding a second one. Counting it would charge the project twice for
     one image and deny the retry of an abandoned reservation — which is the very recovery ADR-0520
@@ -171,21 +174,14 @@ async def _project_usage(
             "FROM image_catalog "
             "WHERE visibility = %(private)s AND owner = %(owner)s "
             "AND state = ANY(%(states)s) "
-            # `IS NOT DISTINCT FROM` rather than `=` so a NULL `adopting` excludes nothing:
-            # provider/name are NOT NULL columns, so each comparison is false and the whole
-            # NOT(...) stays true. With `=` the clause would go NULL and drop every row.
-            "AND NOT ("
-            "  state = %(pending)s"
-            "  AND provider IS NOT DISTINCT FROM %(adopt_provider)s"
-            "  AND name IS NOT DISTINCT FROM %(adopt_name)s"
-            ")",
+            # `IS DISTINCT FROM` makes a NULL candidate exclude nothing, while a UUID excludes
+            # exactly one row even if malformed duplicate pending rows already exist.
+            "AND id IS DISTINCT FROM %(adopting)s",
             {
                 "private": ImageVisibility.PRIVATE.value,
                 "owner": project,
                 "states": list(_LIVE_PRIVATE_STATES),
-                "pending": ImageState.PENDING.value,
-                "adopt_provider": adopting.provider if adopting else None,
-                "adopt_name": adopting.name if adopting else None,
+                "adopting": adopting,
             },
         )
         row = await cur.fetchone()
@@ -407,7 +403,8 @@ async def _reserve_under_quota(
         conflict = await _registered_private_name_conflict(conn, request)
         if conflict is not None:
             raise conflict
-        count, used_bytes = await _project_usage(conn, project, adopting=request)
+        adopting = await lock_pending_adoption_candidate(conn, request)
+        count, used_bytes = await _project_usage(conn, project, adopting=adopting)
         denial = _quota_denial(
             project=project, count=count, used_bytes=used_bytes, new_bytes=new_bytes
         )

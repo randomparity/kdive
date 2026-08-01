@@ -26,11 +26,14 @@ import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import psycopg
 import pytest
 from psycopg.pq import TransactionStatus
+from psycopg.types.json import Jsonb
 
+import kdive.config as config
 from kdive.artifacts import storage as artifact_types
 from kdive.config.core_settings import (
     IMAGE_PRIVATE_LIFETIME_MAX,
@@ -39,7 +42,7 @@ from kdive.config.core_settings import (
 )
 from kdive.db.locks import LockScope, _lock_key, advisory_xact_lock
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.catalog.images import ImageState, ImageVisibility
+from kdive.domain.catalog.images import Capability, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.cataloging.catalog import resolve_rootfs
 from kdive.images.cataloging.validation import GUEST_CONTRACT_PATHS, InspectSeam
@@ -52,6 +55,7 @@ from kdive.services.images.upload import (
     _project_usage,
     _quota_denial,
     _reject_oversize_upload,
+    _reserve_under_quota,
     register_private_upload,
 )
 from tests.clock import STORE_MTIME
@@ -325,6 +329,7 @@ async def _register(
     arch: str = "x86_64",
     quarantine_key: str = "uploads/q/proj/rootfs.qcow2",
     expires_at: datetime | None = None,
+    required: tuple[str, ...] = _REQUIRED,
     inspect: InspectSeam | None = None,
 ):
     return await register_private_upload(
@@ -338,7 +343,7 @@ async def _register(
             arch=arch,
             quarantine_key=quarantine_key,
             expires_at=expires_at or (_DT + timedelta(days=3)),
-            required=_REQUIRED,
+            required=required,
         ),
         inspect=inspect or _conforming(),
     )
@@ -498,6 +503,85 @@ def test_reserved_pending_row_occupies_quota_before_its_object_exists(
     asyncio.run(_run())
 
 
+def test_quota_excludes_only_the_deterministic_pending_adoption(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    newer_id = uuid4()
+    older_id = uuid4()
+    newer_attempt = uuid4()
+    older_attempt = uuid4()
+    request = _publish_request(name="shared", payload=b"winner-bytes!")
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            # Insert the newer row first so physical insertion order disagrees with the required
+            # deterministic oldest-created candidate order.
+            for row_id, attempt_id, arch, size, created_at in (
+                (newer_id, newer_attempt, "aarch64", 10, _DT + timedelta(hours=1)),
+                (older_id, older_attempt, "x86_64", 11, _DT),
+            ):
+                await conn.execute(
+                    "INSERT INTO image_catalog "
+                    "(id, provider, name, arch, format, root_device, object_key, digest, "
+                    " capabilities, provenance, visibility, owner, expires_at, state, "
+                    " size_bytes, publication_attempt_id, publication_principal, pending_since, "
+                    " created_at) "
+                    "VALUES (%s, 'local-libvirt', 'shared', %s, 'qcow2', '/dev/vda', %s, %s, "
+                    " %s, %s, 'private', 'proj', %s, 'pending', %s, %s, %s, %s, %s)",
+                    (
+                        row_id,
+                        arch,
+                        f"images/local-libvirt__proj/shared/{attempt_id}.qcow2",
+                        "sha256:" + "0" * 64,
+                        ["kdump"],
+                        Jsonb({"seed": arch}),
+                        _DT + timedelta(days=3),
+                        size,
+                        attempt_id,
+                        f"seed-{arch}",
+                        created_at,
+                        created_at,
+                    ),
+                )
+
+            # Excluding both same-name rows would admit 13 bytes under this cap. Exact exclusion
+            # leaves the non-adopted 10-byte claim, so 10 + 13 exceeds 22 and must fail closed.
+            monkeypatch.setenv(IMAGE_PRIVATE_MAX_COUNT.name, "10")
+            monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "22")
+            with pytest.raises(CategorizedError) as err:
+                await _reserve_under_quota(
+                    conn,
+                    request=request,
+                    project="proj",
+                    principal="winner",
+                    new_bytes=13,
+                )
+            assert err.value.category is ErrorCategory.QUOTA_EXCEEDED
+            assert await _project_usage(conn, "proj", adopting=None) == (2, 21)
+
+            # At the exact boundary, the oldest candidate is adopted regardless of insertion
+            # order. Its 11-byte claim is replaced; the other 10-byte claim remains counted.
+            monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "23")
+            config.reset()
+            reservation = await _reserve_under_quota(
+                conn,
+                request=request,
+                project="proj",
+                principal="winner",
+                new_bytes=13,
+            )
+            assert reservation.row_id == older_id
+            assert await _project_usage(conn, "proj", adopting=None) == (2, 23)
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, size_bytes FROM image_catalog ORDER BY created_at, id"
+                )
+                rows = await cur.fetchall()
+            assert rows == [(older_id, 13), (newer_id, 10)]
+
+    asyncio.run(_run())
+
+
 def test_registers_private_image_resolving_only_within_owning_project(migrated_url: str) -> None:
     store = _quarantine(b"conforming-rootfs")
 
@@ -539,6 +623,7 @@ def test_registered_private_name_reupload_conflicts_before_publish(migrated_url:
                     quarantine_key="uploads/q/proj/replacement.qcow2",
                 )
             assert err.value.category is ErrorCategory.CONFLICT
+            assert "images.list" in str(err.value)
             assert "images.delete" in str(err.value)
             assert "images.upload" in str(err.value)
             assert store.puts == puts_after_first
@@ -939,7 +1024,14 @@ def test_concurrent_different_arch_uploads_adopt_and_supersede(
     )
 
     async def _run() -> None:
-        async def _one(key: str, arch: str) -> object:
+        async def _one(
+            key: str,
+            arch: str,
+            *,
+            principal: str,
+            expires_at: datetime,
+            required: tuple[str, ...],
+        ) -> object:
             conn = await _connect(migrated_url)
             try:
                 return await _register(
@@ -948,16 +1040,37 @@ def test_concurrent_different_arch_uploads_adopt_and_supersede(
                     name="shared",
                     arch=arch,
                     quarantine_key=key,
+                    principal=principal,
+                    expires_at=expires_at,
+                    required=required,
                 )
             except CategorizedError as exc:
                 return exc
             finally:
                 await conn.close()
 
-        first = asyncio.create_task(_one("uploads/q/proj/x86.qcow2", "x86_64"))
+        first_expiry = _DT + timedelta(days=1)
+        winner_expiry = _DT + timedelta(days=2)
+        first = asyncio.create_task(
+            _one(
+                "uploads/q/proj/x86.qcow2",
+                "x86_64",
+                principal="alice",
+                expires_at=first_expiry,
+                required=("kdump",),
+            )
+        )
         assert await asyncio.to_thread(first_put_started.wait, 10)
 
-        second = asyncio.create_task(_one("uploads/q/proj/arm.qcow2", "aarch64"))
+        second = asyncio.create_task(
+            _one(
+                "uploads/q/proj/arm.qcow2",
+                "aarch64",
+                principal="bob",
+                expires_at=winner_expiry,
+                required=("drgn",),
+            )
+        )
 
         async def _wait_for_second_reservation() -> str:
             deadline = time.monotonic() + 10.0
@@ -999,10 +1112,23 @@ def test_concurrent_different_arch_uploads_adopt_and_supersede(
         assert "superseded" in str(conflicts[0])
         assert len(registered) == 1
         assert registered[0].arch == "aarch64"
+        assert registered[0].capabilities == [Capability.DRGN]
+        assert registered[0].expires_at == winner_expiry
+        assert registered[0].provenance == {
+            "upload": {
+                "principal": "bob",
+                "quarantine_key": "uploads/q/proj/arm.qcow2",
+            }
+        }
 
         async with await _connect(migrated_url) as conn:
             rows = await IMAGE_CATALOG.list_all(conn)
             usage = await _project_usage(conn, "proj", adopting=None)
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT principal FROM audit_log WHERE transition = 'private-upload:registered'"
+                )
+                audit_rows = await cur.fetchall()
         assert rows == registered
         assert rows[0].object_key is not None
         registered_bytes = store._objects[rows[0].object_key]  # noqa: SLF001 - integrity seam
@@ -1012,6 +1138,7 @@ def test_concurrent_different_arch_uploads_adopt_and_supersede(
         assert len(store.puts) == 2
         assert len(set(store.puts)) == 2
         assert rows[0].object_key == store.puts[1]
+        assert audit_rows == [("bob",)]
 
     asyncio.run(_run())
 

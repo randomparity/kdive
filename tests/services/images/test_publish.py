@@ -544,22 +544,40 @@ def test_private_pending_adoption_uses_registered_identity_and_updates_arch(
         owner="proj",
         expires_at=_DT + timedelta(days=1),
     )
-    second_request = replace(first_request, arch="aarch64")
+    second_digest = "sha256:" + hashlib.sha256(b"winner-bytes").hexdigest()
+    second_expiry = _DT + timedelta(days=2)
+    second_request = replace(
+        first_request,
+        arch="aarch64",
+        root_device="/dev/sda",
+        digest=second_digest,
+        capabilities=("ssh", "build"),
+        provenance={"upload": {"quarantine_key": "uploads/q/proj/winner.qcow2"}},
+        expires_at=second_expiry,
+        kernel_config=b"winner-config",
+    )
 
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             first = await reserve_publish(
                 conn, first_request, size_bytes=len(_QCOW2), principal="alice"
             )
-            second = await reserve_publish(
-                conn, second_request, size_bytes=len(_QCOW2), principal="bob"
-            )
+            second = await reserve_publish(conn, second_request, size_bytes=777, principal="bob")
             row = await IMAGE_CATALOG.get(conn, second.row_id)
             assert row is not None
             assert first.row_id == second.row_id
             assert row.arch == "aarch64"
+            assert row.format == "qcow2"
+            assert row.root_device == "/dev/sda"
             assert row.object_key == second.object_key
+            assert row.kernel_config_key == second.config_key
+            assert row.digest == second_digest
+            assert row.size_bytes == 777
+            assert row.capabilities == [Capability.SSH, Capability.BUILD]
+            assert row.provenance == second_request.provenance
+            assert row.expires_at == second_expiry
             assert row.publication_attempt_id == second.publication_attempt_id
+            assert row.publication_principal == "bob"
 
     asyncio.run(_run())
 

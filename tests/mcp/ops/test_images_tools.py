@@ -675,7 +675,9 @@ def test_upload_conflict_exposes_delete_then_retry(
     registered_conflict, publication_conflict = asyncio.run(_run())
 
     assert registered_conflict.error_category == ErrorCategory.CONFLICT.value
-    assert registered_conflict.suggested_next_actions == ["images.delete", "images.upload"]
+    assert registered_conflict.object_id == "custom"
+    assert registered_conflict.suggested_next_actions == ["images.list"]
+    assert "image_id" not in registered_conflict.data
     assert publication_conflict.suggested_next_actions == []
 
     pool = AsyncConnectionPool("postgresql://unused", open=False)
@@ -693,9 +695,13 @@ def test_upload_conflict_exposes_delete_then_retry(
 
     description = asyncio.run(_description())
     assert "CONFLICT" in description
-    assert "images.delete" in description
+    assert "images.list" in description
+    assert "authorized" in description.lower()
+    assert "image id" in description.lower()
+    assert description.index("images.list") < description.index("images.delete")
+    assert description.index("images.delete") < description.lower().index("wait")
     assert "wait" in description.lower()
-    assert "images.upload" in description
+    assert description.lower().index("wait") < description.index("images.upload")
 
 
 def test_upload_rejects_quarantine_key_in_published_prefix(migrated_url: str) -> None:
