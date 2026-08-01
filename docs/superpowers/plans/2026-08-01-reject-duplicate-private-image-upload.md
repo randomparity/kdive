@@ -176,7 +176,7 @@ actions are literal tool names in recovery order, and the FastMCP-visible wrappe
 an agent to delete, wait for deletion, then upload again. Publication-supersession conflicts and
 other error categories retain their existing empty action list.
 
-- [ ] **Step 1: Write the MCP mapping test**
+- [x] **Step 1: Write the MCP mapping test**
 
 In `tests/mcp/ops/test_images_tools.py`, monkeypatch `image_upload.register_private_upload` to raise:
 
@@ -197,7 +197,7 @@ pattern) and assert it contains `CONFLICT`, `images.delete`, the wait requiremen
 `CategorizedError(..., category=ErrorCategory.CONFLICT)` representing publication supersession and
 assert its `suggested_next_actions` is empty.
 
-- [ ] **Step 2: Run the MCP test and verify red**
+- [x] **Step 2: Run the MCP test and verify red**
 
 Run:
 
@@ -207,7 +207,7 @@ uv run python -m pytest tests/mcp/ops/test_images_tools.py::test_upload_conflict
 
 Expected: FAIL because `_register_upload` currently maps every typed error without recovery actions and the wrapper does not document the duplicate-name contract.
 
-- [ ] **Step 3: Map only conflicts to the recovery actions**
+- [x] **Step 3: Map only conflicts to the recovery actions**
 
 Import `RegisteredPrivateNameConflict`. In `_register_upload`, catch it before the generic
 `CategorizedError` clause and supply recovery actions only for that subtype:
@@ -228,7 +228,7 @@ already registered private project/name returns `CONFLICT` before a published ob
 caller deletes with `images.delete`, waits for deletion to complete, then retries `images.upload`.
 Keep the parameter descriptions accurate and avoid adding a new field or tool.
 
-- [ ] **Step 4: Run focused MCP and service tests**
+- [x] **Step 4: Run focused MCP and service tests**
 
 Run:
 
@@ -242,7 +242,7 @@ just type
 
 Expected: all pass with zero warnings.
 
-- [ ] **Step 5: Commit the MCP contract**
+- [x] **Step 5: Commit the MCP contract**
 
 Stage only `src/kdive/mcp/tools/ops/images/upload.py` and `tests/mcp/ops/test_images_tools.py`, then commit:
 
