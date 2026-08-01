@@ -146,10 +146,10 @@ def _reserve_staging_space(
     dest: Path,
     budget: _StagingBudget | None,
     system_id: UUID,
-) -> bool:
+) -> None:
     """Reserve the base's blocks atomically, or degrade when native allocation is unsupported."""
     if budget is None:
-        return False
+        return
     try:
         _native_fallocate(fd, budget.required)
     except OSError as error:
@@ -161,7 +161,7 @@ def _reserve_staging_space(
                 partial,
                 error.strerror,
             )
-            return False
+            return
         if error.errno in {errno.ENOSPC, errno.EDQUOT}:
             raise CategorizedError(
                 f"could not reserve {budget.required} bytes for the uploaded rootfs at "
@@ -177,7 +177,6 @@ def _reserve_staging_space(
                 },
             ) from error
         raise
-    return True
 
 
 class UploadObjectStore(Protocol):
