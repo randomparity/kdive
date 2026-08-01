@@ -109,16 +109,24 @@ async def repair_dangling_images(
     require_top_level_transaction(conn, "image publication recovery candidate scan")
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT id, state, publication_attempt_id FROM image_catalog "
+            "SELECT id, state, publication_attempt_id, object_key FROM image_catalog "
             "WHERE object_key IS NOT NULL AND state <> %s AND pending_since < now() - %s "
-            "AND (state <> %s OR publication_attempt_id IS NOT NULL)",
+            "AND (state <> %s OR publication_attempt_id IS NOT NULL) ORDER BY object_key, id",
             (_DEFINED_STATE, grace, ImageState.PENDING.value),
         )
         candidates = await cur.fetchall()
     terminal = 0
     for cand in candidates:
-        if await _repair_image_candidate(conn, store, cand, grace):
-            terminal += 1
+        try:
+            if await _repair_image_candidate(conn, store, cand, grace):
+                terminal += 1
+        except CategorizedError as exc:
+            _log.warning(
+                "reconciler: image publication candidate %s (%s) store operation failed: %s",
+                cand["id"],
+                cand["object_key"],
+                exc,
+            )
     return terminal
 
 

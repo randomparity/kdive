@@ -15,10 +15,10 @@ BEGIN
                 USING ERRCODE = '55000';
         END IF;
         IF ROW(NEW.object_key, NEW.kernel_config_key, NEW.volume, NEW.path, NEW.digest,
-               NEW.provenance, NEW.provenance_attested, NEW.size_bytes, NEW.pending_since)
+               NEW.provenance, NEW.provenance_attested, NEW.size_bytes)
            IS DISTINCT FROM
            ROW(OLD.object_key, OLD.kernel_config_key, OLD.volume, OLD.path, OLD.digest,
-               OLD.provenance, OLD.provenance_attested, OLD.size_bytes, OLD.pending_since) THEN
+               OLD.provenance, OLD.provenance_attested, OLD.size_bytes) THEN
             NEW.publication_attempt_id := NULL;
             NEW.publication_principal := NULL;
         END IF;

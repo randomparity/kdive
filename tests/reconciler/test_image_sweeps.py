@@ -71,6 +71,7 @@ class _FakeImageStore:
         *,
         fails_on: frozenset[str] = frozenset(),
         heads: dict[str, HeadResult] | None = None,
+        typed_head_errors: set[str] | None = None,
         head_errors: set[str] | None = None,
         delete_errors: set[str] | None = None,
         sticky_deletes: set[str] | None = None,
@@ -78,6 +79,7 @@ class _FakeImageStore:
         # objects maps key -> age; the absolute mtime is now - age.
         self._objects = dict(objects)
         self._heads = dict(heads or {})
+        self._typed_head_errors = set(typed_head_errors or ())
         self._head_errors = set(head_errors or ())
         self._delete_errors = set(delete_errors or ())
         self._sticky_deletes = set(sticky_deletes or ())
@@ -97,6 +99,10 @@ class _FakeImageStore:
         return self.head(key) is not None
 
     def head(self, key: str) -> HeadResult | None:
+        if key in self._typed_head_errors:
+            raise CategorizedError(
+                f"HEAD failed for {key}", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
         if key in self._head_errors:
             raise RuntimeError(f"HEAD failed for {key}")
         if key not in self._objects or (key in self.deleted and key not in self._sticky_deletes):
@@ -845,6 +851,37 @@ def test_unproven_invalid_object_deletion_keeps_row_for_retry(
         async with await connect(migrated_url) as check:
             cur = await check.execute("SELECT state FROM image_catalog WHERE id = %s", (row_id,))
             assert await cur.fetchone() == ("pending",)
+
+    asyncio.run(_run())
+
+
+def test_typed_store_failure_isolated_so_later_candidate_progresses(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    failing_key = "images/local-libvirt/a-failing/x86_64/attempt.qcow2"
+    healthy_key = "images/local-libvirt/b-healthy/x86_64/attempt.qcow2"
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            failing_id = await _insert_image_row(
+                seed, name="a-failing", state="pending", object_key=failing_key
+            )
+            healthy_id = await _insert_image_row(
+                seed, name="b-healthy", state="pending", object_key=healthy_key
+            )
+        store = _FakeImageStore({failing_key: timedelta(hours=2)}, typed_head_errors={failing_key})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert (
+                await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace())) == 1
+            )
+        async with await connect(migrated_url) as check:
+            cur = await check.execute(
+                "SELECT id FROM image_catalog WHERE id = ANY(%s)",
+                ([failing_id, healthy_id],),
+            )
+            assert {row[0] for row in await cur.fetchall()} == {failing_id}
+        assert str(failing_id) in caplog.text
+        assert failing_key in caplog.text
 
     asyncio.run(_run())
 
