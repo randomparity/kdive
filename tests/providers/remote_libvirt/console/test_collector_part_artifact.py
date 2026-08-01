@@ -36,7 +36,11 @@ class RecordingObjectStore:
         self.encodings[key] = request.content_encoding
         self._etag += 1
         return StoredArtifact(
-            key, f"etag-{self._etag}", request.sensitivity, request.retention_class
+            key,
+            f"etag-{self._etag}",
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
         )
 
     def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:

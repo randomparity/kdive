@@ -97,7 +97,11 @@ class _FakeImageStore:
         self._objects[key] = (request.data, timedelta())
         etag = hashlib.md5(request.data).hexdigest()  # noqa: S324 - etag stand-in, not security
         return artifact_types.StoredArtifact(
-            key, etag, request.sensitivity, request.retention_class
+            key,
+            etag,
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
         )
 
     def head(self, key: str) -> artifact_types.HeadResult | None:
@@ -105,7 +109,11 @@ class _FakeImageStore:
         if entry is None or key in self.deleted:
             return None
         return artifact_types.HeadResult(
-            size_bytes=len(entry[0]), checksum_sha256=None, etag="e", last_modified=STORE_MTIME
+            size_bytes=len(entry[0]),
+            checksum_sha256=None,
+            etag="e",
+            last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
     def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact:

@@ -359,6 +359,7 @@ def test_component_upload_finalization_is_idempotent(migrated_url: str) -> None:
                 checksum_sha256="sha256:" + "2" * 64,
                 etag="e",
                 last_modified=STORE_MTIME,
+                version_id="test-version",
             )
             store = _ObjectStore({key: head})
 
@@ -413,6 +414,7 @@ def test_expired_component_upload_cannot_finalize(migrated_url: str) -> None:
                         checksum_sha256="sha256:" + "7" * 64,
                         etag="e",
                         last_modified=STORE_MTIME,
+                        version_id="test-version",
                     )
                 }
             )
@@ -470,6 +472,7 @@ def test_component_upload_finalization_uses_persisted_tenant(migrated_url: str) 
                         checksum_sha256="sha256:" + "3" * 64,
                         etag="e",
                         last_modified=STORE_MTIME,
+                        version_id="test-version",
                     )
                 }
             )
@@ -510,6 +513,7 @@ def test_component_upload_finalization_accepts_s3_base64_sha256(migrated_url: st
                         checksum_sha256=base64.b64encode(digest).decode("ascii"),
                         etag="e",
                         last_modified=STORE_MTIME,
+                        version_id="test-version",
                     )
                 }
             )
@@ -553,6 +557,7 @@ def test_component_upload_finalization_rejects_s3_checksum_mismatch(
                         checksum_sha256=base64.b64encode(wrong_digest).decode("ascii"),
                         etag="e",
                         last_modified=STORE_MTIME,
+                        version_id="test-version",
                     )
                 }
             )

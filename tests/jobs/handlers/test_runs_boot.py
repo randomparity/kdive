@@ -532,7 +532,7 @@ def test_local_console_artifact_is_per_run_immutable(migrated_url: str) -> None:
 
     def _stored(run_id: object, etag: str) -> StoredArtifact:
         key = f"local/systems/{system_id}/console-{run_id}"
-        return StoredArtifact(key, etag, Sensitivity.REDACTED, "console")
+        return StoredArtifact(key, etag, Sensitivity.REDACTED, "console", version_id="test-version")
 
     async def _seed(conn: AsyncConnection) -> None:
         # run_id is an FK (ADR-0279); both Runs must exist for their console rows to insert.
@@ -1109,7 +1109,7 @@ def test_upsert_row_and_existing_row_carry_etag_key_and_data(migrated_url: str) 
     key = f"local/systems/{system_id}/console-{run_id}"
 
     def _stored(etag: str) -> StoredArtifact:
-        return StoredArtifact(key, etag, Sensitivity.REDACTED, "console")
+        return StoredArtifact(key, etag, Sensitivity.REDACTED, "console", version_id="test-version")
 
     async def _run():
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:

@@ -109,7 +109,11 @@ class FakeStore:
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         self.put_requests.append(request)
         return StoredArtifact(
-            request.key(), "etag-red", request.sensitivity, request.retention_class
+            request.key(),
+            "etag-red",
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
         )
 
     def put_stream(self, request: ArtifactStreamRequest) -> StoredArtifact:
@@ -154,7 +158,11 @@ def test_capture_two_phase_happy_path(tmp_path: Path) -> None:
     agent = FakeAgentExec(inspect=_inspect_json())
     store = FakeStore(
         head=HeadResult(
-            size_bytes=4096, checksum_sha256=_SHA, etag="etag-raw", last_modified=STORE_MTIME
+            size_bytes=4096,
+            checksum_sha256=_SHA,
+            etag="etag-raw",
+            last_modified=STORE_MTIME,
+            version_id="test-version",
         )
     )
     out = _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
@@ -182,7 +190,11 @@ def test_capture_loopback_endpoint_fails_before_touching_the_guest(
     agent = FakeAgentExec(inspect=_inspect_json())
     store = FakeStore(
         head=HeadResult(
-            size_bytes=4096, checksum_sha256=_SHA, etag="etag-raw", last_modified=STORE_MTIME
+            size_bytes=4096,
+            checksum_sha256=_SHA,
+            etag="etag-raw",
+            last_modified=STORE_MTIME,
+            version_id="test-version",
         )
     )
     with pytest.raises(CategorizedError) as excinfo:
@@ -197,7 +209,11 @@ def test_capture_waits_out_a_rebooting_agent(tmp_path: Path) -> None:
     agent = FakeAgentExec(inspect=_inspect_json(), unreachable_before=2)
     store = FakeStore(
         head=HeadResult(
-            size_bytes=4096, checksum_sha256=_SHA, etag="etag-raw", last_modified=STORE_MTIME
+            size_bytes=4096,
+            checksum_sha256=_SHA,
+            etag="etag-raw",
+            last_modified=STORE_MTIME,
+            version_id="test-version",
         )
     )
     out = _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)

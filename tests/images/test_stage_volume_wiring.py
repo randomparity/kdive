@@ -156,7 +156,13 @@ class _FakeObjectStore:
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         self.put_calls.append(request)
-        return StoredArtifact(request.key(), "etag-1", request.sensitivity, request.retention_class)
+        return StoredArtifact(
+            request.key(),
+            "etag-1",
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
+        )
 
 
 def test_attach_config_db_error_maps_to_infrastructure_failure(

@@ -43,6 +43,7 @@ class _SpyStore:
             etag="spy-etag",
             sensitivity=request.sensitivity,
             retention_class=request.retention_class,
+            version_id="test-version",
         )
 
     def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
@@ -138,7 +139,13 @@ def test_scope_released_even_when_heal_persist_raises(tmp_path: Path) -> None:
             if self._puts == 2:  # fail the heal write, not the quarantine write
                 raise RuntimeError("object store down")
             self.objects[request.key()] = request
-            return StoredArtifact(request.key(), "e", request.sensitivity, request.retention_class)
+            return StoredArtifact(
+                request.key(),
+                "e",
+                request.sensitivity,
+                request.retention_class,
+                version_id="test-version",
+            )
 
         def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
             request = self.objects[key]
@@ -239,7 +246,11 @@ def test_heal_refetches_the_quarantined_object_by_its_etag(tmp_path: Path) -> No
         def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
             self.objects[request.key()] = request
             return StoredArtifact(
-                request.key(), "etag-42", request.sensitivity, request.retention_class
+                request.key(),
+                "etag-42",
+                request.sensitivity,
+                request.retention_class,
+                version_id="test-version",
             )
 
         def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:

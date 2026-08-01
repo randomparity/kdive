@@ -25,7 +25,13 @@ class FakeObjectStore:
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         key = request.key()
         self.objects[key] = request.data
-        return StoredArtifact(key, f"etag-{len(self.objects)}", request.sensitivity, "console")
+        return StoredArtifact(
+            key,
+            f"etag-{len(self.objects)}",
+            request.sensitivity,
+            "console",
+            version_id="test-version",
+        )
 
     def get_artifact(self, key: str, etag):  # noqa: ANN001, ANN201
         from kdive.artifacts.storage import FetchedArtifact

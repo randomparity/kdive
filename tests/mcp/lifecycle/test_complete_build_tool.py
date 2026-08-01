@@ -540,9 +540,19 @@ def test_complete_build_omits_nudge_when_effective_config_present(migrated_url: 
                 {kernel_key: _KERNEL_TAR, config_key: config},
                 {
                     kernel_key: HeadResult(
-                        len(_KERNEL_TAR), "ck", "e-k", last_modified=STORE_MTIME
+                        len(_KERNEL_TAR),
+                        "ck",
+                        "e-k",
+                        last_modified=STORE_MTIME,
+                        version_id="test-version",
                     ),
-                    config_key: HeadResult(len(config), "cc", "e-c", last_modified=STORE_MTIME),
+                    config_key: HeadResult(
+                        len(config),
+                        "cc",
+                        "e-c",
+                        last_modified=STORE_MTIME,
+                        version_id="test-version",
+                    ),
                 },
             )
             resp = await CompleteBuildHandlers(
@@ -652,9 +662,19 @@ def test_complete_build_writes_effective_config_artifact(
                 {kernel_key: _KERNEL_TAR, config_key: config},
                 {
                     kernel_key: HeadResult(
-                        len(_KERNEL_TAR), "ck", "e-k", last_modified=STORE_MTIME
+                        len(_KERNEL_TAR),
+                        "ck",
+                        "e-k",
+                        last_modified=STORE_MTIME,
+                        version_id="test-version",
                     ),
-                    config_key: HeadResult(len(config), "cc", "e-c", last_modified=STORE_MTIME),
+                    config_key: HeadResult(
+                        len(config),
+                        "cc",
+                        "e-c",
+                        last_modified=STORE_MTIME,
+                        version_id="test-version",
+                    ),
                 },
             )
 
@@ -700,12 +720,16 @@ class _ReassemblyStore:
 
     def head(self, key: str) -> HeadResult | None:
         if key.endswith(".part0001"):
-            return HeadResult(5, "c0", "e", last_modified=STORE_MTIME)
+            return HeadResult(5, "c0", "e", last_modified=STORE_MTIME, version_id="test-version")
         if key.endswith(".part0002"):
-            return HeadResult(3, "c1", "e", last_modified=STORE_MTIME)
+            return HeadResult(3, "c1", "e", last_modified=STORE_MTIME, version_id="test-version")
         if key.endswith("/kernel"):
             return HeadResult(
-                8, None, "final-etag", last_modified=STORE_MTIME
+                8,
+                None,
+                "final-etag",
+                last_modified=STORE_MTIME,
+                version_id="test-version",
             )  # reassembled: composite/None checksum
         return None
 

@@ -22,7 +22,7 @@ from tests.clock import STORE_MTIME
 
 
 def _written(key: str, etag: str) -> StoredArtifact:
-    return StoredArtifact(key, etag, Sensitivity.REDACTED, "console")
+    return StoredArtifact(key, etag, Sensitivity.REDACTED, "console", version_id="test-version")
 
 
 class _RecordingStore:
@@ -46,6 +46,7 @@ class _RecordingStore:
             checksum_sha256=None,
             etag=self.etags[key],
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
     def delete(self, key: str) -> None:

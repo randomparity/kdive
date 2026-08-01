@@ -51,6 +51,7 @@ class _FakeStore:
             etag="e",
             sensitivity=None,
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
     def presign_get(self, key: str, *, expires_in: int) -> str:

@@ -57,10 +57,18 @@ _ABANDONED_ETAG = "etag-of-the-abandoned-first-attempt"
 
 def _core(run_id: str) -> CaptureOutput:
     raw = StoredArtifact(
-        f"local/runs/{run_id}/vmcore-{_METHOD.value}", "e1", Sensitivity.SENSITIVE, "vmcore"
+        f"local/runs/{run_id}/vmcore-{_METHOD.value}",
+        "e1",
+        Sensitivity.SENSITIVE,
+        "vmcore",
+        version_id="test-version",
     )
     redacted = StoredArtifact(
-        f"local/runs/{run_id}/vmcore-{_METHOD.value}-redacted", "e2", Sensitivity.REDACTED, "vmcore"
+        f"local/runs/{run_id}/vmcore-{_METHOD.value}-redacted",
+        "e2",
+        Sensitivity.REDACTED,
+        "vmcore",
+        version_id="test-version",
     )
     return CaptureOutput(raw=raw, redacted=redacted, vmcore_build_id="deadbeef", raw_size_bytes=512)
 
@@ -329,7 +337,11 @@ class _SweepableCaptureStore:
         if entry is None:
             return None
         return HeadResult(
-            etag=entry[0], size_bytes=1, last_modified=self._mtime(key), checksum_sha256=None
+            etag=entry[0],
+            size_bytes=1,
+            last_modified=self._mtime(key),
+            checksum_sha256=None,
+            version_id="test-version",
         )
 
     def list_prefix(self, prefix: str) -> list[str]:

@@ -116,13 +116,17 @@ def _ensure_empty_bucket(client: Any, bucket: str) -> None:
     bucket rather than raising)."""
     with suppress(client.exceptions.BucketAlreadyOwnedByYou, client.exceptions.BucketAlreadyExists):
         client.create_bucket(Bucket=bucket)
+    client.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
     _empty_bucket(client, bucket)  # unconditional: no-op on a fresh bucket
 
 
 def _empty_bucket(client: Any, bucket: str) -> None:
-    paginator = client.get_paginator("list_objects_v2")
+    paginator = client.get_paginator("list_object_versions")
     for page in paginator.paginate(Bucket=bucket):
-        objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+        objects = [
+            {"Key": entry["Key"], "VersionId": entry["VersionId"]}
+            for entry in [*page.get("Versions", []), *page.get("DeleteMarkers", [])]
+        ]
         if objects:
             client.delete_objects(Bucket=bucket, Delete={"Objects": objects})
 

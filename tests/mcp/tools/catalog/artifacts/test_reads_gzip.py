@@ -63,6 +63,7 @@ class _GzipStore:
             sensitivity=self.sensitivity,
             content_encoding="gzip",
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
     def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
@@ -86,6 +87,7 @@ class _PlainStore:
             etag="e",
             sensitivity=self.sensitivity,
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
     def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:

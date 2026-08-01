@@ -218,7 +218,7 @@ class KdumpCapturer:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id), "key": raw_key},
             )
-        return StoredArtifact(raw_key, head.etag, Sensitivity.SENSITIVE, RETENTION)
+        return StoredArtifact(raw_key, head.etag, Sensitivity.SENSITIVE, RETENTION, head.version_id)
 
     def _default_agent_exec(self, timeout_s: float) -> GuestAgentExec:
         return GuestAgentExec(

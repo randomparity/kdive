@@ -57,13 +57,18 @@ def test_head_returns_size_checksum_and_etag() -> None:
                 "ChecksumSHA256": "Zm9vYmFy",
                 "ETag": '"abc123"',
                 "LastModified": STORE_MTIME,
+                "VersionId": "head-version-1",
             }
         ),
         "bucket",
     )
     result = store.head("t/runs/r1/kernel")
     assert result == HeadResult(
-        size_bytes=42, checksum_sha256="Zm9vYmFy", etag="abc123", last_modified=STORE_MTIME
+        size_bytes=42,
+        checksum_sha256="Zm9vYmFy",
+        etag="abc123",
+        last_modified=STORE_MTIME,
+        version_id="head-version-1",
     )
 
 
@@ -74,10 +79,19 @@ def test_head_missing_object_returns_none() -> None:
 
 def test_head_without_checksum_metadata_yields_none_checksum() -> None:
     store = ObjectStore(
-        _HeadClient({"ContentLength": 7, "ETag": '"e"', "LastModified": STORE_MTIME}), "bucket"
+        _HeadClient(
+            {
+                "ContentLength": 7,
+                "ETag": '"e"',
+                "LastModified": STORE_MTIME,
+                "VersionId": "null",
+            }
+        ),
+        "bucket",
     )
     result = store.head("t/runs/r1/kernel")
     assert result is not None and result.checksum_sha256 is None
+    assert result.version_id == "null"
 
 
 def test_head_maps_transport_error_to_infrastructure_failure() -> None:

@@ -60,7 +60,9 @@ class _FakeStore:
         )
         self.put_calls.append(key)
         etag = hashlib.sha256(request.data).hexdigest()
-        return StoredArtifact(key, etag, request.sensitivity, request.retention_class)
+        return StoredArtifact(
+            key, etag, request.sensitivity, request.retention_class, version_id="test-version"
+        )
 
     def get_artifact(self, key: str, _etag: str | None) -> FetchedArtifact:
         if key not in self.objects:
@@ -82,6 +84,7 @@ class _FakeStore:
             sensitivity=sensitivity,
             content_encoding=enc,
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
     def part_puts(self) -> list[str]:

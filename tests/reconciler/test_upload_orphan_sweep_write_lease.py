@@ -101,6 +101,7 @@ class _LeaseFakeStore:
             size_bytes=1,
             last_modified=self._mtime(age),
             checksum_sha256=None,
+            version_id="test-version",
         )
 
     def delete(self, key: str) -> None:

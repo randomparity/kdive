@@ -32,7 +32,11 @@ class _FakeStore:
         if key in sizes:
             size, sha = sizes[key]
             return HeadResult(
-                size_bytes=size, checksum_sha256=sha, etag="e", last_modified=STORE_MTIME
+                size_bytes=size,
+                checksum_sha256=sha,
+                etag="e",
+                last_modified=STORE_MTIME,
+                version_id="test-version",
             )
         return None
 

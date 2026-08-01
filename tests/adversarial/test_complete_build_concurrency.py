@@ -103,9 +103,9 @@ class _LoserStore:
 
     def head(self, key: str) -> HeadResult | None:
         if key.endswith(".part0001"):
-            return HeadResult(5, "c0", "e", last_modified=STORE_MTIME)
+            return HeadResult(5, "c0", "e", last_modified=STORE_MTIME, version_id="test-version")
         if key.endswith(".part0002"):
-            return HeadResult(3, "c1", "e", last_modified=STORE_MTIME)
+            return HeadResult(3, "c1", "e", last_modified=STORE_MTIME, version_id="test-version")
         return None
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:

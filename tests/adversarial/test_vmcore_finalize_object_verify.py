@@ -89,6 +89,7 @@ class _VerifyStore:
             checksum_sha256=None,
             etag=etag,
             last_modified=datetime.now(UTC) - age,
+            version_id="test-version",
         )
 
     def list_prefix(self, prefix: str) -> list[str]:
@@ -154,9 +155,19 @@ def _redacted_key(run_id: str, method: CaptureMethod = _METHOD) -> str:
 
 def _capture_output(run_id: str, method: CaptureMethod = _METHOD) -> CaptureOutput:
     return CaptureOutput(
-        raw=StoredArtifact(_raw_key(run_id, method), _RAW_ETAG, Sensitivity.SENSITIVE, "vmcore"),
+        raw=StoredArtifact(
+            _raw_key(run_id, method),
+            _RAW_ETAG,
+            Sensitivity.SENSITIVE,
+            "vmcore",
+            version_id="test-version",
+        ),
         redacted=StoredArtifact(
-            _redacted_key(run_id, method), _REDACTED_ETAG, Sensitivity.REDACTED, "vmcore"
+            _redacted_key(run_id, method),
+            _REDACTED_ETAG,
+            Sensitivity.REDACTED,
+            "vmcore",
+            version_id="test-version",
         ),
         vmcore_build_id="deadbeef",
         raw_size_bytes=512,

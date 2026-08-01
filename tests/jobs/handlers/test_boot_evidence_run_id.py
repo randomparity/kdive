@@ -46,7 +46,7 @@ async def _seed_run(conn: AsyncConnection, system_id: UUID, run_id: UUID) -> Non
 
 def _stored(system_id: UUID, run_id: UUID, etag: str) -> StoredArtifact:
     key = f"local/systems/{system_id}/console-{run_id}"
-    return StoredArtifact(key, etag, Sensitivity.REDACTED, "console")
+    return StoredArtifact(key, etag, Sensitivity.REDACTED, "console", version_id="test-version")
 
 
 def test_boot_evidence_row_carries_run_id(migrated_url: str) -> None:

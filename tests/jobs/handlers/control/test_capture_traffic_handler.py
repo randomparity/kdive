@@ -59,7 +59,13 @@ class _FakeStore:
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         self.objects[request.key()] = (request.data, request.sensitivity, request.retention_class)
         etag = hashlib.sha256(request.data).hexdigest()
-        return StoredArtifact(request.key(), etag, request.sensitivity, request.retention_class)
+        return StoredArtifact(
+            request.key(),
+            etag,
+            request.sensitivity,
+            request.retention_class,
+            version_id="test-version",
+        )
 
     def get_artifact(self, key: str, _etag: str | None) -> FetchedArtifact:
         data, sensitivity, retention = self.objects[key]
@@ -76,6 +82,7 @@ class _FakeStore:
             etag=hashlib.sha256(data).hexdigest(),
             sensitivity=sensitivity,
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
 

@@ -62,6 +62,7 @@ class _HeadStore:
             etag=self.etag,
             sensitivity=Sensitivity.SENSITIVE,
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
 

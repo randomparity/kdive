@@ -476,7 +476,9 @@ async def _insert_artifact_rows(
     finalization: _ExternalBuildFinalization,
 ) -> None:
     for name, head in finalization.heads.items():
-        stored = StoredArtifact(finalization.keys[name], head.etag, Sensitivity.SENSITIVE, "build")
+        stored = StoredArtifact(
+            finalization.keys[name], head.etag, Sensitivity.SENSITIVE, "build", head.version_id
+        )
         row = register_artifact_row(stored, owner_kind="runs", owner_id=run_id)
         await ARTIFACTS.insert(conn, row)
 

@@ -105,7 +105,11 @@ class _RecordingUploadStore:
         if not any(key in keys for keys in self._prefixed.values()):
             return None
         return HeadResult(
-            size_bytes=1, checksum_sha256=None, etag="e", last_modified=datetime.now(UTC)
+            size_bytes=1,
+            checksum_sha256=None,
+            etag="e",
+            last_modified=datetime.now(UTC),
+            version_id="test-version",
         )
 
     def delete(self, key: str) -> None:

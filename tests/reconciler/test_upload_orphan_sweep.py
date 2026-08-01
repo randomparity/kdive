@@ -145,6 +145,7 @@ class _FakeUploadStore:
             checksum_sha256=None,
             etag=self._etag(key),
             last_modified=self._mtime(age),
+            version_id="test-version",
         )
 
     def delete(self, key: str) -> None:

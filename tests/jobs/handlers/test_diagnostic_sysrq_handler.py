@@ -61,7 +61,9 @@ class _FakeStore:
         self.objects[key] = (request.data, request.sensitivity, request.retention_class)
         self.put_calls.append(key)
         etag = hashlib.sha256(request.data).hexdigest()
-        return StoredArtifact(key, etag, request.sensitivity, request.retention_class)
+        return StoredArtifact(
+            key, etag, request.sensitivity, request.retention_class, version_id="test-version"
+        )
 
     def get_artifact(self, key: str, _etag: str | None) -> FetchedArtifact:
         data, sensitivity, retention = self.objects[key]
@@ -78,6 +80,7 @@ class _FakeStore:
             etag=hashlib.sha256(data).hexdigest(),
             sensitivity=sensitivity,
             last_modified=STORE_MTIME,
+            version_id="test-version",
         )
 
 

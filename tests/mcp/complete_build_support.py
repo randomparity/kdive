@@ -183,7 +183,13 @@ class FakeValidator:
         if isinstance(self._output, Exception):
             raise self._output
         heads = {
-            name: HeadResult(size_bytes=1, checksum_sha256="c", etag="e", last_modified=STORE_MTIME)
+            name: HeadResult(
+                size_bytes=1,
+                checksum_sha256="c",
+                etag="e",
+                last_modified=STORE_MTIME,
+                version_id="test-version",
+            )
             for name in keys
         }
         return ValidatedUpload(output=self._output, heads=heads)

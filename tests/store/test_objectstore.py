@@ -155,7 +155,43 @@ class _RecordingPutClient:
         if hasattr(body, "read"):
             kwargs["Body"] = body.read()  # ty: ignore[call-non-callable]
         self.last_kwargs = kwargs
-        return {"ETag": '"stored-etag"'}
+        return {"ETag": '"stored-etag"', "VersionId": "put-version-1"}
+
+
+class _CannedPutClient:
+    def __init__(self, reply: dict[str, object]) -> None:
+        self._reply = reply
+
+    def put_object(self, **_kwargs: object) -> dict[str, object]:
+        return self._reply
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"ETag": '"etag"'},
+        {"ETag": '"etag"', "VersionId": ""},
+        {"ETag": '"etag"', "VersionId": 1},
+    ],
+)
+def test_put_artifact_rejects_missing_empty_or_malformed_version_id(
+    reply: dict[str, object],
+) -> None:
+    store = ObjectStore(_CannedPutClient(reply), "bucket")
+    request = ArtifactWriteRequest(
+        tenant="t",
+        owner_kind="runs",
+        owner_id="r1",
+        name="kernel",
+        data=b"payload",
+        sensitivity=Sensitivity.REDACTED,
+        retention_class="build",
+    )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        store.put_artifact(request)
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_put_artifact_writes_metadata_and_returns_stored_artifact() -> None:
@@ -186,6 +222,7 @@ def test_put_artifact_writes_metadata_and_returns_stored_artifact() -> None:
     assert stored.etag == "stored-etag"  # the surrounding quotes are normalized off
     assert stored.sensitivity is Sensitivity.SENSITIVE
     assert stored.retention_class == "vmcore"
+    assert stored.version_id == "put-version-1"
 
 
 def test_put_artifact_records_content_encoding_under_the_exact_metadata_key() -> None:
@@ -211,6 +248,7 @@ def test_put_artifact_records_content_encoding_under_the_exact_metadata_key() ->
         "content-encoding": "gzip",
     }
     assert stored.key == "t/systems/sys-1/console-part-0"
+    assert stored.version_id == "put-version-1"
 
 
 def _sha256_b64(path: Path) -> str:
@@ -291,6 +329,7 @@ def test_put_stream_writes_checksum_metadata_and_returns_stored_artifact(tmp_pat
     assert stored.etag == "stored-etag"
     assert stored.sensitivity is Sensitivity.SENSITIVE
     assert stored.retention_class == "vmcore"
+    assert stored.version_id == "put-version-1"
 
 
 def test_put_stream_maps_local_source_error_to_infrastructure_failure(tmp_path: Path) -> None:
@@ -443,6 +482,7 @@ def test_head_invalid_sensitivity_metadata_returns_unknown_sensitivity() -> None
                 "ContentLength": 1,
                 "ETag": '"etag"',
                 "LastModified": STORE_MTIME,
+                "VersionId": "head-version-1",
                 "Metadata": {"sensitivity": "bogus"},
             }
 
@@ -688,7 +728,9 @@ def test_get_artifact_stream_none_etag_omits_if_match() -> None:
 
 
 def test_register_artifact_row_maps_stored_and_owner() -> None:
-    stored = StoredArtifact("t/vmcore/oid/core", "etag123", Sensitivity.REDACTED, "vmcore")
+    stored = StoredArtifact(
+        "t/vmcore/oid/core", "etag123", Sensitivity.REDACTED, "vmcore", "test-version-1"
+    )
     owner_id = uuid4()
 
     row = register_artifact_row(stored, owner_kind="system", owner_id=owner_id)
@@ -725,16 +767,87 @@ def test_object_store_from_env_requires_bucket(monkeypatch: pytest.MonkeyPatch) 
     assert str(excinfo.value) == "KDIVE_S3_BUCKET is not set; cannot reach the object store"
 
 
+class _VersioningClient:
+    def __init__(self, reply: dict[str, object] | Exception) -> None:
+        self._reply = reply
+        self.head_calls = 0
+        self.versioning_calls = 0
+
+    def head_bucket(self, **_kwargs: object) -> None:
+        self.head_calls += 1
+
+    def get_bucket_versioning(self, **_kwargs: object) -> dict[str, object]:
+        self.versioning_calls += 1
+        if isinstance(self._reply, Exception):
+            raise self._reply
+        return self._reply
+
+
+def test_validate_versioning_accepts_enabled_bucket_without_mfa_delete() -> None:
+    client = _VersioningClient({"Status": "Enabled"})
+    ObjectStore(client, "bucket").validate_versioning()
+    assert client.versioning_calls == 1
+
+
+@pytest.mark.parametrize("status", [None, "Suspended"])
+def test_validate_versioning_rejects_missing_or_suspended_versioning(status: str | None) -> None:
+    reply: dict[str, object] = {} if status is None else {"Status": status}
+    with pytest.raises(CategorizedError) as excinfo:
+        ObjectStore(_VersioningClient(reply), "bucket").validate_versioning()
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "bucket" in str(excinfo.value) and "Enabled" in str(excinfo.value)
+
+
+def test_mfa_delete_enabled_is_configuration_error() -> None:
+    store = ObjectStore(_VersioningClient({"Status": "Enabled", "MFADelete": "Enabled"}), "bucket")
+    with pytest.raises(CategorizedError) as excinfo:
+        store.validate_versioning()
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "dedicated bucket" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("reply", [{"Status": 1}, {"Status": "Enabled", "MFADelete": 1}])
+def test_validate_versioning_rejects_malformed_reply(reply: dict[str, object]) -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        ObjectStore(_VersioningClient(reply), "bucket").validate_versioning()
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_validate_versioning_maps_client_fault_to_infrastructure_failure() -> None:
+    store = ObjectStore(
+        _VersioningClient(EndpointConnectionError(endpoint_url="http://x")), "bucket"
+    )
+    with pytest.raises(CategorizedError) as excinfo:
+        store.validate_versioning()
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_ping_revalidates_versioning_after_head_bucket() -> None:
+    client = _VersioningClient({"Status": "Enabled"})
+    ObjectStore(client, "bucket").ping()
+    assert client.head_calls == 1 and client.versioning_calls == 1
+
+
 def test_object_store_from_env_defaults_region(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", "http://localhost:9000")
     monkeypatch.setenv("KDIVE_S3_BUCKET", "bucket")
     monkeypatch.delenv("KDIVE_S3_REGION", raising=False)
 
+    client = _VersioningClient({"Status": "Enabled"})
+    client_kwargs: dict[str, object] = {}
+
+    def _client_factory(*args: object, **kwargs: object) -> _VersioningClient:
+        assert args == ("s3",)
+        client_kwargs.update(kwargs)
+        return client
+
+    monkeypatch.setattr("kdive.store.objectstore.boto3.client", _client_factory)
     store = object_store_from_env()
 
-    assert store._client.meta.region_name == "us-east-1"
+    assert store._client is client
     assert store._bucket == "bucket"
-    assert store._client.meta.endpoint_url == "http://localhost:9000"
+    assert client.versioning_calls == 1
+    assert client_kwargs == {"endpoint_url": "http://localhost:9000", "region_name": "us-east-1"}
 
 
 def test_object_store_from_env_uses_configured_region(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -744,11 +857,24 @@ def test_object_store_from_env_uses_configured_region(monkeypatch: pytest.Monkey
     monkeypatch.setenv("KDIVE_S3_BUCKET", "artifacts")
     monkeypatch.setenv("KDIVE_S3_REGION", "eu-west-1")
 
+    client = _VersioningClient({"Status": "Enabled"})
+    client_kwargs: dict[str, object] = {}
+
+    def _client_factory(*args: object, **kwargs: object) -> _VersioningClient:
+        assert args == ("s3",)
+        client_kwargs.update(kwargs)
+        return client
+
+    monkeypatch.setattr("kdive.store.objectstore.boto3.client", _client_factory)
     store = object_store_from_env()
 
-    assert store._client.meta.region_name == "eu-west-1"
-    assert store._client.meta.endpoint_url == "http://minio.internal:9000"
+    assert store._client is client
     assert store._bucket == "artifacts"
+    assert client.versioning_calls == 1
+    assert client_kwargs == {
+        "endpoint_url": "http://minio.internal:9000",
+        "region_name": "eu-west-1",
+    }
 
 
 def test_put_get_round_trip(minio_store: ObjectStore, key_ns: str) -> None:

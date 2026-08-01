@@ -87,12 +87,14 @@ class _SecretBearingRetriever:
             "e1",
             Sensitivity.SENSITIVE,
             "vmcore",
+            version_id="test-version",
         )
         red = StoredArtifact(
             f"local/runs/{self._run_id}/vmcore-host_dump-redacted",
             "e2",
             Sensitivity.REDACTED,
             "vmcore",
+            version_id="test-version",
         )
         return self._objects.record(
             CaptureOutput(raw=raw, redacted=red, vmcore_build_id="deadbeef", raw_size_bytes=512)

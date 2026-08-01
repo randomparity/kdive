@@ -167,6 +167,13 @@ class _StoreReply:
             return None
         return self.required(field, expected)
 
+    def required_nonempty_string(self, field: str) -> str:
+        """Return a required nonempty string field from a successful store response."""
+        value = self.required(field, str)
+        if not value:
+            raise self._malformed(field, f"returned {field!r} as an empty string")
+        return value
+
     def _malformed(self, field: str, problem: str) -> CategorizedError:
         return CategorizedError(
             f"object-store {self.op} for {self.subject!r} in bucket {self.bucket!r} {problem}; "
@@ -219,7 +226,7 @@ class ObjectStore:
     def put_artifact(
         self, request: artifact_types.ArtifactWriteRequest
     ) -> artifact_types.StoredArtifact:
-        """Write ``data`` under the key scheme; return its key, etag, and class.
+        """Write ``data`` under the key scheme; return its key, etag, class, and VersionId.
 
         The object carries the request's ``sensitivity`` and ``retention_class`` as user metadata.
         Async callers must offload this call via ``asyncio.to_thread``.
@@ -245,11 +252,13 @@ class ObjectStore:
             )
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("put_object", key, err) from err
+        reply = _StoreReply("put_object", self._bucket, key, resp)
         return artifact_types.StoredArtifact(
             key,
-            _normalize_etag(resp["ETag"]),
+            _normalize_etag(reply.required_nonempty_string("ETag")),
             request.sensitivity,
             request.retention_class,
+            reply.required_nonempty_string("VersionId"),
         )
 
     def put_stream(
@@ -259,7 +268,8 @@ class ObjectStore:
 
         Used by callers holding a large artifact on local disk (the spooled host_dump core,
         ADR-0094): the open file handle is the PUT body, so boto3 streams it in chunks rather
-        than the whole object being read into RAM. The object carries the request's
+        than the whole object being read into RAM. The returned value carries the observed
+        immutable VersionId. The object carries the request's
         ``sensitivity``/``retention_class`` as user metadata, matching :meth:`put_artifact`,
         and ``request.sha256_b64`` is sent as ``ChecksumSHA256`` so S3 rejects the PUT if the
         streamed body does not hash to it (the end-to-end integrity binding) and a later
@@ -288,11 +298,13 @@ class ObjectStore:
             raise _infrastructure_error("put_object", key, err) from err
         except OSError as err:
             raise _local_stream_error(key, str(request.path), err) from err
+        reply = _StoreReply("put_object", self._bucket, key, resp)
         return artifact_types.StoredArtifact(
             key,
-            _normalize_etag(resp["ETag"]),
+            _normalize_etag(reply.required_nonempty_string("ETag")),
             request.sensitivity,
             request.retention_class,
+            reply.required_nonempty_string("VersionId"),
         )
 
     def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact:
@@ -393,13 +405,47 @@ class ObjectStore:
 
         Raises:
             CategorizedError: the bucket is unreachable or absent
-                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`). Async callers offload via
-                ``asyncio.to_thread``.
+                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`), or its versioning is unsuitable
+                for immutable deletion (:attr:`ErrorCategory.CONFIGURATION_ERROR`). Async callers
+                offload via ``asyncio.to_thread``.
         """
         try:
             self._client.head_bucket(Bucket=self._bucket)
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("head_bucket", self._bucket, err) from err
+        self.validate_versioning()
+
+    def validate_versioning(self) -> None:
+        """Require a bucket that supports unattended immutable-version deletion."""
+        try:
+            response = self._client.get_bucket_versioning(Bucket=self._bucket)
+        except (BotoCoreError, ClientError) as err:
+            raise _infrastructure_error("get_bucket_versioning", self._bucket, err) from err
+
+        reply = _StoreReply("get_bucket_versioning", self._bucket, self._bucket, response)
+        status = reply.optional("Status", str)
+        if status != "Enabled":
+            observed = status if status is not None else "missing"
+            raise CategorizedError(
+                f"object-store bucket {self._bucket!r} reports versioning {observed!r}; "
+                "KDIVE requires Status='Enabled'. Enable versioning on a dedicated compatible "
+                "bucket before starting KDIVE.",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "bucket": self._bucket,
+                    "observed_status": observed,
+                    "required_status": "Enabled",
+                },
+            )
+        mfa_delete = reply.optional("MFADelete", str)
+        if mfa_delete == "Enabled":
+            raise CategorizedError(
+                f"object-store bucket {self._bucket!r} has MFA Delete enabled; KDIVE requires "
+                "MFA Delete disabled because unattended version deletion cannot provide an MFA "
+                "proof. Use a dedicated bucket without MFA Delete.",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"bucket": self._bucket, "observed_mfa_delete": mfa_delete},
+            )
 
     def head(self, key: str) -> artifact_types.HeadResult | None:
         """Return the object's size/checksum/etag/mtime/sensitivity, or ``None`` if it is absent.
@@ -409,7 +455,8 @@ class ObjectStore:
         uninterpretable), so a caller can gate on the object's own class without fetching
         the body. ``last_modified`` makes this the single-object stat the ADR-0455 orphan
         sweep re-reads a candidate's mtime with, in one round trip whatever else sits under
-        that key's prefix (#1575).
+        that key's prefix (#1575). The result also includes the observed immutable VersionId,
+        including the legacy literal ``"null"``.
 
         Raises:
             CategorizedError: any non-404 store error, or a reply that omits or mistypes one of the
@@ -439,6 +486,7 @@ class ObjectStore:
             checksum_sha256=reply.optional("ChecksumSHA256", str),
             etag=_normalize_etag(reply.required("ETag", str)),
             last_modified=reply.required("LastModified", datetime),
+            version_id=reply.required_nonempty_string("VersionId"),
             sensitivity=sensitivity,
             content_encoding=metadata.get("content-encoding"),
         )
@@ -738,7 +786,8 @@ def object_store_from_env() -> ObjectStore:
     come from boto3's default chain (the standard ``AWS_*`` vars).
 
     Raises:
-        CategorizedError: ``KDIVE_S3_ENDPOINT_URL`` or ``KDIVE_S3_BUCKET`` is unset
+        CategorizedError: ``KDIVE_S3_ENDPOINT_URL`` or ``KDIVE_S3_BUCKET`` is unset, or the
+            configured bucket lacks compatible versioning
             (:attr:`ErrorCategory.CONFIGURATION_ERROR`).
     """
     endpoint_url = config.get(S3_ENDPOINT_URL)
@@ -755,4 +804,6 @@ def object_store_from_env() -> ObjectStore:
         )
     region = config.get(S3_REGION) or _DEFAULT_REGION
     client = boto3.client("s3", endpoint_url=endpoint_url, region_name=region)
-    return ObjectStore(client, bucket)
+    store = ObjectStore(client, bucket)
+    store.validate_versioning()
+    return store

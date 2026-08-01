@@ -158,7 +158,11 @@ def test_gdb_mi_attachment_records_are_not_shared_between_instances(tmp_path: Pa
 def test_build_output_and_validated_upload_are_stable_namedtuples() -> None:
     output = BuildOutput(kernel_ref="kernel", debuginfo_ref="vmlinux", build_id="deadbeef")
     head = HeadResult(
-        size_bytes=10, checksum_sha256="sha256", etag="etag", last_modified=STORE_MTIME
+        size_bytes=10,
+        checksum_sha256="sha256",
+        etag="etag",
+        last_modified=STORE_MTIME,
+        version_id="test-version",
     )
     validated = ValidatedUpload(output=output, heads={"kernel": head})
 
@@ -173,8 +177,12 @@ def test_build_output_and_validated_upload_are_stable_namedtuples() -> None:
 
 
 def test_retrieve_port_outputs_are_stable_namedtuples() -> None:
-    raw = StoredArtifact("raw-key", "raw-etag", Sensitivity.SENSITIVE, "vmcore")
-    redacted = StoredArtifact("redacted-key", "redacted-etag", Sensitivity.REDACTED, "vmcore")
+    raw = StoredArtifact(
+        "raw-key", "raw-etag", Sensitivity.SENSITIVE, "vmcore", version_id="test-version"
+    )
+    redacted = StoredArtifact(
+        "redacted-key", "redacted-etag", Sensitivity.REDACTED, "vmcore", version_id="test-version"
+    )
 
     capture = CaptureOutput(
         raw=raw, redacted=redacted, vmcore_build_id="deadbeef", raw_size_bytes=42

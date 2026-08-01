@@ -82,6 +82,7 @@ class _FakeImageStore:
             etag="etag",
             sensitivity=request.sensitivity,
             retention_class=request.retention_class,
+            version_id="test-version",
         )
 
 

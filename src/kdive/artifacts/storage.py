@@ -80,6 +80,7 @@ class StoredArtifact(NamedTuple):
     etag: str
     sensitivity: Sensitivity
     retention_class: str
+    version_id: str
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -168,6 +169,7 @@ class HeadResult(NamedTuple):
     checksum_sha256: str | None
     etag: str
     last_modified: datetime
+    version_id: str
     sensitivity: Sensitivity | None = None
     content_encoding: str | None = None
 

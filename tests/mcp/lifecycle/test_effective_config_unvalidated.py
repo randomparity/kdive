@@ -164,7 +164,15 @@ def test_legacy_build_profile_uploads_and_completes(migrated_url: str) -> None:
             kernel_key = f"local/runs/{run_id}/kernel"
             store = _ValidationStore(
                 {kernel_key: _KERNEL_TAR},
-                {kernel_key: HeadResult(len(_KERNEL_TAR), "ck", "e-k", last_modified=STORE_MTIME)},
+                {
+                    kernel_key: HeadResult(
+                        len(_KERNEL_TAR),
+                        "ck",
+                        "e-k",
+                        last_modified=STORE_MTIME,
+                        version_id="test-version",
+                    )
+                },
             )
             resp = await CompleteBuildHandlers(object_store_factory=lambda: store).complete_build(
                 pool, _ctx(), str(run_id), build_id=None, cmdline="x"
@@ -200,10 +208,18 @@ def test_bad_effective_config_uploads_completes_and_warns(migrated_url: str) -> 
                 {kernel_key: _KERNEL_TAR, config_key: _BAD_CONFIG},
                 {
                     kernel_key: HeadResult(
-                        len(_KERNEL_TAR), "ck", "e-k", last_modified=STORE_MTIME
+                        len(_KERNEL_TAR),
+                        "ck",
+                        "e-k",
+                        last_modified=STORE_MTIME,
+                        version_id="test-version",
                     ),
                     config_key: HeadResult(
-                        len(_BAD_CONFIG), "cc", "e-c", last_modified=STORE_MTIME
+                        len(_BAD_CONFIG),
+                        "cc",
+                        "e-c",
+                        last_modified=STORE_MTIME,
+                        version_id="test-version",
                     ),
                 },
             )
@@ -253,9 +269,15 @@ def test_supported_effective_config_completes_without_warning(migrated_url: str)
                 {kernel_key: _KERNEL_TAR, config_key: good},
                 {
                     kernel_key: HeadResult(
-                        len(_KERNEL_TAR), "ck", "e-k", last_modified=STORE_MTIME
+                        len(_KERNEL_TAR),
+                        "ck",
+                        "e-k",
+                        last_modified=STORE_MTIME,
+                        version_id="test-version",
                     ),
-                    config_key: HeadResult(len(good), "cc", "e-c", last_modified=STORE_MTIME),
+                    config_key: HeadResult(
+                        len(good), "cc", "e-c", last_modified=STORE_MTIME, version_id="test-version"
+                    ),
                 },
             )
             with _patched_load(parse_kernel_config(good)):

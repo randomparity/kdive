@@ -31,6 +31,7 @@ _HEAD_REPLY: dict[str, Any] = {
     "ContentLength": 7,
     "ETag": '"abc"',
     "LastModified": STORE_MTIME,
+    "VersionId": "head-version-1",
     "Metadata": {"sensitivity": "redacted", "retention-class": "vmcore"},
 }
 
@@ -42,6 +43,7 @@ _HEAD_FIELDS = [
     ("ContentLength", "7", "str", "int"),
     ("ETag", 12, "int", "str"),
     ("LastModified", "2026-07-29T00:00:00Z", "str", "datetime"),
+    ("VersionId", 7, "int", "str"),
 ]
 
 #: The fields a listing entry requires, same shape.
@@ -136,15 +138,31 @@ def test_head_still_returns_a_result_when_only_the_optional_fields_are_absent() 
     ``ChecksumSHA256``, and a store may omit ``Metadata`` entirely for an object with none — so the
     line between required and optional is itself worth pinning.
     """
-    reply = {"ContentLength": 7, "ETag": '"abc"', "LastModified": STORE_MTIME}
+    reply = {
+        "ContentLength": 7,
+        "ETag": '"abc"',
+        "LastModified": STORE_MTIME,
+        "VersionId": "head-version-1",
+    }
 
     head = ObjectStore(_CannedHeadClient(reply), "the-bucket").head("k")
 
     assert head is not None
+    assert head.version_id == "head-version-1"
     assert (head.size_bytes, head.etag, head.last_modified) == (7, "abc", STORE_MTIME)
     assert head.checksum_sha256 is None
     assert head.sensitivity is None
     assert head.content_encoding is None
+
+
+def test_head_rejects_an_empty_version_id() -> None:
+    store = ObjectStore(_CannedHeadClient({**_HEAD_REPLY, "VersionId": ""}), "the-bucket")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        store.head("k")
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert excinfo.value.details["field"] == "VersionId"
 
 
 @pytest.mark.parametrize(
