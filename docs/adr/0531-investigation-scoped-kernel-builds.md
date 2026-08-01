@@ -66,6 +66,14 @@ Investigation and rechecks the deadline and that no live Run references the buil
 Runs store the selected `build_ref`, so concurrent create versus reclaim is serialized and the
 reference remains auditable.
 
+Install is the artifact-use fence. `runs.install` acquires the Investigation lock before its Run
+lock and atomically checks the generation deadline while enqueueing. A new or restaged install at
+or after expiry fails with the same timestamps and recreate/re-upload recovery as expired reuse; an
+idempotent no-op for the already installed variant remains callable because it reads no artifact.
+Garbage collection defers while an install job for a referencing Run is queued or running. The job
+therefore keeps the generation through every provider/object-store read even when it starts after
+the deadline; success materializes the kernel onto the System, while failure releases the fence.
+
 ## Consequences
 
 - One validated upload can back any number of compatible Runs and Systems in its Investigation.
@@ -81,6 +89,8 @@ reference remains auditable.
   deadline. Looking up or reusing a build does not extend retention.
 - Reuse bypasses build upload and validation because it selects an already validated immutable
   record. Install, boot, and debug behavior remain unchanged.
+- A queued or running install pins its generation. A delayed first install or restage after expiry
+  must recreate and upload; an already-installed unchanged variant remains an idempotent no-op.
 - The schema gains an investigation-build catalog and a nullable `runs.build_ref` audit link.
 
 ## Considered & rejected

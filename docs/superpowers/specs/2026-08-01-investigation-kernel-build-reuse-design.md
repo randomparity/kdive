@@ -129,11 +129,22 @@ artifact rows. The latter uses each record's stored absolute deadline. Legacy
 `owner_kind='runs'` build artifacts keep their current close and age-based TTL paths.
 
 Create and reclaim take the Investigation advisory lock. Reclaim rechecks for non-terminal Runs
-whose `build_ref` selects the generation. A live reference defers deletion. Otherwise it marks the
-generation `reclaiming` before deleting its exact object versions. A partial object-store failure
-keeps that state for retry. After deletion it removes only that generation's artifact rows and
-record, rechecking the state under the lock. A fresh publication of identical content uses a new
-generation and cannot be deleted or selected through the old record.
+whose `build_ref` selects the generation and for queued or running install jobs on any referencing
+Run. Either condition defers deletion. Otherwise reclaim marks the generation `reclaiming` before
+deleting its exact object versions. A partial object-store failure keeps that state for retry.
+After deletion it removes only that generation's artifact rows and record, rechecking the state
+under the lock. A fresh publication of identical content uses a new generation and cannot be
+deleted or selected through the old record.
+
+`runs.install` acquires the Investigation lock before the existing Run lock. In that transaction it
+checks the generation deadline and enqueues or recycles the install job. A first install or restage
+at or after expiry returns `build_ref_expired` with `expires_at`, `server_time`, and `runs.create`
+as the first recovery action. The caller recreates without the expired reference and follows the
+upload flow. An unchanged already-succeeded install is an idempotent no-op and remains callable
+after expiry because it performs no artifact read. Once admission enqueues work, the queued/running
+job is the durable use fence; GC defers until the provider has consumed every object and the job
+settles. A failed job releases the fence, and retry after expiry follows recovery instead of reading
+possibly reclaimed objects.
 
 The Investigation lock makes create-versus-reclaim deterministic. Concurrent source completions
 of identical content converge through the active-digest query under that lock and artifact
@@ -184,8 +195,9 @@ class within that boundary.
    dangling build reference; a validated identical completion after expiry publishes a distinct
    generation that survives partial cleanup of the old one.
 6. Close-plus-grace and absolute-deadline collection reclaim new investigation-owned build objects
-   only after no live Run references them; expiry is reported with database-clock timestamps and a
-   re-upload recovery action, and legacy run-owned build collection remains green.
+   only after no live Run or queued/running install job references them; expiry is reported with
+   database-clock timestamps and a recreate/re-upload recovery action, and legacy run-owned build
+   collection remains green.
 7. `runs.create`, `runs.complete_build`, `runs.get`, generated CLI/docs, schema migration tests,
    service tests, and adversarial concurrency tests describe and prove the contract. Every
    `suggested_next_actions` entry is directly callable with identifiers in that response; expired
@@ -195,8 +207,11 @@ class within that boundary.
 
 Start with focused failing service tests for `runs.create` reuse and complete-build ownership.
 Cover bound and unbound success, every rejection in criterion 4, idempotent replay, and a
-barrier-controlled create/reclaim race. Fault injection pauses after each old-generation artifact
-deletion and proves a fresh same-content generation stays usable. Add migration shape and garbage-collection tests, then MCP
+barrier-controlled create/reclaim and install/reclaim races. A queued install delayed past expiry
+pins all objects through provider consumption; a first install after expiry fails before enqueue;
+an unchanged installed variant remains an idempotent no-op. Fault injection pauses after each
+old-generation artifact deletion and proves a fresh same-content generation stays usable. Add
+migration shape and garbage-collection tests, then MCP
 wrapper/schema tests proving the agent-visible contract and suggested next actions. Mutate the
 Investigation ownership predicate and profile compatibility check to confirm those tests fail.
 
