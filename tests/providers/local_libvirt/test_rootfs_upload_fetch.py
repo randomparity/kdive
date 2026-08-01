@@ -16,7 +16,7 @@ import stat
 import threading
 import time
 import types
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any, cast
@@ -135,11 +135,13 @@ class _RecordingReader:
         *,
         max_chunk: int | None = None,
         fail: tuple[int, BaseException] | None = None,
+        on_first_read: Callable[[], None] | None = None,
     ) -> None:
         self._data = data
         self._offset = 0
         self._max_chunk = max_chunk
         self._fail = fail
+        self._on_first_read = on_first_read
         self.largest_read = 0
 
     @property
@@ -152,6 +154,8 @@ class _RecordingReader:
                 "the staging path asked for the whole object in one read; it must read in "
                 "bounded chunks so peak memory does not scale with the object size (#1520)"
             )
+        if self._offset == 0 and self._on_first_read is not None:
+            self._on_first_read()
         if self._fail is not None:
             at, error = self._fail
             if self._offset >= at:
@@ -176,11 +180,17 @@ class _FakeStore:
         checksum: str | None,
         max_chunk: int | None = None,
         fail: tuple[int, BaseException] | None = None,
+        head_size: int | None = None,
+        on_first_read: Callable[[], None] | None = None,
+        on_first_range: Callable[[], None] | None = None,
     ) -> None:
         self._data = data
         self._checksum = checksum
         self._max_chunk = max_chunk
         self._fail = fail
+        self._head_size = head_size
+        self._on_first_read = on_first_read
+        self._on_first_range = on_first_range
         self.head_calls = 0
         self.range_calls = 0
         self.stream_calls = 0
@@ -193,7 +203,7 @@ class _FakeStore:
         if self._data is None:
             return None
         return HeadResult(
-            size_bytes=len(self._data),
+            size_bytes=len(self._data) if self._head_size is None else self._head_size,
             checksum_sha256=self._checksum,
             etag="e",
             last_modified=STORE_MTIME,
@@ -204,7 +214,12 @@ class _FakeStore:
     def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
         self.stream_calls += 1
         assert self._data is not None
-        reader = _RecordingReader(self._data, max_chunk=self._max_chunk, fail=self._fail)
+        reader = _RecordingReader(
+            self._data,
+            max_chunk=self._max_chunk,
+            fail=self._fail,
+            on_first_read=self._on_first_read,
+        )
         self.readers.append(reader)
         try:
             yield StreamedArtifact(cast(IO[bytes], reader), Sensitivity.SENSITIVE, "rootfs")
@@ -213,6 +228,8 @@ class _FakeStore:
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
         self.range_calls += 1
+        if self.range_calls == 1 and self._on_first_range is not None:
+            self._on_first_range()
         if self.range_fault is not None:
             raise self.range_fault
         assert self._data is not None
@@ -547,6 +564,49 @@ def test_stage_identity_sentinel_stages_verbatim(tmp_path: Path) -> None:
     assert store.range_calls == 0
 
 
+def test_stage_identity_writes_without_truncating_the_guarded_inode(tmp_path: Path) -> None:
+    partial = tmp_path / "identity-reserved.partial"
+    observed_sizes: list[int] = []
+    store = _FakeStore(
+        _QCOW2,
+        checksum=_sha256_b64(_QCOW2),
+        on_first_read=lambda: observed_sizes.append(partial.stat().st_size),
+    )
+    fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        os.ftruncate(fd, len(_QCOW2))
+        actual = rootfs_upload_fetch._stage_identity(
+            store,
+            key="k",
+            checksum=_sha256_b64(_QCOW2),
+            partial_fd=fd,
+            system_id=uuid4(),
+        )
+    finally:
+        os.close(fd)
+
+    assert actual == len(_QCOW2)
+    assert observed_sizes == [len(_QCOW2)]
+    assert partial.read_bytes() == _QCOW2
+
+
+def test_stage_identity_rejects_a_get_shorter_than_head(tmp_path: Path) -> None:
+    store = _FakeStore(
+        _QCOW2,
+        checksum=_sha256_b64(_QCOW2),
+        head_size=len(_QCOW2) + 8,
+    )
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert error.value.details["expected_bytes"] == len(_QCOW2) + 8
+    assert error.value.details["actual_bytes"] == len(_QCOW2)
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
 def test_stage_identity_streams_without_buffering_the_whole_object(tmp_path: Path) -> None:
     # #1520: peak memory is bounded by the read chunk, not the object size. The store fake offers
     # no whole-object accessor at all, so a regression to ``get_artifact(...).data`` cannot even
@@ -664,6 +724,44 @@ def test_stage_gzip_streams_decompressed_qcow2(tmp_path: Path) -> None:
     dest = _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(canonical))
     assert dest.read_bytes() == canonical
     assert store.stream_calls == 0 and store.range_calls >= 1  # ranged, never whole-object
+
+
+def test_stage_gzip_shrinks_its_reservation_before_the_format_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical = _QCOW2 + b"x" * 4096
+    compressed = gzip.compress(canonical)
+    reserved = len(canonical) + 4096
+    sizes_during_decode: list[int] = []
+    sizes_at_format_gate: list[int] = []
+    store = _FakeStore(
+        compressed,
+        checksum=_sha256_b64(compressed),
+        on_first_range=lambda: sizes_during_decode.append(
+            next(tmp_path.glob(f"{_TOKEN}.*.partial")).stat().st_size
+        ),
+    )
+    original_flocked_partial = rootfs_upload_fetch._flocked_partial
+    original_format_gate = rootfs_upload_fetch._require_qcow2_magic
+
+    @contextmanager
+    def _preallocated_partial(partial: Path) -> Iterator[int]:
+        with original_flocked_partial(partial) as fd:
+            os.ftruncate(fd, reserved)
+            yield fd
+
+    def _record_format_gate(partial: Path, *, system_id: str) -> None:
+        sizes_at_format_gate.append(partial.stat().st_size)
+        original_format_gate(partial, system_id=system_id)
+
+    monkeypatch.setattr(rootfs_upload_fetch, "_flocked_partial", _preallocated_partial)
+    monkeypatch.setattr(rootfs_upload_fetch, "_require_qcow2_magic", _record_format_gate)
+
+    dest = _stage(store, tmp_path, encoding="gzip", uncompressed_size=reserved)
+
+    assert sizes_during_decode == [reserved]
+    assert sizes_at_format_gate == [len(canonical)]
+    assert dest.read_bytes() == canonical
 
 
 def test_stage_gzip_bomb_is_rejected_and_stages_nothing(tmp_path: Path) -> None:
