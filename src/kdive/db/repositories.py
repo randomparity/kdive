@@ -55,6 +55,10 @@ class ObjectNotFound(RuntimeError):
     """An `update_state` target id does not exist — a consistency error."""
 
 
+class ArtifactClaimConflict(RuntimeError):
+    """A conflicting artifact claim repeatedly disappeared before it could be adopted."""
+
+
 class Repository[M: BaseModel]:
     """Async `insert` / `get` for one table.
 
@@ -290,6 +294,47 @@ class KeyedRepository[M: BaseModel](Repository[M]):
         return self._model.model_validate(row)
 
 
+class ArtifactRepository(Repository[Artifact]):
+    """Artifact rows with a conflict-aware ownership-triple claim operation (ADR-0528)."""
+
+    async def claim(self, conn: AsyncConnection, obj: Artifact) -> tuple[Artifact, bool]:
+        """Insert ``obj`` or adopt the row that already owns its artifact triple.
+
+        A conflicting row can be deleted between PostgreSQL resolving ``ON CONFLICT`` and the
+        following read. Retry the pair once so the now-free triple can be claimed; repeated
+        disappearance is a consistency failure the post-PUT handler must compensate.
+        """
+        insert_query = sql.SQL(
+            "INSERT INTO {table} ({cols}) VALUES ({vals}) "
+            "ON CONFLICT (owner_kind, owner_id, object_key) DO NOTHING "
+            "RETURNING {projection}"
+        ).format(
+            table=sql.Identifier(self._table),
+            cols=sql.SQL(", ").join(sql.Identifier(c) for c in self._insert_columns),
+            vals=sql.SQL(", ").join(sql.Placeholder(c) for c in self._insert_columns),
+            projection=self._projection,
+        )
+        select_query = sql.SQL(
+            "SELECT {projection} FROM {table} "
+            "WHERE owner_kind = %s AND owner_id = %s AND object_key = %s"
+        ).format(projection=self._projection, table=sql.Identifier(self._table))
+        for _attempt in range(2):
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(insert_query, self._insert_params(obj))
+                row = await cur.fetchone()
+                if row is not None:
+                    return self._model.model_validate(row), True
+                await cur.execute(select_query, (obj.owner_kind, obj.owner_id, obj.object_key))
+                row = await cur.fetchone()
+                if row is not None:
+                    return self._model.model_validate(row), False
+        raise ArtifactClaimConflict(
+            "artifact claim winner disappeared twice for "
+            f"({obj.owner_kind}, {obj.owner_id}, {obj.object_key}); "
+            "conditionally discard the unregistered object and retry the job"
+        )
+
+
 def _to_db_value(value: object) -> object:
     """Convert enum-backed domain scalars to their SQL column representation."""
     if isinstance(value, StrEnum):
@@ -396,7 +441,7 @@ JOBS = StatefulRepository(
     JobState,
     json_columns=frozenset({"payload", "authorizing", "failure_context"}),
 )
-ARTIFACTS = Repository(Artifact, "artifacts")
+ARTIFACTS = ArtifactRepository(Artifact, "artifacts")
 
 # The image catalog (ADR-0092). A plain `Repository`: the publish/register state machine
 # (defined → pending → registered, re-arming `pending_since`) is owned by the images publish
