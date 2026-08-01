@@ -134,12 +134,19 @@ stop_daemons() {
 # End daemons which remain after stop_daemons' grace period. This is deliberately a separate
 # helper: stop_daemons also runs during bring-up, where escalation would abandon legitimate work.
 force_stop_daemons() {
-  local pid
+  local current pid still_daemon
   local -a pids remaining unsignalled=()
   mapfile -t pids < <(daemon_pids)
   ((${#pids[@]})) || return 0
   echo "force-stopping kdive daemons: ${pids[*]}"
   for pid in "${pids[@]}"; do
+    # Discovery and signalling cannot be atomic in portable shell. Narrow the PID-reuse window by
+    # requiring the pid to match the daemon argv again immediately before the irreversible signal.
+    still_daemon=0
+    while read -r current; do
+      [[ "$current" == "$pid" ]] && still_daemon=1
+    done < <(daemon_pids)
+    ((still_daemon)) || continue
     if pids_need_sudo "$pid"; then
       sudo kill -9 "$pid" 2>/dev/null || unsignalled+=("$pid")
     else
@@ -411,9 +418,15 @@ require_workers_alive() {
   # count exists to prevent. The two directions need different remedies, so they say different
   # things.
   if ((have > want)); then
-    local pid_csv
+    local pid_csv stopped_pid worker_pid
+    local -a unsignalled_workers=()
     printf -v pid_csv '%s,' "${pids[@]}"
     pid_csv="${pid_csv%,}"
+    for stopped_pid in "${STOP_DAEMONS_UNSIGNALLED[@]}"; do
+      for worker_pid in "${pids[@]}"; do
+        [[ "$stopped_pid" == "$worker_pid" ]] && unsignalled_workers+=("$stopped_pid")
+      done
+    done
     # Forced teardown owns escalation. Keeping it out of stop_daemons preserves bring-up's
     # graceful-only contract while giving this error one supported, ownership-aware remedy.
     {
@@ -426,8 +439,8 @@ require_workers_alive() {
       echo "  The survivors are whichever have the older start times. This step is diagnostic"
       echo "  only — the kill below ends every pid in the list, survivor or not:"
       echo "    ps -ww -o pid,lstart,etime,args -p ${pid_csv}"
-      if ((${#STOP_DAEMONS_UNSIGNALLED[@]})); then
-        echo "  SIGTERM was not delivered to: ${STOP_DAEMONS_UNSIGNALLED[*]}. Waiting cannot end"
+      if ((${#unsignalled_workers[@]})); then
+        echo "  SIGTERM was not delivered to: ${unsignalled_workers[*]}. Waiting cannot end"
         echo "  those pids; use the forced teardown below."
       else
         echo "  Either wait for the in-flight job to finish, then re-run, or end the stack with:"

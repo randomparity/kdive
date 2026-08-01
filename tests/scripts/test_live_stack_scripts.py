@@ -569,7 +569,7 @@ def test_force_stop_daemons_sends_sigkill_only_to_graceful_survivors(tmp_path: P
     result = _lib(
         "sleep() { :; }\n"
         f'daemon_pids() {{ echo scan >>"{scans}"; '
-        f'[[ $(wc -l <"{scans}") == 1 ]] && printf "111\\n222\\n"; }}\n'
+        f'(( $(wc -l <"{scans}") <= 3 )) && printf "111\\n222\\n"; }}\n'
         "pids_need_sudo() { return 1; }\n"
         f'kill() {{ echo "$*" >>"{signals}"; }}\n'
         "force_stop_daemons\n"
@@ -589,6 +589,22 @@ def test_force_stop_daemons_fails_when_sigkill_cannot_be_delivered() -> None:
     )
     assert result.returncode != 0
     assert "SIGKILL was not delivered to: 111" in result.stderr, result.stderr
+
+
+def test_force_stop_daemons_revalidates_a_pid_before_sigkill(tmp_path: Path) -> None:
+    """A daemon that exits after discovery must not expose a reused pid to SIGKILL."""
+    scans = tmp_path / "scans"
+    signals = tmp_path / "signals"
+    result = _lib(
+        "sleep() { :; }\n"
+        f'daemon_pids() {{ echo scan >>"{scans}"; '
+        f'[[ $(wc -l <"{scans}") == 1 ]] && echo 111; }}\n'
+        "pids_need_sudo() { return 1; }\n"
+        f'kill() {{ echo "$*" >>"{signals}"; }}\n'
+        "force_stop_daemons\n"
+    )
+    assert result.returncode == 0, result.stderr
+    assert not signals.exists(), "a pid absent from the revalidated daemon set must not be killed"
 
 
 def test_down_force_is_teardown_only_and_runs_after_the_graceful_stop() -> None:
@@ -656,6 +672,19 @@ def test_surplus_report_distinguishes_a_pid_that_was_not_signalled(tmp_path: Pat
     assert "SIGTERM was not delivered to: 111" in result.stderr
     assert "Waiting cannot end those pids" in " ".join(result.stderr.split())
     assert "wait for the in-flight job" not in result.stderr
+
+
+def test_surplus_report_ignores_unsignalled_nonworker_daemons(tmp_path: Path) -> None:
+    """Host-wide stop failures must not change advice for checkout-scoped worker pids."""
+    result = _lib(
+        f'py="{tmp_path}/no-such-python"\n'
+        "STOP_DAEMONS_UNSIGNALLED=(999)\n"
+        "worker_pids() { echo 111; echo 222; }\n"
+        "require_workers_alive 1\n"
+    )
+    assert result.returncode != 0
+    assert "SIGTERM was not delivered" not in result.stderr
+    assert "wait for the in-flight job" in result.stderr
 
 
 def test_build_stamps_still_report_a_worker_row_with_no_logs(tmp_path: Path) -> None:
