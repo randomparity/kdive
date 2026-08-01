@@ -51,6 +51,12 @@ both fields. New writers change the attempt UUID together with publication field
 remain attempt-aware. This makes old-image adoption and rollback safe: recovery skips the demoted
 row, and old registration cannot retain stale attempt metadata.
 
+A companion `BEFORE DELETE` trigger declines deletion of a pending row with a non-null attempt.
+This protects a new publisher from predecessor dangling, expiry, and inventory-prune paths that do
+not know the fence. New recovery first clears the attempt and principal inside its locked candidate
+transaction when it has proven deletion is the terminal outcome, then deletes the row. The later
+contract phase owns removal or replacement of this compatibility guard.
+
 The qcow2 and optional config object keys include the attempt UUID, so a PUT from a superseded,
 cancelled, or disconnected attempt can land only at its own now-rowless key; it cannot recreate or
 overwrite the key a later attempt or recovery validated. This narrowly replaces ADR-0317/0336's
@@ -145,6 +151,8 @@ revalidating the same persisted attempt.
   dangling repair is the only automatic path that can remove an active reservation.
 - A predecessor writer can still publish during coexistence, but adopting an attempt-aware row
   demotes it to legacy state; recovery intentionally leaves it for the later contract phase.
+- Predecessor deletion paths cannot remove an attempt-aware pending row; only new recovery can
+  disarm the compatibility guard under the publication fence before deletion.
 
 ## Considered & rejected
 

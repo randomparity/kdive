@@ -85,6 +85,11 @@ the same non-null attempt UUID clears both attempt and principal. A new writer c
 UUID in the same statement, so its reservation remains attempt-aware. Every transition out of
 `pending` clears both fields regardless of writer version.
 
+A `BEFORE DELETE` compatibility trigger returns `NULL` for a pending row whose attempt is non-null,
+so predecessor dangling repair, private expiry, and inventory prune cannot remove a new writer's
+active reservation without the fence. New recovery, after acquiring the fence and proving a delete
+outcome, clears attempt/principal inside the same locked transaction before issuing its delete.
+
 Thus an old writer adopting a phase-2 reservation atomically turns it into legacy null-attempt
 state before its unfenced PUT; recovery skips the row throughout coexistence. Old-image registration
 cannot leave stale attempt metadata. This trigger is compatibility machinery for the expand phase,
@@ -170,8 +175,9 @@ Migration 0092 adds nullable `publication_attempt_id uuid` and `publication_prin
 without backfill or a final constraint. New writers populate attempts; old-image and pre-migration
 pending rows remain nullable legacy state that recovery ignores in this phase. Registration clears
 both fields. A compatibility trigger demotes predecessor-shaped pending mutations to null-attempt
-legacy state and clears metadata on every transition out of pending. `ImageCatalogEntry` gains both
-nullable fields so its
+legacy state and clears metadata on every transition out of pending. A delete trigger protects
+attempt-aware pending rows; fenced recovery explicitly disarms it before terminal deletion.
+`ImageCatalogEntry` gains both nullable fields so its
 `extra="forbid"` validation continues to accept `SELECT *`; `PublishReservation` gains the required
 attempt UUID. Every explicit image projection is audited and extended when it feeds that model.
 Catalog/MCP response builders remain explicit projections and must never render either internal
@@ -265,6 +271,7 @@ The focused acceptance matrix is binding:
 | migration compatibility | pre-0092 pending rows remain null-attempt legacy state, new-writer pending rows receive distinct non-null attempts, and both new registration paths clear attempt/principal atomically |
 | predecessor adoption | phase-1 SQL adopting a phase-2 pending row atomically clears attempt/principal before its unfenced PUT; recovery skips the demoted row |
 | predecessor registration | phase-1 SQL transitioning an attempt-aware row to registered cannot retain attempt/principal metadata |
+| predecessor deletion | phase-1 dangling, expiry, and inventory-prune DELETE shapes cannot remove an attempt-aware pending row; fenced new recovery can disarm and delete it atomically |
 | candidate isolation | a typed store failure on the first candidate preserves it while a healthy later candidate reaches a terminal outcome in the same pass |
 | exact SDK checksum | the request maps canonical padded base64 to `ChecksumSHA256`; null omits it |
 | normal HEAD integrity | matching size+checksum registers; absent, wrong-size, missing/malformed, or mismatched checksum stays pending and raises the typed publish failure |
