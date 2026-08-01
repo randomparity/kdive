@@ -74,7 +74,13 @@ class _FakeImageStore:
     def head_present(self, key: str) -> bool:
         return key not in self.deleted
 
+    def head(self, key: str) -> None:
+        return None
+
     def delete(self, key: str) -> None:
+        self.deleted.append(key)
+
+    def delete_version(self, key: str, version_id: str) -> None:
         self.deleted.append(key)
 
     def put_artifact(

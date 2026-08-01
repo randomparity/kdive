@@ -7,7 +7,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Protocol, cast
+from typing import Protocol
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -44,7 +44,7 @@ class ExternalBuildStore(Protocol):
 
     def head(self, key: str) -> HeadResult | None: ...
     def get_range(self, key: str, *, start: int, length: int) -> bytes: ...
-    def delete(self, key: str) -> None: ...
+    def delete_version(self, key: str, version_id: str) -> None: ...
     def create_multipart_upload(
         self, key: str, *, sensitivity: Sensitivity, retention_class: str
     ) -> str: ...
@@ -209,8 +209,6 @@ class CompleteBuildFinalizer:
             keys=prepared.keys,
             heads=validated.heads,
             store=prepared.store,
-            entries=prepared.manifest_row.entries,
-            prefix=prepared.manifest_row.prefix,
             chunked=prepared.has_chunks,
             chunk_heads=chunk_heads,
             window_deadline=window_deadline,
@@ -250,8 +248,6 @@ class _ExternalBuildFinalization:
     keys: dict[str, str]
     heads: dict[str, HeadResult]
     store: ExternalBuildStore | None
-    entries: Sequence[ManifestEntry]
-    prefix: str
     chunked: bool
     chunk_heads: dict[str, HeadResult]
     window_deadline: datetime
@@ -307,9 +303,10 @@ async def _reassemble_chunked_artifacts(
 
     The ``RUN`` lock taken here is transaction-scoped and this ``conn.transaction()`` is a
     savepoint (the request's transaction is already open), so ``RELEASE SAVEPOINT`` does *not*
-    drop it: the lock is held for the rest of the request. That is deliberate — it is what keeps
-    the reaper off the chunk objects for the whole reassembly — and it is why the unlocked stretch
-    ``_require_unreaped_window`` guards exists only on the single-PUT path.
+    drop it: the lock is held until successful finalization's explicit commit. That is deliberate
+    — it keeps the reaper off the chunk objects through reassembly and row registration, then the
+    commit releases the lock before the post-commit exact chunk deletes. It is why the unlocked
+    stretch ``_require_unreaped_window`` guards exists only on the single-PUT path.
 
     The savepoint also commits the extension independently of the rest of the finalize, which is
     why the extension has to be bounded here rather than unwound later. Every failure past this
@@ -432,6 +429,7 @@ async def _finalize_external_build(
         if not finalization.chunked:
             await upload_manifest.delete_manifest(conn, "runs", run.id)
     if finalization.chunked and finalization.store is not None:
+        await conn.commit()
         await _cleanup_chunks_and_manifest(
             conn,
             finalization.store,
@@ -547,9 +545,7 @@ async def _cleanup_chunks_and_manifest(
 ) -> None:
     for key, head in chunk_heads.items():
         try:
-            await asyncio.to_thread(
-                cast(_VersionedDeleteStore, store).delete_version, key, head.version_id
-            )
+            await asyncio.to_thread(store.delete_version, key, head.version_id)
         except CategorizedError as exc:
             _log.warning("chunk cleanup failed for %s: %s", key, exc)
             return
@@ -557,12 +553,6 @@ async def _cleanup_chunks_and_manifest(
         await upload_manifest.delete_manifest(conn, "runs", run_id)
     except CategorizedError as exc:
         _log.warning("manifest cleanup failed for run %s: %s", run_id, exc)
-
-
-class _VersionedDeleteStore(Protocol):
-    """The exact-delete operation required after chunk identities are selected."""
-
-    def delete_version(self, key: str, version_id: str) -> None: ...
 
 
 __all__ = [

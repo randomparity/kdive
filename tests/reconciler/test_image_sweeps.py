@@ -21,15 +21,18 @@ windows are set in SQL against the Postgres clock, so there is no test-vs-DB ske
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID
 
 import psycopg
+import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import ArtifactWriteRequest, HeadResult, StoredArtifact
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.images import (
     ImageMtime,
     _delete_if_leaked,
@@ -57,12 +60,15 @@ class _FakeImageStore:
     ``ImageMtime`` so the leaked-grace comparison stays on the DB clock.
     """
 
-    def __init__(self, objects: dict[str, timedelta]) -> None:
+    def __init__(
+        self, objects: dict[str, timedelta], *, fails_on: frozenset[str] = frozenset()
+    ) -> None:
         # objects maps key -> age; the absolute mtime is now - age.
         self._objects = dict(objects)
         self._now = datetime.now(UTC)
         self.deleted: list[str] = []
         self.deleted_versions: list[tuple[str, str]] = []
+        self._fails_on = fails_on
 
     def list_image_objects(self) -> list[ImageMtime]:
         return [
@@ -86,6 +92,8 @@ class _FakeImageStore:
         )
 
     def delete_version(self, key: str, version_id: str) -> None:
+        if key in self._fails_on:
+            raise CategorizedError("delete failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
         self.deleted.append(key)
         self.deleted_versions.append((key, version_id))
 
@@ -281,6 +289,26 @@ def test_leaked_sweep_reclaims_orphaned_config(migrated_url: str) -> None:
         assert store.deleted_versions == [(orphan_config, "test-version")]
 
     asyncio.run(_run())
+
+
+def test_leaked_sweep_continues_after_one_object_store_failure(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def _run() -> None:
+        failed = "images/local-libvirt/gone/x86_64.qcow2"
+        later = "images/local-libvirt/later/x86_64.qcow2"
+        store = _FakeImageStore(
+            {failed: timedelta(hours=2), later: timedelta(hours=2)}, fails_on=frozenset({failed})
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: _repair_leaked_images(c, store, _grace()))
+
+        assert count == 1
+        assert store.deleted_versions == [(later, "test-version")]
+
+    with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.images"):
+        asyncio.run(_run())
+    assert any("gone/x86_64.qcow2" in record.getMessage() for record in caplog.records)
 
 
 def test_leaked_sweep_deletes_the_pre_fence_head_version_after_a_peer_put(

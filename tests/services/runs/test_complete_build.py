@@ -862,3 +862,34 @@ def test_complete_build_chunk_cleanup_does_not_target_peer_chunk_versions(
         assert set(store.current_versions.values()) == {"peer-version-2"}
 
     asyncio.run(_run())
+
+
+def test_complete_build_does_not_delete_chunks_when_the_commit_fails(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact chunk cleanup cannot begin until the Run finalization is durable."""
+
+    async def _reject_commit(_: psycopg.AsyncConnection) -> None:
+        raise psycopg.OperationalError("commit failed")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
+            store = _ChunkedStore()
+            finalizer = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(run_id)),
+                object_store_factory=lambda: store,
+            )
+            run = await _run_by_id(pool, run_id)
+            async with pool.connection() as conn:
+                with monkeypatch.context() as patched:
+                    patched.setattr(psycopg.AsyncConnection, "commit", _reject_commit)
+                    with pytest.raises(psycopg.OperationalError, match="commit failed"):
+                        await finalizer.complete(
+                            conn, _ctx(), run, build_id=None, cmdline="console=ttyS0"
+                        )
+
+        assert store.deleted_versions == []
+
+    asyncio.run(_run())

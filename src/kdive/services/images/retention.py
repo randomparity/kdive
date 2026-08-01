@@ -10,7 +10,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.artifacts.storage import ArtifactWriteRequest, ObjectListing, StoredArtifact
+from kdive.artifacts.storage import ArtifactWriteRequest, HeadResult, ObjectListing, StoredArtifact
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.images.cataloging.read_model import image_referenced_by_live_system
 
@@ -23,15 +23,18 @@ _PRIVATE_VISIBILITY = ImageVisibility.PRIVATE.value
 class ImageSweepStore(Protocol):
     """The object-store port the image sweeps and the reconcile inventory pass share.
 
-    The sweeps use ``list_image_objects``/``head_present``/``delete``; the inventory reconcile
+    The sweeps use ``list_image_objects``/``head``/``head_present``/``delete``/``delete_version``;
+    the inventory reconcile
     additionally uploads a staged image's captured kernel ``.config`` via ``put_artifact``
     (ADR-0336). The real :class:`~kdive.store.objectstore.ObjectStore` satisfies all four, and the
     reconcile loop holds that store, so the shared port keeps one type flowing to both consumers.
     """
 
     def list_image_objects(self) -> list[ObjectListing]: ...
+    def head(self, key: str) -> HeadResult | None: ...
     def head_present(self, key: str) -> bool: ...
     def delete(self, key: str) -> None: ...
+    def delete_version(self, key: str, version_id: str) -> None: ...
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact: ...
 
 

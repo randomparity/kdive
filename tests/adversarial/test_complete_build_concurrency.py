@@ -140,7 +140,7 @@ class _LoserStore:
     def abort_multipart_upload(self, key, upload_id) -> None:
         pass
 
-    def delete(self, key: str) -> None:
+    def delete_version(self, key: str, version_id: str) -> None:
         pass
 
 

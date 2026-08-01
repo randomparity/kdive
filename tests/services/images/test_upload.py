@@ -915,7 +915,13 @@ class _SweepStore:
     def head_present(self, key: str) -> bool:
         return False
 
+    def head(self, key: str) -> artifact_types.HeadResult | None:
+        return None
+
     def delete(self, key: str) -> None:
+        raise AssertionError(f"the dangling sweep must not delete objects (got {key!r})")
+
+    def delete_version(self, key: str, version_id: str) -> None:
         raise AssertionError(f"the dangling sweep must not delete objects (got {key!r})")
 
     def put_artifact(

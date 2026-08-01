@@ -91,7 +91,7 @@ class _ValidationStore:
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
         return self._blobs[key][start : start + length]
 
-    def delete(self, key: str) -> None:
+    def delete_version(self, key: str, version_id: str) -> None:
         raise AssertionError("single-PUT path must not delete")
 
     def create_multipart_upload(

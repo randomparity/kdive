@@ -141,6 +141,9 @@ class _FakeImageStore:
     def delete(self, key: str) -> None:
         self.deleted.append(key)
 
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.deleted.append(key)
+
 
 def _conforming() -> InspectSeam:
     def _probe(qcow2_path: Path, candidates: Sequence[str]) -> set[str]:
