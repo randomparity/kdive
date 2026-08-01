@@ -117,7 +117,8 @@ Run:
 ```bash
 uv run python -m pytest \
   tests/providers/local_libvirt/test_rootfs_upload_fetch.py::test_native_fallocate_preserves_lengths_above_two_gib \
-  tests/providers/local_libvirt/test_rootfs_upload_fetch.py::test_native_fallocate_captures_errno -q
+  tests/providers/local_libvirt/test_rootfs_upload_fetch.py::test_native_fallocate_captures_errno \
+  tests/providers/local_libvirt/test_rootfs_upload_fetch.py::test_native_fallocate_allocates_a_real_temporary_file -q
 just lint
 just type
 ```
