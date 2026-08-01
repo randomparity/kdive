@@ -167,3 +167,37 @@ needs to bite (#1723). `just ci` gives the same local feedback without the false
 as a complement, and it is one, but the reordering here happened between two agents who were
 each following the pre-assignment practice correctly. Guidance does not catch what nobody is
 in a position to notice.
+
+### Amendment (2026-08-01): a merge queue is disproportionate to the remaining risk (#1753)
+
+The earlier amendment left GitHub's merge queue unevaluated. It is now evaluated and rejected;
+the required checks remain non-strict, the repository does not require a merge queue, and the
+residual race described above remains accepted.
+
+A queue would close the race. A `merge_group` run checks out the prospective merge-group commit:
+the latest target-branch state plus the queued changes ahead of and including the pull request.
+The ordering guard can keep fetching `origin/main` and compare that base with the checkout. If a
+higher-numbered sibling is already on `main`, the lower-numbered addition fails. If both
+migrations are in one merge group, both are in the checkout and the combined merge applies them
+in filename order, so their order of arrival in the queue does not create the deployed-state gap.
+
+That stronger invariant is not free. Every queued change would run the full required CI and
+records workflows again on a merge-group commit, although this stale-base hazard belongs only to
+concurrent migration additions. The queue preserves first-in-first-out ordering; failed entries
+are removed and later groups are rebuilt. Configurable build concurrency and grouping can run
+several prospective groups at once and merge several pull requests together, but they do not
+remove the additional workflow executions or the repository-wide queue policy. Current campaign
+practice already merges serially and refreshes remaining pull requests after each merge. Applying
+the queue's latency and operating model to every pull request is disproportionate to the narrow,
+explicitly accepted risk outside that path.
+
+Enabling it later is a coupled change, not a ruleset toggle in isolation. Both required workflows
+must trigger on `merge_group`, or their required contexts never report and the queued merge fails.
+The CI workflow's checkout plus its explicit `origin/main` fetch already give the ordering guard
+the right comparison. The records workflow also needs event-specific base and concurrency
+handling: it currently reads `github.event.pull_request.base.sha`, which a `merge_group` event
+does not provide, and its gate deliberately fails in CI when `BASE_SHA` is empty. Its concurrency
+key likewise uses `github.event.pull_request.number`; without an event-specific ref or head SHA,
+every merge-group run would share one empty-suffixed key and newer groups would cancel older
+required checks. Wiring unused triggers now is rejected as speculative surface; the workflow and
+repository setting should change together if the tradeoff changes.
