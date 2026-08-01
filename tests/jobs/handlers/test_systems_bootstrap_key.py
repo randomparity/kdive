@@ -39,6 +39,7 @@ from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.security.audit import args_digest
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.systems_support import PROVISIONING_PROFILE, provider_resolver
+from tests.support.object_store import INERT_OBJECT_STORE
 
 _RESOLVED_CPU: dict[str, Any] = {"model": "SapphireRapids", "arch": "x86_64"}
 
@@ -476,7 +477,9 @@ def test_teardown_handler_deletes_key_row(migrated_url: str) -> None:
                     f"{system_id}:teardown",
                 )
             async with pool.connection() as conn:
-                await systems_handlers.teardown_handler(conn, job, resolver=resolver)
+                await systems_handlers.teardown_handler(
+                    conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                )
             return await _key_row_count(pool, system_id), await _audit_rows(pool, system_id)
 
     count, audit = asyncio.run(_run())
@@ -511,7 +514,9 @@ def test_teardown_handler_reclaims_pcap_directory(migrated_url, tmp_path, monkey
                     f"{system_id}:teardown",
                 )
             async with pool.connection() as conn:
-                await systems_handlers.teardown_handler(conn, job, resolver=resolver)
+                await systems_handlers.teardown_handler(
+                    conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                )
             return pcap_root.exists()
 
     assert asyncio.run(_run()) is False
@@ -539,6 +544,8 @@ def test_teardown_handler_pcap_reclaim_tolerates_absent_dir(
                     f"{system_id}:teardown",
                 )
             async with pool.connection() as conn:
-                return await systems_handlers.teardown_handler(conn, job, resolver=resolver)
+                return await systems_handlers.teardown_handler(
+                    conn, job, resolver=resolver, artifact_store=INERT_OBJECT_STORE
+                )
 
     assert asyncio.run(_run()) is not None

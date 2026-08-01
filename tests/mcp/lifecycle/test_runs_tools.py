@@ -65,6 +65,7 @@ from kdive.services.runs.liveness import Liveness
 from kdive.services.runs.steps import StepProgress, ready_boot_outcome, step_progress
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.systems_support import provider_resolver
+from tests.support.object_store import INERT_OBJECT_STORE
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _PROFILE: dict[str, Any] = {"schema_version": 1}
@@ -4641,6 +4642,7 @@ def test_boot_handler_records_step_run_stays_succeeded(migrated_url: str) -> Non
                     job,
                     resolver=provider_resolver(booter=booter),
                     secret_registry=SecretRegistry(),
+                    artifact_store=INERT_OBJECT_STORE,
                 )
             assert result == run_id
             assert len(booter.calls) == 1
@@ -4667,6 +4669,7 @@ def test_boot_handler_replay_does_not_reboot(migrated_url: str) -> None:
                     job,
                     resolver=provider_resolver(booter=booter),
                     secret_registry=SecretRegistry(),
+                    artifact_store=INERT_OBJECT_STORE,
                 )
             async with pool.connection() as conn:
                 await runs_handlers.boot_handler(
@@ -4674,6 +4677,7 @@ def test_boot_handler_replay_does_not_reboot(migrated_url: str) -> None:
                     job,
                     resolver=provider_resolver(booter=booter),
                     secret_registry=SecretRegistry(),
+                    artifact_store=INERT_OBJECT_STORE,
                 )
         assert len(booter.calls) == 1
 
@@ -4695,6 +4699,7 @@ def test_boot_handler_failure_records_no_step(migrated_url: str, category: Error
                         job,
                         resolver=provider_resolver(booter=booter),
                         secret_registry=SecretRegistry(),
+                        artifact_store=INERT_OBJECT_STORE,
                     )
             assert caught.value.category is category
             nsteps = await _count(
@@ -4727,6 +4732,7 @@ def test_boot_handler_cleanup_failure_preserves_provider_category(
                         job,
                         resolver=provider_resolver(booter=booter),
                         secret_registry=SecretRegistry(),
+                        artifact_store=INERT_OBJECT_STORE,
                     )
 
         assert caught.value.category is ErrorCategory.BOOT_TIMEOUT

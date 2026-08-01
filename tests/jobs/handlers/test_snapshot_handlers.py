@@ -48,6 +48,7 @@ from tests.mcp.systems_support import (
     FakeProvisioning,
     provider_resolver,
 )
+from tests.support.object_store import INERT_OBJECT_STORE
 
 _DT = datetime(2026, 7, 17, tzinfo=UTC)
 
@@ -465,6 +466,7 @@ def test_teardown_deletes_all_snapshots_and_ledger_rows(migrated_url: str) -> No
                     conn,
                     _job(JobKind.TEARDOWN, sid, {}),
                     resolver=resolver,
+                    artifact_store=INERT_OBJECT_STORE,
                 )
                 assert await _sys_state(conn, sid) is SystemState.TORN_DOWN
                 assert await snapshots_for_system(conn, sid) == []
@@ -489,6 +491,7 @@ def test_teardown_of_a_restoring_system_succeeds(migrated_url: str) -> None:
                     conn,
                     _job(JobKind.TEARDOWN, sid, {}),
                     resolver=resolver,
+                    artifact_store=INERT_OBJECT_STORE,
                 )
                 assert await _sys_state(conn, sid) is SystemState.TORN_DOWN
         finally:

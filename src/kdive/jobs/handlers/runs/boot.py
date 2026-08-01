@@ -30,7 +30,7 @@ from kdive.providers.ports.lifecycle import (
 from kdive.security.authz.context import RequestContext
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
-from kdive.store.objectstore import ObjectStore, object_store_from_env
+from kdive.store.objectstore import ObjectStore
 
 
 async def _resolve_system_accel(conn: AsyncConnection, system_id: UUID) -> str | None:
@@ -142,10 +142,9 @@ async def boot_handler(
     *,
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
-    artifact_store: ObjectStore | None = None,
+    artifact_store: ObjectStore,
 ) -> str | None:
     """Boot the installed kernel and confirm run-readiness, recording the `boot` step."""
-    artifact_store = artifact_store or object_store_from_env()
     run_id = UUID(load_payload(job, RunPayload).run_id)
     run = await RUNS.get(conn, run_id)
     if run is None:

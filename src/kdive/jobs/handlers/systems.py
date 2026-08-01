@@ -53,7 +53,7 @@ from kdive.providers.ports.lifecycle import Snapshotter
 from kdive.providers.shared.runtime_paths import domain_name_for, pcap_dir
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import artifact_key, object_store_from_env
+from kdive.store.objectstore import artifact_key
 
 _log = logging.getLogger(__name__)
 
@@ -753,11 +753,10 @@ async def teardown_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
-    artifact_store: RetiredKeyBatchDeleter | None = None,
+    artifact_store: RetiredKeyBatchDeleter,
 ) -> str | None:
     """Destroy the domain, reclaim console artifacts, and drive the System ``-> torn_down``."""
     system_id = UUID(load_payload(job, SystemPayload).system_id)
-    artifact_store = artifact_store or object_store_from_env()
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
@@ -815,7 +814,7 @@ def register_handlers(
     *,
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
-    artifact_store: RetiredKeyBatchDeleter | None = None,
+    artifact_store: RetiredKeyBatchDeleter,
 ) -> None:
     """Bind the provision/teardown/reprovision/authorize_ssh_key/check_ssh_reachable handlers."""
     registry.register(

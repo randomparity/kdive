@@ -84,6 +84,7 @@ from tests.mcp.systems_support import (
 from tests.mcp.systems_support import (
     upload_profile as _upload_profile,
 )
+from tests.support.object_store import INERT_OBJECT_STORE
 
 
 async def _seed_system(
@@ -1329,7 +1330,10 @@ def test_teardown_handler_destroys_and_sets_torn_down(migrated_url: str) -> None
             prov = _FakeProvisioning()
             async with pool.connection() as conn:
                 await systems_handlers.teardown_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn,
+                    job,
+                    resolver=_provider_resolver(provisioner=prov),
+                    artifact_store=INERT_OBJECT_STORE,
                 )
             assert prov.torn_down == [f"kdive-{sys_id}"]
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -1349,7 +1353,10 @@ def test_teardown_handler_provisioning_system_one_transition(migrated_url: str) 
             prov = _FakeProvisioning()
             async with pool.connection() as conn:
                 await systems_handlers.teardown_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn,
+                    job,
+                    resolver=_provider_resolver(provisioner=prov),
+                    artifact_store=INERT_OBJECT_STORE,
                 )
             assert prov.torn_down == [f"kdive-{sys_id}"]  # NULL domain_name -> deterministic name
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -1374,7 +1381,10 @@ def test_teardown_handler_already_torn_down_reattempts_destroy_no_transition(
             prov = _FakeProvisioning()
             async with pool.connection() as conn:
                 await systems_handlers.teardown_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn,
+                    job,
+                    resolver=_provider_resolver(provisioner=prov),
+                    artifact_store=INERT_OBJECT_STORE,
                 )
             assert prov.torn_down == [f"kdive-{sys_id}"]  # idempotent destroy re-attempted
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -2046,6 +2056,7 @@ def test_register_handlers_binds_provision_teardown_and_reprovision() -> None:
         registry,
         resolver=_provider_resolver(provisioner=_FakeProvisioning()),
         secret_registry=SecretRegistry(),
+        artifact_store=INERT_OBJECT_STORE,
     )
     assert registry.get(JobKind.PROVISION) is not None
     assert registry.get(JobKind.TEARDOWN) is not None
@@ -2134,7 +2145,10 @@ def test_teardown_handler_drives_pre_ready_system_to_torn_down(migrated_url: str
             prov = _FakeProvisioning()
             async with pool.connection() as conn:
                 await systems_handlers.teardown_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn,
+                    job,
+                    resolver=_provider_resolver(provisioner=prov),
+                    artifact_store=INERT_OBJECT_STORE,
                 )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
