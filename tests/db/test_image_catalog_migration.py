@@ -16,6 +16,7 @@ from psycopg import sql
 
 from kdive.db import migrate
 from kdive.domain.catalog.images import ImageState, ImageVisibility
+from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
 
 
 def _columns(conn: psycopg.Connection, table: str) -> dict[str, str]:
@@ -440,23 +441,50 @@ def test_phase_two_reserve_adopt_and_registration_sql_remain_compatible(
     migrate.apply_migrations(pg_conn)
     attempt = uuid4()
     _insert_image(pg_conn, state="defined", object_key=None, digest=None)
+    row_id = pg_conn.execute("SELECT id FROM image_catalog").fetchone()
+    assert row_id is not None
 
     pg_conn.execute(
-        "UPDATE image_catalog SET state = 'pending', object_key = %s, digest = %s, "
-        "pending_since = now(), publication_attempt_id = %s, publication_principal = NULL",
-        ("images/attempt", "sha256:new", attempt),
+        "UPDATE image_catalog "
+        "SET state = %s, object_key = %s, kernel_config_key = %s, digest = %s, "
+        "    size_bytes = %s, pending_since = now(), publication_attempt_id = %s, "
+        "    publication_principal = %s "
+        "WHERE id = %s",
+        (
+            ImageState.PENDING.value,
+            "images/attempt",
+            "images/attempt.config",
+            "sha256:new",
+            4096,
+            attempt,
+            None,
+            row_id[0],
+        ),
     )
-    reserved = pg_conn.execute("SELECT state, publication_attempt_id FROM image_catalog").fetchone()
-    assert reserved == ("pending", attempt)
+    reserved = pg_conn.execute(
+        "SELECT state, object_key, kernel_config_key, digest, size_bytes, publication_attempt_id "
+        "FROM image_catalog"
+    ).fetchone()
+    assert reserved == (
+        "pending",
+        "images/attempt",
+        "images/attempt.config",
+        "sha256:new",
+        4096,
+        attempt,
+    )
 
-    pg_conn.execute(
+    registration = pg_conn.execute(
         "UPDATE image_catalog SET state = 'registered', publication_attempt_id = NULL, "
-        "publication_principal = NULL WHERE publication_attempt_id = %s",
-        (attempt,),
-    )
-    assert pg_conn.execute(
-        "SELECT state, publication_attempt_id, publication_principal FROM image_catalog"
-    ).fetchone() == ("registered", None, None)
+        "publication_principal = NULL "
+        "WHERE id = %s AND publication_attempt_id = %s AND digest = %s AND object_key = %s "
+        "RETURNING " + IMAGE_CATALOG_ENTRY_PROJECTION,
+        (row_id[0], attempt, "sha256:new", "images/attempt"),
+    ).fetchone()
+    assert registration is not None
+    assert registration[0] == row_id[0]
+    assert registration[16] == "registered"
+    assert registration[24:] == (None, None)
 
 
 def test_phase_two_reserve_insert_sql_remains_compatible(
@@ -465,16 +493,18 @@ def test_phase_two_reserve_insert_sql_remains_compatible(
     migrate.apply_migrations(pg_conn)
     attempt = uuid4()
 
-    pg_conn.execute(
+    inserted = pg_conn.execute(
         "INSERT INTO image_catalog "
-        "(provider, name, arch, format, root_device, object_key, digest, visibility, owner, "
-        "expires_at, state, publication_attempt_id, publication_principal, pending_since) "
+        "(provider, name, arch, format, root_device, object_key, kernel_config_key, digest, "
+        " capabilities, provenance, visibility, owner, expires_at, state, size_bytes, "
+        " publication_attempt_id, publication_principal, pending_since) "
         "VALUES ('local-libvirt', 'private', 'x86_64', 'qcow2', '/dev/vda', 'images/private', "
-        "'sha256:abc', 'private', 'project-a', '2099-01-01T00:00:00Z', 'pending', %s, "
-        "'tenant-a', now())",
+        "NULL, 'sha256:abc', '{}', '{}', 'private', 'project-a', "
+        "'2099-01-01T00:00:00Z', 'pending', 4096, %s, 'tenant-a', now()) RETURNING id",
         (attempt,),
-    )
+    ).fetchone()
 
+    assert inserted is not None
     assert pg_conn.execute(
         "SELECT state, publication_attempt_id, publication_principal FROM image_catalog"
     ).fetchone() == ("pending", attempt, "tenant-a")
@@ -492,12 +522,14 @@ def test_phase_two_recovery_disarm_then_delete_remains_compatible(
         publication_attempt_id=attempt,
     )
 
+    row_id = pg_conn.execute("SELECT id FROM image_catalog").fetchone()
+    assert row_id is not None
     disarmed = pg_conn.execute(
         "UPDATE image_catalog SET publication_attempt_id = NULL, publication_principal = NULL "
-        "WHERE id = (SELECT id FROM image_catalog) AND publication_attempt_id = %s",
-        (attempt,),
+        "WHERE id = %s AND state = %s",
+        (row_id[0], ImageState.PENDING.value),
     ).rowcount
-    deleted = pg_conn.execute("DELETE FROM image_catalog").rowcount
+    deleted = pg_conn.execute("DELETE FROM image_catalog WHERE id = %s", (row_id[0],)).rowcount
 
     assert disarmed == 0
     assert deleted == 0
@@ -509,8 +541,10 @@ def test_phase_two_registered_delete_remains_compatible(
 ) -> None:
     migrate.apply_migrations(pg_conn)
     _insert_image(pg_conn, state="registered")
+    row_id = pg_conn.execute("SELECT id FROM image_catalog").fetchone()
+    assert row_id is not None
 
-    assert pg_conn.execute("DELETE FROM image_catalog").rowcount == 1
+    assert pg_conn.execute("DELETE FROM image_catalog WHERE id = %s", (row_id[0],)).rowcount == 1
 
 
 def test_phase_three_direct_pending_delete_is_not_suppressed(
