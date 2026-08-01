@@ -963,7 +963,7 @@ def test_reconcile_runtime_cas_preserves_row_that_became_pending(
             "state": "pending",
             "kernel_config_key": "images/local-libvirt/i/publish-attempt.config",
             "publication_attempt_id": attempt_id,
-            "publication_principal": "alice",
+            "publication_principal": None,
             "size_bytes": 4096,
             "pending_since": pending_since,
         }
@@ -1033,7 +1033,7 @@ def test_reconcile_loaded_pending_row_preserves_concurrent_registration(
             await seed.execute(
                 "UPDATE image_catalog SET state = 'pending', object_key = %s, digest = %s, "
                 "provenance = %s, provenance_attested = true, kernel_config_key = %s, "
-                "publication_attempt_id = %s, publication_principal = 'alice', size_bytes = 2048, "
+                "publication_attempt_id = %s, publication_principal = NULL, size_bytes = 2048, "
                 "pending_since = %s WHERE id = %s",
                 (
                     "images/local-libvirt/i/pending.qcow2",
