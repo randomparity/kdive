@@ -58,10 +58,13 @@ and then its build record. ADR-0234's independent TTL backstop also applies: the
 an absolute `expires_at` stamped from the Postgres clock at completion using
 `KDIVE_BUILD_ARTIFACT_RETENTION_DAYS` (days, per generation). `runs.complete_build` returns that deadline
 and `server_time`. `runs.create` rejects a reference at or after the deadline with
-`reason='build_ref_expired'`, the same two timestamps, and `artifacts.create_run_upload` as the
-recovery path. Reclaim locks the Investigation and rechecks the deadline and that no live Run
-references the build before deletion. Runs store the selected `build_ref`, so concurrent create
-versus reclaim is serialized and the reference remains auditable.
+`reason='build_ref_expired'`, the same two timestamps, and `runs.create` as its literal next tool.
+The caller retries the same Investigation, System or target kind, and profile without `build_ref`;
+that successful response provides the new Run id and directs the existing
+`artifacts.create_run_upload` → upload → `runs.complete_build` recovery sequence. Reclaim locks the
+Investigation and rechecks the deadline and that no live Run references the build before deletion.
+Runs store the selected `build_ref`, so concurrent create versus reclaim is serialized and the
+reference remains auditable.
 
 ## Consequences
 

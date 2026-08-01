@@ -102,11 +102,13 @@ architecture fields.
 The existing `KDIVE_BUILD_ARTIFACT_RETENTION_DAYS` applies in days per build. Completion stamps
 `expires_at` from the Postgres clock as `server_time + retention`; it never refreshes on reuse.
 Create at or after that instant returns `reason: build_ref_expired` with `expires_at`, a fresh
-`server_time` from the same database clock, and `artifacts.create_run_upload` as the recovery tool.
-Uploading and completing identical content after expiry revalidates it and atomically publishes a
-new generation with a new deadline; the expired generation and any live Run references to it remain
-isolated. This preserves ADR-0234's storage backstop while giving an agent a terminating recovery
-path and the full limit contract before it plans reuse.
+`server_time` from the same database clock, and `runs.create` as the literal recovery tool. The
+caller repeats create with the same Investigation, System or target kind, and profile but omits
+`build_ref`. That successful create returns a Run id and the normal
+`artifacts.create_run_upload` → upload → `runs.complete_build` sequence. Uploading and completing
+identical content then publishes a new generation with a new deadline; the expired generation and
+any live Run references to it remain isolated. This preserves ADR-0234's storage backstop while
+giving an agent a terminating recovery path and the full limit contract before it plans reuse.
 
 Creation writes the Run with state `succeeded`, `kernel_ref`, `debuginfo_ref`, and `build_ref`, plus
 a succeeded `build` run step copied from the immutable record. It does not create an upload
@@ -185,7 +187,9 @@ class within that boundary.
    only after no live Run references them; expiry is reported with database-clock timestamps and a
    re-upload recovery action, and legacy run-owned build collection remains green.
 7. `runs.create`, `runs.complete_build`, `runs.get`, generated CLI/docs, schema migration tests,
-   service tests, and adversarial concurrency tests describe and prove the contract.
+   service tests, and adversarial concurrency tests describe and prove the contract. Every
+   `suggested_next_actions` entry is directly callable with identifiers in that response; expired
+   reuse points first to `runs.create`, never an upload tool that needs an absent Run id.
 
 ## Verification plan
 
