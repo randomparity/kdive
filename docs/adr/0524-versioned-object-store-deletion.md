@@ -63,7 +63,8 @@ The three issue paths split their work around the advisory lock. They capture im
 targets without a database transaction, re-check their existing database fences and commit their
 row decision under the short owner lock, then delete only the captured VersionIds after the lock is
 released. An ambiguous response is safe to retry because it can affect only the same immutable
-version.
+version. Expired-upload reaping scans at most one 1,000-entry version page after retiring a
+manifest; the recurring orphan sweep owns every later page so one owner cannot delay its peers.
 
 The upload-orphan sweep enumerates `ListObjectVersions`, not only the current logical objects. It
 groups work by exact key and spends the existing 200-target per-root budget on captured versions,

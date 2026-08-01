@@ -113,11 +113,11 @@ cannot resolve the removed row.
 ### Expired-upload reaper
 
 The reaper claims and removes the expired manifest under the existing owner lock without listing or
-deleting from the store in that transaction. After commit it enumerates the prefix's version pages,
+deleting from the store in that transaction. After commit it enumerates one prefix version page,
 groups entries by exact key, and captures bounded key batches. For each key, a short owner-locked
 transaction re-runs `owner_key_is_fenced`; it then releases the transaction and calls
 `delete_batch`. Contention or a new artifact, manifest, or live write lease declines the key for a
-later pass. An incomplete batch retains latest and leaves the remainder to the orphan sweep.
+later pass. An incomplete batch or later prefix page retains its objects for the orphan sweep.
 
 Store/list/delete failures count as undeleted. Since the manifest is already gone, surviving
 versions remain candidates for the version-aware orphan sweep.

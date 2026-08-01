@@ -156,6 +156,20 @@ class _HookedStore(_FakeStore):
         return super().delete_batch(batch)
 
 
+class _SecondPageForbiddenStore(_FakeStore):
+    """Expose one useful page and fail if the reaper tries to drain the whole prefix."""
+
+    def __init__(self, objects: dict[str, list[str]]) -> None:
+        super().__init__(objects)
+        self.pages_requested: dict[str, int] = {}
+
+    def iter_prefix_version_pages(self, prefix: str) -> Iterator[VersionPage]:
+        self.pages_requested[prefix] = self.pages_requested.get(prefix, 0) + 1
+        entries = tuple(self._version(key) for key in self._objects.get(prefix, []))
+        yield VersionPage(entries, True, "next-key", "next-version")
+        raise AssertionError("expired-upload reaping must leave later pages to orphan repair")
+
+
 def _advisory_locks_held_by(url: str, backend_pid: int) -> int:
     """Count granted advisory locks held by a backend from a second connection."""
     with psycopg.connect(url, autocommit=True) as observer:
@@ -715,6 +729,31 @@ def test_mid_sweep_delete_failure_does_not_abandon_later_owners(migrated_url: st
         async with await connect(migrated_url) as check:
             for run_id in run_ids:
                 assert await upload_manifest.get_manifest(check, "runs", run_id) is None
+
+    asyncio.run(_run())
+
+
+def test_reaper_reads_one_version_page_per_owner_and_progresses_later_owners(
+    migrated_url: str,
+) -> None:
+    """The recurring orphan sweep, not the serial reaper, owns later prefix pages."""
+
+    async def _run() -> None:
+        prefixes: list[str] = []
+        async with await connect(migrated_url) as seed:
+            for _ in range(2):
+                system_id = await seed_system(seed)
+                run_id = await seed_run(seed, system_id, run_state=RunState.CREATED)
+                prefix, request = _run_manifest(run_id, timedelta(seconds=-1))
+                await upload_manifest.replace_manifest(seed, request)
+                prefixes.append(prefix)
+        store = _SecondPageForbiddenStore({p: [f"{p}first-page"] for p in prefixes})
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _reap(store)) == 2
+
+        assert store.pages_requested == {prefix: 1 for prefix in prefixes}
+        assert sorted(store.deleted) == sorted(f"{prefix}first-page" for prefix in prefixes)
 
     asyncio.run(_run())
 

@@ -171,7 +171,7 @@ async def reap_one_owner(
             reaped=False, deferred=claim.deferred, attempted=0, declined=0, undeleted=0
         )
     try:
-        doomed = await _listed_version_keys(store, claim.prefix)
+        doomed = await _first_page_version_keys(store, claim.prefix)
     except CategorizedError as exc:
         _log.warning(
             "reconciler: upload reap could not list versions under %s for owner %s/%s: %s; "
@@ -289,19 +289,23 @@ async def _claim_abandoned_prefix(
     return _Claim(prefix=prefix, deferred=False)
 
 
-async def _listed_version_keys(store: UploadStore, prefix: str) -> list[str]:
-    """Enumerate version pages after the manifest commit and return unique keys in store order."""
+async def _first_page_version_keys(store: UploadStore, prefix: str) -> list[str]:
+    """Return unique keys from one bounded version page after the manifest commit.
+
+    The version-aware orphan sweep owns every later page. Keeping this serial phase to one store
+    page prevents a version-heavy expired owner from delaying unrelated owners in the same pass.
+    """
     pages = store.iter_prefix_version_pages(prefix)
-    keys: list[str] = []
+    page = await asyncio.to_thread(_next_version_page, pages)
+    if page is None:
+        return []
     seen: set[str] = set()
-    while True:
-        page = await asyncio.to_thread(_next_version_page, pages)
-        if page is None:
-            return keys
-        for entry in page.entries:
-            if entry.key not in seen:
-                seen.add(entry.key)
-                keys.append(entry.key)
+    keys: list[str] = []
+    for entry in page.entries:
+        if entry.key not in seen:
+            seen.add(entry.key)
+            keys.append(entry.key)
+    return keys
 
 
 def _next_version_page(pages: Iterator[VersionPage]) -> VersionPage | None:
