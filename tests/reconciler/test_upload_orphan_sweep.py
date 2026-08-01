@@ -1189,7 +1189,7 @@ def test_one_undeletable_key_does_not_starve_the_keys_behind_it(migrated_url: st
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             with pytest.raises(CategorizedError) as caught:  # still reported, once
                 await run_repair(pool, _sweep(store))
-        assert "could not reclaim 1 target(s); 2 were confirmed reclaimed" in str(caught.value)
+        assert "encountered 1 failed operation(s); 2 were confirmed reclaimed" in str(caught.value)
         assert sorted(store.deleted) == sorted([behind, other_root])
 
     asyncio.run(_run())
@@ -1331,7 +1331,7 @@ def test_many_capture_denials_spend_the_root_budget_without_starving_the_other_r
         assert run_captures == [(key, MAX_VERSIONS_PER_KEY) for key in denied[:10]]
         assert store.capture_limits[-1] == (sibling_root, MAX_VERSIONS_PER_KEY)
         assert store.deleted_versions == [(sibling_root, "v1")]
-        assert "could not reclaim 10 target(s)" in str(caught.value)
+        assert "encountered 10 failed operation(s)" in str(caught.value)
 
     asyncio.run(_run())
 
@@ -1435,7 +1435,7 @@ def test_complete_latest_failure_resumes_after_key_when_page_ends_inside_its_his
         assert len(confirmed) == 1
         assert sibling in confirmed[0]
         assert key not in confirmed[0]
-        assert "could not reclaim 1 target(s); 1 were confirmed reclaimed" in str(caught.value)
+        assert "encountered 1 failed operation(s); 1 were confirmed reclaimed" in str(caught.value)
 
     asyncio.run(_run())
 
@@ -1491,7 +1491,9 @@ def test_a_wholly_stuck_first_root_does_not_starve_the_second(migrated_url: str)
                 await run_repair(pool, _sweep(store))
         # The stuck root spent its own budget; the investigations root still got swept.
         assert store.deleted == [rootfs]
-        assert f"{MAX_RECLAIMS_PER_ROOT} target(s); 1 were confirmed reclaimed" in str(caught.value)
+        assert (
+            f"encountered {MAX_RECLAIMS_PER_ROOT} failed operation(s); 1 were confirmed reclaimed"
+        ) in str(caught.value)
 
     asyncio.run(_run())
 
@@ -1627,7 +1629,7 @@ def test_a_classify_failure_on_the_first_root_does_not_starve_the_second(
                 await run_repair(pool, _sweep(store))
         # The root whose classify raised was skipped; the sibling still drained.
         assert store.deleted == [rootfs]
-        assert "could not reclaim 1 target(s); 1 were confirmed reclaimed" in str(caught.value)
+        assert "encountered 1 failed operation(s); 1 were confirmed reclaimed" in str(caught.value)
 
     asyncio.run(_run())
 
@@ -1659,7 +1661,7 @@ def test_a_listing_failure_on_the_first_root_does_not_starve_the_second(
         # The unlistable root did not stop the sibling from draining...
         assert store.deleted == [rootfs]
         # ...and the fault is still reported, counted as the one failure of the pass.
-        assert "could not reclaim 1 target(s); 1 were confirmed reclaimed" in str(caught.value)
+        assert "encountered 1 failed operation(s); 1 were confirmed reclaimed" in str(caught.value)
 
     asyncio.run(_run())
 
@@ -1850,7 +1852,7 @@ def test_a_listing_fault_partway_through_a_root_keeps_the_pages_it_already_swept
                 await run_repair(pool, _sweep(store))
         # Page 1's three keys are gone and stay gone; the fault is the pass's one failure.
         assert store.deleted == sorted(keys)[:_PAGE_SIZE]
-        assert "could not reclaim 1 target(s); 3 were confirmed reclaimed" in str(caught.value)
+        assert "encountered 1 failed operation(s); 3 were confirmed reclaimed" in str(caught.value)
         assert store.present == set(sorted(keys)[_PAGE_SIZE:])
 
     asyncio.run(_run())

@@ -3,8 +3,8 @@
 The reclaim's filesystem half moved from the reconciler to the worker because a root-owned staging
 tree is not writable by an unprivileged reconciler. These cover the regression that motivated the
 move, the ADR-0441 §6 pin gate and the ADR-0495 in-flight-download gate the handler enforces ahead
-of it, the flipped file -> object -> row order, and the drain/marker bookkeeping that replaced the
-sweep's per-pass ``drained`` flag.
+of it, capture before the staged-base/row retirement transaction, post-commit exact-version
+deletion, and the drain/marker bookkeeping that replaced the sweep's per-pass ``drained`` flag.
 
 Async-DB tests follow the in-repo pattern: a sync ``def test_(migrated_url)`` with an inner
 ``async def _run()`` driven by ``asyncio.run``.
@@ -262,7 +262,9 @@ def _dirs(tmp_path: Path) -> tuple[Path, Path]:
 
 def test_reclaims_base_object_row_and_marker(migrated_url: str, tmp_path: Path) -> None:
     # The path #1522 had no working version of: a closed investigation past grace whose only
-    # referencer is torn_down drains completely — staged base, object, row, marker, staging dir.
+    # referencer is torn_down drains completely — immutable history captured first, staged base and
+    # row retired together, captured version exact-deleted after commit, then marker and staging
+    # directory cleared.
     inv = uuid4()
 
     async def _run() -> None:
@@ -352,8 +354,9 @@ def test_unlink_permission_fault_never_deletes_the_object_or_row(
     # #1522's regression, with the real EPERM the live proof hit (dropping the staging dir's write
     # bit blocks unlink even for the file's owner) rather than root. The harm was that the object
     # was ALREADY gone by the time the unlink failed, stranding a bootable SENSITIVE base with no
-    # recoverable copy. Under ADR-0442's file -> object -> row order that is structurally
-    # impossible: nothing is deleted, and the job fails loudly instead of warning every 30 s.
+    # recoverable copy. The current order captures immutable history first, then attempts the base
+    # unlink before row retirement; a failed unlink rolls back that transaction and prevents the
+    # post-commit exact delete, so the job fails loudly with both copies still owned.
     inv = uuid4()
 
     async def _run() -> None:
@@ -1276,12 +1279,10 @@ def _orphan_base(uploads: Path, inv: UUID) -> tuple[Path, Path]:
 def test_an_orphan_base_is_collected_after_a_faulting_checksum_retires_its_row(
     migrated_url: str, tmp_path: Path
 ) -> None:
-    # Residual (c) of #1559. A store that refuses the delete keeps the checksum's row, and
-    # ADR-0442's drain tail returned early on any surviving row -- so the staging directory was
-    # never swept again and an orphan base beside it was collected by nothing, indefinitely.
-    # ADR-0494 keys the
-    # collection on each file's own token, so the orphan goes while the faulting row's own base and
-    # marker (already unlinked here, ahead of the failed store delete) are untouched.
+    # The current order captures first, commits the staged-base unlink and row retirement, then
+    # attempts exact delete; a store fault therefore leaves a rowless version for orphan repair.
+    # ADR-0494's token-keyed staging sweep also collects the neighbouring orphan before the handler
+    # reports that post-commit fault.
     inv = uuid4()
 
     async def _run() -> None:
@@ -1476,8 +1477,9 @@ def test_a_live_held_fetch_lease_pins_the_base_with_no_partial_yet(
     # is in a pin-dropping terminal state. Neither older gate sees the download —
     # _ROOTFS_REFERENCERS_SQL excludes torn_down outright and FAILED is outside
     # ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES, so the ADR-0441 §6 classifier calls the base
-    # reclaimable, and there is no partial for the ADR-0495 flock probe to find. Before ADR-0515
-    # the base, the object and the row were all deleted out from under a live download.
+    # reclaimable, and there is no partial for the ADR-0495 flock probe to find. Before ADR-0515 the
+    # handler could capture versions, commit the staged-base unlink and row retirement, then
+    # exact-delete the captured versions out from under a live download.
     #
     # Both terminal states are parametrized because the issue names both and they defeat the
     # classifier for *different* reasons; a fix closing only one would pass a single-state test.

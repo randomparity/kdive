@@ -153,7 +153,7 @@ async def repair_leaked_upload_objects(
 
 @dataclass
 class _Tally:
-    """Completed-batch confirmations and failures across every root reached by one pass.
+    """Completed-batch confirmations and failed operations across roots reached by one pass.
 
     ``deleted`` excludes any nonlatest identities a batch removed before raising. The narrow store
     API reports only completion or failure, so claiming a partial count would invent knowledge the
@@ -173,10 +173,10 @@ class _Tally:
         """
         _log.error(
             "reconciler: upload orphan sweep aborted before its last root; it had confirmed %d "
-            "version target(s) reclaimed by completed batches and counted %d it could not "
-            "reclaim. A failed batch may have made uncounted partial progress. Neither count "
-            "reaches the repairs counter because this pass raises, and a root it had not reached "
-            "was not swept.",
+            "version target(s) reclaimed by completed batches and counted %d failed operation(s). "
+            "A failed batch may have made uncounted partial progress. Neither count reaches the "
+            "repairs counter because this pass raises, and a root it had not reached was not "
+            "swept.",
             self.deleted,
             self.failed,
         )
@@ -192,9 +192,9 @@ class _Tally:
         """
         _log.error(
             "reconciler: upload orphan sweep confirmed %d version target(s) reclaimed by completed "
-            "batches and could not reclaim %d; a failed batch may have made uncounted partial "
-            "progress. The confirmed count is not reported to the repairs counter because this "
-            "pass raises",
+            "batches and encountered %d failed operation(s); a failed batch may have made "
+            "uncounted partial progress. The confirmed count is not reported to the repairs "
+            "counter because this pass raises",
             self.deleted,
             self.failed,
         )
@@ -205,11 +205,11 @@ class _Tally:
             return self.deleted
         self.log()
         raise CategorizedError(
-            f"upload orphan sweep could not reclaim {self.failed} target(s); {self.deleted} were "
-            "confirmed reclaimed by completed batches this pass. A failed batch may have made "
-            "uncounted partial progress. Every survivor remains discoverable in version inventory "
-            "for the next pass, but a key that fails every pass (an object-lock hold, a per-key "
-            "deny) leaks until it is cleared.",
+            f"upload orphan sweep encountered {self.failed} failed operation(s); {self.deleted} "
+            "were confirmed reclaimed by completed batches this pass. A failed batch may have "
+            "made uncounted partial progress. Every survivor remains discoverable in version "
+            "inventory for the next pass, but a key that fails every pass (an object-lock hold, a "
+            "per-key deny) leaks until it is cleared.",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         )
 
