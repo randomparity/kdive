@@ -45,8 +45,12 @@ class LockScope(StrEnum):
     ``resource.id``, co-held in the ``PROJECT → RESOURCE`` order above). The one exception is the
     reconcile / ``inventory.clear_override`` per-identity lock: a ``RESOURCE``-scope lock keyed by a
     ``"{kind}:{name}"`` string and always held alone, outside the co-hold total order.
-    ``IMAGE_PUBLISH`` is keyed by the image row UUID and is likewise held alone: its session form
-    spans object publication while its transaction form fences reconciliation (ADR-0525).
+    ``IMAGE_PUBLISH`` is keyed by the image row UUID. Its session form spans object publication
+    while its transaction form fences reconciliation (ADR-0525). It is normally held alone; the
+    private-upload finisher's one co-hold is ``IMAGE_PUBLISH → PROJECT`` for the short registration
+    + audit transaction (ADR-0526). That inverse-looking exception is acyclic because a reservation
+    holding PROJECT never attempts IMAGE_PUBLISH before commit, and the finisher takes PROJECT
+    before any catalog-row mutation that could block a reservation.
     """
 
     PROJECT = "project"

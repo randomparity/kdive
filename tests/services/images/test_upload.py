@@ -1,4 +1,4 @@
-"""Project-private upload registration (ADR-0093, ADR-0520, issue #286).
+"""Project-private upload registration (ADR-0093, ADR-0520, ADR-0525, ADR-0526).
 
 ``register_private_upload`` validates the quarantined object's guest contract, then — under the
 project advisory lock — enforces the per-project count/bytes quota fail-closed and commits a
@@ -6,11 +6,13 @@ project advisory lock — enforces the per-project count/bytes quota fail-closed
 (ADR-0520). These tests pin: a non-conforming image is rejected with a named reason while still
 quarantined (never registered); an over-cap upload is denied fail-closed and audited; two
 concurrent uploads cannot both pass either cap, on the committed reservation rather than a held
-lock; **no advisory lock is held while the PUT runs**; an abandoned reservation holds quota only
-until the reconciler's dangling sweep reclaims it; a registered private image resolves only within
-its owning project and shadows a same-identity public image there; and the publish refuses a
-connection that already opened a transaction, which would demote its transaction to a savepoint
-that neither commits the reservation nor releases the lock (ADR-0516 §1).
+lock; **no PROJECT advisory lock is held while the PUT runs**; private finish is ordered after any
+in-flight PROJECT-locked reservation without deadlocking its IMAGE_PUBLISH fence; an abandoned
+reservation holds quota only until the reconciler's dangling sweep reclaims it; a registered
+private image resolves only within its owning project and shadows a same-identity public image
+there; and the publish refuses a connection that already opened a transaction, which would demote
+its transaction to a savepoint that neither commits the reservation nor releases the lock
+(ADR-0516 §1).
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from kdive.security.audit import args_digest
 from kdive.services.images.audit import record_private_registration
 from kdive.services.images.upload import (
     PrivateUploadRequest,
+    RegisteredPrivateNameConflict,
     _clamp_expiry,
     _project_usage,
     _quota_denial,
@@ -120,6 +123,36 @@ class _FakeStore:
             last_modified=STORE_MTIME,
             version_id="test-version",
         )
+
+
+class _FirstPutGateStore(_FakeStore):
+    """Pause the first published qcow2 PUT until the concurrency test releases it."""
+
+    def __init__(
+        self,
+        quarantined: dict[str, bytes],
+        *,
+        first_put_started: threading.Event,
+        release_first_put: threading.Event,
+    ) -> None:
+        super().__init__(quarantined)
+        self._first_put_started = first_put_started
+        self._release_first_put = release_first_put
+        self._published_qcow2_count = 0
+        self._put_count_lock = threading.Lock()
+
+    def put_artifact(
+        self, request: artifact_types.ArtifactWriteRequest
+    ) -> artifact_types.StoredArtifact:
+        if request.key().endswith(".qcow2"):
+            with self._put_count_lock:
+                self._published_qcow2_count += 1
+                is_first = self._published_qcow2_count == 1
+            if is_first:
+                self._first_put_started.set()
+                if not self._release_first_put.wait(timeout=10):
+                    raise AssertionError("test did not release the first published-object PUT")
+        return super().put_artifact(request)
 
 
 async def _connect(url: str) -> psycopg.AsyncConnection:
@@ -215,6 +248,41 @@ async def _ungranted_advisory_locks(url: str) -> int:
     return int(row[0])
 
 
+async def _scoped_lock_has_waiter(url: str, scope: LockScope, key_value: str) -> bool:
+    """Report whether a backend is blocked on the exact scoped advisory lock."""
+    key = _lock_key(scope, key_value)
+    unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
+    classid = (unsigned >> 32) & 0xFFFF_FFFF
+    objid = unsigned & 0xFFFF_FFFF
+    async with await _connect(url) as probe, probe.cursor() as cur:
+        await cur.execute(
+            "SELECT EXISTS ("
+            "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' "
+            "AND classid = %s AND objid = %s AND objsubid = 1 AND NOT granted)",
+            (classid, objid),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return bool(row[0])
+
+
+async def _wait_for_registered_row_or_project_waiter(url: str) -> str:
+    """Wait until a publisher registers or blocks trying to order its finish on PROJECT."""
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if await _scoped_lock_has_waiter(url, LockScope.PROJECT, "proj"):
+            return "project_waiter"
+        async with await _connect(url) as observer, observer.cursor() as cur:
+            await cur.execute(
+                "SELECT EXISTS (SELECT 1 FROM image_catalog WHERE state = 'registered')"
+            )
+            row = await cur.fetchone()
+        if row is not None and row[0]:
+            return "registered"
+        await asyncio.sleep(0.02)
+    raise AssertionError("first publisher neither registered nor waited on the PROJECT lock")
+
+
 async def _run_both_contending(url: str, *coro_factories) -> list[object]:
     """Run two uploads with both provably blocked on the PROJECT lock before either proceeds.
 
@@ -253,6 +321,7 @@ async def _register(
     project: str = "proj",
     principal: str = "alice",
     name: str = "myrootfs",
+    arch: str = "x86_64",
     quarantine_key: str = "uploads/q/proj/rootfs.qcow2",
     expires_at: datetime | None = None,
     inspect: InspectSeam | None = None,
@@ -265,7 +334,7 @@ async def _register(
             principal=principal,
             name=name,
             provider="local-libvirt",
-            arch="x86_64",
+            arch=arch,
             quarantine_key=quarantine_key,
             expires_at=expires_at or (_DT + timedelta(days=3)),
             required=_REQUIRED,
@@ -478,6 +547,39 @@ def test_registered_private_name_reupload_conflicts_before_publish(migrated_url:
             assert first.object_key is not None
             registered_bytes = store._objects[first.object_key]  # noqa: SLF001 - integrity test seam
             assert "sha256:" + hashlib.sha256(registered_bytes).hexdigest() == first.digest
+            assert len(await IMAGE_CATALOG.list_all(conn)) == 1
+
+    asyncio.run(_run())
+
+
+def test_registered_private_name_conflict_excludes_architecture(migrated_url: str) -> None:
+    from kdive.db.repositories import IMAGE_CATALOG
+
+    store = _quarantine(b"x86-rootfs", key="uploads/q/proj/x86.qcow2")
+    store._objects["uploads/q/proj/arm.qcow2"] = b"arm-rootfs"  # noqa: SLF001 - test seam
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            first = await _register(
+                conn,
+                store,
+                name="shared-name",
+                arch="x86_64",
+                quarantine_key="uploads/q/proj/x86.qcow2",
+            )
+            puts_after_first = list(store.puts)
+
+            with pytest.raises(RegisteredPrivateNameConflict) as err:
+                await _register(
+                    conn,
+                    store,
+                    name="shared-name",
+                    arch="aarch64",
+                    quarantine_key="uploads/q/proj/arm.qcow2",
+                )
+            assert err.value.category is ErrorCategory.CONFLICT
+            assert store.puts == puts_after_first
+            assert await IMAGE_CATALOG.get(conn, first.id) == first
             assert len(await IMAGE_CATALOG.list_all(conn)) == 1
 
     asyncio.run(_run())
@@ -811,6 +913,108 @@ def test_concurrent_same_identity_uploads_cannot_both_register(migrated_url: str
             assert rows[0].object_key is not None
             registered_bytes = store._objects[rows[0].object_key]  # noqa: SLF001 - integrity test seam
             assert "sha256:" + hashlib.sha256(registered_bytes).hexdigest() == rows[0].digest
+
+    asyncio.run(_run())
+
+
+def test_registration_is_ordered_after_an_inflight_duplicate_reservation(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kdive.db.repositories import IMAGE_CATALOG
+    from kdive.domain.catalog.images import ImageCatalogEntry
+    from kdive.services.images import upload as image_upload
+    from kdive.services.images.publish import PublishRequest, PublishReservation
+
+    first_put_started = threading.Event()
+    release_first_put = threading.Event()
+    store = _FirstPutGateStore(
+        {
+            "uploads/q/proj/a.qcow2": b"alpha-bytes",
+            "uploads/q/proj/b.qcow2": b"beta-bytes-differ",
+        },
+        first_put_started=first_put_started,
+        release_first_put=release_first_put,
+    )
+    real_reserve = image_upload.reserve_publish
+    reserve_calls = 0
+    second_before_reserve: asyncio.Event
+    release_second_reserve: asyncio.Event
+
+    async def _reserve_with_forced_gap(
+        conn: psycopg.AsyncConnection,
+        request: PublishRequest,
+        *,
+        size_bytes: int,
+        principal: str | None = None,
+    ) -> PublishReservation:
+        nonlocal reserve_calls
+        reserve_calls += 1
+        if reserve_calls == 2:
+            # `_reserve_under_quota` already queried and saw only the first attempt's pending row;
+            # pause before the adopt/insert statement while it still holds PROJECT.
+            second_before_reserve.set()
+            await release_second_reserve.wait()
+        return await real_reserve(
+            conn,
+            request,
+            size_bytes=size_bytes,
+            principal=principal,
+        )
+
+    monkeypatch.setattr(image_upload, "reserve_publish", _reserve_with_forced_gap)
+
+    async def _run() -> None:
+        nonlocal second_before_reserve, release_second_reserve
+        second_before_reserve = asyncio.Event()
+        release_second_reserve = asyncio.Event()
+
+        async def _one(key: str) -> object:
+            conn = await _connect(migrated_url)
+            try:
+                return await _register(conn, store, name="shared", quarantine_key=key)
+            except CategorizedError as exc:
+                return exc
+            finally:
+                await conn.close()
+
+        first = asyncio.create_task(_one("uploads/q/proj/a.qcow2"))
+        assert await asyncio.to_thread(first_put_started.wait, 10)
+        second = asyncio.create_task(_one("uploads/q/proj/b.qcow2"))
+        await asyncio.wait_for(second_before_reserve.wait(), timeout=10)
+
+        # The second upload now owns PROJECT in the exact gap under review. Let the first PUT
+        # return and wait until its finish either registers (old ordering) or queues on PROJECT
+        # (the required ordering), then allow the second reservation statement to run.
+        release_first_put.set()
+        finish_order = await _wait_for_registered_row_or_project_waiter(migrated_url)
+        release_second_reserve.set()
+        results = await asyncio.gather(first, second, return_exceptions=True)
+
+        assert finish_order == "project_waiter"
+        assert all(
+            isinstance(result, (ImageCatalogEntry, CategorizedError)) for result in results
+        ), results
+        conflicts = [result for result in results if isinstance(result, CategorizedError)]
+        registered = [result for result in results if isinstance(result, ImageCatalogEntry)]
+        assert len(conflicts) == 1
+        assert conflicts[0].category is ErrorCategory.CONFLICT
+        assert "superseded" in str(conflicts[0])
+        assert len(registered) == 1
+
+        async with await _connect(migrated_url) as conn:
+            rows = await IMAGE_CATALOG.list_all(conn)
+            usage = await _project_usage(conn, "proj", adopting=None)
+        assert len(rows) == 1
+        assert rows[0] == registered[0]
+        assert rows[0].object_key is not None
+        registered_bytes = store._objects[rows[0].object_key]  # noqa: SLF001 - integrity seam
+        assert "sha256:" + hashlib.sha256(registered_bytes).hexdigest() == rows[0].digest
+        assert rows[0].size_bytes == len(registered_bytes)
+        assert usage == (1, len(registered_bytes))
+        # Each attempt wrote only its own attempt-specific key; the loser never overwrote the
+        # winner, and its rowless key remains owned by the existing leaked-object recovery.
+        assert len(store.puts) == 2
+        assert len(set(store.puts)) == 2
 
     asyncio.run(_run())
 

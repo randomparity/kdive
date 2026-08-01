@@ -4,6 +4,10 @@
 
 Accepted (2026-08-01)
 
+Narrowly refines [ADR-0520](0520-quota-reservation-releases-the-project-lock-before-the-put.md)
+§3 and [ADR-0525](0525-fence-and-reconcile-pending-image-publications.md) for the private finish:
+PROJECT remains absent from object I/O, but registration reacquires it under IMAGE_PUBLISH.
+
 ## Context
 
 Private image identity is unique by `(owner, provider, name)` once registered. Publication writes
@@ -34,6 +38,19 @@ ADR-0525's attempt fence ensures only the current reservation registers, while a
 keys isolate any write an earlier attempt already started. A later upload observes the registered
 winner and is rejected before its publish write.
 
+Private finish reacquires transaction-scoped PROJECT while the row's session-scoped IMAGE_PUBLISH
+fence remains held, and keeps it through the registration flip and audit commit. The order is
+therefore ``IMAGE_PUBLISH → PROJECT`` for this short finish only. It does not create a cycle with
+reservation: a reservation holding PROJECT never attempts IMAGE_PUBLISH until after its transaction
+commits, and a finisher acquires PROJECT before issuing the catalog update, so it holds no row lock
+a reservation could await while retaining PROJECT. The object PUT completes before this co-hold.
+
+This closes the duplicate precheck-to-reservation gap. If a second reservation reads the first row
+as pending and pauses before adopting it, the first finisher waits for PROJECT. The second then
+adopts and commits before the first may finish; the first receives the existing typed supersession
+``CONFLICT``, and the current attempt registers under the same isolated-attempt object-key rules.
+Registration can no longer overtake the decision whose result its competing reservation consumes.
+
 Rejection does not supersede an object. The registered row, its object key and digest, and any
 System already booted from that image remain unchanged. A caller that intends different bytes must
 delete the existing image through `images.delete`, wait for deletion to complete, and then upload
@@ -45,6 +62,8 @@ again under the name.
   and guest-validation cost, but writes no published object and does not mutate the catalog entry.
 - An overlapping first attempt may have written its isolated attempt-specific key before being
   superseded. It cannot register that key; ADR-0525's leaked-object recovery remains its owner.
+- Private finish adds one bounded PROJECT section after the PUT. It contains only the fenced
+  catalog flip and audit write; quota reservation remains the other bounded section.
 - The public MCP contract gains a documented `CONFLICT` outcome and recovery sequence.
 - Replacement remains an explicit delete-then-upload lifecycle, so no hidden object swap changes a
   running System or requires a second retirement mechanism.

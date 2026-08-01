@@ -1,4 +1,4 @@
-"""Project-private upload registration (ADR-0093, ADR-0516, ADR-0520, ADR-0526, issue #286).
+"""Project-private upload registration (ADR-0093, ADR-0516, ADR-0520, ADR-0525, ADR-0526).
 
 A developer uploads a custom rootfs through the ADR-0048 ingest, which lands the bytes as a
 *quarantined* object (its guest contract unverified, its scope not yet owner-bound).
@@ -12,13 +12,14 @@ image:
    then enforce the per-project count/bytes quota fail-closed and commit or adopt a ``pending``
    row reserving this upload's bytes. A rejection or denial raises before any write.
 4. Release the PROJECT lock, then take the row-scoped IMAGE_PUBLISH session fence across the object
-   write, registration flip, and audit — the shared row-first publish steps with
-   ``visibility='private'`` and ``owner=project``, no second implementation.
+   write. Reacquire PROJECT only for the short registration-flip + audit transaction, ordering the
+   flip against private reservations without project-locking object I/O.
 
 The PROJECT lock is held across the reservation only, never across the object-store write
 (ADR-0520): the committed ``pending`` row *is* the quota claim, so a concurrent upload sees it in
 the aggregate without the project-wide lock spanning a multi-GiB PUT. The row-scoped IMAGE_PUBLISH
-session lock remains held through the PUT, registration flip, and audit (ADR-0525).
+session lock remains held through the PUT, registration flip, and audit (ADR-0525). Its only
+co-hold is ``IMAGE_PUBLISH → PROJECT`` during the short private finish transaction (ADR-0526).
 
 The owner of the registered image is the **project**; the uploading ``principal`` is recorded only
 for audit attribution.
@@ -285,13 +286,15 @@ async def register_private_upload(
 
     Takes the PROJECT advisory lock across the quota check and the ``pending``-row reservation
     only, then publishes with that project-wide lock released (ADR-0520). The row-scoped
-    IMAGE_PUBLISH session lock remains held through PUT, registration, and audit (ADR-0525). The cap
-    stays fail-closed because the reservation commits inside the PROJECT lock: two concurrent
-    uploads cannot both pass it, since the second one's usage read sees the first one's committed
-    claim. The quarantined object is validated against the guest contract *before* any reservation
-    or write, so a non-conforming image is rejected while still quarantined (never registered).
-    The durable writes go through the shared publish steps (``visibility='private'``,
-    ``owner=project``); the uploading ``principal`` is recorded only for audit attribution.
+    IMAGE_PUBLISH session lock remains held through PUT, registration, and audit (ADR-0525); the
+    short finish transaction reacquires PROJECT beneath it so a private reservation cannot be
+    overtaken between its duplicate precheck and row mutation (ADR-0526). The cap stays fail-closed
+    because the reservation commits inside the PROJECT lock: two concurrent uploads cannot both
+    pass it, since the second one's usage read sees the first one's committed claim. The
+    quarantined object is validated against the guest contract *before* any reservation or write,
+    so a non-conforming image is rejected while still quarantined (never registered). The durable
+    writes go through the shared publish steps (``visibility='private'``, ``owner=project``); the
+    uploading ``principal`` is recorded only for audit attribution.
 
     Args:
         conn: An async Postgres connection with **no transaction open** — this function opens its
@@ -380,7 +383,9 @@ async def _reserve_under_quota(
     registered row rejects the re-upload. It holds no object-store call and no unbounded loop, and
     it is released by the ``return`` committing the transaction — which is what lets the caller
     run the PUT without the PROJECT or any transaction-scoped lock. The caller separately holds
-    the row-scoped IMAGE_PUBLISH session lock (ADR-0520, ADR-0525).
+    the row-scoped IMAGE_PUBLISH session lock. Private registration later reacquires PROJECT under
+    that session fence, after all object I/O, to order the finish against this reservation phase
+    (ADR-0520, ADR-0525, ADR-0526).
 
     The transaction must be a real one and not a savepoint: releasing a savepoint commits neither
     the reservation nor the lock, so the claim would be invisible to a concurrent upload *and* the
@@ -423,10 +428,12 @@ async def _publish_under_quota(
 
     The three phases are deliberately separated (ADR-0520, ADR-0525): the PROJECT-locked
     reservation transaction; the object write with no PROJECT or transaction-scoped lock, but with
-    the IMAGE_PUBLISH session lock held; and the registration flip composed with its audit row
-    under that same session fence. The cap stays fail-closed because the reservation commits inside
-    the PROJECT lock — a concurrent upload's aggregate read sees the claim — rather than because
-    that project-wide lock spans the multi-GiB PUT.
+    the IMAGE_PUBLISH session lock held; and the registration flip composed with its audit row in
+    a short transaction that reacquires PROJECT under that same session fence. The second PROJECT
+    section orders registration against another upload's duplicate precheck + reservation, but
+    starts only after the object write completes. The cap stays fail-closed because the reservation
+    commits inside the first PROJECT section — a concurrent upload's aggregate read sees the claim
+    — rather than because that project-wide lock spans the multi-GiB PUT.
 
     A PUT that fails or a worker that dies after the reservation commits leaves a ``pending`` row
     holding its bytes; the reconciler's ``repair_dangling_images`` releases it once its
@@ -456,9 +463,11 @@ async def _publish_under_quota(
                 exc_info=True,
             )
             raise
-        # The flip and its audit row share one transaction so a registered image is never unaudited;
-        # `audit.record_system` opens none of its own, by contract, for exactly this composition.
-        async with conn.transaction():
+        # IMAGE_PUBLISH → PROJECT is the private finisher's only lock co-hold. A reservation that
+        # owns PROJECT never attempts IMAGE_PUBLISH before committing, while this finisher takes
+        # PROJECT before mutating the row, so the order cannot form a wait cycle (ADR-0526).
+        # The flip and its audit row share the transaction so registration is never unaudited.
+        async with conn.transaction(), advisory_xact_lock(conn, LockScope.PROJECT, project):
             entry = await finish_publish(conn, reservation, config_written=config_written)
             await record_private_registration(conn, entry, principal)
         return entry

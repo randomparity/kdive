@@ -4,7 +4,7 @@
 
 **Goal:** Reject an `images.upload` whose private project/provider/name is already registered before any published object write, while preserving the existing concurrent-attempt integrity guarantees.
 
-**Architecture:** Add a registered-identity query to the existing PROJECT-locked reservation transaction in `services/images/upload.py`. Return the existing `CONFLICT` category and map it at the MCP wrapper to an ordered `images.delete` then `images.upload` recovery hint; leave ADR-0525 attempt-specific keys and publication fencing unchanged.
+**Architecture:** Add a registered-identity query to the existing PROJECT-locked reservation transaction in `services/images/upload.py`. Reacquire PROJECT only in the short private finish + audit transaction, beneath the existing IMAGE_PUBLISH session fence, so registration and reservation consume one order without project-locking object I/O. Return the existing `CONFLICT` category and map it at the MCP wrapper to an ordered `images.delete` then `images.upload` recovery hint; leave ADR-0525 attempt-specific keys and recovery unchanged.
 
 **Tech Stack:** Python 3.14, psycopg async SQL, FastMCP/Pydantic tool wrappers, pytest, `uv`, `ruff`, `ty`, and `just` guardrails.
 
@@ -13,6 +13,8 @@
 - Branch `feat/reject-duplicate-image-upload-1756` is based on `main`; do not implement on the default branch.
 - Private registered identity follows the existing database index: `(owner, provider, name)`, without architecture.
 - The registered-name check runs under `LockScope.PROJECT` before quota accounting, pending-row mutation, and published-prefix object writes.
+- Private finish holds `IMAGE_PUBLISH → PROJECT` only across registration + audit. Reservation
+  never attempts IMAGE_PUBLISH while holding PROJECT, and no PROJECT lock spans object I/O.
 - The conflict lookup is owner- and private-visibility-scoped, parameterized, and discloses no row id, object key, digest, principal, or other tenant.
 - A sequential duplicate returns `ErrorCategory.CONFLICT`; its registered row and object remain unchanged and digest-consistent.
 - An overlapping first upload may write only its own attempt-specific key; exactly one row registers and its object must match its digest. Do not redesign ADR-0525 recovery.
@@ -33,7 +35,7 @@
   category is always `CONFLICT`, and `_registered_private_name_conflict(conn, request) ->
   RegisteredPrivateNameConflict | None`, called while the PROJECT advisory lock is held.
 
-**Acceptance criteria:** A sequential duplicate is rejected with `CONFLICT` before a published-prefix PUT or catalog mutation; the original row fields and object bytes remain unchanged and the object SHA-256 matches the row digest. A same name in another project or a public row does not conflict. Existing concurrent same-identity coverage remains green and proves the registered row/object invariant.
+**Acceptance criteria:** A sequential duplicate, including one that changes architecture, is rejected with `CONFLICT` before a published-prefix PUT or catalog mutation; the original row fields and object bytes remain unchanged and the object SHA-256 matches the row digest. A same name in another project or a public row does not conflict. Existing concurrent same-identity coverage remains green and proves the registered row/object invariant. A forced pause after the duplicate precheck but before reservation returns one typed supersession and one digest-consistent registration rather than a raw uniqueness exception.
 
 - [x] **Step 1: Write the sequential regression test**
 
@@ -133,6 +135,11 @@ uv run python -m pytest \
 Expected: 3 passed. The concurrent test uses a genuinely shared namespace and proves the row/object
 digest invariant; the public-shadow test is the control that public visibility does not trigger the
 private-name conflict.
+
+The final review proof additionally pauses a competing same-identity upload between its duplicate
+precheck and reservation statement. Private finish must queue on PROJECT (while retaining
+IMAGE_PUBLISH) until that reservation adopts and commits; then the superseded attempt returns typed
+`CONFLICT`, both PUTs use distinct attempt keys, and the sole registered object matches its digest.
 
 - [x] **Step 5: Add a cross-owner control if the regression does not already exercise one**
 

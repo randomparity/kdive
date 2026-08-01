@@ -34,20 +34,33 @@ materialization continues to resolve the unchanged registered row.
 ## Concurrency
 
 The duplicate check and reservation run under the project's existing transaction-scoped advisory
-lock. A sequential duplicate sees the registered row and fails. Two overlapping first uploads may
-both begin validation, but their reservation phases serialize. The second can adopt the first
-pending row before either is registered. ADR-0525's IMAGE_PUBLISH fence ensures only the current
-attempt registers. If an earlier attempt already passed revalidation, it may finish writing only to
-its own attempt-specific key before registration fails; existing leaked-object recovery owns that
-rowless object. An upload whose reservation begins after registration observes the registered row
-and fails before writing.
+lock. Private finish reacquires PROJECT inside its short registration + audit transaction while its
+existing session IMAGE_PUBLISH fence remains held. Thus registration cannot overtake a competing
+duplicate precheck before that reservation statement consumes the decision. The ``IMAGE_PUBLISH →
+PROJECT`` finish order is acyclic: a reservation holding PROJECT never attempts IMAGE_PUBLISH
+before commit, and the finisher takes PROJECT before mutating the catalog row. PROJECT is absent
+from validation and every object-store operation.
 
-Tests must cover both faces:
+A sequential duplicate sees the registered row and fails. Two overlapping first uploads may both
+begin validation, but their reservation phases serialize. The second can adopt the first pending
+row before either is registered. ADR-0525's IMAGE_PUBLISH fence ensures only the current attempt
+registers. If an earlier attempt already passed revalidation, it may finish writing only to its own
+attempt-specific key before registration fails; existing leaked-object recovery owns that rowless
+object. An upload whose reservation begins after registration observes the registered row and
+fails before writing.
+
+Tests must cover these cases:
 
 1. Register bytes A, attempt the same project/provider/name with bytes B, assert `CONFLICT`, assert
    no new published-prefix PUT, and verify the original row's object hashes to its persisted digest.
 2. Force two same-identity first uploads to overlap, assert exactly one registered result and one
    `CONFLICT`, and verify the registered object's bytes hash to the registered digest.
+3. Pause the second same-identity upload after its pending-only duplicate precheck but before its
+   reservation statement, let the first PUT finish, and prove the first finisher waits for PROJECT.
+   Then release the reservation and assert one typed supersession, one registration, two isolated
+   attempt keys, and a digest-consistent registered object.
+4. Register one architecture, retry the same owner/provider/name under another architecture, and
+   assert the architecture-agnostic `CONFLICT` occurs before another published-prefix PUT.
 
 ## Failure contract and observability
 
@@ -86,6 +99,10 @@ error, while the database and object store remain unchanged by the rejected publ
 - Same-identity concurrent first uploads leave exactly one registered row whose object matches its
   digest. A losing attempt can only write to its isolated attempt-specific key, cannot register it,
   and remains covered by existing leaked-object recovery.
+- A forced duplicate precheck-to-reservation interleaving returns a typed supersession rather than
+  leaking a database uniqueness exception; PROJECT remains absent during each object PUT.
+- Registered private-name rejection intentionally ignores architecture, matching the database
+  uniqueness key `(owner, provider, name)`.
 - The MCP wrapper docstring exposes the duplicate-name outcome and recovery sequence; other
   `CONFLICT` causes do not advertise deletion.
 - Focused service and MCP tests, then `just ci`, pass from the feature worktree.
