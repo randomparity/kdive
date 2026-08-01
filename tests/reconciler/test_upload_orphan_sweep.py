@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -30,7 +31,13 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import upload_manifest
-from kdive.artifacts.storage import HeadResult, ObjectListing
+from kdive.artifacts.storage import (
+    HeadResult,
+    ObjectListing,
+    ObjectVersion,
+    VersionBatch,
+    VersionPage,
+)
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.config.core_settings import UPLOAD_ORPHAN_GRACE, UPLOAD_TTL_SECONDS
 from kdive.domain.capacity.state import RunState
@@ -38,6 +45,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup import upload_orphans
 from kdive.reconciler.cleanup.upload_orphans import (
     MAX_RECLAIMS_PER_ROOT,
+    MAX_VERSIONS_PER_KEY,
     UPLOAD_ORPHAN_ROOTS,
     UploadOrphanCandidate,
     reclaimable_upload_keys,
@@ -88,12 +96,20 @@ class _FakeUploadStore:
     def __init__(self, objects: dict[str, timedelta], *, page_size: int = _PAGE_SIZE) -> None:
         self._objects = dict(objects)
         self._etags: dict[str, str] = {}
+        self._versions: dict[str, list[ObjectVersion]] = {
+            key: [self._make_version(key, age, "v1", is_latest=True)]
+            for key, age in objects.items()
+        }
+        self._next_version = 2
         self._page_size = page_size
         self.deleted: list[str] = []
+        self.deleted_versions: list[tuple[str, str]] = []
         self.deleted_etags: list[str] = []
         self.listed_prefixes: list[str] = []
         self.pages_yielded: list[list[str]] = []
         self.headed_keys: list[str] = []
+        self.capture_limits: list[tuple[str, int]] = []
+        self.version_page_calls: list[tuple[str, str | None, str | None, int]] = []
         self.events: list[str] = []
 
     @property
@@ -101,6 +117,11 @@ class _FakeUploadStore:
         return set(self._objects)
 
     def put(self, key: str, age: timedelta = timedelta(0), etag: str | None = None) -> None:
+        prior = self._versions.get(key, [])
+        self._versions[key] = [replace(version, is_latest=False) for version in prior]
+        version_id = f"v{self._next_version}"
+        self._next_version += 1
+        self._versions[key].append(self._make_version(key, age, version_id, is_latest=True))
         self._objects[key] = age
         if etag is not None:
             self._etags[key] = etag
@@ -111,12 +132,152 @@ class _FakeUploadStore:
     def forget(self, key: str) -> None:
         """Remove an object without recording a delete — another actor got there first."""
         self._objects.pop(key, None)
+        self._versions.pop(key, None)
+
+    def seed_versions(self, key: str, versions: list[ObjectVersion]) -> None:
+        """Replace one key's immutable history for version-specific tests."""
+        self._versions[key] = list(versions)
+        latest = next((version for version in versions if version.is_latest), None)
+        if latest is None or latest.is_delete_marker:
+            self._objects.pop(key, None)
+            return
+        self._objects[key] = datetime.now(UTC) - latest.last_modified
+
+    def version_ids(self, key: str) -> set[str]:
+        """Return the surviving immutable identities for one key."""
+        return {version.version_id for version in self._versions.get(key, ())}
 
     def _mtime(self, age: timedelta) -> datetime:
         return datetime.now(UTC) - age
 
     def list_prefix(self, prefix: str) -> list[str]:
         return sorted(key for key in self._objects if key.startswith(prefix))
+
+    def list_version_page(
+        self,
+        prefix: str,
+        *,
+        key_marker: str | None = None,
+        version_id_marker: str | None = None,
+        max_keys: int = 1000,
+    ) -> VersionPage:
+        self.listed_prefixes.append(prefix)
+        self.version_page_calls.append((prefix, key_marker, version_id_marker, max_keys))
+        entries = self._version_listing(prefix)
+        start = 0
+        if key_marker is not None:
+            if version_id_marker is None:
+                while start < len(entries) and entries[start].key <= key_marker:
+                    start += 1
+            else:
+                marker = (key_marker, version_id_marker)
+                while start < len(entries):
+                    entry = entries[start]
+                    if (entry.key, entry.version_id) > marker:
+                        break
+                    start += 1
+        page_size = min(self._page_size, max_keys)
+        selected = entries[start : start + page_size]
+        self.pages_yielded.append([entry.key for entry in selected])
+        self.events.append(f"page:{len(selected)}")
+        truncated = start + page_size < len(entries)
+        last = selected[-1] if selected else None
+        return VersionPage(
+            entries=tuple(selected),
+            is_truncated=truncated,
+            next_key_marker=last.key if truncated and last is not None else None,
+            next_version_id_marker=last.version_id if truncated and last is not None else None,
+        )
+
+    def iter_prefix_version_pages(self, prefix: str) -> Iterator[VersionPage]:
+        key_marker = version_marker = None
+        while True:
+            page = self.list_version_page(
+                prefix, key_marker=key_marker, version_id_marker=version_marker
+            )
+            yield page
+            if not page.is_truncated:
+                return
+            key_marker = page.next_key_marker
+            version_marker = page.next_version_id_marker
+
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch:
+        self.capture_limits.append((key, limit))
+        versions = list(self._versions.get(key, ()))
+        complete = len(versions) <= limit
+        if not complete:
+            latest = [version for version in versions if version.is_latest]
+            nonlatest = [version for version in versions if not version.is_latest]
+            versions = [*latest, *nonlatest]
+        return VersionBatch(key, tuple(versions[:limit]), complete)
+
+    def delete_batch(self, batch: VersionBatch) -> bool:
+        for version in batch.targets:
+            if not version.is_latest:
+                self.delete_version(version.key, version.version_id)
+        if not batch.history_complete:
+            return False
+        for version in batch.targets:
+            if version.is_latest:
+                self.delete_version(version.key, version.version_id)
+        return True
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        versions = self._versions.get(key, [])
+        target = next((version for version in versions if version.version_id == version_id), None)
+        if target is None:
+            return
+        if target.etag is not None:
+            self.deleted_etags.append(target.etag)
+        survivors = [version for version in versions if version.version_id != version_id]
+        self.deleted.append(key)
+        self.deleted_versions.append((key, version_id))
+        self.events.append(f"delete:{key}")
+        if not survivors:
+            self._versions.pop(key, None)
+            self._objects.pop(key, None)
+            return
+        if not any(version.is_latest for version in survivors):
+            newest = max(survivors, key=lambda version: version.last_modified)
+            survivors = [
+                replace(version, is_latest=version.version_id == newest.version_id)
+                for version in survivors
+            ]
+        self._versions[key] = survivors
+        current = next(version for version in survivors if version.is_latest)
+        if current.is_delete_marker:
+            self._objects.pop(key, None)
+        else:
+            self._objects[key] = datetime.now(UTC) - current.last_modified
+
+    def _version_listing(self, prefix: str) -> list[ObjectVersion]:
+        return sorted(
+            (
+                version
+                for key, versions in self._versions.items()
+                if key.startswith(prefix)
+                for version in versions
+            ),
+            key=lambda version: (version.key, version.last_modified, version.version_id),
+        )
+
+    def _make_version(
+        self,
+        key: str,
+        age: timedelta,
+        version_id: str,
+        *,
+        is_latest: bool,
+        is_delete_marker: bool = False,
+    ) -> ObjectVersion:
+        return ObjectVersion(
+            key=key,
+            version_id=version_id,
+            last_modified=self._mtime(age),
+            etag=None if is_delete_marker else self._etag(key),
+            is_latest=is_latest,
+            is_delete_marker=is_delete_marker,
+        )
 
     def _listing(self, prefix: str) -> list[ObjectListing]:
         return [
@@ -172,6 +333,39 @@ class _FailingDeleteStore(_FakeUploadStore):
             )
         super().delete(key)
 
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.attempted.append(key)
+        if key in self._fail_keys:
+            raise CategorizedError(
+                f"delete_object failed for {key} version {version_id}",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        super().delete_version(key, version_id)
+
+
+class _FailingVersionStore(_FakeUploadStore):
+    """Fail selected immutable identities while allowing sibling versions and keys."""
+
+    def __init__(
+        self,
+        objects: dict[str, timedelta],
+        *,
+        fail_versions: set[tuple[str, str]],
+    ) -> None:
+        super().__init__(objects)
+        self._fail_versions = fail_versions
+        self.attempted_versions: list[tuple[str, str]] = []
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        identity = (key, version_id)
+        self.attempted_versions.append(identity)
+        if identity in self._fail_versions:
+            raise CategorizedError(
+                f"delete_object failed for {key} version {version_id}",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        super().delete_version(key, version_id)
+
 
 class _FailingListStore(_FakeUploadStore):
     """Raises ``CategorizedError`` from the listing iterator for the named root prefixes.
@@ -193,6 +387,7 @@ class _FailingListStore(_FakeUploadStore):
         super().__init__(objects, page_size=page_size)
         self._fail_list_prefixes = fail_list_prefixes
         self._fail_after_pages = fail_after_pages
+        self._version_pages_seen: dict[str, int] = {}
 
     def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[ObjectListing]]:
         if prefix not in self._fail_list_prefixes:
@@ -214,20 +409,46 @@ class _FailingListStore(_FakeUploadStore):
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         )
 
+    def list_version_page(
+        self,
+        prefix: str,
+        *,
+        key_marker: str | None = None,
+        version_id_marker: str | None = None,
+        max_keys: int = 1000,
+    ) -> VersionPage:
+        seen = self._version_pages_seen.get(prefix, 0)
+        if prefix in self._fail_list_prefixes and seen >= self._fail_after_pages:
+            self.listed_prefixes.append(prefix)
+            raise CategorizedError(
+                f"list_object_versions failed for {prefix}",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        self._version_pages_seen[prefix] = seen + 1
+        return super().list_version_page(
+            prefix,
+            key_marker=key_marker,
+            version_id_marker=version_id_marker,
+            max_keys=max_keys,
+        )
 
-class _FailingHeadStore(_FakeUploadStore):
-    """Raises ``CategorizedError`` from ``head`` for the named keys — a per-key HEAD deny."""
+
+class _FailingCaptureStore(_FakeUploadStore):
+    """Raise ``CategorizedError`` while capturing immutable history for named keys."""
 
     def __init__(self, objects: dict[str, timedelta], *, fail_keys: set[str]) -> None:
         super().__init__(objects)
         self._fail_keys = fail_keys
 
-    def head(self, key: str) -> HeadResult | None:
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch:
+        self.capture_limits.append((key, limit))
         if key in self._fail_keys:
             raise CategorizedError(
-                f"head_object failed for {key}", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+                f"list_object_versions failed for {key}",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             )
-        return super().head(key)
+        self.capture_limits.pop()
+        return super().capture_exact_versions(key, limit)
 
 
 class _HookedStore(_FakeUploadStore):
@@ -248,6 +469,23 @@ class _HookedStore(_FakeUploadStore):
             self._before_delete()
         super().delete(key)
 
+    def delete_version(self, key: str, version_id: str) -> None:
+        if not self._fired:
+            self._fired = True
+            self._before_delete()
+        super().delete_version(key, version_id)
+
+
+def _advisory_locks_held_by(url: str, backend_pid: int) -> int:
+    """Count granted advisory locks held by ``backend_pid`` from a second connection."""
+    with psycopg.connect(url, autocommit=True) as observer:
+        row = observer.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = %s AND granted",
+            (backend_pid,),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
 
 def _sweep(
     store: _FakeUploadStore,
@@ -257,6 +495,19 @@ def _sweep(
     """The repair under test. ``upload_ttl`` defaults to zero so a test that is not *about* the
     TTL stacking reads its threshold straight off ``grace``; the stacking has its own test."""
     return lambda conn: _repair_leaked_upload_objects(conn, store, grace, upload_ttl)
+
+
+def _data_history(store: _FakeUploadStore, key: str, count: int) -> list[ObjectVersion]:
+    """Build an old version history whose final member is latest."""
+    return [
+        store._make_version(  # noqa: SLF001 - explicit test-fixture history
+            key,
+            _GRACE * 2 + timedelta(seconds=count - number),
+            f"v{number:04d}",
+            is_latest=number == count,
+        )
+        for number in range(1, count + 1)
+    ]
 
 
 async def _seed_run_with_window(url: str, ttl: timedelta) -> tuple[UUID, str]:
@@ -384,6 +635,48 @@ def test_a_live_upload_window_is_never_reclaimed(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_a_live_upload_window_protects_every_version_and_marker(migrated_url: str) -> None:
+    """The owner fence protects the key, not merely the version visible as latest."""
+
+    async def _run() -> None:
+        _run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(hours=1))
+        key = f"{prefix}kernel"
+        store = _FakeUploadStore({key: _GRACE * 10})
+        history = _data_history(store, key, 3)
+        history[-1] = replace(history[-1], etag=None, is_delete_marker=True)
+        store.seed_versions(key, history)
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _sweep(store)) == 0
+        assert store.deleted_versions == []
+        assert store.version_ids(key) == {"v0001", "v0002", "v0003"}
+
+    asyncio.run(_run())
+
+
+def test_literal_null_version_and_delete_marker_are_deleted_exactly(migrated_url: str) -> None:
+    """An unversioned ``null`` identity and a delete marker are both first-class targets."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        key = f"{prefix}kernel"
+        store = _FakeUploadStore({key: _GRACE * 2})
+        old = store._make_version(  # noqa: SLF001 - explicit immutable test identity
+            key, _GRACE * 3, "null", is_latest=False
+        )
+        marker = store._make_version(  # noqa: SLF001 - explicit immutable test identity
+            key, _GRACE * 2, "marker-1", is_latest=True, is_delete_marker=True
+        )
+        store.seed_versions(key, [old, marker])
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _sweep(store)) == 2
+        assert store.deleted_versions == [(key, "null"), (key, "marker-1")]
+        assert store.version_ids(key) == set()
+
+    asyncio.run(_run())
+
+
 def test_a_re_minted_window_protects_the_same_key_names(migrated_url: str) -> None:
     """AC-2, the case that matters: re-mint is the *documented* recovery from a reap (ADR-0448).
 
@@ -463,6 +756,31 @@ def test_an_investigation_orphan_is_reclaimed(migrated_url: str) -> None:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             assert await run_repair(pool, _sweep(store)) == 1
         assert store.deleted == [f"{prefix}rootfs-abc"]
+
+    asyncio.run(_run())
+
+
+def test_orphan_exact_delete_runs_after_owner_unlock(migrated_url: str) -> None:
+    """The final database fence commits before any exact VersionId deletion starts."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        key = f"{prefix}kernel"
+        observations: list[int] = []
+        sweeper = await psycopg.AsyncConnection.connect(migrated_url)
+        store = _HookedStore(
+            {key: _GRACE * 2},
+            before_delete=lambda: observations.append(
+                _advisory_locks_held_by(migrated_url, sweeper.info.backend_pid)
+            ),
+        )
+        try:
+            assert await _repair_leaked_upload_objects(sweeper, store, _GRACE, _NO_TTL) == 1
+        finally:
+            await sweeper.close()
+        assert observations == [0]
 
     asyncio.run(_run())
 
@@ -710,7 +1028,7 @@ def test_a_root_whose_keys_are_all_unattributable_is_reported(
                 assert await run_repair(pool, _sweep(store)) == 0
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1  # only the root that listed something warns
-        assert "attributed none of 1 object(s) under local/runs/" in warnings[0]
+        assert "attributed none of 1 version entry(s) under local/runs/" in warnings[0]
 
     asyncio.run(_run())
 
@@ -771,46 +1089,17 @@ def test_an_object_rewritten_between_the_listing_and_the_delete_is_not_reclaimed
     asyncio.run(_run())
 
 
-def test_a_put_inside_the_same_key_s_re_read_delete_gap_is_destroyed(
+def test_a_put_after_the_same_key_s_final_fence_survives_exact_delete(
     migrated_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """ADR-0455 §3's residual, for the key actually being deleted (#1574, ADR-0497).
-
-    Every other concurrency test in this module fires its hook before a **different** key's delete,
-    so what they pin is the re-check declining a *later* candidate — the gap this one is about was
-    never exercised. Here the store holds one key, so the hook lands between that key's own
-    re-check and its own ``delete_object``.
-
-    The assertion is the version identity, not the deletion. A key going away proves nothing: an
-    aged rowless orphan is deleted by four earlier tests in this module. What is specific to this
-    race is the *pair* — the sweep's reclaim line names the etag it re-read and decided on, and the
-    etag it actually destroyed is a different, newer one. The delete is issued on bytes the sweep
-    never examined.
-
-    This asserts the loss on purpose, and since ADR-0502 it pins the **unleased** path
-    specifically. A fence can only protect a writer that declares itself, and the writer here
-    declares nothing: no ``object_write_leases`` row exists for this owner, so the sweep is
-    behaving correctly in deleting an aged rowless orphan. The capture lane no longer takes this
-    path — it holds a write lease across its ``put_stream``, proven end to end against this same
-    sweep in ``tests/adversarial/test_vmcore_capture_write_lease.py``. What remains true here is
-    the raw store-level residual, and it is kept as the regression test for the sweep's behaviour
-    toward an undeclared writer.
-
-    ADR-0497 rejected the other fix this test invites — S3 ``If-Match`` on ``DeleteObject``, using
-    the etag the re-read already observed — because both MinIO releases this repo pins accept the
-    header, return success, and delete the object regardless, so a guard built on it would leave
-    this pair true while reading as if the race were closed. The loss is also made *loud* one layer
-    down, where ``finalize_capture`` refuses to commit a row against the object this delete removed
-    (``tests/adversarial/test_vmcore_finalize_object_verify.py``). If the two etags below ever stop
-    diverging, the store has gained the precondition and ADR-0497 §1 should be revisited.
-    """
+    """A peer PUT after the owner fence is not among the captured immutable identities."""
 
     async def _run() -> None:
         run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
         async with await connect(migrated_url) as seed:
             await upload_manifest.delete_manifest(seed, "runs", run_id)
         vmcore = f"{prefix}vmcore-kdump"
-        stale, fresh = "etag-of-the-abandoned-attempt", "etag-of-the-retried-capture"
+        fresh = "etag-of-the-retried-capture"
         store: _FakeUploadStore
 
         def _the_retried_capture_s_put_completes() -> None:
@@ -820,16 +1109,15 @@ def test_a_put_inside_the_same_key_s_re_read_delete_gap_is_destroyed(
         store = _HookedStore(
             {vmcore: _GRACE * 2}, before_delete=_the_retried_capture_s_put_completes
         )
-        store.put(vmcore, _GRACE * 2, etag=stale)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             with caplog.at_level(logging.INFO, logger="kdive.reconciler.cleanup.upload_orphans"):
                 assert await run_repair(pool, _sweep(store)) == 1
-        assert store.deleted == [vmcore]
-        # The bytes destroyed are the retry's, not the ones the re-read decided on.
-        assert store.deleted_etags == [fresh]
+        assert store.deleted_versions == [(vmcore, "v1")]
+        assert store.version_ids(vmcore) == {"v2"}
+        assert store.deleted_etags == [f"etag-of-{vmcore}"]
         reclaims = [r.getMessage() for r in caplog.records if "deleted" in r.getMessage()]
         assert len(reclaims) == 1
-        assert stale in reclaims[0], "the decision was made on the version that no longer existed"
+        assert "version v1" in reclaims[0]
         assert fresh not in reclaims[0]
 
     asyncio.run(_run())
@@ -886,7 +1174,7 @@ def test_one_undeletable_key_does_not_starve_the_keys_behind_it(migrated_url: st
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             with pytest.raises(CategorizedError) as caught:  # still reported, once
                 await run_repair(pool, _sweep(store))
-        assert "could not reclaim 1 object(s); 2 were reclaimed" in str(caught.value)
+        assert "could not reclaim 1 target(s); 2 were reclaimed" in str(caught.value)
         assert sorted(store.deleted) == sorted([behind, other_root])
 
     asyncio.run(_run())
@@ -913,6 +1201,122 @@ def test_one_pass_reclaims_at_most_the_per_root_budget(migrated_url: str) -> Non
             # The next pass picks the remainder up; nothing is stranded by the cap.
             assert await run_repair(pool, _sweep(store)) == 5
         assert store.present == set()
+
+    asyncio.run(_run())
+
+
+def test_one_hot_key_is_capped_and_a_key_only_marker_reaches_its_sibling(
+    migrated_url: str,
+) -> None:
+    """Twenty captured identities cap one key without stranding the next key in that root."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        hot, sibling = f"{prefix}a-hot", f"{prefix}b-sibling"
+        store = _FakeUploadStore({hot: _GRACE * 2, sibling: _GRACE * 2})
+        store.seed_versions(hot, _data_history(store, hot, MAX_VERSIONS_PER_KEY + 5))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _sweep(store)) == MAX_VERSIONS_PER_KEY
+        assert store.capture_limits[:2] == [
+            (hot, MAX_VERSIONS_PER_KEY),
+            (sibling, MAX_VERSIONS_PER_KEY),
+        ]
+        assert store.version_ids(hot) == {
+            f"v{number:04d}" for number in range(MAX_VERSIONS_PER_KEY, 26)
+        }
+        assert sibling not in store.present
+        assert any(
+            key_marker == hot and version_marker is None
+            for _root, key_marker, version_marker, _limit in store.version_page_calls
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_denied_hot_history_over_the_root_budget_does_not_hide_the_next_key(
+    migrated_url: str,
+) -> None:
+    """One denied 205-version key costs 20 targets, then key-only resume reaches a sibling."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        hot, sibling = f"{prefix}a-denied", f"{prefix}b-sibling"
+        store = _FailingDeleteStore({hot: _GRACE * 2, sibling: _GRACE * 2}, fail_keys={hot})
+        store.seed_versions(hot, _data_history(store, hot, MAX_RECLAIMS_PER_ROOT + 5))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError):
+                await run_repair(pool, _sweep(store))
+        assert store.attempted == [hot, sibling]
+        assert store.capture_limits == [
+            (hot, MAX_VERSIONS_PER_KEY),
+            (sibling, MAX_VERSIONS_PER_KEY),
+        ]
+        assert store.version_ids(hot) == {
+            f"v{number:04d}" for number in range(1, MAX_RECLAIMS_PER_ROOT + 6)
+        }
+        assert store.deleted_versions == [(sibling, "v1")]
+
+    asyncio.run(_run())
+
+
+def test_a_capture_denied_hot_history_uses_a_key_only_marker_before_its_sibling(
+    migrated_url: str,
+) -> None:
+    """An exact-inventory deny cannot force broad enumeration of one key's 205 versions."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        hot, sibling = f"{prefix}a-denied", f"{prefix}b-sibling"
+        store = _FailingCaptureStore({hot: _GRACE * 2, sibling: _GRACE * 2}, fail_keys={hot})
+        store.seed_versions(hot, _data_history(store, hot, MAX_RECLAIMS_PER_ROOT + 5))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError):
+                await run_repair(pool, _sweep(store))
+        assert store.capture_limits == [
+            (hot, MAX_VERSIONS_PER_KEY),
+            (sibling, MAX_VERSIONS_PER_KEY),
+        ]
+        assert store.deleted_versions == [(sibling, "v1")]
+        assert any(
+            key_marker == hot and version_marker is None
+            for _root, key_marker, version_marker, _limit in store.version_page_calls
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_latest_version_delete_failure_leaves_it_discoverable_and_sweeps_sibling(
+    migrated_url: str,
+) -> None:
+    """Non-latest progress survives a latest-delete fault; the remaining latest is listed later."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        key, sibling = f"{prefix}a-history", f"{prefix}b-sibling"
+        store = _FailingVersionStore(
+            {key: _GRACE * 2, sibling: _GRACE * 2}, fail_versions={(key, "latest")}
+        )
+        old = store._make_version(  # noqa: SLF001 - explicit immutable test identity
+            key, _GRACE * 3, "old", is_latest=False
+        )
+        latest = store._make_version(  # noqa: SLF001 - explicit immutable test identity
+            key, _GRACE * 2, "latest", is_latest=True
+        )
+        store.seed_versions(key, [old, latest])
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError):
+                await run_repair(pool, _sweep(store))
+        assert store.attempted_versions[:2] == [(key, "old"), (key, "latest")]
+        assert store.version_ids(key) == {"latest"}
+        assert store.deleted_versions[-1] == (sibling, "v1")
 
     asyncio.run(_run())
 
@@ -968,7 +1372,7 @@ def test_a_wholly_stuck_first_root_does_not_starve_the_second(migrated_url: str)
                 await run_repair(pool, _sweep(store))
         # The stuck root spent its own budget; the investigations root still got swept.
         assert store.deleted == [rootfs]
-        assert f"{MAX_RECLAIMS_PER_ROOT} object(s); 1 were reclaimed" in str(caught.value)
+        assert f"{MAX_RECLAIMS_PER_ROOT} target(s); 1 were reclaimed" in str(caught.value)
 
     asyncio.run(_run())
 
@@ -1004,15 +1408,8 @@ def test_each_key_under_one_prefix_is_aged_on_its_own_mtime(migrated_url: str) -
     asyncio.run(_run())
 
 
-def test_the_mtime_re_read_costs_one_head_and_never_a_listing(migrated_url: str) -> None:
-    """The re-read is a single ``head``, so a base key does not enumerate its parts (#1575).
-
-    The whole point is that the cost is independent of how many keys the candidate prefixes: a
-    LIST-backed re-read of ``<base>`` returns ``<base>`` plus every ``<base>.partNNNN``, paginated
-    to exhaustion. Both halves of that are asserted — one ``head`` per examined candidate, and
-    **no** listing beyond the one per root the sweep opens with — because a re-read that merely
-    got cheaper (a bounded LIST) would still pass a call-count-only assertion.
-    """
+def test_each_candidate_gets_one_bounded_exact_version_capture(migrated_url: str) -> None:
+    """Every unique key is captured exactly once and legacy HEAD is not used."""
 
     async def _run() -> None:
         run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
@@ -1025,53 +1422,40 @@ def test_the_mtime_re_read_costs_one_head_and_never_a_listing(migrated_url: str)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             assert await run_repair(pool, _sweep(store)) == len(keys)
         assert sorted(store.deleted) == sorted(keys)
-        # One listing per root, and not one more: the re-read never lists.
-        assert store.listed_prefixes == list(UPLOAD_ORPHAN_ROOTS)
-        # Exactly one head per examined candidate, the base's no dearer than a part's.
-        assert sorted(store.headed_keys) == sorted(keys)
+        assert set(store.listed_prefixes) == set(UPLOAD_ORPHAN_ROOTS)
+        assert sorted(store.capture_limits) == sorted((key, MAX_VERSIONS_PER_KEY) for key in keys)
+        assert store.headed_keys == []
 
     asyncio.run(_run())
 
 
-def test_a_re_read_failure_is_skipped_and_counted_like_every_other_per_key_fault(
+def test_an_exact_capture_failure_is_skipped_and_counted_like_every_per_key_fault(
     migrated_url: str,
 ) -> None:
-    """The re-read is a fourth per-key failure site, and it fails the same way the others do.
-
-    Since #1575 it is also the only store call in the sweep that needs ``s3:GetObject`` rather
-    than ``s3:ListBucket``, so a credential that can list and delete but not HEAD faults *here*
-    and nowhere else. It must not delete on a re-read it could not make, and it must not abort
-    the pass: the key is skipped, counted, and the pass raises once at the end (ADR-0455 §5).
-    """
+    """A per-key inventory fault preserves that key and does not starve its sibling."""
 
     async def _run() -> None:
         run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
         async with await connect(migrated_url) as seed:
             await upload_manifest.delete_manifest(seed, "runs", run_id)
         denied, reachable = f"{prefix}vmcore", f"{prefix}kernel"
-        store = _FailingHeadStore({denied: _GRACE * 2, reachable: _GRACE * 2}, fail_keys={denied})
+        store = _FailingCaptureStore(
+            {denied: _GRACE * 2, reachable: _GRACE * 2}, fail_keys={denied}
+        )
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             with pytest.raises(CategorizedError) as excinfo:
                 await run_repair(pool, _sweep(store))
         assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-        # The un-HEADable key survives — a re-read that failed is not a licence to delete — and
-        # the key behind it is still reclaimed.
         assert store.deleted == [reachable]
         assert store.present == {denied}
 
     asyncio.run(_run())
 
 
-def test_the_reclaim_log_names_the_etag_the_delete_decision_was_made_on(
+def test_the_reclaim_log_names_the_exact_version_identity_and_kind(
     migrated_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The re-read observes an identity, not just an age, and the record says which one.
-
-    ``head`` returns the object's etag in the same round trip as its mtime, so the two cannot
-    disagree about which bytes were examined. Naming it on the reclaim line is what lets an
-    operator investigating a wrongly-drained key tell whether the deleted version is the one they
-    expect — the alternative is a log that says an object was deleted and nothing about which.
-    """
+    """The reclaim record identifies the immutable data version that was deleted."""
 
     async def _run() -> None:
         run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
@@ -1085,7 +1469,7 @@ def test_the_reclaim_log_names_the_etag_the_delete_decision_was_made_on(
         reclaims = [r.getMessage() for r in caplog.records if "deleted" in r.getMessage()]
         assert len(reclaims) == 1
         assert key in reclaims[0]
-        assert f"etag-of-{key}" in reclaims[0]
+        assert "version v1 (data version)" in reclaims[0]
 
     asyncio.run(_run())
 
@@ -1124,7 +1508,7 @@ def test_a_classify_failure_on_the_first_root_does_not_starve_the_second(
                 await run_repair(pool, _sweep(store))
         # The root whose classify raised was skipped; the sibling still drained.
         assert store.deleted == [rootfs]
-        assert "could not reclaim 1 object(s); 1 were reclaimed" in str(caught.value)
+        assert "could not reclaim 1 target(s); 1 were reclaimed" in str(caught.value)
 
     asyncio.run(_run())
 
@@ -1156,7 +1540,7 @@ def test_a_listing_failure_on_the_first_root_does_not_starve_the_second(
         # The unlistable root did not stop the sibling from draining...
         assert store.deleted == [rootfs]
         # ...and the fault is still reported, counted as the one failure of the pass.
-        assert "could not reclaim 1 object(s); 1 were reclaimed" in str(caught.value)
+        assert "could not reclaim 1 target(s); 1 were reclaimed" in str(caught.value)
 
     asyncio.run(_run())
 
@@ -1240,7 +1624,7 @@ def test_the_classify_never_sees_more_than_one_listing_page_of_candidates(
 
 
 def test_the_delete_order_is_store_order_across_page_boundaries(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str,
 ) -> None:
     """ADR-0455 §3 and ADR-0498 §2: paging must not become the classify's row order.
 
@@ -1258,14 +1642,36 @@ def test_the_delete_order_is_store_order_across_page_boundaries(
             migrated_url, [f"orphan-{i:02d}" for i in range(8)]
         )
         store = _FakeUploadStore(dict.fromkeys(keys, _GRACE * 2))
-        calls = _recording_classify(monkeypatch)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             assert await run_repair(pool, _sweep(store)) == len(keys)
         # Store order is lexicographic by key, and that is exactly the delete sequence.
         assert store.deleted == sorted(keys)
         # And it really did span pages — otherwise this pins order within one listing, not across.
-        assert len([call for call in calls if len(call) > 1]) > 1
         assert store.events.count("page:3") > 1
+
+    asyncio.run(_run())
+
+
+def test_one_key_crossing_version_pages_is_captured_and_deleted_once(
+    migrated_url: str,
+) -> None:
+    """Broad-page duplication does not repeat an exact capture or exact version deletion."""
+
+    async def _run() -> None:
+        _prefix, keys = await _seed_reaped_run_orphans(migrated_url, ["a-history", "b-next"])
+        history_key, sibling = keys
+        store = _FakeUploadStore(
+            {history_key: _GRACE * 2, sibling: _GRACE * 2}, page_size=_PAGE_SIZE
+        )
+        store.seed_versions(history_key, _data_history(store, history_key, 7))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _sweep(store)) == 8
+        assert store.capture_limits.count((history_key, MAX_VERSIONS_PER_KEY)) == 1
+        assert [version_id for key, version_id in store.deleted_versions if key == history_key] == [
+            f"v{number:04d}" for number in range(1, 8)
+        ]
+        assert store.deleted_versions[-1] == (sibling, "v1")
+        assert any(len(page) == _PAGE_SIZE for page in store.pages_yielded)
 
     asyncio.run(_run())
 
@@ -1325,7 +1731,7 @@ def test_a_listing_fault_partway_through_a_root_keeps_the_pages_it_already_swept
                 await run_repair(pool, _sweep(store))
         # Page 1's three keys are gone and stay gone; the fault is the pass's one failure.
         assert store.deleted == sorted(keys)[:_PAGE_SIZE]
-        assert "could not reclaim 1 object(s); 3 were reclaimed" in str(caught.value)
+        assert "could not reclaim 1 target(s); 3 were reclaimed" in str(caught.value)
         assert store.present == set(sorted(keys)[_PAGE_SIZE:])
 
     asyncio.run(_run())
@@ -1356,6 +1762,6 @@ def test_a_listing_failure_on_the_second_root_still_records_the_first_root_s_del
         assert store.deleted == [f"{prefix}orphan"]  # the first root's delete really happened
         errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
         assert len(errors) == 1
-        assert "reclaimed 1 object(s)" in errors[0]
+        assert "reclaimed 1 version target(s)" in errors[0]
 
     asyncio.run(_run())

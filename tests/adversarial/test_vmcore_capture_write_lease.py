@@ -24,6 +24,7 @@ import asyncio
 import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -31,7 +32,14 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.storage import HeadResult, ObjectListing, StoredArtifact
+from kdive.artifacts.storage import (
+    HeadResult,
+    ObjectListing,
+    ObjectVersion,
+    StoredArtifact,
+    VersionBatch,
+    VersionPage,
+)
 from kdive.artifacts.upload_manifest import RUN_UPLOAD_OWNER, lock_scope_for
 from kdive.artifacts.write_lease import hold_write_lease, reap_stale_write_leases
 from kdive.db.locks import require_top_level_transaction, try_advisory_xact_lock
@@ -312,6 +320,10 @@ class _SweepableCaptureStore:
 
     def __init__(self, objects: dict[str, tuple[str, timedelta]]) -> None:
         self._objects = dict(objects)
+        self._next_version = 1
+        self._versions: dict[str, list[ObjectVersion]] = {}
+        for key, (etag, age) in objects.items():
+            self._append_version(key, etag, age)
         self.deleted: list[str] = []
 
     @property
@@ -321,7 +333,21 @@ class _SweepableCaptureStore:
     def record(self, output: CaptureOutput) -> CaptureOutput:
         for stored in (output.raw, output.redacted):
             self._objects[stored.key] = (stored.etag, timedelta(0))
+            self._append_version(stored.key, stored.etag, timedelta(0))
         return output
+
+    def _append_version(self, key: str, etag: str, age: timedelta) -> None:
+        prior = [replace(version, is_latest=False) for version in self._versions.get(key, ())]
+        version = ObjectVersion(
+            key=key,
+            version_id=f"v{self._next_version}",
+            last_modified=datetime.now(UTC) - age,
+            etag=etag,
+            is_latest=True,
+            is_delete_marker=False,
+        )
+        self._next_version += 1
+        self._versions[key] = [*prior, version]
 
     def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[ObjectListing]]:
         page = [
@@ -331,6 +357,47 @@ class _SweepableCaptureStore:
         ]
         if page:
             yield page
+
+    def list_version_page(
+        self,
+        prefix: str,
+        *,
+        key_marker: str | None = None,
+        version_id_marker: str | None = None,
+        max_keys: int = 1000,
+    ) -> VersionPage:
+        entries = tuple(
+            version
+            for key in sorted(self._versions)
+            if key.startswith(prefix) and (key_marker is None or key > key_marker)
+            for version in self._versions[key]
+        )
+        return VersionPage(entries[:max_keys], False, None, None)
+
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch:
+        versions = list(self._versions.get(key, ()))
+        complete = len(versions) <= limit
+        if not complete:
+            latest = [version for version in versions if version.is_latest]
+            versions = [*latest, *(version for version in versions if not version.is_latest)]
+        return VersionBatch(key, tuple(versions[:limit]), complete)
+
+    def delete_batch(self, batch: VersionBatch) -> bool:
+        targets = [target for target in batch.targets if not target.is_latest]
+        if batch.history_complete:
+            targets.extend(target for target in batch.targets if target.is_latest)
+        for target in targets:
+            versions = self._versions.get(target.key, [])
+            if not any(version.version_id == target.version_id for version in versions):
+                continue
+            self._versions[target.key] = [
+                version for version in versions if version.version_id != target.version_id
+            ]
+            self.deleted.append(target.key)
+            if not self._versions[target.key]:
+                self._versions.pop(target.key)
+                self._objects.pop(target.key, None)
+        return batch.history_complete
 
     def head(self, key: str) -> HeadResult | None:
         entry = self._objects.get(key)

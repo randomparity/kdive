@@ -35,7 +35,8 @@ from uuid import UUID
 from psycopg import AsyncConnection
 
 from kdive.artifacts.content_address import rootfs_object_token
-from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.artifacts.storage import VersionBatch
+from kdive.db.locks import LockScope, advisory_xact_lock, require_top_level_transaction
 from kdive.domain.capacity.state import ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
@@ -60,15 +61,6 @@ from kdive.providers.shared.staging_partials import (
 
 _log = logging.getLogger(__name__)
 
-#: Wall-clock budget for one object-store delete. The delete runs inside the transaction holding the
-#: ``INVESTIGATION`` advisory lock, and the TTL backstop reclaims **live** ``open``/``active``
-#: investigations, so an untimed store call could stall a bind, a close, or a ``runs.create`` for as
-#: long as the client's own retry budget. A timeout is treated like any other real fault: defer the
-#: checksum and keep its row, so the row-last contract holds. The abandoned request may still land,
-#: leaving a row whose object *and* staged base are both gone until the next reclaim drains it — a
-#: bounded residual, recorded in ADR-0442, not a silently-benign case.
-_STORE_DELETE_TIMEOUT_S = 10.0
-
 #: The state values of the pre-overlay/re-materialize referencer states — condition (b) of the
 #: investigation-rootfs reclaim gate (ADR-0441 §6). A referencer in one of these pins the base even
 #: with its overlay file momentarily absent.
@@ -91,9 +83,10 @@ _INV_ROOTFS_KEYS_SQL = (
 
 
 class ArtifactObjectDeleter(Protocol):
-    """The object-store delete surface the rootfs reclaim needs."""
+    """The bounded exact-version surface investigation-rootfs reclaim needs."""
 
-    def delete(self, key: str) -> None: ...
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch: ...
+    def delete_batch(self, batch: VersionBatch) -> bool: ...
 
 
 def _overlay_pins_base(system_id: object, *, rootfs_dir: str) -> bool:
@@ -662,14 +655,14 @@ async def _reclaim_one_checksum(
     rootfs_dir: str,
     uploads_dir: str,
 ) -> bool | None:
-    """Gate and reclaim one due row under the investigation lock (ADR-0442 §3/§4, ADR-0495).
+    """Capture one due key, retire its row under lock, then exact-delete after commit.
 
-    Returns ``True`` when the checksum drained, ``False`` on a real fault (the caller fails the job
-    once every other checksum has been attempted), and ``None`` when there was nothing to do — the
-    row already drained, the gate pins the base, or a live writer provably holds one of this token's
-    staging partials. All three are expected steady states, not errors. Order is staged base ->
-    object -> row, so a fault leaves the re-downloadable copy rather than an unreclaimable local
-    base, and the row (the worklist anchor) outlives both.
+    Returns ``True`` when the database retirement committed, ``False`` on a real capture, unlink, or
+    exact-delete fault, and ``None`` when there was nothing to do. Version inventory is captured
+    before the owner transaction. The staged base and row are then removed under the investigation
+    lock, and only the captured immutable identities are deleted after that transaction commits.
+    An incomplete batch is progress rather than a fault: its survivors are rowless and remain
+    discoverable by the upload-version orphan sweep.
 
     **Two gates, in this order, and neither can stand in for the other.** The ADR-0441 §6 pin gate
     asks whether a System's *overlay* is backed by this base; it reads rows and one ``stat``, and it
@@ -702,6 +695,23 @@ async def _reclaim_one_checksum(
     on a 6-hour deadline, so the pin lapses when the worker stops heartbeating that job's lease
     instead of when a worst-case transfer estimate runs out.
     """
+    require_top_level_transaction(conn, "investigation rootfs version capture")
+    async with conn.transaction(), conn.cursor() as cur:
+        await cur.execute(_DUE_ROOTFS_ROW_SQL, (artifact_id, investigation_id))
+        candidate_row = await cur.fetchone()
+    if candidate_row is None:
+        return None
+    object_key = str(candidate_row[0])
+    try:
+        batch = await asyncio.to_thread(store.capture_exact_versions, object_key, 1000)
+    except Exception:  # noqa: BLE001 - the store boundary owns dependency exception mapping
+        _log.warning(
+            "capturing investigation rootfs versions for %s failed; nothing reclaimed for it",
+            object_key,
+            exc_info=True,
+        )
+        return False
+
     async with (
         conn.transaction(),
         advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
@@ -711,7 +721,8 @@ async def _reclaim_one_checksum(
             row = await cur.fetchone()
         if row is None:
             return None
-        object_key = str(row[0])
+        if str(row[0]) != object_key:
+            return None
         token = _rootfs_token_from_key(object_key)
         if not await rootfs_base_reclaimable(conn, investigation_id, token, rootfs_dir=rootfs_dir):
             return None
@@ -754,18 +765,23 @@ async def _reclaim_one_checksum(
                 exc_info=True,
             )
             return False
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(store.delete, object_key), timeout=_STORE_DELETE_TIMEOUT_S
-            )
-        except Exception:  # noqa: BLE001 - a real store fault or timeout defers before the row
-            _log.warning(
-                "deleting the investigation rootfs object %s failed or timed out; its row is kept",
-                object_key,
-                exc_info=True,
-            )
-            return False
         await conn.execute("DELETE FROM artifacts WHERE id = %s", (artifact_id,))
+    try:
+        complete = await asyncio.to_thread(store.delete_batch, batch)
+    except Exception:  # noqa: BLE001 - report the dependency fault after durable row retirement
+        _log.warning(
+            "deleting captured investigation rootfs versions for %s failed; the row is already "
+            "retired and the upload orphan sweep will rediscover every survivor",
+            object_key,
+            exc_info=True,
+        )
+        return False
+    if not complete:
+        _log.info(
+            "investigation rootfs %s retained the captured latest version because its 1000-target "
+            "history batch was incomplete; the upload orphan sweep will continue it",
+            object_key,
+        )
     return True
 
 

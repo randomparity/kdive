@@ -143,7 +143,9 @@ _NULL_RESETTER: TransportResetter = NullResetter()
 _NULL_DUMP_VOLUME_REAPER: DumpVolumeReaper = NullDumpVolumeReaper()
 
 
-class ReconcileUploadStore(UploadOrphanStore, gc_repairs.ArtifactObjectDeleter, Protocol):
+class ReconcileUploadStore(
+    UploadOrphanStore, UploadStore, gc_repairs.ArtifactObjectDeleter, Protocol
+):
     """Object-store surface required by the upload and artifact-retention reconciler lanes."""
 
 

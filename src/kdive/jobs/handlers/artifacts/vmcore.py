@@ -121,28 +121,19 @@ async def verify_objects_still_stored(
 ) -> None:
     """Raise unless the store still holds each ``stored`` object at the etag the capture observed.
 
-    This is the ADR-0497 fence against a lost write. The vmcore lane's keys are deterministic per
-    ``(run, method)`` and mint **no** upload window, so between a first attempt that wrote the core
-    and died before this finalize and a retry that writes it again, the key is a live candidate for
-    the ADR-0455 orphan sweep: rowless, manifest-less, and past the grace. The sweep re-reads and
-    re-classifies immediately before deleting, but a write landing inside that last gap is deleted
-    anyway (ADR-0455 §3). The reachable lane is **local-libvirt**, whose keys sit under the swept
-    ``local/`` tenant and whose ``put_stream`` runs with no lock held — ``precheck_run`` releases
-    the Run lock before the capture by design (ADR-0244) — while the sweep takes no Run lock.
-    Without this check the retry then commits ``artifacts`` rows against bytes that no longer
-    exist — a dangling reference on a Run reporting success — and nothing raises.
+    This is the ADR-0497 fence against any lost or replaced write. ADR-0524's upload-orphan sweep
+    now captures immutable VersionIds before its final database fence and deletes only those
+    identities after unlocking, so a later PUT at this deterministic key survives cleanup. This
+    verification remains the publication backstop for disappearance or replacement from any other
+    path before the artifact row commits.
 
     The comparison is on the etag rather than on presence, which costs the same round trip and
     catches strictly more: an object deleted *and re-PUT* between the capture and here is present
     but is not the object the row would claim, and committing would write an ``etag`` column that
     never matched any bytes.
 
-    This does not prevent the delete, and did not when it shipped: the conditional delete that
-    would have stopped it is inert on the MinIO releases this repo pins (ADR-0497 §1), so all this
-    did was convert a silent dangling row into a failed job naming the key. ADR-0502's write lease
-    is what prevents it, and this stays as the backstop — it is what still catches a lost write on
-    the paths a lease does not cover (a writer that takes none) and in the window where a lease's
-    holding job has stopped being live.
+    The guard does not attempt cleanup or repair. It fails the finalize transaction with the key
+    and observed identity so a retry can publish a fresh capture without creating a dangling row.
 
     Args:
         store: The object store to stat through.

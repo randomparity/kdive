@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any, cast
 
+from kdive.artifacts.storage import VersionBatch, VersionPage
 from kdive.reconciler.loop import ReconcileConfig, ReconcileUploadStore
 from kdive.services.images.retention import ImageSweepStore
 
@@ -42,6 +43,25 @@ class _NullUploadStore:
 
     def delete(self, key: str) -> None:
         return None
+
+    def list_version_page(
+        self,
+        prefix: str,
+        *,
+        key_marker: str | None = None,
+        version_id_marker: str | None = None,
+        max_keys: int = 1000,
+    ) -> VersionPage:
+        return VersionPage((), False, None, None)
+
+    def iter_prefix_version_pages(self, prefix: str) -> Iterator[VersionPage]:
+        yield self.list_version_page(prefix)
+
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch:
+        return VersionBatch(key, (), True)
+
+    def delete_batch(self, batch: VersionBatch) -> bool:
+        return True
 
     def delete_retired_key_batch(self, key: str, limit: int) -> bool:
         assert limit == 20

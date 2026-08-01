@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -43,13 +42,11 @@ _BUCKET = "the-bucket"
 class _FakeS3:
     """A boto client stand-in that can serve one key a reply missing or corrupting one field.
 
-    Only the three operations the sweep reaches are implemented — the paged listing, the per-key
-    ``head_object``, and ``delete_object`` — because the point is to exercise ``ObjectStore``'s own
-    parsing of those replies, not to emulate S3.
+    Only the two operations the sweep reaches are implemented: version inventory and exact-version
+    deletion. The point is to exercise ``ObjectStore``'s parsing, not to emulate S3.
 
-    ``head_object`` for ``bad_key`` returns HTTP 200 with ``bad_field`` removed (or replaced by
-    ``bad_value``), which is the shape of a proxy or partial S3 implementation that answers
-    successfully with an unusable body. Every other key gets a well-formed reply.
+    Exact-key inventory for ``bad_key`` returns HTTP 200 with ``bad_field`` removed (or replaced
+    by ``bad_value``). Broad root inventory stays well formed so the fault costs one key.
     """
 
     def __init__(
@@ -62,7 +59,7 @@ class _FakeS3:
         bad_value: object | None = None,
     ) -> None:
         self._mtime = datetime.now(UTC) - age
-        self._present = list(keys)
+        self._versions = {key: {"v1"} for key in keys}
         self._bad_key = bad_key
         self._bad_field = bad_field
         self._bad_value = bad_value
@@ -71,42 +68,35 @@ class _FakeS3:
 
     @property
     def present(self) -> set[str]:
-        return set(self._present)
+        return {key for key, versions in self._versions.items() if versions}
 
-    def get_paginator(self, _op: str) -> _FakeS3:
-        return self
-
-    def paginate(self, **kwargs: object) -> Iterator[dict[str, Any]]:
+    def list_object_versions(self, **kwargs: object) -> dict[str, Any]:
         prefix = str(kwargs["Prefix"])
         self.listed_prefixes.append(prefix)
-        contents = [
-            {"Key": key, "LastModified": self._mtime}
-            for key in sorted(self._present)
-            if key.startswith(prefix)
-        ]
-        yield {"Contents": contents}
-
-    def head_object(self, **kwargs: object) -> dict[str, Any]:
-        key = str(kwargs["Key"])
-        reply: dict[str, Any] = {
-            "ContentLength": 1,
-            "ETag": f'"etag-of-{key}"',
-            "LastModified": self._mtime,
-            "Metadata": {},
-        }
-        if key != self._bad_key or self._bad_field is None:
-            return reply
-        if self._bad_value is None:
-            del reply[self._bad_field]
-        else:
-            reply[self._bad_field] = self._bad_value
-        return reply
+        versions: list[dict[str, Any]] = []
+        for key in sorted(self.present):
+            if not key.startswith(prefix):
+                continue
+            reply: dict[str, Any] = {
+                "Key": key,
+                "VersionId": "v1",
+                "LastModified": self._mtime,
+                "ETag": f'"etag-of-{key}"',
+                "IsLatest": True,
+            }
+            if prefix == self._bad_key and key == self._bad_key and self._bad_field is not None:
+                if self._bad_value is None:
+                    del reply[self._bad_field]
+                else:
+                    reply[self._bad_field] = self._bad_value
+            versions.append(reply)
+        return {"Versions": versions, "DeleteMarkers": [], "IsTruncated": False}
 
     def delete_object(self, **kwargs: object) -> dict[str, Any]:
         key = str(kwargs["Key"])
+        version_id = str(kwargs["VersionId"])
         self.deleted.append(key)
-        if key in self._present:
-            self._present.remove(key)
+        self._versions.get(key, set()).discard(version_id)
         return {}
 
 
@@ -147,13 +137,13 @@ async def _sweep_expecting_one_fault(migrated_url: str, client: _FakeS3) -> Cate
     return excinfo.value
 
 
-@pytest.mark.parametrize("field", ["LastModified", "ContentLength", "ETag"])
-def test_a_head_reply_missing_a_field_costs_one_key_and_the_pass_finishes(
+@pytest.mark.parametrize("field", ["Key", "VersionId", "LastModified", "ETag", "IsLatest"])
+def test_an_exact_version_reply_missing_a_field_costs_one_key_and_the_pass_finishes(
     migrated_url: str, field: str
 ) -> None:
     """The whole point of #1685: the malformed key is skipped and counted, the rest are reclaimed.
 
-    Parametrized over all three required fields because the sweep does not care *which* field the
+    Parametrized over all required version fields because the sweep does not care *which* field the
     store dropped — it cares that the store's answer arrived as the error category its per-key
     handler catches. A guard on ``LastModified`` alone would leave two fields able to reproduce the
     identical abort.
@@ -181,7 +171,9 @@ def test_a_head_reply_missing_a_field_costs_one_key_and_the_pass_finishes(
     asyncio.run(_run())
 
 
-def test_a_head_reply_with_a_wrong_typed_field_costs_one_key_too(migrated_url: str) -> None:
+def test_an_exact_version_reply_with_a_wrong_typed_field_costs_one_key_too(
+    migrated_url: str,
+) -> None:
     """An ill-typed ``LastModified`` is survivable for the same reason a missing one is.
 
     Without the boundary check this reaches ``_RECLAIMABLE_SQL`` as a ``text`` in a
@@ -218,8 +210,8 @@ def test_the_recorded_fault_names_the_store_call_the_key_and_the_field(
 
     ``_reclaim_page`` logs the candidate's key and the exception's message, so an operator seeing
     one key fail every pass forever needs the message itself to say *why* — that the store's
-    ``head_object`` reply omitted a field, and which one. "head_object failed" would not
-    distinguish this from a per-key deny.
+    ``list_object_versions`` reply omitted a field, and which one. A generic store failure would
+    not distinguish this from a per-key deny.
     """
 
     async def _run() -> None:
@@ -239,7 +231,7 @@ def test_the_recorded_fault_names_the_store_call_the_key_and_the_field(
         skips = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert len(skips) == 1
         assert malformed in skips[0]
-        assert "head_object" in skips[0]
+        assert "list_object_versions" in skips[0]
         assert _BUCKET in skips[0]
         assert "LastModified" in skips[0]
 
@@ -264,7 +256,7 @@ def test_a_fault_that_is_not_a_store_fault_still_aborts_the_whole_pass(migrated_
     """
 
     class _BuggyStore(ObjectStore):
-        def head(self, key: str) -> Any:
+        def capture_exact_versions(self, key: str, limit: int) -> Any:
             raise KeyError(f"a bug in the sweep, not a store reply, on {key}")
 
     async def _run() -> None:
@@ -300,13 +292,23 @@ def test_a_malformed_listing_entry_ends_its_root_without_ending_the_pass(
     class _MalformedListing(_FakeS3):
         """Serves ``local/runs/`` one entry with no ``Key`` at all; the sibling root is normal."""
 
-        def paginate(self, **kwargs: object) -> Iterator[dict[str, Any]]:
+        def list_object_versions(self, **kwargs: object) -> dict[str, Any]:
             prefix = str(kwargs["Prefix"])
             if not prefix.startswith("local/runs/"):
-                yield from super().paginate(**kwargs)
-                return
+                return super().list_object_versions(**kwargs)
             self.listed_prefixes.append(prefix)
-            yield {"Contents": [{"LastModified": self._mtime}]}
+            return {
+                "Versions": [
+                    {
+                        "VersionId": "v1",
+                        "LastModified": self._mtime,
+                        "ETag": '"etag"',
+                        "IsLatest": True,
+                    }
+                ],
+                "DeleteMarkers": [],
+                "IsTruncated": False,
+            }
 
     async def _run() -> None:
         await _seed_rowless_upload_prefix(migrated_url)

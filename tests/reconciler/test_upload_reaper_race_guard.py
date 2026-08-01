@@ -21,8 +21,9 @@ another advisory acquisition of the same key.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from datetime import timedelta
+from collections.abc import Callable, Iterator
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import psycopg
@@ -30,6 +31,7 @@ import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.storage import ObjectVersion, VersionBatch, VersionPage
 from kdive.artifacts.upload_manifest import (
     INVESTIGATION_UPLOAD_OWNER,
     RUN_UPLOAD_OWNER,
@@ -56,16 +58,69 @@ _CONTESTED = "kernel"
 
 
 class _HookedStore:
-    """A store that runs ``before_delete`` once, from inside its first ``delete``."""
+    """A versioned store that runs ``before_delete`` once inside exact batch deletion."""
 
     def __init__(self, prefix: str, keys: list[str], before_delete: Callable[[], None]) -> None:
         self._objects: dict[str, list[str]] = {prefix: keys}
         self._before_delete = before_delete
         self._fired = False
+        self._versions = {key: [self._version(key, "old", is_latest=True)] for key in keys}
         self.deleted: list[str] = []
+        self.deleted_versions: list[tuple[str, str]] = []
 
     def list_prefix(self, prefix: str) -> list[str]:
         return list(self._objects.get(prefix, []))
+
+    def iter_prefix_version_pages(self, prefix: str) -> Iterator[VersionPage]:
+        entries = tuple(
+            version
+            for key in self._objects.get(prefix, [])
+            for version in self._versions.get(key, [])
+        )
+        yield VersionPage(entries, False, None, None)
+
+    def capture_exact_versions(self, key: str, limit: int) -> VersionBatch:
+        versions = list(self._versions.get(key, ()))
+        complete = len(versions) <= limit
+        if not complete:
+            latest = [version for version in versions if version.is_latest]
+            versions = [*latest, *(version for version in versions if not version.is_latest)]
+        return VersionBatch(key, tuple(versions[:limit]), complete)
+
+    def delete_batch(self, batch: VersionBatch) -> bool:
+        if not self._fired:
+            self._fired = True
+            self._before_delete()
+        targets = [target for target in batch.targets if not target.is_latest]
+        if batch.history_complete:
+            targets.extend(target for target in batch.targets if target.is_latest)
+        selected = {target.version_id for target in targets}
+        self._versions[batch.key] = [
+            version
+            for version in self._versions.get(batch.key, ())
+            if version.version_id not in selected
+        ]
+        self.deleted.extend(target.key for target in targets)
+        self.deleted_versions.extend((target.key, target.version_id) for target in targets)
+        return batch.history_complete
+
+    def put(self, key: str, version_id: str = "peer") -> None:
+        prior = [replace(version, is_latest=False) for version in self._versions.get(key, ())]
+        self._versions[key] = [*prior, self._version(key, version_id, is_latest=True)]
+
+    def versions(self, key: str) -> set[str]:
+        return {version.version_id for version in self._versions.get(key, ())}
+
+    @staticmethod
+    def _version(key: str, version_id: str, *, is_latest: bool) -> ObjectVersion:
+        return ObjectVersion(
+            key=key,
+            version_id=version_id,
+            last_modified=datetime(2026, 7, 1, tzinfo=UTC),
+            etag=f"etag-{version_id}",
+            is_latest=is_latest,
+            is_delete_marker=False,
+        )
 
     def delete(self, key: str) -> None:
         if not self._fired:
@@ -341,6 +396,65 @@ def test_the_same_key_is_deleted_once_the_owner_lock_is_free(migrated_url: str) 
             await sweeper.close()
         assert (outcome.deleted, outcome.declined, outcome.undeleted) == (1, 0, 0)
         assert store.deleted == [key]
+
+    asyncio.run(_run())
+
+
+def test_a_peer_put_after_the_same_key_s_fence_survives_exact_delete(
+    migrated_url: str,
+) -> None:
+    """A version created after capture is not selected by the post-unlock batch delete."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        key = f"{prefix}{_CONTESTED}"
+        store: _HookedStore
+        store = _HookedStore(prefix, [key], lambda: store.put(key))
+        async with await connect(migrated_url) as seed:
+            await seed.execute(
+                "DELETE FROM upload_manifests WHERE owner_kind = %s AND owner_id = %s",
+                (RUN_UPLOAD_OWNER, run_id),
+            )
+        sweeper = await psycopg.AsyncConnection.connect(migrated_url)
+        try:
+            outcome = await _sweep_uncommitted_objects(
+                sweeper, store, RUN_UPLOAD_OWNER, run_id, [key]
+            )
+        finally:
+            await sweeper.close()
+        assert (outcome.deleted, outcome.declined, outcome.undeleted) == (1, 0, 0)
+        assert store.deleted_versions == [(key, "old")]
+        assert store.versions(key) == {"peer"}
+
+    asyncio.run(_run())
+
+
+def test_an_incomplete_reap_batch_retains_latest_and_does_not_starve_a_sibling(
+    migrated_url: str,
+) -> None:
+    """A hot key makes bounded progress; its survivors stay visible to orphan repair."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        hot, sibling = f"{prefix}a-hot", f"{prefix}b-sibling"
+        store = _HookedStore(prefix, [hot, sibling], _noop)
+        for number in range(2, 26):
+            store.put(hot, f"v{number}")
+        async with await connect(migrated_url) as seed:
+            await seed.execute(
+                "DELETE FROM upload_manifests WHERE owner_kind = %s AND owner_id = %s",
+                (RUN_UPLOAD_OWNER, run_id),
+            )
+        sweeper = await psycopg.AsyncConnection.connect(migrated_url)
+        try:
+            outcome = await _sweep_uncommitted_objects(
+                sweeper, store, RUN_UPLOAD_OWNER, run_id, [hot, sibling]
+            )
+        finally:
+            await sweeper.close()
+        assert (outcome.deleted, outcome.declined, outcome.undeleted) == (2, 0, 0)
+        assert store.versions(hot) == {"v20", "v21", "v22", "v23", "v24", "v25"}
+        assert store.versions(sibling) == set()
 
     asyncio.run(_run())
 
