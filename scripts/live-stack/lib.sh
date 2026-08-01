@@ -93,9 +93,14 @@ pids_need_sudo() {
   awk -v me="$EUID" '$1 != me { foreign = 1 } END { exit !foreign }' <<<"$rows"
 }
 
+# Set by stop_daemons so its caller can distinguish a process which ignored SIGTERM from one the
+# caller could not signal. Process-local by design: the value describes only the latest stop pass.
+STOP_DAEMONS_UNSIGNALLED=()
+
 stop_daemons() {
   local pids pid
   local -a remaining
+  STOP_DAEMONS_UNSIGNALLED=()
   mapfile -t pids < <(daemon_pids)
   ((${#pids[@]})) || {
     echo "no kdive daemons running"
@@ -104,11 +109,14 @@ stop_daemons() {
   echo "stopping kdive daemons: ${pids[*]}"
   for pid in "${pids[@]}"; do
     if pids_need_sudo "$pid"; then
-      sudo kill "$pid" 2>/dev/null || true
+      sudo kill "$pid" 2>/dev/null || STOP_DAEMONS_UNSIGNALLED+=("$pid")
     else
-      kill "$pid" 2>/dev/null || true
+      kill "$pid" 2>/dev/null || STOP_DAEMONS_UNSIGNALLED+=("$pid")
     fi
   done
+  if ((${#STOP_DAEMONS_UNSIGNALLED[@]})); then
+    echo "WARN: SIGTERM was not delivered to: ${STOP_DAEMONS_UNSIGNALLED[*]}" >&2
+  fi
   # One scan per poll, reused by the WARN. A second `daemon_pids` down there was a separate `ps`,
   # so the set it printed was not the set that decided to warn — the same double-scan skew fixed
   # in require_workers_alive later in this file, and this list is likewise what an operator would
@@ -121,6 +129,34 @@ stop_daemons() {
     ((${#remaining[@]})) || return 0
   done
   echo "WARN: daemons still running after stop: ${remaining[*]}" >&2
+}
+
+# End daemons which remain after stop_daemons' grace period. This is deliberately a separate
+# helper: stop_daemons also runs during bring-up, where escalation would abandon legitimate work.
+force_stop_daemons() {
+  local pid
+  local -a pids remaining unsignalled=()
+  mapfile -t pids < <(daemon_pids)
+  ((${#pids[@]})) || return 0
+  echo "force-stopping kdive daemons: ${pids[*]}"
+  for pid in "${pids[@]}"; do
+    if pids_need_sudo "$pid"; then
+      sudo kill -9 "$pid" 2>/dev/null || unsignalled+=("$pid")
+    else
+      kill -9 "$pid" 2>/dev/null || unsignalled+=("$pid")
+    fi
+  done
+  if ((${#unsignalled[@]})); then
+    echo "ERROR: SIGKILL was not delivered to: ${unsignalled[*]}" >&2
+    return 1
+  fi
+  for _ in {1..20}; do
+    sleep 0.5
+    mapfile -t remaining < <(daemon_pids)
+    ((${#remaining[@]})) || return 0
+  done
+  echo "ERROR: daemons still running after SIGKILL: ${remaining[*]}" >&2
+  return 1
 }
 
 # Fail (return 1) if KDIVE_HTTP_PORT is already held by a foreign listener, printing the holder so
@@ -375,34 +411,11 @@ require_workers_alive() {
   # count exists to prevent. The two directions need different remedies, so they say different
   # things.
   if ((have > want)); then
-    local pid_csv kill_cmd
+    local pid_csv
     printf -v pid_csv '%s,' "${pids[@]}"
     pid_csv="${pid_csv%,}"
-    # Prescribe `sudo` only when the operator actually needs it, rather than unconditionally: under
-    # KDIVE_WORKER_AS_ROOT=0 these are the operator's own processes, and an operator already root
-    # on a host without sudo installed cannot run the command at all. Same helper stop_daemons
-    # uses, so the prescription an operator is told to run and the kill the script performs itself
-    # cannot disagree about who owns what. One prefix covers the whole list: the helper asks about
-    # the set, and root may signal every pid in it.
-    kill_cmd="kill -9"
-    if pids_need_sudo "$pid_csv"; then
-      kill_cmd="sudo kill -9"
-    fi
-    # The remedy is deliberately NOT down.sh. It calls this same stop_daemons — one SIGTERM, a
-    # ten-second poll, a WARN, `return 0`, no escalation — so the survivor this message is about
-    # outlives it exactly as it outlived bring-up, and the compose backends come down for nothing.
-    # (`--yes` gates only the --wipe prompt, so `down.sh --yes` is `down.sh` here.)
-    #
-    # Escalating to SIGKILL inside stop_daemons was the alternative, and is rejected because that
-    # helper runs on EVERY bring-up, not just teardown: escalation would hard-kill a worker that is
-    # legitimately mid-job every time anyone runs up.sh, discarding a multi-GiB fetch or a build
-    # that was about to finish. Recovery is not free either — reclaiming the abandoned job spends
-    # one of its bounded attempts. So the judgement call is the operator's; state both options and
-    # what killing actually costs, rather than making the choice for them silently.
-    #
-    # That leaves teardown with no supported way to end a SIGTERM-ignoring worker, which is a real
-    # gap and is tracked in #1733 — escalation scoped to down.sh, where it does not run on every
-    # bring-up. Until that lands, the pids below are the operator's only handle.
+    # Forced teardown owns escalation. Keeping it out of stop_daemons preserves bring-up's
+    # graceful-only contract while giving this error one supported, ownership-aware remedy.
     {
       echo "ERROR: asked for ${want} worker(s) but ${have} from this checkout are running."
       echo "  A worker from a previous stack outlived stop_daemons — it does not act on SIGTERM"
@@ -413,13 +426,13 @@ require_workers_alive() {
       echo "  The survivors are whichever have the older start times. This step is diagnostic"
       echo "  only — the kill below ends every pid in the list, survivor or not:"
       echo "    ps -ww -o pid,lstart,etime,args -p ${pid_csv}"
-      echo "  Tearing the stack down will NOT clear it: that path sends the same SIGTERM and"
-      echo "  gives up the same way. So either wait for the in-flight job to finish and re-run"
-      echo "  (that only helps if the SIGTERM landed — if it did not, the worker keeps claiming"
-      echo "  new jobs and waiting never ends it; and this run's own workers above are claiming"
-      echo "  jobs meanwhile, so a re-run can land on this same surplus), or end these in one"
-      echo "  step and re-run:"
-      echo "    ${kill_cmd} ${pids[*]}"
+      if ((${#STOP_DAEMONS_UNSIGNALLED[@]})); then
+        echo "  SIGTERM was not delivered to: ${STOP_DAEMONS_UNSIGNALLED[*]}. Waiting cannot end"
+        echo "  those pids; use the forced teardown below."
+      else
+        echo "  Either wait for the in-flight job to finish, then re-run, or end the stack with:"
+      fi
+      echo "    scripts/live-stack/down.sh --force"
       echo "  Killing abandons those jobs mid-flight: another worker reclaims each one once its"
       echo "  lease lapses, spending one of its bounded attempts."
     } >&2

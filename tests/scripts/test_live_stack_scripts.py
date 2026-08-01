@@ -249,8 +249,8 @@ def test_stop_daemons_keeps_sudo_for_a_daemon_the_caller_cannot_signal() -> None
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="the self-owned arm needs a non-root caller")
-def test_surplus_worker_remedy_drops_sudo_for_self_owned_workers() -> None:
-    """The prescribed kill must use the same ownership test stop_daemons does (#1739).
+def test_surplus_worker_remedy_uses_supported_teardown_for_self_owned_workers() -> None:
+    """The remedy delegates ownership handling to the supported teardown path (#1733).
 
     Under `KDIVE_WORKER_AS_ROOT=0` the workers are the operator's own processes, so a `sudo kill`
     is wrong — and on a host where the operator is already root with no sudo installed it is not
@@ -269,18 +269,14 @@ def test_surplus_worker_remedy_drops_sudo_for_self_owned_workers() -> None:
     )
     assert result.returncode != 0, "two live workers against a want of 1 is a surplus"
     first, second = result.stdout.split("PIDS=")[1].strip().split(",")
-    # The four-space indent IS the assertion here, not incidental formatting: it is what marks a
-    # line as a command the operator runs rather than prose about one, so an unindented match
-    # would pass against a sentence merely mentioning the kill.
-    assert f"\n    kill -9 {first} {second}\n" in result.stderr, (
-        f"self-owned workers must be killed without sudo: {result.stderr}"
-    )
-    assert "sudo kill" not in result.stderr, f"sudo must not be prescribed here: {result.stderr}"
+    assert f"Live worker pids: {first} {second}" in result.stderr
+    assert "\n    scripts/live-stack/down.sh --force\n" in result.stderr
+    assert "kill -9" not in result.stderr, "manual privilege selection is no longer the remedy"
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="a root caller needs sudo for nothing")
-def test_surplus_worker_remedy_keeps_sudo_when_a_pid_is_not_the_callers() -> None:
-    """One unsignalable pid in the list must pull `sudo` back in, even mixed with the caller's own.
+def test_surplus_worker_remedy_uses_supported_teardown_for_foreign_workers() -> None:
+    """The same supported command handles a mixed-ownership pid set (#1733).
 
     The complement of the self-owned arm, and the reason the test is "is any pid NOT mine" rather
     than "are they all mine": a bare `kill -9` against a pid the operator cannot signal fails with
@@ -290,9 +286,8 @@ def test_surplus_worker_remedy_keeps_sudo_when_a_pid_is_not_the_callers() -> Non
     """
     result = _lib("worker_pids() { echo 1; echo $$; }\nrequire_workers_alive 1\n")
     assert result.returncode != 0, "two live workers against a want of 1 is a surplus"
-    assert "sudo kill -9 1 " in result.stderr, (
-        f"a pid the caller cannot signal must keep sudo in the remedy: {result.stderr}"
-    )
+    assert "\n    scripts/live-stack/down.sh --force\n" in result.stderr
+    assert "sudo kill -9" not in result.stderr
 
 
 def test_the_worker_count_ceiling_is_documented_where_operators_read_it() -> None:
@@ -452,7 +447,7 @@ def test_bring_up_fails_on_a_surplus_worker_too(tmp_path: Path) -> None:
 
 
 def test_the_surplus_remedy_is_one_that_actually_clears_the_surplus(tmp_path: Path) -> None:
-    """The remedy must not be `down.sh`, which cannot end the worker this message is about.
+    """The remedy must use forced teardown, which can end the worker this message is about.
 
     `down.sh` calls the same `stop_daemons` that just let the survivor through: one SIGTERM, a
     ten-second poll, a WARN, `return 0` — there is no escalation past SIGTERM anywhere. So a
@@ -469,19 +464,12 @@ def test_the_surplus_remedy_is_one_that_actually_clears_the_surplus(tmp_path: Pa
         "require_workers_alive 1\n"
     )
     assert surplus.returncode != 0
-    assert "down.sh" not in surplus.stderr, (
-        f"down.sh cannot clear a SIGTERM-ignoring worker; it must not be the remedy, and "
-        f"--wipe must not be dangled as recovery for an abandoned job either: {surplus.stderr}"
-    )
-    assert "Tearing the stack down will NOT clear it" in surplus.stderr, (
-        f"the message must say outright that teardown does not fix this: {surplus.stderr}"
-    )
-    assert "kill -9 111 222" in surplus.stderr, (
-        f"the remedy must name the pids it just printed: {surplus.stderr}"
+    assert "scripts/live-stack/down.sh --force" in surplus.stderr, (
+        f"the remedy must name the supported forced teardown path: {surplus.stderr}"
     )
     # Not a bare `"wait" in stderr` — the pre-fix message already said "the ten-second wait only
     # warns", so that substring passes against the very message this test exists to reject.
-    assert surplus.stderr.index("wait for the in-flight job") < surplus.stderr.index("kill -9"), (
+    assert surplus.stderr.index("wait for the in-flight job") < surplus.stderr.index("--force"), (
         f"the non-destructive option must be offered before the destructive one: {surplus.stderr}"
     )
     # Killing abandons a running job, so the message must not stop at the command: it has to say
@@ -566,6 +554,71 @@ def test_stop_daemons_warns_with_the_set_it_actually_polled(tmp_path: Path) -> N
     assert "999" not in result.stderr, (
         f"the WARN re-scanned after the poll loop instead of reusing it: {result.stderr}"
     )
+
+
+def test_stop_daemons_names_pids_that_never_received_sigterm() -> None:
+    """A failed signal and an ignored signal need different operator remedies (#1733)."""
+    result = _lib(
+        "sleep() { :; }\n"
+        "daemon_pids() { echo 111; echo 222; }\n"
+        'kill() { [[ "$1" != "111" ]]; }\n'
+        "pids_need_sudo() { return 1; }\n"
+        "stop_daemons\n"
+    )
+    assert "SIGTERM was not delivered to: 111" in result.stderr, result.stderr
+    assert "daemons still running after stop: 111 222" in result.stderr, result.stderr
+
+
+def test_force_stop_daemons_sends_sigkill_only_to_graceful_survivors(tmp_path: Path) -> None:
+    """The force helper is the teardown-only escalation primitive (#1733)."""
+    scans = tmp_path / "scans"
+    signals = tmp_path / "signals"
+    result = _lib(
+        "sleep() { :; }\n"
+        f'daemon_pids() {{ echo scan >>"{scans}"; '
+        f'[[ $(wc -l <"{scans}") == 1 ]] && printf "111\\n222\\n"; }}\n'
+        "pids_need_sudo() { return 1; }\n"
+        f'kill() {{ echo "$*" >>"{signals}"; }}\n'
+        "force_stop_daemons\n"
+    )
+    assert result.returncode == 0, result.stderr
+    assert signals.read_text().splitlines() == ["-9 111", "-9 222"]
+
+
+def test_force_stop_daemons_fails_when_sigkill_cannot_be_delivered() -> None:
+    """Forced teardown must not claim success and stop backends after signal failure."""
+    result = _lib(
+        "sleep() { :; }\n"
+        "daemon_pids() { echo 111; }\n"
+        "pids_need_sudo() { return 1; }\n"
+        "kill() { return 1; }\n"
+        "force_stop_daemons\n"
+    )
+    assert result.returncode != 0
+    assert "SIGKILL was not delivered to: 111" in result.stderr, result.stderr
+
+
+def test_down_force_is_teardown_only_and_runs_after_the_graceful_stop() -> None:
+    """Bring-up keeps graceful signalling; only down.sh wires in escalation (#1733)."""
+    down = (ROOT / "scripts/live-stack/down.sh").read_text()
+    up = (ROOT / "scripts/live-stack/up.sh").read_text()
+    assert down.index("stop_daemons\n") < down.index("force_stop_daemons\n")
+    assert '[[ "$force" == "1" ]]' in down
+    assert "force_stop_daemons" not in up
+
+
+def test_surplus_report_distinguishes_a_pid_that_was_not_signalled(tmp_path: Path) -> None:
+    """Waiting is not offered when the preceding SIGTERM never reached a worker."""
+    result = _lib(
+        f'py="{tmp_path}/no-such-python"\n'
+        "STOP_DAEMONS_UNSIGNALLED=(111)\n"
+        "worker_pids() { echo 111; echo 222; }\n"
+        "require_workers_alive 1\n"
+    )
+    assert result.returncode != 0
+    assert "SIGTERM was not delivered to: 111" in result.stderr
+    assert "Waiting cannot end those pids" in " ".join(result.stderr.split())
+    assert "wait for the in-flight job" not in result.stderr
 
 
 def test_build_stamps_still_report_a_worker_row_with_no_logs(tmp_path: Path) -> None:
