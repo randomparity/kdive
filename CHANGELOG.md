@@ -310,6 +310,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cite assigned publication recovery ADR
 - Expose publication delete conflict
 - Date publication recovery acceptance
+- Specify publication attempt contract
 
 ### Fixed
 
@@ -548,6 +549,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve pending rows during inventory reconcile
 - Preserve expand-phase recovery compatibility
 - Reject deletion during publication
+- Contract image publication attempts
+- Activate legacy image recovery
 
 ### Build
 
