@@ -31,7 +31,6 @@ Run via ``just cli-verbs`` (write) / ``just cli-verbs-check`` (verify; joins ``j
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import sys
 import tempfile
@@ -47,6 +46,8 @@ from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 from kdive.cli.reserved_flags import RESERVED_CLI_FLAGS, derive_cli_flag
 from kdive.mcp.assembly.app import build_app
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.assembly import ObjectStoreAssembly
+from kdive.store.objectstore import ObjectStore
 
 _COMMANDS_DIR = Path(__file__).resolve().parents[1] / "src" / "kdive" / "cli" / "commands"
 _MODULE = _COMMANDS_DIR / "_generated_verbs.py"
@@ -243,14 +244,18 @@ def _ruff_format(source: str) -> str:
 
 
 def _registry_tools() -> list[Any]:
-    # Offline schema extraction (mirrors gen_tool_reference): the pool never connects and the
-    # dummy S3 endpoint is never reached; the app is built purely to read tool schemas.
-    os.environ.setdefault("KDIVE_S3_ENDPOINT_URL", "http://minio.invalid:9000")
-    os.environ.setdefault("KDIVE_S3_BUCKET", "kdive-docs")
+    # Offline schema extraction (mirrors gen_tool_reference): the pool and injected store are
+    # never invoked; the app is built purely to read tool schemas.
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     kp = RSAKeyPair.generate()
     verifier = JWTVerifier(public_key=kp.public_key, issuer="https://gen.local", audience="kdive")
-    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
+    object_stores = ObjectStoreAssembly(store=cast(ObjectStore, object()))
+    app = build_app(
+        pool,
+        verifier=verifier,
+        object_store_assembly=object_stores,
+        secret_registry=SecretRegistry(),
+    )
     return cast(list[Any], asyncio.run(app.list_tools()))
 
 

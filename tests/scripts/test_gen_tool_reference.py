@@ -166,3 +166,14 @@ def test_write_reference_writes_namespace_and_index_files(
     assert "`runs.get`" in (tmp_path / "runs.md").read_text(encoding="utf-8")
     assert "jobs.md#jobswait" in (tmp_path / "index.md").read_text(encoding="utf-8")
     assert not list(tmp_path.glob(".*.md.*"))
+
+
+def test_live_registry_extraction_is_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail_if_default_store_is_built() -> object:
+        raise AssertionError("offline schema extraction reached production object-store assembly")
+
+    monkeypatch.setattr(
+        "kdive.mcp.assembly.app.build_object_store_assembly", _fail_if_default_store_is_built
+    )
+
+    assert gen_tool_reference._registry_tools()
