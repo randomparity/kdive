@@ -43,6 +43,14 @@ same reservation transaction, replacing any prior attempt's actor; every public 
 atomic audit. During this mixed-version phase the reconciler skips pending rows whose attempt is
 `NULL`; the later contract phase owns legacy-row normalization and the final invariant.
 
+The migration also installs a compatibility trigger for predecessor writers. If a pending-row
+mutation changes publication-owned fields while leaving a non-null attempt UUID unchanged, the
+trigger clears the attempt and principal, atomically demoting the row to legacy state before the
+predecessor writes its object without the new fence. Any transition out of `pending` also clears
+both fields. New writers change the attempt UUID together with publication fields and therefore
+remain attempt-aware. This makes old-image adoption and rollback safe: recovery skips the demoted
+row, and old registration cannot retain stale attempt metadata.
+
 The qcow2 and optional config object keys include the attempt UUID, so a PUT from a superseded,
 cancelled, or disconnected attempt can land only at its own now-rowless key; it cannot recreate or
 overwrite the key a later attempt or recovery validated. This narrowly replaces ADR-0317/0336's
@@ -135,6 +143,8 @@ revalidating the same persisted attempt.
   independent publications.
 - Automatic TTL and config-inventory deletion paths yield to pending-publication ownership, so the
   dangling repair is the only automatic path that can remove an active reservation.
+- A predecessor writer can still publish during coexistence, but adopting an attempt-aware row
+  demotes it to legacy state; recovery intentionally leaves it for the later contract phase.
 
 ## Considered & rejected
 

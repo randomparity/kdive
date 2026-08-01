@@ -76,6 +76,21 @@ while the PUT thread continues, the attempt key cannot collide with recovery or 
 The PROJECT lock remains absent during the PUT. Tests distinguish the image fence from the project
 quota lock rather than asserting that no advisory lock of any kind exists.
 
+### Predecessor-writer compatibility
+
+The phase-1 predecessor can adopt a pending row but does not write `publication_attempt_id` or take
+the image fence. Migration 0092 therefore installs a trigger that recognizes predecessor-shaped
+mutations: while `state` remains `pending`, changing any publication-owned field while preserving
+the same non-null attempt UUID clears both attempt and principal. A new writer changes the attempt
+UUID in the same statement, so its reservation remains attempt-aware. Every transition out of
+`pending` clears both fields regardless of writer version.
+
+Thus an old writer adopting a phase-2 reservation atomically turns it into legacy null-attempt
+state before its unfenced PUT; recovery skips the row throughout coexistence. Old-image registration
+cannot leave stale attempt metadata. This trigger is compatibility machinery for the expand phase,
+not the final invariant; issue #1790 may remove or replace it when old writers leave the supported
+coexistence horizon.
+
 Both private-expiry predicates exclude `pending` state: the candidate SELECT and the later
 `FOR UPDATE` re-read immediately before object/row deletion. The second predicate closes a selected
 `registered` candidate becoming an adopted `pending` reservation before the lock is obtained. The
@@ -154,7 +169,9 @@ registered or removed. It logs the outcome without object bytes or tenant-sensit
 Migration 0092 adds nullable `publication_attempt_id uuid` and `publication_principal text` columns
 without backfill or a final constraint. New writers populate attempts; old-image and pre-migration
 pending rows remain nullable legacy state that recovery ignores in this phase. Registration clears
-both fields. `ImageCatalogEntry` gains both nullable fields so its
+both fields. A compatibility trigger demotes predecessor-shaped pending mutations to null-attempt
+legacy state and clears metadata on every transition out of pending. `ImageCatalogEntry` gains both
+nullable fields so its
 `extra="forbid"` validation continues to accept `SELECT *`; `PublishReservation` gains the required
 attempt UUID. Every explicit image projection is audited and extended when it feeds that model.
 Catalog/MCP response builders remain explicit projections and must never render either internal
@@ -246,6 +263,8 @@ The focused acceptance matrix is binding:
 | quota release | before/after usage asserts both pending+registered count and summed `size_bytes`; reclaimed row releases both caps |
 | schema/read model | migrated finish, resolve, list, and describe accept the new columns and expose neither internal field |
 | migration compatibility | pre-0092 pending rows remain null-attempt legacy state, new-writer pending rows receive distinct non-null attempts, and both new registration paths clear attempt/principal atomically |
+| predecessor adoption | phase-1 SQL adopting a phase-2 pending row atomically clears attempt/principal before its unfenced PUT; recovery skips the demoted row |
+| predecessor registration | phase-1 SQL transitioning an attempt-aware row to registered cannot retain attempt/principal metadata |
 | candidate isolation | a typed store failure on the first candidate preserves it while a healthy later candidate reaches a terminal outcome in the same pass |
 | exact SDK checksum | the request maps canonical padded base64 to `ChecksumSHA256`; null omits it |
 | normal HEAD integrity | matching size+checksum registers; absent, wrong-size, missing/malformed, or mismatched checksum stays pending and raises the typed publish failure |
