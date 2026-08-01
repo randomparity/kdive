@@ -90,10 +90,6 @@ class FakePartStore:
         self.system_ids.append(system_id)
         self.artifact = data
 
-    def delete_part(self, system_id, index: int) -> None:  # noqa: ANN001
-        self.system_ids.append(system_id)
-        self.parts.pop(index, None)
-
 
 def _collector(open_console, store, *, registry=None, **kw) -> ConsoleCollector:  # noqa: ANN001
     return ConsoleCollector(

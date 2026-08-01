@@ -83,6 +83,8 @@ def test_reconcile_report_holds_counts_and_failures() -> None:
     assert report.orphaned_systems == 1
     assert report.idempotency_keys_gc_count == 6
     assert report.reconciled_inventory == 7
+    assert report.local_system_object_versions_deleted == 0
+    assert report.remote_system_object_versions_deleted == 0
     assert report.failures == ("abandoned_jobs",)
     assert tuple(report.repair_counts) == loop.ALL_REPAIR_KINDS
     assert report.repair_counts["abandoned_uploads"] == 0
@@ -927,6 +929,12 @@ class _FakeConsoleCollector:
         self.closed = True
 
 
+class _FakeSystemObjectHostingGate:
+    def __init__(self, registry: object, *, is_leader: bool = True) -> None:
+        self.registry = registry
+        self.is_leader = is_leader
+
+
 def test_console_reap_finalizes_and_drops_gone_system(migrated_url: str) -> None:
     from kdive.providers.infra.console_hosting import CollectorRegistry
 
@@ -995,7 +1003,7 @@ def test_console_reap_with_empty_registry_is_noop(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_reconcile_once_wires_console_registry_into_the_repair(migrated_url: str) -> None:
+def test_reconcile_once_wires_console_hosting_gate_into_the_repairs(migrated_url: str) -> None:
     # reconcile_once must pass the configured registry AND the pooled connection into the
     # console-collector repair. A mis-wired arg (None conn/registry, or a no-op lambda) makes
     # the repair raise -> the pass records a failure and the count is wrong.
@@ -1006,7 +1014,9 @@ def test_reconcile_once_wires_console_registry_into_the_repair(migrated_url: str
             gone = await seed_system(seed, system_state=SystemState.TORN_DOWN)
         registry = CollectorRegistry()
         registry.add(_FakeConsoleCollector(gone))
-        config = make_reconcile_config(console_registry=registry)
+        config = make_reconcile_config(
+            system_object_hosting_gate=_FakeSystemObjectHostingGate(registry)
+        )
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             report = await reconcile_once(pool, NullReaper(), config=config)
         assert report.failures == ()  # every repair, including the console reap, ran cleanly
@@ -1310,13 +1320,45 @@ def test_all_repair_kinds_matches_a_fully_populated_plan() -> None:
     config = make_reconcile_config(
         upload_store=cast(loop.ReconcileUploadStore, object()),
         image_store=cast(loop.ImageSweepStore, object()),
-        console_registry=cast(loop.CollectorRegistry, object()),
+        system_object_hosting_gate=cast(loop.SystemObjectHostingGate, object()),
         resource_probe=cast(loop.ResourceProbe, object()),
     )
     plan = loop._repair_plan(
         reaper=NullReaper(), config=config, image_publish_grace=timedelta(seconds=1)
     )
     assert tuple(spec.name for spec in plan) == loop.ALL_REPAIR_KINDS
+
+
+def test_system_object_sweeps_are_named_and_ordered_after_collector_reaping() -> None:
+    config = make_reconcile_config(
+        system_object_hosting_gate=cast(loop.SystemObjectHostingGate, object())
+    )
+    names = tuple(
+        spec.name
+        for spec in loop._repair_plan(
+            reaper=NullReaper(), config=config, image_publish_grace=timedelta(seconds=1)
+        )
+    )
+
+    assert "local_system_object_versions_deleted" in loop.ALL_REPAIR_KINDS
+    assert "remote_system_object_versions_deleted" in loop.ALL_REPAIR_KINDS
+    assert names.index("console_collectors_reaped") < names.index(
+        "remote_system_object_versions_deleted"
+    )
+
+
+def test_remote_system_object_sweep_is_absent_without_hosting_gate() -> None:
+    names = tuple(
+        spec.name
+        for spec in loop._repair_plan(
+            reaper=NullReaper(),
+            config=make_reconcile_config(),
+            image_publish_grace=timedelta(seconds=1),
+        )
+    )
+
+    assert "local_system_object_versions_deleted" in names
+    assert "remote_system_object_versions_deleted" not in names
 
 
 def test_build_artifact_repairs_are_in_all_repair_kinds() -> None:

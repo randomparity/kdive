@@ -6,6 +6,7 @@ import asyncio
 import logging
 from uuid import uuid4
 
+import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.providers.infra.console_hosting import (
@@ -26,6 +27,7 @@ class FakeCollector:
         self.finalized = False
         self.closed = False
         self.raise_on_pump = False
+        self.raise_on_finalize = False
 
     def pump_once(self) -> bool:
         self.pumps += 1
@@ -34,6 +36,8 @@ class FakeCollector:
         return True
 
     def finalize(self) -> None:
+        if self.raise_on_finalize:
+            raise RuntimeError("finalize boom")
         self.finalized = True
 
     def close(self) -> None:
@@ -307,6 +311,24 @@ def test_registry_cancels_pump_on_finalize_and_drop() -> None:
     reg.add(FakeCollector(sid))
     reg.finalize_and_drop(sid)
     assert runner.cancelled == [sid]
+
+
+def test_async_finalize_failure_retains_registry_entry_for_retry() -> None:
+    runner = FakePumpRunner()
+    reg = CollectorRegistry(pump_runner=runner)
+    sid = uuid4()
+    collector = FakeCollector(sid)
+    collector.raise_on_finalize = True
+    reg.add(collector)
+
+    async def go() -> None:
+        with pytest.raises(RuntimeError, match="finalize boom"):
+            await reg.finalize_and_drop_async(sid)
+
+    asyncio.run(go())
+
+    assert runner.cancelled == [sid]
+    assert reg.get(sid) is collector
 
 
 class RaisingLeaderLock(FakeLeaderLock):

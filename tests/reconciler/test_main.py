@@ -111,6 +111,20 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     expected_registry = SecretRegistry()
     constructed: dict[str, object] = {}
 
+    class _FakeConsoleHosting:
+        def __init__(self) -> None:
+            self.registry = object()
+            self.is_leader = False
+
+        async def run(self, stop: asyncio.Event) -> None:
+            events.append("hosting-run")
+            await stop.wait()
+
+        async def close(self) -> None:
+            events.append("hosting-close")
+
+    expected_hosting = _FakeConsoleHosting()
+
     class _FakeProviderComposition:
         def __init__(self, *, secret_registry: SecretRegistry | None = None) -> None:
             assert secret_registry is expected_registry
@@ -132,12 +146,12 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
             *,
             enable_remote_libvirt: bool | None = None,
             console_telemetry: object | None = None,
-        ) -> None:
+        ) -> _FakeConsoleHosting:
             del enable_remote_libvirt
             # Capture rather than discard: the runner builds this instance from the
             # process meter, so a fake that drops it lets the wiring go dead unseen.
             constructed["console_telemetry"] = console_telemetry
-            return None
+            return expected_hosting
 
     monkeypatch.setattr(composition, "ProviderComposition", _FakeProviderComposition)
 
@@ -147,6 +161,7 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
         constructed["resetter"] = config.resetter
         constructed["dump_volume_reaper"] = config.dump_volume_reaper
         constructed["debug_session_telemetry"] = config.debug_session_telemetry
+        constructed["system_object_hosting_gate"] = config.system_object_hosting_gate
 
     async def _fake_run(self: object, stop: object) -> None:
         events.append("run")
@@ -165,6 +180,7 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     assert constructed["reaper"] is expected_reaper
     assert constructed["resetter"] is expected_resetter
     assert constructed["dump_volume_reaper"] is expected_dump_volume_reaper
+    assert constructed["system_object_hosting_gate"] is expected_hosting
 
     # Assembly must hand both telemetry planes a *live* instance built from the process
     # meter. Both classes default to a no-op `.disabled()` elsewhere, so asserting the

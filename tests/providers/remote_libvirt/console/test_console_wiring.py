@@ -41,9 +41,6 @@ class FakeObjectStore:
     def list_prefix(self, prefix: str) -> list[str]:
         return [k for k in self.objects if k.startswith(prefix)]
 
-    def delete(self, key: str) -> None:
-        self.objects.pop(key, None)
-
 
 def test_parts_roundtrip_and_index_listing(migrated_url: str) -> None:
     store = FakeObjectStore()
@@ -54,8 +51,12 @@ def test_parts_roundtrip_and_index_listing(migrated_url: str) -> None:
     part_store.put_part(sid, 10, b"ten")
     assert part_store.list_part_indices(sid) == [0, 1, 10]
     assert part_store.read_part(sid, 1) == b"one"
-    part_store.delete_part(sid, 1)
-    assert part_store.list_part_indices(sid) == [0, 10]
+
+
+def test_part_store_has_no_undriven_key_delete_surface(migrated_url: str) -> None:
+    part_store = RemoteConsolePartStore(FakeObjectStore(), migrated_url)
+
+    assert not hasattr(part_store, "delete_part")
 
 
 def test_assemble_concatenates_all_parts_by_default(migrated_url: str) -> None:

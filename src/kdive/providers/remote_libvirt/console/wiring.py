@@ -55,7 +55,6 @@ class _StorePort(Protocol):
     def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact: ...
 
     def list_prefix(self, prefix: str) -> list[str]: ...
-    def delete(self, key: str) -> None: ...
 
 
 class RemoteConsolePartStore:
@@ -170,9 +169,6 @@ class RemoteConsolePartStore:
     def read_part(self, system_id: UUID, index: int) -> bytes:
         fetched = self._store.get_artifact(self._part_key(system_id, index), None)
         return fetched.data
-
-    def delete_part(self, system_id: UUID, index: int) -> None:
-        self._store.delete(self._part_key(system_id, index))
 
     def assemble(self, system_id: UUID, start_index: int = 0) -> bytes:
         """Concatenate the System's numbered console parts in index order (no DB access).

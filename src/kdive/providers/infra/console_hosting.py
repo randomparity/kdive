@@ -138,11 +138,13 @@ class CollectorRegistry:
 
     async def finalize_and_drop_async(self, system_id: UUID) -> None:
         """Event-loop-safe :meth:`finalize_and_drop`."""
-        collector = self._collectors.pop(system_id, None)
+        collector = self._collectors.get(system_id)
         if collector is None:
             return
         self._cancel_pump(system_id)
         await asyncio.to_thread(collector.finalize)
+        if self._collectors.get(system_id) is collector:
+            self._collectors.pop(system_id)
 
     def drop_all(self) -> None:
         """Close and forget every collector without finalizing."""
@@ -323,6 +325,11 @@ class ConsoleHosting:
         self.registry = registry
         self._leader_conn = leader_conn
         self._host_pool = host_pool
+
+    @property
+    def is_leader(self) -> bool:
+        """Whether this process currently owns console-hosting leadership."""
+        return self.loop.is_leader
 
     async def run(self, stop: asyncio.Event) -> None:
         """Run the attach watcher until ``stop`` is set."""
