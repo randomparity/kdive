@@ -156,10 +156,10 @@ class CompleteBuildHandlers:
         warning = await rootfs_mount_warning(conn, uid)
         nudge = None if warning is not None else await missing_effective_config_nudge(conn, uid)
         async with conn.cursor() as cur:
-            await cur.execute("SELECT now()")
+            await cur.execute("SELECT clock_timestamp()")
             row = await cur.fetchone()
-        if row is None:  # Invariant: SELECT now() returns exactly one row.
-            raise RuntimeError("SELECT now() returned no row")
+        if row is None:  # Invariant: SELECT clock_timestamp() returns exactly one row.
+            raise RuntimeError("SELECT clock_timestamp() returned no row")
         return _complete_envelope(
             uid, result, server_time=row[0].isoformat(), warning=warning, nudge=nudge
         )

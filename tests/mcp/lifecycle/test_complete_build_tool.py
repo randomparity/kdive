@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import tarfile
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -13,10 +14,12 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.results import BuildOutput
+from kdive.config.core_settings import BUILD_ARTIFACT_RETENTION_DAYS
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -98,6 +101,14 @@ async def create_run_upload(
 
 def _build_handlers(validator) -> CompleteBuildHandlers:
     return CompleteBuildHandlers(validate_complete_build=validator)
+
+
+class _DelayedValidator(_FakeValidator):
+    """Makes a response-clock regression observable without a real large upload."""
+
+    def __call__(self, manifest, keys, declared_build_id, *, arch: str = "x86_64"):
+        time.sleep(0.5)
+        return super().__call__(manifest, keys, declared_build_id, arch=arch)
 
 
 class _UploadStore:
@@ -228,6 +239,30 @@ def test_complete_build_returns_reusable_build_deadline_contract(migrated_url: s
             assert expires_at > server_time
         assert first.data["build_ref"] == replay.data["build_ref"]
         assert first.data["expires_at"] == replay.data["expires_at"]
+
+    asyncio.run(_run())
+
+
+def test_complete_build_response_server_time_is_current_after_validation(
+    migrated_url: str,
+) -> None:
+    """The completion response clock and generation deadline begin after validation work."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            response = await _build_handlers(
+                _DelayedValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            ).complete_build(pool, _ctx(), str(run_id), build_id=None)
+            async with pool.connection() as conn:
+                row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+            assert row is not None
+
+        expires_at = datetime.fromisoformat(str(response.data["expires_at"]))
+        server_time = datetime.fromisoformat(str(response.data["server_time"]))
+        retention = timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS))
+        assert row[0] - server_time < timedelta(milliseconds=250)
+        assert expires_at - row[0] >= retention - timedelta(milliseconds=250)
 
     asyncio.run(_run())
 
