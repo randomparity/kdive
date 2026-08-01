@@ -248,11 +248,23 @@ def test_investigation_build_catalog_schema(pg_conn: psycopg.Connection) -> None
         ).fetchall()
     }
     assert "^[0-9a-f]{64}$" in checks["investigation_builds_content_digest_check"]
+    assert checks["investigation_builds_build_ref_check"] == (
+        "CHECK ((build_ref = ((content_digest || '.'::text) || (generation)::text)))"
+    )
     assert "active" in checks["investigation_builds_state_check"]
     assert "reclaiming" in checks["investigation_builds_state_check"]
     assert _nullable(pg_conn, "runs").get("build_ref") == "YES"
-    indexed = _indexed_columns(pg_conn, "investigation_builds")
-    assert {"investigation_id", "content_digest", "expires_at"} <= indexed
+    active_digest_index = pg_conn.execute(
+        "SELECT indexdef FROM pg_indexes WHERE indexname = 'investigation_builds_active_digest_idx'"
+    ).fetchone()
+    assert active_digest_index == (
+        "CREATE INDEX investigation_builds_active_digest_idx ON public.investigation_builds "
+        "USING btree (investigation_id, content_digest) WHERE (state = 'active'::text)",
+    )
+    expiry_index = pg_conn.execute(
+        "SELECT indexdef FROM pg_indexes WHERE indexname = 'investigation_builds_expires_at_idx'"
+    ).fetchone()
+    assert expiry_index is not None and "expires_at" in expiry_index[0]
 
 
 def test_dedup_key_not_null(pg_conn: psycopg.Connection) -> None:
