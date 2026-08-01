@@ -95,6 +95,10 @@ Run: `just schema-guard`
 
 Run: `just migration-order-check`
 
+Run: `just lint`
+
+Run: `just type`
+
 Expected: all PASS.
 
 - [ ] **Step 8: Commit**
@@ -142,11 +146,12 @@ Change `_finalize_external_build` to acquire `LockScope.INVESTIGATION` before `L
 
 Return one `BuildPublication` from the service. After commit, delete only the losing candidate's versions; log and leave failures to orphan repair. `_complete_envelope` and replay return the stored build reference/deadline plus database `server_time`.
 
-- [ ] **Step 5: Run focused tests, including mutations**
+- [ ] **Step 5: Run focused tests, including mutations and guardrails**
 
 Run: `uv run python -m pytest tests/services/runs/test_complete_build.py tests/mcp/lifecycle/test_complete_build_tool.py -q`
 
-Then temporarily reverse the two lock acquisitions and confirm the concurrency test fails or times out under its bounded barrier; restore immediately. Temporarily register loser rows and confirm the ownership assertion fails; restore.
+Assert the recorded acquisition trace is Investigation then Run. Temporarily register loser rows
+and confirm the ownership assertion fails; restore. Then run `just lint` and `just type`; all pass.
 
 - [ ] **Step 6: Commit**
 
@@ -199,6 +204,12 @@ Run: `uv run python -m pytest tests/services/runs/test_create_flow.py tests/mcp/
 
 Temporarily remove the Investigation predicate and verify the cross-tenant test fails; restore. Temporarily skip profile comparison and verify its test fails; restore.
 
+Run: `just lint`
+
+Run: `just type`
+
+Expected: PASS after every mutation is restored.
+
 - [ ] **Step 7: Commit**
 
 ```bash
@@ -236,6 +247,10 @@ Resolve the Run before locking only to obtain Investigation id, then acquire Inv
 Run: `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py tests/jobs/handlers/test_runs_install.py -q`
 
 Expected: PASS.
+
+Temporarily reverse complete-build to Run → Investigation and run the bounded
+complete-build-versus-install barrier test; it must fail or time out. Restore the correct order,
+then run `just lint` and `just type`; all pass.
 
 - [ ] **Step 5: Commit**
 
@@ -278,6 +293,12 @@ Delete exact retired versions in bounded batches. On any store failure keep `rec
 - [ ] **Step 5: Run focused tests and mutation checks**
 
 Run the Task 5 command. Then temporarily remove the queued-job predicate and prove install/reclaim fails; restore. Temporarily delete by content digest rather than generation and prove old/new isolation fails; restore.
+
+Run: `just lint`
+
+Run: `just type`
+
+Expected: PASS after every mutation is restored.
 
 - [ ] **Step 6: Commit**
 
