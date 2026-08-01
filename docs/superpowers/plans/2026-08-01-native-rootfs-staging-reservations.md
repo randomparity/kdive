@@ -64,6 +64,14 @@ Add a second test whose fake sets `ctypes.set_errno(errno.ENOSPC)` and returns `
 helper raises `OSError` with `errno == ENOSPC`. Assert `_fallocate.argtypes` and `.restype` on the
 real bound function before monkeypatching so a missing prototype cannot pass through the fake.
 
+Add `test_native_fallocate_allocates_a_real_temporary_file`. Open a one-MiB temporary file with
+`os.open(..., O_CREAT | O_EXCL | O_WRONLY, 0o600)`, call the unpatched `_native_fallocate`, and
+assert `os.fstat(fd).st_size == requested` and `st_blocks * 512 >= requested`. Skip only when the
+real call raises `ENOSYS` or `EOPNOTSUPP`, including that errno in the skip reason; every other
+error fails. Close and unlink the file in `finally`. This smoke proves the configured ctypes symbol
+and native mode-zero allocation work on the host, while the fake-backed test remains the
+deterministic proof for capacity contention.
+
 - [ ] **Step 2: Run the tests and verify red**
 
 Run:
@@ -71,7 +79,8 @@ Run:
 ```bash
 uv run python -m pytest \
   tests/providers/local_libvirt/test_rootfs_upload_fetch.py::test_native_fallocate_preserves_lengths_above_two_gib \
-  tests/providers/local_libvirt/test_rootfs_upload_fetch.py::test_native_fallocate_captures_errno -q
+  tests/providers/local_libvirt/test_rootfs_upload_fetch.py::test_native_fallocate_captures_errno \
+  tests/providers/local_libvirt/test_rootfs_upload_fetch.py::test_native_fallocate_allocates_a_real_temporary_file -q
 ```
 
 Expected: collection fails because `_native_fallocate` does not exist.
@@ -113,7 +122,11 @@ just lint
 just type
 ```
 
-Expected: both tests pass; lint and type checks report no warnings.
+Expected: all three tests pass; lint and type checks report no warnings.
+
+The real-filesystem smoke must pass on the local implementation host. A skip is acceptable only on
+an explicitly unsupported filesystem and must be reported; the PR's Linux CI run supplies the
+second production-seam arm.
 
 - [ ] **Step 5: Mutation-check the ABI test**
 
@@ -257,6 +270,8 @@ both and the loser raises `OSError(ENOSPC, ...)`. Pin `disk_usage` so both advis
 Assert both callers reached the barrier, exactly one destination published, exactly one store
 opened its stream, exactly one caller raised `CategorizedError(INFRASTRUCTURE_FAILURE)`, and that
 error's `system_id`, `dest`, `requested_bytes`, `budget_source`, and `errno` identify the loser.
+After both threads join, assert the shared staging directory contains no `*.partial`, proving the
+new pre-download capacity failure still unwinds through the existing discard `finally`.
 
 - [ ] **Step 2: Write the unsupported-native-allocation degrade test**
 
