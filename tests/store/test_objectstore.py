@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from datetime import UTC
 from pathlib import Path
@@ -36,6 +38,36 @@ from kdive.store.objectstore import (
     object_store_from_env,
 )
 from tests.clock import STORE_MTIME
+
+_UNSUPPORTED_VERSIONING_SUSPEND_CODES = frozenset(
+    {"MethodNotAllowed", "NotImplemented", "UnsupportedOperation"}
+)
+
+
+def _versioning_suspension_is_unsupported(error: ClientError) -> bool:
+    code = error.response.get("Error", {}).get("Code")
+    status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return code in _UNSUPPORTED_VERSIONING_SUSPEND_CODES or status in {405, 501}
+
+
+@contextmanager
+def _suspend_versioning_or_skip(store: ObjectStore) -> Iterator[None]:
+    """Suspend fixture versioning only around a legacy-identity proof, then always re-enable it."""
+    try:
+        store._client.put_bucket_versioning(
+            Bucket=store._bucket, VersioningConfiguration={"Status": "Suspended"}
+        )
+    except ClientError as error:
+        if _versioning_suspension_is_unsupported(error):
+            code = error.response.get("Error", {}).get("Code", "unknown")
+            pytest.skip(f"object-store endpoint does not support versioning suspension: {code}")
+        raise
+    try:
+        yield
+    finally:
+        store._client.put_bucket_versioning(
+            Bucket=store._bucket, VersioningConfiguration={"Status": "Enabled"}
+        )
 
 
 def test_normalize_etag_strips_surrounding_quotes() -> None:
@@ -1340,6 +1372,50 @@ def test_minio_lists_versions_and_markers_then_deletes_one_exact_identity(
     assert {second["VersionId"], marker["VersionId"]} <= {
         entry.version_id for entry in remaining.entries
     }
+
+
+def test_minio_public_put_and_head_expose_the_same_version_id(
+    minio_store: ObjectStore, key_ns: str
+) -> None:
+    stored = minio_store.put_artifact(
+        ArtifactWriteRequest(
+            tenant=key_ns,
+            owner_kind="runs",
+            owner_id="run-1",
+            name="version-id-round-trip",
+            data=b"payload",
+            sensitivity=Sensitivity.REDACTED,
+            retention_class="build",
+        )
+    )
+
+    head = minio_store.head(stored.key)
+
+    assert stored.version_id
+    assert head is not None
+    assert head.version_id == stored.version_id
+
+
+def test_minio_suspended_versioning_exposes_legacy_null_when_supported(
+    minio_store: ObjectStore, key_ns: str
+) -> None:
+    key = f"{key_ns}/runs/run-1/legacy-null-version"
+    wrote_legacy_version = False
+    try:
+        with _suspend_versioning_or_skip(minio_store):
+            minio_store._client.put_object(Bucket=minio_store._bucket, Key=key, Body=b"payload")
+            wrote_legacy_version = True
+            raw_head = minio_store._client.head_object(Bucket=minio_store._bucket, Key=key)
+            version_id = raw_head.get("VersionId")
+            if not isinstance(version_id, str) or not version_id:
+                pytest.skip("object-store endpoint does not expose legacy suspended VersionIds")
+            assert version_id == "null"
+            head = minio_store.head(key)
+            assert head is not None
+            assert head.version_id == "null"
+    finally:
+        if wrote_legacy_version:
+            minio_store.delete_version(key, "null")
 
 
 def test_put_stream_round_trip_streams_from_disk(
