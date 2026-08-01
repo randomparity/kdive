@@ -35,7 +35,7 @@
 
 **Acceptance criteria:** A sequential duplicate is rejected with `CONFLICT` before a published-prefix PUT or catalog mutation; the original row fields and object bytes remain unchanged and the object SHA-256 matches the row digest. A same name in another project or a public row does not conflict. Existing concurrent same-identity coverage remains green and proves the registered row/object invariant.
 
-- [ ] **Step 1: Write the sequential regression test**
+- [x] **Step 1: Write the sequential regression test**
 
 Add `test_registered_private_name_reupload_conflicts_before_publish` beside the other registration tests in `tests/services/images/test_upload.py`. Register bytes A, snapshot the returned row and `store.puts`, seed bytes B at a second quarantine key, and call `_register` with the same project/provider/name. Assert:
 
@@ -55,7 +55,7 @@ assert store.puts == puts_after_first
 
 Read the row back through `IMAGE_CATALOG.get`, assert it equals the first registered entry, fetch `store._objects[first.object_key]` through the test seam, and assert `"sha256:" + hashlib.sha256(data).hexdigest() == first.digest`. Also assert no second catalog row exists.
 
-- [ ] **Step 2: Run the regression test and verify red**
+- [x] **Step 2: Run the regression test and verify red**
 
 Run:
 
@@ -65,7 +65,7 @@ uv run python -m pytest tests/services/images/test_upload.py::test_registered_pr
 
 Expected: FAIL because the second attempt reaches publication/registration instead of returning the typed pre-write conflict.
 
-- [ ] **Step 3: Add the registered-identity decision**
+- [x] **Step 3: Add the registered-identity decision**
 
 In `src/kdive/services/images/upload.py`, add the transport-neutral subtype and a narrow query
 helper using the cursor's default row shape:
@@ -105,7 +105,7 @@ async def _registered_private_name_conflict(
 
 Call it as the first operation inside `_reserve_under_quota`'s existing PROJECT-locked transaction. Raise the returned conflict before `_project_usage`, `_quota_denial`, or `reserve_publish`. Update the module and function docstrings to distinguish registered-name rejection from pending-row adoption and cite ADR-0526.
 
-- [ ] **Step 4: Run the sequential and concurrency service tests**
+- [x] **Step 4: Run the sequential and concurrency service tests**
 
 Before running them, strengthen `test_concurrent_same_identity_uploads_cannot_both_register` so
 both contenders use one `_ContendedStore` seeded with both quarantine keys rather than two stores
@@ -134,11 +134,11 @@ Expected: 3 passed. The concurrent test uses a genuinely shared namespace and pr
 digest invariant; the public-shadow test is the control that public visibility does not trigger the
 private-name conflict.
 
-- [ ] **Step 5: Add a cross-owner control if the regression does not already exercise one**
+- [x] **Step 5: Add a cross-owner control if the regression does not already exercise one**
 
 Add `test_registered_private_name_conflict_is_owner_scoped` only if the sequential regression lacks this explicit check. Register `shared` for `proj`, upload `shared` for `other` using a second quarantine key, and assert both entries register under their respective owners. Do not introduce a reusable helper solely for this second occurrence.
 
-- [ ] **Step 6: Run the focused service module and static checks**
+- [x] **Step 6: Run the focused service module and static checks**
 
 Run:
 
@@ -150,7 +150,7 @@ just type
 
 Expected: all pass with zero warnings.
 
-- [ ] **Step 7: Commit the service behavior**
+- [x] **Step 7: Commit the service behavior**
 
 Stage only `src/kdive/services/images/upload.py` and `tests/services/images/test_upload.py`, then
 commit. The test file includes both the sequential regression and the strengthened concurrent
