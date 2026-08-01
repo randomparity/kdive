@@ -47,11 +47,12 @@ The migration also installs a compatibility trigger for predecessor writers. If 
 mutation changes publication-owned fields while leaving a non-null attempt UUID unchanged, the
 trigger clears the attempt and principal, atomically demoting the row to legacy state before the
 predecessor writes its object without the new fence. A predecessor-shaped transition out of
-`pending` that preserves a non-null attempt is declined: this prevents a late old publisher from
-registering a successor attempt it no longer owns. New writers change the attempt UUID at
+`pending` that preserves a non-null attempt raises a stable trigger exception: this prevents a late
+old publisher from registering a successor attempt it no longer owns or reporting false success
+and emitting a registration audit. New writers change the attempt UUID at
 reservation and explicitly clear attempt/principal at registration, so both mutations remain
 distinguishable and allowed. This makes old-image adoption and rollback safe: recovery skips a
-demoted row, and late old registration cannot mutate a successor attempt.
+demoted row, and late old registration fails without mutating or auditing a successor attempt.
 
 A companion `BEFORE DELETE` trigger declines deletion of a pending row with a non-null attempt.
 This protects a new publisher from predecessor dangling, expiry, and inventory-prune paths that do
