@@ -2,9 +2,10 @@
 
 ## Goal
 
-Make every expired `pending` image publication converge without reclaiming an object that a live
-publisher is still writing. A complete object is registered only when it matches the catalog row;
-an absent or invalid object and its row are reclaimed so private-image quota is released.
+Make every expired attempt-aware `pending` image publication converge without reclaiming an object
+that a live publisher is still writing. A complete object is registered only when it matches the
+catalog row; an absent or invalid object and its row are reclaimed so private-image quota is
+released. Legacy null-attempt rows remain untouched during mixed-version operation.
 
 This design implements campaign phase #1789 of #1757 and
 [ADR-0525](../../adr/0525-fence-and-reconcile-pending-image-publications.md).
@@ -31,7 +32,8 @@ the writer is still active.
 - The configured S3-compatible store honors the existing read-after-write and
   read-after-delete HEAD behavior on which KDIVE's current object lifecycle already relies.
 - `image_catalog.digest` is `sha256:<hex>` and `size_bytes` is the expected qcow2 byte length for a
-  pending reservation. New requests validate that form before reservation. A malformed legacy row
+  pending reservation. New requests validate that form before reservation. A malformed
+  attempt-aware row
   is terminally unverifiable, not a retryable store failure: recovery deletes its object, confirms
   absence, and removes the row.
 - The issue is one cohesive change. No new tool, setting, worker job, or operator procedure is
@@ -40,7 +42,7 @@ the writer is still active.
 ## Approaches
 
 The selected approach combines a database session advisory lock keyed by image row UUID with a
-persisted attempt UUID in every pending reservation. The lock is visible to every service instance,
+persisted attempt UUID in every new-writer pending reservation. The lock is visible to every service instance,
 survives transaction boundaries, and PostgreSQL releases it on backend death. The attempt UUID
 keeps a late PUT isolated if the database session dies before its blocking store thread. A row lock
 would require a long transaction during the PUT. A persisted heartbeat lease would add a renewal
@@ -100,8 +102,9 @@ attempt, later inventory passes resume normal ownership.
 
 ## Reconciliation flow
 
-`repair_dangling_images` keeps the configured grace as the abandonment threshold. For each expired
-non-`defined` candidate it opens a transaction and tries the candidate's publication fence without
+`repair_dangling_images` keeps the configured grace as the abandonment threshold. It skips legacy
+pending rows whose attempt is null. For each other expired non-`defined` candidate it opens a
+transaction and tries the candidate's publication fence without
 waiting. If the lock is held, this pass skips the row. If acquired, it re-reads the candidate under
 row lock and rechecks the deadline before any store call. That same transaction, xact advisory lock,
 and row lock remain open through every HEAD/delete call, terminal row mutation or private audit, and
@@ -115,7 +118,7 @@ objects remain untouched. Pending candidates use the following decision table:
 | absent | object never landed or was removed | delete row |
 | present; size and SHA-256 match row | complete abandoned publication | reconcile config key and set `registered`; atomically audit private recovery under persisted principal |
 | present; size/checksum missing or mismatched | incomplete, overwritten, or unverifiable | delete object; confirm absent; delete row |
-| persisted digest malformed | legacy/unverifiable reservation | delete any object; confirm absent; delete row |
+| persisted digest malformed | attempt-aware but unverifiable reservation | delete any object; confirm absent; delete row |
 | store error, or object remains after delete | outcome is not proven | roll back/retain row and retry next pass |
 
 The repair returns the number of rows that reached a terminal catalog outcome in that pass, whether
@@ -131,7 +134,8 @@ registered or removed. It logs the outcome without object bytes or tenant-sensit
 - Async cancellation has the same safe failed-attempt outcome. It need not pretend the offloaded
   SDK thread was cancelled; a late object remains isolated under the abandoned attempt key.
 - Death after PUT but before registration leaves a checksum-bearing object; recovery registers it.
-- A transient HEAD or delete failure preserves the pending row and its quota reservation for retry.
+- A typed HEAD or delete failure preserves the pending row and its quota reservation for retry,
+  reports candidate context, and does not prevent later candidates from progressing in the pass.
 - Death after a successful delete but before row commit rolls the row deletion back. The next pass
   observes a missing object and deletes the row.
 - A publisher that loses the reservation while waiting for the fence fails with `CONFLICT` before
@@ -147,9 +151,10 @@ registered or removed. It logs the outcome without object bytes or tenant-sensit
 
 ## Data and interface changes
 
-Migration 0093 adds nullable `publication_attempt_id uuid` and `publication_principal text` columns,
-backfills a unique attempt UUID for existing pending rows, and constrains new pending rows to carry
-an attempt. Registration clears both fields. `ImageCatalogEntry` gains both nullable fields so its
+Migration 0092 adds nullable `publication_attempt_id uuid` and `publication_principal text` columns
+without backfill or a final constraint. New writers populate attempts; old-image and pre-migration
+pending rows remain nullable legacy state that recovery ignores in this phase. Registration clears
+both fields. `ImageCatalogEntry` gains both nullable fields so its
 `extra="forbid"` validation continues to accept `SELECT *`; `PublishReservation` gains the required
 attempt UUID. Every explicit image projection is audited and extended when it feeds that model.
 Catalog/MCP response builders remain explicit projections and must never render either internal
@@ -203,7 +208,8 @@ already required by artifact storage; its replies are still treated as fallible 
 - The shared lock orders publisher and repair; the row re-read prevents a stale candidate from
   acting on a re-armed or replaced reservation.
 - Delete is followed by HEAD. The row is retained unless absence is observed.
-- Store errors propagate to the per-repair failure boundary; no exception is swallowed as success.
+- Typed store errors stop only the current candidate, preserve its row, and are reported with
+  candidate context; later candidates continue. No exception is swallowed as success.
 
 ### Out of scope
 
@@ -231,7 +237,7 @@ The focused acceptance matrix is binding:
 | private audit | recovered registration and the existing audit transition commit atomically under the persisted principal; injected audit failure registers nothing |
 | missing private principal | valid bytes are deleted and the row reclaimed, never registered |
 | invalid object | wrong size, missing/malformed checksum, or mismatched checksum deletes; a still-present post-delete HEAD preserves the row |
-| malformed digest | a new request fails before reservation; a seeded legacy pending row deletes object+row and releases quota |
+| malformed digest | a new request fails before reservation; a seeded attempt-aware pending row deletes object+row and releases quota |
 | crash after delete | rollback/death after confirmed object deletion preserves the row; the next pass sees missing and removes it |
 | private expiry | both candidate and locked predicates skip pending; an already-expired recovered row registers first and prunes only on the next TTL pass |
 | inventory races | `defined -> pending` and `pending -> registered` interleavings preserve every protected column and report deferred realization accurately |
@@ -239,7 +245,8 @@ The focused acceptance matrix is binding:
 | registered regression | present registered rows remain; missing registered rows retain existing deadline removal semantics |
 | quota release | before/after usage asserts both pending+registered count and summed `size_bytes`; reclaimed row releases both caps |
 | schema/read model | migrated finish, resolve, list, and describe accept the new columns and expose neither internal field |
-| migration invariant | two pre-0093 pending rows receive distinct non-null attempts, non-pending rows remain null, null-attempt pending writes fail, and both registration paths clear attempt/principal atomically |
+| migration compatibility | pre-0092 pending rows remain null-attempt legacy state, new-writer pending rows receive distinct non-null attempts, and both new registration paths clear attempt/principal atomically |
+| candidate isolation | a typed store failure on the first candidate preserves it while a healthy later candidate reaches a terminal outcome in the same pass |
 | exact SDK checksum | the request maps canonical padded base64 to `ChecksumSHA256`; null omits it |
 | normal HEAD integrity | matching size+checksum registers; absent, wrong-size, missing/malformed, or mismatched checksum stays pending and raises the typed publish failure |
 

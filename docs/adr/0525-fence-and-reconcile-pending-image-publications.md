@@ -35,11 +35,13 @@ the sibling object exists.
 
 ## Decision
 
-Migration 0093 adds a non-null publication-attempt UUID to each `pending` row and a nullable
-initiating principal. Every reservation, including adoption, mints a fresh attempt UUID. Every
-private insert or adoption writes the current authenticated principal in that same reservation
-transaction, replacing any prior attempt's actor; every public reservation writes `NULL`. Normal
-and recovered registration clear both fields only after using the principal for any atomic audit.
+Migration 0092 adds nullable publication-attempt UUID and initiating-principal columns without a
+backfill or final invariant constraint. New-writer reservations, including adoption, mint a fresh
+attempt UUID. Every private insert or adoption writes the current authenticated principal in that
+same reservation transaction, replacing any prior attempt's actor; every public reservation writes
+`NULL`. Normal and recovered registration clear both fields only after using the principal for any
+atomic audit. During this mixed-version phase the reconciler skips pending rows whose attempt is
+`NULL`; the later contract phase owns legacy-row normalization and the final invariant.
 
 The qcow2 and optional config object keys include the attempt UUID, so a PUT from a superseded,
 cancelled, or disconnected attempt can land only at its own now-rowless key; it cannot recreate or
@@ -99,11 +101,13 @@ row lock and skips `pending`. Publication recovery removes a failed attempt; aft
 registration, a later inventory pass may update or prune the row normally. This narrowly refines
 ADR-0112's config ownership.
 
-Store errors abort the candidate transaction and preserve the row for a later pass. If deletion
-returns but the follow-up HEAD still sees the object, the row is also preserved. A crash after
-object deletion but before row deletion leaves a pending row with a missing object, which the next
-pass removes. A crash after the publisher PUT but before registration releases the advisory lock
-and leaves a valid object that the next pass registers.
+Typed store errors are isolated at each candidate: they abort that candidate's transaction,
+preserve its row for a later pass, report candidate context, and do not prevent later candidates
+from progressing. Unexpected programming failures remain fail-fast. If deletion returns but the
+follow-up HEAD still sees the object, the row is also preserved. A crash after object deletion but
+before row deletion leaves a pending row with a missing object, which the next pass removes. A
+crash after the publisher PUT but before registration releases the advisory lock and leaves a valid
+object that the next pass registers.
 
 Database-session loss or async task cancellation while the blocking PUT thread remains alive is a
 safe terminal publication failure, not an active-publisher guarantee: either condition may release
