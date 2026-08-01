@@ -43,12 +43,20 @@ shrinks its upper-bound reservation to verified output length before publish.
 
 Add imports for `ctypes` and import `_native_fallocate`. Add a fake callable that records its four
 integer arguments and returns a configured result. Monkeypatch the module `_fallocate` seam and
-assert a `3 * 1024**3` length arrives unchanged:
+assert the real binding has the exact 64-bit prototype before monkeypatching, then assert a
+`3 * 1024**3` length arrives unchanged through the Python seam:
 
 ```python
 def test_native_fallocate_preserves_lengths_above_two_gib(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    assert rootfs_upload_fetch._fallocate.restype is ctypes.c_int
+    assert rootfs_upload_fetch._fallocate.argtypes == [
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_long,
+        ctypes.c_long,
+    ]
     calls: list[tuple[int, int, int, int]] = []
 
     def _call(fd: int, mode: int, offset: int, length: int) -> int:
@@ -132,8 +140,10 @@ second production-seam arm.
 - [ ] **Step 5: Mutation-check the ABI test**
 
 Temporarily narrow `_fallocate`'s length argument to `ctypes.c_int`, run
-`test_native_fallocate_preserves_lengths_above_two_gib`, and confirm it fails because the observed
-length is truncated. Restore `c_long` and rerun the test green.
+`test_native_fallocate_preserves_lengths_above_two_gib`, and confirm its pre-monkeypatch prototype
+assertion fails. Restore `c_long` and rerun the test green. The Python fake proves the helper passes
+the full integer to its call seam; the prototype assertion, not fake coercion, proves libc receives
+it as a 64-bit `off_t`.
 
 - [ ] **Step 6: Commit**
 
