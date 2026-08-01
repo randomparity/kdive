@@ -8,6 +8,7 @@
 #
 # Usage:
 #   scripts/live-stack/down.sh            stop the stack, keep state
+#   scripts/live-stack/down.sh --force    SIGKILL daemons remaining after the grace period
 #   scripts/live-stack/down.sh --wipe     also wipe DB + reap kdive domains/overlays
 #   scripts/live-stack/down.sh --wipe --yes   skip the confirmation prompt
 set -euo pipefail
@@ -19,12 +20,14 @@ cd "$repo_root"
 
 wipe=0
 assume_yes=0
+force=0
 for arg in "$@"; do
   case "$arg" in
   --wipe) wipe=1 ;;
   --yes) assume_yes=1 ;;
+  --force) force=1 ;;
   *)
-    echo "unknown argument: $arg (accepts --wipe, --yes)" >&2
+    echo "unknown argument: $arg (accepts --force, --wipe, --yes)" >&2
     exit 2
     ;;
   esac
@@ -48,6 +51,10 @@ fi
 
 echo "=== stopping host processes ==="
 stop_daemons
+if [[ "$force" == "1" ]]; then
+  echo "=== force-stopping host processes still running ==="
+  force_stop_daemons
+fi
 
 echo "=== stopping compose backends + obs ==="
 if [[ "$wipe" == "1" ]]; then

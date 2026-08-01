@@ -338,8 +338,14 @@ Patched kernels can boot and reach the readiness marker.
 
 ```bash
 scripts/live-stack/down.sh          # stop host processes + backends, keep state
+scripts/live-stack/down.sh --force  # also SIGKILL host processes left after the grace period
 scripts/live-stack/down.sh --wipe   # full reset: drop DB/MinIO volumes AND reap kdive-* domains/overlays
 ```
+
+`down.sh --force` is the supported recovery when a worker remains inside a long-running job after
+the normal SIGTERM grace period. It ends every matched kdive host process, including workers with
+in-flight jobs. Those jobs are abandoned; another worker may reclaim each after its lease lapses,
+spending one of its bounded attempts. Bring-up and plain teardown remain graceful-only.
 
 `down.sh --wipe` drops the Postgres and MinIO volumes and reaps all `kdive-*` libvirt domains
 and their overlay disks, so the next `up.sh` starts from a clean schema and an empty bucket.
