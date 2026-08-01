@@ -82,8 +82,10 @@ The phase-1 predecessor can adopt a pending row but does not write `publication_
 the image fence. Migration 0092 therefore installs a trigger that recognizes predecessor-shaped
 mutations: while `state` remains `pending`, changing any publication-owned field while preserving
 the same non-null attempt UUID clears both attempt and principal. A new writer changes the attempt
-UUID in the same statement, so its reservation remains attempt-aware. Every transition out of
-`pending` clears both fields regardless of writer version.
+UUID in the same statement, so its reservation remains attempt-aware. If an update transitions out
+of `pending` while preserving the same non-null attempt, the trigger returns the old row unchanged:
+this is a late predecessor registration that no longer owns the row. New registration explicitly
+clears both fields and is allowed.
 
 A `BEFORE DELETE` compatibility trigger returns `NULL` for a pending row whose attempt is non-null,
 so predecessor dangling repair, private expiry, and inventory prune cannot remove a new writer's
@@ -91,8 +93,9 @@ active reservation without the fence. New recovery, after acquiring the fence an
 outcome, clears attempt/principal inside the same locked transaction before issuing its delete.
 
 Thus an old writer adopting a phase-2 reservation atomically turns it into legacy null-attempt
-state before its unfenced PUT; recovery skips the row throughout coexistence. Old-image registration
-cannot leave stale attempt metadata. This trigger is compatibility machinery for the expand phase,
+state before its unfenced PUT; recovery skips the row throughout coexistence. Conversely, if an old
+writer reserved first and a phase-2 writer then adopts the row, the late old registration is a
+no-op and cannot register the successor's key. This trigger is compatibility machinery for the expand phase,
 not the final invariant; issue #1790 may remove or replace it when old writers leave the supported
 coexistence horizon.
 
@@ -175,7 +178,8 @@ Migration 0092 adds nullable `publication_attempt_id uuid` and `publication_prin
 without backfill or a final constraint. New writers populate attempts; old-image and pre-migration
 pending rows remain nullable legacy state that recovery ignores in this phase. Registration clears
 both fields. A compatibility trigger demotes predecessor-shaped pending mutations to null-attempt
-legacy state and clears metadata on every transition out of pending. A delete trigger protects
+legacy state, blocks predecessor-shaped registration of a non-null successor attempt, and allows
+new registration only when it explicitly clears the fields. A delete trigger protects
 attempt-aware pending rows; fenced recovery explicitly disarms it before terminal deletion.
 `ImageCatalogEntry` gains both nullable fields so its
 `extra="forbid"` validation continues to accept `SELECT *`; `PublishReservation` gains the required
@@ -270,7 +274,7 @@ The focused acceptance matrix is binding:
 | schema/read model | migrated finish, resolve, list, and describe accept the new columns and expose neither internal field |
 | migration compatibility | pre-0092 pending rows remain null-attempt legacy state, new-writer pending rows receive distinct non-null attempts, and both new registration paths clear attempt/principal atomically |
 | predecessor adoption | phase-1 SQL adopting a phase-2 pending row atomically clears attempt/principal before its unfenced PUT; recovery skips the demoted row |
-| predecessor registration | phase-1 SQL transitioning an attempt-aware row to registered cannot retain attempt/principal metadata |
+| predecessor registration | phase 1 reserves, phase 2 adopts, then the late phase-1 registration is a no-op and leaves the phase-2 attempt pending and unchanged |
 | predecessor deletion | phase-1 dangling, expiry, and inventory-prune DELETE shapes cannot remove an attempt-aware pending row; fenced new recovery can disarm and delete it atomically |
 | candidate isolation | a typed store failure on the first candidate preserves it while a healthy later candidate reaches a terminal outcome in the same pass |
 | exact SDK checksum | the request maps canonical padded base64 to `ChecksumSHA256`; null omits it |

@@ -46,10 +46,12 @@ atomic audit. During this mixed-version phase the reconciler skips pending rows 
 The migration also installs a compatibility trigger for predecessor writers. If a pending-row
 mutation changes publication-owned fields while leaving a non-null attempt UUID unchanged, the
 trigger clears the attempt and principal, atomically demoting the row to legacy state before the
-predecessor writes its object without the new fence. Any transition out of `pending` also clears
-both fields. New writers change the attempt UUID together with publication fields and therefore
-remain attempt-aware. This makes old-image adoption and rollback safe: recovery skips the demoted
-row, and old registration cannot retain stale attempt metadata.
+predecessor writes its object without the new fence. A predecessor-shaped transition out of
+`pending` that preserves a non-null attempt is declined: this prevents a late old publisher from
+registering a successor attempt it no longer owns. New writers change the attempt UUID at
+reservation and explicitly clear attempt/principal at registration, so both mutations remain
+distinguishable and allowed. This makes old-image adoption and rollback safe: recovery skips a
+demoted row, and late old registration cannot mutate a successor attempt.
 
 A companion `BEFORE DELETE` trigger declines deletion of a pending row with a non-null attempt.
 This protects a new publisher from predecessor dangling, expiry, and inventory-prune paths that do
