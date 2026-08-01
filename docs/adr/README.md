@@ -17,15 +17,23 @@ implementation"; those ADRs live here.
   same PR, so status never drifts from reality. An ADR that ships only partially
   stays **Proposed** until its decision is fully realized.
 - Move an ADR to **Superseded by NNNN** when a later ADR fully replaces it.
-  Never edit an accepted decision in place — write a new ADR that supersedes it.
-  Record the supersession in the superseded record, as a one-line banner beneath
-  its existing status (form below). That banner is the only edit a merged ADR
-  permits, and its link must resolve to a sibling record — the records CI gate
-  checks both.
-- When a later ADR supersedes only *part* of an earlier one, strike through the
-  superseded prose (`~~…~~`) in the earlier ADR and add an italic
-  *"Superseded by NNNN — …"* note next to it; the in-force sections stay plain.
-  (ADR-0035 is the worked example.)
+  Do not rewrite the accepted decision — write a new ADR that supersedes it.
+  Record the supersession in the superseded record as a one-line banner beneath
+  its existing status (form below). Its link must resolve to a sibling record;
+  the records CI gate checks both.
+- A merged ADR is append-only outside `## Status`. When later evidence or a
+  follow-up decision qualifies its reasoning, append a block to the level-2
+  section it qualifies with the heading
+  `### Amendment (YYYY-MM-DD): <claim> (#NNNN)`. Start the block by explaining
+  why the addition is an amendment and state which earlier claim it qualifies.
+  An amendment preserves the original record; it does not replace the need for a
+  new ADR and supersession banner when a later decision fully replaces the
+  accepted one.
+- When a later ADR supersedes only *part* of an earlier one, append an amendment
+  to the affected section that links to the later ADR and identifies the
+  superseded claim. Do not strike through or otherwise rewrite the earlier prose:
+  removing or changing a line reports `E-REWRITE` for records held to the current
+  gate.
 
 The supersession banner, verbatim — substitute the number and slug of the ADR that
 replaces this one, and the date it was accepted:
