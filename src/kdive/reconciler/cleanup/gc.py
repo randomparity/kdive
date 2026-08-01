@@ -117,6 +117,10 @@ ROOTFS_STAGING_DRAIN_BACKOFF = timedelta(hours=6)
 #: ``console``/``vmcore`` (system-owned crash evidence). Both sweeps also pin ``owner_kind='runs'``,
 #: so operator base-image uploads (system-owned) are out of scope.
 _BUILD_RETENTION_CLASSES: tuple[str, ...] = ("build", "kernel-build")
+_SYSTEM_TEARDOWN_ARTIFACT_PATTERNS: tuple[str, ...] = (
+    "%console-part-%",
+    "%sysrq-diagnostic-%",
+)
 
 
 class ArtifactObjectDeleter(Protocol):
@@ -189,8 +193,9 @@ async def gc_system_artifacts(conn: AsyncConnection, store: ArtifactObjectDelete
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT a.id, a.object_key FROM artifacts a JOIN systems s ON s.id = a.owner_id "
-            "WHERE a.owner_kind = 'systems' AND s.state = ANY(%s)",
-            (list(gone_system_state_values()),),
+            "WHERE a.owner_kind = 'systems' AND s.state = ANY(%s) "
+            "AND a.object_key LIKE ANY(%s)",
+            (list(gone_system_state_values()), list(_SYSTEM_TEARDOWN_ARTIFACT_PATTERNS)),
         )
         candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
     deleted = 0
