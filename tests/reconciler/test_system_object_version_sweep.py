@@ -625,7 +625,9 @@ def test_leader_deletes_remote_parts_only_after_registry_absence(migrated_url: s
     asyncio.run(go())
 
 
-def test_hosting_transition_waits_for_reserved_remote_delete(migrated_url: str) -> None:
+def test_cancelled_sweep_holds_reservation_until_remote_delete_finishes(
+    migrated_url: str,
+) -> None:
     class LeaderLock:
         def __init__(self) -> None:
             self.held = False
@@ -693,18 +695,24 @@ def test_hosting_transition_waits_for_reserved_remote_delete(migrated_url: str) 
                 )
             )
             assert await asyncio.to_thread(delete_started.wait, 5)
+            delete_task.cancel()
+            await asyncio.sleep(0)
+            cancellation_waited_for_delete = not delete_task.done()
             running.systems.add(system_id)
             transition = asyncio.create_task(loop.tick())
             await asyncio.sleep(0)
             transition_waited = not transition.done()
             collector_absent_during_delete = not registry.has(system_id)
             release_delete.set()
-            assert await delete_task == 1
+            with pytest.raises(asyncio.CancelledError):
+                await delete_task
             await transition
 
+        assert cancellation_waited_for_delete
         assert transition_waited
         assert collector_absent_during_delete
         assert registry.has(system_id)
+        assert store.deleted == [(key, "v1")]
 
     asyncio.run(go())
 

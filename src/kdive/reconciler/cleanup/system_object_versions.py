@@ -263,7 +263,20 @@ async def _delete_if_fenced(
 
 
 async def _delete_batch(store: SystemObjectVersionStore, batch: VersionBatch) -> int:
-    complete = await asyncio.to_thread(store.delete_batch, batch)
+    delete_task = asyncio.create_task(asyncio.to_thread(store.delete_batch, batch))
+    try:
+        complete = await asyncio.shield(delete_task)
+    except asyncio.CancelledError as cancelled:
+        while not delete_task.done():
+            try:
+                await asyncio.shield(delete_task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not delete_task.cancelled():
+            delete_task.exception()
+        raise cancelled
     deleted = batch.targets if complete else tuple(t for t in batch.targets if not t.is_latest)
     return len(deleted)
 

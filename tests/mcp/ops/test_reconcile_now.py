@@ -287,6 +287,29 @@ def test_concurrent_on_demand_and_periodic_pass_enqueue_one_teardown(migrated_ur
     asyncio.run(_run())
 
 
+def test_registered_wrapper_discloses_local_version_deletion_and_remote_skip() -> None:
+    app = FastMCP("reconcile-now-contract")
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    ops_reconcile.register(app, pool, ports=_ports())
+    tools = asyncio.run(app.list_tools())
+    tool = next(tool for tool in tools if tool.name == "ops.reconcile_now")
+    description = " ".join((tool.description or "").lower().split())
+
+    assert "permanently delete" in description
+    assert "rowless local system object version" in description
+    assert "200" in description and "per call" in description
+    assert "20" in description and "per exact key" in description
+    assert "system lock" in description
+    assert "gone system" in description
+    assert "artifact row" in description and "exact key" in description
+    assert "releases the database transaction" in description
+    assert "local_system_object_versions_deleted" in description
+    assert "remote" in description and "skipped" in description
+    assert "hosting gate" in description
+    assert "ops.reconcile_now" in description
+    assert "never deletes objects" not in description
+
+
 class _FakeFastMCP:
     def __init__(self) -> None:
         self.tools: dict[str, Callable[[], Awaitable[ToolResponse]]] = {}
