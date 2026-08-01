@@ -1094,6 +1094,114 @@ def test_stage_precheck_does_not_run_before_the_object_is_known_to_exist(
     assert measured == []
 
 
+def test_concurrent_native_reservations_admit_exactly_one_stager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = _QCOW2 + b"r" * 4096
+    stores = [
+        _FakeStore(payload, checksum=_sha256_b64(payload)),
+        _FakeStore(payload, checksum=_sha256_b64(payload)),
+    ]
+    destinations = [tmp_path / "first.qcow2", tmp_path / "second.qcow2"]
+    system_ids = [uuid4(), uuid4()]
+    allocator_barrier = threading.Barrier(2)
+    allocator_lock = threading.Lock()
+    remaining = len(payload)
+    allocation_calls: list[int] = []
+    outcomes: list[Path | CategorizedError | None] = [None, None]
+
+    def _allocate(_fd: int, length: int) -> None:
+        nonlocal remaining
+        allocation_calls.append(length)
+        allocator_barrier.wait(timeout=5)
+        with allocator_lock:
+            if remaining < length:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            remaining -= length
+
+    def _run(index: int) -> None:
+        try:
+            stage_uploaded_rootfs(
+                stores[index],
+                object_key=f"local/investigations/inv/rootfs-{index}",
+                dest=destinations[index],
+                encoding=None,
+                uncompressed_size=None,
+                system_id=system_ids[index],
+            )
+            outcomes[index] = destinations[index]
+        except CategorizedError as error:
+            outcomes[index] = error
+
+    monkeypatch.setattr(rootfs_upload_fetch, "_native_fallocate", _allocate)
+    workers = [threading.Thread(target=_run, args=(index,)) for index in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert allocation_calls == [len(payload), len(payload)]
+    successes = [outcome for outcome in outcomes if isinstance(outcome, Path)]
+    failures = [outcome for outcome in outcomes if isinstance(outcome, CategorizedError)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert sum(store.stream_calls for store in stores) == 1
+    failure = failures[0]
+    assert failure.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    failed_index = system_ids.index(UUID(str(failure.details["system_id"])))
+    assert failure.details == {
+        "system_id": str(system_ids[failed_index]),
+        "dest": str(destinations[failed_index]),
+        "requested_bytes": len(payload),
+        "budget_source": "object_size",
+        "errno": errno.ENOSPC,
+    }
+    assert list(tmp_path.glob("*.partial")) == []
+
+
+def test_unsupported_native_reservation_degrades_without_posix_fallocate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def _unsupported(_fd: int, _length: int) -> None:
+        raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+
+    def _forbidden_posix_fallocate(_fd: int, _offset: int, _length: int) -> None:
+        raise AssertionError("native-allocation degrade must not invoke posix_fallocate emulation")
+
+    monkeypatch.setattr(rootfs_upload_fetch, "_native_fallocate", _unsupported)
+    monkeypatch.setattr(os, "posix_fallocate", _forbidden_posix_fallocate)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with caplog.at_level(logging.WARNING, logger=rootfs_upload_fetch.__name__):
+        dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.read_bytes() == _QCOW2
+    assert store.stream_calls == 1
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+    assert "does not support native rootfs staging reservations" in caplog.text
+    assert "advisory free-space precheck" in caplog.text
+
+
+def test_native_reservation_io_failure_does_not_degrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _io_failure(_fd: int, _length: int) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(rootfs_upload_fetch, "_native_fallocate", _io_failure)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "Input/output error" in str(error.value)
+    assert store.stream_calls == 0
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
 # --- stage_uploaded_rootfs: crash durability of the publish (#1526) ------------------------------
 
 
