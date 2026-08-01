@@ -1655,7 +1655,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="images.upload",
         read_only=False,
         destructive=False,
-        help="Create an image upload request.",
+        help="Register a quarantined upload as a project-private image.",
         unwrap_request=False,
         flags=(
             GeneratedFlag(
