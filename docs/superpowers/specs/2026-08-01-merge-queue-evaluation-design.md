@@ -1,7 +1,7 @@
 # Merge queue evaluation
 
 Date: 2026-08-01
-Status: approved requirement, pending implementation
+Status: implemented
 ADR: [0517](../../adr/0517-migration-numbers-are-strictly-ascending-across-merges.md)
 
 ## Problem
