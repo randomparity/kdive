@@ -81,6 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Require versioned bucket identities
 - Delete bounded immutable versions
 - Persist system version sweep progress
+- Persist publication attempts
+- Bind publishes to object checksums
+- Fence active publication attempts
 
 ### Changed
 
@@ -290,6 +293,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clarify sweep store surface
 - Require versioned bucket provisioning
 - Accept versioned store deletion
+- Design pending publication recovery
+- Harden publication recovery design
+- Close publication recovery races
+- Fence inventory from pending publishes
+- Make inventory updates compare-and-swap
+- Make recovery spec falsifiable
+- Close recovery specification gaps
+- Assign publication recovery ADR
+- Preserve mixed-version publication state
+- Fence predecessor publication adoption
+- Protect attempts from predecessor cleanup
+- Reject stale predecessor registration
+- Fail stale predecessor registration
+- Clarify publication lock span
+- Cite assigned publication recovery ADR
+- Expose publication delete conflict
+- Date publication recovery acceptance
 
 ### Fixed
 
@@ -522,6 +542,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve gone system evidence
 - Bound system artifact retries
 - Tolerate additive catalog columns
+- Preserve build publication principal
+- Reconcile abandoned publications
+- Require top-level recovery transactions
+- Preserve pending rows during inventory reconcile
+- Preserve expand-phase recovery compatibility
+- Reject deletion during publication
 
 ### Build
 
