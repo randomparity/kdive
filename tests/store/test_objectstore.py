@@ -194,6 +194,24 @@ def test_put_artifact_rejects_missing_empty_or_malformed_version_id(
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
+def test_put_artifact_accepts_literal_null_version_id() -> None:
+    store = ObjectStore(_CannedPutClient({"ETag": '"etag"', "VersionId": "null"}), "bucket")
+
+    stored = store.put_artifact(
+        ArtifactWriteRequest(
+            tenant="t",
+            owner_kind="runs",
+            owner_id="r1",
+            name="kernel",
+            data=b"payload",
+            sensitivity=Sensitivity.REDACTED,
+            retention_class="build",
+        )
+    )
+
+    assert stored.version_id == "null"
+
+
 def test_put_artifact_writes_metadata_and_returns_stored_artifact() -> None:
     client = _RecordingPutClient()
     store = ObjectStore(client, "the-bucket")
@@ -330,6 +348,59 @@ def test_put_stream_writes_checksum_metadata_and_returns_stored_artifact(tmp_pat
     assert stored.sensitivity is Sensitivity.SENSITIVE
     assert stored.retention_class == "vmcore"
     assert stored.version_id == "put-version-1"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"ETag": '"etag"'},
+        {"ETag": '"etag"', "VersionId": ""},
+        {"ETag": '"etag"', "VersionId": 1},
+    ],
+)
+def test_put_stream_rejects_missing_empty_or_malformed_version_id(
+    tmp_path: Path, reply: dict[str, object]
+) -> None:
+    spool = tmp_path / "core"
+    spool.write_bytes(b"payload")
+    store = ObjectStore(_CannedPutClient(reply), "bucket")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        store.put_stream(
+            ArtifactStreamRequest(
+                tenant="t",
+                owner_kind="runs",
+                owner_id="r1",
+                name="kernel",
+                path=spool,
+                sha256_b64=_sha256_b64(spool),
+                sensitivity=Sensitivity.REDACTED,
+                retention_class="build",
+            )
+        )
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_put_stream_accepts_literal_null_version_id(tmp_path: Path) -> None:
+    spool = tmp_path / "core"
+    spool.write_bytes(b"payload")
+    store = ObjectStore(_CannedPutClient({"ETag": '"etag"', "VersionId": "null"}), "bucket")
+
+    stored = store.put_stream(
+        ArtifactStreamRequest(
+            tenant="t",
+            owner_kind="runs",
+            owner_id="r1",
+            name="kernel",
+            path=spool,
+            sha256_b64=_sha256_b64(spool),
+            sensitivity=Sensitivity.REDACTED,
+            retention_class="build",
+        )
+    )
+
+    assert stored.version_id == "null"
 
 
 def test_put_stream_maps_local_source_error_to_infrastructure_failure(tmp_path: Path) -> None:
@@ -783,8 +854,14 @@ class _VersioningClient:
         return self._reply
 
 
-def test_validate_versioning_accepts_enabled_bucket_without_mfa_delete() -> None:
-    client = _VersioningClient({"Status": "Enabled"})
+@pytest.mark.parametrize("mfa_delete", [None, "Disabled"])
+def test_validate_versioning_accepts_enabled_bucket_with_absent_or_disabled_mfa_delete(
+    mfa_delete: str | None,
+) -> None:
+    reply: dict[str, object] = {"Status": "Enabled"}
+    if mfa_delete is not None:
+        reply["MFADelete"] = mfa_delete
+    client = _VersioningClient(reply)
     ObjectStore(client, "bucket").validate_versioning()
     assert client.versioning_calls == 1
 
@@ -806,7 +883,15 @@ def test_mfa_delete_enabled_is_configuration_error() -> None:
     assert "dedicated bucket" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("reply", [{"Status": 1}, {"Status": "Enabled", "MFADelete": 1}])
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"Status": 1},
+        {"Status": "Enabled", "MFADelete": 1},
+        {"Status": "Enabled", "MFADelete": ""},
+        {"Status": "Enabled", "MFADelete": "Bogus"},
+    ],
+)
 def test_validate_versioning_rejects_malformed_reply(reply: dict[str, object]) -> None:
     with pytest.raises(CategorizedError) as excinfo:
         ObjectStore(_VersioningClient(reply), "bucket").validate_versioning()

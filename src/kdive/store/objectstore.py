@@ -446,6 +446,10 @@ class ObjectStore:
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"bucket": self._bucket, "observed_mfa_delete": mfa_delete},
             )
+        if mfa_delete not in {None, "Disabled"}:
+            raise reply._malformed(
+                "MFADelete", f"returned unsupported MFADelete state {mfa_delete!r}"
+            )
 
     def head(self, key: str) -> artifact_types.HeadResult | None:
         """Return the object's size/checksum/etag/mtime/sensitivity, or ``None`` if it is absent.
