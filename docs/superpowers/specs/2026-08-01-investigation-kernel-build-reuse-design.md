@@ -46,10 +46,18 @@ provenance. Canonical JSON uses sorted keys and compact separators; SHA-256 over
 the `build_ref`. Object keys and etags are excluded because they describe storage placement rather
 than content. Finalization already requires the object store's SHA-256 for every artifact.
 
-The record is immutable. `INSERT ... ON CONFLICT DO NOTHING` followed by an equality read makes
-same-content retries converge and treats a hash collision or inconsistent canonicalization as an
-infrastructure failure. New artifact rows use `owner_kind='investigations'` and the Investigation
-id. The existing owner-triple uniqueness constraint makes row registration replay-safe.
+The record is immutable and stores the exact selected artifact keys and versions. Under the
+Investigation lock, `INSERT ... ON CONFLICT DO NOTHING` chooses a candidate. A conflict reloads the
+winner and requires equality of the canonical document; inequality is an infrastructure failure.
+Only the winner's artifact set gets new rows with `owner_kind='investigations'` and the
+Investigation id. The existing owner-triple uniqueness constraint makes its registration
+replay-safe.
+
+An identical-content loser completes its source Run with the winner's build result and references,
+not its own uploaded keys. Its uploaded versions remain unregistered, are deleted exactly after the
+database commit, and fall to the existing Run-prefix orphan sweep if exact deletion fails. Loser
+cleanup never names the winner's keys. Catalog selection and registration share the Investigation
+lock, so garbage collection cannot observe or delete a half-published winner.
 
 ## Completion flow
 
@@ -57,14 +65,15 @@ id. The existing owner-triple uniqueness constraint makes row registration repla
 final transaction it:
 
 1. derives the canonical build document and `build_ref` from validated HEAD data and build result;
-2. registers artifact rows against the Investigation;
-3. inserts or verifies the immutable investigation-build record;
+2. selects or verifies the immutable investigation-build record;
+3. registers artifact rows against the Investigation only when this candidate won;
 4. records the source Run's succeeded build step and `runs.build_ref`;
 5. marks the source Run succeeded and records the existing audit event.
 
-All five database effects commit together. Object uploads precede the transaction as today; the
-existing orphan sweeps remain the recovery owner if the transaction fails. The successful tool
-response includes `data.build_ref`, and `runs.get`/`runs.list` expose it.
+All five database effects commit together. Object uploads precede the transaction as today. After
+commit, a uniqueness loser deletes only its own exact uploaded versions; the existing orphan sweep
+remains the retry owner if that cleanup or the transaction fails. The successful tool response
+includes `data.build_ref`, and `runs.get`/`runs.list` expose it.
 
 ## Reuse flow
 
@@ -96,8 +105,10 @@ from `runs.complete_build` or `runs.get`).
 ## Garbage collection and concurrency
 
 Investigation ownership replaces Run ownership only for newly finalized builds. The existing
-close-plus-grace and TTL sweeps are extended to enumerate `investigation_builds` and their artifact
-rows. Legacy `owner_kind='runs'` build artifacts keep their current path.
+close-plus-grace sweep is extended to enumerate `investigation_builds` and their artifact rows.
+New builds have no open-Investigation TTL: they remain reusable until the Investigation closes and
+the configured grace deadline passes. Legacy `owner_kind='runs'` build artifacts keep their current
+close and TTL paths.
 
 Create and reclaim take the Investigation advisory lock. Reclaim rechecks for non-terminal Runs
 whose `build_ref` selects the candidate. A live reference defers deletion. After object versions
@@ -151,8 +162,9 @@ class within that boundary.
    references fail without a Run, System hold, audit transition, or tenancy disclosure.
 5. Concurrent identical completions converge; create racing close or reclaim cannot produce a
    dangling build reference.
-6. Close-plus-grace and TTL collection reclaim new investigation-owned build objects only after no
-   live Run references them; legacy run-owned build collection remains green.
+6. Close-plus-grace collection reclaims new investigation-owned build objects only after no live
+   Run references them; no open-Investigation TTL applies, and legacy run-owned build collection
+   remains green.
 7. `runs.create`, `runs.complete_build`, `runs.get`, generated CLI/docs, schema migration tests,
    service tests, and adversarial concurrency tests describe and prove the contract.
 

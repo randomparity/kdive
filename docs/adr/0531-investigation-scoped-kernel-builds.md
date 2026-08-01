@@ -25,6 +25,15 @@ checksums and build metadata. The artifact catalog rows use `owner_kind='investi
 Investigation id. A uniqueness constraint on `(investigation_id, build_ref)` makes concurrent or
 replayed finalization converge on one record.
 
+The record stores one exact validated artifact set. A finalizer first attempts to publish its
+candidate record under the Investigation lock. On uniqueness conflict it reloads the winner and
+verifies that the canonical document matches before using the winner's references for its source
+Run. Only the winner registers investigation-owned artifact rows. A loser retains its uploaded
+objects as uncommitted Run-prefix objects, deletes their exact versions after commit, and leaves a
+failed delete to the existing prefix-orphan sweep. It never registers or deletes the winner's
+objects. The lock spans catalog selection and database registration, so collection cannot race a
+partially published winner.
+
 `runs.complete_build` still completes its source Run and additionally returns the `build_ref`.
 `runs.create` accepts an optional `build_ref`. Under the Investigation lock it resolves only a
 record owned by the requested Investigation, requires its target architecture and build profile to
@@ -37,10 +46,11 @@ cross-Investigation, or incompatible reference fails as `configuration_error` wi
 whether another tenant owns a matching build. The source Run may be terminal or deleted later;
 the build record, not that Run, is the reuse authority.
 
-Investigation-close and TTL garbage collection delete the build's investigation-owned artifacts
-and then its build record. Reclaim locks the Investigation and rechecks that no live Run references
-the build before deletion. Runs store the selected `build_ref`, so concurrent create versus reclaim
-is serialized and the reference remains auditable.
+Investigation-close-plus-grace garbage collection deletes the build's investigation-owned artifacts
+and then its build record. There is no open-Investigation TTL: the promised lifetime lasts until
+the Investigation closes and its configured grace deadline passes. Reclaim locks the Investigation
+and rechecks that no live Run references the build before deletion. Runs store the selected
+`build_ref`, so concurrent create versus reclaim is serialized and the reference remains auditable.
 
 ## Consequences
 
@@ -49,6 +59,8 @@ is serialized and the reference remains auditable.
 - Cross-Investigation reuse is rejected at the ownership predicate even when bytes are identical.
 - Existing run-owned build rows remain readable and reclaimable; there is no backfill or dual
   creation path for new completions.
+- Duplicate physical uploads can occur before the content identity is known. Only one becomes the
+  durable build; losing object versions are best-effort deleted and remain covered by orphan repair.
 - Reuse bypasses build upload and validation because it selects an already validated immutable
   record. Install, boot, and debug behavior remain unchanged.
 - The schema gains an investigation-build catalog and a nullable `runs.build_ref` audit link.
