@@ -34,7 +34,7 @@ from kdive.artifacts.pcap_count import count_pcap_packets
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ARTIFACTS, JOBS, RUNS, SYSTEMS
+from kdive.db.repositories import ARTIFACTS, JOBS, RUNS, SYSTEMS, ArtifactClaimConflict
 from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -207,27 +207,37 @@ async def _store_capture(
 
     stored = await asyncio.to_thread(_put_artifact, store, run_id, name, data)
 
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
-        canceled = await _job_canceled(conn, job.id)
-        existing = await _existing_artifact_row(conn, run_id, object_key)
-        if existing is None and not canceled:
-            artifact = register_artifact_row(
-                stored, owner_kind=_OWNER_KIND, owner_id=run_id, run_id=run_id
-            )
-            await ARTIFACTS.insert(conn, artifact)
-            await audit.record(
-                conn,
-                job_context_from_job(job, project),
-                audit.AuditEvent(
-                    tool="control.capture_traffic",
-                    object_kind="runs",
-                    object_id=run_id,
-                    transition="capture_traffic",
-                    args={"run_id": str(run_id)},
-                    project=project,
-                ),
-            )
-            return artifact.id
+    try:
+        async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
+            canceled = await _job_canceled(conn, job.id)
+            existing = await _existing_artifact_row(conn, run_id, object_key)
+            if existing is None and not canceled:
+                artifact = register_artifact_row(
+                    stored, owner_kind=_OWNER_KIND, owner_id=run_id, run_id=run_id
+                )
+                claimed, inserted = await ARTIFACTS.claim(conn, artifact)
+                if inserted:
+                    await audit.record(
+                        conn,
+                        job_context_from_job(job, project),
+                        audit.AuditEvent(
+                            tool="control.capture_traffic",
+                            object_kind="runs",
+                            object_id=run_id,
+                            transition="capture_traffic",
+                            args={"run_id": str(run_id)},
+                            project=project,
+                        ),
+                    )
+                    return claimed.id
+                existing = _ExistingRow(claimed.id, claimed.etag)
+    except ArtifactClaimConflict:
+        await discard_unregistered_objects(
+            store,
+            [stored],
+            still_unregistered=lambda key: _key_unregistered(conn, run_id, key),
+        )
+        raise
     if existing is not None:
         # A peer attempt registered the key while this PUT was in flight, so one of the two PUTs
         # overwrote the object that row describes. Which one landed last is not knowable here —

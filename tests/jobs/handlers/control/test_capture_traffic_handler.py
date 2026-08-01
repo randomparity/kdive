@@ -32,6 +32,7 @@ from kdive.artifacts.storage import (
     StoredArtifact,
 )
 from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.repositories import ArtifactClaimConflict
 from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -810,6 +811,34 @@ def test_discard_failure_does_not_mask_the_cancel_outcome(
     assert ref is None  # ...and its failure did not become the handler's result
     assert rows == []
     assert capturer.reclaimed  # the host-side pcap is still reclaimed
+
+
+def test_repeated_claim_disappearance_discards_then_retries(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
+    """A typed claim race conditionally removes the post-PUT object before job retry."""
+    store = _LockProbingStore(migrated_url)
+    capturer = _FakeCapturer(tmp_path)
+
+    async def _vanishing_claim(*args: object, **kwargs: object) -> None:
+        raise ArtifactClaimConflict("winner disappeared twice")
+
+    monkeypatch.setattr(capture_traffic.ARTIFACTS, "claim", _vanishing_claim)
+
+    async def _go() -> tuple[str, Job]:
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            run_id, _ = await _seed_ready_run(pool)
+            job = _job(run_id)
+            await _insert_job(pool, job, JobState.RUNNING)
+            with pytest.raises(ArtifactClaimConflict, match="winner disappeared twice"):
+                await _run_probing(pool, store, capturer, job, monkeypatch=monkeypatch)
+            return run_id, job
+
+    run_id, job = asyncio.run(_go())
+    expected_key = f"local/runs/{run_id}/pcap-{job.id}"
+    assert store.deleted == [expected_key]
+    assert store.objects == {}
 
 
 # --- Two concurrent attempts of one job (#1725 H2) -------------------------------------

@@ -28,7 +28,7 @@ from kdive.artifacts.etag_repair import reconcile_row_etag
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ARTIFACTS, SYSTEMS
+from kdive.db.repositories import ARTIFACTS, SYSTEMS, ArtifactClaimConflict
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -294,28 +294,38 @@ async def _store_capture(
     stored = await asyncio.to_thread(_put_artifact, store, system_id, name, redacted)
 
     ready = False
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        system = await SYSTEMS.get(conn, system_id)
-        ready = system is not None and system.state is SystemState.READY
-        existing = await _existing_artifact_row(conn, system_id, object_key)
-        if existing is None and system is not None and ready:
-            artifact = register_artifact_row(
-                stored, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=None
-            )
-            await ARTIFACTS.insert(conn, artifact)
-            await audit.record(
-                conn,
-                job_context_from_job(job, system.project),
-                audit.AuditEvent(
-                    tool="control.diagnostic_sysrq",
-                    object_kind="systems",
-                    object_id=system_id,
-                    transition=f"sysrq:{command.value}",
-                    args={"system_id": str(system_id), "command": command.value},
-                    project=system.project,
-                ),
-            )
-            return artifact.id
+    try:
+        async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+            system = await SYSTEMS.get(conn, system_id)
+            ready = system is not None and system.state is SystemState.READY
+            existing = await _existing_artifact_row(conn, system_id, object_key)
+            if existing is None and system is not None and ready:
+                artifact = register_artifact_row(
+                    stored, owner_kind=_OWNER_KIND, owner_id=system_id, run_id=None
+                )
+                claimed, inserted = await ARTIFACTS.claim(conn, artifact)
+                if inserted:
+                    await audit.record(
+                        conn,
+                        job_context_from_job(job, system.project),
+                        audit.AuditEvent(
+                            tool="control.diagnostic_sysrq",
+                            object_kind="systems",
+                            object_id=system_id,
+                            transition=f"sysrq:{command.value}",
+                            args={"system_id": str(system_id), "command": command.value},
+                            project=system.project,
+                        ),
+                    )
+                    return claimed.id
+                existing = _ExistingRow(claimed.id, claimed.etag)
+    except ArtifactClaimConflict:
+        await discard_unregistered_objects(
+            store,
+            [stored],
+            still_unregistered=lambda key: _key_unregistered(conn, system_id, key),
+        )
+        raise
     if existing is not None:
         # A peer attempt registered the key while this PUT was in flight, so one of the two PUTs
         # overwrote the object that row describes. Which one landed last is not knowable here —
