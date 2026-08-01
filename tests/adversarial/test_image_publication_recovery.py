@@ -6,7 +6,6 @@ import asyncio
 import base64
 import hashlib
 import threading
-from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -220,19 +219,72 @@ async def _wait_for_publication_waiter(conn: psycopg.AsyncConnection, row_id: UU
     await asyncio.wait_for(_poll(), _TIMEOUT)
 
 
+async def _row_waiter_exists(conn: psycopg.AsyncConnection, backend_pid: int) -> bool:
+    cur = await conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = %s AND NOT granted "
+        "AND locktype IN ('transactionid', 'tuple'))",
+        (backend_pid,),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return bool(row[0])
+
+
+async def _wait_for_row_waiter(conn: psycopg.AsyncConnection, backend_pid: int) -> None:
+    async def _poll() -> None:
+        while not await _row_waiter_exists(conn, backend_pid):
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_poll(), _TIMEOUT)
+
+
+async def _contend_on_image_row(conn: psycopg.AsyncConnection, row_id: UUID) -> int:
+    cur = await conn.execute(
+        "UPDATE image_catalog SET updated_at = updated_at WHERE id = %s", (row_id,)
+    )
+    return cur.rowcount
+
+
 async def _settle(task: asyncio.Task[object]) -> None:
+    """Bound cancellation and retrieve terminal errors without hiding a timeout."""
     if not task.done():
         task.cancel()
-    with suppress(asyncio.CancelledError, Exception):
-        await asyncio.wait_for(task, _TIMEOUT)
+        await asyncio.wait_for(asyncio.wait((task,)), _TIMEOUT)
+    assert task.done()
+    if not task.cancelled():
+        task.exception()
+
+
+def test_settle_propagates_nonterminating_task_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup must fail when cancellation does not terminate a task within its bound."""
+
+    async def _run() -> None:
+        async def _slow_cancellation() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.05)
+
+        task = asyncio.create_task(_slow_cancellation())
+        await asyncio.sleep(0)
+        with pytest.raises(TimeoutError):
+            await _settle(task)
+        assert not task.done()
+        await asyncio.wait_for(task, 1.0)
+        assert task.done()
+
+    monkeypatch.setattr("tests.adversarial.test_image_publication_recovery._TIMEOUT", 0.01)
+    asyncio.run(_run())
 
 
 async def _install_delete_failure_trigger(
-    conn: psycopg.AsyncConnection, row_id: UUID
-) -> tuple[str, str]:
-    suffix = uuid4().hex
-    function_name = f"fail_image_delete_{suffix}"
-    trigger_name = f"fail_image_delete_trigger_{suffix}"
+    conn: psycopg.AsyncConnection,
+    row_id: UUID,
+    trigger_name: str,
+    function_name: str,
+) -> None:
     await conn.execute(
         sql.SQL(
             "CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$ "
@@ -246,7 +298,11 @@ async def _install_delete_failure_trigger(
             "CREATE TRIGGER {} BEFORE DELETE ON image_catalog FOR EACH ROW EXECUTE FUNCTION {}()"
         ).format(sql.Identifier(trigger_name), sql.Identifier(function_name))
     )
-    return trigger_name, function_name
+
+
+def _delete_failure_trigger_names() -> tuple[str, str]:
+    suffix = uuid4().hex
+    return f"fail_image_delete_trigger_{suffix}", f"fail_image_delete_{suffix}"
 
 
 async def _remove_delete_failure_trigger(
@@ -258,6 +314,65 @@ async def _remove_delete_failure_trigger(
     await conn.execute(
         sql.SQL("DROP FUNCTION IF EXISTS {}()").format(sql.Identifier(function_name))
     )
+
+
+def test_trigger_names_allow_cleanup_when_trigger_creation_fails(
+    migrated_url: str,
+) -> None:
+    """Caller-owned names make partial trigger installation recoverable."""
+
+    async def _run() -> None:
+        suffix = uuid4().hex
+        trigger_name = f"fail_image_delete_trigger_{suffix}"
+        function_name = f"fail_image_delete_{suffix}"
+        collision_function = f"existing_image_delete_{suffix}"
+        conn = await _connect(migrated_url, autocommit=True)
+        try:
+            await conn.execute(
+                sql.SQL(
+                    "CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                    "BEGIN RETURN OLD; END $$"
+                ).format(sql.Identifier(collision_function))
+            )
+            await conn.execute(
+                sql.SQL(
+                    "CREATE TRIGGER {} BEFORE DELETE ON image_catalog "
+                    "FOR EACH ROW EXECUTE FUNCTION {}()"
+                ).format(
+                    sql.Identifier(trigger_name),
+                    sql.Identifier(collision_function),
+                )
+            )
+            with pytest.raises(psycopg.errors.DuplicateObject):
+                await _install_delete_failure_trigger(
+                    conn,
+                    uuid4(),
+                    trigger_name,
+                    function_name,
+                )
+        finally:
+            await _remove_delete_failure_trigger(conn, trigger_name, function_name)
+            await conn.execute(
+                sql.SQL("DROP FUNCTION IF EXISTS {}()").format(sql.Identifier(collision_function))
+            )
+            await conn.close()
+
+        check = await _connect(migrated_url, autocommit=True)
+        try:
+            cur = await check.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname = %s)",
+                (function_name,),
+            )
+            assert await cur.fetchone() == (False,)
+            cur = await check.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = %s)",
+                (trigger_name,),
+            )
+            assert await cur.fetchone() == (False,)
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
 
 
 async def _publish_reserved(
@@ -322,6 +437,8 @@ def test_active_slow_publisher_is_skipped_until_its_fence_releases(
             assert await cur.fetchone() is None
         finally:
             store.put_release.set()
+            if not publisher.done():
+                await publisher_conn.close()
             await _settle(publisher)
             if store.put_entered.is_set():
                 await _wait_for_event(store.put_finished)
@@ -347,6 +464,7 @@ def test_recovery_fence_blocks_publisher_before_revalidation_and_put(
         publisher_conn = await _connect(migrated_url, autocommit=True)
         recovery_conn = await _connect(migrated_url, autocommit=False)
         observer_conn = await _connect(migrated_url, autocommit=True)
+        row_contender_conn = await _connect(migrated_url, autocommit=True)
         reservation = await reserve_publish(
             publisher_conn,
             _publish_request("reverse", data),
@@ -355,8 +473,13 @@ def test_recovery_fence_blocks_publisher_before_revalidation_and_put(
         await _age_row(observer_conn, reservation.row_id)
         recovery = asyncio.create_task(repair_dangling_images(recovery_conn, store, _GRACE))
         publisher: asyncio.Task[object] | None = None
+        row_contender: asyncio.Task[object] | None = None
         try:
             await _wait_for_event(store.head_entered)
+            row_contender = asyncio.create_task(
+                _contend_on_image_row(row_contender_conn, reservation.row_id)
+            )
+            await _wait_for_row_waiter(observer_conn, row_contender_conn.info.backend_pid)
             publisher = asyncio.create_task(
                 _publish_reserved(publisher_conn, store, reservation, source)
             )
@@ -365,20 +488,30 @@ def test_recovery_fence_blocks_publisher_before_revalidation_and_put(
 
             store.head_release.set()
             assert await asyncio.wait_for(recovery, _TIMEOUT) == 1
+            assert await asyncio.wait_for(row_contender, _TIMEOUT) == 0
             with pytest.raises(CategorizedError) as error:
                 await asyncio.wait_for(publisher, _TIMEOUT)
             assert error.value.category is ErrorCategory.CONFLICT
             assert store.puts == []
         finally:
             store.head_release.set()
+            if not recovery.done():
+                await recovery_conn.close()
             await _settle(recovery)
+            if row_contender is not None:
+                if not row_contender.done():
+                    await row_contender_conn.close()
+                await _settle(row_contender)
             if publisher is not None:
+                if not publisher.done():
+                    await publisher_conn.close()
                 await _settle(publisher)
             if store.head_entered.is_set():
                 await _wait_for_event(store.head_finished)
             await publisher_conn.close()
             await recovery_conn.close()
             await observer_conn.close()
+            await row_contender_conn.close()
             await _assert_no_publication_lock(migrated_url, reservation.row_id)
 
     asyncio.run(_run())
@@ -448,6 +581,8 @@ def test_cancelled_publisher_late_put_isolated_under_abandoned_attempt_key(
             assert await cur.fetchone() == (successor.id, successor.object_key)
         finally:
             store.put_release.set()
+            if not publisher.done():
+                await publisher_conn.close()
             await _settle(publisher)
             if store.put_entered.is_set():
                 await _wait_for_event(store.put_finished)
@@ -485,9 +620,14 @@ def test_delete_rollback_preserves_pending_row_for_next_recovery_pass(
             b"invalid-publication",
             base64.b64encode(b"x" * 32).decode("ascii"),
         )
-        trigger: tuple[str, str] | None = None
+        trigger = _delete_failure_trigger_names()
         try:
-            trigger = await _install_delete_failure_trigger(observer_conn, reservation.row_id)
+            await _install_delete_failure_trigger(
+                observer_conn,
+                reservation.row_id,
+                trigger[0],
+                trigger[1],
+            )
             try:
                 with pytest.raises(
                     psycopg.errors.RaiseException,
