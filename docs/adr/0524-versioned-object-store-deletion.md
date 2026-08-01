@@ -25,9 +25,16 @@ snapshot, build, garbage-collection, and remote-console cleanup into marker crea
 
 The configured artifact bucket must have versioning fully `Enabled`. `Suspended`, an absent status,
 and prefix exclusions are unsupported. KDIVE-provisioned development and demo buckets enable
-versioning when they are created. Operator-provisioned buckets remain operator-owned; every KDIVE
-runtime that uses the store validates the versioning state before accepting work and fails with an
-actionable configuration error rather than mutating external bucket policy.
+versioning with no exclusions when they are created. Operator-provisioned buckets remain
+operator-owned; every KDIVE runtime that uses the store validates the standard bucket status before
+accepting work and fails with an actionable configuration error rather than changing external
+bucket policy.
+
+The standard `GetBucketVersioning` response cannot report MinIO's non-standard prefix exclusions.
+An external endpoint is supported only when `Enabled` applies to the whole bucket. The operator must
+verify that provider-specific condition; KDIVE cannot claim to detect it through the S3 API. A
+configured endpoint that assigns mutable `null` versions under an excluded prefix violates the
+contract and can invalidate version-specific deletion.
 
 The object-store port exposes immutable version inventory and deletion:
 
@@ -35,9 +42,16 @@ The object-store port exposes immutable version inventory and deletion:
   store mtime, and latest/marker flags;
 - `delete_version(key, version_id)` sends `DeleteObject` with `VersionId`, including the reserved
   `null` value for objects that predate versioning;
-- the key-oriented convenience delete first snapshots every exact version and delete marker, then
-  deletes only that captured set. It never sends key-only `DeleteObject`; a version written after
-  the snapshot survives.
+- the key-oriented convenience delete first captures the complete exact-key history across all
+  pages. It deletes captured nonlatest versions and markers first, and deletes the captured latest
+  entry only after every prerequisite delete succeeds. It never sends key-only `DeleteObject`.
+
+Keeping the latest entry until last is failure-atomic for visibility: a partial failure leaves the
+same current data or delete marker in place instead of exposing older bytes. A later PUT has a new
+VersionId and is not targeted by an already completed capture. A write concurrent with paginated
+capture may or may not enter the captured set, so concurrency-sensitive callers must retain their
+database publication fences through the capture decision; pagination is not described as an atomic
+store snapshot.
 
 The three issue paths split their work around the advisory lock. They capture immutable deletion
 targets without a database transaction, re-check their existing database fences and commit their
@@ -46,6 +60,7 @@ released. An ambiguous response is safe to retry because it can affect only the 
 version.
 
 The upload-orphan sweep enumerates `ListObjectVersions`, not only the current logical objects. It
+groups work by exact key so a history split across pages still uses the latest-last rule. It
 therefore rediscovers failed deletes, noncurrent versions, legacy `null` versions, and delete markers
 under the upload roots. The object store is the durable worklist; no PostgreSQL deletion queue is
 added. Database artifact/manifest/write-lease fences remain key-scoped, so a live key conservatively
@@ -54,11 +69,19 @@ protects all of its versions until the key is no longer reachable.
 All other production object deletes use the shared version-aware convenience operation. The raw
 client must never issue key-only `DeleteObject` in KDIVE production code.
 
-Rollout enables bucket versioning before the new application image is started. During a rolling
-upgrade, an old replica still performs its lock-held key delete; on the now-versioned bucket that
-creates a marker rather than permanently deleting bytes. New replicas enumerate and remove those
-markers. Rolling back to the old image remains data-safe but pauses permanent reclamation until the
-version-aware image returns.
+The first rollout is an explicit stop-old-first maintenance window, not an ordinary rolling update.
+The operator quiesces every KDIVE writer and deleter, installs and verifies the new version
+inspection/list/delete permissions, enables bucket versioning, and waits for the provider's
+documented activation barrier. For Amazon S3 this includes its documented propagation interval;
+managed MinIO initialization completes `mc version enable` and verifies the resulting status before
+starting KDIVE. Only the version-aware image then starts. This prevents old key-delete callers from
+creating markers over writes during mixed-version service.
+
+Once the contract is active, deployments may roll between versions that implement ADR-0524.
+Rolling back to a pre-ADR image is unsupported while the service is live: the old image would turn
+permanent cleanup into marker creation and can hide a concurrent PUT. Diagnosis with the old image
+requires the same quiesced maintenance boundary; recovery is a forward deployment of a
+version-aware image. Suspending versioning is never a rollback action.
 
 The runtime credential needs bucket-version inspection, version listing, and version deletion in
 addition to its existing object permissions. Object Lock or a per-version deny remains an ordinary
@@ -73,8 +96,12 @@ failure.
   and test-bucket teardown must enumerate versions and markers rather than current keys alone.
 - A live database reference protects all versions of its key. This may temporarily retain obsolete
   versions, but avoids guessing which version a legacy key-only row intended.
+- The standard S3 API validates bucket status but not provider-specific prefix exclusions. External
+  operators own that verification; managed KDIVE MinIO never configures exclusions.
 - Externally managed deployments gain a pre-deploy prerequisite and IAM permissions:
   `GetBucketVersioning`, `ListBucketVersions`, and `DeleteObjectVersion`.
+- The first adoption needs downtime and cannot be rolled back to the prior image while accepting
+  work. Subsequent ADR-0524-aware releases retain the normal rolling contract.
 - No database migration, write-path VersionId column, compatibility shim, or new dependency is
   introduced.
 
@@ -93,5 +120,8 @@ failure.
 - **Automatically enable external buckets.** It widens runtime credentials to bucket-policy
   mutation and changes operator-owned state during startup. Provisioning owns mutation; runtime
   assembly owns validation.
+- **Treat standard bucket status as proof that MinIO has no exclusions.** `GetBucketVersioning`
+  exposes only status and MFA Delete. Provider-specific exclusions are an explicit external
+  prerequisite, not something the standard client can fail fast on honestly.
 - **Continue key-only delete after enabling versioning.** It creates markers, does not reclaim
   bytes, and makes the contract appear successful while storage grows.

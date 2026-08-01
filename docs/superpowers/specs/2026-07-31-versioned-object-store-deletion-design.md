@@ -25,17 +25,26 @@ provider selection, and MCP schemas do not change. No database migration or depe
 
 ### Bucket contract
 
-The configured bucket must report `Status=Enabled` from `GetBucketVersioning`. Missing status,
-`Suspended`, and prefix exclusions fail with `configuration_error`; the message names the bucket,
-observed state, required state, and recovery action. The check runs before server, worker, or
-reconciler work begins and remains part of object-store readiness.
+The configured bucket must report `Status=Enabled` from `GetBucketVersioning`. Missing status and
+`Suspended` fail with `configuration_error`; the message names the bucket, observed state, required
+state, and recovery action. The check runs before server, worker, or reconciler work begins and
+remains part of object-store readiness.
+
+The standard response exposes only bucket status and MFA Delete. It cannot report MinIO's
+non-standard excluded-prefix configuration, so KDIVE does not claim to fail fast on that state.
+External endpoints are supported only when `Enabled` applies bucket-wide; their operator verifies
+that provider-specific prerequisite. Managed MinIO is enabled without exclusions. Prefix exclusion
+under any KDIVE key is a contract violation because a mutable `null` identity can make a delayed
+delete unsafe.
 
 Compose `minio-init`, the Helm bundled-backend initializer, and the live MinIO test fixture enable
 versioning immediately after bucket creation. External deployments enable it outside KDIVE before
 rolling out the image. KDIVE does not call `PutBucketVersioning` for an external bucket.
 
 The documented runtime policy adds `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and
-`s3:DeleteObjectVersion`. Existing read, write, current-key list, and HEAD permissions remain.
+`s3:DeleteObjectVersion`. Existing read, write, current-key list, and HEAD permissions remain. The
+first rollout installs and verifies these grants before versioning is enabled or an application is
+started.
 
 ### Store values and operations
 
@@ -49,9 +58,10 @@ Add an immutable `ObjectVersion` value carrying:
 - `is_delete_marker: bool`.
 
 `iter_prefix_version_pages(prefix)` lazily paginates `ListObjectVersions` with the existing
-1,000-entry page bound. It validates fields through the store boundary, combines `Versions` and
-`DeleteMarkers`, and preserves the service's per-page order. `list_exact_versions(key)` consumes
-that iterator with `Prefix=key`, retains only entries whose key equals `key`, and returns every data
+1,000-entry page bound. It validates fields through the store boundary and combines `Versions` and
+`DeleteMarkers` into a deterministic key/mtime/VersionId order; boto3 exposes those collections
+separately, so no cross-collection service order is claimed. `list_exact_versions(key)` consumes
+all pages with `Prefix=key`, retains only entries whose key equals `key`, and returns every data
 version and marker for the exact key.
 
 `delete_version(key, version_id)` always supplies `VersionId` to `DeleteObject`. Deleting an absent
@@ -59,9 +69,16 @@ version is idempotent. A malformed reply or client/transport fault maps to
 `infrastructure_failure` and names the key and VersionId without exposing credentials.
 
 The existing key-oriented `delete(key)` remains as a convenience for callers that do not need a
-database split. It snapshots `list_exact_versions(key)` completely before issuing any delete, then
-deletes every captured VersionId. It never sends key-only `DeleteObject`. A PUT that lands after the
-snapshot creates a VersionId outside the captured set and survives.
+database split. It captures `list_exact_versions(key)` completely before issuing any delete. It
+then deletes every captured nonlatest data version and marker before deleting the captured latest
+entry. If any prerequisite deletion fails, it does not attempt the latest entry. This makes a
+partial operation leave the same key-visible version or marker in place instead of resurrecting
+older bytes. It never sends key-only `DeleteObject`.
+
+`ListObjectVersions` pagination is not an atomic snapshot. A PUT after capture completes has a new
+VersionId outside the captured set and survives; a PUT concurrent with pagination may appear in the
+captured set. Callers with concurrent publishers must pair capture with their existing database
+manifest/write-lease/owner-lock fences rather than infer a store transaction from pagination.
 
 Current-object APIs (`head`, `get`, `list_prefix`) retain their logical-key behavior. This avoids
 leaking versioning concerns into readers and callers that do not delete.
@@ -73,11 +90,11 @@ key. Under `LockScope.INVESTIGATION`, it re-reads the due row, referencer/fetch-
 fences, unlinks the staged base, and removes the artifact row. It commits before deleting any
 captured version.
 
-It then calls `delete_version` for the captured targets without an open transaction or advisory
-lock. A failed or ambiguous delete returns the existing infrastructure failure; the artifact row
-stays retired and every surviving version is discoverable under `local/investigations/` by the
-version-aware orphan sweep. There is no application timeout around an uncancellable blocking
-thread.
+It then deletes captured nonlatest targets followed by the captured latest target without an open
+transaction or advisory lock. A failed or ambiguous prerequisite delete stops before the latest;
+the artifact row stays retired and every surviving version is discoverable under
+`local/investigations/` by the version-aware orphan sweep. There is no application timeout around
+an uncancellable blocking thread.
 
 A later PUT to the same key is a different VersionId and cannot be hit by the captured deletes. A
 fetch that began first still has a durable lease and blocks row retirement; one that begins later
@@ -86,10 +103,11 @@ cannot resolve the removed row.
 ### Expired-upload reaper
 
 The reaper claims and removes the expired manifest under the existing owner lock without listing or
-deleting from the store in that transaction. After commit it snapshots the prefix's version pages.
-For each version, a short owner-locked transaction re-runs `owner_key_is_fenced`; it then releases
-the transaction and deletes that exact VersionId. Contention or a new artifact, manifest, or live
-write lease declines the version for a later pass.
+deleting from the store in that transaction. After commit it enumerates the prefix's version pages,
+groups entries by exact key, and captures each complete key history. For each key, a short
+owner-locked transaction re-runs `owner_key_is_fenced`; it then releases the transaction and deletes
+the captured nonlatest entries before the captured latest entry. Contention or a new artifact,
+manifest, or live write lease declines the key for a later pass.
 
 Store/list/delete failures count as undeleted. Since the manifest is already gone, surviving
 versions remain candidates for the version-aware orphan sweep.
@@ -97,15 +115,18 @@ versions remain candidates for the version-aware orphan sweep.
 ### Upload-orphan sweep
 
 The sweep walks `local/runs/` and `local/investigations/` through
-`iter_prefix_version_pages`. Its 200-unit per-root budget counts versions, not logical keys. It
-attributes each version by key, uses the immutable version mtime for the grace test, and removes the
-current-key HEAD re-read: a version's mtime and identity cannot change.
+`iter_prefix_version_pages`. Its 200-unit per-root budget counts exact keys selected for re-check,
+not individual versions. It attributes entries by key, deduplicates a key across page boundaries,
+and delegates an eligible key to the complete exact-key capture/delete primitive. Immutable
+version mtimes replace the current-key HEAD rewrite check.
 
-Immediately before deletion it attempts the owner lock and re-runs the existing key-scoped artifact,
-manifest, and write-lease fences. The transaction ends before `delete_version` is called. A key
-with any live database reference conservatively protects all versions. If a new PUT lands after the
-listed snapshot, its new VersionId is not the target. Failed exact deletes, noncurrent versions,
-legacy `null` versions, and delete markers are all re-enumerated by later passes.
+For a candidate key it captures the complete exact history, then attempts the owner lock and
+re-runs the existing key-scoped artifact, manifest, write-lease, and grace fences. The transaction
+ends before exact deletion begins. A key with any live database reference conservatively protects
+all versions. Eligible nonlatest entries are removed first; the captured latest entry is attempted
+only when all captured older entries are eligible and their deletes succeed. A new PUT after capture
+has a different VersionId. Failed exact deletes, noncurrent versions, legacy `null` versions, and
+delete markers are all re-enumerated by later passes.
 
 The sweep logs the key, VersionId, and whether the target was a data version or marker. It never
 logs credentials or presigned URLs.
@@ -128,7 +149,8 @@ gate; the only raw call may be `ObjectStore.delete_version`, and it must include
 | crash after row retirement | captured and older versions survive | version orphan sweep enumerates them |
 | delete response is ambiguous | only the named VersionId may have changed | retrying that VersionId is idempotent |
 | later PUT races delete | later VersionId is outside the captured set | later bytes survive |
-| exact current delete exposes an older version | older version becomes listable/current | same captured batch or later version sweep deletes it |
+| nonlatest exact delete fails | captured latest remains current | later sweep retries without resurrection |
+| latest exact delete is ambiguous | all captured older versions are already absent | retry latest; no older captured bytes can reappear |
 | Object Lock/per-version deny | target remains stored and pass reports failure | operator removes hold/deny; later pass retries |
 
 No safety argument depends on a wall-clock lease, process liveness, PostgreSQL backend identity, ETag
@@ -136,15 +158,19 @@ delete preconditions, or cancellation of a boto3 thread.
 
 ## Rollout and rollback
 
-1. Enable versioning on the external bucket and verify `Status=Enabled` without exclusions.
-2. Grant the runtime role version inspection/list/delete permissions.
-3. Roll out the new image. No database migration is involved.
-4. Confirm readiness, then confirm a version-aware cleanup pass can remove a test version and marker.
+1. Quiesce and stop every old server, worker, and reconciler so no KDIVE PUT or DELETE is in flight.
+2. Grant and verify version inspection, listing, and exact-delete permissions.
+3. Enable versioning; verify `Status=Enabled` and the provider-specific no-exclusions prerequisite.
+4. Wait the provider's activation barrier before any application write. Amazon S3's documented
+   first-enable propagation interval applies; managed MinIO initialization waits for `mc version
+   enable` and verifies status before completing.
+5. Start only the version-aware image and confirm readiness plus exact version/marker cleanup.
 
-Old replicas may coexist during step 3. Their lock-held key deletes create markers after versioning
-is enabled; they do not permanently delete a later version, and new orphan sweeps enumerate the
-markers. Rollback to the old image is data-safe but reduces cleanup to marker creation, so storage
-grows until the version-aware image is restored. Suspending versioning is not a rollback action.
+This first adoption is a documented stop-old-first downtime release under ADR-0088. A pre-ADR image
+must not coexist with or replace the new image while accepting work: its key-only cleanup creates
+markers and can hide concurrent writes. An emergency diagnostic rollback must remain quiesced;
+service recovery is a forward deployment of an ADR-0524-aware image. Suspending versioning is not a
+rollback action. Later releases that implement this contract may use normal rolling upgrades.
 
 ## Threat model
 
@@ -159,13 +185,16 @@ request field, secret, command, query, or path parser.
 
 Authenticated tenants can cause uploads and lifecycle cleanup only through existing manifests,
 artifact rows, write leases, and owner locks. The deployment operator controls endpoint, bucket,
-credentials, versioning, Object Lock, and IAM policy. The configured object store is trusted to
-implement the S3 versioning operations it advertises; malformed replies are treated as dependency
-failure rather than trusted data.
+credentials, bucket-wide versioning, Object Lock, provider-specific exclusions, and IAM policy. The
+configured object store is trusted to implement the S3 versioning operations it advertises and to
+apply `Enabled` to every KDIVE prefix; malformed replies are treated as dependency failure rather
+than trusted data.
 
 ### Controls
 
-- Bucket state is validated before work; runtime credentials cannot enable external versioning.
+- Standard bucket state is validated before work; runtime credentials cannot enable external
+  versioning. Provider-specific no-exclusion verification remains an operator prerequisite because
+  the standard API does not expose it.
 - Exact-key filtering prevents a prefix such as `key` from selecting sibling `key-extra` versions.
 - Every reply field is type-checked at the store boundary.
 - Permanent deletion always includes a service-issued VersionId; tenant input never supplies one.
@@ -176,10 +205,11 @@ failure rather than trusted data.
 
 ### Out of scope
 
-Compromise of operator/object-store credentials, an administrator suspending versioning after
-startup, an undeclared writer bypassing KDIVE publication fences, and stores that falsely claim S3
-versioning compatibility are operator trust failures. Object Lock retention and lifecycle policies
-remain operator-owned; KDIVE reports their refusal rather than bypassing them.
+Compromise of operator/object-store credentials, an administrator suspending versioning or adding
+an excluded prefix after validation, an undeclared writer bypassing KDIVE publication fences, and
+stores that falsely claim S3 versioning compatibility are operator trust failures. Object Lock
+retention and lifecycle policies remain operator-owned; KDIVE reports their refusal rather than
+bypassing them.
 
 ## Verification
 
@@ -192,10 +222,14 @@ Tests follow red-green-refactor and mutation-check every changed guard:
   with no transaction-scoped owner lock;
 - race tests PUT a later version between snapshot and delete and prove its VersionId and bytes
   survive, while all captured versions and markers are removed;
+- failure-order tests split one key's history across pages, fail immediately before the latest
+  deletion, and prove the same latest data/marker remains current;
 - failure/crash tests leave a captured version behind and prove the next orphan sweep deletes it;
 - the real MinIO fixture proves bucket validation, VersionId replies, legacy `null` handling where
   supported, marker/noncurrent enumeration, exact deletion, and test teardown of all versions;
-- Compose/Helm render tests assert managed buckets enable versioning before app startup;
+- Compose/Helm render tests assert managed buckets enable and verify versioning before app startup;
+- rollout documentation tests/guards keep the permission-before-enable, quiesce, and activation
+  barrier explicit, including the provider-specific exclusion limitation;
 - the structural sweep rejects production key-only `DeleteObject` calls.
 
 Focused Python tests run through `uv run python -m pytest`; repository gates are `just lint`,
