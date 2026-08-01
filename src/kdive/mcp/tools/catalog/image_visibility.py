@@ -9,13 +9,14 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageVisibility
+from kdive.images.cataloging.projection import IMAGE_CATALOG_ENTRY_PROJECTION
 from kdive.images.planes.base import PROVENANCE_DEFAULT_KERNEL_VERSION
 from kdive.log import bind_context
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, projects_with_role
 
-_VISIBLE_IMAGE_SQL = """
-    SELECT *
+_VISIBLE_IMAGE_SQL = f"""
+    SELECT {IMAGE_CATALOG_ENTRY_PROJECTION}
     FROM image_catalog
     WHERE id = %(id)s
       AND (visibility = %(public)s

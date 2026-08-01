@@ -4,7 +4,7 @@ A base `Repository[M]` provides `insert` / `get`; `StatefulRepository[M, S]` add
 `update_state`, guarded by `kdive.domain.capacity.state.can_transition` and bound to the
 object's state enum `S`. Module-level instances bind these to each table. Rows map to
 Pydantic models field-for-column; the database owns the `created_at` / `updated_at`
-timestamps (they are omitted from inserts and read back via `RETURNING *`).
+timestamps (they are omitted from inserts and read back through the repository projection).
 """
 
 from __future__ import annotations
@@ -60,7 +60,9 @@ class Repository[M: BaseModel]:
 
     Columns in ``server_generated`` are omitted from inserts so the DB default/trigger
     fills them; ``key_column`` is the lookup column ``get`` filters on (``id`` for the
-    durable objects, the natural key for the accounting tables).
+    durable objects, the natural key for the accounting tables). ``projection_columns``
+    selects a stable model projection when an additive schema must remain compatible with
+    an older strict model; other repositories retain their full-row reads.
     """
 
     def __init__(
@@ -69,6 +71,7 @@ class Repository[M: BaseModel]:
         table: str,
         *,
         json_columns: frozenset[str] = frozenset(),
+        projection_columns: tuple[str, ...] | None = None,
         server_generated: tuple[str, ...] = _SERVER_GENERATED,
         key_column: str = "id",
     ) -> None:
@@ -76,6 +79,11 @@ class Repository[M: BaseModel]:
         self._table = table
         self._json_columns = json_columns
         self._key_column = key_column
+        self._projection = (
+            sql.SQL("*")
+            if projection_columns is None
+            else sql.SQL(", ").join(sql.Identifier(name) for name in projection_columns)
+        )
         self._insert_columns = tuple(
             name for name in model.model_fields if name not in server_generated
         )
@@ -91,10 +99,13 @@ class Repository[M: BaseModel]:
 
     async def insert(self, conn: AsyncConnection, obj: M) -> M:
         """Insert ``obj`` and return it as persisted (DB-authoritative timestamps)."""
-        query = sql.SQL("INSERT INTO {table} ({cols}) VALUES ({vals}) RETURNING *").format(
+        query = sql.SQL(
+            "INSERT INTO {table} ({cols}) VALUES ({vals}) RETURNING {projection}"
+        ).format(
             table=sql.Identifier(self._table),
             cols=sql.SQL(", ").join(sql.Identifier(c) for c in self._insert_columns),
             vals=sql.SQL(", ").join(sql.Placeholder(c) for c in self._insert_columns),
+            projection=self._projection,
         )
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(query, self._insert_params(obj))
@@ -105,8 +116,10 @@ class Repository[M: BaseModel]:
 
     async def get(self, conn: AsyncConnection, key: UUID | str) -> M | None:
         """Return the row whose ``key_column`` equals ``key``, or ``None`` if absent."""
-        query = sql.SQL("SELECT * FROM {table} WHERE {col} = %s").format(
-            table=sql.Identifier(self._table), col=sql.Identifier(self._key_column)
+        query = sql.SQL("SELECT {projection} FROM {table} WHERE {col} = %s").format(
+            projection=self._projection,
+            table=sql.Identifier(self._table),
+            col=sql.Identifier(self._key_column),
         )
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(query, (key,))
@@ -115,8 +128,10 @@ class Repository[M: BaseModel]:
 
     async def list_all(self, conn: AsyncConnection) -> list[M]:
         """Return every row, ordered by ``key_column`` for a stable collection envelope."""
-        query = sql.SQL("SELECT * FROM {table} ORDER BY {col}").format(
-            table=sql.Identifier(self._table), col=sql.Identifier(self._key_column)
+        query = sql.SQL("SELECT {projection} FROM {table} ORDER BY {col}").format(
+            projection=self._projection,
+            table=sql.Identifier(self._table),
+            col=sql.Identifier(self._key_column),
         )
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(query)
@@ -388,7 +403,10 @@ ARTIFACTS = Repository(Artifact, "artifacts")
 # service, not the `can_transition`-guarded `update_state`, so it is not a StatefulRepository.
 # `provenance` is jsonb; `capabilities` is a Postgres text[] psycopg adapts from a list directly.
 IMAGE_CATALOG = Repository(
-    ImageCatalogEntry, "image_catalog", json_columns=frozenset({"provenance"})
+    ImageCatalogEntry,
+    "image_catalog",
+    json_columns=frozenset({"provenance"}),
+    projection_columns=tuple(ImageCatalogEntry.model_fields),
 )
 
 # Accounting tables. COST_CLASS_COEFFICIENTS/QUOTAS upsert every non-key column;
