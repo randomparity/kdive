@@ -324,6 +324,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document append-only amendments
 - Design forced teardown path
 - Record forced teardown threat model
+- Design artifact ownership uniqueness
+- Harden artifact conflict design
+- Define artifact conflict recovery
 
 ### Fixed
 
@@ -572,6 +575,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve public retry metadata
 - Add forced daemon teardown
 - Revalidate forced teardown targets
+- Enforce unique artifact ownership claims
+- Adopt concurrent artifact claims
+- Satisfy decision record guard
 
 ### Build
 
