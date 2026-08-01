@@ -51,10 +51,13 @@ Tests must cover both faces:
 
 ## Failure contract and observability
 
-The conflict is a normal typed tool failure, not a database uniqueness exception. It carries no
-secret or cross-project metadata. The lookup is owner-scoped and parameterized. Quota denial stays
-`QUOTA_EXCEEDED`; guest-contract and source-object failures retain their current categories and
-precedence because validation still precedes reservation.
+The conflict is a normal typed tool failure, not a database uniqueness exception. A dedicated
+service error subtype retains `ErrorCategory.CONFLICT` while letting the MCP handler attach
+delete-then-upload actions only to the registered-name case. A concurrent publication-supersession
+`CONFLICT` must not suggest deleting the winner. The error carries no secret or cross-project
+metadata. The lookup is owner-scoped and parameterized. Quota denial stays `QUOTA_EXCEEDED`;
+guest-contract and source-object failures retain their current categories and precedence because
+validation still precedes reservation.
 
 No new audit event is introduced. Existing request/tool failure observability reports the typed
 error, while the database and object store remain unchanged by the rejected publish attempt.
@@ -83,7 +86,8 @@ error, while the database and object store remain unchanged by the rejected publ
 - Same-identity concurrent first uploads leave exactly one registered row whose object matches its
   digest. A losing attempt can only write to its isolated attempt-specific key, cannot register it,
   and remains covered by existing leaked-object recovery.
-- The MCP wrapper docstring exposes the duplicate-name outcome and recovery sequence.
+- The MCP wrapper docstring exposes the duplicate-name outcome and recovery sequence; other
+  `CONFLICT` causes do not advertise deletion.
 - Focused service and MCP tests, then `just ci`, pass from the feature worktree.
 
 ## Delivery context

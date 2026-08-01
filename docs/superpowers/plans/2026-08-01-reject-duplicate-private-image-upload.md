@@ -29,7 +29,9 @@
 
 **Interfaces:**
 - Consumes: `_reserve_under_quota(conn, *, request, project, principal, new_bytes)` and the existing `image_catalog_one_private` identity `(owner, provider, name)`.
-- Produces: `_registered_private_name_conflict(conn, request) -> CategorizedError | None`, called while the PROJECT advisory lock is held.
+- Produces: `RegisteredPrivateNameConflict`, a service-specific `CategorizedError` subtype whose
+  category is always `CONFLICT`, and `_registered_private_name_conflict(conn, request) ->
+  RegisteredPrivateNameConflict | None`, called while the PROJECT advisory lock is held.
 
 **Acceptance criteria:** A sequential duplicate is rejected with `CONFLICT` before a published-prefix PUT or catalog mutation; the original row fields and object bytes remain unchanged and the object SHA-256 matches the row digest. A same name in another project or a public row does not conflict. Existing concurrent same-identity coverage remains green and proves the registered row/object invariant.
 
@@ -65,12 +67,24 @@ Expected: FAIL because the second attempt reaches publication/registration inste
 
 - [ ] **Step 3: Add the registered-identity decision**
 
-In `src/kdive/services/images/upload.py`, add a narrow query helper using `dict_row` or the cursor's default row shape:
+In `src/kdive/services/images/upload.py`, add the transport-neutral subtype and a narrow query
+helper using the cursor's default row shape:
 
 ```python
+class RegisteredPrivateNameConflict(CategorizedError):
+    """A private upload collided with its project's registered name."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"private image {name!r} is already registered in this project; "
+            "delete it with images.delete, wait for deletion, then retry images.upload",
+            category=ErrorCategory.CONFLICT,
+        )
+
+
 async def _registered_private_name_conflict(
     conn: AsyncConnection, request: PublishRequest
-) -> CategorizedError | None:
+) -> RegisteredPrivateNameConflict | None:
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT 1 FROM image_catalog "
@@ -86,11 +100,7 @@ async def _registered_private_name_conflict(
         )
         if await cur.fetchone() is None:
             return None
-    return CategorizedError(
-        f"private image {request.name!r} is already registered in this project; "
-        "delete it with images.delete, wait for deletion, then retry images.upload",
-        category=ErrorCategory.CONFLICT,
-    )
+    return RegisteredPrivateNameConflict(request.name)
 ```
 
 Call it as the first operation inside `_reserve_under_quota`'s existing PROJECT-locked transaction. Raise the returned conflict before `_project_usage`, `_quota_denial`, or `reserve_publish`. Update the module and function docstrings to distinguish registered-name rejection from pending-row adoption and cite ADR-0526.
@@ -139,20 +149,21 @@ git commit -m "fix(images): reject registered private image names"
 - Modify: `src/kdive/mcp/tools/ops/images/upload.py`
 
 **Interfaces:**
-- Consumes: `CategorizedError(ErrorCategory.CONFLICT)` from `register_private_upload` and `ToolResponse.failure_from_error`.
+- Consumes: `RegisteredPrivateNameConflict` from `register_private_upload`, other
+  `CategorizedError` failures, and `ToolResponse.failure_from_error`.
 - Produces: a failure envelope with `suggested_next_actions == ["images.delete", "images.upload"]` for upload conflicts, plus wrapper docstring text naming the outcome and ordered recovery.
 
-**Acceptance criteria:** The service conflict maps to a `CONFLICT` envelope, the next actions are literal tool names in recovery order, and the FastMCP-visible wrapper docstring tells an agent to delete, wait for deletion, then upload again. Other error categories retain their existing empty action list.
+**Acceptance criteria:** The registered-name conflict maps to a `CONFLICT` envelope, the next
+actions are literal tool names in recovery order, and the FastMCP-visible wrapper docstring tells
+an agent to delete, wait for deletion, then upload again. Publication-supersession conflicts and
+other error categories retain their existing empty action list.
 
 - [ ] **Step 1: Write the MCP mapping test**
 
 In `tests/mcp/ops/test_images_tools.py`, monkeypatch `image_upload.register_private_upload` to raise:
 
 ```python
-raise CategorizedError(
-    "private image 'custom' is already registered in this project",
-    category=ErrorCategory.CONFLICT,
-)
+raise RegisteredPrivateNameConflict("custom")
 ```
 
 Call `image_upload.upload` as a project operator and assert:
@@ -162,7 +173,11 @@ assert response.error_category == ErrorCategory.CONFLICT.value
 assert response.suggested_next_actions == ["images.delete", "images.upload"]
 ```
 
-Also inspect the registered `images.upload` tool description (using the existing FastMCP registrar pattern) and assert it contains `CONFLICT`, `images.delete`, the wait requirement, and `images.upload`.
+Also inspect the registered `images.upload` tool description (using the existing FastMCP registrar
+pattern) and assert it contains `CONFLICT`, `images.delete`, the wait requirement, and
+`images.upload`. Add a control that monkeypatches the service to raise a plain
+`CategorizedError(..., category=ErrorCategory.CONFLICT)` representing publication supersession and
+assert its `suggested_next_actions` is empty.
 
 - [ ] **Step 2: Run the MCP test and verify red**
 
@@ -176,22 +191,24 @@ Expected: FAIL because `_register_upload` currently maps every typed error witho
 
 - [ ] **Step 3: Map only conflicts to the recovery actions**
 
-In `_register_upload`, preserve every existing error mapping while supplying actions only for `CONFLICT`:
+Import `RegisteredPrivateNameConflict`. In `_register_upload`, catch it before the generic
+`CategorizedError` clause and supply recovery actions only for that subtype:
 
 ```python
-actions = (
-    ["images.delete", "images.upload"]
-    if exc.category is ErrorCategory.CONFLICT
-    else None
-)
-return ToolResponse.failure_from_error(
-    request.name,
-    exc,
-    suggested_next_actions=actions,
-)
+except RegisteredPrivateNameConflict as exc:
+    return ToolResponse.failure_from_error(
+        request.name,
+        exc,
+        suggested_next_actions=["images.delete", "images.upload"],
+    )
+except CategorizedError as exc:
+    return ToolResponse.failure_from_error(request.name, exc)
 ```
 
-Import `ErrorCategory`. Update the decorated/wrapper-facing `upload` docstring, not only the inner helper, to state that an already registered private project/name returns `CONFLICT` before a published object write; the caller deletes with `images.delete`, waits for deletion to complete, then retries `images.upload`. Keep the parameter descriptions accurate and avoid adding a new field or tool.
+Update the decorated/wrapper-facing `upload` docstring, not only the inner helper, to state that an
+already registered private project/name returns `CONFLICT` before a published object write; the
+caller deletes with `images.delete`, waits for deletion to complete, then retries `images.upload`.
+Keep the parameter descriptions accurate and avoid adding a new field or tool.
 
 - [ ] **Step 4: Run focused MCP and service tests**
 

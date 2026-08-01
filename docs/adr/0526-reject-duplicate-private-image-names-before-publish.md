@@ -22,8 +22,10 @@ retired without breaking a boot or materialization already in progress.
 `images.upload` rejects a project/provider/name that already has a registered private image. Under
 the existing PROJECT advisory lock, the reservation phase checks for that registered identity
 before quota accounting and before creating or adopting a pending row. It raises the existing
-`CONFLICT` category and names deletion plus a later upload as the recovery path. No catalog row and
-no published object are written by the rejected attempt.
+`CONFLICT` category through a dedicated service error type and names deletion plus a later upload
+as the recovery path. The type lets the MCP handler attach that destructive recovery only to this
+conflict, never to an in-flight attempt superseded by a concurrent winner. No catalog row and no
+published object are written by the rejected attempt.
 
 The check deliberately remains in the reservation transaction, after quarantine validation. The
 PROJECT lock orders it with other private reservations without extending the lock across validation
