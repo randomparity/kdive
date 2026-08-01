@@ -12,8 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any, cast
 
-from kdive.reconciler.cleanup.upload_orphans import UploadOrphanStore
-from kdive.reconciler.loop import ReconcileConfig
+from kdive.reconciler.loop import ReconcileConfig, ReconcileUploadStore
 from kdive.services.images.retention import ImageSweepStore
 
 
@@ -44,6 +43,10 @@ class _NullUploadStore:
     def delete(self, key: str) -> None:
         return None
 
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
+        return True
+
 
 def null_image_store() -> ImageSweepStore:
     """An inert ``ImageSweepStore`` for inventory-pass tests with no s3 images."""
@@ -52,8 +55,9 @@ def null_image_store() -> ImageSweepStore:
 
 def make_reconcile_config(**overrides: Any) -> ReconcileConfig:
     """Build a ``ReconcileConfig`` with inert default stores for store-agnostic tests."""
+    upload_store: ReconcileUploadStore = _NullUploadStore()
     defaults: dict[str, Any] = {
-        "upload_store": cast(UploadOrphanStore, _NullUploadStore()),
+        "upload_store": upload_store,
         "image_store": cast(ImageSweepStore, _NullImageStore()),
     }
     defaults.update(overrides)

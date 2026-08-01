@@ -56,23 +56,38 @@ class _RecordingImageStore:
 
     def __init__(self, objects: dict[str, timedelta]) -> None:
         self._objects = dict(objects)
+        now = datetime.now(UTC)
+        self._mtimes = {key: now - age for key, age in self._objects.items()}
         self.deleted: list[str] = []
 
     def list_image_objects(self) -> list[ImageMtime]:
-        from datetime import UTC, datetime
-
-        now = datetime.now(UTC)
         return [
-            ImageMtime(key=key, last_modified=now - age)
-            for key, age in self._objects.items()
+            ImageMtime(key=key, last_modified=self._mtimes[key])
+            for key in self._objects
             if key not in self.deleted
         ]
 
     def head_present(self, key: str) -> bool:
         return key in self._objects and key not in self.deleted
 
-    def delete(self, key: str) -> None:
+    def head(self, key: str) -> HeadResult | None:
+        if not self.head_present(key):
+            return None
+        return HeadResult(
+            size_bytes=1,
+            checksum_sha256=None,
+            etag="e",
+            last_modified=self._mtimes[key],
+            version_id="test-version",
+        )
+
+    def delete_version(self, key: str, _version_id: str) -> None:
         self.deleted.append(key)
+
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
+        self.deleted.append(key)
+        return True
 
     def put_artifact(self, request: object) -> object:  # pragma: no cover - sweeps never upload
         raise NotImplementedError("recording image store does not upload artifacts")
@@ -114,6 +129,11 @@ class _RecordingUploadStore:
 
     def delete(self, key: str) -> None:
         self.deleted.append(key)
+
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
+        self.deleted.append(key)
+        return True
 
 
 async def _seed_artifact(

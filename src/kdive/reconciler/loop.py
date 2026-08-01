@@ -21,7 +21,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -127,6 +127,7 @@ __all__ = [
     "ALL_REPAIR_KINDS",
     "ReconcileConfig",
     "ReconcileReport",
+    "ReconcileUploadStore",
     "Reconciler",
     "UploadOrphanStore",
     "UploadStore",
@@ -140,6 +141,11 @@ _NULL_RESETTER: TransportResetter = NullResetter()
 # The default dump-volume reaper (ADR-0094): a module-level singleton so it can be a
 # stateless default argument without a per-call construction (ruff B008).
 _NULL_DUMP_VOLUME_REAPER: DumpVolumeReaper = NullDumpVolumeReaper()
+
+
+class ReconcileUploadStore(UploadOrphanStore, gc_repairs.ArtifactObjectDeleter, Protocol):
+    """Object-store surface required by the upload and artifact-retention reconciler lanes."""
+
 
 # The default (no-op) admission metrics (ADR-0190 D): a module-level singleton so it is a
 # stateless default field without a per-call construction (ruff B008).
@@ -237,7 +243,7 @@ class ReconcileConfig:
     ADR-0337) without reordering the defaulted fields.
     """
 
-    upload_store: UploadOrphanStore
+    upload_store: ReconcileUploadStore
     image_store: ImageSweepStore
     resetter: TransportResetter = _NULL_RESETTER
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
@@ -310,7 +316,7 @@ def _report_artifacts_gc_repair(
 ) -> _RepairFn | None:
     return lambda conn: _gc_report_artifacts(
         conn,
-        cast(gc_repairs.ArtifactObjectDeleter, config.upload_store),
+        config.upload_store,
         config.report_artifact_retention,
     )
 
@@ -320,7 +326,7 @@ def _investigation_artifacts_gc_repair(
 ) -> _RepairFn | None:
     return lambda conn: _gc_investigation_artifacts(
         conn,
-        cast(gc_repairs.ArtifactObjectDeleter, config.upload_store),
+        config.upload_store,
         config.investigation_cleanup_grace,
     )
 
@@ -330,7 +336,7 @@ def _expired_build_artifacts_gc_repair(
 ) -> _RepairFn | None:
     return lambda conn: _gc_expired_build_artifacts(
         conn,
-        cast(gc_repairs.ArtifactObjectDeleter, config.upload_store),
+        config.upload_store,
         config.build_artifact_retention,
     )
 

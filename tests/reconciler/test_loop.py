@@ -17,6 +17,7 @@ from kdive.health.heartbeat import Heartbeat
 from kdive.providers.infra.reaping import DumpVolume, InfraReaper, NullReaper
 from kdive.reconciler import loop
 from kdive.reconciler.cleanup.gc import (
+    ArtifactObjectDeleter,
     reap_console_collectors,
     reap_orphaned_dump_volumes,
 )
@@ -45,6 +46,15 @@ from tests.reconciler.conftest import (
 
 def test_null_reaper_is_an_infra_reaper() -> None:
     assert isinstance(NullReaper(), InfraReaper)
+
+
+def test_reconcile_config_upload_store_supports_retired_key_batches() -> None:
+    """Configured reconciliation must expose every artifact-GC store capability."""
+
+    def _needs_retired_key_batches(_store: ArtifactObjectDeleter) -> None:
+        return None
+
+    _needs_retired_key_batches(make_reconcile_config().upload_store)
 
 
 def test_null_reaper_lists_nothing_and_destroy_is_noop() -> None:
@@ -1298,7 +1308,7 @@ def test_all_repair_kinds_matches_a_fully_populated_plan() -> None:
     declared bound must stay in lock-step with the plan or the cardinality guard drifts.
     """
     config = make_reconcile_config(
-        upload_store=cast(loop.UploadOrphanStore, object()),
+        upload_store=cast(loop.ReconcileUploadStore, object()),
         image_store=cast(loop.ImageSweepStore, object()),
         console_registry=cast(loop.CollectorRegistry, object()),
         resource_probe=cast(loop.ResourceProbe, object()),
