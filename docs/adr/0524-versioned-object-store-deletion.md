@@ -51,8 +51,10 @@ Keeping the latest entry until last is failure-atomic for visibility: a partial 
 same current data or delete marker in place instead of exposing older bytes. A later PUT has a new
 VersionId and cannot be targeted by a caller holding an earlier PUT or HEAD result. A write
 concurrent with paginated key-history capture may or may not enter a batch, so only a key proven
-permanently retired may use that operation. Identity-sensitive compensation always deletes the
-VersionId selected by the observation and database fence that licensed it.
+permanently retired may use that operation. Every identity-sensitive caller selects a VersionId
+first, then performs its authoritative database and ETag fence, and deletes only that already
+selected VersionId. It must not issue another HEAD or recapture history between the fence and the
+exact delete.
 
 The three issue paths split their work around the advisory lock. They capture immutable deletion
 targets without a database transaction, re-check their existing database fences and commit their
@@ -61,19 +63,27 @@ released. An ambiguous response is safe to retry because it can affect only the 
 version.
 
 The upload-orphan sweep enumerates `ListObjectVersions`, not only the current logical objects. It
-groups work by exact key and spends the existing 200-target per-root budget on captured versions.
-When a history exceeds the remaining budget, the sweep deletes only captured nonlatest entries and
+groups work by exact key and spends the existing 200-target per-root budget on captured versions,
+with at most 20 targets charged to one key in one pass. Reaching that per-key cap skips the rest of
+the key for the current pass by resuming `ListObjectVersions` with that key as `KeyMarker` and no
+`VersionIdMarker`; S3-compatible listing then begins after the key's final version. The sweep
+continues with later keys and preserves their share of the root allowance even when the capped key
+cannot make progress. It reports each attempted failure, while a later pass restarts from the prefix
+and retries the skipped history.
+
+When a history exceeds either allowance, the sweep deletes only captured nonlatest entries and
 leaves the latest entry for a later pass. Peak memory remains one 1,000-entry store page and one
-bounded batch, preserving ADR-0498; no operation buffers a complete unbounded history. The sweep
-therefore rediscovers failed deletes, noncurrent versions, legacy `null` versions, and delete markers
-under the upload roots. The object store is the durable worklist; no PostgreSQL deletion queue is
-added. Database artifact/manifest/write-lease fences remain key-scoped, so a live key conservatively
-protects all of its versions until the key is no longer reachable.
+20-target exact-key batch, preserving ADR-0498; no operation buffers a complete unbounded history.
+The sweep therefore rediscovers failed deletes, noncurrent versions, legacy `null` versions, and
+delete markers under the upload roots. The object store is the durable worklist; no PostgreSQL
+deletion queue is added. Database artifact/manifest/write-lease fences remain key-scoped, so a live
+key conservatively protects all of its versions until the key is no longer reachable.
 
 There is no key-only convenience operation. Existing consumers are assigned explicitly:
 
-- `discard_unregistered_objects`, chunk-upload compensation, and leaked-image repair delete the
-  VersionId returned by the PUT or final HEAD whose ETag and row fence they already check;
+- `discard_unregistered_objects`, chunk-upload compensation, and leaked-image repair observe the
+  PUT or HEAD VersionId before their final ETag/database fence, then delete only that selected
+  VersionId after the fence without re-observing the key;
 - the three issue paths, row-driven report/build/investigation garbage collection, private-image
   retirement, System console/SysRq/sidecar teardown, and remote-console part retirement use bounded
   batches only after their existing lifecycle decision proves the logical key retired.
@@ -108,6 +118,9 @@ failure.
 - Version-history cleanup retains at most one store page plus the caller's explicit version budget
   and may take several reconciler passes for a hot key. A fault or exhausted budget leaves the
   latest entry untouched.
+- The orphan sweep charges at most 20 targets to one key per pass and advances with a key-only
+  listing marker, so a denied or version-heavy key cannot consume all 200 targets or starve later
+  keys in the root.
 - A live database reference protects all versions of its key. This may temporarily retain obsolete
   versions, but avoids guessing which version a legacy key-only row intended.
 - The standard S3 API validates bucket status but not provider-specific prefix exclusions. External
