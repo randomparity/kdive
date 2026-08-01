@@ -19,6 +19,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied, require_role
 from kdive.services.images.upload import (
     PrivateUploadRequest,
+    RegisteredPrivateNameConflict,
     UploadObjectStore,
     register_private_upload,
 )
@@ -119,6 +120,12 @@ async def _register_upload(
                     expires_at=expires_at,
                     required=DEFAULT_REQUIRED_CONTRACT,
                 ),
+            )
+        except RegisteredPrivateNameConflict as exc:
+            return ToolResponse.failure_from_error(
+                request.name,
+                exc,
+                suggested_next_actions=["images.delete", "images.upload"],
             )
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(request.name, exc)

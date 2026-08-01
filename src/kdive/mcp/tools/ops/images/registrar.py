@@ -95,7 +95,12 @@ def _register_images_upload(
             ),
         ] = None,
     ) -> ToolResponse:
-        """Create an image upload request."""
+        """Register a quarantined upload as a project-private image.
+
+        An already registered private image with the same project and name returns ``CONFLICT``
+        before a published object write. Delete it with ``images.delete``, wait for deletion to
+        complete, then retry ``images.upload``.
+        """
         return await upload(
             pool,
             current_context(),
