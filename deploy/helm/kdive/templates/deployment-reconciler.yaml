@@ -23,6 +23,7 @@ spec:
         runAsUser: 10001
         # fsGroup so the non-root UID can read a mounted file-ref Secret via its group bit.
         fsGroup: 10001
+      {{- include "kdive.minioVersioningBarrier" . | nindent 6 }}
       containers:
         - name: reconciler
           image: {{ include "kdive.image" . }}

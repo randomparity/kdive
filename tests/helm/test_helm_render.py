@@ -82,6 +82,44 @@ _VERSIONING_REPLIES = (
         '"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":null}}',
         1,
     ),
+    (
+        "compatible-decoy-before-suspended-real-state",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"decoy":{"versioning":{"status":"Enabled","MFADelete":""}},'
+        '"versioning":{"status":"Suspended","MFADelete":""}}',
+        1,
+    ),
+    (
+        "duplicate-versioning-keys",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""},'
+        '"versioning":{"status":"Suspended","MFADelete":""}}',
+        1,
+    ),
+    (
+        "trailing-junk",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}not-json',
+        1,
+    ),
+    (
+        "error-status-decoy",
+        '{"Op":"info","status":"error","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}',
+        1,
+    ),
+    (
+        "reordered-fields",
+        '{"status":"success","Op":"info","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}',
+        1,
+    ),
+    (
+        "extra-top-level-field",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""},"extra":true}',
+        1,
+    ),
 )
 
 # Per-process aux health/metrics ports (ADR-0090 §5), matching the registry defaults.
@@ -113,6 +151,7 @@ def _minio_init_script(*set_args: str) -> str:
 
 
 def _fake_mc(tmp_path: Path) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     calls = tmp_path / "mc-calls"
     executable = tmp_path / "mc"
     executable.write_text(
@@ -135,7 +174,7 @@ def _run_minio_init(
 ) -> tuple[int, list[str]]:
     calls = _fake_mc(tmp_path)
     result = subprocess.run(
-        ["/bin/sh", "-c", _minio_init_script()],
+        ["/bin/bash", "-c", _minio_init_script()],
         capture_output=True,
         text=True,
         env={
@@ -361,7 +400,12 @@ def _workloads(*set_args: str) -> dict[str, dict[str, Any]]:
     Covers both workload kinds: server/reconciler are Deployments, the worker is a
     StatefulSet (ADR-0514). Extra ``--set`` args layer onto the external-backend base.
     """
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+    return _rendered_app_workloads("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+
+
+def _rendered_app_workloads(*set_args: str) -> dict[str, dict[str, Any]]:
+    """Render and index each app workload without assuming a backend mode."""
+    res = _template(*set_args)
     assert res.returncode == 0, res.stderr
     out: dict[str, dict[str, Any]] = {}
     for doc in yaml.safe_load_all(res.stdout):
@@ -374,8 +418,94 @@ def _workloads(*set_args: str) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _bundled_workloads(*set_args: str) -> dict[str, dict[str, Any]]:
+    return _rendered_app_workloads("bundledBackends=true", "demoAcknowledged=true", *set_args)
+
+
+def _minio_barrier(workload: dict[str, Any]) -> dict[str, Any]:
+    init_containers = workload["spec"]["template"]["spec"].get("initContainers", [])
+    matches = [item for item in init_containers if item["name"] == "verify-minio-versioning"]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _run_minio_barrier(
+    tmp_path: Path, workload: dict[str, Any], reply: str
+) -> tuple[int, list[str]]:
+    calls = _fake_mc(tmp_path)
+    barrier = _minio_barrier(workload)
+    assert barrier["command"][:2] == ["/bin/sh", "-c"]
+    result = subprocess.run(
+        ["/bin/bash", "-c", barrier["command"][2]],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "MC_CALLS": str(calls),
+            "MC_VERSION_INFO": reply,
+            "MC_INFO_FAIL": "0",
+            "MC_USER": "minioadmin",
+            "MC_PASS": "minioadmin",
+        },
+    )
+    return result.returncode, calls.read_text().splitlines()
+
+
 def _container(workload: dict[str, Any]) -> dict[str, Any]:
     return workload["spec"]["template"]["spec"]["containers"][0]
+
+
+def test_bundled_app_workloads_share_minio_versioning_startup_barrier() -> None:
+    barriers = {proc: _minio_barrier(workload) for proc, workload in _bundled_workloads().items()}
+    assert set(barriers) == set(_WORKLOAD_KINDS)
+    assert len({barrier["command"][2] for barrier in barriers.values()}) == 1
+    for proc, barrier in barriers.items():
+        assert barrier["image"].startswith("minio/mc:"), proc
+        env = {entry["name"]: entry["value"] for entry in barrier["env"]}
+        assert env["MC_CONFIG_DIR"] == "/tmp/.mc", proc
+        assert set(env) == {"MC_CONFIG_DIR", "MC_USER", "MC_PASS"}, proc
+
+
+def test_external_app_workloads_omit_minio_versioning_startup_barrier() -> None:
+    for proc, workload in _workloads().items():
+        names = {
+            item["name"] for item in workload["spec"]["template"]["spec"].get("initContainers", [])
+        }
+        assert "verify-minio-versioning" not in names, proc
+
+
+@pytest.mark.parametrize("proc", list(_WORKLOAD_KINDS))
+def test_bundled_minio_barrier_allows_only_compatible_policy(tmp_path: Path, proc: str) -> None:
+    workload = _bundled_workloads()[proc]
+    compatible = (
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}'
+    )
+    returncode, calls = _run_minio_barrier(tmp_path / "ok", workload, compatible)
+    assert returncode == 0
+    assert calls == [
+        "alias set local http://kdive-kdive-minio:9000 minioadmin minioadmin",
+        "version info --json local/kdive-artifacts",
+    ]
+
+    incompatible = (
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Suspended","MFADelete":""}}'
+    )
+    returncode, calls = _run_minio_barrier(tmp_path / "bad", workload, incompatible)
+    assert returncode != 0
+    assert calls[-1] == "version info --json local/kdive-artifacts"
+
+
+def test_bundled_minio_barrier_uses_configured_bucket(tmp_path: Path) -> None:
+    workload = _bundled_workloads("config.KDIVE_S3_BUCKET=custom-artifacts")["server"]
+    reply = (
+        '{"Op":"info","status":"success","url":"local/custom-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":[]}}'
+    )
+    returncode, calls = _run_minio_barrier(tmp_path, workload, reply)
+    assert returncode == 0
+    assert calls[-1] == "version info --json local/custom-artifacts"
 
 
 @pytest.mark.parametrize("proc", list(_AUX_PORTS))

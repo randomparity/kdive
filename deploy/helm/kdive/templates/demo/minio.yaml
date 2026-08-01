@@ -90,15 +90,7 @@ spec:
               mc version enable "$bucket"
               version_info=$(mc version info --json "$bucket")
               # Pinned mc omits ExcludedPrefixes when empty; compatible variants may emit [].
-              case "$version_info" in
-                *'"versioning":{"status":"Enabled","MFADelete":""}'* | \
-                *'"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":[]}'*) ;;
-                *)
-                  echo "MinIO bucket versioning is incompatible." >&2
-                  echo "Require Enabled, MFA Delete off, and no excluded prefixes." >&2
-                  exit 1
-                  ;;
-              esac
+              {{- include "kdive.minioVersioningPolicyCheck" . | nindent 14 }}
           env:
             - name: MC_USER
               value: {{ .Values.demoCredentials.minio.rootUser | quote }}

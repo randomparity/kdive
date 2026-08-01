@@ -112,15 +112,16 @@ services:
         mc version enable "$$bucket"
         version_info=$$(mc version info --json "$$bucket")
         # Pinned mc omits ExcludedPrefixes when empty; compatible variants may emit [].
-        case "$$version_info" in
-          *'"versioning":{"status":"Enabled","MFADelete":""}'* | \
-          *'"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":[]}'*) ;;
-          *)
-            echo "MinIO bucket versioning is incompatible." >&2
-            echo "Require Enabled, MFA Delete off, and no excluded prefixes." >&2
-            exit 1
-            ;;
-        esac
+        # Its /bin/sh is Bash 5.1, whose [[ =~ ]] can anchor the complete compact reply.
+        versioning_pattern='^\{"Op":"info","status":"success",'
+        versioning_pattern+='"url":"[^"[:space:]]+",'
+        versioning_pattern+='"versioning":\{"status":"Enabled","MFADelete":""'
+        versioning_pattern+='(,"ExcludedPrefixes":\[\])?\}\}$$'
+        if [[ ! "$$version_info" =~ $$versioning_pattern ]]; then
+          echo "MinIO bucket versioning is incompatible." >&2
+          echo "Require Enabled, MFA Delete off, and no excluded prefixes." >&2
+          exit 1
+        fi
 
   # Multi-arch mock OIDC issuer. The upstream ghcr.io/navikt/mock-oauth2-server is amd64/arm64
   # only, breaking `docker compose up` on a POWER host, so kdive mirrors it (deploy/mock-oidc,

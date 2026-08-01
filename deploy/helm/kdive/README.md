@@ -163,8 +163,11 @@ image the demo cannot pull. The demo migrate Job runs `post-install` behind a DB
 init container.
 
 The bundled `minio-init` Job creates the configured bucket, enables bucket-wide versioning, then
-fails closed unless MinIO reports `Enabled`, MFA Delete off, and no prefix/folder exclusions. App
-workloads cannot become ready against an incompatible bundled bucket.
+fails closed unless MinIO reports `Enabled`, MFA Delete off, and no prefix/folder exclusions. The
+server, worker, and reconciler Pods each repeat that policy check in an `mc` init container. Until
+the bucket exists and passes, Kubernetes may restart the init container, but it cannot start the
+app container. External-backend workloads omit this MinIO-specific barrier and use the runtime S3
+validation described above.
 
 ### Single object store (remote-libvirt & external uploads)
 

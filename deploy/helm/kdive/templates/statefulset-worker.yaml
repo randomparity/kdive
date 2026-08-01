@@ -36,6 +36,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 10001
         fsGroup: 10001
+      {{- include "kdive.minioVersioningBarrier" . | nindent 6 }}
       containers:
         - name: worker
           image: {{ include "kdive.image" . }}

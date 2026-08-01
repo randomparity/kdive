@@ -108,6 +108,44 @@ _VERSIONING_REPLIES = (
         '"versioning":{"status":"Enabled","MFADelete":"","ExcludedPrefixes":null}}',
         1,
     ),
+    (
+        "compatible-decoy-before-suspended-real-state",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"decoy":{"versioning":{"status":"Enabled","MFADelete":""}},'
+        '"versioning":{"status":"Suspended","MFADelete":""}}',
+        1,
+    ),
+    (
+        "duplicate-versioning-keys",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""},'
+        '"versioning":{"status":"Suspended","MFADelete":""}}',
+        1,
+    ),
+    (
+        "trailing-junk",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}not-json',
+        1,
+    ),
+    (
+        "error-status-decoy",
+        '{"Op":"info","status":"error","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}',
+        1,
+    ),
+    (
+        "reordered-fields",
+        '{"status":"success","Op":"info","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""}}',
+        1,
+    ),
+    (
+        "extra-top-level-field",
+        '{"Op":"info","status":"success","url":"local/kdive-artifacts",'
+        '"versioning":{"status":"Enabled","MFADelete":""},"extra":true}',
+        1,
+    ),
 )
 
 
@@ -162,7 +200,7 @@ def _run_minio_init(
 ) -> tuple[int, list[str]]:
     calls = _fake_mc(tmp_path)
     result = subprocess.run(
-        ["/bin/sh", "-c", _minio_init_script()],
+        ["/bin/bash", "-c", _minio_init_script()],
         capture_output=True,
         text=True,
         env={
