@@ -321,6 +321,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mark MCP task complete
 - Regenerate upload contract references
 - Complete duplicate upload plan
+- Document append-only amendments
 
 ### Fixed
 
