@@ -18,6 +18,8 @@ from kdive.mcp.assembly.app import build_app
 from kdive.mcp.dev_harness import AUDIENCE, ISSUER, make_keypair
 from kdive.mcp.tools import _docmeta
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.assembly import ObjectStoreAssembly
+from kdive.store.objectstore import ObjectStore
 
 
 @dataclass(frozen=True)
@@ -42,7 +44,13 @@ def _build_tools() -> list[FunctionTool]:
     kp = make_keypair()
     verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
+    object_stores = ObjectStoreAssembly(store=cast(ObjectStore, object()))
+    app = build_app(
+        pool,
+        verifier=verifier,
+        object_store_assembly=object_stores,
+        secret_registry=SecretRegistry(),
+    )
     return cast(list[FunctionTool], asyncio.run(app.list_tools()))
 
 
