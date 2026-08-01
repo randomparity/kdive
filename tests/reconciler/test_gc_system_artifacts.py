@@ -22,6 +22,16 @@ class _TwoPassStore:
         return len(self.calls) > 1
 
 
+class _IncompleteStore:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
+        self.calls.append(key)
+        return False
+
+
 async def _insert_system_artifact(
     conn, system_id: UUID, key: str, retention_class: str = "console"
 ) -> UUID:
@@ -70,5 +80,32 @@ def test_later_reconcile_pass_finishes_incomplete_system_artifact_retirement(
                 assert await _artifact_exists(check, evidence_id)
 
         assert store.calls == [key, key]
+
+    asyncio.run(go())
+
+
+def test_system_artifact_repair_is_bounded_and_wraps_to_retry_survivors(
+    migrated_url: str,
+) -> None:
+    async def go() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed, system_state=SystemState.TORN_DOWN)
+            keys = [f"local/systems/{system_id}/console-part-{index}-0" for index in range(12)]
+            for key in keys:
+                await _insert_system_artifact(seed, system_id, key)
+        store = _IncompleteStore()
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, lambda conn: gc_system_artifacts(conn, store)) == 0
+            assert len(store.calls) == 10
+            assert await run_repair(pool, lambda conn: gc_system_artifacts(conn, store)) == 0
+            assert len(store.calls) == 20
+            assert await run_repair(pool, lambda conn: gc_system_artifacts(conn, store)) == 0
+            assert len(store.calls) == 30
+            assert await run_repair(pool, lambda conn: gc_system_artifacts(conn, store)) == 0
+            assert len(store.calls) == 40
+
+        assert set(store.calls[:20]) == set(keys)
+        assert set(store.calls[20:]) <= set(keys)
 
     asyncio.run(go())

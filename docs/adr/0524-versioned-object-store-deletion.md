@@ -117,8 +117,9 @@ in version inventory for a later leader pass. The remote collector's unused key-
 removed instead of retaining a cleanup path no caller drives.
 
 Broad System roots also contain deliberately ineligible row-backed history, so deletion-target
-budgets alone cannot bound listing work. Migration 0091 adds `system_object_sweep_cursors`, exactly
-two rows keyed by the local and remote lane, each holding a nullable `after_key`. A lane reads at
+budgets alone cannot bound listing work. Migration 0091 adds `system_object_sweep_cursors`, with
+rows for the local, remote, and row-backed lanes, each holding a nullable `after_key`. A rowless
+lane reads at
 most one 1,000-entry `ListObjectVersions` page per pass. When a page or deletion budget stops work,
 it persists the last fully considered key and the next pass supplies that value as `KeyMarker`
 without `VersionIdMarker`, beginning after every version of that key. At end-of-root it resets the
@@ -129,6 +130,11 @@ observed `after_key`. Concurrent reconcile calls may repeat exact idempotent del
 call cannot move a lane backward over a newer cursor. Listing or unisolated database failure leaves
 the cursor unchanged. The cursor records only scan position; object versions remain the durable
 deletion worklist, and no deletion target or VersionId is persisted in PostgreSQL.
+
+The row-backed lane processes at most ten retained console-part or SysRq rows per pass, with each
+row still capped at 20 version targets. It orders row UUIDs cyclically after its cursor, advances
+past attempted failures, and wraps within the next bounded query so every survivor is retried
+without letting an early failed row starve its siblings.
 
 The raw client must never issue key-only `DeleteObject` in KDIVE production code.
 
@@ -179,7 +185,7 @@ failure.
   `GetBucketVersioning`, `ListBucketVersions`, and `DeleteObjectVersion`.
 - The first adoption needs downtime and cannot be rolled back to the prior image while accepting
   work. Subsequent ADR-0524-aware releases retain the normal rolling contract.
-- One two-row scan-cursor migration is introduced. No write-path VersionId column, deletion-target
+- One three-row scan-cursor migration is introduced. No write-path VersionId column, deletion-target
   queue, compatibility shim, or new dependency is introduced.
 
 ## Considered & rejected

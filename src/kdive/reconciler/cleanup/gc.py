@@ -121,6 +121,8 @@ _SYSTEM_TEARDOWN_ARTIFACT_PATTERNS: tuple[str, ...] = (
     "%console-part-%",
     "%sysrq-diagnostic-%",
 )
+_SYSTEM_ARTIFACT_KEYS_PER_PASS = 10
+_SYSTEM_ARTIFACT_CURSOR_LANE = "row-backed"
 
 
 class ArtifactObjectDeleter(Protocol):
@@ -190,12 +192,22 @@ async def gc_system_artifacts(conn: AsyncConnection, store: ArtifactObjectDelete
     history or store fault retains its row, and this recurring repair retries one bounded batch per
     row on every pass. The row is removed only after the store reports the retired key complete.
     """
+    async with conn.transaction():
+        observed = await _read_system_artifact_cursor(conn)
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT a.id, a.object_key FROM artifacts a JOIN systems s ON s.id = a.owner_id "
             "WHERE a.owner_kind = 'systems' AND s.state = ANY(%s) "
-            "AND a.object_key LIKE ANY(%s)",
-            (list(gone_system_state_values()), list(_SYSTEM_TEARDOWN_ARTIFACT_PATTERNS)),
+            "AND a.object_key LIKE ANY(%s) "
+            "ORDER BY CASE WHEN %s::uuid IS NOT NULL AND a.id <= %s::uuid THEN 1 ELSE 0 END, "
+            "a.id LIMIT %s",
+            (
+                list(gone_system_state_values()),
+                list(_SYSTEM_TEARDOWN_ARTIFACT_PATTERNS),
+                observed,
+                observed,
+                _SYSTEM_ARTIFACT_KEYS_PER_PASS,
+            ),
         )
         candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
     deleted = 0
@@ -221,7 +233,26 @@ async def gc_system_artifacts(conn: AsyncConnection, store: ArtifactObjectDelete
         deleted += 1
     if deleted:
         _log.info("reconciler: GC'd %d gone-System artifact(s)", deleted)
+    next_cursor = str(candidates[-1][0]) if candidates else None
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE system_object_sweep_cursors SET after_key = %s, updated_at = now() "
+            "WHERE lane = %s AND after_key IS NOT DISTINCT FROM %s",
+            (next_cursor, _SYSTEM_ARTIFACT_CURSOR_LANE, observed),
+        )
     return deleted
+
+
+async def _read_system_artifact_cursor(conn: AsyncConnection) -> str | None:
+    row = await (
+        await conn.execute(
+            "SELECT after_key FROM system_object_sweep_cursors WHERE lane = %s",
+            (_SYSTEM_ARTIFACT_CURSOR_LANE,),
+        )
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("system_object_sweep_cursors has no row-backed lane")
+    return row[0]
 
 
 async def gc_investigation_artifacts(

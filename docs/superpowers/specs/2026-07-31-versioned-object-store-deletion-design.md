@@ -20,7 +20,7 @@ existing delete effective: the shared store/value types, all production key-dele
 upload and System-object orphan repair, runtime validation, Compose and Helm demo provisioning,
 test bucket lifecycle, IAM/operator docs, and focused contract/concurrency tests. Retention
 durations, object-key formats, authorization, provider selection, and MCP schemas do not change. No
-write-path VersionId or deletion target is persisted. One two-row scan-cursor migration is added;
+write-path VersionId or deletion target is persisted. One three-row scan-cursor migration is added;
 no dependency is added.
 
 ## Required behavior
@@ -174,8 +174,10 @@ be `ObjectStore.delete_version`, and it must include `VersionId`.
 
 System teardown gives each console-part and SysRq row one bounded attempt. A recurring
 `system_artifact_rows_gc_count` repair selects rows owned by gone Systems, retries one bounded batch
-per row, and removes a row only after its key history is complete. A store fault or incomplete
-batch therefore cannot strand the retained row after the teardown job succeeds.
+for at most ten rows per pass, and removes a row only after its key history is complete. Its
+`row-backed` cursor orders candidate UUIDs cyclically after the last considered row, so a failed
+early row cannot starve later rows and wraparound retries every survivor. A store fault or
+incomplete batch therefore cannot strand the retained row after the teardown job succeeds.
 
 ### Rowless System-object continuation
 
@@ -221,9 +223,10 @@ or unbounded teardown loop is added.
 
 Migration `0091_system_object_sweep_cursors.sql` creates the table
 `system_object_sweep_cursors` with a text primary-key `lane`, nullable text `after_key`, and
-non-null timestamp `updated_at`. A check restricts the lane to `local` and `remote`, and the
-migration seeds exactly those two rows. This is scan position, not a deletion queue: it stores no
-object identity beyond the last fully considered key and no VersionId.
+non-null timestamp `updated_at`. A check restricts the lane to `local`, `remote`, and `row-backed`,
+and the migration seeds exactly those three rows. This is scan position, not a deletion queue: it
+stores no object identity beyond the last fully considered key or artifact-row UUID and no
+VersionId.
 
 A lane reads its `after_key` without holding a transaction across store I/O, then requests one
 `ListObjectVersions` page with `MaxKeys=1000` and that value as `KeyMarker` when non-NULL. Entries

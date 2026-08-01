@@ -19,17 +19,19 @@ def test_0091_is_discovered_after_0090() -> None:
     ]
 
 
-def test_0091_seeds_exactly_the_two_sweep_lanes(pg_conn: psycopg.Connection) -> None:
+def test_0091_seeds_exactly_the_three_sweep_lanes(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
 
     rows = pg_conn.execute(
         "SELECT lane, after_key FROM system_object_sweep_cursors ORDER BY lane"
     ).fetchall()
 
-    assert rows == [("local", None), ("remote", None)]
+    assert rows == [("local", None), ("remote", None), ("row-backed", None)]
 
 
-def test_0091_lane_check_accepts_only_local_and_remote(pg_conn: psycopg.Connection) -> None:
+def test_0091_lane_check_accepts_only_declared_system_cleanup_lanes(
+    pg_conn: psycopg.Connection,
+) -> None:
     migrate.apply_migrations(pg_conn)
 
     constraint = pg_conn.execute(
@@ -37,7 +39,11 @@ def test_0091_lane_check_accepts_only_local_and_remote(pg_conn: psycopg.Connecti
         "WHERE conrelid = 'system_object_sweep_cursors'::regclass AND contype = 'c'"
     ).fetchone()
     assert constraint is not None
-    assert set(re.findall(r"'([^']+)'", str(constraint[0]))) == {"local", "remote"}
+    assert set(re.findall(r"'([^']+)'", str(constraint[0]))) == {
+        "local",
+        "remote",
+        "row-backed",
+    }
 
     with pytest.raises(psycopg.errors.CheckViolation):
         pg_conn.execute("INSERT INTO system_object_sweep_cursors (lane) VALUES ('third-lane')")
