@@ -90,6 +90,38 @@ def test_canonical_document_is_deterministic_and_head_order_independent() -> Non
     assert artifacts["kernel"] == {"checksum_sha256": "kernel-sha"}
 
 
+def test_publication_uses_fixed_compact_sorted_content_digest(migrated_url: str) -> None:
+    async def exercise() -> None:
+        investigation_id = uuid4()
+        async with await _connect(migrated_url) as conn:
+            await _seed_investigation(conn, investigation_id)
+            first = await publish_or_reuse_build(
+                conn,
+                run=_run(investigation_id, build_profile={"z": [2, 1], "a": "x"}),
+                result=_result(),
+                heads=_heads(),
+                retention=timedelta(days=7),
+            )
+            second = await publish_or_reuse_build(
+                conn,
+                run=_run(investigation_id, build_profile={"a": "x", "z": [2, 1]}),
+                result=_result(),
+                heads=_heads(),
+                retention=timedelta(days=7),
+            )
+
+            assert (
+                first.build.content_digest
+                == (
+                    "94a31a9ad2cfbcc85125943687d3892b28ced464e8cd256ddd028a0cec9e386a"  # pragma: allowlist secret  # noqa: E501
+                )
+            )
+            assert second.created is False
+            assert second.build == first.build
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     "value",
     [
