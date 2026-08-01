@@ -27,8 +27,10 @@ Worker phase-3 registration uses `INSERT ... ON CONFLICT DO NOTHING`. A conflict
 concurrent outcome: the helper loads the winning row and the handler follows the same compensation
 and stat-based etag-repair path used when its phase-3 probe finds an existing claim. If the winner
 disappears between conflict resolution and that load, the helper retries the insert/load pair once;
-a second disappearance raises an explicit consistency error. The probe remains as an optimization
-and for clear control flow, while the index is the authoritative invariant.
+a second disappearance raises `ArtifactClaimConflict`. The handler conditionally discards its
+post-PUT object through the existing row-and-etag fence before the worker retries the job. The probe
+remains as an optimization and for clear control flow, while the index is the authoritative
+invariant.
 
 ## Consequences
 
@@ -37,7 +39,9 @@ and for clear control flow, while the index is the authoritative invariant.
 - A losing worker insert does not leak a raw integrity error or overwrite the winning row's etag.
 - Deployment stops on historical duplicates instead of performing an implicit destructive repair.
 - Index creation takes a write-blocking table lock; deployments schedule 0094 as a maintenance
-  operation under the existing atomic migration contract.
+  operation under the existing atomic migration contract. The operator contract requires full
+  KDIVE downtime, verification that old application sessions have drained, migration, and only then
+  startup of the new image.
 - Object keys may still be reused by different owners; cross-owner key uniqueness is not claimed.
 
 ## Considered & rejected

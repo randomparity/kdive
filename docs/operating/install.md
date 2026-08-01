@@ -30,6 +30,26 @@ Do not run an old and new image together during this adoption. Suspending bucket
 live rollback to an image from before ADR-0524 are unsupported; recover forward with a
 version-aware image. A diagnostic run of an old image must remain quiesced.
 
+### Migration 0094: full-downtime artifact index build
+
+Migration 0094 builds a unique index over the artifact catalog inside KDIVE's atomic migration
+transaction. The index build takes a write-blocking table lock, so a deployment that includes 0094
+is a full-downtime maintenance operation, not a rolling upgrade:
+
+1. Stop every old KDIVE server, worker, and reconciler instance. Disable restart controllers so an
+   old process cannot reconnect during the migration.
+2. On the target database, verify `pg_stat_activity` has no sessions from the KDIVE runtime role.
+   Do not start migration while any old application session remains.
+3. Run `python -m kdive migrate` once with the new image. If duplicate ownership triples make the
+   unique-index build fail, inspect and repair those durable claims before retrying; the migration
+   never chooses a winner or deletes data.
+4. Start only the new server, worker, and reconciler image, then verify readiness.
+
+For Kubernetes, scaling the three KDIVE Deployments to zero and waiting for their pods to terminate
+must precede the hooked upgrade that runs migration 0094. For systemd or Compose, stop all three app
+services before the migrate one-shot. A normal rolling `helm upgrade` while old pods still write is
+not supported for the release containing 0094.
+
 ## Install paths
 
 ### From source
