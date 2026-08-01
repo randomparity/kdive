@@ -36,9 +36,10 @@ materialization continues to resolve the unchanged registered row.
 The duplicate check and reservation run under the project's existing transaction-scoped advisory
 lock. A sequential duplicate sees the registered row and fails. Two overlapping first uploads may
 both begin validation, but their reservation phases serialize. The second can adopt the first
-pending row before either is registered; ADR-0525's IMAGE_PUBLISH fence revalidates attempt
-ownership before writing, so the superseded attempt fails before its write and the current attempt
-registers. An upload whose reservation begins after that registration observes the registered row
+pending row before either is registered. ADR-0525's IMAGE_PUBLISH fence ensures only the current
+attempt registers. If an earlier attempt already passed revalidation, it may finish writing only to
+its own attempt-specific key before registration fails; existing leaked-object recovery owns that
+rowless object. An upload whose reservation begins after registration observes the registered row
 and fails before writing.
 
 Tests must cover both faces:
@@ -80,7 +81,8 @@ error, while the database and object store remain unchanged by the rejected publ
   mutation and names `images.delete` followed by `images.upload` as recovery.
 - The registered row remains unchanged and its stored object SHA-256 equals the persisted digest.
 - Same-identity concurrent first uploads leave exactly one registered row whose object matches its
-  digest; the losing attempt writes no published object after its reservation is superseded.
+  digest. A losing attempt can only write to its isolated attempt-specific key, cannot register it,
+  and remains covered by existing leaked-object recovery.
 - The MCP wrapper docstring exposes the duplicate-name outcome and recovery sequence.
 - Focused service and MCP tests, then `just ci`, pass from the feature worktree.
 

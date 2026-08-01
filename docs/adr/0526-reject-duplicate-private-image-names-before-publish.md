@@ -27,9 +27,10 @@ no published object are written by the rejected attempt.
 
 The check deliberately remains in the reservation transaction, after quarantine validation. The
 PROJECT lock orders it with other private reservations without extending the lock across validation
-or object-store I/O. Two first uploads that overlap may still share the pending-row adoption path;
-ADR-0525's attempt fence and attempt-specific keys ensure only the current reservation writes and
-registers. A later upload observes the registered winner and is rejected before its publish write.
+or object-store I/O. Two first uploads that overlap may still share the pending-row adoption path.
+ADR-0525's attempt fence ensures only the current reservation registers, while attempt-specific
+keys isolate any write an earlier attempt already started. A later upload observes the registered
+winner and is rejected before its publish write.
 
 Rejection does not supersede an object. The registered row, its object key and digest, and any
 System already booted from that image remain unchanged. A caller that intends different bytes must
@@ -38,8 +39,10 @@ again under the name.
 
 ## Consequences
 
-- Duplicate uploads may still pay quarantine read and guest-validation cost, but never publish a
-  second object or mutate the registered catalog entry.
+- An upload rejected because the registered identity already exists may still pay quarantine read
+  and guest-validation cost, but writes no published object and does not mutate the catalog entry.
+- An overlapping first attempt may have written its isolated attempt-specific key before being
+  superseded. It cannot register that key; ADR-0525's leaked-object recovery remains its owner.
 - The public MCP contract gains a documented `CONFLICT` outcome and recovery sequence.
 - Replacement remains an explicit delete-then-upload lifecycle, so no hidden object swap changes a
   running System or requires a second retirement mechanism.
