@@ -19,7 +19,8 @@ object checksum cannot identify that complete set.
 
 ## Decision
 
-Finalizing an external build creates an immutable investigation-owned build record. Its public
+Finalizing an external build creates an investigation-owned build record with immutable content.
+Its public
 `build_ref` is the SHA-256 of a versioned canonical document containing the validated artifact
 checksums and build metadata. The artifact catalog rows use `owner_kind='investigations'` and the
 Investigation id. A uniqueness constraint on `(investigation_id, build_ref)` makes concurrent or
@@ -28,11 +29,13 @@ replayed finalization converge on one record.
 The record stores one exact validated artifact set. A finalizer first attempts to publish its
 candidate record under the Investigation lock. On uniqueness conflict it reloads the winner and
 verifies that the canonical document matches before using the winner's references for its source
-Run. Only the winner registers investigation-owned artifact rows. A loser retains its uploaded
-objects as uncommitted Run-prefix objects, deletes their exact versions after commit, and leaves a
-failed delete to the existing prefix-orphan sweep. It never registers or deletes the winner's
-objects. The lock spans catalog selection and database registration, so collection cannot race a
-partially published winner.
+Run. If the winner is expired, this fully validated identical upload renews `expires_at` from the
+current Postgres clock and records that renewal in the complete-build audit; ordinary reuse never
+refreshes it. Only the winner registers investigation-owned artifact rows. A loser retains its
+uploaded objects as uncommitted Run-prefix objects, deletes their exact versions after commit, and
+leaves a failed delete to the existing prefix-orphan sweep. It never registers or deletes the
+winner's objects. The lock spans catalog selection, optional renewal, and database registration,
+so collection cannot race a partially published winner.
 
 `runs.complete_build` still completes its source Run and additionally returns the `build_ref`.
 `runs.create` accepts an optional `build_ref`. Under the Investigation lock it resolves only a
@@ -67,6 +70,8 @@ versus reclaim is serialized and the reference remains auditable.
   durable build; losing object versions are best-effort deleted and remain covered by orphan repair.
 - Investigation ownership permits reuse within the advertised absolute deadline; it does not waive
   ADR-0234's never-closed-Investigation storage bound.
+- Re-uploading and completing the identical build after expiry revalidates the bytes and renews the
+  deadline. Looking up or reusing a build does not extend retention.
 - Reuse bypasses build upload and validation because it selects an already validated immutable
   record. Install, boot, and debug behavior remain unchanged.
 - The schema gains an investigation-build catalog and a nullable `runs.build_ref` audit link.
