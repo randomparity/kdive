@@ -13,6 +13,10 @@ therefore needs another upload even when it should boot the identical build. Inv
 already governs build-artifact reclamation, but the ownership model and `runs.create` contract do
 not expose that lifetime.
 
+ADR-0316 removed KDIVE's server-side kernel build lane. “Build once” here means the agent builds
+outside KDIVE and uploads the resulting validated artifact set once; this decision does not restore
+`runs.build` or any managed build host.
+
 A reusable build is a set, not one object: installation needs the validated kernel and may also
 need an initrd and debuginfo, while debug consumers need the same build id and provenance. A bare
 object checksum cannot identify that complete set.

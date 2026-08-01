@@ -7,15 +7,15 @@
 ## Frozen scope
 
 The outcome is investigation-lifetime ownership and content-addressed resolution for reusable
-kernel/build artifacts. One upload or build must install across multiple Systems in one
+externally built and uploaded kernel artifacts. One upload must install across multiple Systems in one
 Investigation; ownership, garbage collection, concurrency, schema, and agent-facing MCP contracts
 must be defined and tested. The user selected an optional investigation build reference on
-`runs.create`. Remote-provider expansion and unrelated artifact classes are excluded. There are no
-remaining design-changing ambiguities.
+`runs.create`. Restoring the server-side build lane removed by ADR-0316, remote-provider expansion,
+and unrelated artifact classes are excluded. There are no remaining design-changing ambiguities.
 
 Scope identity is `https://github.com/randomparity/kdive/issues/1519 +
-work-1519-20260801-b`. Provenance is issue #1519, linked issue #1502, merged PR #1517, and the
-user's explicit answer in the active interactive run.
+work-1519-20260801-d`. Provenance is issue #1519, linked issue #1502, merged PR #1517, and the
+user's explicit `runs.create` and external-build-only decisions in the active interactive run.
 
 ## Approaches
 
