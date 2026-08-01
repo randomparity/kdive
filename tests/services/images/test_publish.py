@@ -4,7 +4,9 @@ The service writes the ``pending`` row before the object, HEAD-gates, then flips
 ``registered``. These tests pin: the success path (a ``registered`` row whose object HEADs
 and resolves), crash-after-pending-before-object adoptability (no unique-violation wedge),
 idempotent re-run (adopt the in-flight ``pending`` row, re-arm ``pending_since``), and realizing
-a seeded ``defined`` baseline through the same path.
+a seeded ``defined`` baseline through the same path. Private pending adoption follows the
+architecture-agnostic registered identity and updates the winner's arch; public pending adoption
+remains architecture-scoped.
 """
 
 from __future__ import annotations
@@ -529,6 +531,49 @@ def test_private_adoption_replaces_persisted_publication_principal(migrated_url:
             assert row is not None
             assert first.row_id == second.row_id
             assert row.publication_principal == "bob"
+
+    asyncio.run(_run())
+
+
+def test_private_pending_adoption_uses_registered_identity_and_updates_arch(
+    migrated_url: str,
+) -> None:
+    first_request = replace(
+        _PUBLIC_REQUEST,
+        visibility=ImageVisibility.PRIVATE,
+        owner="proj",
+        expires_at=_DT + timedelta(days=1),
+    )
+    second_request = replace(first_request, arch="aarch64")
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            first = await reserve_publish(
+                conn, first_request, size_bytes=len(_QCOW2), principal="alice"
+            )
+            second = await reserve_publish(
+                conn, second_request, size_bytes=len(_QCOW2), principal="bob"
+            )
+            row = await IMAGE_CATALOG.get(conn, second.row_id)
+            assert row is not None
+            assert first.row_id == second.row_id
+            assert row.arch == "aarch64"
+            assert row.object_key == second.object_key
+            assert row.publication_attempt_id == second.publication_attempt_id
+
+    asyncio.run(_run())
+
+
+def test_public_pending_adoption_remains_arch_scoped(migrated_url: str) -> None:
+    second_request = replace(_PUBLIC_REQUEST, arch="aarch64")
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            first = await reserve_publish(conn, _PUBLIC_REQUEST, size_bytes=len(_QCOW2))
+            second = await reserve_publish(conn, second_request, size_bytes=len(_QCOW2))
+            rows = await IMAGE_CATALOG.list_all(conn)
+            assert first.row_id != second.row_id
+            assert {row.arch for row in rows} == {"x86_64", "aarch64"}
 
     asyncio.run(_run())
 

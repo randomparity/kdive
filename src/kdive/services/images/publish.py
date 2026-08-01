@@ -1,4 +1,4 @@
-"""Row-first publish/register two-write for catalog images (ADR-0092, issue #285).
+"""Row-first publish/register two-write for catalog images (ADR-0092, ADR-0526, issue #285).
 
 ``publish_image`` registers the catalog row **before** the object, so a rowless object can
 never exist during a live publish (the window in which ``leaked_images`` could race the write).
@@ -6,8 +6,9 @@ It adopts the identity's existing ``defined``/``pending`` row (or inserts a fres
 row), sets its ``object_key``, writes the qcow2 to the image prefix, gates on ``store.head()``,
 then flips the row to ``registered`` and returns it.
 
-Publish is **idempotent on the scoped identity
-``(provider, name, arch, visibility, owner)``**: a re-run after a crashed attempt adopts that
+Pending-row adoption follows each visibility's registered identity. Public publication uses
+``(provider, name, arch)``; private publication uses ``(owner, provider, name)`` without arch,
+matching its registered uniqueness constraint. A re-run after a crashed attempt adopts that
 scope's in-flight ``pending`` row and re-arms its ``pending_since`` rather than colliding. Public
 and private rows, and private rows for different owners, intentionally do not adopt each other.
 The recovery path for a crash mid-publish is the reconciler, not a bespoke rollback — the leftover
@@ -203,12 +204,14 @@ async def _adopt_or_insert_pending(
     """Adopt this scope's existing non-registered row, or insert a fresh ``pending`` row.
 
     Runs in one transaction so concurrent re-runs of the same image serialize on the adopted row.
-    The match is scoped by ``(provider, name, arch, visibility, owner)`` — a public publish never
-    adopts a project's private row and one project never adopts another's, so cross-tenant
-    isolation holds (the private uniqueness key is ``(owner, provider, name)``). A ``defined``
-    baseline and a crashed ``pending`` attempt are both adopted in place and moved to ``pending``
-    with ``object_key`` set and ``pending_since`` re-armed; resolution never returns either, so an
-    adopted row is never visible mid-publish.
+    Public pending rows match ``(provider, name, arch)``. Private pending rows match
+    ``(owner, provider, name)`` without arch, exactly like the registered-private uniqueness key;
+    adopting a private row updates its arch to the current attempt's. A public publish never adopts
+    a project's private row and one project never adopts another's, so cross-tenant isolation
+    holds. A ``defined`` baseline remains arch-scoped. It and a crashed ``pending`` attempt are
+    adopted in place and moved to ``pending`` with ``object_key`` set and ``pending_since``
+    re-armed; resolution never returns either, so an adopted row is never visible mid-publish
+    (ADR-0526).
 
     ``size_bytes`` is the size of the object this publish is about to write. It lands on the row
     *before* the object exists so the row is a durable quota claim (ADR-0520); an adopted row's
@@ -222,9 +225,10 @@ async def _adopt_or_insert_pending(
     """
     select_q = sql.SQL(
         "SELECT id FROM image_catalog "
-        "WHERE provider = %(provider)s AND name = %(name)s AND arch = %(arch)s "
+        "WHERE provider = %(provider)s AND name = %(name)s "
         "AND visibility = %(visibility)s AND owner IS NOT DISTINCT FROM %(owner)s "
         "AND state IN (%(defined)s, %(pending)s) "
+        "AND (arch = %(arch)s OR (visibility = %(private)s AND state = %(pending)s)) "
         "ORDER BY CASE WHEN state = %(pending)s THEN 0 ELSE 1 END "
         "FOR UPDATE LIMIT 1"
     )
@@ -234,6 +238,7 @@ async def _adopt_or_insert_pending(
         "arch": request.arch,
         "visibility": request.visibility.value,
         "owner": request.owner,
+        "private": ImageVisibility.PRIVATE.value,
         "defined": ImageState.DEFINED.value,
         "pending": ImageState.PENDING.value,
     }
@@ -243,12 +248,13 @@ async def _adopt_or_insert_pending(
         if existing is not None:
             await cur.execute(
                 "UPDATE image_catalog "
-                "SET state = %s, object_key = %s, kernel_config_key = %s, digest = %s, "
+                "SET state = %s, arch = %s, object_key = %s, kernel_config_key = %s, digest = %s, "
                 "    size_bytes = %s, pending_since = now(), publication_attempt_id = %s, "
                 "    publication_principal = %s "
                 "WHERE id = %s",
                 (
                     ImageState.PENDING.value,
+                    request.arch,
                     object_key,
                     config_key,
                     request.digest,

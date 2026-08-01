@@ -31,19 +31,17 @@ as the recovery path. The type lets the MCP handler attach that destructive reco
 conflict, never to an in-flight attempt superseded by a concurrent winner. No catalog row and no
 published object are written by the rejected attempt.
 
-The same PROJECT-locked check also rejects a pending row with the same owner/provider/name and a
-different architecture. Registered uniqueness omits architecture, while pending adoption includes
-it; allowing that reservation would create two pending rows that cannot both register. This case
-returns a generic `CONFLICT` before quota accounting, reservation, or object write and tells the
-caller to retry after the in-flight upload finishes. It does not suggest deletion because no
-registered winner exists yet. A pending row with the same architecture remains adoptable under
-ADR-0525's attempt fencing.
+Private pending-row adoption uses the same `(owner, provider, name)` identity as registered-private
+uniqueness, without architecture. A concurrent first upload under another architecture therefore
+adopts and supersedes the existing pending attempt instead of inserting a second row that cannot
+register. Adoption updates the row's architecture, digest, size, attempt-specific keys, attempt id,
+and principal to the new attempt. Quota accounting excludes that one adoptable pending claim before
+replacing its recorded size. Public pending adoption remains scoped by `(provider, name, arch)`.
 
-The check deliberately remains in the reservation transaction, after quarantine validation. The
-PROJECT lock orders it with other private reservations without extending the lock across validation
-or object-store I/O. Two same-architecture first uploads that overlap may still share the
-pending-row adoption path. First uploads with different architectures cannot reserve a second row
-for the same registered identity. ADR-0525's attempt fence ensures only the current same-arch
+The registered-name check deliberately remains in the reservation transaction, after quarantine
+validation. The PROJECT lock orders it with other private reservations without extending the lock
+across validation or object-store I/O. Overlapping first uploads share the pending-row adoption
+path even when their architectures differ. ADR-0525's attempt fence ensures only the current
 reservation registers, while attempt-specific keys isolate any write an earlier attempt already
 started. A later upload observes the registered winner and is rejected before its publish write.
 
@@ -69,17 +67,17 @@ again under the name.
 
 - An upload rejected because the registered identity already exists may still pay quarantine read
   and guest-validation cost, but writes no published object and does not mutate the catalog entry.
-- A different-architecture upload rejected behind an in-flight first upload reserves no row,
-  writes no published object, and can retry after that upload reaches a terminal outcome.
-- An overlapping first attempt may have written its isolated attempt-specific key before being
-  superseded. It cannot register that key; ADR-0525's leaked-object recovery remains its owner.
+- Overlapping first uploads of any architecture consume one pending row and one quota claim. The
+  winner's architecture and size replace the earlier attempt's values.
+- A superseded attempt may have written its isolated attempt-specific key. It cannot register that
+  key; ADR-0525's leaked-object recovery remains its owner.
 - Private finish adds one bounded PROJECT section after the PUT. It contains only the fenced
   catalog flip and audit write; quota reservation remains the other bounded section.
 - The public MCP contract gains a documented `CONFLICT` outcome and recovery sequence.
 - Replacement remains an explicit delete-then-upload lifecycle, so no hidden object swap changes a
   running System or requires a second retirement mechanism.
-- The check is private-upload-specific; public/operator publication and same-architecture
-  pending-attempt recovery keep their accepted behavior.
+- The registered-name check is private-upload-specific. Public pending identity remains
+  architecture-scoped; private pending identity now matches private registered identity.
 
 ## Considered & rejected
 

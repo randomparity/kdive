@@ -10,9 +10,9 @@ lock; **no PROJECT advisory lock is held while the PUT runs**; private finish is
 in-flight PROJECT-locked reservation without deadlocking its IMAGE_PUBLISH fence; an abandoned
 reservation holds quota only until the reconciler's dangling sweep reclaims it; a registered
 private image resolves only within its owning project and shadows a same-identity public image
-there; a different-architecture first upload for the same private registered identity is rejected
-before its own PUT while a same-architecture pending row remains adoptable; and the publish refuses
-a connection that already opened a transaction, which would demote its transaction to a savepoint
+there; concurrent different-architecture first uploads for the same private registered identity
+adopt one pending row and use the existing attempt-supersession path; and the publish refuses a
+connection that already opened a transaction, which would demote its transaction to a savepoint
 that neither commits the reservation nor releases the lock (ADR-0516 §1).
 """
 
@@ -918,14 +918,17 @@ def test_concurrent_same_identity_uploads_cannot_both_register(migrated_url: str
     asyncio.run(_run())
 
 
-def test_concurrent_different_arch_upload_conflicts_before_second_publish(
-    migrated_url: str,
+def test_concurrent_different_arch_uploads_adopt_and_supersede(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from kdive.db.repositories import IMAGE_CATALOG
     from kdive.domain.catalog.images import ImageCatalogEntry
 
     first_put_started = threading.Event()
     release_first_put = threading.Event()
+    # One attempt fits, but both byte counts do not. Adoption must exclude the existing pending
+    # claim even though its arch differs, then replace that claim with the winner's size.
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "20")
     store = _FirstPutGateStore(
         {
             "uploads/q/proj/x86.qcow2": b"x86-first-bytes",
@@ -953,15 +956,37 @@ def test_concurrent_different_arch_upload_conflicts_before_second_publish(
 
         first = asyncio.create_task(_one("uploads/q/proj/x86.qcow2", "x86_64"))
         assert await asyncio.to_thread(first_put_started.wait, 10)
+
+        second = asyncio.create_task(_one("uploads/q/proj/arm.qcow2", "aarch64"))
+
+        async def _wait_for_second_reservation() -> str:
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                if second.done():
+                    return "completed"
+                async with await _connect(migrated_url) as observer, observer.cursor() as cur:
+                    await cur.execute(
+                        "SELECT arch FROM image_catalog "
+                        "WHERE owner = 'proj' AND provider = 'local-libvirt' "
+                        "AND name = 'shared' AND state = 'pending'"
+                    )
+                    row = await cur.fetchone()
+                if row is not None and row[0] == "aarch64":
+                    return "adopted"
+                await asyncio.sleep(0.02)
+            raise AssertionError("second upload neither adopted the pending row nor completed")
+
         try:
-            # The first row is durably pending while its PUT is blocked. The second request has a
-            # different arch but the same registered-private uniqueness identity.
-            second_result = await _one("uploads/q/proj/arm.qcow2", "aarch64")
+            # The first row is durably pending while its PUT is blocked. Private pending identity
+            # excludes arch, so the second reservation must adopt the row and queue on the first
+            # attempt's IMAGE_PUBLISH fence before the PUT is released.
+            reservation_outcome = await _wait_for_second_reservation()
         finally:
             release_first_put.set()
-        first_result = (await asyncio.gather(first, return_exceptions=True))[0]
+        first_result, second_result = await asyncio.gather(first, second, return_exceptions=True)
         results = [first_result, second_result]
 
+        assert reservation_outcome == "adopted", results
         assert all(
             isinstance(result, (ImageCatalogEntry, CategorizedError)) for result in results
         ), results
@@ -971,7 +996,9 @@ def test_concurrent_different_arch_upload_conflicts_before_second_publish(
         assert conflicts[0].category is ErrorCategory.CONFLICT
         assert not isinstance(conflicts[0], RegisteredPrivateNameConflict)
         assert "images.delete" not in str(conflicts[0])
+        assert "superseded" in str(conflicts[0])
         assert len(registered) == 1
+        assert registered[0].arch == "aarch64"
 
         async with await _connect(migrated_url) as conn:
             rows = await IMAGE_CATALOG.list_all(conn)
@@ -982,7 +1009,9 @@ def test_concurrent_different_arch_upload_conflicts_before_second_publish(
         assert "sha256:" + hashlib.sha256(registered_bytes).hexdigest() == rows[0].digest
         assert rows[0].size_bytes == len(registered_bytes)
         assert usage == (1, len(registered_bytes))
-        assert store.puts == [rows[0].object_key]
+        assert len(store.puts) == 2
+        assert len(set(store.puts)) == 2
+        assert rows[0].object_key == store.puts[1]
 
     asyncio.run(_run())
 
