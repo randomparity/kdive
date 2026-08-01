@@ -658,7 +658,7 @@ class _LockProbingStore(_FakeStore):
         self.locks_at_put.append(_advisory_locks_held_by(self._url, self.backend_pid))
         return super().put_artifact(request)
 
-    def delete(self, key: str) -> None:
+    def delete_version(self, key: str, _version_id: str) -> None:
         self.deleted.append(key)
         self.objects.pop(key, None)
 
@@ -786,7 +786,7 @@ def test_discard_failure_does_not_mask_the_changed_state_error(
     control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
 
     class _UndeletableStore(_TearingDownStore):
-        def delete(self, key: str) -> None:
+        def delete_version(self, key: str, _version_id: str) -> None:
             self.deleted.append(key)
             raise CategorizedError(
                 "delete_object failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE

@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 
 from kdive.artifacts.storage import ArtifactWriteRequest, HeadResult, ObjectListing, StoredArtifact
 from kdive.domain.catalog.images import ImageVisibility
+from kdive.domain.errors import CategorizedError
 from kdive.images.cataloging.read_model import image_referenced_by_live_system
 
 _log = logging.getLogger(__name__)
@@ -23,8 +24,8 @@ _PRIVATE_VISIBILITY = ImageVisibility.PRIVATE.value
 class ImageSweepStore(Protocol):
     """The object-store port the image sweeps and the reconcile inventory pass share.
 
-    The sweeps use ``list_image_objects``/``head``/``head_present``/``delete``/``delete_version``;
-    the inventory reconcile
+    The sweeps use ``list_image_objects``/``head``/``head_present``/``delete_version`` and
+    ``delete_retired_key_batch``; the inventory reconcile
     additionally uploads a staged image's captured kernel ``.config`` via ``put_artifact``
     (ADR-0336). The real :class:`~kdive.store.objectstore.ObjectStore` satisfies this combined
     surface, and the reconcile loop holds that store, so the shared port keeps one type flowing to
@@ -34,8 +35,8 @@ class ImageSweepStore(Protocol):
     def list_image_objects(self) -> list[ObjectListing]: ...
     def head(self, key: str) -> HeadResult | None: ...
     def head_present(self, key: str) -> bool: ...
-    def delete(self, key: str) -> None: ...
     def delete_version(self, key: str, version_id: str) -> None: ...
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool: ...
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact: ...
 
 
@@ -76,7 +77,9 @@ async def expire_one_private_image(
     the same transaction so a System that still uses the image defers expiry. Object deletion
     precedes row deletion so a crash leaves at most a dangling row for the reconciler to heal; the
     kernel ``.config`` sibling (``config_key``, ADR-0317) is deleted alongside the qcow2 for prompt
-    reclamation (the leaked-sweep is the backstop for the other row-deletion paths).
+    reclamation (the leaked-sweep is the backstop for the other row-deletion paths). Each retired
+    key gets one 20-version batch per invocation. The row remains until both sibling keys report a
+    complete history, which makes it the durable retry marker.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -94,10 +97,22 @@ async def expire_one_private_image(
                 row_id,
             )
             return False
-        if object_key is not None:
-            await asyncio.to_thread(store.delete, object_key)
-        if config_key is not None:
-            await asyncio.to_thread(store.delete, config_key)
+        complete = True
+        for key in (object_key, config_key):
+            if key is None:
+                continue
+            try:
+                if not await asyncio.to_thread(store.delete_retired_key_batch, key, 20):
+                    complete = False
+            except CategorizedError:
+                _log.warning(
+                    "images: expired private image %s retired-key batch failed; retry next pass",
+                    row_id,
+                    exc_info=True,
+                )
+                complete = False
+        if not complete:
+            return False
         await cur.execute("DELETE FROM image_catalog WHERE id = %s", (row_id,))
     _log.info("images: expired private image %s pruned (object + row deleted)", row_id)
     return True

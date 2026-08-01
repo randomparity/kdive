@@ -97,8 +97,10 @@ class _FakeImageStore:
         self.deleted.append(key)
         self.deleted_versions.append((key, version_id))
 
-    def delete(self, key: str) -> None:
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        assert limit == 20
         self.deleted.append(key)
+        return True
 
     def put_artifact(
         self, request: ArtifactWriteRequest

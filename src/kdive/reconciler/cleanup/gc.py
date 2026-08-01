@@ -120,9 +120,9 @@ _BUILD_RETENTION_CLASSES: tuple[str, ...] = ("build", "kernel-build")
 
 
 class ArtifactObjectDeleter(Protocol):
-    """The object-store delete surface the report-artifact reaper needs."""
+    """The bounded retired-key delete surface the artifact reapers need."""
 
-    def delete(self, key: str) -> None: ...
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool: ...
 
 
 async def gc_idempotency_keys(conn: AsyncConnection, retention: timedelta) -> int:
@@ -157,12 +157,18 @@ async def gc_report_artifacts(
     deleted = 0
     for artifact_id, object_key in candidates:
         try:
-            await asyncio.to_thread(store.delete, object_key)
+            complete = await asyncio.to_thread(store.delete_retired_key_batch, object_key, 20)
         except Exception:  # noqa: BLE001 - one object failure must not starve the rest
             _log.warning(
                 "reconciler: deleting report artifact object %s failed; retry next pass",
                 object_key,
                 exc_info=True,
+            )
+            continue
+        if not complete:
+            _log.info(
+                "reconciler: report artifact object %s has more retired versions; retry next pass",
+                object_key,
             )
             continue
         async with conn.transaction(), conn.cursor() as cur:
@@ -205,12 +211,20 @@ async def gc_investigation_artifacts(
         drained = True
         for artifact_id, object_key in candidates:
             try:
-                await asyncio.to_thread(store.delete, object_key)
+                complete = await asyncio.to_thread(store.delete_retired_key_batch, object_key, 20)
             except Exception:  # noqa: BLE001 - one object failure must not starve the rest
                 _log.warning(
                     "reconciler: deleting investigation artifact object %s failed; retry next pass",
                     object_key,
                     exc_info=True,
+                )
+                drained = False
+                continue
+            if not complete:
+                _log.info(
+                    "reconciler: investigation artifact object %s has more retired versions; "
+                    "retry next pass",
+                    object_key,
                 )
                 drained = False
                 continue
@@ -248,12 +262,19 @@ async def gc_expired_build_artifacts(
     deleted = 0
     for artifact_id, object_key in candidates:
         try:
-            await asyncio.to_thread(store.delete, object_key)
+            complete = await asyncio.to_thread(store.delete_retired_key_batch, object_key, 20)
         except Exception:  # noqa: BLE001 - one object failure must not starve the rest
             _log.warning(
                 "reconciler: deleting expired build artifact object %s failed; retry next pass",
                 object_key,
                 exc_info=True,
+            )
+            continue
+        if not complete:
+            _log.info(
+                "reconciler: expired build artifact object %s has more retired versions; "
+                "retry next pass",
+                object_key,
             )
             continue
         async with conn.transaction(), conn.cursor() as cur:

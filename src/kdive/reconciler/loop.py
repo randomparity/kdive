@@ -309,7 +309,9 @@ def _report_artifacts_gc_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
     return lambda conn: _gc_report_artifacts(
-        conn, config.upload_store, config.report_artifact_retention
+        conn,
+        cast(gc_repairs.ArtifactObjectDeleter, config.upload_store),
+        config.report_artifact_retention,
     )
 
 
@@ -317,7 +319,9 @@ def _investigation_artifacts_gc_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
     return lambda conn: _gc_investigation_artifacts(
-        conn, config.upload_store, config.investigation_cleanup_grace
+        conn,
+        cast(gc_repairs.ArtifactObjectDeleter, config.upload_store),
+        config.investigation_cleanup_grace,
     )
 
 
@@ -325,7 +329,9 @@ def _expired_build_artifacts_gc_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
     return lambda conn: _gc_expired_build_artifacts(
-        conn, config.upload_store, config.build_artifact_retention
+        conn,
+        cast(gc_repairs.ArtifactObjectDeleter, config.upload_store),
+        config.build_artifact_retention,
     )
 
 
