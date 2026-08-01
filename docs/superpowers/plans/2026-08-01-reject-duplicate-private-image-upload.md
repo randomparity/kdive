@@ -2,9 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Reject an `images.upload` whose private project/provider/name is already registered before any published object write, while preserving the existing concurrent-attempt integrity guarantees.
+**Goal:** Reject an `images.upload` whose private project/provider/name is already registered, or
+whose first upload is pending under a different architecture, before any published object write,
+while preserving the existing same-architecture concurrent-attempt integrity guarantees.
 
-**Architecture:** Add a registered-identity query to the existing PROJECT-locked reservation transaction in `services/images/upload.py`. Reacquire PROJECT only in the short private finish + audit transaction, beneath the existing IMAGE_PUBLISH session fence, so registration and reservation consume one order without project-locking object I/O. Return the existing `CONFLICT` category and map it at the MCP wrapper to an ordered `images.delete` then `images.upload` recovery hint; leave ADR-0525 attempt-specific keys and recovery unchanged.
+**Architecture:** Add a private-name conflict query to the existing PROJECT-locked reservation
+transaction in `services/images/upload.py`: registered rows get the dedicated delete-then-upload
+conflict, different-architecture pending rows get a generic retry-only conflict, and
+same-architecture pending rows remain adoptable. Reacquire PROJECT only in the short private finish
+and audit transaction, beneath the existing IMAGE_PUBLISH session fence, so registration and
+reservation consume one order without project-locking object I/O. Leave ADR-0525 attempt-specific
+keys and recovery unchanged.
 
 **Tech Stack:** Python 3.14, psycopg async SQL, FastMCP/Pydantic tool wrappers, pytest, `uv`, `ruff`, `ty`, and `just` guardrails.
 
@@ -12,7 +20,9 @@
 
 - Branch `feat/reject-duplicate-image-upload-1756` is based on `main`; do not implement on the default branch.
 - Private registered identity follows the existing database index: `(owner, provider, name)`, without architecture.
-- The registered-name check runs under `LockScope.PROJECT` before quota accounting, pending-row mutation, and published-prefix object writes.
+- The private-name check runs under `LockScope.PROJECT` before quota accounting, pending-row
+  mutation, and published-prefix object writes. It rejects a registered row of any architecture and
+  a pending row of a different architecture; a same-architecture pending row remains adoptable.
 - Private finish holds `IMAGE_PUBLISH → PROJECT` only across registration + audit. Reservation
   never attempts IMAGE_PUBLISH while holding PROJECT, and no PROJECT lock spans object I/O.
 - The conflict lookup is owner- and private-visibility-scoped, parameterized, and discloses no row id, object key, digest, principal, or other tenant.
@@ -32,8 +42,10 @@
 **Interfaces:**
 - Consumes: `_reserve_under_quota(conn, *, request, project, principal, new_bytes)` and the existing `image_catalog_one_private` identity `(owner, provider, name)`.
 - Produces: `RegisteredPrivateNameConflict`, a service-specific `CategorizedError` subtype whose
-  category is always `CONFLICT`, and `_registered_private_name_conflict(conn, request) ->
-  RegisteredPrivateNameConflict | None`, called while the PROJECT advisory lock is held.
+  category is always `CONFLICT`, and `_private_name_conflict(conn, request) -> CategorizedError |
+  None`, called while the PROJECT advisory lock is held. Registered rows return the subtype;
+  different-architecture pending rows return a generic retry-only conflict; same-architecture
+  pending rows return no conflict and remain adoptable.
 
 **Acceptance criteria:** A sequential duplicate, including one that changes architecture, is rejected with `CONFLICT` before a published-prefix PUT or catalog mutation; the original row fields and object bytes remain unchanged and the object SHA-256 matches the row digest. A same name in another project or a public row does not conflict. Existing concurrent same-identity coverage remains green and proves the registered row/object invariant. A forced pause after the duplicate precheck but before reservation returns one typed supersession and one digest-consistent registration rather than a raw uniqueness exception.
 
@@ -84,28 +96,44 @@ class RegisteredPrivateNameConflict(CategorizedError):
         )
 
 
-async def _registered_private_name_conflict(
+async def _private_name_conflict(
     conn: AsyncConnection, request: PublishRequest
-) -> RegisteredPrivateNameConflict | None:
+) -> CategorizedError | None:
     async with conn.cursor() as cur:
         await cur.execute(
-            "SELECT 1 FROM image_catalog "
+            "SELECT state FROM image_catalog "
             "WHERE owner = %s AND provider = %s AND name = %s "
-            "AND visibility = %s AND state = %s LIMIT 1",
+            "AND visibility = %s "
+            "AND (state = %s OR (state = %s AND arch <> %s)) "
+            "ORDER BY CASE WHEN state = %s THEN 0 ELSE 1 END LIMIT 1",
             (
                 request.owner,
                 request.provider,
                 request.name,
                 ImageVisibility.PRIVATE.value,
                 ImageState.REGISTERED.value,
+                ImageState.PENDING.value,
+                request.arch,
+                ImageState.REGISTERED.value,
             ),
         )
-        if await cur.fetchone() is None:
-            return None
-    return RegisteredPrivateNameConflict(request.name)
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    if row[0] == ImageState.REGISTERED.value:
+        return RegisteredPrivateNameConflict(request.name)
+    return CategorizedError(
+        f"another upload for private image {request.name!r} is pending under a different "
+        "architecture; retry after it finishes",
+        category=ErrorCategory.CONFLICT,
+    )
 ```
 
-Call it as the first operation inside `_reserve_under_quota`'s existing PROJECT-locked transaction. Raise the returned conflict before `_project_usage`, `_quota_denial`, or `reserve_publish`. Update the module and function docstrings to distinguish registered-name rejection from pending-row adoption and cite ADR-0526.
+Call it as the first operation inside `_reserve_under_quota`'s existing PROJECT-locked transaction.
+Raise the returned conflict before `_project_usage`, `_quota_denial`, or `reserve_publish`. Update
+the module and function docstrings to distinguish registered-name rejection,
+different-architecture pending rejection, and same-architecture pending-row adoption, and cite
+ADR-0526.
 
 - [x] **Step 4: Run the sequential and concurrency service tests**
 
@@ -140,6 +168,11 @@ The final review proof additionally pauses a competing same-identity upload betw
 precheck and reservation statement. Private finish must queue on PROJECT (while retaining
 IMAGE_PUBLISH) until that reservation adopts and commits; then the superseded attempt returns typed
 `CONFLICT`, both PUTs use distinct attempt keys, and the sole registered object matches its digest.
+
+A second final-review proof blocks the first published PUT, then starts the same private registered
+identity under another architecture. It must return one generic `CONFLICT` before the second
+reservation or PUT, no delete advice and no raw uniqueness exception, while the first upload
+registers one digest-consistent object and occupies quota once.
 
 - [x] **Step 5: Add a cross-owner control if the regression does not already exercise one**
 
@@ -270,7 +303,7 @@ git commit -m "docs(images): expose duplicate upload recovery"
 
 - [x] **Step 1: Prove the sequential test bites**
 
-Temporarily bypass the `_registered_private_name_conflict` result at its call site, run:
+Temporarily bypass the `_private_name_conflict` result at its call site, run:
 
 ```bash
 uv run python -m pytest tests/services/images/test_upload.py::test_registered_private_name_reupload_conflicts_before_publish -q

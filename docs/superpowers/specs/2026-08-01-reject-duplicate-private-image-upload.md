@@ -17,14 +17,21 @@ publication recovery.
 
 After validating the quarantined image and entering the existing PROJECT-locked reservation
 transaction, the service queries for a registered private row with the same owner, provider, and
-name. Architecture is intentionally absent from this lookup because the database uniqueness
-contract for registered private images is `(owner, provider, name)`.
+name. It also queries for a pending row with that identity and a different architecture.
+Architecture is intentionally absent from the registered identity because the database uniqueness
+contract for registered private images is `(owner, provider, name)`; pending adoption, however,
+requires the architecture to match.
 
 When the row exists, the service raises `ErrorCategory.CONFLICT` before quota calculation,
 pending-row mutation, or any published-prefix object write. The error identifies the existing
 image and tells the caller to use `images.delete`, wait for deletion, and then retry
 `images.upload`. The MCP wrapper documents the conflict and recovery sequence. The quarantined
 source remains available under its existing lifecycle; the rejected attempt does not delete it.
+
+When only a different-architecture pending row exists, the service returns a generic `CONFLICT`
+before quota calculation, reservation, or object write. The message tells the caller to retry after
+the in-flight upload finishes and does not advertise `images.delete`. A same-architecture pending
+row remains adoptable under the existing attempt-fencing behavior.
 
 The existing registered row is byte-for-byte unchanged: its id, digest, object key, expiry, and
 metadata remain as they were, and the object at its key still matches its digest. No object is
@@ -41,13 +48,15 @@ PROJECT`` finish order is acyclic: a reservation holding PROJECT never attempts 
 before commit, and the finisher takes PROJECT before mutating the catalog row. PROJECT is absent
 from validation and every object-store operation.
 
-A sequential duplicate sees the registered row and fails. Two overlapping first uploads may both
-begin validation, but their reservation phases serialize. The second can adopt the first pending
-row before either is registered. ADR-0525's IMAGE_PUBLISH fence ensures only the current attempt
-registers. If an earlier attempt already passed revalidation, it may finish writing only to its own
-attempt-specific key before registration fails; existing leaked-object recovery owns that rowless
-object. An upload whose reservation begins after registration observes the registered row and
-fails before writing.
+A sequential duplicate sees the registered row and fails. Two overlapping same-architecture first
+uploads may both begin validation, but their reservation phases serialize. The second can adopt the
+first pending row before either is registered. ADR-0525's IMAGE_PUBLISH fence ensures only the
+current attempt registers. If an earlier attempt already passed revalidation, it may finish writing
+only to its own attempt-specific key before registration fails; existing leaked-object recovery
+owns that rowless object. For two first uploads with different architectures, the second reservation
+observes the incompatible pending row and returns a generic `CONFLICT` before reserving or writing.
+An upload whose reservation begins after registration observes the registered row and fails before
+writing.
 
 Tests must cover these cases:
 
@@ -61,16 +70,20 @@ Tests must cover these cases:
    attempt keys, and a digest-consistent registered object.
 4. Register one architecture, retry the same owner/provider/name under another architecture, and
    assert the architecture-agnostic `CONFLICT` occurs before another published-prefix PUT.
+5. Block one first upload's PUT, start the same owner/provider/name under another architecture,
+   and assert one registration plus one generic `CONFLICT`, one published PUT, no raw database
+   exception, no deletion advice, and a digest-consistent winner.
 
 ## Failure contract and observability
 
-The conflict is a normal typed tool failure, not a database uniqueness exception. A dedicated
-service error subtype retains `ErrorCategory.CONFLICT` while letting the MCP handler attach
-delete-then-upload actions only to the registered-name case. A concurrent publication-supersession
-`CONFLICT` must not suggest deleting the winner. The error carries no secret or cross-project
-metadata. The lookup is owner-scoped and parameterized. Quota denial stays `QUOTA_EXCEEDED`;
-guest-contract and source-object failures retain their current categories and precedence because
-validation still precedes reservation.
+The conflicts are normal tool failures, not database uniqueness exceptions. A dedicated service
+error subtype retains `ErrorCategory.CONFLICT` while letting the MCP handler attach
+delete-then-upload actions only to the registered-name case. Incompatible pending-upload and
+concurrent publication-supersession conflicts stay generic and must not suggest deleting a current
+or eventual winner. The errors carry no secret or cross-project metadata. The lookup is
+owner-scoped and parameterized. Quota denial stays `QUOTA_EXCEEDED`; guest-contract and
+source-object failures retain their current categories and precedence because validation still
+precedes reservation.
 
 No new audit event is introduced. Existing request/tool failure observability reports the typed
 error, while the database and object store remain unchanged by the rejected publish attempt.
@@ -99,6 +112,9 @@ error, while the database and object store remain unchanged by the rejected publ
 - Same-identity concurrent first uploads leave exactly one registered row whose object matches its
   digest. A losing attempt can only write to its isolated attempt-specific key, cannot register it,
   and remains covered by existing leaked-object recovery.
+- Different-architecture concurrent first uploads leave one registered row and one published
+  object. The loser returns a generic `CONFLICT` before reservation or PUT, without raw database
+  failure or delete advice, and the winner's object matches its persisted digest.
 - A forced duplicate precheck-to-reservation interleaving returns a typed supersession rather than
   leaking a database uniqueness exception; PROJECT remains absent during each object PUT.
 - Registered private-name rejection intentionally ignores architecture, matching the database

@@ -31,12 +31,21 @@ as the recovery path. The type lets the MCP handler attach that destructive reco
 conflict, never to an in-flight attempt superseded by a concurrent winner. No catalog row and no
 published object are written by the rejected attempt.
 
+The same PROJECT-locked check also rejects a pending row with the same owner/provider/name and a
+different architecture. Registered uniqueness omits architecture, while pending adoption includes
+it; allowing that reservation would create two pending rows that cannot both register. This case
+returns a generic `CONFLICT` before quota accounting, reservation, or object write and tells the
+caller to retry after the in-flight upload finishes. It does not suggest deletion because no
+registered winner exists yet. A pending row with the same architecture remains adoptable under
+ADR-0525's attempt fencing.
+
 The check deliberately remains in the reservation transaction, after quarantine validation. The
 PROJECT lock orders it with other private reservations without extending the lock across validation
-or object-store I/O. Two first uploads that overlap may still share the pending-row adoption path.
-ADR-0525's attempt fence ensures only the current reservation registers, while attempt-specific
-keys isolate any write an earlier attempt already started. A later upload observes the registered
-winner and is rejected before its publish write.
+or object-store I/O. Two same-architecture first uploads that overlap may still share the
+pending-row adoption path. First uploads with different architectures cannot reserve a second row
+for the same registered identity. ADR-0525's attempt fence ensures only the current same-arch
+reservation registers, while attempt-specific keys isolate any write an earlier attempt already
+started. A later upload observes the registered winner and is rejected before its publish write.
 
 Private finish reacquires transaction-scoped PROJECT while the row's session-scoped IMAGE_PUBLISH
 fence remains held, and keeps it through the registration flip and audit commit. The order is
@@ -60,6 +69,8 @@ again under the name.
 
 - An upload rejected because the registered identity already exists may still pay quarantine read
   and guest-validation cost, but writes no published object and does not mutate the catalog entry.
+- A different-architecture upload rejected behind an in-flight first upload reserves no row,
+  writes no published object, and can retry after that upload reaches a terminal outcome.
 - An overlapping first attempt may have written its isolated attempt-specific key before being
   superseded. It cannot register that key; ADR-0525's leaked-object recovery remains its owner.
 - Private finish adds one bounded PROJECT section after the PUT. It contains only the fenced
@@ -67,8 +78,8 @@ again under the name.
 - The public MCP contract gains a documented `CONFLICT` outcome and recovery sequence.
 - Replacement remains an explicit delete-then-upload lifecycle, so no hidden object swap changes a
   running System or requires a second retirement mechanism.
-- The check is private-upload-specific; public/operator publication and pending-attempt recovery
-  keep their accepted behavior.
+- The check is private-upload-specific; public/operator publication and same-architecture
+  pending-attempt recovery keep their accepted behavior.
 
 ## Considered & rejected
 

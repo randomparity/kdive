@@ -696,6 +696,8 @@ def test_upload_conflict_exposes_delete_then_retry(
     assert "images.delete" in description
     assert "wait" in description.lower()
     assert "images.upload" in description
+    assert "different architecture" in description
+    assert "do not delete it" in " ".join(description.split())
 
 
 def test_upload_rejects_quarantine_key_in_published_prefix(migrated_url: str) -> None:

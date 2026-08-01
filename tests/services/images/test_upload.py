@@ -10,9 +10,10 @@ lock; **no PROJECT advisory lock is held while the PUT runs**; private finish is
 in-flight PROJECT-locked reservation without deadlocking its IMAGE_PUBLISH fence; an abandoned
 reservation holds quota only until the reconciler's dangling sweep reclaims it; a registered
 private image resolves only within its owning project and shadows a same-identity public image
-there; and the publish refuses a connection that already opened a transaction, which would demote
-its transaction to a savepoint that neither commits the reservation nor releases the lock
-(ADR-0516 §1).
+there; a different-architecture first upload for the same private registered identity is rejected
+before its own PUT while a same-architecture pending row remains adoptable; and the publish refuses
+a connection that already opened a transaction, which would demote its transaction to a savepoint
+that neither commits the reservation nor releases the lock (ADR-0516 §1).
 """
 
 from __future__ import annotations
@@ -913,6 +914,75 @@ def test_concurrent_same_identity_uploads_cannot_both_register(migrated_url: str
             assert rows[0].object_key is not None
             registered_bytes = store._objects[rows[0].object_key]  # noqa: SLF001 - integrity test seam
             assert "sha256:" + hashlib.sha256(registered_bytes).hexdigest() == rows[0].digest
+
+    asyncio.run(_run())
+
+
+def test_concurrent_different_arch_upload_conflicts_before_second_publish(
+    migrated_url: str,
+) -> None:
+    from kdive.db.repositories import IMAGE_CATALOG
+    from kdive.domain.catalog.images import ImageCatalogEntry
+
+    first_put_started = threading.Event()
+    release_first_put = threading.Event()
+    store = _FirstPutGateStore(
+        {
+            "uploads/q/proj/x86.qcow2": b"x86-first-bytes",
+            "uploads/q/proj/arm.qcow2": b"arm-second-bytes",
+        },
+        first_put_started=first_put_started,
+        release_first_put=release_first_put,
+    )
+
+    async def _run() -> None:
+        async def _one(key: str, arch: str) -> object:
+            conn = await _connect(migrated_url)
+            try:
+                return await _register(
+                    conn,
+                    store,
+                    name="shared",
+                    arch=arch,
+                    quarantine_key=key,
+                )
+            except CategorizedError as exc:
+                return exc
+            finally:
+                await conn.close()
+
+        first = asyncio.create_task(_one("uploads/q/proj/x86.qcow2", "x86_64"))
+        assert await asyncio.to_thread(first_put_started.wait, 10)
+        try:
+            # The first row is durably pending while its PUT is blocked. The second request has a
+            # different arch but the same registered-private uniqueness identity.
+            second_result = await _one("uploads/q/proj/arm.qcow2", "aarch64")
+        finally:
+            release_first_put.set()
+        first_result = (await asyncio.gather(first, return_exceptions=True))[0]
+        results = [first_result, second_result]
+
+        assert all(
+            isinstance(result, (ImageCatalogEntry, CategorizedError)) for result in results
+        ), results
+        conflicts = [result for result in results if isinstance(result, CategorizedError)]
+        registered = [result for result in results if isinstance(result, ImageCatalogEntry)]
+        assert len(conflicts) == 1
+        assert conflicts[0].category is ErrorCategory.CONFLICT
+        assert not isinstance(conflicts[0], RegisteredPrivateNameConflict)
+        assert "images.delete" not in str(conflicts[0])
+        assert len(registered) == 1
+
+        async with await _connect(migrated_url) as conn:
+            rows = await IMAGE_CATALOG.list_all(conn)
+            usage = await _project_usage(conn, "proj", adopting=None)
+        assert rows == registered
+        assert rows[0].object_key is not None
+        registered_bytes = store._objects[rows[0].object_key]  # noqa: SLF001 - integrity seam
+        assert "sha256:" + hashlib.sha256(registered_bytes).hexdigest() == rows[0].digest
+        assert rows[0].size_bytes == len(registered_bytes)
+        assert usage == (1, len(registered_bytes))
+        assert store.puts == [rows[0].object_key]
 
     asyncio.run(_run())
 
