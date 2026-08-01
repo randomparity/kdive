@@ -79,11 +79,12 @@ Cross-project queue depth and per-job state. Requires platform operator.
 Run reconciler cleanup once (platform_operator).
 
 Repairs runtime drift such as expired leases and orphaned allocations. Among its repairs,
-the local System-object sweep can permanently delete at most 200 rowless local System
-object version identities per call and at most 20 per exact key. It first takes the System
-lock and confirms a present gone System and that no artifact row names the exact key, then
-releases the database transaction before the object-store deletion. If eligible versions
-remain, call `ops.reconcile_now` again. Confirmed deletions appear in
+the local System-object sweep can permanently delete at most 200 rowless
+local System object version identities per call and at most 20 per exact
+key. It first takes the System lock and confirms a present gone System and that no artifact
+row names the exact key, then releases the database transaction before the object-store
+deletion. If eligible versions remain, call `ops.reconcile_now` again. Confirmed deletions
+appear in
 `data.repair_counts.local_system_object_versions_deleted`.
 
 The remote System-object version lane is skipped because this on-demand configuration has
