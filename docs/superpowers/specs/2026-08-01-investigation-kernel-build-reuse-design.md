@@ -35,7 +35,8 @@ Migration 0095 adds `investigation_builds` with:
 - `investigation_id` referencing `investigations(id)`;
 - `build_ref`, a lowercase hexadecimal SHA-256 string;
 - `target_kind`, `build_profile`, and the complete serialized `BuildStepResult`;
-- timestamps and a primary key on `(investigation_id, build_ref)`.
+- `created_at` and absolute `expires_at` timestamps, plus a primary key on
+  `(investigation_id, build_ref)`.
 
 It also adds nullable `runs.build_ref`. The link is an audit and reclaim reference, not a foreign
 key to a composite owner whose deletion timing differs from Run retention.
@@ -73,7 +74,8 @@ final transaction it:
 All five database effects commit together. Object uploads precede the transaction as today. After
 commit, a uniqueness loser deletes only its own exact uploaded versions; the existing orphan sweep
 remains the retry owner if that cleanup or the transaction fails. The successful tool response
-includes `data.build_ref`, and `runs.get`/`runs.list` expose it.
+includes `data.build_ref`, `data.expires_at`, and `data.server_time`; `runs.get`/`runs.list` expose
+the reference and deadline.
 
 ## Reuse flow
 
@@ -91,6 +93,13 @@ an oracle. The record's target kind and normalized build profile must equal the 
 values; mismatch returns `reason: build_ref_incompatible` and safe expected/actual target-kind and
 architecture fields.
 
+The existing `KDIVE_BUILD_ARTIFACT_RETENTION_DAYS` applies in days per build. Completion stamps
+`expires_at` from the Postgres clock as `server_time + retention`; it never refreshes on reuse.
+Create at or after that instant returns `reason: build_ref_expired` with `expires_at`, a fresh
+`server_time` from the same database clock, and `artifacts.create_run_upload` as the recovery tool.
+This preserves ADR-0234's storage backstop while giving an agent the full limit contract before it
+plans reuse.
+
 Creation writes the Run with state `succeeded`, `kernel_ref`, `debuginfo_ref`, and `build_ref`, plus
 a succeeded `build` run step copied from the immutable record. It does not create an upload
 manifest. Admission, System holding, Investigation state transition, audit, and idempotency remain
@@ -105,10 +114,9 @@ from `runs.complete_build` or `runs.get`).
 ## Garbage collection and concurrency
 
 Investigation ownership replaces Run ownership only for newly finalized builds. The existing
-close-plus-grace sweep is extended to enumerate `investigation_builds` and their artifact rows.
-New builds have no open-Investigation TTL: they remain reusable until the Investigation closes and
-the configured grace deadline passes. Legacy `owner_kind='runs'` build artifacts keep their current
-close and TTL paths.
+close-plus-grace and expired-build sweeps are extended to enumerate `investigation_builds` and their
+artifact rows. The latter uses each record's stored absolute deadline. Legacy
+`owner_kind='runs'` build artifacts keep their current close and age-based TTL paths.
 
 Create and reclaim take the Investigation advisory lock. Reclaim rechecks for non-terminal Runs
 whose `build_ref` selects the candidate. A live reference defers deletion. After object versions
@@ -162,9 +170,9 @@ class within that boundary.
    references fail without a Run, System hold, audit transition, or tenancy disclosure.
 5. Concurrent identical completions converge; create racing close or reclaim cannot produce a
    dangling build reference.
-6. Close-plus-grace collection reclaims new investigation-owned build objects only after no live
-   Run references them; no open-Investigation TTL applies, and legacy run-owned build collection
-   remains green.
+6. Close-plus-grace and absolute-deadline collection reclaim new investigation-owned build objects
+   only after no live Run references them; expiry is reported with database-clock timestamps and a
+   re-upload recovery action, and legacy run-owned build collection remains green.
 7. `runs.create`, `runs.complete_build`, `runs.get`, generated CLI/docs, schema migration tests,
    service tests, and adversarial concurrency tests describe and prove the contract.
 

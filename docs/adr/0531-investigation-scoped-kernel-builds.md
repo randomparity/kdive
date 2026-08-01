@@ -47,10 +47,14 @@ whether another tenant owns a matching build. The source Run may be terminal or 
 the build record, not that Run, is the reuse authority.
 
 Investigation-close-plus-grace garbage collection deletes the build's investigation-owned artifacts
-and then its build record. There is no open-Investigation TTL: the promised lifetime lasts until
-the Investigation closes and its configured grace deadline passes. Reclaim locks the Investigation
-and rechecks that no live Run references the build before deletion. Runs store the selected
-`build_ref`, so concurrent create versus reclaim is serialized and the reference remains auditable.
+and then its build record. ADR-0234's independent TTL backstop also applies: the build record stores
+an absolute `expires_at` stamped from the Postgres clock at completion using
+`KDIVE_BUILD_ARTIFACT_RETENTION_DAYS` (days, per build). `runs.complete_build` returns that deadline
+and `server_time`. `runs.create` rejects a reference at or after the deadline with
+`reason='build_ref_expired'`, the same two timestamps, and `artifacts.create_run_upload` as the
+recovery path. Reclaim locks the Investigation and rechecks the deadline and that no live Run
+references the build before deletion. Runs store the selected `build_ref`, so concurrent create
+versus reclaim is serialized and the reference remains auditable.
 
 ## Consequences
 
@@ -61,6 +65,8 @@ and rechecks that no live Run references the build before deletion. Runs store t
   creation path for new completions.
 - Duplicate physical uploads can occur before the content identity is known. Only one becomes the
   durable build; losing object versions are best-effort deleted and remain covered by orphan repair.
+- Investigation ownership permits reuse within the advertised absolute deadline; it does not waive
+  ADR-0234's never-closed-Investigation storage bound.
 - Reuse bypasses build upload and validation because it selects an already validated immutable
   record. Install, boot, and debug behavior remain unchanged.
 - The schema gains an investigation-build catalog and a nullable `runs.build_ref` audit link.
@@ -76,3 +82,6 @@ and rechecks that no live Run references the build before deletion. Runs store t
 - **Widen `runs.install`.** Rejected because install should consume the Run's immutable build
   result, not mutate build identity while operating on a System.
 - **Keep per-Run uploads.** Rejected because it does not satisfy upload-once reuse across Systems.
+- **Remove the independent TTL.** Rejected because never-closed Investigations would accumulate
+  sensitive multi-gigabyte builds without a bound, contrary to ADR-0234. The absolute deadline and
+  explicit re-upload recovery make the retained limit agent-visible.
