@@ -123,12 +123,8 @@ def _ensure_empty_bucket(client: Any, bucket: str) -> None:
 def _empty_bucket(client: Any, bucket: str) -> None:
     paginator = client.get_paginator("list_object_versions")
     for page in paginator.paginate(Bucket=bucket):
-        objects = [
-            {"Key": entry["Key"], "VersionId": entry["VersionId"]}
-            for entry in [*page.get("Versions", []), *page.get("DeleteMarkers", [])]
-        ]
-        if objects:
-            client.delete_objects(Bucket=bucket, Delete={"Objects": objects})
+        for entry in [*page.get("Versions", []), *page.get("DeleteMarkers", [])]:
+            client.delete_object(Bucket=bucket, Key=entry["Key"], VersionId=entry["VersionId"])
 
 
 @contextmanager

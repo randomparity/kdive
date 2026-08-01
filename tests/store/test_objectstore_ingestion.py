@@ -208,7 +208,7 @@ def test_owner_prefix_rejects_invalid_component() -> None:
 class _ListClient:
     def __init__(self, pages: list[dict[str, object]]) -> None:
         self._pages = pages
-        self.deleted: list[str] = []
+        self.deleted: list[dict[str, object]] = []
 
     def get_paginator(self, op: str) -> object:
         assert op == "list_objects_v2"
@@ -221,7 +221,7 @@ class _ListClient:
         return _Paginator()
 
     def delete_object(self, **kwargs: object) -> dict[str, object]:
-        self.deleted.append(str(kwargs["Key"]))
+        self.deleted.append(kwargs)
         return {}
 
 
@@ -237,11 +237,11 @@ def test_list_prefix_flattens_pages() -> None:
     assert store.list_prefix("p/") == ["p/a", "p/b", "p/c"]
 
 
-def test_delete_calls_delete_object() -> None:
+def test_delete_version_calls_delete_object_with_identity() -> None:
     client = _ListClient([])
     store = ObjectStore(client, "bucket")
-    store.delete("p/a")
-    assert client.deleted == ["p/a"]
+    store.delete_version("p/a", "null")
+    assert client.deleted == [{"Bucket": "bucket", "Key": "p/a", "VersionId": "null"}]
 
 
 class _FailingListClient:
@@ -266,10 +266,10 @@ class _FailingDeleteClient:
         raise EndpointConnectionError(endpoint_url="http://x")
 
 
-def test_delete_maps_transport_error_to_infrastructure_failure() -> None:
+def test_delete_version_maps_transport_error_to_infrastructure_failure() -> None:
     store = ObjectStore(_FailingDeleteClient(), "bucket")
     with pytest.raises(CategorizedError) as excinfo:
-        store.delete("p/a")
+        store.delete_version("p/a", "v1")
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 

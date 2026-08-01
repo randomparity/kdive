@@ -76,8 +76,37 @@ class _CannedPagesClient:
         return self._pages
 
 
+class _CannedVersionPageClient:
+    def __init__(self, page: object) -> None:
+        self._page = page
+
+    def list_object_versions(self, **_kwargs: object) -> object:
+        return self._page
+
+
 def _without(reply: dict[str, Any], field: str) -> dict[str, Any]:
     return {name: value for name, value in reply.items() if name != field}
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        [],
+        {"Versions": {}, "IsTruncated": False},
+        {"DeleteMarkers": ["not-an-entry"], "IsTruncated": False},
+        {"Versions": [{"Key": "p/key"}], "IsTruncated": False},
+        {"Versions": [], "IsTruncated": "no"},
+        {"Versions": [], "IsTruncated": True, "NextKeyMarker": "p/key"},
+    ],
+)
+def test_version_listing_rejects_malformed_successful_replies(page: object) -> None:
+    store = ObjectStore(_CannedVersionPageClient(page), "the-bucket")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        store.list_version_page("p/")
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert excinfo.value.details["op"] == "list_object_versions"
 
 
 @pytest.mark.parametrize("field", [name for name, _v, _got, _want in _HEAD_FIELDS])

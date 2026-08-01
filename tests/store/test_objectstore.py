@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from dataclasses import FrozenInstanceError
 from datetime import UTC
 from pathlib import Path
 from uuid import uuid4
@@ -20,7 +21,10 @@ from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import (
     ArtifactStreamRequest,
     ArtifactWriteRequest,
+    ObjectVersion,
     StoredArtifact,
+    VersionBatch,
+    VersionPage,
 )
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -39,6 +43,337 @@ def test_normalize_etag_strips_surrounding_quotes() -> None:
     assert _normalize_etag("abc123") == "abc123"
     # Only the surrounding double-quotes are stripped; other edge characters are preserved.
     assert _normalize_etag('"Xabc-9X"') == "Xabc-9X"
+
+
+class _VersionClient:
+    """Canned version-list replies with raw request recording."""
+
+    def __init__(self, pages: list[dict[str, object]]) -> None:
+        self._pages = iter(pages)
+        self.list_calls: list[dict[str, object]] = []
+        self.delete_calls: list[dict[str, object]] = []
+
+    def list_object_versions(self, **kwargs: object) -> dict[str, object]:
+        self.list_calls.append(kwargs)
+        return next(self._pages)
+
+    def delete_object(self, **kwargs: object) -> dict[str, object]:
+        self.delete_calls.append(kwargs)
+        return {}
+
+
+def _version(
+    key: str,
+    version_id: str,
+    *,
+    latest: bool,
+    etag: str = '"etag"',
+) -> dict[str, object]:
+    return {
+        "Key": key,
+        "VersionId": version_id,
+        "LastModified": STORE_MTIME,
+        "ETag": etag,
+        "IsLatest": latest,
+    }
+
+
+def _marker(key: str, version_id: str, *, latest: bool) -> dict[str, object]:
+    return {
+        "Key": key,
+        "VersionId": version_id,
+        "LastModified": STORE_MTIME,
+        "IsLatest": latest,
+    }
+
+
+def test_version_values_are_immutable() -> None:
+    entry = ObjectVersion("p/key", "null", STORE_MTIME, None, True, True)
+    page = VersionPage((entry,), False, None, None)
+    batch = VersionBatch("p/key", page.entries, True)
+
+    with pytest.raises(FrozenInstanceError):
+        entry.version_id = "changed"  # ty: ignore[invalid-assignment]
+    with pytest.raises(FrozenInstanceError):
+        page.is_truncated = True  # ty: ignore[invalid-assignment]
+    with pytest.raises(FrozenInstanceError):
+        batch.history_complete = False  # ty: ignore[invalid-assignment]
+
+
+def test_list_version_page_lists_data_and_markers_with_continuation() -> None:
+    client = _VersionClient(
+        [
+            {
+                "Versions": [_version("p/b", "v2", latest=False)],
+                "DeleteMarkers": [_marker("p/a", "m1", latest=True)],
+                "IsTruncated": True,
+                "NextKeyMarker": "p/b",
+                "NextVersionIdMarker": "v2",
+            }
+        ]
+    )
+
+    page = ObjectStore(client, "bucket").list_version_page(
+        "p/", key_marker="p/a", version_id_marker="v1", max_keys=17
+    )
+
+    assert client.list_calls == [
+        {
+            "Bucket": "bucket",
+            "Prefix": "p/",
+            "KeyMarker": "p/a",
+            "VersionIdMarker": "v1",
+            "MaxKeys": 17,
+        }
+    ]
+    assert page.entries == (
+        ObjectVersion("p/a", "m1", STORE_MTIME, None, True, True),
+        ObjectVersion("p/b", "v2", STORE_MTIME, "etag", False, False),
+    )
+    assert (page.is_truncated, page.next_key_marker, page.next_version_id_marker) == (
+        True,
+        "p/b",
+        "v2",
+    )
+
+
+def test_iter_prefix_version_pages_resumes_with_returned_markers() -> None:
+    client = _VersionClient(
+        [
+            {
+                "Versions": [_version("p/key", "v1", latest=True)],
+                "IsTruncated": True,
+                "NextKeyMarker": "p/key",
+                "NextVersionIdMarker": "v1",
+            },
+            {"DeleteMarkers": [_marker("p/key", "m2", latest=True)], "IsTruncated": False},
+        ]
+    )
+
+    pages = list(ObjectStore(client, "bucket").iter_prefix_version_pages("p/"))
+
+    assert [page.entries[0].version_id for page in pages] == ["v1", "m2"]
+    assert client.list_calls == [
+        {"Bucket": "bucket", "Prefix": "p/", "MaxKeys": 1000},
+        {
+            "Bucket": "bucket",
+            "Prefix": "p/",
+            "KeyMarker": "p/key",
+            "VersionIdMarker": "v1",
+            "MaxKeys": 1000,
+        },
+    ]
+
+
+def test_iter_prefix_version_pages_supports_key_only_resume() -> None:
+    client = _VersionClient([{"IsTruncated": False}])
+
+    assert list(ObjectStore(client, "bucket").iter_prefix_version_pages("p/", key_marker="p/key"))
+    assert client.list_calls == [
+        {"Bucket": "bucket", "Prefix": "p/", "KeyMarker": "p/key", "MaxKeys": 1000}
+    ]
+
+
+@pytest.mark.parametrize("max_keys", [0, 1001, True])
+def test_list_version_page_rejects_out_of_range_limits(max_keys: int) -> None:
+    with pytest.raises(ValueError):
+        ObjectStore(_VersionClient([]), "bucket").list_version_page("p/", max_keys=max_keys)
+
+
+def test_truncated_version_page_requires_advancing_markers() -> None:
+    client = _VersionClient(
+        [
+            {
+                "Versions": [],
+                "IsTruncated": True,
+                "NextKeyMarker": "p/key",
+                "NextVersionIdMarker": "v1",
+            }
+        ]
+    )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        list(
+            ObjectStore(client, "bucket").iter_prefix_version_pages(
+                "p/", key_marker="p/key", version_id_marker="v1"
+            )
+        )
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_capture_exact_versions_excludes_sibling_keys_and_accepts_null() -> None:
+    client = _VersionClient(
+        [
+            {
+                "Versions": [
+                    _version("p/key", "null", latest=False),
+                    _version("p/key-extra", "sibling", latest=True),
+                    _version("p/key", "v2", latest=True),
+                ],
+                "IsTruncated": False,
+            }
+        ]
+    )
+
+    batch = ObjectStore(client, "bucket").capture_exact_versions("p/key", 2)
+
+    assert batch == VersionBatch(
+        "p/key",
+        (
+            ObjectVersion("p/key", "null", STORE_MTIME, "etag", False, False),
+            ObjectVersion("p/key", "v2", STORE_MTIME, "etag", True, False),
+        ),
+        True,
+    )
+
+
+def test_capture_exact_versions_keeps_latest_when_history_is_incomplete() -> None:
+    client = _VersionClient(
+        [
+            {
+                "Versions": [_version("p/key", "v1", latest=False)],
+                "IsTruncated": True,
+                "NextKeyMarker": "p/key",
+                "NextVersionIdMarker": "v1",
+            }
+        ]
+    )
+
+    batch = ObjectStore(client, "bucket").capture_exact_versions("p/key", 1)
+
+    assert batch.history_complete is False
+    assert batch.targets[0].version_id == "v1"
+
+
+def test_capture_exact_versions_keeps_the_latest_entry_inside_the_bound() -> None:
+    client = _VersionClient(
+        [
+            {
+                "Versions": [
+                    _version("p/key", "a-old", latest=False),
+                    _version("p/key", "z-latest", latest=True),
+                ],
+                "IsTruncated": False,
+            }
+        ]
+    )
+
+    batch = ObjectStore(client, "bucket").capture_exact_versions("p/key", 1)
+
+    assert batch.targets[0].version_id == "z-latest"
+    assert batch.history_complete is False
+
+
+@pytest.mark.parametrize("limit", [0, -1, True])
+def test_capture_exact_versions_requires_a_positive_limit(limit: int) -> None:
+    with pytest.raises(ValueError):
+        ObjectStore(_VersionClient([]), "bucket").capture_exact_versions("p/key", limit)
+
+
+def test_delete_version_always_names_identity() -> None:
+    client = _VersionClient([])
+
+    ObjectStore(client, "bucket").delete_version("p/key", "v2")
+
+    assert client.delete_calls == [{"Bucket": "bucket", "Key": "p/key", "VersionId": "v2"}]
+
+
+def test_delete_batch_deletes_nonlatest_before_latest() -> None:
+    client = _VersionClient([])
+    batch = VersionBatch(
+        "p/key",
+        (
+            ObjectVersion("p/key", "v1", STORE_MTIME, "etag", False, False),
+            ObjectVersion("p/key", "v2", STORE_MTIME, "etag", True, False),
+        ),
+        True,
+    )
+
+    assert ObjectStore(client, "bucket").delete_batch(batch) is True
+    assert [call["VersionId"] for call in client.delete_calls] == ["v1", "v2"]
+
+
+def test_delete_batch_retains_latest_when_capture_is_incomplete() -> None:
+    client = _VersionClient([])
+    batch = VersionBatch(
+        "p/key",
+        (
+            ObjectVersion("p/key", "v1", STORE_MTIME, "etag", False, False),
+            ObjectVersion("p/key", "v2", STORE_MTIME, "etag", True, False),
+        ),
+        False,
+    )
+
+    assert ObjectStore(client, "bucket").delete_batch(batch) is False
+    assert [call["VersionId"] for call in client.delete_calls] == ["v1"]
+
+
+def test_delete_batch_does_not_delete_latest_after_a_nonlatest_failure() -> None:
+    class _FailingVersionClient(_VersionClient):
+        def delete_object(self, **kwargs: object) -> dict[str, object]:
+            super().delete_object(**kwargs)
+            raise EndpointConnectionError(endpoint_url="http://unreachable")
+
+    client = _FailingVersionClient([])
+    batch = VersionBatch(
+        "p/key",
+        (
+            ObjectVersion("p/key", "v1", STORE_MTIME, "etag", False, False),
+            ObjectVersion("p/key", "v2", STORE_MTIME, "etag", True, False),
+        ),
+        True,
+    )
+
+    with pytest.raises(CategorizedError):
+        ObjectStore(client, "bucket").delete_batch(batch)
+    assert [call["VersionId"] for call in client.delete_calls] == ["v1"]
+
+
+def test_delete_retired_key_batch_returns_false_without_deleting_an_incomplete_latest() -> None:
+    client = _VersionClient(
+        [
+            {
+                "Versions": [
+                    _version("p/key", "v1", latest=False),
+                    _version("p/key", "v2", latest=True),
+                ],
+                "IsTruncated": True,
+                "NextKeyMarker": "p/key",
+                "NextVersionIdMarker": "v2",
+            }
+        ]
+    )
+
+    complete = ObjectStore(client, "bucket").delete_retired_key_batch("p/key", 2)
+
+    assert complete is False
+    assert [call["VersionId"] for call in client.delete_calls] == ["v1"]
+
+
+def test_delete_batch_rejects_multiple_keys_or_latest_entries() -> None:
+    store = ObjectStore(_VersionClient([]), "bucket")
+    multiple_keys = VersionBatch(
+        "p/key",
+        (
+            ObjectVersion("p/key", "v1", STORE_MTIME, "etag", False, False),
+            ObjectVersion("p/other", "v2", STORE_MTIME, "etag", False, False),
+        ),
+        True,
+    )
+    multiple_latest = VersionBatch(
+        "p/key",
+        (
+            ObjectVersion("p/key", "v1", STORE_MTIME, "etag", True, False),
+            ObjectVersion("p/key", "v2", STORE_MTIME, "etag", True, False),
+        ),
+        True,
+    )
+
+    with pytest.raises(ValueError):
+        store.delete_batch(multiple_keys)
+    with pytest.raises(ValueError):
+        store.delete_batch(multiple_latest)
 
 
 def test_infrastructure_error_from_client_error_carries_s3_code() -> None:
@@ -980,6 +1315,33 @@ def test_put_get_round_trip(minio_store: ObjectStore, key_ns: str) -> None:
     assert fetched.data == b"payload-bytes"
 
 
+def test_minio_lists_versions_and_markers_then_deletes_one_exact_identity(
+    minio_store: ObjectStore, key_ns: str
+) -> None:
+    key = f"{key_ns}/runs/run-1/versioned"
+    first = minio_store._client.put_object(Bucket=minio_store._bucket, Key=key, Body=b"first")
+    second = minio_store._client.put_object(Bucket=minio_store._bucket, Key=key, Body=b"second")
+    marker = minio_store._client.delete_object(Bucket=minio_store._bucket, Key=key)
+
+    page = minio_store.list_version_page(key)
+
+    assert {entry.version_id for entry in page.entries} == {
+        first["VersionId"],
+        second["VersionId"],
+        marker["VersionId"],
+    }
+    assert any(entry.is_delete_marker and entry.is_latest for entry in page.entries)
+    assert any(not entry.is_delete_marker and not entry.is_latest for entry in page.entries)
+
+    minio_store.delete_version(key, first["VersionId"])
+
+    remaining = minio_store.list_version_page(key)
+    assert first["VersionId"] not in {entry.version_id for entry in remaining.entries}
+    assert {second["VersionId"], marker["VersionId"]} <= {
+        entry.version_id for entry in remaining.entries
+    }
+
+
 def test_put_stream_round_trip_streams_from_disk(
     minio_store: ObjectStore, key_ns: str, tmp_path: Path
 ) -> None:
@@ -1380,21 +1742,25 @@ def test_list_prefix_maps_client_error_to_infrastructure() -> None:
     assert str(excinfo.value) == "object-store list_objects_v2 for 'p/' failed: boom"
 
 
-def test_delete_targets_bound_bucket_and_key() -> None:
+def test_delete_version_targets_bound_bucket_key_and_identity() -> None:
     client = _PaginatorClient([])
     store = ObjectStore(client, "the-bucket")
-    store.delete("t/vmcore/oid/core")
-    assert client.delete_kwargs == {"Bucket": "the-bucket", "Key": "t/vmcore/oid/core"}
+    store.delete_version("t/vmcore/oid/core", "v1")
+    assert client.delete_kwargs == {
+        "Bucket": "the-bucket",
+        "Key": "t/vmcore/oid/core",
+        "VersionId": "v1",
+    }
 
 
-def test_delete_maps_client_error_to_infrastructure() -> None:
+def test_delete_version_maps_client_error_to_infrastructure() -> None:
     class _Raises:
         def delete_object(self, **_: object) -> dict[str, object]:
             raise ClientError({"Error": {"Code": "boom"}}, "delete_object")
 
     store = ObjectStore(_Raises(), "bucket")
     with pytest.raises(CategorizedError) as excinfo:
-        store.delete("k")
+        store.delete_version("k", "null")
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert str(excinfo.value) == "object-store delete_object for 'k' failed: boom"
 
