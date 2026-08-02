@@ -51,3 +51,13 @@
 - `0095_investigation_builds.sql`
 - `0096_investigation_build_gc.sql` (`reclaim_retry_at`, `expired`/`closed` reusable-build cursors)
 - `0097_investigation_build_tombstones.sql`
+
+## Reduced-branch review fixes
+
+- `367bb90e1`: reusable Runs now fail before provider invocation unless every referenced artifact
+  has a nonempty persisted VersionId; legacy Runs retain key-only fallback.
+- `1fd27aecd`: install and get/list retain the full expiry contract after catalog reclamation by
+  consulting the persisted build step and same-Investigation tombstone.
+- `0f02554c0`: migration 0095 refuses to run with other database clients connected; operator and
+  Helm documentation require stop-old-first for the strict Run projection boundary.
+- `69c629c53`: removed the transient implementation plan while retaining ADR-0531 and its spec.

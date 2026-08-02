@@ -434,6 +434,14 @@ def test_install_expired_build_ref_rejects_before_enqueue(migrated_url: str) -> 
                     "UPDATE runs SET build_ref = %s WHERE id = %s", (build_ref, run.id)
                 )
                 await conn.execute(
+                    "UPDATE run_steps SET result = jsonb_set(result, '{artifact_versions}', "
+                    "%s::jsonb) WHERE run_id = %s AND step = 'build'",
+                    (
+                        Jsonb({"kernel": "kernel-v1", "vmlinux": "vmlinux-v1"}),
+                        run.id,
+                    ),
+                )
+                await conn.execute(
                     "UPDATE investigation_builds SET expires_at = "
                     "clock_timestamp() - interval '1 second' "
                     "WHERE investigation_id = %s AND build_ref = %s",
@@ -4890,6 +4898,14 @@ def test_queued_install_admitted_before_expiry_runs_after_expiry(migrated_url: s
                 build_ref = await _seed_investigation_build(pool, str(run.investigation_id))
                 await conn.execute(
                     "UPDATE runs SET build_ref = %s WHERE id = %s", (build_ref, run.id)
+                )
+                await conn.execute(
+                    "UPDATE run_steps SET result = jsonb_set(result, '{artifact_versions}', "
+                    "%s::jsonb) WHERE run_id = %s AND step = 'build'",
+                    (
+                        Jsonb({"kernel": "kernel-v1", "vmlinux": "vmlinux-v1"}),
+                        run.id,
+                    ),
                 )
             admitted = await _install(pool, _ctx(), run_id)
             assert admitted.status == "queued"
