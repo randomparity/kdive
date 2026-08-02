@@ -163,10 +163,11 @@ checks the generation deadline and enqueues or recycles the install job. A first
 at or after expiry returns `build_ref_expired` with `expires_at`, `server_time`, and `runs.create`
 as the first recovery action. The caller recreates without the expired reference and follows the
 upload flow. An unchanged already-succeeded install is an idempotent no-op and remains callable
-after expiry because it performs no artifact read. Once admission enqueues work, the queued/running
-job is the durable use fence; GC defers until the provider has consumed every object and the job
-settles. A failed job releases the fence, and retry after expiry follows recovery instead of reading
-possibly reclaimed objects.
+after expiry because it performs no artifact read. Once admission enqueues work, queued/running job
+state fences the ordinary admission-to-handler path. A failed job releases that fence, and retry
+after expiry follows recovery instead of reading possibly reclaimed objects. Worker process death
+and provider threads that outlive job state require a platform-level fence and recovery design;
+that boundary is tracked by [#1803](https://github.com/randomparity/kdive/issues/1803).
 
 The Investigation lock makes create-versus-reclaim deterministic. Concurrent source completions
 of identical content converge through the active-digest query under that lock and artifact
