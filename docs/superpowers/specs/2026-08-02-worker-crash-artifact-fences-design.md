@@ -117,7 +117,9 @@ service-account token that Kubernetes binds to the Pod UID. The controller verif
 live UID/resource-version read and returns the credential idempotently from its encrypted envelope over
 authenticated cluster TLS into an init-only tmpfs handoff. The init acknowledges after the tmpfs write;
 delivery and acknowledgment repeat the token/UID/resource-version checks, and acknowledgment clears the
-envelope. A lost response or acknowledgment retries the same delivery only for the same live Pod. The
+envelope and records a durable acknowledged marker atomically. A lost delivery response retries delivery
+while pending. After the tmpfs write, a lost acknowledgment response retries acknowledgment and receives
+idempotent success from the marker without redelivery; delivery after acknowledgment is refused. The
 worker receives the credential but never the projected token, envelope key, or an API-readable Secret.
 Ordinal replacement cannot reuse a credential because UID, token binding, and registration must all
 match; a new UID receives a new credential. The witness
@@ -151,8 +153,9 @@ object-store failure leaves the row/tombstone retryable and never widens the del
 - Provider cancellation: caller observes cancellation only after the provider thread exits; process
   death retains the use.
 - Witness database/API failure: runtime object and finalizer remain; no termination is inferred.
-- Kubernetes credential delivery/acknowledgment loss: the same bound live Pod idempotently retries the
-  encrypted envelope; another UID is refused; timeout alone never authorizes termination.
+- Kubernetes credential delivery loss: the same bound live Pod retries the pending envelope. Lost
+  acknowledgment retries the durable acknowledged result without redelivery. Another UID is refused;
+  timeout alone never authorizes termination.
 - Conflicting registration/termination replay: fail closed and preserve the first immutable facts.
 - Unauthorized SQL operation: permission denied, with no protected-table mutation.
 - Recovery mismatch: audited refusal where the operator surface requires it; use remains pinned.

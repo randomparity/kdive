@@ -49,10 +49,12 @@ client presents a short-lived projected service-account token bound by Kubernete
 controller verifies it with TokenReview plus a live UID/resource-version read, consumes the credential
 idempotently from the encrypted envelope over authenticated cluster TLS into an init-only tmpfs
 handoff. Delivery and acknowledgment both repeat TokenReview and the live UID/resource-version check.
-An authenticated acknowledgment irreversibly clears the envelope; a lost response or acknowledgment
-is retried only by the same live Pod and returns the same credential. The long-running worker receives
-neither the projected token, the controller envelope key, nor an API-readable Secret. Thus a terminal
-Pod whose worker never started still has a pre-start, authority-bound identity; the witness may
+An authenticated acknowledgment atomically records an acknowledged marker and clears the envelope. A
+lost delivery response retries delivery while the envelope remains pending. After the init has written
+the credential to tmpfs, a lost acknowledgment response retries acknowledgment; the durable marker
+returns success without redelivery. Delivery after acknowledgment is refused. The long-running worker
+receives neither the projected token, the controller envelope key, nor an API-readable Secret. Thus a
+terminal Pod whose worker never started still has a pre-start, authority-bound identity; the witness may
 terminate it but may not invent a different holder after the fact. Termination also clears any
 unacknowledged envelope. The witness compare-and-sets namespace, name, UID, resource version, and
 credential-record state before removing the finalizer. API or database failure retains the runtime

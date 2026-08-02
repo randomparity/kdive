@@ -109,7 +109,6 @@ Commit explicit migration/test paths with: `feat: enforce worker fence database 
 ### Task 2: Bind worker operations to authority-minted incarnation credentials
 
 **Files:**
-- Create: `src/kdive/db/schema/0106_worker_fence_protocol_claim.sql`
 - Modify: `src/kdive/services/runs/worker_incarnations.py`
 - Modify: `src/kdive/services/runs/build_use.py`
 - Modify: `src/kdive/processes/worker_incarnation.py`
@@ -162,6 +161,7 @@ Commit explicit service/process/test paths with: `security: bind build uses to w
 ### Task 3: Reject old or unregistered workers at the database claim boundary
 
 **Files:**
+- Create: `src/kdive/db/schema/0106_worker_fence_protocol_claim.sql`
 - Modify: `src/kdive/jobs/queue.py`
 - Modify: `src/kdive/jobs/worker.py`
 - Modify: `src/kdive/processes/worker.py`
@@ -317,19 +317,28 @@ Commit with: `feat: preserve compose worker termination evidence`
 ### Task 6: Pre-register Kubernetes identities and fence finalizer removal
 
 **Files:**
+- Create: `src/kdive/processes/kubernetes_credential_broker.py`
+- Create: `src/kdive/processes/kubernetes_credential_init.py`
 - Modify: `src/kdive/processes/kubernetes_termination_witness.py`
 - Modify: `src/kdive/processes/reconciler.py`
+- Create: `deploy/helm/kdive/templates/service-worker-credential-broker.yaml`
+- Create: `deploy/helm/kdive/templates/networkpolicy-worker-credential-broker.yaml`
 - Modify: `deploy/helm/kdive/templates/statefulset-worker.yaml`
 - Modify: `deploy/helm/kdive/templates/deployment-reconciler.yaml`
 - Modify: `deploy/helm/kdive/templates/deployment-server.yaml`
 - Modify: `deploy/helm/kdive/templates/worker-death-rbac.yaml`
 - Modify: `deploy/helm/kdive/templates/_helpers.tpl`
 - Modify: `deploy/helm/kdive/values.yaml`
+- Create: `tests/processes/test_kubernetes_credential_broker.py`
+- Create: `tests/processes/test_kubernetes_credential_init.py`
 - Modify: `tests/processes/test_kubernetes_termination_witness.py`
 - Modify: `tests/helm/test_helm_render.py`
 
 **Interfaces:**
 - Controller registers the exact Pending Pod UID; an init client uses a Pod-UID-bound projected token to idempotently deliver and acknowledge the encrypted credential envelope before worker start.
+- Reconciler hosts a bounded internal TLS broker on a dedicated ClusterIP Service; it is not exposed through MCP/HTTP ingress.
+- Broker frames are length-prefixed JSON capped at 16 KiB requests and 4 KiB responses with a 5-second database-clock operation deadline; secrets are never logged.
+- Init atomically writes the credential with mode 0400 to a memory-backed `emptyDir`, fsyncs it, then retries acknowledgment until the durable marker returns success.
 - Witness terminates only an existing lifecycle-registered UID and patches only its finalizer with UID/resourceVersion/binding tests.
 - Truly unregistered terminal Pods remain finalized and cannot authorize recovery.
 
@@ -337,20 +346,23 @@ Commit with: `feat: preserve compose worker termination evidence`
 
 Cover pre-start registration, never-started-but-registered terminal Pod, truly unregistered terminal
 Pod, invalid/audience-mismatched/unbound tokens, duplicate delivery before acknowledgment, dropped
-delivery and acknowledgment responses, envelope clearing after acknowledgment/termination, UID
+delivery and acknowledgment responses, durable acknowledgment without redelivery, broker frame/timeout
+bounds, TLS failure, atomic tmpfs mode/rename, envelope clearing after acknowledgment/termination, UID
 replacement, rollout, scale-down, API/database failure, ordinal ceiling decrease, and exact JSON Patch
-tests.
+tests. Broker/client tests live in their dedicated files; witness state tests remain separate.
 
 - [ ] **Step 2: Run red Kubernetes/Helm tests**
 
-Run: `uv run python -m pytest tests/processes/test_kubernetes_termination_witness.py tests/helm/test_helm_render.py -q`
+Run: `uv run python -m pytest tests/processes/test_kubernetes_credential_broker.py tests/processes/test_kubernetes_credential_init.py tests/processes/test_kubernetes_termination_witness.py tests/helm/test_helm_render.py -q`
 
 - [ ] **Step 3: Implement bounded controller phases**
 
 Use explicit states: observe fixed ordinal → validate UID/finalizer → ensure authority registration;
 then init delivery → TokenReview with fixed audience → live UID/resource-version read → decrypt exact
-envelope → init-only tmpfs write → authenticated acknowledgment with repeated checks → envelope clear →
-worker gate. Delivery before acknowledgment is idempotent for the same live UID; another UID is refused.
+envelope → atomic mode-0400 tmpfs write/fsync/rename → authenticated acknowledgment with repeated checks
+→ atomically set acknowledged marker and clear envelope → worker gate. Delivery before acknowledgment is
+idempotent for the same live UID; after acknowledgment delivery is refused and repeated acknowledgment
+returns success without secret material. Another UID is refused.
 Terminal processing is observe → verify existing binding → persist termination and clear envelope →
 patch exact finalizer. Each pass handles at most the configured count capped at 1,000 and leaves
 retryable state on failure. Ordinal reuse cannot overwrite a credential because registration and every
@@ -360,9 +372,11 @@ delivery/acknowledgment compare the exact UID.
 
 Grant the controller fixed-namespace Pod get/list, TokenReview create, and resource-version-fenced Pod
 patch. Mount the short-lived fixed-audience projected token only in the init container; do not mount it
-in the worker. Store the envelope key only in the controller deployment. No credential Secret API
-permission is required. Keep the worker unable to read Pods, tokens, or other credentials. Run Step 2
-green and server-side Helm rendering if a cluster API is configured.
+in the worker. Wire the init command, memory-backed `emptyDir`, dedicated ClusterIP Service, operator-
+supplied TLS certificate/key/CA settings, readiness shutdown, and a NetworkPolicy allowing only worker
+Pods to the broker port. Store the envelope key and TLS private key only in the reconciler deployment.
+No credential Secret API permission is required. Keep the worker unable to read Pods, tokens, or other
+credentials. Run Step 2 green and server-side Helm rendering if a cluster API is configured.
 
 - [ ] **Step 5: Run `just ci` and commit**
 
