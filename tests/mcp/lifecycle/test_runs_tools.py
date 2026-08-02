@@ -581,6 +581,32 @@ def test_install_restage_rejects_expired_build_ref(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_install_restage_before_build_expiry_enqueues(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _seed_installed_and_booted(
+                pool, run_id, installed_cmdline=_SUCCEEDED_BUILD["cmdline"]
+            )
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, UUID(run_id))
+                assert run is not None
+                build_ref = await _seed_investigation_build(pool, str(run.investigation_id))
+                await conn.execute(
+                    "UPDATE runs SET build_ref = %s WHERE id = %s", (build_ref, run.id)
+                )
+            response = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                cmdline="dhash_entries=1",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
+        assert response.status == "queued"
+
+    asyncio.run(_run())
+
+
 def test_install_lock_order_cannot_deadlock_complete_build(migrated_url: str) -> None:
     import psycopg
 
