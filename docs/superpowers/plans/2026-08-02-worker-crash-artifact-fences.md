@@ -31,14 +31,36 @@
 - Modify: `tests/db/test_migrate.py`
 - Modify: `tests/db/test_migration_0091_system_object_sweep_cursors.py`
 - Create: `tests/db/test_worker_fence_authority.py`
+- Modify: `src/kdive/jobs/handlers/runs/install.py`
+- Modify: `tests/jobs/handlers/test_runs_install.py`
 
 **Interfaces:**
 - Produces SQL roles `kdive_server`, `kdive_worker`, `kdive_reconciler`, `kdive_lifecycle_witness`.
 - Produces guarded functions `register_worker_incarnation`, `authenticate_worker_incarnation`, `terminate_worker_incarnation`, `acquire_investigation_build_use`, `release_investigation_build_use`, and `recover_investigation_build_use`.
 - Protected tables retain no direct runtime-role mutation grants.
 - Claim-trigger activation is deliberately deferred to Task 3, after credential-aware worker code exists.
+- Produces a green cancellation baseline: repeated cancellation cannot finish or abandon the install
+  coroutine while its provider thread is active. Credential-bound use acquisition is still Task 4.
 
-- [ ] **Step 1: Write failing migration and role tests**
+- [ ] **Step 1: Confirm the preserved cancellation regression is red**
+
+Run: `uv run python -m pytest tests/jobs/handlers/test_runs_install.py::test_cancelled_install_waits_for_provider_thread_before_abandoning -q`
+
+Expected: FAIL because the coroutine abandons/finishes while the provider thread is still blocked.
+
+- [ ] **Step 2: Add cancellation-resistant provider supervision**
+
+Introduce the `_wait_through_cancellation` helper specified in Task 4 and use it for the provider task
+and abandonment cleanup. Extend the test to cancel twice before releasing the provider thread. Do not
+add build-use integration yet; Task 4 owns that after credential services exist.
+
+- [ ] **Step 3: Run the cancellation proof green**
+
+Run the Step 1 command.
+
+Expected: PASS; neither cancellation completes the task before provider release.
+
+- [ ] **Step 4: Write failing migration and role tests**
 
 Add tests that assert migration versions are unique and end in the new monotonic tail. Create distinct
 LOGIN principals with only one intended non-login runtime-role membership, plus an unprivileged login,
@@ -60,13 +82,13 @@ def test_worker_fence_role_matrix(role: str, operation: str, allowed: bool, role
         assert _login_operation_succeeds(role_conn, operation) is allowed
 ```
 
-- [ ] **Step 2: Run the red tests**
+- [ ] **Step 5: Run the red migration tests**
 
 Run: `uv run python -m pytest tests/db/test_migrate.py tests/db/test_migration_0091_system_object_sweep_cursors.py tests/db/test_worker_fence_authority.py -q`
 
 Expected: failure from duplicate migration versions and missing roles/functions.
 
-- [ ] **Step 3: Build a unique immutable migration tail**
+- [ ] **Step 6: Build a unique immutable migration tail**
 
 Keep `main` 0095–0097 unchanged. Consolidate use rows, recovery audit, bounds/indexes/cursors,
 incarnation protocol and credential hash, role creation, revokes/grants, and guarded functions into
@@ -92,17 +114,17 @@ REVOKE INSERT, UPDATE, DELETE ON worker_incarnations FROM PUBLIC;
 REVOKE INSERT, UPDATE, DELETE ON investigation_build_uses FROM PUBLIC;
 ```
 
-- [ ] **Step 4: Run migration tests green**
+- [ ] **Step 7: Run migration tests green**
 
 Run the Step 2 command.
 
 Expected: all pass; permission-denied cases roll back their transaction before the next assertion.
 
-- [ ] **Step 5: Run repository guardrails and commit**
+- [ ] **Step 8: Run repository guardrails and commit**
 
 Run: `just ci`
 
-Commit explicit migration/test paths with: `feat: enforce worker fence database authority`
+Commit explicit migration, install-handler, and test paths with: `feat: enforce worker fence database authority`
 
 ---
 
@@ -208,20 +230,22 @@ Commit with: `security: reject workers without fence protocol`
 - Modify: `tests/reconciler/test_gc_expired_build_artifacts.py`
 
 **Interfaces:**
-- `_run_install_step` receives the exact use/credential context and does not release it until `installer.install` has returned.
-- Cancellation is re-raised only after the supervised thread task completes and run-step abandonment executes.
+- `_run_install_step` uses Task 1's cancellation-resistant supervision and receives the exact
+  use/credential context; it does not release until `installer.install` has returned.
+- Cancellation is re-raised only after the supervised thread task completes, run-step abandonment
+  executes, and the exact use releases.
 
-- [ ] **Step 1: Run the preserved failing cancellation proof**
+- [ ] **Step 1: Add the failing durable-use cancellation proof**
 
-Run: `uv run python -m pytest tests/jobs/handlers/test_runs_install.py::test_cancelled_install_waits_for_provider_thread_before_abandoning -q`
+Run: `uv run python -m pytest tests/jobs/handlers/test_runs_install.py::test_cancelled_install_keeps_build_use_until_provider_thread_exits -q`
 
-Expected: FAIL because the task finishes/abandons before the provider thread is released.
+Expected: FAIL because the supervised provider path is not yet wrapped in credential-bound build-use
+acquisition/release.
 
-- [ ] **Step 2: Supervise the provider task explicitly**
+- [ ] **Step 2: Integrate build-use lifetime with the supervised provider task**
 
-Use a cancellation-resistant drain around the thread-backed task. Every cancellation is recorded while
-the same shielded task continues to be awaited; cleanup and the outer use release run only after the
-thread is done:
+Reuse Task 1's cancellation-resistant drain around the thread-backed task. Acquire the credential-bound
+use before provider consumption and release it only after the thread and abandonment cleanup are done:
 
 ```python
 async def _wait_through_cancellation(task: asyncio.Task[object]) -> bool:
@@ -247,9 +271,9 @@ if cancelled:
     raise asyncio.CancelledError
 ```
 
-Acquire the build use immediately before this block and release in an outer `finally`, so process death
-preserves the separately committed row. Add a test that cancels twice while the provider remains blocked
-and asserts neither abandonment nor use release occurs until thread exit.
+Release in an outer `finally`, so process death preserves the separately committed row. The test cancels
+twice while the provider remains blocked and asserts neither abandonment nor use release occurs until
+thread exit.
 
 - [ ] **Step 3: Run cancellation, overlap, and GC tests green**
 
