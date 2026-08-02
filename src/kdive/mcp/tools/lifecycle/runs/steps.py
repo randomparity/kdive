@@ -31,6 +31,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.runs.build_catalog import resolve_build
 from kdive.services.runs.steps import (
     build_baked_cmdline_extra,
     install_method_for,
@@ -163,9 +164,6 @@ async def _restage_and_enqueue_install(
     ``runs.install`` cannot interleave read→delete→enqueue (ADR-0299/0300). The shared ledger-driven
     recycle (``_locked_enqueue``) then carries the new cmdline + crashkernel into the recycled job.
     """
-    requested_cmdline = (
-        cmdline.strip() if cmdline is not None else await build_baked_cmdline_extra(conn, run.id)
-    )
     # Omit → default 256M (recorded as ``None``): each install fully specifies its variant, so an
     # omitted reservation reverts to the platform default, like the cmdline's build-baked anchor.
     requested_crashkernel = crashkernel.strip() if crashkernel is not None else None
@@ -177,7 +175,19 @@ async def _restage_and_enqueue_install(
         audit_args["cmdline"] = cmdline.strip()
     if crashkernel is not None:
         audit_args["crashkernel"] = crashkernel.strip()
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
+    async with (
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.INVESTIGATION, run.investigation_id),
+        advisory_xact_lock(conn, LockScope.RUN, run.id),
+    ):
+        locked_run = await RUNS.get(conn, run.id)
+        if locked_run is None or locked_run.investigation_id != run.investigation_id:
+            return _config_error(str(run.id))
+        requested_cmdline = (
+            cmdline.strip()
+            if cmdline is not None
+            else await build_baked_cmdline_extra(conn, locked_run.id)
+        )
         progress = await step_progress(conn, run.id)
         if progress.install == RUN_STEP_RUNNING or progress.boot == RUN_STEP_RUNNING:
             return _config_error(str(run.id), data={"reason": "step_in_progress"})
@@ -185,6 +195,10 @@ async def _restage_and_enqueue_install(
             progress.installed_cmdline != requested_cmdline
             or progress.installed_crashkernel != requested_crashkernel
         )
+        if progress.install != RUN_STEP_SUCCEEDED or variant_changed:
+            build_error = await _reusable_build_install_error(conn, locked_run)
+            if build_error is not None:
+                return build_error
         if progress.install == RUN_STEP_SUCCEEDED and variant_changed:
             await delete_run_step(conn, run.id, "install")
             await delete_run_step(conn, run.id, "boot")
@@ -200,6 +214,38 @@ async def _restage_and_enqueue_install(
             audit_args,
         )
     return run_job_envelope(job, run.id)
+
+
+async def _reusable_build_install_error(conn: AsyncConnection, run: Run) -> ToolResponse | None:
+    """Fence a new artifact-consuming install at its generation deadline (ADR-0531)."""
+    if run.build_ref is None:
+        return None
+    build = await resolve_build(conn, run.investigation_id, run.build_ref)
+    if build is None or build.state != "active":
+        return ToolResponse.failure(
+            str(run.id),
+            ErrorCategory.CONFIGURATION_ERROR,
+            suggested_next_actions=["runs.create"],
+            data={"reason": "build_ref_not_found"},
+        )
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT clock_timestamp()")
+        row = await cur.fetchone()
+    if row is None:
+        raise RuntimeError("SELECT clock_timestamp() returned no row")
+    server_time = row[0]
+    if build.expires_at <= server_time:
+        return ToolResponse.failure(
+            str(run.id),
+            ErrorCategory.CONFIGURATION_ERROR,
+            suggested_next_actions=["runs.create"],
+            data={
+                "reason": "build_ref_expired",
+                "expires_at": build.expires_at.isoformat(),
+                "server_time": server_time.isoformat(),
+            },
+        )
+    return None
 
 
 async def boot_run(

@@ -422,6 +422,74 @@ def test_install_unbound_run_is_not_bound(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_install_expired_build_ref_rejects_before_enqueue(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, UUID(run_id))
+                assert run is not None
+                build_ref = await _seed_investigation_build(pool, str(run.investigation_id))
+                await conn.execute(
+                    "UPDATE runs SET build_ref = %s WHERE id = %s", (build_ref, run.id)
+                )
+                await conn.execute(
+                    "UPDATE investigation_builds SET expires_at = "
+                    "clock_timestamp() - interval '1 second' "
+                    "WHERE investigation_id = %s AND build_ref = %s",
+                    (run.investigation_id, build_ref),
+                )
+            response = await install_run(
+                pool, _ctx(), run_id, resolver=provider_resolver(profile_policy=_LOCAL_POLICY)
+            )
+            n_jobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
+        assert response.status == "error"
+        assert response.data["reason"] == "build_ref_expired"
+        expires_at = response.data["expires_at"]
+        server_time = response.data["server_time"]
+        assert isinstance(expires_at, str)
+        assert isinstance(server_time, str)
+        assert expires_at <= server_time
+        assert response.suggested_next_actions == ["runs.create"]
+        assert n_jobs == 0
+
+    asyncio.run(_run())
+
+
+def test_install_unchanged_succeeded_variant_ignores_build_expiry(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _seed_installed_and_booted(
+                pool, run_id, installed_cmdline=_SUCCEEDED_BUILD["cmdline"]
+            )
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, UUID(run_id))
+                assert run is not None
+                build_ref = await _seed_investigation_build(pool, str(run.investigation_id))
+                await conn.execute(
+                    "UPDATE runs SET build_ref = %s WHERE id = %s", (build_ref, run.id)
+                )
+                await conn.execute(
+                    "UPDATE investigation_builds SET expires_at = "
+                    "clock_timestamp() - interval '1 second' "
+                    "WHERE investigation_id = %s AND build_ref = %s",
+                    (run.investigation_id, build_ref),
+                )
+            response = await install_run(
+                pool, _ctx(), run_id, resolver=provider_resolver(profile_policy=_LOCAL_POLICY)
+            )
+            n_jobs = await _count(
+                pool,
+                "SELECT count(*) AS n FROM jobs WHERE kind='install' AND dedup_key=%s",
+                (f"{run_id}:install",),
+            )
+        assert response.status == "succeeded"
+        assert n_jobs == 1
+
+    asyncio.run(_run())
+
+
 def test_boot_unbound_run_is_not_bound(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
