@@ -45,8 +45,10 @@ key to a composite owner whose deletion timing differs from Run retention.
 
 The canonical build document is versioned and includes the target kind, normalized build profile,
 kernel checksum, optional initrd and debuginfo checksums, build id, cmdline, and normalized
-provenance. Canonical JSON uses sorted keys and compact separators; SHA-256 over its UTF-8 bytes is
-the `content_digest`. Object keys and etags are excluded because they describe storage placement
+provenance. A chunked artifact uses its ordered validated chunk checksum-and-size vector plus total
+size, excluding its advisory whole-object hash. Canonical JSON uses sorted keys and compact
+separators; SHA-256 over its UTF-8 bytes is the `content_digest`. Object keys and etags are excluded
+because they describe storage placement
 rather than content. Finalization already requires the object store's SHA-256 for every artifact.
 The generation suffix prevents an expired or partially reclaimed physical set from being mistaken
 for a fresh publication of the same content.

@@ -90,6 +90,58 @@ def test_canonical_document_is_deterministic_and_head_order_independent() -> Non
     assert artifacts["kernel"] == {"checksum_sha256": "kernel-sha"}
 
 
+def test_chunked_identity_uses_ordered_validated_chunks_and_total_size() -> None:
+    run = _run(uuid4())
+    result = _result()
+    key = result.kernel_ref
+    assert key is not None
+    first = canonical_build_document(
+        run,
+        result,
+        _heads(),
+        verified_identities={
+            key: {
+                "chunks": [
+                    {"checksum_sha256": "part-a", "size_bytes": 5},
+                    {"checksum_sha256": "part-b", "size_bytes": 3},
+                ],
+                "size_bytes": 8,
+            }
+        },
+    )
+    same_bytes_different_advisory_hash = canonical_build_document(
+        run,
+        result,
+        _heads(),
+        verified_identities={
+            key: {
+                "chunks": [
+                    {"checksum_sha256": "part-a", "size_bytes": 5},
+                    {"checksum_sha256": "part-b", "size_bytes": 3},
+                ],
+                "size_bytes": 8,
+            }
+        },
+    )
+    changed_chunk_order = canonical_build_document(
+        run,
+        result,
+        _heads(),
+        verified_identities={
+            key: {
+                "chunks": [
+                    {"checksum_sha256": "part-b", "size_bytes": 3},
+                    {"checksum_sha256": "part-a", "size_bytes": 5},
+                ],
+                "size_bytes": 8,
+            }
+        },
+    )
+
+    assert first == same_bytes_different_advisory_hash
+    assert first != changed_chunk_order
+
+
 def test_publication_uses_fixed_compact_sorted_content_digest(migrated_url: str) -> None:
     async def exercise() -> None:
         investigation_id = uuid4()

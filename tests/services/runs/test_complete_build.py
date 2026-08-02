@@ -51,6 +51,15 @@ _CHUNKED_KERNEL = ManifestEntry(
 )
 
 
+def test_chunked_content_identity_ignores_advisory_whole_hash_but_pins_ordered_chunks() -> None:
+    same_chunks_other_whole = _CHUNKED_KERNEL._replace(sha256="different-advisory-whole")
+    reversed_chunks = _CHUNKED_KERNEL._replace(chunks=tuple(reversed(_CHUNKED_KERNEL.chunks or ())))
+
+    identity = complete_build._manifest_content_identity(_CHUNKED_KERNEL)
+    assert identity == complete_build._manifest_content_identity(same_chunks_other_whole)
+    assert identity != complete_build._manifest_content_identity(reversed_chunks)
+
+
 class _ChunkedStore:
     def __init__(self, *, bad_head: bool = False, delete_raises: str | None = None) -> None:
         self.bad_head = bad_head

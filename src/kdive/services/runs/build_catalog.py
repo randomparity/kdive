@@ -35,15 +35,21 @@ class BuildPublication:
 
 
 def canonical_build_document(
-    run: Run, result: BuildStepResult, heads: Mapping[str, HeadResult]
+    run: Run,
+    result: BuildStepResult,
+    heads: Mapping[str, HeadResult],
+    *,
+    verified_identities: Mapping[str, JsonValue] | None = None,
 ) -> dict[str, JsonValue]:
-    """Build the versioned content identity document from validated artifact HEADs."""
+    """Build content identity from validator-backed checksums, including multipart evidence."""
     checksums: dict[str, JsonValue] = {}
     for name, key in sorted(result.refs().items()):
         head = heads.get(key)
-        if head is None or head.checksum_sha256 is None:
+        identity = verified_identities.get(key) if verified_identities is not None else None
+        checksum = head.checksum_sha256 if head is not None else None
+        if head is None or (identity is None and checksum is None):
             raise ValueError(f"validated HEAD checksum is required for {name}")
-        checksums[name] = {"checksum_sha256": head.checksum_sha256}
+        checksums[name] = identity or {"checksum_sha256": checksum}
     document = {
         "version": _CANONICAL_DOCUMENT_VERSION,
         "target_kind": run.target_kind.value,
@@ -70,10 +76,13 @@ async def publish_or_reuse_build(
     run: Run,
     result: BuildStepResult,
     heads: Mapping[str, HeadResult],
+    verified_identities: Mapping[str, JsonValue] | None = None,
     retention: timedelta,
 ) -> BuildPublication:
     """Select or insert one immutable build generation under the caller's Investigation lock."""
-    canonical_document = canonical_build_document(run, result, heads)
+    canonical_document = canonical_build_document(
+        run, result, heads, verified_identities=verified_identities
+    )
     encoded_document = json.dumps(canonical_document, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(encoded_document.encode("utf-8")).hexdigest()
     artifact_versions = _artifact_versions(result, heads)

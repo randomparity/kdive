@@ -27,7 +27,9 @@ Finalizing an external build creates an investigation-owned build record with im
 Its public
 `build_ref` is `<content_digest>.<generation>`. `content_digest` is the lowercase hexadecimal
 SHA-256 of a versioned canonical document containing the validated artifact checksums and build
-metadata; `generation` is an opaque UUID minted for one publication lifetime. The artifact catalog
+metadata. A chunked artifact uses its ordered validator-backed `(checksum, size)` vector and total
+size; its advisory whole-object hash is excluded. `generation` is an opaque UUID minted for one
+publication lifetime. The artifact catalog
 rows use `owner_kind='investigations'` and the Investigation id.
 
 The record stores one exact validated artifact set. Under the Investigation lock, a finalizer first
