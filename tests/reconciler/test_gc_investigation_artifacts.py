@@ -12,6 +12,7 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -95,7 +96,7 @@ async def _seed_generation(
     conn: psycopg.AsyncConnection, investigation_id: UUID, *, expired: bool = False
 ) -> tuple[UUID, str, list[tuple[str, str]]]:
     generation = uuid4()
-    digest = "a" * 64
+    digest = f"{generation.int:064x}"
     build_ref = f"{digest}.{generation}"
     versions = [
         (f"builds/{generation}/kernel", "v-kernel"),
@@ -486,5 +487,45 @@ def test_idempotent_after_full_drain(migrated_url: str) -> None:
 
         assert first == 1
         assert second == 0  # marker cleared, nothing left to do
+
+    asyncio.run(_run())
+
+
+def test_close_driven_generation_budget_is_fair_across_investigations(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kdive.reconciler.cleanup import gc as gc_module
+
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        first_id, later_id = UUID(int=1), UUID(int=2)
+        try:
+            for investigation_id in (first_id, later_id):
+                await conn.execute(
+                    "INSERT INTO investigations "
+                    "(id, principal, project, title, state, cleanup_pending_at) "
+                    "VALUES (%s, 'p', 'proj', 't', 'closed', now() - interval '2 days')",
+                    (investigation_id,),
+                )
+            for _ in range(3):
+                await _seed_generation(conn, first_id)
+            later_generation, _ref, _versions = await _seed_generation(conn, later_id)
+        finally:
+            await conn.close()
+
+        class _FirstFails(_RecordingStore):
+            def delete_version(self, key: str, version_id: str) -> None:
+                self.deleted.append(f"{key}@{version_id}")
+                if str(later_generation) not in key:
+                    raise RuntimeError("early tenant failure")
+
+        monkeypatch.setattr(gc_module, "_BUILD_GENERATIONS_PER_PASS", 2)
+        store = _FirstFails()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_investigation_artifacts(conn, store, timedelta(days=1)) == 2
+        finally:
+            await conn.close()
+        assert any(str(later_generation) in call for call in store.deleted)
 
     asyncio.run(_run())

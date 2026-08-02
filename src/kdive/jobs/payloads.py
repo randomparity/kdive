@@ -193,8 +193,9 @@ class InstallPayload(RunPayload):
         if value is None:
             return None
         stripped = value.strip()
-        if not stripped:
-            raise ValueError("cmdline must not be blank")
+        error = cmdline_extra_error(stripped)
+        if error is not None:
+            raise ValueError(error)
         return stripped
 
     @field_validator("crashkernel")

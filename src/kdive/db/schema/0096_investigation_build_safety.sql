@@ -21,4 +21,4 @@ CREATE TABLE investigation_build_gc_cursor (
     investigation_id uuid,
     generation uuid
 );
-INSERT INTO investigation_build_gc_cursor (lane) VALUES ('expired');
+INSERT INTO investigation_build_gc_cursor (lane) VALUES ('expired'), ('closed');

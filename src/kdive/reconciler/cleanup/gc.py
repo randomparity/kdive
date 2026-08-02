@@ -179,8 +179,17 @@ async def _mark_generation_reclaiming(
                     "UNION ALL SELECT 1 FROM jobs j JOIN runs r "
                     "ON r.id::text = j.payload->>'run_id' "
                     "WHERE r.investigation_id = %s AND r.build_ref = %s "
-                    "AND j.kind = 'install' AND j.state IN ('queued', 'running'))",
-                    (investigation_id, build_ref, investigation_id, build_ref),
+                    "AND j.kind = 'install' AND j.state IN ('queued', 'running') "
+                    "UNION ALL SELECT 1 FROM investigation_build_uses u "
+                    "WHERE u.investigation_id = %s AND u.generation = %s)",
+                    (
+                        investigation_id,
+                        build_ref,
+                        investigation_id,
+                        build_ref,
+                        investigation_id,
+                        generation,
+                    ),
                 )
             ).fetchone()
             if pin is None or pin[0]:
@@ -248,6 +257,7 @@ async def _generation_candidates(
     *,
     investigation_id: UUID | None = None,
     expired: bool = False,
+    closed_grace: timedelta | None = None,
     limit: int = _BUILD_GENERATIONS_PER_PASS,
 ) -> list[tuple[UUID, UUID]]:
     if investigation_id is not None:
@@ -260,15 +270,27 @@ async def _generation_candidates(
                 (investigation_id, limit),
             )
         ).fetchall()
-    elif expired:
+    elif expired or closed_grace is not None:
+        lane = "expired" if expired else "closed"
+        eligibility = (
+            "(ib.state = 'reclaiming' OR ib.expires_at <= now())"
+            if expired
+            else "(ib.state = 'reclaiming' OR (i.cleanup_pending_at IS NOT NULL "
+            "AND i.cleanup_pending_at < now() - %s))"
+        )
+        join = "" if expired else " JOIN investigations i ON i.id = ib.investigation_id"
+        params: tuple[object, ...] = (lane, limit) if expired else (lane, closed_grace, limit)
         rows = await (
             await conn.execute(
                 "WITH cursor AS (SELECT investigation_id, generation "
-                "FROM investigation_build_gc_cursor WHERE lane = 'expired'), eligible AS ("
+                "FROM investigation_build_gc_cursor WHERE lane = %s), eligible AS ("
                 "SELECT ib.investigation_id, ib.generation, row_number() OVER "
                 "(PARTITION BY ib.investigation_id ORDER BY ib.generation) AS tenant_rank "
-                "FROM investigation_builds ib WHERE "
-                "(ib.state = 'reclaiming' OR ib.expires_at <= now()) AND "
+                "FROM investigation_builds ib"
+                + join
+                + " WHERE "
+                + eligibility
+                + " AND "
                 + _UNPINNED_GENERATION_SQL
                 + " AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now())) "
                 "SELECT e.investigation_id, e.generation FROM eligible e CROSS JOIN cursor c "
@@ -276,14 +298,14 @@ async def _generation_candidates(
                 "(e.investigation_id, e.generation) <= "
                 "(c.investigation_id, c.generation) THEN 1 ELSE 0 END, "
                 "e.investigation_id, e.generation LIMIT %s",
-                (limit,),
+                params,
             )
         ).fetchall()
         if rows:
             await conn.execute(
                 "UPDATE investigation_build_gc_cursor SET investigation_id = %s, generation = %s "
-                "WHERE lane = 'expired'",
-                rows[-1],
+                "WHERE lane = %s",
+                (*rows[-1], lane),
             )
     else:
         rows = await (
@@ -443,21 +465,18 @@ async def gc_investigation_artifacts(
         )
         investigation_ids = [row[0] for row in await cur.fetchall()]
     deleted = 0
-    remaining_generation_budget = _BUILD_GENERATIONS_PER_PASS
+    generation_candidates = await _generation_candidates(
+        conn, closed_grace=grace, limit=_BUILD_GENERATIONS_PER_PASS
+    )
+    generations_by_investigation: dict[UUID, list[UUID]] = {}
+    for investigation_id, generation in generation_candidates:
+        generations_by_investigation.setdefault(investigation_id, []).append(generation)
     for investigation_id in investigation_ids:
-        generation_candidates = (
-            await _generation_candidates(
-                conn, investigation_id=investigation_id, limit=remaining_generation_budget
-            )
-            if remaining_generation_budget > 0
-            else []
-        )
-        remaining_generation_budget -= len(generation_candidates)
-        for candidate_investigation_id, generation in generation_candidates:
+        for generation in generations_by_investigation.get(investigation_id, []):
             deleted += await _reclaim_generation(
                 conn,
                 cast("ExactArtifactObjectDeleter", store),
-                candidate_investigation_id,
+                investigation_id,
                 generation,
             )
         async with conn.cursor() as cur:
