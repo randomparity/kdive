@@ -357,7 +357,7 @@ def test_create_rejects_unusable_reusable_build(migrated_url: str, mode: str) ->
                         {"schema_version": 1, "arch": "ppc64le"} if mode == "profile" else None
                     ),
                     state="reclaiming" if mode == "reclaiming" else "active",
-                    expired=mode == "expired",
+                    expired=mode in {"expired", "reclaiming"},
                     target_kind=(
                         ResourceKind.FAULT_INJECT
                         if mode == "target"
@@ -383,9 +383,12 @@ def test_create_rejects_unusable_reusable_build(migrated_url: str, mode: str) ->
                 "target": "build_ref_incompatible",
                 "profile": "build_ref_incompatible",
                 "expired": "build_ref_expired",
-                "reclaiming": "build_ref_not_found",
+                "reclaiming": "build_ref_expired",
             }[mode]
             assert caught.value.details["reason"] == expected
+            if mode == "reclaiming":
+                assert caught.value.details["expires_at"]
+                assert caught.value.details["server_time"]
             rows = await _fetchall(
                 pool, "SELECT id FROM runs WHERE investigation_id = %s", (inv_id,)
             )

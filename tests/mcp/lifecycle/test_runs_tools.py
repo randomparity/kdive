@@ -2214,12 +2214,14 @@ def test_created_response_with_unbound_reusable_build_chains_to_bind() -> None:
             target_kind=base.target_kind,
             build_ref=f"{'a' * 64}.{uuid4()}",
             build_expires_at="2026-08-08T00:00:00+00:00",
-        )
+        ),
+        server_time="2026-08-01T00:00:00+00:00",
     )
     assert resp.status == "succeeded"
     assert resp.suggested_next_actions == ["runs.get", "runs.bind"]
     assert resp.data["build_ref"] is not None
     assert resp.data["build_expires_at"] == "2026-08-08T00:00:00+00:00"
+    assert resp.data["server_time"] == "2026-08-01T00:00:00+00:00"
     assert "external_build_contract" not in resp.refs
 
 
@@ -2234,7 +2236,8 @@ def test_created_response_with_bound_reusable_build_chains_to_install() -> None:
             system_id=uuid4(),
             build_ref=f"{'a' * 64}.{uuid4()}",
             build_expires_at="2026-08-08T00:00:00+00:00",
-        )
+        ),
+        server_time="2026-08-01T00:00:00+00:00",
     )
     assert resp.suggested_next_actions == ["runs.get", "runs.install"]
 
@@ -2341,12 +2344,19 @@ def test_reusable_create_idempotency_and_read_models(migrated_url: str) -> None:
             )
             read = await get_run(pool, _ctx(), first.object_id)
             listed = await list_runs(pool, _ctx(), RunsListRequest(investigation_id=inv_id))
-            assert replay.model_dump() == first.model_dump()
+            replay_dump = replay.model_dump()
+            first_dump = first.model_dump()
+            replay_dump["data"].pop("server_time")
+            first_dump["data"].pop("server_time")
+            assert replay_dump == first_dump
             assert first.status == "succeeded"
             assert read.data["build_ref"] == build_ref
             assert read.data["build_expires_at"] == first.data["build_expires_at"]
             assert listed.items[0].data["build_ref"] == build_ref
             assert listed.items[0].data["build_expires_at"] == first.data["build_expires_at"]
+            assert first.data["server_time"]
+            assert read.data["server_time"]
+            assert listed.data["server_time"]
 
             other_inv = await _seed_investigation(pool, state=InvestigationState.OPEN)
             other_ref = await _seed_investigation_build(pool, other_inv)

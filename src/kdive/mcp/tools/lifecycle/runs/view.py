@@ -62,6 +62,7 @@ class RunReadDetails:
     liveness: Liveness | None
     vmcore_artifact_id: str | None
     build_expires_at: str | None
+    server_time: str | None
 
 
 async def get_run(
@@ -110,6 +111,7 @@ async def get_run(
             liveness=details.liveness,
             vmcore_ref=details.vmcore_artifact_id,
             build_expires_at=details.build_expires_at,
+            server_time=details.server_time,
         )
 
 
@@ -124,6 +126,7 @@ async def _load_run_read_details(
     system = await SYSTEMS.get(conn, run.system_id) if run.system_id is not None else None
     runtime = await resolver.runtime_for_run(conn, run.id) if system is not None else None
     progress = await _step_progress(conn, run.id) if run.state is RunState.SUCCEEDED else None
+    build_expires_at = await _build_expires_at(conn, run)
     return RunReadDetails(
         required_cmdline=_required_cmdline(system, runtime),
         failing_job=await _failing_job(conn, run),
@@ -135,8 +138,16 @@ async def _load_run_read_details(
         latest_console_id=await _latest_console_id(conn, run),
         liveness=await _liveness(conn, run, progress, secret_registry),
         vmcore_artifact_id=await redacted_vmcore_artifact_id(conn, run.id),
-        build_expires_at=await _build_expires_at(conn, run),
+        build_expires_at=build_expires_at,
+        server_time=await _server_time(conn) if build_expires_at is not None else None,
     )
+
+
+async def _server_time(conn: AsyncConnection) -> str:
+    row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+    if row is None:
+        raise RuntimeError("SELECT clock_timestamp() returned no row")
+    return row[0].isoformat()
 
 
 async def _build_expires_at(conn: AsyncConnection, run: Run) -> str | None:

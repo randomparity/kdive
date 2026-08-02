@@ -515,7 +515,7 @@ async def _resolve_selected_build(
     except ValueError:
         raise config_failure(object_id, data={"reason": "build_ref_not_found"}) from None
     selected = await resolve_build(conn, investigation_id, build_ref)
-    if selected is None or selected.state != "active":
+    if selected is None:
         raise config_failure(object_id, data={"reason": "build_ref_not_found"})
     async with conn.cursor() as cur:
         await cur.execute("SELECT clock_timestamp()")
@@ -532,6 +532,10 @@ async def _resolve_selected_build(
                 "server_time": server_time.isoformat(),
             },
         )
+    if selected.state != "active":
+        raise config_failure(object_id, data={"reason": "build_ref_not_found"})
+    if selected.state != "active":
+        raise config_failure(object_id, data={"reason": "build_ref_not_found"})
     actual_profile = dump_build_profile(build_profile)
     try:
         expected_profile = dump_build_profile(BuildProfile.parse(selected.build_profile))

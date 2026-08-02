@@ -62,6 +62,12 @@ Success returns `data.build_ref`, the reusable same-Investigation handle, plus i
 ISO-8601 UTC retention deadline in `data.expires_at` and the reference clock in
 `data.server_time`. Reuse it through `runs.create`; reuse does not refresh the deadline.
 
+`runs.create`, `runs.get`, and `runs.list` also return `data.server_time` whenever they expose
+`data.build_expires_at` (one collection-level clock for `runs.list`). Compute remaining retention
+as `build_expires_at - server_time`. Retention is per generation; at or after the deadline a new or
+restaged install is rejected. Recover with `runs.create` without `build_ref`, then upload and
+complete a new external build.
+
 The `kernel` tar's boot/vmlinuz member is validated against the Run's build-profile arch
 (declared at runs.create): a bzImage for x86_64, an ELF vmlinux for ppc64le. A payload that
 does not match the declared arch is rejected. See
