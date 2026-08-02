@@ -4885,6 +4885,11 @@ def test_queued_install_admitted_before_expiry_runs_after_expiry(migrated_url: s
             assert admitted.status == "queued"
             async with pool.connection() as conn:
                 await conn.execute(
+                    "INSERT INTO worker_incarnations "
+                    "(incarnation, authority_kind, authority_binding) "
+                    "VALUES ('test-worker', 'local', '{\"test\": true}'::jsonb)"
+                )
+                await conn.execute(
                     "UPDATE investigation_builds SET expires_at = "
                     "clock_timestamp() - interval '1 second' "
                     "WHERE investigation_id = %s AND build_ref = %s",
