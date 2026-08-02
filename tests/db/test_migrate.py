@@ -196,6 +196,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0093",
         "0094",
         "0095",
+        "0096",
     ]
     assert second == []
 
@@ -224,6 +225,7 @@ def test_investigation_build_catalog_schema(pg_conn: psycopg.Connection) -> None
         "build_profile": "jsonb",
         "state": "text",
         "expires_at": "timestamp with time zone",
+        "reclaim_retry_at": "timestamp with time zone",
         "created_at": "timestamp with time zone",
         "updated_at": "timestamp with time zone",
     }
@@ -772,6 +774,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0093",
         "0094",
         "0095",
+        "0096",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1144,6 +1147,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0093",
         "0094",
         "0095",
+        "0096",
     ]
 
 

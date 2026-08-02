@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, mo
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
+from kdive.domain.cmdline import cmdline_extra_error
 from kdive.domain.operations.jobs import (
     RETIRED_JOB_KINDS,
     Job,
@@ -144,8 +145,9 @@ class BuildPayload(RunPayload):
         if value is None:
             return None
         stripped = value.strip()
-        if not stripped:
-            raise ValueError("cmdline must not be blank")
+        error = cmdline_extra_error(stripped)
+        if error is not None:
+            raise ValueError(error)
         return stripped
 
     @field_validator("build_host_id")

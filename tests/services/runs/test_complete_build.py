@@ -759,6 +759,38 @@ def _prefix(run_id: Any) -> str:
     return f"local/runs/{run_id}/"
 
 
+def test_complete_build_rejects_after_investigation_closes(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE investigations SET state = 'closed' WHERE id = "
+                    "(SELECT investigation_id FROM runs WHERE id = %s)",
+                    (run_id,),
+                )
+            with pytest.raises(CompleteBuildConfigurationError) as caught:
+                await _complete(
+                    pool,
+                    run_id,
+                    CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(run_id))),
+                )
+            assert caught.value.data == {"reason": "investigation_not_accepting_upload"}
+            async with pool.connection() as conn:
+                assert (
+                    await (
+                        await conn.execute(
+                            "SELECT 1 FROM investigation_builds WHERE investigation_id = "
+                            "(SELECT investigation_id FROM runs WHERE id = %s)",
+                            (run_id,),
+                        )
+                    ).fetchone()
+                    is None
+                )
+
+    asyncio.run(_run())
+
+
 def test_complete_build_success_persists_run_step_artifacts_and_audit(migrated_url: str) -> None:
     """A successful non-chunked finalize persists the run/step/artifact/audit rows verbatim.
 

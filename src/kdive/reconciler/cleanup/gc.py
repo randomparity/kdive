@@ -125,6 +125,7 @@ _SYSTEM_TEARDOWN_ARTIFACT_PATTERNS: tuple[str, ...] = (
 _SYSTEM_ARTIFACT_KEYS_PER_PASS = 10
 _SYSTEM_ARTIFACT_CURSOR_LANE = "row-backed"
 _BUILD_GENERATIONS_PER_PASS = 50
+BUILD_GENERATION_RETRY_BACKOFF = timedelta(minutes=5)
 
 _UNPINNED_GENERATION_SQL = (
     "(ib.state = 'reclaiming' OR (ib.state = 'active' "
@@ -133,7 +134,9 @@ _UNPINNED_GENERATION_SQL = (
     "AND NOT EXISTS (SELECT 1 FROM jobs j JOIN runs r "
     "ON r.id::text = j.payload->>'run_id' "
     "WHERE r.investigation_id = ib.investigation_id AND r.build_ref = ib.build_ref "
-    "AND j.kind = 'install' AND j.state IN ('queued', 'running'))))"
+    "AND j.kind = 'install' AND j.state IN ('queued', 'running')) "
+    "AND NOT EXISTS (SELECT 1 FROM investigation_build_uses u "
+    "WHERE u.investigation_id = ib.investigation_id AND u.generation = ib.generation)))"
 )
 
 
@@ -205,6 +208,15 @@ async def _reclaim_generation(
                 store.delete_version, str(artifact["key"]), str(artifact["version_id"])
             )
         except Exception:  # noqa: BLE001 - preserve reclaiming state for a later pass
+            async with (
+                conn.transaction(),
+                advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
+            ):
+                await conn.execute(
+                    "UPDATE investigation_builds SET reclaim_retry_at = now() + %s "
+                    "WHERE investigation_id = %s AND generation = %s",
+                    (BUILD_GENERATION_RETRY_BACKOFF, investigation_id, generation),
+                )
             _log.warning(
                 "reconciler: deleting Investigation build generation %s failed; retry next pass",
                 generation,
@@ -243,6 +255,7 @@ async def _generation_candidates(
             await conn.execute(
                 "SELECT ib.investigation_id, ib.generation FROM investigation_builds ib "
                 "WHERE ib.investigation_id = %s AND " + _UNPINNED_GENERATION_SQL + " "
+                "AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now()) "
                 "ORDER BY ib.generation LIMIT %s",
                 (investigation_id, limit),
             )
@@ -250,18 +263,34 @@ async def _generation_candidates(
     elif expired:
         rows = await (
             await conn.execute(
-                "SELECT ib.investigation_id, ib.generation FROM investigation_builds ib "
-                "WHERE (ib.state = 'reclaiming' OR ib.expires_at <= now()) AND "
+                "WITH cursor AS (SELECT investigation_id, generation "
+                "FROM investigation_build_gc_cursor WHERE lane = 'expired'), eligible AS ("
+                "SELECT ib.investigation_id, ib.generation, row_number() OVER "
+                "(PARTITION BY ib.investigation_id ORDER BY ib.generation) AS tenant_rank "
+                "FROM investigation_builds ib WHERE "
+                "(ib.state = 'reclaiming' OR ib.expires_at <= now()) AND "
                 + _UNPINNED_GENERATION_SQL
-                + " ORDER BY ib.investigation_id, ib.generation LIMIT %s",
+                + " AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now())) "
+                "SELECT e.investigation_id, e.generation FROM eligible e CROSS JOIN cursor c "
+                "ORDER BY e.tenant_rank, CASE WHEN c.investigation_id IS NOT NULL AND "
+                "(e.investigation_id, e.generation) <= "
+                "(c.investigation_id, c.generation) THEN 1 ELSE 0 END, "
+                "e.investigation_id, e.generation LIMIT %s",
                 (limit,),
             )
         ).fetchall()
+        if rows:
+            await conn.execute(
+                "UPDATE investigation_build_gc_cursor SET investigation_id = %s, generation = %s "
+                "WHERE lane = 'expired'",
+                rows[-1],
+            )
     else:
         rows = await (
             await conn.execute(
                 "SELECT ib.investigation_id, ib.generation FROM investigation_builds ib WHERE "
                 + _UNPINNED_GENERATION_SQL
+                + " AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now())"
                 + " ORDER BY ib.investigation_id, ib.generation LIMIT %s",
                 (limit,),
             )

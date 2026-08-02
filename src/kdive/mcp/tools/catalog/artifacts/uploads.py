@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple, Protocol, cast
@@ -646,7 +647,13 @@ async def _run_accepts_upload(
     conn: AsyncConnection, owner_id: UUID, _resolver: ProviderResolver
 ) -> bool:
     run = await RUNS.get(conn, owner_id)
-    return run is not None and run.state is RunState.CREATED
+    if run is None or run.state is not RunState.CREATED:
+        return False
+    investigation = await INVESTIGATIONS.get(conn, run.investigation_id)
+    return investigation is not None and investigation.state in {
+        InvestigationState.OPEN,
+        InvestigationState.ACTIVE,
+    }
 
 
 async def _investigation_project(conn: AsyncConnection, owner_id: UUID) -> str | None:
@@ -744,6 +751,13 @@ async def _create_upload(
                 return validated
             entries = validated
 
+            parent_investigation_id: UUID | None = None
+            if spec.owner_kind == upload_manifest.RUN_UPLOAD_OWNER:
+                run = await RUNS.get(conn, uid)
+                if run is None:
+                    return _config_error(owner_id)
+                parent_investigation_id = run.investigation_id
+
             prefix = owner_prefix(_TENANT, spec.owner_kind, str(uid))
             try:
                 # `spec.project` above already ran a statement on this non-autocommit pooled
@@ -757,7 +771,15 @@ async def _create_upload(
                 # resolves the owner this lock is keyed by, so it cannot move inside the lock, and
                 # a guard here would refuse every valid call. Adding object-store I/O inside this
                 # block would change the answer.
-                async with conn.transaction(), advisory_xact_lock(conn, spec.lock_scope, uid):
+                async with AsyncExitStack() as locks:
+                    await locks.enter_async_context(conn.transaction())
+                    if parent_investigation_id is not None:
+                        await locks.enter_async_context(
+                            advisory_xact_lock(
+                                conn, LockScope.INVESTIGATION, parent_investigation_id
+                            )
+                        )
+                    await locks.enter_async_context(advisory_xact_lock(conn, spec.lock_scope, uid))
                     if not await spec.accepts_upload(conn, uid, resolver):
                         return _config_error(
                             owner_id, data={"reason": "owner_not_accepting_upload"}

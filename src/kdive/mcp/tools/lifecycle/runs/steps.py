@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -13,6 +14,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.capture import KDUMP_FAMILY
+from kdive.domain.cmdline import cmdline_extra_error
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.lifecycle.run_steps import RUN_STEP_RUNNING, RUN_STEP_SUCCEEDED
@@ -31,6 +33,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.serialization import JsonValue
 from kdive.services.runs.build_catalog import resolve_build
 from kdive.services.runs.steps import (
     build_baked_cmdline_extra,
@@ -85,13 +88,14 @@ async def install_run(
     uid = _as_uuid(run_id)
     if uid is None:
         return _invalid_uuid_error("run_id", run_id)
+    cmdline_error = cmdline_extra_error(cmdline)
+    if cmdline_error is not None:
+        return _config_error(run_id, data={"reason": cmdline_error})
     owned = platform_owned_cmdline_token(cmdline)
     if owned is not None:
         return _config_error(
             run_id, data={"reason": "cmdline_overrides_platform_args", "token": owned}
         )
-    if cmdline is not None and not cmdline.strip():
-        return _config_error(run_id, data={"reason": "cmdline_blank"})
     crashkernel_error = _crashkernel_error(run_id, crashkernel)
     if crashkernel_error is not None:
         return crashkernel_error
@@ -248,6 +252,10 @@ async def _reusable_build_install_error(conn: AsyncConnection, run: Run) -> Tool
                 "reason": "build_ref_expired",
                 "expires_at": build.expires_at.isoformat(),
                 "server_time": server_time.isoformat(),
+                "investigation_id": str(run.investigation_id),
+                "build_profile": cast("JsonValue", run.build_profile),
+                "system_id": str(run.system_id) if run.system_id is not None else None,
+                "target_kind": run.target_kind,
             },
         )
     return None

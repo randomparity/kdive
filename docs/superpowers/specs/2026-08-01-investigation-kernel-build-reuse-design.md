@@ -139,6 +139,8 @@ Create and reclaim take the Investigation advisory lock. Reclaim rechecks for no
 whose `build_ref` selects the generation and for queued or running install jobs on any referencing
 Run. Either condition defers deletion. Otherwise reclaim marks the generation `reclaiming` before
 deleting its exact object versions. A partial object-store failure keeps that state for retry.
+Failed deletes receive a database-clock retry delay. The global bounded pass rotates a durable
+cursor and takes at most one generation per Investigation before a second from any tenant.
 After deletion it removes only that generation's artifact rows and record, rechecking the state
 under the lock. A fresh publication of identical content uses a new generation and cannot be
 deleted or selected through the old record.
@@ -148,10 +150,16 @@ checks the generation deadline and enqueues or recycles the install job. A first
 at or after expiry returns `build_ref_expired` with `expires_at`, `server_time`, and `runs.create`
 as the first recovery action. The caller recreates without the expired reference and follows the
 upload flow. An unchanged already-succeeded install is an idempotent no-op and remains callable
-after expiry because it performs no artifact read. Once admission enqueues work, the queued/running
-job is the durable use fence; GC defers until the provider has consumed every object and the job
-settles. A failed job releases the fence, and retry after expiry follows recovery instead of reading
-possibly reclaimed objects.
+after expiry because it performs no artifact read. Once admission enqueues work, the queued job
+closes the gap until execution. Each executing install attempt records its own durable
+generation-use row before resolving artifact references and removes only that row after provider
+consumption. GC waits for every row independently of the shared job state, so cancellation or
+lease overlap cannot expose an older still-running attempt. A cleanup fault leaks a safe pin rather
+than permitting deletion.
+
+Caller-controlled build and install cmdline extras are trimmed and limited to 4096 printable
+characters at MCP ingress and at the service/worker boundaries before hashing, persistence, or
+provider use.
 
 The Investigation lock makes create-versus-reclaim deterministic. Concurrent source completions
 of identical content converge through the active-digest query under that lock and artifact

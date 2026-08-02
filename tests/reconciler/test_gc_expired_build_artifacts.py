@@ -38,6 +38,8 @@ def test_expired_generation_reclaims_by_absolute_deadline(migrated_url: str) -> 
         conn = await connect(migrated_url)
         investigation_id = uuid4()
         generation = uuid4()
+        job_id = uuid4()
+        use_id = uuid4()
         digest = "b" * 64
         build_ref = f"{digest}.{generation}"
         key = f"builds/{generation}/kernel"
@@ -66,12 +68,25 @@ def test_expired_generation_reclaims_by_absolute_deadline(migrated_url: str) -> 
                 "VALUES ('investigations', %s, %s, 'etag', 'sensitive', 'build')",
                 (investigation_id, key),
             )
+            await conn.execute(
+                "INSERT INTO jobs (id, kind, state, max_attempts, authorizing, dedup_key) "
+                "VALUES (%s, 'install', 'canceled', 3, '{}'::jsonb, %s)",
+                (job_id, f"fence-{job_id}"),
+            )
+            await conn.execute(
+                "INSERT INTO investigation_build_uses "
+                "(use_id, investigation_id, generation, job_id, attempt) "
+                "VALUES (%s, %s, %s, %s, 1)",
+                (use_id, investigation_id, generation, job_id),
+            )
         finally:
             await conn.close()
 
         store = _RecordingStore()
         conn = await connect(migrated_url)
         try:
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+            await conn.execute("DELETE FROM investigation_build_uses WHERE use_id = %s", (use_id,))
             assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
             result = await conn.execute(
                 "SELECT 1 FROM investigation_builds WHERE generation = %s", (generation,)
@@ -147,6 +162,11 @@ def test_reclaiming_generation_retries_exact_versions_without_touching_fresh_gen
                 )
             ).fetchone()
             assert state == ("reclaiming",)
+            await conn.execute(
+                "UPDATE investigation_builds SET reclaim_retry_at = now() - interval '1 second' "
+                "WHERE generation = %s",
+                (old_generation,),
+            )
             assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
             remaining = await (
                 await conn.execute(
@@ -282,6 +302,68 @@ def test_pinned_generation_does_not_consume_reclaim_budget(
             assert rows == [(pinned_generation,)]
         finally:
             await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_failed_generation_backs_off_without_starving_later_tenant(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        first_id, later_id = UUID(int=1), UUID(int=2)
+        first_generation, later_generation = UUID(int=11), UUID(int=22)
+        try:
+            for investigation_id, generation in (
+                (first_id, first_generation),
+                (later_id, later_generation),
+            ):
+                digest = f"{generation.int:064x}"
+                key = f"builds/{generation}/kernel"
+                await conn.execute(
+                    "INSERT INTO investigations (id, principal, project, title, state) "
+                    "VALUES (%s, 'p', 'proj', 't', 'active')",
+                    (investigation_id,),
+                )
+                await conn.execute(
+                    "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                    "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                    "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, "
+                    "'{}'::jsonb, %s::jsonb, 'local-libvirt', '{}'::jsonb, now() - interval '1s')",
+                    (
+                        investigation_id,
+                        generation,
+                        f"{digest}.{generation}",
+                        digest,
+                        Jsonb({"kernel": {"key": key, "version_id": f"v-{generation}"}}),
+                    ),
+                )
+        finally:
+            await conn.close()
+
+        class _FirstTenantFails(_RecordingStore):
+            def delete_version(self, key: str, version_id: str) -> None:
+                self.deleted.append(f"{key}@{version_id}")
+                if str(first_generation) in key:
+                    raise RuntimeError("permanent first-tenant fault")
+
+        monkeypatch.setattr(gc_module, "_BUILD_GENERATIONS_PER_PASS", 1)
+        store = _FirstTenantFails()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
+            retry = await (
+                await conn.execute(
+                    "SELECT reclaim_retry_at > now() FROM investigation_builds "
+                    "WHERE generation = %s",
+                    (first_generation,),
+                )
+            ).fetchone()
+            assert retry == (True,)
+        finally:
+            await conn.close()
+        assert any(str(later_generation) in deleted for deleted in store.deleted)
 
     asyncio.run(_run())
 

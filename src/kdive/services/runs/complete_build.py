@@ -28,9 +28,10 @@ from kdive.config.core_settings import (
     UPLOAD_WINDOW_MAX_TTL_MULTIPLE,
 )
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ARTIFACTS
-from kdive.domain.capacity.state import RunState
+from kdive.db.repositories import ARTIFACTS, INVESTIGATIONS
+from kdive.domain.capacity.state import InvestigationState, RunState
 from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.cmdline import cmdline_extra_error
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import Run
 from kdive.security import audit
@@ -146,6 +147,9 @@ class CompleteBuildFinalizer:
         source_provenance: dict[str, str | bool | list[str]] | None = None,
     ) -> BuildStepResult:
         """Validate uploads and finalize an external Run from ``created`` to ``succeeded``."""
+        cmdline_error = cmdline_extra_error(cmdline)
+        if cmdline_error is not None:
+            raise CompleteBuildConfigurationError({"reason": cmdline_error})
         try:
             prepared = await self._prepare(conn, run)
             validated = await self._validate_uploads(
@@ -438,6 +442,12 @@ async def _finalize_external_build(
         advisory_xact_lock(conn, LockScope.INVESTIGATION, run.investigation_id),
         advisory_xact_lock(conn, LockScope.RUN, run.id),
     ):
+        investigation = await INVESTIGATIONS.get(conn, run.investigation_id)
+        if investigation is None or investigation.state not in {
+            InvestigationState.OPEN,
+            InvestigationState.ACTIVE,
+        }:
+            raise CompleteBuildConfigurationError({"reason": "investigation_not_accepting_upload"})
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("SELECT state FROM runs WHERE id = %s FOR UPDATE", (run.id,))
             row = await cur.fetchone()

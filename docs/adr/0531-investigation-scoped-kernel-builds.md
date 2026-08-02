@@ -95,8 +95,10 @@ the deadline; success materializes the kernel onto the System, while failure rel
   deadline. Looking up or reusing a build does not extend retention.
 - Reuse bypasses build upload and validation because it selects an already validated immutable
   record. Install, boot, and debug behavior remain unchanged.
-- A queued or running install pins its generation. A delayed first install or restage after expiry
-  must recreate and upload; an already-installed unchanged variant remains an idempotent no-op.
+- A queued install and every independently executing install attempt pin their generation. A
+  canceled or lease-overlapped shared job cannot release another attempt's fence. A delayed first
+  install or restage after expiry must recreate and upload; an already-installed unchanged variant
+  remains an idempotent no-op.
 - The schema gains an investigation-build catalog and a nullable `runs.build_ref` audit link.
 
 ## Considered & rejected

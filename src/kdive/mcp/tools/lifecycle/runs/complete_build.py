@@ -10,6 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.upload_manifest import UPLOAD_WINDOW_EXPIRED
 from kdive.db.repositories import RUNS
+from kdive.domain.cmdline import cmdline_extra_error
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_provenance import external_source_provenance
 from kdive.kernel_config.gate import missing_effective_config_nudge, rootfs_mount_warning
@@ -64,6 +65,9 @@ class CompleteBuildHandlers:
         if uid is None:
             return _config_error(run_id)
         cmdline = _normalize_cmdline(cmdline)
+        cmdline_error = cmdline_extra_error(cmdline)
+        if cmdline_error is not None:
+            return _config_error(run_id, data={"reason": cmdline_error})
         owned = platform_owned_cmdline_token(cmdline)
         if owned is not None:
             return _config_error(

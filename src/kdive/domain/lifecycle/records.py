@@ -152,6 +152,7 @@ class InvestigationBuild(DomainBase):
     expires_at: datetime
     created_at: datetime
     updated_at: datetime
+    reclaim_retry_at: datetime | None = None
 
 
 class ExpectedBootFailure(DomainBase):

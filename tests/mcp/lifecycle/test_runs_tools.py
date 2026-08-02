@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, LiteralString, cast
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
@@ -450,6 +451,10 @@ def test_install_expired_build_ref_rejects_before_enqueue(migrated_url: str) -> 
         assert isinstance(expires_at, str)
         assert isinstance(server_time, str)
         assert expires_at <= server_time
+        assert response.data["investigation_id"] == str(run.investigation_id)
+        assert response.data["build_profile"] == run.build_profile
+        assert response.data["system_id"] == str(run.system_id)
+        assert response.data["target_kind"] == run.target_kind
         assert response.suggested_next_actions == ["runs.create"]
         assert n_jobs == 0
 
@@ -3827,6 +3832,27 @@ def test_install_rejects_blank_cmdline(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize(
+    ("cmdline", "reason"),
+    [("x" * 4097, "cmdline_too_long"), ("quiet\x00debug", "cmdline_not_printable")],
+)
+def test_install_rejects_unsafe_cmdline(migrated_url: str, cmdline: str, reason: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                cmdline=cmdline,
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == reason
+
+    asyncio.run(_run())
+
+
 def test_install_enqueues_install_payload_with_cmdline(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -4822,14 +4848,38 @@ def test_queued_install_admitted_before_expiry_runs_after_expiry(migrated_url: s
                 )
                 job = await JOBS.get(conn, UUID(admitted.object_id))
                 assert job is not None
-                installer = _FakeInstaller()
+                await conn.commit()
+                await conn.set_autocommit(True)
+
+                class _FenceObservingInstaller(_FakeInstaller):
+                    observed_uses = 0
+
+                    def install(self, request) -> None:
+                        with psycopg.connect(migrated_url) as observer:
+                            row = observer.execute(
+                                "SELECT count(*) FROM investigation_build_uses WHERE job_id = %s",
+                                (job.id,),
+                            ).fetchone()
+                            assert row is not None
+                            self.observed_uses = row[0]
+                        super().install(request)
+
+                installer = _FenceObservingInstaller()
                 result = await runs_handlers.install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
                 )
+                remaining = await (
+                    await conn.execute(
+                        "SELECT count(*) FROM investigation_build_uses WHERE job_id = %s", (job.id,)
+                    )
+                ).fetchone()
+                await conn.set_autocommit(False)
         assert result == run_id
         assert len(installer.calls) == 1
+        assert installer.observed_uses == 1
+        assert remaining == (0,)
 
     asyncio.run(_run())
 

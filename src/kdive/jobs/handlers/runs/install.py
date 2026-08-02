@@ -25,6 +25,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.lifecycle import Installer, InstallRequest
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
+from kdive.services.runs.build_use import acquire_build_use, release_build_use
 from kdive.services.runs.steps import (
     cmdline_for,
     existing_build_result,
@@ -63,13 +64,17 @@ async def install_handler(
     longer has a registered worker handler, so compatibility decoding stays out of this boundary.
     """
     payload = _install_payload_context(job)
-    plan = await _resolve_install_plan(conn, payload, resolver)
-    job_ctx = job_context_from_job(job, plan.run.project)
-    claimed = await _run_install_step(conn, payload.run_id, plan.installer, plan.request)
-    if not claimed:
+    use_id = await acquire_build_use(conn, payload.run_id, job_id=job.id, attempt=job.attempt)
+    try:
+        plan = await _resolve_install_plan(conn, payload, resolver)
+        job_ctx = job_context_from_job(job, plan.run.project)
+        claimed = await _run_install_step(conn, payload.run_id, plan.installer, plan.request)
+        if not claimed:
+            return str(payload.run_id)
+        await _complete_install_step(conn, job_ctx, plan)
         return str(payload.run_id)
-    await _complete_install_step(conn, job_ctx, plan)
-    return str(payload.run_id)
+    finally:
+        await release_build_use(conn, use_id)
 
 
 def _install_payload_context(job: Job) -> _InstallPayloadContext:
