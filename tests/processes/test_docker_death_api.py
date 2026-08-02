@@ -95,6 +95,32 @@ def test_gate_records_sigkill_as_killed_before_removal() -> None:
     assert outcomes == ["killed"]
 
 
+def test_gate_reconciles_retained_terminal_worker_before_requesting_replacement() -> None:
+    container_id = "a" * 64
+    nonce = "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret
+    state = _worker(container_id, nonce, status="exited")
+    events: list[str] = []
+
+    async def terminate(holder: str, outcome: str) -> None:
+        events.append("terminate")
+
+    async def remove(value: str) -> None:
+        events.append("remove")
+
+    gate = WorkerLifecycleGate(
+        project="kdive",
+        inspect=lambda value: state,
+        register=lambda holder, binding: _done(),
+        terminate=terminate,
+        start=_done,
+        stop=_done,
+        remove=remove,
+    )
+
+    assert asyncio.run(gate.reconcile(container_id)) is True
+    assert events == ["terminate", "remove"]
+
+
 def test_gate_refuses_short_ids_and_wrong_exact_binding() -> None:
     container_id = "a" * 64
     nonce = "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret

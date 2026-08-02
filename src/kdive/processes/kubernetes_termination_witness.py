@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import ssl
 import urllib.error
 import urllib.parse
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 FINALIZER = "kdive.io/worker-termination-evidence"
+_log = logging.getLogger(__name__)
+_CONFLICT_RETRIES = 3
 
 type ReadPod = Callable[[str, str], Mapping[str, Any] | None]
 type PatchFinalizers = Callable[[str, str, list[dict[str, object]]], Awaitable[None]]
@@ -78,12 +81,17 @@ def patch_finalizers(namespace: str, name: str, operations: list[dict[str, objec
         response.read(1)
 
 
-async def run_witness(witness: KubernetesTerminationWitness, stop: asyncio.Event) -> None:
+async def run_witness(
+    witness: KubernetesTerminationWitness, stop: asyncio.Event, *, interval: float = 5
+) -> None:
     """Run bounded sweeps until process shutdown; failures retain finalizers."""
     while not stop.is_set():
-        await witness.sweep_once()
+        try:
+            await witness.sweep_once()
+        except Exception:  # noqa: BLE001 -- authority/DB outage must retain and retry
+            _log.warning("Kubernetes worker termination witness sweep failed", exc_info=True)
         with suppress(TimeoutError):
-            await asyncio.wait_for(stop.wait(), timeout=5)
+            await asyncio.wait_for(stop.wait(), timeout=interval)
 
 
 def _terminal_claim(pod: Mapping[str, Any]) -> tuple[str, str, str, int] | None:
@@ -129,25 +137,33 @@ class KubernetesTerminationWitness:
         completed = 0
         for ordinal in range(self.ordinal_ceiling):
             name = f"{self.worker_name}-{ordinal}"
-            pod = self.read_pod(self.namespace, name)
-            if pod is None or (claim := _terminal_claim(pod)) is None:
-                continue
-            uid, resource_version, phase, index = claim
-            holder = f"kubernetes:{self.namespace}:{name}:{uid}"
-            await self.terminate(holder, f"kubernetes_pod_{phase}")
-            operations: list[dict[str, object]] = [
-                {
-                    "op": "test",
-                    "path": "/metadata/resourceVersion",
-                    "value": resource_version,
-                },
-                {
-                    "op": "test",
-                    "path": f"/metadata/finalizers/{index}",
-                    "value": FINALIZER,
-                },
-                {"op": "remove", "path": f"/metadata/finalizers/{index}"},
-            ]
-            await self.patch_finalizers(self.namespace, name, operations)
-            completed += 1
+            for attempt in range(_CONFLICT_RETRIES):
+                pod = self.read_pod(self.namespace, name)
+                if pod is None or (claim := _terminal_claim(pod)) is None:
+                    break
+                uid, resource_version, phase, index = claim
+                holder = f"kubernetes:{self.namespace}:{name}:{uid}"
+                await self.terminate(holder, f"kubernetes_pod_{phase}")
+                operations: list[dict[str, object]] = [
+                    {
+                        "op": "test",
+                        "path": "/metadata/resourceVersion",
+                        "value": resource_version,
+                    },
+                    {
+                        "op": "test",
+                        "path": f"/metadata/finalizers/{index}",
+                        "value": FINALIZER,
+                    },
+                    {"op": "remove", "path": f"/metadata/finalizers/{index}"},
+                ]
+                try:
+                    await self.patch_finalizers(self.namespace, name, operations)
+                except urllib.error.HTTPError as exc:
+                    if exc.code != 409:
+                        raise
+                    await asyncio.sleep(0.05 * (2**attempt))
+                    continue
+                completed += 1
+                break
         return completed

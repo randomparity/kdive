@@ -16,9 +16,16 @@ def _commands(events: list[tuple[str, object]]) -> list[_CommandEvent]:
 
 
 class _Gate:
-    def __init__(self, events: list[tuple[str, object]], *, fail_register: bool = False) -> None:
+    def __init__(
+        self,
+        events: list[tuple[str, object]],
+        *,
+        fail_register: bool = False,
+        needs_replacement: bool = False,
+    ) -> None:
         self.events = events
         self.fail_register = fail_register
+        self.needs_replacement = needs_replacement
 
     async def register_and_start(self, container_id: str) -> None:
         self.events.append(("register-and-start", container_id))
@@ -28,9 +35,16 @@ class _Gate:
     async def terminate_and_remove(self, container_id: str) -> None:
         self.events.append(("terminate-and-remove", container_id))
 
+    async def reconcile(self, container_id: str) -> bool:
+        self.events.append(("reconcile", container_id))
+        return self.needs_replacement
+
 
 def _lifecycle(
-    *, fail_register: bool = False, initially_created: bool = False
+    *,
+    fail_register: bool = False,
+    initially_created: bool = False,
+    needs_replacement: bool = False,
 ) -> tuple[ComposeWorkerLifecycle, list[tuple[str, object]]]:
     events: list[tuple[str, object]] = []
     container_id = "a" * 64
@@ -46,7 +60,11 @@ def _lifecycle(
     return (
         ComposeWorkerLifecycle(
             command=command,
-            gate=_Gate(events, fail_register=fail_register),
+            gate=_Gate(
+                events,
+                fail_register=fail_register,
+                needs_replacement=needs_replacement,
+            ),
             nonce=lambda: _NONCE,
         ),
         events,
@@ -87,8 +105,19 @@ def test_retry_resumes_an_existing_never_started_worker() -> None:
 
     asyncio.run(lifecycle.up())
 
-    assert ("register-and-start", "a" * 64) in events
+    assert ("reconcile", "a" * 64) in events
     assert not any(
+        event[0][-3:] == ("create", "--no-recreate", "worker") for event in _commands(events)
+    )
+
+
+def test_up_reconciles_terminal_worker_before_creating_replacement() -> None:
+    lifecycle, events = _lifecycle(initially_created=True, needs_replacement=True)
+
+    asyncio.run(lifecycle.up())
+
+    assert ("reconcile", "a" * 64) in events
+    assert any(
         event[0][-3:] == ("create", "--no-recreate", "worker") for event in _commands(events)
     )
 

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import json
 import os
+import re
 import secrets
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Protocol
 
 import psycopg
@@ -25,6 +29,7 @@ type Command = Callable[[tuple[str, ...], dict[str, str] | None], str]
 
 _COMPOSE = ("docker", "compose")
 _PROFILE = ("--profile", "managed-worker")
+_PROJECT = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}")
 
 
 class LifecycleGate(Protocol):
@@ -33,6 +38,8 @@ class LifecycleGate(Protocol):
     async def register_and_start(self, container_id: str) -> None: ...
 
     async def terminate_and_remove(self, container_id: str) -> None: ...
+
+    async def reconcile(self, container_id: str) -> bool: ...
 
 
 class ComposeWorkerLifecycle:
@@ -68,10 +75,8 @@ class ComposeWorkerLifecycle:
         """Start the non-worker graph, then create, bind, and start the worker."""
         self._command((*_COMPOSE, "up", "-d", "--wait", "--wait-timeout", "120"), None)
         current = self._worker_id()
-        if current is None:
+        if current is None or await self._gate.reconcile(current):
             await self._create()
-        else:
-            await self._gate.register_and_start(current)
 
     async def recreate(self) -> None:
         """Terminate the old generation before creating its replacement."""
@@ -151,15 +156,34 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+@contextmanager
+def _lifecycle_lock(project: str):
+    if not _PROJECT.fullmatch(project):
+        raise RuntimeError("Compose project name is invalid for the lifecycle lock")
+    path = Path(f"/tmp/kdive-compose-worker-{project}.lock")
+    with path.open("a+", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                f"another worker lifecycle operation is active for Compose project {project}"
+            ) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parser().parse_args(argv)
-    lifecycle = _lifecycle(args.project)
-    if args.action == "up":
-        asyncio.run(lifecycle.up())
-    elif args.action == "recreate":
-        asyncio.run(lifecycle.recreate())
-    else:
-        asyncio.run(lifecycle.down(volumes=args.volumes))
+    with _lifecycle_lock(args.project):
+        lifecycle = _lifecycle(args.project)
+        if args.action == "up":
+            asyncio.run(lifecycle.up())
+        elif args.action == "recreate":
+            asyncio.run(lifecycle.recreate())
+        else:
+            asyncio.run(lifecycle.down(volumes=args.volumes))
 
 
 if __name__ == "__main__":

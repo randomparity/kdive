@@ -75,6 +75,24 @@ class WorkerLifecycleGate:
         await self.register(holder, container_id)
         await self.start(container_id)
 
+    async def reconcile(self, container_id: str) -> bool:
+        """Reconcile one retained worker; return whether a replacement must be created."""
+        holder, container = self._identity(container_id)
+        state = _nested_mapping(container.get("State"))
+        status = state.get("Status") if state is not None else None
+        if status == "created":
+            await self.register(holder, container_id)
+            await self.start(container_id)
+            return False
+        if status == "running":
+            # Exact idempotent registration proves the running container matches its active row.
+            await self.register(holder, container_id)
+            return False
+        if status in {"exited", "dead"}:
+            await self.terminate_and_remove(container_id)
+            return True
+        raise RuntimeError("managed worker has no reconcilable retained Docker state")
+
     async def terminate_and_remove(self, container_id: str) -> None:
         """Persist exact terminal evidence before removing Docker's retained record."""
         holder, container = self._identity(container_id)
