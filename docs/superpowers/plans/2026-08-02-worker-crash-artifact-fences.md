@@ -337,7 +337,8 @@ Commit with: `feat: preserve compose worker termination evidence`
 
 Cover pre-start registration, never-started-but-registered terminal Pod, truly unregistered terminal
 Pod, invalid/audience-mismatched/unbound tokens, one-time consume replay, UID replacement, rollout,
-scale-down, API/database failure, ordinal ceiling decrease, and exact JSON Patch tests.
+scale-down, API/database failure, a dropped response after committed consumption followed by normal
+finalized Pod deletion and fresh-UID replacement, ordinal ceiling decrease, and exact JSON Patch tests.
 
 - [ ] **Step 2: Run red Kubernetes/Helm tests**
 
@@ -351,6 +352,8 @@ credential consume → init-only tmpfs handoff → worker gate. Terminal process
 existing binding → persist termination → patch exact finalizer. Each pass handles at most the configured
 count capped at 1,000 and leaves retryable state on failure. Ordinal reuse cannot overwrite a credential:
 registration and consumption compare the exact UID, and a consumed credential is never reissued.
+If delivery is lost after consumption, refuse replay and keep the init gated; normal Pod deletion runs
+the witness/finalizer path and the StatefulSet replacement starts with a fresh UID and credential.
 
 - [ ] **Step 4: Minimize RBAC and prove rendering**
 

@@ -52,7 +52,9 @@ worker receives neither the projected token nor an API-readable Secret. Thus a t
 worker never started still has a pre-start, authority-bound identity; the witness may terminate it but
 may not invent a different holder after the fact. The witness compare-and-sets namespace, name, UID,
 resource version, and credential-record state before removing the finalizer. API or database failure
-retains the runtime object and fence.
+retains the runtime object and fence. A lost response after credential consumption is not replayed: the
+init remains gated, normal Pod termination/finalizer evidence closes that unused incarnation, and the
+StatefulSet replacement receives a fresh UID and credential.
 
 Identity text is at most 512 bytes; serialized authority bindings and Kubernetes names are capped before
 persistence; recovery actor, evidence, and reason retain their schema caps of 255, 1024, and 512 bytes.

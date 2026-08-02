@@ -124,6 +124,12 @@ this pre-start record, so the witness terminates that existing identity rather t
 post-hoc holder. It removes only its own finalizer with resource-version, UID, and binding tests.
 API/database failure leaves the Pod unchanged. Ordinal history can increase but not decrease.
 
+Credential consumption and response delivery cannot be atomic. If the controller commits consumption
+but the response is lost, it refuses replay and the init remains gated. The Pod terminates through the
+normal finalizer/witness path, which records that unused incarnation's terminal evidence before
+deletion; the StatefulSet replacement has a fresh UID and receives a new credential. Operators recover
+by deleting the gated Pod normally, never by removing its finalizer or resetting consumption.
+
 ### Recovery, GC, and tenancy
 
 Operator recovery resolves the caller's project authorization before selecting a use. Inputs and pages
@@ -147,6 +153,8 @@ object-store failure leaves the row/tombstone retryable and never widens the del
 - Provider cancellation: caller observes cancellation only after the provider thread exits; process
   death retains the use.
 - Witness database/API failure: runtime object and finalizer remain; no termination is inferred.
+- Consumed Kubernetes credential with lost response: replay is refused; worker remains gated; operator
+  normally deletes the Pod so witness evidence precedes replacement with a fresh UID.
 - Conflicting registration/termination replay: fail closed and preserve the first immutable facts.
 - Unauthorized SQL operation: permission denied, with no protected-table mutation.
 - Recovery mismatch: audited refusal where the operator surface requires it; use remains pinned.
@@ -199,8 +207,9 @@ These actors already control the evidence boundary or are excluded deployment pa
    bypass refusal while preserving the exact container evidence.
 7. Helm/controller tests cover rollout, scale-down, terminal Pods whose worker never started but whose
    UID was lifecycle-registered before startup, bound-token rejection, one-time credential consumption,
-   API/database outage, UID replacement, finalizer fencing, ordinal bounds, and credential separation.
-   A truly unregistered terminal Pod cannot produce termination evidence or authorize fence recovery.
+   dropped post-consume response and normal replacement recovery, API/database outage, UID replacement,
+   finalizer fencing, ordinal bounds, and credential separation. A truly unregistered terminal Pod
+   cannot produce termination evidence or authorize fence recovery.
 8. Deployment tests prove migration credentials are absent from runtime containers, role-specific
    credentials are wired, and the stop-old-first protocol is documented and structurally enforced.
 9. Focused suites pass, then the repository gate `just ci` passes without warnings.
