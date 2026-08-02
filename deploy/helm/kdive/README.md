@@ -34,7 +34,7 @@ rollback is image-only and the prior image must tolerate the newer schema.
 
 The external artifact bucket must have bucket-wide versioning `Enabled`, MFA Delete off, and no
 provider-specific prefix or folder exclusions. Grant the runtime identity its existing object
-permissions plus `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and
+permissions plus `s3:GetObjectVersion`, `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and
 `s3:DeleteObjectVersion`. The standard S3 response cannot expose MinIO exclusions, so verify that
 provider policy separately.
 
