@@ -14,10 +14,12 @@ from kdive.processes.runtime import (
     readiness,
     run_process_runtime,
 )
-from kdive.processes.worker_incarnation import worker_incarnation_registration
+from kdive.processes.worker_incarnation import (
+    worker_incarnation_credential,
+    worker_incarnation_id,
+)
 from kdive.services.runs.worker_incarnations import (
-    register_worker_incarnation,
-    verify_active_worker_incarnation,
+    authenticate_worker_incarnation,
 )
 
 if TYPE_CHECKING:
@@ -36,7 +38,9 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
     from kdive.store.objectstore import object_store_from_env
 
     stop = install_stop()
-    worker_id, authority_kind, authority_binding = worker_incarnation_registration(os.getpid())
+    configured_worker_id = worker_incarnation_id(os.getpid())
+    incarnation_credential = worker_incarnation_credential()
+    secret_registry.register(incarnation_credential.get_secret_value(), scope=None)
 
     def build_probe(pool: AsyncConnectionPool) -> HealthProbe:
         return build_worker_probe(
@@ -47,17 +51,15 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
         pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe
     ) -> None:
         async with pool.connection() as conn:
-            if authority_kind == "docker":
-                await verify_active_worker_incarnation(conn, worker_id, authority_kind)
-            else:
-                assert authority_binding is not None
-                await register_worker_incarnation(
-                    conn, worker_id, authority_kind, authority_binding
-                )
+            incarnation = await authenticate_worker_incarnation(conn, incarnation_credential)
+        if incarnation.incarnation != configured_worker_id:
+            raise RuntimeError(
+                "authenticated worker incarnation does not match configured runtime identity"
+            )
         worker = Worker(
             pool,
             build_handler_registry(secret_registry=secret_registry),
-            worker_id=worker_id,
+            worker_id=incarnation.incarnation,
             secret_registry=secret_registry,
             config=WorkerConfig(
                 heartbeat=heartbeat,

@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
+from pydantic import SecretStr
 
 from kdive.db.locks import LockScope, advisory_xact_lock, require_top_level_transaction
 from kdive.db.repositories import RUNS
@@ -11,7 +12,12 @@ from kdive.services.runs.build_catalog import resolve_build
 
 
 async def acquire_build_use(
-    conn: AsyncConnection, run_id: UUID, *, job_id: UUID, attempt: int
+    conn: AsyncConnection,
+    run_id: UUID,
+    *,
+    job_id: UUID,
+    attempt: int,
+    incarnation_credential: SecretStr,
 ) -> UUID | None:
     """Fence a reusable generation for this exact executing job attempt."""
     require_top_level_transaction(conn, "acquire_build_use")
@@ -27,50 +33,45 @@ async def acquire_build_use(
         build = await resolve_build(conn, run.investigation_id, run.build_ref)
         if build is None or build.state != "active":
             raise RuntimeError("reusable build became unavailable before install execution")
-        claim = await (
+        acquired = await (
             await conn.execute(
-                "SELECT worker_id, lease_expires_at FROM jobs WHERE id = %s "
-                "AND state = 'running' AND attempt = %s FOR UPDATE",
-                (job_id, attempt),
-            )
-        ).fetchone()
-        if claim is None or claim[0] is None or claim[1] is None:
-            raise RuntimeError("install job no longer has a live executing claim")
-        async with advisory_xact_lock(conn, LockScope.WORKER_INCARNATION, claim[0]):
-            incarnation = await (
-                await conn.execute(
-                    "SELECT state FROM worker_incarnations WHERE incarnation = %s FOR UPDATE",
-                    (claim[0],),
-                )
-            ).fetchone()
-            if incarnation is None:
-                raise RuntimeError("install worker incarnation is not registered")
-            if incarnation[0] != "active":
-                raise RuntimeError("install worker incarnation is terminated")
-            await conn.execute(
-                "INSERT INTO investigation_build_uses "
-                "(use_id, investigation_id, generation, job_id, attempt, holder_worker_id, "
-                "lease_expires_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                "SELECT public.acquire_investigation_build_use(%s, %s, %s, %s, %s, "
+                "sha256(convert_to(%s, 'UTF8')))",
                 (
                     use_id,
                     run.investigation_id,
                     build.generation,
                     job_id,
                     attempt,
-                    claim[0],
-                    claim[1],
+                    incarnation_credential.get_secret_value(),
                 ),
             )
+        ).fetchone()
+        assert acquired is not None
+        if not acquired[0]:
+            raise RuntimeError("install job has no credential-owned executing claim")
     return use_id
 
 
-async def release_build_use(conn: AsyncConnection, use_id: UUID | None) -> None:
+async def release_build_use(
+    conn: AsyncConnection,
+    use_id: UUID | None,
+    *,
+    incarnation_credential: SecretStr,
+) -> bool:
     """Release only this executing attempt's fence; a failure remains a safe pin."""
     if use_id is None:
-        return
+        return True
     require_top_level_transaction(conn, "release_build_use")
     async with conn.transaction():
-        await conn.execute("DELETE FROM investigation_build_uses WHERE use_id = %s", (use_id,))
+        row = await (
+            await conn.execute(
+                "SELECT public.release_investigation_build_use(%s, sha256(convert_to(%s, 'UTF8')))",
+                (use_id, incarnation_credential.get_secret_value()),
+            )
+        ).fetchone()
+    assert row is not None
+    return bool(row[0])
 
 
 async def recover_build_use_after_confirmed_worker_death(

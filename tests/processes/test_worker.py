@@ -7,11 +7,13 @@ from collections.abc import Awaitable, Callable
 from typing import cast
 
 import pytest
+from pydantic import SecretStr
 
 from kdive.jobs.worker import WorkerConfig
 from kdive.observability.facade import Telemetry
 from kdive.processes.worker import run_worker
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.runs.worker_incarnations import WorkerIncarnation
 
 
 def _telemetry() -> Telemetry:
@@ -51,11 +53,12 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     pool = _Pool()
     probe = object()
     stop = asyncio.Event()
+    incarnation_credential = SecretStr("authority-delivered-credential")
 
     monkeypatch.setattr("kdive.processes.worker.create_pool", lambda **kw: pool)
+    monkeypatch.setattr("kdive.processes.worker.worker_incarnation_id", lambda pid: "docker:nonce")
     monkeypatch.setattr(
-        "kdive.processes.worker.worker_incarnation_registration",
-        lambda pid: ("docker:nonce", "docker", None),
+        "kdive.processes.worker.worker_incarnation_credential", lambda: incarnation_credential
     )
     monkeypatch.setattr("kdive.processes.worker.install_stop", lambda: stop)
     monkeypatch.setattr("kdive.health.processes.server.build_postgres_ping", lambda value: value)
@@ -109,18 +112,71 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
         assert built_probe["postgres_ping"] is pool
         store = cast(Callable[[], str], built_probe["store"])
         assert store() == "store"
-        monkeypatch.setattr(
-            "kdive.processes.worker.verify_active_worker_incarnation",
-            lambda *args: _record_registration(events),
-        )
+
+        async def authenticate(conn: object, credential: SecretStr) -> WorkerIncarnation:
+            assert credential is incarnation_credential
+            events.append("authenticate")
+            return WorkerIncarnation(
+                incarnation="docker:nonce",
+                authority_kind="docker",
+                authority_binding={"container_id": "a" * 64},
+                fence_protocol=1,
+            )
+
+        monkeypatch.setattr("kdive.processes.worker.authenticate_worker_incarnation", authenticate)
         await body(pool, "heartbeat", probe)
 
     monkeypatch.setattr("kdive.processes.worker.run_process_runtime", _runtime)
 
     asyncio.run(run_worker(secret_registry, _telemetry()))
 
-    assert events == ["register", "init", "run"]
+    assert events == ["authenticate", "init", "run"]
+    assert secret_registry.snapshot() == frozenset({"authority-delivered-credential"})
 
 
-async def _record_registration(events: list[str]) -> None:
-    events.append("register")
+def test_run_worker_refuses_a_credential_bound_to_another_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    secret_registry = SecretRegistry()
+    credential = SecretStr("wrong-holder-credential")
+
+    class _ConnectionContext:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class _Pool:
+        def connection(self) -> _ConnectionContext:
+            return _ConnectionContext()
+
+    pool = _Pool()
+    monkeypatch.setattr("kdive.processes.worker.create_pool", lambda **kw: pool)
+    monkeypatch.setattr(
+        "kdive.processes.worker.worker_incarnation_id", lambda pid: "docker:configured"
+    )
+    monkeypatch.setattr("kdive.processes.worker.worker_incarnation_credential", lambda: credential)
+    monkeypatch.setattr("kdive.processes.worker.install_stop", asyncio.Event)
+
+    async def authenticate(conn: object, supplied: SecretStr) -> WorkerIncarnation:
+        return WorkerIncarnation(
+            incarnation="docker:other",
+            authority_kind="docker",
+            authority_binding={"container_id": "b" * 64},
+            fence_protocol=1,
+        )
+
+    monkeypatch.setattr("kdive.processes.worker.authenticate_worker_incarnation", authenticate)
+    monkeypatch.setattr("kdive.jobs.worker.Worker", lambda *args, **kwargs: events.append("init"))
+
+    async def _runtime(**kwargs: object) -> None:
+        body = cast(Callable[[object, object, object], Awaitable[None]], kwargs["body"])
+        await body(pool, "heartbeat", object())
+
+    monkeypatch.setattr("kdive.processes.worker.run_process_runtime", _runtime)
+
+    with pytest.raises(RuntimeError, match="does not match configured runtime identity"):
+        asyncio.run(run_worker(secret_registry, _telemetry()))
+    assert events == []

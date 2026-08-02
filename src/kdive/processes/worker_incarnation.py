@@ -12,7 +12,9 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
+
+from pydantic import SecretStr
 
 import kdive.config as config
 from kdive.config.core_settings import (
@@ -27,6 +29,7 @@ from kdive.config.core_settings import (
 
 _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _PROC_ROOT = Path("/proc")
+_INCARNATION_CREDENTIAL = Path("/run/kdive/worker-incarnation-credential")
 _CONTAINER_ID = re.compile(r"[0-9a-f]{12}(?:[0-9a-f]{52})?")
 _KUBE_NAME = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?")
 
@@ -73,40 +76,12 @@ def worker_incarnation_id(
     return f"{socket.gethostname()}:{pid}:{boot_id}:{_start_ticks(stat)}"
 
 
-def worker_incarnation_registration(
-    pid: int,
-    *,
-    boot_id_path: Path = _BOOT_ID,
-    stat_path: Path | None = None,
-) -> tuple[str, Literal["local", "docker", "kubernetes"], dict[str, Any] | None]:
-    """Return the exact identity and immutable authority binding registered at startup."""
-    kind = config.require(WORKER_INCARNATION_KIND)
-    incarnation = worker_incarnation_id(pid, boot_id_path=boot_id_path, stat_path=stat_path)
-    if kind == "docker":
-        return incarnation, kind, None
-    if kind == "kubernetes":
-        return (
-            incarnation,
-            kind,
-            {
-                "pod_namespace": config.require(POD_NAMESPACE),
-                "pod_name": config.require(POD_NAME),
-                "pod_uid": config.require(POD_UID),
-            },
-        )
-    if kind != "local":
-        raise RuntimeError(f"unsupported worker incarnation kind: {kind}")
-    host, raw_pid, boot_id, start_ticks = incarnation.rsplit(":", 3)
-    return (
-        incarnation,
-        kind,
-        {
-            "host": host,
-            "pid": int(raw_pid),
-            "boot_id": boot_id,
-            "start_ticks": start_ticks,
-        },
-    )
+def worker_incarnation_credential(path: Path = _INCARNATION_CREDENTIAL) -> SecretStr:
+    """Load the authority-delivered credential from its init-only runtime handoff."""
+    value = path.read_text(encoding="utf-8").strip()
+    if not value:
+        raise RuntimeError("worker incarnation credential handoff is empty")
+    return SecretStr(value)
 
 
 @dataclass(frozen=True, slots=True)

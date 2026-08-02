@@ -7,6 +7,7 @@ Console (system-owned), build-log (run-owned evidence), and system-owned uploads
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import timedelta
 from uuid import UUID, uuid4
@@ -197,7 +198,14 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
                 reason="dead worker cleanup",
             )
             for holder in ("dead-worker", "recycled-worker"):
-                await register_worker_incarnation(conn, holder, "local", {"test_identity": holder})
+                await register_worker_incarnation(
+                    conn,
+                    holder,
+                    "local",
+                    {"test_identity": holder},
+                    hashlib.sha256(holder.encode()).digest(),
+                    1,
+                )
                 await terminate_worker_incarnation(conn, holder, "failed")
             assert await recover_build_use_after_confirmed_worker_death(
                 conn,

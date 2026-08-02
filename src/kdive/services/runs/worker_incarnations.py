@@ -1,15 +1,15 @@
-"""Permanent registration and termination evidence for exact worker incarnations."""
+"""Role-gated registration and authentication for exact worker incarnations."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Literal, cast
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, errors
 from psycopg.types.json import Jsonb
+from pydantic import SecretStr
 
-from kdive.db.locks import LockScope, advisory_xact_lock, require_top_level_transaction
+from kdive.db.locks import require_top_level_transaction
 
 type AuthorityKind = Literal["local", "docker", "kubernetes"]
 type TerminationOutcome = Literal["succeeded", "failed", "killed"]
@@ -19,17 +19,18 @@ class IncarnationConflict(RuntimeError):
     """An immutable incarnation was replayed with conflicting facts."""
 
 
+class IncarnationAuthenticationError(RuntimeError):
+    """A credential did not identify an active worker incarnation."""
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerIncarnation:
-    """One permanent exact-incarnation record."""
+    """Public immutable facts for one authority-registered incarnation."""
 
     incarnation: str
     authority_kind: AuthorityKind
     authority_binding: dict[str, Any]
-    state: Literal["active", "terminated"]
-    recorded_at: datetime
-    terminated_at: datetime | None
-    outcome: TerminationOutcome | None
+    fence_protocol: int
 
 
 def _record(row: tuple[Any, ...]) -> WorkerIncarnation:
@@ -37,105 +38,76 @@ def _record(row: tuple[Any, ...]) -> WorkerIncarnation:
         incarnation=cast(str, row[0]),
         authority_kind=cast(AuthorityKind, row[1]),
         authority_binding=cast(dict[str, Any], row[2]),
-        state=cast(Literal["active", "terminated"], row[3]),
-        recorded_at=cast(datetime, row[4]),
-        terminated_at=cast(datetime | None, row[5]),
-        outcome=cast(TerminationOutcome | None, row[6]),
+        fence_protocol=cast(int, row[3]),
     )
-
-
-async def _get_locked(conn: AsyncConnection, incarnation: str) -> WorkerIncarnation | None:
-    row = await (
-        await conn.execute(
-            "SELECT incarnation, authority_kind, authority_binding, state, recorded_at, "
-            "terminated_at, outcome FROM worker_incarnations WHERE incarnation = %s FOR UPDATE",
-            (incarnation,),
-        )
-    ).fetchone()
-    return None if row is None else _record(row)
 
 
 async def register_worker_incarnation(
     conn: AsyncConnection,
     incarnation: str,
     authority_kind: AuthorityKind,
-    authority_binding: dict[str, Any],
+    binding: dict[str, Any],
+    credential_hash: bytes,
+    fence_protocol: int,
 ) -> WorkerIncarnation:
-    """Register one immutable active incarnation; allow only an identical active replay."""
-    if not incarnation or len(incarnation) > 512 or not authority_binding:
-        raise ValueError("worker incarnation and authority binding must be non-empty and bounded")
+    """Ask the lifecycle-witness authority to register immutable incarnation facts."""
     require_top_level_transaction(conn, "register_worker_incarnation")
-    async with (
-        conn.transaction(),
-        advisory_xact_lock(conn, LockScope.WORKER_INCARNATION, incarnation),
-    ):
-        current = await _get_locked(conn, incarnation)
-        if current is not None:
-            if (
-                current.state == "active"
-                and current.authority_kind == authority_kind
-                and current.authority_binding == authority_binding
-            ):
-                return current
-            raise IncarnationConflict(
-                "worker incarnation registration conflicts with durable state"
+    try:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT public.register_worker_incarnation(%s, %s, %s, %s, %s)",
+                (
+                    incarnation,
+                    authority_kind,
+                    Jsonb(binding),
+                    credential_hash,
+                    fence_protocol,
+                ),
             )
+    except errors.UniqueViolation as exc:
+        raise IncarnationConflict(
+            "worker incarnation registration conflicts with durable state"
+        ) from exc
+    return WorkerIncarnation(
+        incarnation=incarnation,
+        authority_kind=authority_kind,
+        authority_binding=binding,
+        fence_protocol=fence_protocol,
+    )
+
+
+async def authenticate_worker_incarnation(
+    conn: AsyncConnection, credential: SecretStr
+) -> WorkerIncarnation:
+    """Authenticate an active identity without accepting caller-supplied holder facts."""
+    require_top_level_transaction(conn, "authenticate_worker_incarnation")
+    async with conn.transaction():
         row = await (
             await conn.execute(
-                "INSERT INTO worker_incarnations "
-                "(incarnation, authority_kind, authority_binding) VALUES (%s, %s, %s) "
-                "RETURNING incarnation, authority_kind, authority_binding, state, recorded_at, "
-                "terminated_at, outcome",
-                (incarnation, authority_kind, Jsonb(authority_binding)),
+                "SELECT incarnation, authority_kind, authority_binding, fence_protocol "
+                "FROM public.authenticate_worker_incarnation("
+                "sha256(convert_to(%s, 'UTF8')))",
+                (credential.get_secret_value(),),
             )
         ).fetchone()
-        assert row is not None
-        return _record(row)
+    if row is None:
+        raise IncarnationAuthenticationError(
+            "worker incarnation credential does not identify an active incarnation"
+        )
+    return _record(row)
 
 
 async def terminate_worker_incarnation(
     conn: AsyncConnection, incarnation: str, outcome: TerminationOutcome
-) -> WorkerIncarnation:
-    """Permanently terminate an exact registered incarnation; allow identical replay."""
+) -> bool:
+    """Ask the lifecycle-witness authority to terminate one exact incarnation."""
     require_top_level_transaction(conn, "terminate_worker_incarnation")
-    async with (
-        conn.transaction(),
-        advisory_xact_lock(conn, LockScope.WORKER_INCARNATION, incarnation),
-    ):
-        current = await _get_locked(conn, incarnation)
-        if current is None:
-            raise IncarnationConflict("worker incarnation was never registered")
-        if current.state == "terminated":
-            if current.outcome == outcome:
-                return current
-            raise IncarnationConflict("worker termination outcome conflicts with durable state")
+    async with conn.transaction():
         row = await (
             await conn.execute(
-                "UPDATE worker_incarnations SET state = 'terminated', terminated_at = now(), "
-                "outcome = %s WHERE incarnation = %s "
-                "RETURNING incarnation, authority_kind, authority_binding, state, recorded_at, "
-                "terminated_at, outcome",
-                (outcome, incarnation),
+                "SELECT public.terminate_worker_incarnation(%s, %s)",
+                (incarnation, outcome),
             )
         ).fetchone()
-        assert row is not None
-        return _record(row)
-
-
-async def verify_active_worker_incarnation(
-    conn: AsyncConnection, incarnation: str, authority_kind: AuthorityKind
-) -> WorkerIncarnation:
-    """Require an authority-pre-registered exact incarnation to remain active."""
-    require_top_level_transaction(conn, "verify_active_worker_incarnation")
-    async with (
-        conn.transaction(),
-        advisory_xact_lock(conn, LockScope.WORKER_INCARNATION, incarnation),
-    ):
-        current = await _get_locked(conn, incarnation)
-        if current is None:
-            raise IncarnationConflict("worker incarnation was not pre-registered by its authority")
-        if current.authority_kind != authority_kind:
-            raise IncarnationConflict("worker incarnation authority binding does not match")
-        if current.state != "active":
-            raise IncarnationConflict("worker incarnation is not active")
-        return current
+    assert row is not None
+    return bool(row[0])

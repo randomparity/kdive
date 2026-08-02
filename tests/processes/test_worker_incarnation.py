@@ -2,14 +2,16 @@
 
 from pathlib import Path
 
+import pytest
+
 import kdive.config as config
+import kdive.processes.worker_incarnation as worker_incarnations
 from kdive.processes.worker_incarnation import (
     DockerWorkerDeathVerifier,
     KubernetesWorkerDeathVerifier,
     LocalWorkerDeathVerifier,
     worker_death_verifier_from_env,
     worker_incarnation_id,
-    worker_incarnation_registration,
 )
 
 
@@ -55,11 +57,6 @@ def test_docker_identity_binds_container_and_verifier_requires_actual_stop(monke
     monkeypatch.setenv("KDIVE_WORKER_INCARNATION_KIND", "docker")
     monkeypatch.setenv("KDIVE_WORKER_INCARNATION_ID", "docker:nonce-123")
     assert worker_incarnation_id(42) == "docker:nonce-123"
-    assert worker_incarnation_registration(42) == (
-        "docker:nonce-123",
-        "docker",
-        None,
-    )
 
     stopped = DockerWorkerDeathVerifier(
         inspect=lambda container: {"Id": "a" * 64, "State": {"Running": False}}
@@ -72,6 +69,24 @@ def test_docker_identity_binds_container_and_verifier_requires_actual_stop(monke
     )
     assert live.verify_dead(f"docker:{'a' * 64}") is None
     assert stopped.verify_dead(f"docker:{'b' * 64}") is None
+
+
+def test_worker_incarnation_credential_is_loaded_as_a_secret(tmp_path: Path) -> None:
+    path = tmp_path / "incarnation-credential"
+    path.write_text("authority-delivered-credential\n", encoding="utf-8")
+
+    credential = worker_incarnations.worker_incarnation_credential(path)
+
+    assert credential.get_secret_value() == "authority-delivered-credential"
+    assert "authority-delivered-credential" not in repr(credential)
+
+
+def test_worker_incarnation_credential_rejects_blank_handoff(tmp_path: Path) -> None:
+    path = tmp_path / "incarnation-credential"
+    path.write_text(" \n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="incarnation credential handoff is empty"):
+        worker_incarnations.worker_incarnation_credential(path)
 
 
 def test_kubernetes_identity_binds_pod_uid_and_accepts_only_same_uid_terminal_pod(

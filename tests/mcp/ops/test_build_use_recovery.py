@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
 
@@ -72,6 +73,8 @@ async def _seed(pool: AsyncConnectionPool, *, terminated: bool = False) -> tuple
             holder,
             "local",
             {"host": "host-a", "pid": 42, "boot_id": "boot-123", "start_ticks": "987"},
+            hashlib.sha256(holder.encode()).digest(),
+            1,
         )
     if terminated:
         async with pool.connection() as conn:

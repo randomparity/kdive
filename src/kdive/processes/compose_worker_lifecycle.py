@@ -120,7 +120,14 @@ async def _docker_operation(operation: str, container_id: str) -> None:
 async def _register(holder: str, container_id: str) -> None:
     conn = await psycopg.AsyncConnection.connect(require(DATABASE_URL))
     try:
-        await register_worker_incarnation(conn, holder, "docker", {"container_id": container_id})
+        await register_worker_incarnation(
+            conn,
+            holder,
+            "docker",
+            {"container_id": container_id},
+            secrets.token_bytes(32),
+            1,
+        )
     finally:
         await conn.close()
 

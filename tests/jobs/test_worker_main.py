@@ -7,6 +7,7 @@ import contextlib
 from collections.abc import AsyncIterator
 
 import pytest
+from pydantic import SecretStr
 
 from kdive.jobs.worker import WorkerConfig
 from kdive.observability.facade import Telemetry
@@ -15,6 +16,7 @@ from kdive.processes.runtime import (
     POOL_OPEN_TIMEOUT_SECONDS,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.runs.worker_incarnations import WorkerIncarnation
 
 
 def _warm_open() -> list[str]:
@@ -69,10 +71,20 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
 
     monkeypatch.setattr("kdive.processes.worker.create_pool", lambda **kw: _FakePool())
 
-    async def _register(*args: object) -> None:
-        events.append("register")
+    credential = SecretStr("authority-delivered-credential")
 
-    monkeypatch.setattr("kdive.processes.worker.register_worker_incarnation", _register)
+    async def _authenticate(*args: object) -> WorkerIncarnation:
+        events.append("authenticate")
+        return WorkerIncarnation(
+            incarnation="docker:nonce",
+            authority_kind="docker",
+            authority_binding={"container_id": "a" * 64},
+            fence_protocol=1,
+        )
+
+    monkeypatch.setattr("kdive.processes.worker.worker_incarnation_id", lambda pid: "docker:nonce")
+    monkeypatch.setattr("kdive.processes.worker.worker_incarnation_credential", lambda: credential)
+    monkeypatch.setattr("kdive.processes.worker.authenticate_worker_incarnation", _authenticate)
     monkeypatch.setattr("kdive.processes.worker.install_stop", lambda: asyncio.Event())
     monkeypatch.setattr("kdive.jobs.assembly.build_handler_registry", lambda **kw: object())
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: object())
@@ -98,7 +110,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
 
     asyncio.run(__main__._run_worker(SecretRegistry(), _fake_telemetry()))
 
-    assert events == [*_warm_open(), "acquire(timeout=None)", "register", "run", _close()]
+    assert events == [*_warm_open(), "acquire(timeout=None)", "authenticate", "run", _close()]
     config = constructed["config"]
     assert isinstance(config, WorkerConfig)
     assert config.heartbeat is not None
