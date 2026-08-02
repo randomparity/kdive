@@ -42,12 +42,22 @@ _EFFECTIVE_CONFIG_KEY_SQL: LiteralString = (
 )
 _EFFECTIVE_CONFIG_KEY_LIKE = "%/effective_config"
 
-_DEBUGINFO_REF_SQL: LiteralString = "SELECT debuginfo_ref FROM runs WHERE id = %s"
+_DEBUGINFO_REF_SQL: LiteralString = (
+    "SELECT r.debuginfo_ref, r.build_ref, "
+    "s.result->'artifact_versions'->>'vmlinux' AS version_id "
+    "FROM runs r LEFT JOIN run_steps s ON s.run_id=r.id AND s.step='build' WHERE r.id = %s"
+)
 
-_KERNEL_REF_SQL: LiteralString = "SELECT kernel_ref FROM runs WHERE id = %s"
+_KERNEL_REF_SQL: LiteralString = (
+    "SELECT r.kernel_ref, r.build_ref, "
+    "s.result->'artifact_versions'->>'kernel' AS version_id "
+    "FROM runs r LEFT JOIN run_steps s ON s.run_id=r.id AND s.step='build' WHERE r.id = %s"
+)
 
 _RUN_FETCH_CONTEXT_SQL: LiteralString = (
-    "SELECT project, system_id, debuginfo_ref FROM runs WHERE id = %s"
+    "SELECT r.project, r.system_id, r.debuginfo_ref, r.build_ref, "
+    "s.result->'artifact_versions'->>'vmlinux' AS debuginfo_version_id "
+    "FROM runs r LEFT JOIN run_steps s ON s.run_id=r.id AND s.step='build' WHERE r.id = %s"
 )
 _SYSTEM_PROJECT_SQL: LiteralString = "SELECT project FROM systems WHERE id = %s"
 
@@ -59,6 +69,16 @@ class RunFetchContext:
     project: str
     system_id: UUID | None
     debuginfo_ref: str | None
+    debuginfo_version_id: str | None
+    reusable_build: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactReadRef:
+    """Object key plus an immutable version pin; ``None`` is explicit legacy fallback."""
+
+    key: str
+    version_id: str | None
 
 
 async def run_fetch_context(conn: AsyncConnection, run_id: UUID) -> RunFetchContext | None:
@@ -79,6 +99,12 @@ async def run_fetch_context(conn: AsyncConnection, run_id: UUID) -> RunFetchCont
         project=str(row["project"]),
         system_id=row["system_id"],
         debuginfo_ref=str(ref) if isinstance(ref, str) and ref else None,
+        debuginfo_version_id=(
+            str(row["debuginfo_version_id"])
+            if isinstance(row["debuginfo_version_id"], str) and row["debuginfo_version_id"]
+            else None
+        ),
+        reusable_build=isinstance(row["build_ref"], str) and bool(row["build_ref"]),
     )
 
 
@@ -152,7 +178,7 @@ async def effective_config_key(conn: AsyncConnection, run_id: UUID) -> str | Non
     return None if row is None else str(row["object_key"])
 
 
-def debuginfo_ref_for_run_sync(conn: Connection, run_id: UUID) -> str | None:
+def debuginfo_ref_for_run_sync(conn: Connection, run_id: UUID) -> ArtifactReadRef | None:
     """Return the Run's published debuginfo (vmlinux) object key, or ``None``.
 
     Sync because the gdb-MI attach seam runs off the event loop (``asyncio.to_thread``) and owns no
@@ -165,10 +191,15 @@ def debuginfo_ref_for_run_sync(conn: Connection, run_id: UUID) -> str | None:
     if row is None:
         return None
     ref = row["debuginfo_ref"]
-    return str(ref) if isinstance(ref, str) and ref else None
+    if not isinstance(ref, str) or not ref:
+        return None
+    version = row["version_id"]
+    if row["build_ref"] is not None and not version:
+        raise RuntimeError("reusable vmlinux is missing its immutable object version")
+    return ArtifactReadRef(ref, str(version) if isinstance(version, str) and version else None)
 
 
-def kernel_ref_for_run_sync(conn: Connection, run_id: UUID) -> str | None:
+def kernel_ref_for_run_sync(conn: Connection, run_id: UUID) -> ArtifactReadRef | None:
     """Return the Run's published combined kernel+modules tar object key, or ``None``.
 
     Sync for the same reason as :func:`debuginfo_ref_for_run_sync` (the gdb-MI ops run off the
@@ -181,4 +212,9 @@ def kernel_ref_for_run_sync(conn: Connection, run_id: UUID) -> str | None:
     if row is None:
         return None
     ref = row["kernel_ref"]
-    return str(ref) if isinstance(ref, str) and ref else None
+    if not isinstance(ref, str) or not ref:
+        return None
+    version = row["version_id"]
+    if row["build_ref"] is not None and not version:
+        raise RuntimeError("reusable kernel is missing its immutable object version")
+    return ArtifactReadRef(ref, str(version) if isinstance(version, str) and version else None)

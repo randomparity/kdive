@@ -89,11 +89,17 @@ class _FakeIntrospector:
         self.kwargs: dict[str, object] = {}
 
     def from_vmcore(
-        self, *, vmcore_ref: str, debuginfo_ref: str, expected_build_id: str
+        self,
+        *,
+        vmcore_ref: str,
+        debuginfo_ref: str,
+        debuginfo_version_id: str | None = None,
+        expected_build_id: str,
     ) -> IntrospectOutput:
         self.kwargs = {
             "vmcore_ref": vmcore_ref,
             "debuginfo_ref": debuginfo_ref,
+            "debuginfo_version_id": debuginfo_version_id,
             "expected_build_id": expected_build_id,
         }
         if self._raises is not None:

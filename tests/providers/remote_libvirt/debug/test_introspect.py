@@ -51,11 +51,13 @@ def _vmcore_introspect(
     open_program=None,
     run_helper=None,
     fetch=None,
+    fetch_versioned=None,
     build_id=lambda b: "BID",
     secret_registry=None,
 ):
     return RemoteLibvirtVmcoreIntrospect(
         fetch_object=fetch or (lambda ref: b"core" if "core" in ref else b"vmlinux"),
+        fetch_versioned_object=fetch_versioned,
         read_vmcore_build_id=build_id,
         secret_registry=secret_registry or SecretRegistry(),
         open_program=open_program,
@@ -69,6 +71,24 @@ def test_from_vmcore_off_gate_is_missing_dependency():
         introspect.from_vmcore(vmcore_ref="core", debuginfo_ref="vmlinux", expected_build_id="BID")
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert str(exc.value) == "offline drgn introspection runs only under the live_vm gate"
+
+
+def test_from_vmcore_reusable_debuginfo_fetches_exact_version():
+    seen: list[tuple[str, str]] = []
+    introspect = _vmcore_introspect(
+        open_program=lambda core, vmlinux: _FakeProgram(),
+        run_helper=lambda program, name: {},
+        fetch_versioned=lambda ref, version: seen.append((ref, version)) or b"vmlinux",
+    )
+
+    introspect.from_vmcore(
+        vmcore_ref="core",
+        debuginfo_ref="vmlinux",
+        debuginfo_version_id="version-9",
+        expected_build_id="BID",
+    )
+
+    assert seen == [("vmlinux", "version-9")]
 
 
 def test_from_vmcore_off_gate_does_not_fetch_when_either_seam_missing():

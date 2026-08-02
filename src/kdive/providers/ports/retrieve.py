@@ -68,6 +68,7 @@ class CrashPostmortem(Protocol):
         *,
         vmcore_ref: str,
         debuginfo_ref: str,
+        debuginfo_version_id: str | None = None,
         expected_build_id: str,
         commands: list[str],
     ) -> CrashOutput:
@@ -85,7 +86,12 @@ class VmcoreIntrospector(Protocol):
     """Offline introspection port for captured vmcores."""
 
     def from_vmcore(
-        self, *, vmcore_ref: str, debuginfo_ref: str, expected_build_id: str
+        self,
+        *,
+        vmcore_ref: str,
+        debuginfo_ref: str,
+        debuginfo_version_id: str | None = None,
+        expected_build_id: str,
     ) -> IntrospectOutput:
         """Inspect a captured vmcore through the provider's offline helper.
 

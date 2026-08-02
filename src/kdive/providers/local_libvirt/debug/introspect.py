@@ -41,6 +41,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 # --- LocalLibvirtVmcoreIntrospect (the realized port) --------------------------------------
 
 type _FetchObject = Callable[[str], bytes]
+type _FetchVersionedObject = Callable[[str, str], bytes]
 type _ReadBuildId = Callable[[bytes], str]
 type _OpenProgram = Callable[[Path, Path], _Program]
 type _RunHelper = Callable[[_Program, str], dict[str, object]]
@@ -64,12 +65,14 @@ class LocalLibvirtVmcoreIntrospect:
         self,
         *,
         fetch_object: _FetchObject,
+        fetch_versioned_object: _FetchVersionedObject | None = None,
         read_vmcore_build_id: _ReadBuildId,
         secret_registry: SecretRegistry,
         open_program: _OpenProgram | None = None,
         run_helper: _RunHelper | None = None,
     ) -> None:
         self._fetch_object = fetch_object
+        self._fetch_versioned_object = fetch_versioned_object
         self._read_vmcore_build_id = read_vmcore_build_id
         self._secret_registry = secret_registry
         self._open_program = open_program
@@ -90,6 +93,7 @@ class LocalLibvirtVmcoreIntrospect:
         # ``Any`` for ``program`` so it needs no cast.
         return cls(
             fetch_object=_real_fetch_object,
+            fetch_versioned_object=_real_fetch_versioned_object,
             read_vmcore_build_id=read_vmcoreinfo_build_id,
             secret_registry=secret_registry,
             open_program=cast("_OpenProgram", open_vmcore_program),
@@ -97,7 +101,12 @@ class LocalLibvirtVmcoreIntrospect:
         )
 
     def from_vmcore(
-        self, *, vmcore_ref: str, debuginfo_ref: str, expected_build_id: str
+        self,
+        *,
+        vmcore_ref: str,
+        debuginfo_ref: str,
+        debuginfo_version_id: str | None = None,
+        expected_build_id: str,
     ) -> IntrospectOutput:
         """Open the core, run the helpers, and return a redacted, size-bounded report.
 
@@ -116,7 +125,12 @@ class LocalLibvirtVmcoreIntrospect:
             )
         vmcore_bytes = self._fetch_object(vmcore_ref)
         self._verify_provenance(vmcore_bytes, expected_build_id, vmcore_ref)
-        vmlinux_bytes = self._fetch_object(debuginfo_ref)
+        if debuginfo_version_id is None:
+            vmlinux_bytes = self._fetch_object(debuginfo_ref)
+        elif self._fetch_versioned_object is not None:
+            vmlinux_bytes = self._fetch_versioned_object(debuginfo_ref, debuginfo_version_id)
+        else:
+            raise RuntimeError("versioned drgn debuginfo fetch seam is not configured")
         with (
             tempfile.NamedTemporaryFile(suffix=".vmcore") as core_file,
             tempfile.NamedTemporaryFile(suffix=".vmlinux") as vmlinux_file,
@@ -173,6 +187,12 @@ def _real_fetch_object(ref: str) -> bytes:  # pragma: no cover - live_vm
     # The ref is a key the system itself produced; there is no client etag handle, so the
     # read is unconditional (ADR-0054). An empty etag would 412 here, not skip the check.
     return object_store_from_env().get_artifact(ref, None).data
+
+
+def _real_fetch_versioned_object(ref: str, version_id: str) -> bytes:  # pragma: no cover
+    from kdive.store.objectstore import object_store_from_env
+
+    return object_store_from_env().get_artifact(ref, None, version_id=version_id).data
 
 
 __all__ = [

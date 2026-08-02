@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -27,7 +28,7 @@ from kdive.artifacts.read_model import (
 )
 from kdive.artifacts.storage import HeadResult
 from kdive.config.core_settings import ARTIFACT_DOWNLOAD_TTL_SECONDS
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -48,8 +49,17 @@ class RawAsset(StrEnum):
 
 
 class _RawStore(Protocol):
-    def head(self, key: str) -> HeadResult | None: ...
-    def presign_get(self, key: str, *, expires_in: int) -> str: ...
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None: ...
+    def presign_get(self, key: str, *, expires_in: int, version_id: str | None = None) -> str: ...
+
+
+_DEFAULT_STORE_FACTORY = cast("Callable[[], _RawStore]", object_store_from_env)
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedRaw:
+    key: str
+    version_id: str | None = None
 
 
 async def _resolve_key(
@@ -59,7 +69,7 @@ async def _resolve_key(
     asset: RawAsset,
     run_uid: UUID,
     artifact_id: str | None,
-) -> str | ToolResponse:
+) -> _ResolvedRaw | ToolResponse:
     """Authorize and resolve the object key for ``asset``, or return a failure envelope.
 
     All assets are gated on the **Run's** project: ``vmlinux`` is the Run's ``debuginfo_ref``, the
@@ -76,7 +86,15 @@ async def _resolve_key(
     if asset is RawAsset.VMLINUX:
         if run.debuginfo_ref is None:
             return _config_error(run_id, data={"reason": "vmlinux_unavailable"})
-        return run.debuginfo_ref
+        if run.reusable_build and run.debuginfo_version_id is None:
+            return ToolResponse.failure_from_error(
+                run_id,
+                CategorizedError(
+                    "reusable vmlinux is missing its immutable object version",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                ),
+            )
+        return _ResolvedRaw(run.debuginfo_ref, run.debuginfo_version_id)
     if asset is RawAsset.PCAP:
         aid = _as_uuid(artifact_id) if artifact_id is not None else None
         if artifact_id is not None and aid is None:
@@ -84,11 +102,11 @@ async def _resolve_key(
         pcap_key = await raw_pcap_key(conn, run_uid, aid)
         if pcap_key is None:
             return _config_error(run_id, data={"reason": "pcap_unavailable"})
-        return pcap_key
+        return _ResolvedRaw(pcap_key)
     key = await raw_vmcore_key(conn, run_uid)
     if key is None:
         return _config_error(run_id, data={"reason": "vmcore_unavailable"})
-    return key
+    return _ResolvedRaw(key)
 
 
 async def fetch_raw(
@@ -98,7 +116,7 @@ async def fetch_raw(
     run_id: str,
     asset: RawAsset,
     artifact_id: str | None = None,
-    store_factory: Callable[[], _RawStore] = object_store_from_env,
+    store_factory: Callable[[], _RawStore] = _DEFAULT_STORE_FACTORY,
 ) -> ToolResponse:
     """Mint a presigned download URL for a Run's raw ``vmcore``, ``vmlinux``, or ``pcap``.
 
@@ -122,14 +140,27 @@ async def fetch_raw(
                 return resolved
             try:
                 store = store_factory()
-                head = await asyncio.to_thread(store.head, resolved)
+                if resolved.version_id is None:
+                    head = await asyncio.to_thread(store.head, resolved.key)
+                else:
+                    head = await asyncio.to_thread(
+                        store.head, resolved.key, version_id=resolved.version_id
+                    )
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(run_id, exc)
             if head is None:
                 return _config_error(run_id, data={"reason": f"{asset.value}_unavailable"})
             ttl = config.require(ARTIFACT_DOWNLOAD_TTL_SECONDS)
             try:
-                url = await asyncio.to_thread(store.presign_get, resolved, expires_in=ttl)
+                if resolved.version_id is None:
+                    url = await asyncio.to_thread(store.presign_get, resolved.key, expires_in=ttl)
+                else:
+                    url = await asyncio.to_thread(
+                        store.presign_get,
+                        resolved.key,
+                        expires_in=ttl,
+                        version_id=resolved.version_id,
+                    )
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(run_id, exc)
             async with conn.transaction():

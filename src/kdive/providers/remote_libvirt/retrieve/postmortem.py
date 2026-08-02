@@ -5,10 +5,12 @@ from __future__ import annotations
 from kdive.providers.ports.retrieve import CrashOutput
 from kdive.providers.shared.debug_common.crash_postmortem import (
     FetchObject,
+    FetchVersionedObject,
     ReadBuildId,
     RunCrash,
     _real_run_crash,
     default_fetch_object,
+    default_fetch_versioned_object,
     default_read_vmcore_build_id,
 )
 from kdive.providers.shared.debug_common.crash_postmortem import (
@@ -25,11 +27,13 @@ class CrashPostmortemAdapter:
         *,
         secret_registry: SecretRegistry,
         fetch_object: FetchObject = default_fetch_object,
+        fetch_versioned_object: FetchVersionedObject = default_fetch_versioned_object,
         read_build_id: ReadBuildId = default_read_vmcore_build_id,
         run_crash: RunCrash = _real_run_crash,
     ) -> None:
         self._secret_registry = secret_registry
         self._fetch_object = fetch_object
+        self._fetch_versioned_object = fetch_versioned_object
         self._read_build_id = read_build_id
         self._run_crash = run_crash
 
@@ -38,15 +42,18 @@ class CrashPostmortemAdapter:
         *,
         vmcore_ref: str,
         debuginfo_ref: str,
+        debuginfo_version_id: str | None = None,
         expected_build_id: str,
         commands: list[str],
     ) -> CrashOutput:
         return _run_crash_postmortem(
             vmcore_ref=vmcore_ref,
             debuginfo_ref=debuginfo_ref,
+            debuginfo_version_id=debuginfo_version_id,
             expected_build_id=expected_build_id,
             commands=commands,
             fetch_object=self._fetch_object,
+            fetch_versioned_object=self._fetch_versioned_object,
             read_build_id=self._read_build_id,
             run_crash=self._run_crash,
             secret_registry=self._secret_registry,

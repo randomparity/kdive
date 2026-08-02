@@ -42,6 +42,7 @@ async def introspect_from_vmcore(
                 introspector.from_vmcore,
                 vmcore_ref=resolved.vmcore_ref,
                 debuginfo_ref=resolved.debuginfo_ref,
+                debuginfo_version_id=resolved.debuginfo_version_id,
                 expected_build_id=resolved.build_id,
             )
         except CategorizedError as exc:

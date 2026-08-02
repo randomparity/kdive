@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import NamedTuple
-from uuid import UUID
 
 from psycopg import AsyncConnection
 
@@ -49,6 +48,7 @@ class RunVmcoreTarget(NamedTuple):
     """The resolved inputs needed to analyze a Run's captured vmcore."""
 
     debuginfo_ref: str
+    debuginfo_version_id: str | None
     build_id: str
     vmcore_ref: str
 
@@ -80,10 +80,17 @@ async def resolve_run_vmcore_target(
         raise _no_vmcore_not_found(run)
     if run.debuginfo_ref is None:
         raise _precondition_not_found(NO_DEBUGINFO)
-    build_id = await _build_id_for_run(conn, uid)
-    if build_id is None:
+    build = await existing_build_result(conn, uid)
+    if build is None or build.build_id is None:
         raise _precondition_not_found(NO_BUILD)
-    return RunVmcoreTarget(run.debuginfo_ref, build_id, vmcore_ref)
+    versions = build.artifact_versions or {}
+    version_id = versions.get("vmlinux")
+    if run.build_ref is not None and version_id is None:
+        raise CategorizedError(
+            "reusable vmlinux is missing its immutable object version",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+    return RunVmcoreTarget(run.debuginfo_ref, version_id, build.build_id, vmcore_ref)
 
 
 def vmcore_target_failure(run_id: str, exc: CategorizedError) -> ToolResponse:
@@ -140,8 +147,3 @@ def _no_vmcore_not_found(run: Run) -> CategorizedError:
         category=ErrorCategory.NOT_FOUND,
         details=details,
     )
-
-
-async def _build_id_for_run(conn: AsyncConnection, run_id: UUID) -> str | None:
-    result = await existing_build_result(conn, run_id)
-    return None if result is None else result.build_id

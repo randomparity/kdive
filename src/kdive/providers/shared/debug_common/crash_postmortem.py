@@ -29,6 +29,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import object_store_from_env
 
 type FetchObject = Callable[[str], bytes]
+type FetchVersionedObject = Callable[[str, str], bytes]
 type ReadBuildId = Callable[[bytes], str]
 type RunCrash = Callable[[Path, Path, str], CrashResult]
 type CrashPathFinder = Callable[[str], str | None]
@@ -51,6 +52,8 @@ def run_crash_postmortem(
     expected_build_id: str,
     commands: list[str],
     fetch_object: FetchObject,
+    fetch_versioned_object: FetchVersionedObject | None = None,
+    debuginfo_version_id: str | None = None,
     read_build_id: ReadBuildId,
     run_crash: RunCrash,
     secret_registry: SecretRegistry,
@@ -77,7 +80,12 @@ def run_crash_postmortem(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"vmcore_ref": vmcore_ref},
         )
-    vmlinux_bytes = fetch_object(debuginfo_ref)
+    if debuginfo_version_id is None:
+        vmlinux_bytes = fetch_object(debuginfo_ref)
+    elif fetch_versioned_object is not None:
+        vmlinux_bytes = fetch_versioned_object(debuginfo_ref, debuginfo_version_id)
+    else:
+        raise RuntimeError("versioned crash debuginfo fetch seam is not configured")
     with (
         tempfile.NamedTemporaryFile(suffix=".vmcore") as core_file,
         tempfile.NamedTemporaryFile(suffix=".vmlinux") as vmlinux_file,
@@ -125,6 +133,11 @@ def default_fetch_object(ref: str) -> bytes:  # pragma: no cover - live_vm
     # The ref is a key the system itself produced; no client etag handle, so the read
     # is unconditional (ADR-0054). A missing object raises STALE_HANDLE in get_artifact.
     return object_store_from_env().get_artifact(ref, None).data
+
+
+def default_fetch_versioned_object(ref: str, version_id: str) -> bytes:  # pragma: no cover
+    """Fetch one immutable object version; reusable artifacts never use key-only reads."""
+    return object_store_from_env().get_artifact(ref, None, version_id=version_id).data
 
 
 def default_read_vmcore_build_id(data: bytes) -> str:  # pragma: no cover - live_vm
@@ -197,9 +210,11 @@ def _exec_crash(  # pragma: no cover - live_vm
 
 __all__ = [
     "FetchObject",
+    "FetchVersionedObject",
     "ReadBuildId",
     "RunCrash",
     "default_fetch_object",
+    "default_fetch_versioned_object",
     "default_read_vmcore_build_id",
     "run_crash_postmortem",
 ]

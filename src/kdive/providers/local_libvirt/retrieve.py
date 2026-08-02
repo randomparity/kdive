@@ -51,6 +51,7 @@ from kdive.providers.shared.debug_common.core_file import (
 from kdive.providers.shared.debug_common.crash_postmortem import (
     _real_run_crash,
     default_fetch_object,
+    default_fetch_versioned_object,
 )
 from kdive.providers.shared.debug_common.crash_postmortem import (
     run_crash_postmortem as _run_crash_postmortem,
@@ -91,6 +92,7 @@ type _ReadBuildId = Callable[[bytes], str]
 type _ReadBuildIdFromFile = Callable[[Path], str]
 type _ExtractRedactedFromFile = Callable[[Path], bytes]
 type _FetchObject = Callable[[str], bytes]
+type _FetchVersionedObject = Callable[[str, str], bytes]
 type _RunCrash = Callable[[Path, Path, str], CrashResult]
 
 
@@ -109,6 +111,7 @@ class LocalLibvirtRetrieve:
         host_dump_capture: _HostDumpCapture,
         secret_registry: SecretRegistry,
         fetch_object: _FetchObject | None = None,
+        fetch_versioned_object: _FetchVersionedObject | None = None,
         run_crash: _RunCrash | None = None,
     ) -> None:
         self._tenant = tenant
@@ -120,6 +123,7 @@ class LocalLibvirtRetrieve:
         self._extract_redacted_from_file = extract_redacted_from_file
         self._host_dump_capture = host_dump_capture
         self._fetch_object = fetch_object
+        self._fetch_versioned_object = fetch_versioned_object
         self._run_crash = run_crash
         self._secret_registry = secret_registry
 
@@ -137,6 +141,7 @@ class LocalLibvirtRetrieve:
             ),
             host_dump_capture=_real_host_dump_capture,
             fetch_object=default_fetch_object,
+            fetch_versioned_object=default_fetch_versioned_object,
             run_crash=_real_run_crash,
             secret_registry=secret_registry,
         )
@@ -274,6 +279,7 @@ class LocalLibvirtRetrieve:
         *,
         vmcore_ref: str,
         debuginfo_ref: str,
+        debuginfo_version_id: str | None = None,
         expected_build_id: str,
         commands: list[str],
     ) -> CrashOutput:
@@ -298,9 +304,11 @@ class LocalLibvirtRetrieve:
         return _run_crash_postmortem(
             vmcore_ref=vmcore_ref,
             debuginfo_ref=debuginfo_ref,
+            debuginfo_version_id=debuginfo_version_id,
             expected_build_id=expected_build_id,
             commands=commands,
             fetch_object=self._fetch_object,
+            fetch_versioned_object=self._fetch_versioned_object,
             read_build_id=self._read_vmcore_build_id,
             run_crash=self._run_crash,
             secret_registry=self._secret_registry,
