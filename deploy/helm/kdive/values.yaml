@@ -95,6 +95,9 @@ reconciler:
 # if you wire one up, do not scale the worker down without reinstalling those Systems.
 worker:
   replicas: 2
+  # Highest StatefulSet ordinal for which the server retains namespaced Pod-read authority.
+  # This is recovery history, not current scale: never lower it after an ordinal has run.
+  deathVerificationOrdinalCeiling: 32
   persistence:
     build:
       size: 10Gi

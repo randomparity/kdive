@@ -269,4 +269,11 @@ named template that a rendered manifest (the ConfigMap) includes.
 {{- if and .Values.bundledBackends (ne (.Values.service.type | toString) "ClusterIP") -}}
 {{- fail "bundledBackends is demo-only and its issuer mints valid kdive tokens for any caller: service.type must stay ClusterIP (reach MCP via `kubectl port-forward`). Expose MCP only on the external-backend path, behind a real IdP." -}}
 {{- end -}}
+{{- $deathCeiling := int .Values.worker.deathVerificationOrdinalCeiling -}}
+{{- if or (lt $deathCeiling 1) (gt $deathCeiling 256) -}}
+{{- fail "worker.deathVerificationOrdinalCeiling must be between 1 and 256" -}}
+{{- end -}}
+{{- if lt $deathCeiling (int .Values.worker.replicas) -}}
+{{- fail "worker.deathVerificationOrdinalCeiling must cover worker.replicas" -}}
+{{- end -}}
 {{- end -}}

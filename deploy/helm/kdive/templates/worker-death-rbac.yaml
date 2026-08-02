@@ -13,16 +13,13 @@ metadata:
   labels:
     {{- include "kdive.labels" . | nindent 4 }}
 rules:
-  {{- if gt (int .Values.worker.replicas) 0 }}
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get"]
     resourceNames:
-      {{- range $ordinal := until (int .Values.worker.replicas) }}
+      {{- range $ordinal := until (int .Values.worker.deathVerificationOrdinalCeiling) }}
       - {{ printf "%s-worker-%d" (include "kdive.fullname" $) $ordinal | quote }}
       {{- end }}
-  {{- else }} []
-  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

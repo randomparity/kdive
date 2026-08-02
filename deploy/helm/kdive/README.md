@@ -374,4 +374,6 @@ throwaway `emptyDir` state.
 The server uses a dedicated service account with `get` permission only for the configured worker
 Pod names. Worker holders include the downward-API Pod UID, so `ops.recover_build_use` can prove a
 specific Pod incarnation terminated without trusting heartbeat age. Scaling `worker.replicas`
-updates the Role's `resourceNames`; no cluster-wide Pod permission is required.
+does not shrink the Role's bounded `resourceNames`: `worker.deathVerificationOrdinalCeiling`
+defaults to 32 and is recovery history. Raise it before scaling beyond it, and never lower it after
+an ordinal has run. No cluster-wide Pod permission is required.

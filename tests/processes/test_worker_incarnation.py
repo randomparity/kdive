@@ -67,7 +67,7 @@ def test_docker_identity_binds_container_and_verifier_requires_actual_stop(monke
     assert stopped.verify_dead(f"docker:{'b' * 64}") is None
 
 
-def test_kubernetes_identity_binds_pod_uid_and_verifier_refuses_live_or_wrong_pod(
+def test_kubernetes_identity_binds_pod_uid_and_accepts_only_same_uid_terminal_pod(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("KDIVE_WORKER_INCARNATION_KIND", "kubernetes")
@@ -77,7 +77,7 @@ def test_kubernetes_identity_binds_pod_uid_and_verifier_refuses_live_or_wrong_po
     holder = "kubernetes:kdive:kdive-worker-0:4a86b0a3-4ba2-4a25-9c3c-12d385e3bcaa"
     assert worker_incarnation_id(42) == holder
 
-    dead = KubernetesWorkerDeathVerifier(
+    replaced = KubernetesWorkerDeathVerifier(
         read_pod=lambda namespace, name: {
             "metadata": {"uid": "different"},
             "status": {"phase": "Running"},
@@ -89,8 +89,29 @@ def test_kubernetes_identity_binds_pod_uid_and_verifier_refuses_live_or_wrong_po
             "status": {"phase": "Running"},
         }
     )
-    assert dead.verify_dead(holder) == "kubernetes: exact pod incarnation absent"
+    terminal = KubernetesWorkerDeathVerifier(
+        read_pod=lambda namespace, name: {
+            "metadata": {"uid": "4a86b0a3-4ba2-4a25-9c3c-12d385e3bcaa"},
+            "status": {"phase": "Failed"},
+        }
+    )
+    absent = KubernetesWorkerDeathVerifier(read_pod=lambda namespace, name: None)
+    assert replaced.verify_dead(holder) is None
+    assert absent.verify_dead(holder) is None
     assert live.verify_dead(holder) is None
+    assert terminal.verify_dead(holder) == "kubernetes: exact pod incarnation terminated"
+
+
+def test_deployment_authority_errors_and_docker_absence_fail_closed() -> None:
+    docker_absent = DockerWorkerDeathVerifier(inspect=lambda container: None)
+
+    def unavailable(namespace: str, name: str):
+        raise OSError("authority unavailable")
+
+    kubernetes_unavailable = KubernetesWorkerDeathVerifier(read_pod=unavailable)
+    holder = "kubernetes:kdive:kdive-worker-0:4a86b0a3-4ba2-4a25-9c3c-12d385e3bcaa"
+    assert docker_absent.verify_dead(f"docker:{'a' * 64}") is None
+    assert kubernetes_unavailable.verify_dead(holder) is None
 
 
 def test_verifier_factory_fails_closed_when_unconfigured(monkeypatch) -> None:

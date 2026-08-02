@@ -13,6 +13,14 @@ chart's namespaced, resource-name-bounded `get pods` Role. Each verifier refuses
 incarnation, malformed identity, authority error, or unverifiable state. The caller cannot supply
 the death evidence, and heartbeat or lease age is never accepted as proof.
 
+Docker daemon absence and Kubernetes Pod absence or same-name UID replacement are not death
+proof: force removal, lost runtime state, or a control-plane partition can hide an object while its
+process remains alive. Docker recovery therefore requires an inspectable stopped container;
+Kubernetes recovery requires the same Pod UID in `Failed` or `Succeeded` phase. A container restart
+inside a still-running Pod deliberately retains the Pod incarnation and keeps the old pin fenced;
+this can retain artifacts until that exact Pod reaches a terminal phase, but cannot authorize early
+deletion. Likewise, recover before deleting a terminal Pod because a later 404 fails closed.
+
 Pass the exact `use_id` and `holder` returned by the list tool plus a concise operator reason. A
 successful recovery atomically retains the generated evidence and reason in
 `investigation_build_use_recoveries`, writes the platform audit row, and deletes only that use pin.

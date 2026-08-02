@@ -306,14 +306,10 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
     worker = next(doc for doc in docs if doc.get("kind") == "StatefulSet")
 
     rule = role["rules"]
-    assert rule == [
-        {
-            "apiGroups": [""],
-            "resources": ["pods"],
-            "verbs": ["get"],
-            "resourceNames": ["kdive-kdive-worker-0", "kdive-kdive-worker-1"],
-        }
-    ]
+    assert rule[0]["apiGroups"] == [""]
+    assert rule[0]["resources"] == ["pods"]
+    assert rule[0]["verbs"] == ["get"]
+    assert rule[0]["resourceNames"] == [f"kdive-kdive-worker-{ordinal}" for ordinal in range(32)]
     assert server["spec"]["template"]["spec"]["serviceAccountName"].endswith("-server")
     server_env = server["spec"]["template"]["spec"]["containers"][0]["env"]
     assert {item["name"]: item.get("value") for item in server_env}[
@@ -324,15 +320,45 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
     assert env_by_name["KDIVE_POD_UID"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.uid"
 
 
-def test_zero_worker_helm_render_grants_no_pod_read() -> None:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "worker.replicas=0")
+def test_worker_death_authority_ceiling_survives_scale_down_and_is_bounded() -> None:
+    res = _template(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y",
+        "worker.replicas=0",
+        "worker.deathVerificationOrdinalCeiling=4",
+    )
     assert res.returncode == 0, res.stderr
     role = next(
         doc
         for doc in yaml.safe_load_all(res.stdout)
         if isinstance(doc, dict) and doc.get("kind") == "Role"
     )
-    assert role["rules"] == []
+    assert role["rules"][0]["resourceNames"] == [
+        "kdive-kdive-worker-0",
+        "kdive-kdive-worker-1",
+        "kdive-kdive-worker-2",
+        "kdive-kdive-worker-3",
+    ]
+
+
+def test_worker_death_authority_ceiling_must_cover_replicas() -> None:
+    res = _template(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y",
+        "worker.replicas=3",
+        "worker.deathVerificationOrdinalCeiling=2",
+    )
+    assert res.returncode != 0
+    assert "deathVerificationOrdinalCeiling" in res.stderr
+
+
+@pytest.mark.parametrize("ceiling", [0, 257])
+def test_worker_death_authority_ceiling_is_bounded(ceiling: int) -> None:
+    res = _template(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y",
+        "worker.replicas=0",
+        f"worker.deathVerificationOrdinalCeiling={ceiling}",
+    )
+    assert res.returncode != 0
+    assert "between 1 and 256" in res.stderr
 
 
 def test_bundled_without_ack_fails_to_render() -> None:

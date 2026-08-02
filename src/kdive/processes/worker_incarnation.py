@@ -132,7 +132,8 @@ class DockerWorkerDeathVerifier:
         except OSError, ValueError:
             return None
         if state is None:
-            return "docker: exact container incarnation absent"
+            # Absence is not process-termination evidence: daemon state may have been lost.
+            return None
         inspected_id = state.get("Id")
         if not isinstance(inspected_id, str) or not inspected_id.startswith(container_id):
             return None
@@ -189,10 +190,12 @@ class KubernetesWorkerDeathVerifier:
         except OSError, ValueError:
             return None
         if pod is None:
-            return "kubernetes: exact pod incarnation absent"
+            # A force-delete or API partition can hide a Pod while its process still runs.
+            return None
         metadata = pod.get("metadata")
         if not isinstance(metadata, Mapping) or metadata.get("uid") != uid:
-            return "kubernetes: exact pod incarnation absent"
+            # Name reuse proves only that the API object changed, not that the old process died.
+            return None
         status = pod.get("status")
         if isinstance(status, Mapping) and status.get("phase") in {"Succeeded", "Failed"}:
             return "kubernetes: exact pod incarnation terminated"
