@@ -4,6 +4,8 @@
 
 Accepted (2026-08-02)
 
+> **Superseded by [0533](0533-role-separated-worker-fence-evidence.md)** (2026-08-02)
+
 ## Context
 
 ADR-0531 permits an admitted install to pin an expired reusable build until its worker finishes.
