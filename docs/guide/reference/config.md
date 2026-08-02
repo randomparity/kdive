@@ -193,6 +193,17 @@
 | `KDIVE_UPLOAD_TTL_SECONDS` | reconciler, server | `86400` | no | Presigned upload-URL TTL in seconds. Also read by the reconciler (ADR-0455). |
 | `KDIVE_UPLOAD_WINDOW_MAX_TTL_MULTIPLE` | server | `3` | no | Cap on how long one minted upload window may live, as a multiple of KDIVE_UPLOAD_TTL_SECONDS measured from the mint (ADR-0511). The chunked runs.complete_build extends its window by a full TTL before server-side reassembly, and that extension commits even when the finalize then fails, so repeated failing retries would otherwise roll the window forward without bound. An extension is clamped to this multiple and never shortens an open window; 1 forbids extension entirely. Re-minting via artifacts.create_run_upload starts a new window and a fresh budget, so this bounds silent drift, not the agent's reach. |
 
+## worker-death
+
+| Variable | Processes | Default | Required | Value |
+|----------|-----------|---------|----------|-------|
+| `KDIVE_DOCKER_DEATH_API` | server | `http://worker-death-api:2375` | no | Private inspect-only Docker authority endpoint used by the Docker death verifier. |
+| `KDIVE_POD_NAME` | worker | — | conditional | Kubernetes worker Pod name supplied by the downward API. |
+| `KDIVE_POD_NAMESPACE` | worker | — | conditional | Kubernetes worker Pod namespace supplied by the downward API. |
+| `KDIVE_POD_UID` | worker | — | conditional | Immutable Kubernetes worker Pod UID supplied by the downward API. |
+| `KDIVE_WORKER_DEATH_VERIFIER` | server | `disabled` | no | Authoritative worker-death verifier; disabled omits build-use recovery tools. |
+| `KDIVE_WORKER_INCARNATION_KIND` | worker | `local` | no | Immutable worker identity source: local process, Docker container, or Kubernetes Pod. |
+
 # Test, tooling, and guest-helper variables
 
 Non-registry `KDIVE_*` variables read outside the process config registry — by the gated test suites, the operator setup/live-stack shell scripts, the in-guest capture/install helpers, and the image/wheel build. Catalogued in `src/kdive/config/external_env.py`.
