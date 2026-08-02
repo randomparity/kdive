@@ -14,8 +14,14 @@ image built by the repo [`Dockerfile`](../../Dockerfile) (`image: kdive:dev`).
 The dependency graph is self-contained, so a single `up` brings the whole stack:
 
 ```bash
-docker compose up -d server worker reconciler   # builds the image, runs the backends + migrate first
+just compose-up   # builds the image, runs the backends + migrate, then gates the worker
 ```
+
+The `compose-up`, `compose-recreate-worker`, and `compose-down` recipes are the only supported
+worker lifecycle. They bind the exact full container ID to a random nonce in Postgres before
+start and record retained terminal inspect evidence before removal. Raw Compose/Docker lifecycle
+commands and host-launched workers bypass that chain and are unsupported. On a database failure,
+the wrapper leaves the never-started or terminal worker retained; restore Postgres and retry.
 
 `docker compose up` resolves the graph rather than relying on the operator to order it:
 the app services pull in a healthy Postgres, the `minio-init` bucket-creation one-shot

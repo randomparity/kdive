@@ -10,11 +10,17 @@ pre-building the image — is in [`deploy/compose/README.md`](../../deploy/compo
 
 ## Bring-up
 
-`docker compose up` resolves the graph, so one command starts the whole stack:
+The lifecycle wrapper resolves the graph and gates the worker, so one command starts the stack:
 
 ```bash
-docker compose up -d server worker reconciler
+just compose-up
 ```
+
+Use `just compose-recreate-worker` to replace the worker and `just compose-down` to tear the
+stack down. These are the only supported worker lifecycle commands: they preserve exact
+worker-incarnation evidence in Postgres. Raw Compose/Docker lifecycle commands and host workers
+bypass that evidence boundary. A database failure is fail-closed, retaining the never-started or
+terminal worker so the same recipe can be retried after Postgres recovers.
 
 Configuration is read from `KDIVE_*` variables; see
 [the config reference](../guide/reference/config.md) for every setting.
@@ -56,7 +62,7 @@ does not start containers when the Docker daemon does. That is deliberate for a 
 MinIO uses root demo credentials and whose mock OIDC issuer mints accepted bearer tokens,
 both on published host ports: they should not come back on every reboot of a machine that
 once ran the stack. After a reboot, bring the stack up again explicitly with
-`docker compose up -d`.
+`just compose-up`.
 
 ## Pointing an agent at the endpoint
 

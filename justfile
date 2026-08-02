@@ -221,7 +221,7 @@ stack-up:
     docker compose run --rm minio-init
     ./scripts/live-stack/apply-migrations.sh
     @echo "Backends healthy and schema migrated."
-    @echo "App tier, for IN-NETWORK clients: docker compose up -d migrate server worker reconciler"
+    @echo "App tier, for IN-NETWORK clients: just compose-up"
     @echo "For the live suites, the CLI, or any local-libvirt VM: scripts/live-stack/up.sh"
     @echo "  (compose containers get a different OIDC issuer identity than a host-minted token"
     @echo "   carries -> 401, and no /dev/kvm or libvirt socket -> no local VM. See the runbook.)"
@@ -288,11 +288,14 @@ changelog:
 
 # Start the operator backing services (Postgres + MinIO + mock OIDC) for a live run.
 compose-up:
-    docker compose up -d
+    uv run python -m kdive.processes.compose_worker_lifecycle up
+
+compose-recreate-worker:
+    uv run python -m kdive.processes.compose_worker_lifecycle recreate
 
 # Stop the operator backing services and remove their volumes.
 compose-down:
-    docker compose down -v
+    uv run python -m kdive.processes.compose_worker_lifecycle down --volumes
 
 # Lint and format-check the shell scripts (recursively under scripts/).
 lint-shell:

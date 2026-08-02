@@ -228,6 +228,12 @@ services:
   # decision 3); server and reconciler need none. It writes vmcore/transcript
   # artifacts to the object store, so it also waits for the bucket to exist.
   worker:
+    # The reference deployment starts workers only through the lifecycle wrapper. The profile
+    # keeps a raw `docker compose up` from bypassing durable registration; the fallback value
+    # also makes an explicitly profile-enabled bypass fail the worker's nonce validation.
+    profiles: ["managed-worker"]
+    labels:
+      io.kdive.managed-worker: "true"
     image: ${KDIVE_IMAGE:-kdive:dev}
     command: ["worker"]
     # The process exits when Postgres is unreachable at start (ADR-0449), so the retry
@@ -239,10 +245,8 @@ services:
     environment:
       <<: *backends
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9465
-      # Docker's default hostname is the immutable 12-character container-ID prefix. The worker
-      # persists it with each build-use pin; inspect resolves that prefix and the server confirms
-      # the returned full ID starts with the exact persisted value.
       KDIVE_WORKER_INCARNATION_KIND: docker
+      KDIVE_WORKER_INCARNATION_ID: docker:${KDIVE_WORKER_INCARNATION_NONCE:-unmanaged}
     healthcheck:
       <<: *readyz_cadence
       test:

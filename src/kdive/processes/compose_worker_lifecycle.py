@@ -67,8 +67,11 @@ class ComposeWorkerLifecycle:
     async def up(self) -> None:
         """Start the non-worker graph, then create, bind, and start the worker."""
         self._command((*_COMPOSE, "up", "-d"), None)
-        if self._worker_id() is None:
+        current = self._worker_id()
+        if current is None:
             await self._create()
+        else:
+            await self._gate.register_and_start(current)
 
     async def recreate(self) -> None:
         """Terminate the old generation before creating its replacement."""

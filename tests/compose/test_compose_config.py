@@ -149,10 +149,14 @@ _VERSIONING_REPLIES = (
 )
 
 
-def _config(env_overrides: dict[str, str] | None = None, *, obs: bool = False) -> dict[str, Any]:
+def _config(
+    env_overrides: dict[str, str] | None = None, *, obs: bool = False, managed_worker: bool = True
+) -> dict[str, Any]:
     # `docker compose config` drops profile-gated services (prometheus/grafana) unless the profile
     # is active, so pass `--profile obs` to render them into the model.
-    profile = ["--profile", "obs"] if obs else []
+    profile = ["--profile", "managed-worker"] if managed_worker else []
+    if obs:
+        profile.extend(("--profile", "obs"))
     res = subprocess.run(
         ["docker", "compose", "-f", str(_COMPOSE_FILE), *profile, "config", "--format", "json"],
         capture_output=True,
@@ -180,6 +184,16 @@ def test_worker_death_verifier_uses_inspect_only_private_proxy() -> None:
     assert proxy["user"] == "root"
     assert proxy["networks"] == {"worker-death": None}
     assert model["networks"]["worker-death"]["internal"] is True
+
+
+def test_worker_requires_evidence_preserving_compose_wrapper() -> None:
+    model = _config(managed_worker=False)
+    worker = _config({"KDIVE_WORKER_INCARNATION_NONCE": "a" * 32})["services"]["worker"]
+
+    assert "worker" not in model["services"]
+    assert worker["profiles"] == ["managed-worker"]
+    assert worker["labels"]["io.kdive.managed-worker"] == "true"
+    assert worker["environment"]["KDIVE_WORKER_INCARNATION_ID"] == f"docker:{'a' * 32}"
 
 
 def _minio_init_script() -> str:

@@ -74,6 +74,17 @@ def test_database_failure_leaves_never_started_worker_for_retry() -> None:
     assert not any(event[0][-2:] == ("start", "worker") for event in _commands(events))
 
 
+def test_retry_resumes_an_existing_never_started_worker() -> None:
+    lifecycle, events = _lifecycle(initially_created=True)
+
+    asyncio.run(lifecycle.up())
+
+    assert ("register-and-start", "a" * 64) in events
+    assert not any(
+        event[0][-3:] == ("create", "--no-recreate", "worker") for event in _commands(events)
+    )
+
+
 def test_recreate_terminates_old_generation_before_creating_new_one() -> None:
     lifecycle, events = _lifecycle(initially_created=True)
 
