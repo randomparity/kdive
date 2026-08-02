@@ -484,6 +484,7 @@ def test_runs_create_schema_describes_reusable_external_build(migrated_url: str)
     build_ref = tool.parameters["properties"]["build_ref"]
     assert "64 lowercase hex digest" in build_ref["description"]
     assert "same-Investigation compatible build_ref" in tool.description
+    assert "unbound Run proceeds to runs.bind" in tool.description
     assert "retry runs.create without the reference" in tool.description
 
 

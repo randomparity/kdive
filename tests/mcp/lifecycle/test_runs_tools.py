@@ -7,7 +7,7 @@ import copy
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, LiteralString, cast
 from uuid import UUID, uuid4
@@ -48,6 +48,7 @@ from kdive.mcp.tools.lifecycle.runs.create import (
     create_run,
 )
 from kdive.mcp.tools.lifecycle.runs.create import _created_response as _created_response
+from kdive.mcp.tools.lifecycle.runs.list import RunsListRequest, list_runs
 from kdive.mcp.tools.lifecycle.runs.metadata import (
     OUTCOME_NOTE_MAX_LEN,
     set_run,
@@ -1991,7 +1992,7 @@ def test_created_response_chains_to_the_upload_loop() -> None:
     assert resp.refs["external_build_contract"] == "resource://kdive/contracts/external-build"
 
 
-def test_created_response_with_reusable_build_chains_to_install() -> None:
+def test_created_response_with_unbound_reusable_build_chains_to_bind() -> None:
     base = _create_result()
     resp = _created_response(
         RunCreateResult(
@@ -2004,10 +2005,26 @@ def test_created_response_with_reusable_build_chains_to_install() -> None:
         )
     )
     assert resp.status == "succeeded"
-    assert resp.suggested_next_actions == ["runs.get", "runs.install"]
+    assert resp.suggested_next_actions == ["runs.get", "runs.bind"]
     assert resp.data["build_ref"] is not None
     assert resp.data["build_expires_at"] == "2026-08-08T00:00:00+00:00"
     assert "external_build_contract" not in resp.refs
+
+
+def test_created_response_with_bound_reusable_build_chains_to_install() -> None:
+    base = _create_result()
+    resp = _created_response(
+        RunCreateResult(
+            run_id=base.run_id,
+            project=base.project,
+            investigation_id=base.investigation_id,
+            target_kind=base.target_kind,
+            system_id=uuid4(),
+            build_ref=f"{'a' * 64}.{uuid4()}",
+            build_expires_at="2026-08-08T00:00:00+00:00",
+        )
+    )
+    assert resp.suggested_next_actions == ["runs.get", "runs.install"]
 
 
 def test_create_external_run_chains_to_upload_loop(migrated_url: str) -> None:
@@ -2044,6 +2061,7 @@ async def _create(
     reuse_requirement: RunReuseRequirementInput | None = None,
     idempotency_key: str | None = None,
     label: str | None = None,
+    build_ref: str | None = None,
 ):
     return await create_run(
         pool,
@@ -2054,10 +2072,88 @@ async def _create(
             build_profile=profile or _profile(),
             reuse_requirement=reuse_requirement,
             label=label,
+            build_ref=build_ref,
         ),
         resolver=provider_resolver(),
         idempotency_key=idempotency_key,
     )
+
+
+async def _seed_investigation_build(pool: AsyncConnectionPool, investigation_id: str) -> str:
+    digest = "b" * 64
+    generation = uuid4()
+    build_ref = f"{digest}.{generation}"
+    expires_at = datetime.now(UTC) + timedelta(days=7)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO investigation_builds "
+            "(investigation_id, generation, build_ref, content_digest, canonical_document, "
+            "build_result, artifacts, target_kind, build_profile, state, expires_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'local-libvirt', %s, 'active', %s)",
+            (
+                investigation_id,
+                generation,
+                build_ref,
+                digest,
+                Jsonb({"version": 1}),
+                Jsonb({"kernel_ref": "build/kernel", "build_id": "id"}),
+                Jsonb({}),
+                Jsonb({"schema_version": 1, "arch": "x86_64"}),
+                expires_at,
+            ),
+        )
+    return build_ref
+
+
+def test_reusable_create_idempotency_and_read_models(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            build_ref = await _seed_investigation_build(pool, inv_id)
+            first = await _create(
+                pool,
+                _ctx(),
+                inv_id,
+                sys_id,
+                build_ref=build_ref,
+                idempotency_key="reuse-build-once",
+            )
+            replay = await _create(
+                pool,
+                _ctx(),
+                inv_id,
+                sys_id,
+                build_ref=build_ref,
+                idempotency_key="reuse-build-once",
+            )
+            read = await get_run(pool, _ctx(), first.object_id)
+            listed = await list_runs(pool, _ctx(), RunsListRequest(investigation_id=inv_id))
+            assert replay.model_dump() == first.model_dump()
+            assert first.status == "succeeded"
+            assert read.data["build_ref"] == build_ref
+            assert read.data["build_expires_at"] == first.data["build_expires_at"]
+            assert listed.items[0].data["build_ref"] == build_ref
+            assert listed.items[0].data["build_expires_at"] == first.data["build_expires_at"]
+
+            other_inv = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            other_ref = await _seed_investigation_build(pool, other_inv)
+            second_system = await _seed_system(pool)
+            ordinary = await _create(pool, _ctx(), inv_id, second_system)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET build_ref = %s WHERE id = %s",
+                    (other_ref, ordinary.object_id),
+                )
+            isolated_get = await get_run(pool, _ctx(), ordinary.object_id)
+            isolated_list = await list_runs(pool, _ctx(), RunsListRequest(investigation_id=inv_id))
+            isolated_item = next(
+                item for item in isolated_list.items if item.object_id == ordinary.object_id
+            )
+            assert "build_expires_at" not in isolated_get.data
+            assert "build_expires_at" not in isolated_item.data
+
+    asyncio.run(_run())
 
 
 def test_create_with_label_echoes_and_persists(migrated_url: str) -> None:

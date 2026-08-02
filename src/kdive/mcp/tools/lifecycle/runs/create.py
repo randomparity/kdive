@@ -147,7 +147,10 @@ def _created_response(result: RunCreateResult) -> ToolResponse:
         return ToolResponse.success(
             str(result.run_id),
             "succeeded",
-            suggested_next_actions=["runs.get", "runs.install"],
+            suggested_next_actions=[
+                "runs.get",
+                "runs.bind" if result.system_id is None else "runs.install",
+            ],
             data=data,
         )
     return ToolResponse.success(

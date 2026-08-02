@@ -27,6 +27,7 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.security.audit import args_digest
 from kdive.services.runs import complete_build
+from kdive.services.runs.admission import RunCreateRequest, create_run
 from kdive.services.runs.complete_build import (
     CompleteBuildConfigurationError,
     CompleteBuildExpiredWindowError,
@@ -38,9 +39,11 @@ from tests.mcp.complete_build_support import (
     FakeValidator,
     seed_external_run,
     seed_external_run_with_manifest,
+    seed_system,
 )
 from tests.mcp.complete_build_support import ctx as _ctx
 from tests.mcp.complete_build_support import pool as _pool
+from tests.mcp.systems_support import provider_resolver
 
 _CHUNKED_KERNEL = ManifestEntry(
     "kernel", "whole", 8, chunks=(ChunkEntry("c0", 5), ChunkEntry("c1", 3))
@@ -982,6 +985,48 @@ def test_loser_bytes_are_retained_when_single_put_commit_fails(
         assert state == (RunState.CREATED.value,)
         assert steps == []
         assert store.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_reused_step_matches_real_publisher_step(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            source_id = await seed_external_run_with_manifest(
+                pool,
+                entries=[ManifestEntry("kernel", "ck", 1), ManifestEntry("vmlinux", "cv", 1)],
+            )
+            prefix = _prefix(source_id)
+            published = await _complete(
+                pool,
+                source_id,
+                CompleteBuildFinalizer(
+                    validate_complete_build=FakeValidator(
+                        BuildOutput(f"{prefix}kernel", f"{prefix}vmlinux", "build-id")
+                    )
+                ),
+            )
+            assert published.build_ref is not None
+            source = await _run_by_id(pool, source_id)
+            target_system = await seed_system(pool)
+            reused = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=str(source.investigation_id),
+                    system_id=str(target_system),
+                    build_profile={"schema_version": 1},
+                    build_ref=published.build_ref,
+                ),
+                resolver=provider_resolver(),
+            )
+            steps = await _fetchall(
+                pool,
+                "SELECT run_id, result FROM run_steps WHERE run_id = ANY(%s) AND step = 'build'",
+                ([source_id, reused.run_id],),
+            )
+        by_run = {run_id: result for run_id, result in steps}
+        assert by_run[source_id] == by_run[reused.run_id] == published.dump()
 
     asyncio.run(_run())
 
