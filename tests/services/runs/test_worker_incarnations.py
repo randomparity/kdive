@@ -11,6 +11,7 @@ from kdive.services.runs.worker_incarnations import (
     IncarnationConflict,
     register_worker_incarnation,
     terminate_worker_incarnation,
+    verify_active_worker_incarnation,
 )
 from tests.reconciler.conftest import connect
 
@@ -63,6 +64,26 @@ def test_registration_rejects_conflicting_binding(migrated_url: str) -> None:
                 await register_worker_incarnation(
                     conn, "docker:nonce", "docker", {"container_id": "b" * 64}
                 )
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_docker_worker_requires_gate_preregistered_active_binding(migrated_url: str) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        try:
+            with pytest.raises(IncarnationConflict, match="pre-registered"):
+                await verify_active_worker_incarnation(conn, "docker:nonce-missing", "docker")
+            await register_worker_incarnation(
+                conn, "docker:nonce-ready", "docker", {"container_id": "a" * 64}
+            )
+            row = await verify_active_worker_incarnation(conn, "docker:nonce-ready", "docker")
+            assert row.authority_binding == {"container_id": "a" * 64}
+            await terminate_worker_incarnation(conn, "docker:nonce-ready", "killed")
+            with pytest.raises(IncarnationConflict, match="not active"):
+                await verify_active_worker_incarnation(conn, "docker:nonce-ready", "docker")
         finally:
             await conn.close()
 

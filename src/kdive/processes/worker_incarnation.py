@@ -20,7 +20,6 @@ from kdive.config.core_settings import (
     POD_NAME,
     POD_NAMESPACE,
     POD_UID,
-    WORKER_AUTHORITY_BINDING,
     WORKER_DEATH_VERIFIER,
     WORKER_INCARNATION_ID,
     WORKER_INCARNATION_KIND,
@@ -79,18 +78,12 @@ def worker_incarnation_registration(
     *,
     boot_id_path: Path = _BOOT_ID,
     stat_path: Path | None = None,
-) -> tuple[str, Literal["local", "docker", "kubernetes"], dict[str, Any]]:
+) -> tuple[str, Literal["local", "docker", "kubernetes"], dict[str, Any] | None]:
     """Return the exact identity and immutable authority binding registered at startup."""
     kind = config.require(WORKER_INCARNATION_KIND)
     incarnation = worker_incarnation_id(pid, boot_id_path=boot_id_path, stat_path=stat_path)
     if kind == "docker":
-        try:
-            binding = json.loads(config.require(WORKER_AUTHORITY_BINDING))
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Docker worker authority binding must be valid JSON") from exc
-        if not isinstance(binding, dict) or not binding:
-            raise RuntimeError("Docker worker authority binding must be a non-empty JSON object")
-        return incarnation, kind, binding
+        return incarnation, kind, None
     if kind == "kubernetes":
         return (
             incarnation,

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import Annotated, Protocol
+from typing import Annotated
 from uuid import UUID
 
 from fastmcp import FastMCP
@@ -20,21 +19,11 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
 from kdive.services.runs.build_use import recover_build_use_in_transaction
-from kdive.services.runs.worker_incarnations import (
-    IncarnationConflict,
-    terminate_worker_incarnation,
-)
 
 _TOOL = "ops.recover_build_use"
 _LIST_TOOL = "ops.build_uses_list"
 _MAX_HOLDER_CHARS = 512
 _MAX_REASON_CHARS = 512
-
-
-class WorkerDeathVerifier(Protocol):
-    """Authoritative source independent of caller claims and job heartbeat state."""
-
-    def verify_dead(self, worker_incarnation: str) -> str | None: ...
 
 
 def _failure(use_id: UUID, message: str) -> ToolResponse:
@@ -129,7 +118,6 @@ async def list_build_uses(
 async def recover_build_use(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    verifier: WorkerDeathVerifier,
     *,
     use_id: UUID,
     holder: str,
@@ -152,78 +140,13 @@ async def recover_build_use(
             outcome="invalid_input",
         )
         return _failure(use_id, "holder and reason must be non-empty and at most 512 characters")
-    # Deployment verifiers may perform a bounded Docker/Kubernetes authority read. Keep that
-    # network I/O off FastMCP's event loop; the transaction starts only after death is proven.
-    try:
-        evidence = await asyncio.to_thread(verifier.verify_dead, holder)
-    except Exception:  # noqa: BLE001 -- the deployment authority is an external boundary
-        await _audit_refusal(
-            pool,
-            ctx,
-            use_id=use_id,
-            holder=holder,
-            reason=clean_reason,
-            outcome="verifier_error",
-        )
-        return _failure(use_id, "the authoritative worker-death verifier failed")
-    if evidence is None:
-        await _audit_refusal(
-            pool,
-            ctx,
-            use_id=use_id,
-            holder=holder,
-            reason=clean_reason,
-            outcome="death_not_proven",
-        )
-        return _failure(use_id, "the authoritative verifier did not prove this worker dead")
-    if len(evidence) > 1024:
-        await _audit_refusal(
-            pool,
-            ctx,
-            use_id=use_id,
-            holder=holder,
-            reason=clean_reason,
-            outcome="evidence_oversized",
-        )
-        return _failure(use_id, "authoritative worker-death evidence exceeds 1024 characters")
-    async with pool.connection() as conn:
-        match = await (
-            await conn.execute(
-                "SELECT 1 FROM investigation_build_uses "
-                "WHERE use_id = %s AND holder_worker_id = %s",
-                (use_id, holder),
-            )
-        ).fetchone()
-    if match is None:
-        await _audit_refusal(
-            pool,
-            ctx,
-            use_id=use_id,
-            holder=holder,
-            reason=clean_reason,
-            outcome="use_or_holder_mismatch",
-        )
-        return _failure(use_id, "build-use pin was absent or its exact holder did not match")
-    try:
-        async with pool.connection() as conn:
-            await terminate_worker_incarnation(conn, holder, "failed")
-    except IncarnationConflict:
-        await _audit_refusal(
-            pool,
-            ctx,
-            use_id=use_id,
-            holder=holder,
-            reason=clean_reason,
-            outcome="termination_evidence_conflict",
-        )
-        return _failure(use_id, "the exact worker has no matching durable termination record")
     async with pool.connection() as conn, conn.transaction():
         recovered = await recover_build_use_in_transaction(
             conn,
             use_id,
             confirmed_worker_id=holder,
             recovered_by=ctx.principal,
-            evidence=evidence,
+            evidence="durable worker-incarnation termination record",
             reason=clean_reason,
         )
         if not recovered:
@@ -239,7 +162,11 @@ async def recover_build_use(
                     actor=actor_for(ctx),
                 ),
             )
-            return _failure(use_id, "build-use pin was absent or its exact holder did not match")
+            return _failure(
+                use_id,
+                "build-use pin was absent, its exact holder did not match, or durable "
+                "termination evidence was not recorded",
+            )
         await audit.record_platform(
             conn,
             principal=ctx.principal,
@@ -255,7 +182,7 @@ async def recover_build_use(
     return ToolResponse.success(str(use_id), "recovered", data={"holder": holder})
 
 
-def register(app: FastMCP, pool: AsyncConnectionPool, *, verifier: WorkerDeathVerifier) -> None:
+def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the authenticated build-use recovery tool."""
 
     @app.tool(name=_LIST_TOOL, annotations=_docmeta.read_only(), meta={"maturity": "implemented"})
@@ -271,7 +198,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, verifier: WorkerDeathVe
     ) -> ToolResponse:
         """List persistent reusable-build pins. Requires platform operator.
 
-        Conditionally available only when the server has an authoritative worker-death verifier.
+        Conditionally available only when durable worker-termination witnesses are configured.
         A stale job lease is diagnostic context only, never proof that its holder stopped. Pass an
         exact returned use id and holder to `ops.recover_build_use` only after operator review.
         """
@@ -301,12 +228,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, verifier: WorkerDeathVe
     ) -> ToolResponse:
         """Release one stranded build-use pin. Requires platform operator.
 
-        Conditionally available only when the server has an authoritative worker-death verifier.
+        Conditionally available only when durable worker-termination witnesses are configured.
         Recovery succeeds only when the supplied holder exactly matches the durable use row and
-        the server's configured deployment verifier independently proves that exact worker
-        incarnation terminated. Job heartbeat, lease expiry, object absence, and identity
-        replacement are never death evidence.
+        the exact worker incarnation already has a durable terminated registry row. This tool
+        cannot publish termination evidence. Job heartbeat, lease expiry, object absence, and
+        identity replacement are never death evidence.
         """
         return await recover_build_use(
-            pool, current_context(), verifier, use_id=use_id, holder=holder, reason=reason
+            pool, current_context(), use_id=use_id, holder=holder, reason=reason
         )

@@ -54,12 +54,11 @@ def test_verifier_refuses_live_or_foreign_incarnation(tmp_path: Path, monkeypatc
 def test_docker_identity_binds_container_and_verifier_requires_actual_stop(monkeypatch) -> None:
     monkeypatch.setenv("KDIVE_WORKER_INCARNATION_KIND", "docker")
     monkeypatch.setenv("KDIVE_WORKER_INCARNATION_ID", "docker:nonce-123")
-    monkeypatch.setenv("KDIVE_WORKER_AUTHORITY_BINDING", '{"container_id":"' + "a" * 64 + '"}')
     assert worker_incarnation_id(42) == "docker:nonce-123"
     assert worker_incarnation_registration(42) == (
         "docker:nonce-123",
         "docker",
-        {"container_id": "a" * 64},
+        None,
     )
 
     stopped = DockerWorkerDeathVerifier(

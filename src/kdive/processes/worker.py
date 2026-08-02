@@ -15,7 +15,10 @@ from kdive.processes.runtime import (
     run_process_runtime,
 )
 from kdive.processes.worker_incarnation import worker_incarnation_registration
-from kdive.services.runs.worker_incarnations import register_worker_incarnation
+from kdive.services.runs.worker_incarnations import (
+    register_worker_incarnation,
+    verify_active_worker_incarnation,
+)
 
 if TYPE_CHECKING:
     from kdive.health.heartbeat import Heartbeat
@@ -44,7 +47,13 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
         pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe
     ) -> None:
         async with pool.connection() as conn:
-            await register_worker_incarnation(conn, worker_id, authority_kind, authority_binding)
+            if authority_kind == "docker":
+                await verify_active_worker_incarnation(conn, worker_id, authority_kind)
+            else:
+                assert authority_binding is not None
+                await register_worker_incarnation(
+                    conn, worker_id, authority_kind, authority_binding
+                )
         worker = Worker(
             pool,
             build_handler_registry(secret_registry=secret_registry),

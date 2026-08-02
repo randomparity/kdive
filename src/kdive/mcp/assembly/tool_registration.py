@@ -190,9 +190,9 @@ def _diagnostics_tools_registrar() -> PlaneRegistrar:
     return _register
 
 
-def _build_use_recovery_registrar(verifier: WorkerDeathVerifier) -> PlaneRegistrar:
+def _build_use_recovery_registrar() -> PlaneRegistrar:
     def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
-        ops_build_uses_tools.register(app, pool, verifier=verifier)
+        ops_build_uses_tools.register(app, pool)
 
     return _register
 
@@ -243,9 +243,7 @@ def _register_lifecycle_prompts(app: FastMCP, _pool: AsyncConnectionPool) -> Non
 def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
     """Build plane registrars from the narrow dependencies each group actually uses."""
     recovery = (
-        (_build_use_recovery_registrar(assembly.worker_death_verifier),)
-        if assembly.worker_death_verifier is not None
-        else ()
+        (_build_use_recovery_registrar(),) if assembly.worker_death_verifier is not None else ()
     )
     return (
         _gateway_tools_registrar(assembly.resolver),

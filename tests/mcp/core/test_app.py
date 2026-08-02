@@ -128,7 +128,7 @@ def test_resource_host_and_mutation_tools_are_registered() -> None:
     asyncio.run(_run())
 
 
-def test_build_use_recovery_is_not_advertised_without_death_authority(monkeypatch) -> None:
+def test_build_use_recovery_is_not_advertised_without_durable_witness(monkeypatch) -> None:
     monkeypatch.delenv("KDIVE_WORKER_DEATH_VERIFIER", raising=False)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
@@ -137,6 +137,26 @@ def test_build_use_recovery_is_not_advertised_without_death_authority(monkeypatc
 
     assert "ops.build_uses_list" not in names
     assert "ops.recover_build_use" not in names
+
+
+def test_build_use_recovery_is_not_advertised_for_legacy_local_verifier(monkeypatch) -> None:
+    monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "local")
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+    names = {tool.name for tool in asyncio.run(app.list_tools())}
+
+    assert "ops.recover_build_use" not in names
+
+
+def test_build_use_recovery_is_advertised_in_durable_witness_mode(monkeypatch) -> None:
+    monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "kubernetes")
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+    names = {tool.name for tool in asyncio.run(app.list_tools())}
+
+    assert {"ops.build_uses_list", "ops.recover_build_use"} <= names
 
 
 def test_build_app_registers_doc_resources() -> None:

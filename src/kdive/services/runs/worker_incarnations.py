@@ -120,3 +120,22 @@ async def terminate_worker_incarnation(
         ).fetchone()
         assert row is not None
         return _record(row)
+
+
+async def verify_active_worker_incarnation(
+    conn: AsyncConnection, incarnation: str, authority_kind: AuthorityKind
+) -> WorkerIncarnation:
+    """Require an authority-pre-registered exact incarnation to remain active."""
+    require_top_level_transaction(conn, "verify_active_worker_incarnation")
+    async with (
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.WORKER_INCARNATION, incarnation),
+    ):
+        current = await _get_locked(conn, incarnation)
+        if current is None:
+            raise IncarnationConflict("worker incarnation was not pre-registered by its authority")
+        if current.authority_kind != authority_kind:
+            raise IncarnationConflict("worker incarnation authority binding does not match")
+        if current.state != "active":
+            raise IncarnationConflict("worker incarnation is not active")
+        return current

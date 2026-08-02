@@ -11,7 +11,10 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.ops import build_uses
 from kdive.security.authz.rbac import PlatformRole
-from kdive.services.runs.worker_incarnations import register_worker_incarnation
+from kdive.services.runs.worker_incarnations import (
+    register_worker_incarnation,
+    terminate_worker_incarnation,
+)
 
 
 def _ctx(*, operator: bool) -> RequestContext:
@@ -34,7 +37,7 @@ async def _pool(url: str):
         await pool.close()
 
 
-async def _seed(pool: AsyncConnectionPool) -> tuple[UUID, str]:
+async def _seed(pool: AsyncConnectionPool, *, terminated: bool = False) -> tuple[UUID, str]:
     investigation_id, generation, job_id, use_id = uuid4(), uuid4(), uuid4(), uuid4()
     holder = "host-a:42:boot-123:987"
     async with pool.connection() as conn:
@@ -70,22 +73,10 @@ async def _seed(pool: AsyncConnectionPool) -> tuple[UUID, str]:
             "local",
             {"host": "host-a", "pid": 42, "boot_id": "boot-123", "start_ticks": "987"},
         )
+    if terminated:
+        async with pool.connection() as conn:
+            await terminate_worker_incarnation(conn, holder, "failed")
     return use_id, holder
-
-
-class _Verifier:
-    def __init__(self, evidence: str | None) -> None:
-        self.evidence = evidence
-        self.seen: list[str] = []
-
-    def verify_dead(self, worker_incarnation: str) -> str | None:
-        self.seen.append(worker_incarnation)
-        return self.evidence
-
-
-class _FailingVerifier:
-    def verify_dead(self, worker_incarnation: str) -> str | None:
-        raise RuntimeError("authority unavailable with secret material")
 
 
 def test_recover_build_use_requires_operator_and_independent_death_proof(
@@ -94,32 +85,30 @@ def test_recover_build_use_requires_operator_and_independent_death_proof(
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             use_id, holder = await _seed(pool)
-            verifier = _Verifier("local-proc: exact worker incarnation absent")
             denied = await build_uses.recover_build_use(
                 pool,
                 _ctx(operator=False),
-                verifier,
                 use_id=use_id,
                 holder=holder,
                 reason="worker host was replaced",
             )
             assert denied.error_category == "authorization_denied"
-            assert verifier.seen == []
 
             no_proof = await build_uses.recover_build_use(
                 pool,
                 _ctx(operator=True),
-                _Verifier(None),
                 use_id=use_id,
                 holder=holder,
                 reason="worker host was replaced",
             )
             assert no_proof.error_category == "configuration_error"
 
+            async with pool.connection() as conn:
+                await terminate_worker_incarnation(conn, holder, "failed")
+
             recovered = await build_uses.recover_build_use(
                 pool,
                 _ctx(operator=True),
-                verifier,
                 use_id=use_id,
                 holder=holder,
                 reason="worker host was replaced",
@@ -156,7 +145,7 @@ def test_recover_build_use_requires_operator_and_independent_death_proof(
                 "local: durable exact-incarnation termination (failed)",
                 "worker host was replaced",
             )
-            assert audit_count == 2  # authorized refusal and atomic successful recovery
+            assert audit_count == 2  # missing durable evidence and atomic successful recovery
 
     asyncio.run(_run())
 
@@ -166,18 +155,15 @@ def test_recover_build_use_audits_every_authorized_refusal(migrated_url: str) ->
         async with _pool(migrated_url) as pool:
             use_id, holder = await _seed(pool)
             attempts = (
-                ("", holder, _Verifier("proof"), "invalid_input"),
-                ("dead", holder, _Verifier(None), "death_not_proven"),
-                ("dead", holder, _FailingVerifier(), "verifier_error"),
-                ("dead", holder, _Verifier("x" * 1025), "evidence_oversized"),
-                ("dead", holder + "-wrong", _Verifier("proof"), "use_or_holder_mismatch"),
+                ("", holder, "invalid_input"),
+                ("dead", holder, "use_or_holder_mismatch"),
+                ("dead", holder + "-wrong", "use_or_holder_mismatch"),
             )
             expected_scopes: set[str] = set()
-            for reason, attempted_holder, verifier, outcome in attempts:
+            for reason, attempted_holder, outcome in attempts:
                 response = await build_uses.recover_build_use(
                     pool,
                     _ctx(operator=True),
-                    verifier,
                     use_id=use_id,
                     holder=attempted_holder,
                     reason=reason,
@@ -221,7 +207,6 @@ def test_recovery_refusal_fails_closed_when_audit_write_fails(
                 await build_uses.recover_build_use(
                     pool,
                     _ctx(operator=True),
-                    _Verifier(None),
                     use_id=use_id,
                     holder=holder,
                     reason="dead",
@@ -250,7 +235,6 @@ def test_recover_build_use_refuses_mismatch_and_bounds_reason(migrated_url: str)
             mismatch = await build_uses.recover_build_use(
                 pool,
                 _ctx(operator=True),
-                _Verifier("proof"),
                 use_id=use_id,
                 holder=holder + "-wrong",
                 reason="dead",
@@ -259,7 +243,6 @@ def test_recover_build_use_refuses_mismatch_and_bounds_reason(migrated_url: str)
             too_long = await build_uses.recover_build_use(
                 pool,
                 _ctx(operator=True),
-                _Verifier("proof"),
                 use_id=use_id,
                 holder=holder,
                 reason="x" * 513,

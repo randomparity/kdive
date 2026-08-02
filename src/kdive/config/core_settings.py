@@ -20,6 +20,7 @@ from kdive.config.registry import RUNNABLE, Setting
 _SERVER = frozenset({"server"})
 _STORE_USERS = frozenset({"server", "worker", "reconciler"})
 _WORKER = frozenset({"worker"})
+_RECONCILER = frozenset({"reconciler"})
 _DISCOVERY = frozenset({"worker", "reconciler"})
 # The upload-orphan sweep's two knobs are read by both processes (ADR-0455 §2, §8): the reconciler
 # runs the sweep on its loop, and the server runs a full `reconcile_once` on demand via
@@ -791,14 +792,6 @@ WORKER_INCARNATION_ID = Setting(
     required_when=_docker_worker,
     help="Lifecycle-gate-injected immutable Docker worker incarnation nonce.",
 )
-WORKER_AUTHORITY_BINDING = Setting(
-    name="KDIVE_WORKER_AUTHORITY_BINDING",
-    parse=_nonempty,
-    group="worker-death",
-    processes=_WORKER,
-    required_when=_docker_worker,
-    help="Lifecycle-gate-injected JSON binding for the exact Docker container authority.",
-)
 WORKER_DEATH_VERIFIER = Setting(
     name="KDIVE_WORKER_DEATH_VERIFIER",
     parse=_choice("disabled", "local", "docker", "kubernetes"),
@@ -844,6 +837,30 @@ POD_UID = Setting(
     processes=_WORKER,
     required_when=_kubernetes_worker,
     help="Immutable Kubernetes worker Pod UID supplied by the downward API.",
+)
+KUBERNETES_WITNESS_NAMESPACE = Setting(
+    name="KDIVE_KUBERNETES_WITNESS_NAMESPACE",
+    parse=_str,
+    default="",
+    group="worker-death",
+    processes=_RECONCILER,
+    help="Namespace watched by the bounded worker termination witness; blank disables it.",
+)
+KUBERNETES_WITNESS_WORKER_NAME = Setting(
+    name="KDIVE_KUBERNETES_WITNESS_WORKER_NAME",
+    parse=_str,
+    default="",
+    group="worker-death",
+    processes=_RECONCILER,
+    help="StatefulSet worker name prefix used with bounded ordinal Pod reads.",
+)
+KUBERNETES_WITNESS_ORDINAL_CEILING = Setting(
+    name="KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING",
+    parse=_nonnegative_int,
+    default="0",
+    group="worker-death",
+    processes=_RECONCILER,
+    help="Maximum exclusive worker ordinal polled by the Kubernetes termination witness.",
 )
 
 SETTINGS = [
@@ -905,10 +922,12 @@ SETTINGS = [
     MCP_TRACE,
     WORKER_INCARNATION_KIND,
     WORKER_INCARNATION_ID,
-    WORKER_AUTHORITY_BINDING,
     WORKER_DEATH_VERIFIER,
     DOCKER_DEATH_API,
     POD_NAMESPACE,
     POD_NAME,
     POD_UID,
+    KUBERNETES_WITNESS_NAMESPACE,
+    KUBERNETES_WITNESS_WORKER_NAME,
+    KUBERNETES_WITNESS_ORDINAL_CEILING,
 ]

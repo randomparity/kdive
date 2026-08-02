@@ -55,7 +55,7 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     monkeypatch.setattr("kdive.processes.worker.create_pool", lambda **kw: pool)
     monkeypatch.setattr(
         "kdive.processes.worker.worker_incarnation_registration",
-        lambda pid: ("local:test", "local", {"host": "host", "pid": pid}),
+        lambda pid: ("docker:nonce", "docker", None),
     )
     monkeypatch.setattr("kdive.processes.worker.install_stop", lambda: stop)
     monkeypatch.setattr("kdive.health.processes.server.build_postgres_ping", lambda value: value)
@@ -110,7 +110,7 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
         store = cast(Callable[[], str], built_probe["store"])
         assert store() == "store"
         monkeypatch.setattr(
-            "kdive.processes.worker.register_worker_incarnation",
+            "kdive.processes.worker.verify_active_worker_incarnation",
             lambda *args: _record_registration(events),
         )
         await body(pool, "heartbeat", probe)
