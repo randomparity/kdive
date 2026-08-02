@@ -310,7 +310,9 @@ class ObjectStore:
             reply.required_nonempty_string("VersionId"),
         )
 
-    def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact:
+    def get_artifact(
+        self, key: str, etag: str | None, *, version_id: str | None = None
+    ) -> artifact_types.FetchedArtifact:
         """Fetch the object at ``key``, optionally guarded by an ``If-Match`` on ``etag``.
 
         When ``etag`` is a bare value (from :class:`StoredArtifact`), the GET is
@@ -327,7 +329,7 @@ class ObjectStore:
                 interpretable sensitivity metadata, or the get otherwise fails
                 (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
         """
-        resp, sensitivity, retention_class = self._open_get(key, etag)
+        resp, sensitivity, retention_class = self._open_get(key, etag, version_id=version_id)
         try:
             data = resp["Body"].read()
         except (BotoCoreError, ClientError) as err:
@@ -336,7 +338,9 @@ class ObjectStore:
             raise _infrastructure_error("get_object", key, err) from err
         return artifact_types.FetchedArtifact(data, sensitivity, retention_class)
 
-    def _open_get(self, key: str, etag: str | None) -> tuple[Any, Sensitivity, str]:
+    def _open_get(
+        self, key: str, etag: str | None, *, version_id: str | None = None
+    ) -> tuple[Any, Sensitivity, str]:
         """Issue the GET and parse the sensitivity metadata, shared by the buffered and
         streaming reads so their error taxonomy cannot drift (ADR-0400, refining ADR-0054).
 
@@ -351,6 +355,8 @@ class ObjectStore:
         get_kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": key}
         if etag is not None:
             get_kwargs["IfMatch"] = f'"{etag}"'
+        if version_id is not None:
+            get_kwargs["VersionId"] = version_id
         try:
             resp = self._client.get_object(**get_kwargs)
         except ClientError as err:
@@ -378,7 +384,7 @@ class ObjectStore:
 
     @contextmanager
     def get_artifact_stream(
-        self, key: str, etag: str | None
+        self, key: str, etag: str | None, *, version_id: str | None = None
     ) -> Iterator[artifact_types.StreamedArtifact]:
         """Yield a streaming reader over the object at ``key`` plus its sensitivity class.
 
@@ -393,7 +399,7 @@ class ObjectStore:
                 (``STALE_HANDLE``); the object lacks interpretable sensitivity metadata, the get
                 otherwise fails, or the body read fails mid-stream (``INFRASTRUCTURE_FAILURE``).
         """
-        resp, sensitivity, retention_class = self._open_get(key, etag)
+        resp, sensitivity, retention_class = self._open_get(key, etag, version_id=version_id)
         body = resp["Body"]
         try:
             # RawIOBase provides the read interface tarfile uses but is not a nominal
@@ -454,7 +460,7 @@ class ObjectStore:
                 "MFADelete", f"returned unsupported MFADelete state {mfa_delete!r}"
             )
 
-    def head(self, key: str) -> artifact_types.HeadResult | None:
+    def head(self, key: str, *, version_id: str | None = None) -> artifact_types.HeadResult | None:
         """Return the object's size/checksum/etag/mtime/sensitivity, or ``None`` if it is absent.
 
         Requests ``ChecksumMode="ENABLED"`` so a checksum written at PUT is returned. The
@@ -471,7 +477,10 @@ class ObjectStore:
                 (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`; see :class:`_StoreReply`).
         """
         try:
-            resp = self._client.head_object(Bucket=self._bucket, Key=key, ChecksumMode="ENABLED")
+            request = {"Bucket": self._bucket, "Key": key, "ChecksumMode": "ENABLED"}
+            if version_id is not None:
+                request["VersionId"] = version_id
+            resp = self._client.head_object(**request)
         except ClientError as err:
             status = err.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
             if status == 404:
@@ -498,7 +507,9 @@ class ObjectStore:
             content_encoding=metadata.get("content-encoding"),
         )
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
         """Return ``length`` bytes of ``key`` starting at ``start`` (an HTTP ranged GET).
 
         Raises:
@@ -507,9 +518,10 @@ class ObjectStore:
         """
         end = start + length - 1
         try:
-            resp = self._client.get_object(
-                Bucket=self._bucket, Key=key, Range=f"bytes={start}-{end}"
-            )
+            request = {"Bucket": self._bucket, "Key": key, "Range": f"bytes={start}-{end}"}
+            if version_id is not None:
+                request["VersionId"] = version_id
+            resp = self._client.get_object(**request)
             return resp["Body"].read()
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("get_range", key, err) from err
@@ -560,7 +572,7 @@ class ObjectStore:
         }
         return artifact_types.PresignedUpload(url=url, required_headers=headers)
 
-    def presign_get(self, key: str, *, expires_in: int) -> str:
+    def presign_get(self, key: str, *, expires_in: int, version_id: str | None = None) -> str:
         """Mint a time-boxed presigned GET URL for one object (ADR-0076, ADR-0078).
 
         The URL is a bearer capability scoped to ``key`` alone, expiring after
@@ -580,9 +592,12 @@ class ObjectStore:
                 details={"key": key},
             )
         try:
+            params = {"Bucket": self._bucket, "Key": key}
+            if version_id is not None:
+                params["VersionId"] = version_id
             return self._client.generate_presigned_url(
                 "get_object",
-                Params={"Bucket": self._bucket, "Key": key},
+                Params=params,
                 ExpiresIn=expires_in,
                 HttpMethod="GET",
             )
@@ -612,7 +627,13 @@ class ObjectStore:
         return resp["UploadId"]
 
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str:
         """Copy ``source_key`` into part ``part_number`` of ``key``'s multipart upload.
 
@@ -627,7 +648,11 @@ class ObjectStore:
                 Key=key,
                 UploadId=upload_id,
                 PartNumber=part_number,
-                CopySource={"Bucket": self._bucket, "Key": source_key},
+                CopySource={
+                    "Bucket": self._bucket,
+                    "Key": source_key,
+                    "VersionId": source_version_id,
+                },
             )
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("upload_part_copy", key, err) from err
@@ -635,7 +660,7 @@ class ObjectStore:
 
     def complete_multipart_upload(
         self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
-    ) -> str:
+    ) -> artifact_types.MultipartCompletion:
         """Complete ``key``'s multipart upload with the ordered ``(part_number, etag)`` list.
 
         Returns the final object ETag (a multipart ``-N`` form).
@@ -650,7 +675,11 @@ class ObjectStore:
             )
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("complete_multipart_upload", key, err) from err
-        return _normalize_etag(resp["ETag"])
+        reply = _StoreReply("complete_multipart_upload", self._bucket, key, resp)
+        return artifact_types.MultipartCompletion(
+            _normalize_etag(reply.required_nonempty_string("ETag")),
+            reply.required_nonempty_string("VersionId"),
+        )
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         """Abort ``key``'s multipart upload (best-effort cleanup of a failed reassembly).

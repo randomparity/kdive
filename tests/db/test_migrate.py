@@ -195,6 +195,9 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0092",
         "0093",
         "0094",
+        "0095",
+        "0096",
+        "0097",
     ]
     assert second == []
 
@@ -203,6 +206,118 @@ def test_unique_constraints_present(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
     assert frozenset({"run_id", "step"}) in _unique_constraints(pg_conn, "run_steps")
     assert frozenset({"dedup_key"}) in _unique_constraints(pg_conn, "jobs")
+
+
+def test_investigation_build_catalog_schema(pg_conn: psycopg.Connection) -> None:
+    """Migration 0095 persists immutable, generation-scoped build records."""
+    migrate.apply_migrations(pg_conn)
+
+    assert "investigation_builds" in _tables(pg_conn)
+    columns = _columns(pg_conn, "investigation_builds")
+    assert columns == {
+        "investigation_id": "uuid",
+        "generation": "uuid",
+        "build_ref": "text",
+        "content_digest": "text",
+        "canonical_document": "jsonb",
+        "build_result": "jsonb",
+        "artifacts": "jsonb",
+        "target_kind": "text",
+        "build_profile": "jsonb",
+        "state": "text",
+        "expires_at": "timestamp with time zone",
+        "reclaim_retry_at": "timestamp with time zone",
+        "created_at": "timestamp with time zone",
+        "updated_at": "timestamp with time zone",
+    }
+    primary_key = pg_conn.execute(
+        """
+        SELECT array_agg(a.attname ORDER BY key.ordinality)
+        FROM pg_constraint c
+        CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS key(attnum, ordinality)
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = key.attnum
+        WHERE c.conrelid = 'investigation_builds'::regclass AND c.contype = 'p'
+        """
+    ).fetchone()
+    assert primary_key == (["investigation_id", "generation"],)
+    assert frozenset({"investigation_id", "build_ref"}) in _unique_constraints(
+        pg_conn, "investigation_builds"
+    )
+    checks = {
+        row[0]: row[1]
+        for row in pg_conn.execute(
+            "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = 'investigation_builds'::regclass AND contype = 'c'"
+        ).fetchall()
+    }
+    assert "^[0-9a-f]{64}$" in checks["investigation_builds_content_digest_check"]
+    assert checks["investigation_builds_build_ref_check"] == (
+        "CHECK ((build_ref = ((content_digest || '.'::text) || (generation)::text)))"
+    )
+    assert "active" in checks["investigation_builds_state_check"]
+    assert "reclaiming" in checks["investigation_builds_state_check"]
+    assert _nullable(pg_conn, "runs").get("build_ref") == "YES"
+    active_digest_index = pg_conn.execute(
+        "SELECT indexdef FROM pg_indexes WHERE indexname = 'investigation_builds_active_digest_idx'"
+    ).fetchone()
+    assert active_digest_index == (
+        "CREATE INDEX investigation_builds_active_digest_idx ON public.investigation_builds "
+        "USING btree (investigation_id, content_digest) WHERE (state = 'active'::text)",
+    )
+    expiry_index = pg_conn.execute(
+        "SELECT indexdef FROM pg_indexes WHERE indexname = 'investigation_builds_expires_at_idx'"
+    ).fetchone()
+    assert expiry_index is not None and "expires_at" in expiry_index[0]
+
+
+def test_0095_declares_stop_old_first_projection_boundary(pg_conn: psycopg.Connection) -> None:
+    sql_text = (migrate.SCHEMA_DIR / "0095_investigation_builds.sql").read_text()
+    assert "pg_stat_activity" in sql_text
+    assert "requires stop-old-first" in sql_text
+
+    migrate.apply_migrations(pg_conn)
+    all_columns = [
+        row[0]
+        for row in pg_conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'runs' ORDER BY ordinal_position"
+        ).fetchall()
+    ]
+    assert "build_ref" in all_columns
+    prior_projection = [name for name in all_columns if name != "build_ref"]
+    assert len(prior_projection) + 1 == len(all_columns)
+
+
+def test_investigation_build_gc_cursor_schema(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+
+    assert _columns(pg_conn, "investigation_build_gc_cursor") == {
+        "lane": "text",
+        "investigation_id": "uuid",
+        "generation": "uuid",
+    }
+    lanes = pg_conn.execute(
+        "SELECT lane FROM investigation_build_gc_cursor ORDER BY lane"
+    ).fetchall()
+    assert lanes == [("closed",), ("expired",)]
+
+
+def test_investigation_build_tombstone_schema(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+
+    assert _columns(pg_conn, "investigation_build_tombstones") == {
+        "investigation_id": "uuid",
+        "build_ref": "text",
+        "expires_at": "timestamp with time zone",
+        "reclaimed_at": "timestamp with time zone",
+    }
+    primary_key = pg_conn.execute(
+        "SELECT array_agg(a.attname ORDER BY key.ordinality) FROM pg_constraint c "
+        "CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS key(attnum, ordinality) "
+        "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = key.attnum "
+        "WHERE c.conrelid = 'investigation_build_tombstones'::regclass AND c.contype = 'p'"
+    ).fetchone()
+    assert primary_key == (["investigation_id", "build_ref"],)
 
 
 def test_dedup_key_not_null(pg_conn: psycopg.Connection) -> None:
@@ -709,6 +824,9 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0092",
         "0093",
         "0094",
+        "0095",
+        "0096",
+        "0097",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1080,6 +1198,9 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0092",
         "0093",
         "0094",
+        "0095",
+        "0096",
+        "0097",
     ]
 
 

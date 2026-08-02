@@ -8,7 +8,7 @@ from collections.abc import Sequence
 import pytest
 
 from kdive.artifacts.reassembly import reassemble_chunked
-from kdive.artifacts.storage import HeadResult
+from kdive.artifacts.storage import HeadResult, MultipartCompletion
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -47,18 +47,24 @@ class _FakeStore:
         return "uid"
 
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str:
         if self._fail_copy_at == part_number:
             raise CategorizedError("boom", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
-        self.events.append(("copy", part_number, source_key, key, upload_id))
+        self.events.append(("copy", part_number, source_key, source_version_id, key, upload_id))
         return f"etag-{part_number}"
 
     def complete_multipart_upload(
         self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
-    ) -> str:
+    ) -> MultipartCompletion:
         self.events.append(("complete", tuple(parts), key, upload_id))
-        return "final"
+        return MultipartCompletion("final", "final-version")
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         self.events.append(("abort", key, upload_id))
@@ -72,10 +78,12 @@ def _entry() -> ManifestEntry:
 
 def test_reassemble_verifies_copies_in_order_completes() -> None:
     store = _FakeStore()
-    heads = reassemble_chunked(store, prefix=_PREFIX, final_key=_FINAL, entry=_entry())
+    heads, completion = reassemble_chunked(store, prefix=_PREFIX, final_key=_FINAL, entry=_entry())
     assert [e[0] for e in store.events] == ["create", "copy", "copy", "complete"]
     assert store.events[1][1] == 1
     assert store.events[2][1] == 2
+    assert store.events[1][3] == "test-version"
+    assert store.events[2][3] == "test-version"
     assert store.events[3][1] == ((1, "etag-1"), (2, "etag-2"))
     assert heads == {
         f"{_PREFIX}vmlinux.part0001": HeadResult(
@@ -85,6 +93,7 @@ def test_reassemble_verifies_copies_in_order_completes() -> None:
             4, "c1", "e", last_modified=STORE_MTIME, version_id="test-version"
         ),
     }
+    assert completion.version_id == "final-version"
 
 
 def test_reassemble_passes_expected_arguments_to_store() -> None:
@@ -96,8 +105,9 @@ def test_reassemble_passes_expected_arguments_to_store() -> None:
 
     first_copy = store.events[1]
     assert first_copy[2] == f"{_PREFIX}vmlinux.part0001"
-    assert first_copy[3] == _FINAL
-    assert first_copy[4] == "uid"
+    assert first_copy[3] == "test-version"
+    assert first_copy[4] == _FINAL
+    assert first_copy[5] == "uid"
 
     second_copy = store.events[2]
     assert second_copy[2] == f"{_PREFIX}vmlinux.part0002"

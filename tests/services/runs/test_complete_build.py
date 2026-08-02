@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Sequence
-from datetime import timedelta
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from typing import Any, LiteralString, NoReturn
 
 import psycopg
@@ -13,17 +15,20 @@ import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
 from kdive.artifacts import upload_manifest
-from kdive.artifacts.storage import HeadResult, chunk_key
+from kdive.artifacts.storage import HeadResult, MultipartCompletion, chunk_key
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
-from kdive.config.core_settings import UPLOAD_WINDOW_MAX_TTL_MULTIPLE
+from kdive.config.core_settings import BUILD_ARTIFACT_RETENTION_DAYS, UPLOAD_WINDOW_MAX_TTL_MULTIPLE
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.mcp.tools.lifecycle.runs.steps import install_run
 from kdive.security.audit import args_digest
 from kdive.services.runs import complete_build
+from kdive.services.runs.admission import RunCreateRequest, create_run
 from kdive.services.runs.complete_build import (
     CompleteBuildConfigurationError,
     CompleteBuildExpiredWindowError,
@@ -35,13 +40,24 @@ from tests.mcp.complete_build_support import (
     FakeValidator,
     seed_external_run,
     seed_external_run_with_manifest,
+    seed_system,
 )
 from tests.mcp.complete_build_support import ctx as _ctx
 from tests.mcp.complete_build_support import pool as _pool
+from tests.mcp.systems_support import provider_resolver
 
 _CHUNKED_KERNEL = ManifestEntry(
     "kernel", "whole", 8, chunks=(ChunkEntry("c0", 5), ChunkEntry("c1", 3))
 )
+
+
+def test_chunked_content_identity_ignores_advisory_whole_hash_but_pins_ordered_chunks() -> None:
+    same_chunks_other_whole = _CHUNKED_KERNEL._replace(sha256="different-advisory-whole")
+    reversed_chunks = _CHUNKED_KERNEL._replace(chunks=tuple(reversed(_CHUNKED_KERNEL.chunks or ())))
+
+    identity = complete_build._manifest_content_identity(_CHUNKED_KERNEL)
+    assert identity == complete_build._manifest_content_identity(same_chunks_other_whole)
+    assert identity != complete_build._manifest_content_identity(reversed_chunks)
 
 
 class _ChunkedStore:
@@ -51,7 +67,7 @@ class _ChunkedStore:
         self.events: list[tuple[str, object]] = []
         self.deleted_versions: list[tuple[str, str]] = []
 
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
         if key.endswith(".part0001"):
             checksum = "wrong" if self.bad_head else "c0"
             return HeadResult(
@@ -61,7 +77,9 @@ class _ChunkedStore:
             return HeadResult(3, "c1", "e2", last_modified=STORE_MTIME, version_id="test-version")
         return HeadResult(8, None, "final", last_modified=STORE_MTIME, version_id="test-version")
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
         del key
         return (b"x" * 8)[start : start + length]
 
@@ -79,18 +97,24 @@ class _ChunkedStore:
         return "upload"
 
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str:
-        del key, upload_id
+        del key, upload_id, source_version_id
         self.events.append(("copy", source_key))
         return f"etag-{part_number}"
 
     def complete_multipart_upload(
         self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
-    ) -> str:
+    ) -> MultipartCompletion:
         del upload_id
         self.events.append(("complete", (key, tuple(parts))))
-        return "final"
+        return MultipartCompletion("final", "final-version")
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         del upload_id
@@ -107,6 +131,65 @@ class _PeerPutChunkedStore(_ChunkedStore):
     def delete_version(self, key: str, version_id: str) -> None:
         self.current_versions[key] = "peer-version-2"
         super().delete_version(key, version_id)
+
+
+class _VersionDeleteStore:
+    """Records exact post-commit convergence deletes for single-PUT candidates."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.deleted: list[tuple[str, str]] = []
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.deleted.append((key, version_id))
+        if self.fail:
+            raise CategorizedError("delete failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
+        del key
+        raise AssertionError("single-PUT cleanup never reads objects")
+
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
+        del key, start, length, version_id
+        raise AssertionError("single-PUT cleanup never reads objects")
+
+    def create_multipart_upload(
+        self, key: str, *, sensitivity: Sensitivity, retention_class: str
+    ) -> str:
+        del key, sensitivity, retention_class
+        raise AssertionError("single-PUT cleanup never reassembles")
+
+    def upload_part_copy(
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
+    ) -> str:
+        del key, upload_id, part_number, source_key, source_version_id
+        raise AssertionError("single-PUT cleanup never reassembles")
+
+    def complete_multipart_upload(
+        self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
+    ) -> MultipartCompletion:
+        del key, upload_id, parts
+        raise AssertionError("single-PUT cleanup never reassembles")
+
+    def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        del key, upload_id
+        raise AssertionError("single-PUT cleanup never reassembles")
+
+
+class _DelayedValidator(FakeValidator):
+    """Makes the arrival-to-publication interval visible to PostgreSQL clock tests."""
+
+    def __call__(self, manifest, keys, declared_build_id, *, arch: str = "x86_64"):
+        time.sleep(0.5)
+        return super().__call__(manifest, keys, declared_build_id, arch=arch)
 
 
 async def _run_by_id(pool: AsyncConnectionPool, run_id: Any):
@@ -397,7 +480,10 @@ def test_complete_build_finalizer_recovers_on_remint_without_reupload(migrated_u
                 )
             result = await _complete(pool, run_id, finalizer)
             keys = await _fetchall(
-                pool, "SELECT object_key FROM artifacts WHERE owner_id = %s", (run_id,)
+                pool,
+                "SELECT object_key FROM artifacts WHERE owner_kind = 'investigations' "
+                "AND owner_id = (SELECT investigation_id FROM runs WHERE id = %s)",
+                (run_id,),
             )
             run = await _run_by_id(pool, run_id)
 
@@ -705,14 +791,18 @@ def test_complete_build_success_persists_run_step_artifacts_and_audit(migrated_u
     the run_steps result JSON, both artifact rows (owner_kind/retention/sensitivity/key), the
     complete_build audit event, and manifest deletion.
     """
-    entries = [ManifestEntry("kernel", "ck", 1), ManifestEntry("initrd", "ci", 1)]
+    entries = [
+        ManifestEntry("kernel", "ck", 1),
+        ManifestEntry("vmlinux", "cv", 1),
+        ManifestEntry("initrd", "ci", 1),
+    ]
     provenance: dict[str, str | bool | list[str]] = {"source_url": "https://x", "verified": True}
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=entries)
             kernel = f"{_prefix(run_id)}kernel"
-            debuginfo = f"{_prefix(run_id)}debuginfo"
+            debuginfo = f"{_prefix(run_id)}vmlinux"
             output = BuildOutput(kernel, debuginfo, "build-id")
             run = await _run_by_id(pool, run_id)
             async with pool.connection() as conn:
@@ -735,7 +825,9 @@ def test_complete_build_success_persists_run_step_artifacts_and_audit(migrated_u
             artifacts = await _fetchall(
                 pool,
                 "SELECT owner_kind, retention_class, sensitivity, object_key "
-                "FROM artifacts WHERE owner_id = %s ORDER BY object_key",
+                "FROM artifacts WHERE owner_kind = 'investigations' "
+                "AND owner_id = (SELECT investigation_id FROM runs WHERE id = %s) "
+                "ORDER BY object_key",
                 (run_id,),
             )
             audit = await _fetchone(
@@ -752,15 +844,20 @@ def test_complete_build_success_persists_run_step_artifacts_and_audit(migrated_u
         assert result.build_id == "build-id"
         assert result.cmdline == "console=ttyS0"
         assert result.build_provenance == provenance
+        assert result.artifact_versions == {
+            "initrd": "test-version",
+            "kernel": "test-version",
+            "vmlinux": "test-version",
+        }
         assert state == RunState.SUCCEEDED.value
         assert run_kernel == kernel
         assert run_debuginfo == debuginfo
         assert step_result[0] == result.dump()
-        # Only the two uploaded manifest entries become artifact rows (debuginfo is a
-        # validator-reported ref, not an uploaded object), ordered by object_key.
+        # Every reusable uploaded build artifact becomes Investigation-owned.
         assert artifacts == [
-            ("runs", "build", "sensitive", f"{_prefix(run_id)}initrd"),
-            ("runs", "build", "sensitive", kernel),
+            ("investigations", "build", "sensitive", f"{_prefix(run_id)}initrd"),
+            ("investigations", "build", "sensitive", kernel),
+            ("investigations", "build", "sensitive", debuginfo),
         ]
         assert audit == (
             "runs.complete_build",
@@ -769,6 +866,367 @@ def test_complete_build_success_persists_run_step_artifacts_and_audit(migrated_u
             args_digest({"run_id": str(run_id)}),
         )
         assert manifest_gone
+
+    asyncio.run(_run())
+
+
+def test_complete_build_publishes_winner_under_investigation_then_run_lock(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reusable artifact set is published atomically under the ordered locks."""
+    entries = [
+        ManifestEntry("kernel", "ck", 1),
+        ManifestEntry("vmlinux", "cv", 1),
+        ManifestEntry("initrd", "ci", 1),
+    ]
+    trace: list[str] = []
+    original_lock = complete_build.advisory_xact_lock
+
+    @asynccontextmanager
+    async def traced_lock(conn, scope, key):
+        trace.append(scope.value)
+        async with original_lock(conn, scope, key):
+            yield
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=entries)
+            prefix = _prefix(run_id)
+            result = await _complete(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(
+                    validate_complete_build=FakeValidator(
+                        BuildOutput(f"{prefix}kernel", f"{prefix}vmlinux", "build-id")
+                    )
+                ),
+            )
+            run_build_ref = await _fetchone(
+                pool, "SELECT build_ref FROM runs WHERE id = %s", (run_id,)
+            )
+            catalog = await _fetchone(
+                pool,
+                "SELECT artifacts FROM investigation_builds "
+                "WHERE investigation_id = (SELECT investigation_id FROM runs WHERE id = %s)",
+                (run_id,),
+            )
+            artifacts = await _fetchall(
+                pool,
+                "SELECT owner_kind, object_key FROM artifacts ORDER BY object_key",
+                (),
+            )
+
+        assert result.build_ref is not None
+        assert result.expires_at is not None
+        assert run_build_ref == (result.build_ref,)
+        assert catalog == (
+            {
+                "initrd": {"key": f"{prefix}initrd", "version_id": "test-version"},
+                "kernel": {"key": f"{prefix}kernel", "version_id": "test-version"},
+                "vmlinux": {"key": f"{prefix}vmlinux", "version_id": "test-version"},
+            },
+        )
+        assert artifacts == [
+            ("investigations", f"{prefix}initrd"),
+            ("investigations", f"{prefix}kernel"),
+            ("investigations", f"{prefix}vmlinux"),
+        ]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(complete_build, "advisory_xact_lock", traced_lock)
+        asyncio.run(_run())
+    assert trace == ["investigation", "run"]
+
+
+def test_real_completion_finalizer_and_install_do_not_cycle(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale completion replay and install serialize through the production dual-lock paths."""
+    acquired = asyncio.Event()
+    release = asyncio.Event()
+    original_lock = complete_build.advisory_xact_lock
+
+    @asynccontextmanager
+    async def paused_lock(conn, scope, key):
+        async with original_lock(conn, scope, key):
+            if scope.value == "investigation":
+                acquired.set()
+                await release.wait()
+            yield
+
+    async def keep_manifest(*args, **kwargs) -> None:
+        del args, kwargs
+
+    async def replay_completion(finalizer, stale_created_run):
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            return await finalizer.complete(
+                conn,
+                _ctx(),
+                stale_created_run,
+                build_id=None,
+                cmdline="console=ttyS0",
+            )
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool)
+            stale_created_run = await _run_by_id(pool, run_id)
+            finalizer = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(run_id))
+            )
+            with monkeypatch.context() as patched:
+                patched.setattr(upload_manifest, "delete_manifest", keep_manifest)
+                await _complete(pool, run_id, finalizer)
+                patched.setattr(complete_build, "advisory_xact_lock", paused_lock)
+                replay = asyncio.create_task(replay_completion(finalizer, stale_created_run))
+                await acquired.wait()
+                install = asyncio.create_task(
+                    install_run(
+                        pool,
+                        _ctx(),
+                        str(run_id),
+                        resolver=provider_resolver(),
+                    )
+                )
+                await asyncio.sleep(0)
+                assert not install.done()
+                release.set()
+                replay_result = await replay
+                install_result = await install
+            assert replay_result.build_ref is not None
+            assert install_result.status == "queued"
+
+    asyncio.run(_run())
+
+
+def test_chunked_completion_acquires_investigation_before_retained_run_lock(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retained chunk-reassembly lock observes the global Investigation → Run order."""
+    trace: list[str] = []
+    original_lock = complete_build.advisory_xact_lock
+
+    @asynccontextmanager
+    async def traced_lock(conn, scope, key):
+        trace.append(scope.value)
+        async with original_lock(conn, scope, key):
+            yield
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
+            store = _ChunkedStore()
+            await _complete(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(
+                    validate_complete_build=FakeValidator(_output(run_id)),
+                    object_store_factory=lambda: store,
+                ),
+            )
+
+    with monkeypatch.context() as patched:
+        patched.setattr(complete_build, "advisory_xact_lock", traced_lock)
+        asyncio.run(_run())
+    assert trace[:2] == ["investigation", "run"]
+
+
+def test_loser_bytes_are_retained_when_single_put_commit_fails(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A loser deletes no exact version until its Run finalization durably commits."""
+
+    async def _reject_commit(_: psycopg.AsyncConnection) -> None:
+        raise psycopg.OperationalError("commit failed")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            winner_id = await seed_external_run_with_manifest(pool)
+            loser_id = await seed_external_run_with_manifest(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET investigation_id = "
+                    "(SELECT investigation_id FROM runs WHERE id = %s) WHERE id = %s",
+                    (winner_id, loser_id),
+                )
+            await _complete(
+                pool,
+                winner_id,
+                CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(winner_id))),
+            )
+            store = _VersionDeleteStore()
+            finalizer = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(loser_id)),
+                object_store_factory=lambda: store,
+            )
+            run = await _run_by_id(pool, loser_id)
+            async with pool.connection() as conn:
+                with monkeypatch.context() as patched:
+                    patched.setattr(psycopg.AsyncConnection, "commit", _reject_commit)
+                    with pytest.raises(psycopg.OperationalError, match="commit failed"):
+                        await finalizer.complete(
+                            conn, _ctx(), run, build_id=None, cmdline="console=ttyS0"
+                        )
+            state = await _fetchone(pool, "SELECT state FROM runs WHERE id = %s", (loser_id,))
+            steps = await _fetchall(
+                pool,
+                "SELECT result FROM run_steps WHERE run_id = %s AND step = 'build'",
+                (loser_id,),
+            )
+
+        assert state == (RunState.CREATED.value,)
+        assert steps == []
+        assert store.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_reused_step_matches_real_publisher_step(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            source_id = await seed_external_run_with_manifest(
+                pool,
+                entries=[ManifestEntry("kernel", "ck", 1), ManifestEntry("vmlinux", "cv", 1)],
+            )
+            prefix = _prefix(source_id)
+            published = await _complete(
+                pool,
+                source_id,
+                CompleteBuildFinalizer(
+                    validate_complete_build=FakeValidator(
+                        BuildOutput(f"{prefix}kernel", f"{prefix}vmlinux", "build-id")
+                    )
+                ),
+            )
+            assert published.build_ref is not None
+            source = await _run_by_id(pool, source_id)
+            target_system = await seed_system(pool)
+            reused = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=str(source.investigation_id),
+                    system_id=str(target_system),
+                    build_profile={"schema_version": 1},
+                    build_ref=published.build_ref,
+                ),
+                resolver=provider_resolver(),
+            )
+            steps = await _fetchall(
+                pool,
+                "SELECT run_id, result FROM run_steps WHERE run_id = ANY(%s) AND step = 'build'",
+                ([source_id, reused.run_id],),
+            )
+        by_run = {run_id: result for run_id, result in steps}
+        assert by_run[source_id] == by_run[reused.run_id] == published.dump()
+
+    asyncio.run(_run())
+
+
+def test_completion_stamps_generation_from_postgres_wall_clock(
+    migrated_url: str,
+) -> None:
+    """Long validation cannot shorten the catalog generation's advertised retention."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool)
+            result = await _complete(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(validate_complete_build=_DelayedValidator(_output(run_id))),
+            )
+            async with pool.connection() as conn:
+                row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+            assert row is not None
+
+        expires_at = datetime.fromisoformat(str(result.expires_at))
+        observed = row[0]
+        retention = timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS))
+        assert expires_at - observed >= retention - timedelta(milliseconds=250)
+
+    asyncio.run(_run())
+
+
+def test_concurrent_identical_completions_reuse_winner_and_delete_loser_versions(
+    migrated_url: str,
+) -> None:
+    """A converged Run stores winner refs and removes only its own validated version."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            first_id = await seed_external_run_with_manifest(pool)
+            second_id = await seed_external_run_with_manifest(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET investigation_id = "
+                    "(SELECT investigation_id FROM runs WHERE id = %s) WHERE id = %s",
+                    (first_id, second_id),
+                )
+            store = _VersionDeleteStore()
+            first = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(first_id)),
+                object_store_factory=lambda: store,
+            )
+            second = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(second_id)),
+                object_store_factory=lambda: store,
+            )
+            results = await asyncio.gather(
+                _complete(pool, first_id, first), _complete(pool, second_id, second)
+            )
+            artifacts = await _fetchall(
+                pool,
+                "SELECT object_key FROM artifacts WHERE owner_kind = 'investigations' "
+                "AND owner_id = (SELECT investigation_id FROM runs WHERE id = %s)",
+                (first_id,),
+            )
+
+        assert results[0].build_ref == results[1].build_ref
+        assert results[0].kernel_ref == results[1].kernel_ref
+        assert artifacts == [(results[0].kernel_ref,)]
+        candidates = {f"{_prefix(first_id)}kernel", f"{_prefix(second_id)}kernel"}
+        assert store.deleted == [(next(iter(candidates - {results[0].kernel_ref})), "test-version")]
+
+    asyncio.run(_run())
+
+
+def test_loser_delete_failure_leaves_the_version_for_orphan_repair(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Delete errors do not roll back a completed loser or target the winning object."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            winner_id = await seed_external_run_with_manifest(pool)
+            loser_id = await seed_external_run_with_manifest(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET investigation_id = "
+                    "(SELECT investigation_id FROM runs WHERE id = %s) WHERE id = %s",
+                    (winner_id, loser_id),
+                )
+            await _complete(
+                pool,
+                winner_id,
+                CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(winner_id))),
+            )
+            store = _VersionDeleteStore(fail=True)
+            with caplog.at_level(logging.WARNING, logger=complete_build.__name__):
+                result = await _complete(
+                    pool,
+                    loser_id,
+                    CompleteBuildFinalizer(
+                        validate_complete_build=FakeValidator(_output(loser_id)),
+                        object_store_factory=lambda: store,
+                    ),
+                )
+
+        assert result.kernel_ref == f"{_prefix(winner_id)}kernel"
+        assert store.deleted == [(f"{_prefix(loser_id)}kernel", "test-version")]
+        assert any(
+            "losing build cleanup failed" in record.getMessage() for record in caplog.records
+        )
 
     asyncio.run(_run())
 

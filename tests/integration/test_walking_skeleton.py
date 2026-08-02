@@ -108,7 +108,13 @@ class _SecretBearingCrash:
     PLANTED_SECRET = "hunter2-s3cr3t"  # pragma: allowlist secret
 
     def run_crash_postmortem(
-        self, *, vmcore_ref: str, debuginfo_ref: str, expected_build_id: str, commands: list[str]
+        self,
+        *,
+        vmcore_ref: str,
+        debuginfo_ref: str,
+        debuginfo_version_id: str | None = None,
+        expected_build_id: str,
+        commands: list[str],
     ) -> CrashOutput:
         return CrashOutput(
             results={c: {"ran": True} for c in commands},

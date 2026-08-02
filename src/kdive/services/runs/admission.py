@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
@@ -22,6 +23,7 @@ from kdive.domain.labels import validate_label
 from kdive.domain.lifecycle.records import (
     ExpectedBootFailure,
     Investigation,
+    InvestigationBuild,
     Run,
 )
 from kdive.domain.lifecycle.system_reuse import ReuseRequirement
@@ -35,6 +37,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import JsonValue
 from kdive.services.idempotency.envelope import StoredResult
+from kdive.services.runs.build_catalog import parse_build_ref, resolve_build
 from kdive.services.runs.host_admission import (
     RunHostTargets,
     check_host_preconditions,
@@ -50,6 +53,7 @@ from kdive.services.runs.states import (
     ALLOC_HOSTABLE,
     INVESTIGATION_OPEN_FOR_RUN,
 )
+from kdive.services.runs.steps import BuildStepResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +101,7 @@ class RunCreateRequest:
     expected_boot_failure: ExpectedBootFailureInput | None = None
     reuse_requirement: RunReuseRequirementInput | None = None
     label: str | None = None
+    build_ref: str | None = None
 
     def domain_reuse_requirement(self) -> ReuseRequirement:
         if self.reuse_requirement is None:
@@ -125,6 +130,8 @@ class RunCreateResult:
     system_id: UUID | None = None
     expected_boot_failure_kind: str | None = None
     label: str | None = None
+    build_ref: str | None = None
+    build_expires_at: str | None = None
 
 
 type RunCreateRecorder = Callable[[AsyncConnection, RunCreateResult], Awaitable[None]]
@@ -141,6 +148,8 @@ def stored_run_create_result(result: RunCreateResult) -> StoredResult:
         "system_id": str(result.system_id) if result.system_id is not None else None,
         "expected_boot_failure_kind": result.expected_boot_failure_kind,
         "label": result.label,
+        "build_ref": result.build_ref,
+        "build_expires_at": result.build_expires_at,
     }
     return StoredResult(document=document)
 
@@ -162,6 +171,8 @@ def run_create_result_from_stored(stored: StoredResult) -> RunCreateResult:
         system_id=UUID(str(system_id)) if isinstance(system_id, str) else None,
         expected_boot_failure_kind=_optional_str(stored.document["expected_boot_failure_kind"]),
         label=_optional_str(stored.document["label"]),
+        build_ref=_optional_str(stored.document.get("build_ref")),
+        build_expires_at=_optional_str(stored.document.get("build_expires_at")),
     )
 
 
@@ -233,6 +244,7 @@ async def create_run(
                 explicit_target_kind=request.target_kind,
                 recorder=recorder,
                 label=label,
+                build_ref=request.build_ref,
             )
 
 
@@ -299,6 +311,7 @@ async def _create_locked(
     explicit_target_kind: str | None,
     recorder: RunCreateRecorder | None = None,
     label: str | None = None,
+    build_ref: str | None = None,
 ) -> RunCreateResult:
     # Global total lock order PROJECT < RESOURCE < ALLOCATION < SYSTEM, then INVESTIGATION →
     # RUN (locks.py, ADR-0040 §1): ALLOCATION must precede SYSTEM. The reconciler →expired
@@ -336,6 +349,14 @@ async def _create_locked(
                     "target_kind": explicit_target_kind,
                 },
             )
+        selected_build = await _resolve_selected_build(
+            conn,
+            targets.investigation_id,
+            build_ref,
+            target_kind=target_kind,
+            build_profile=build_profile,
+            object_id=str(targets.system_id),
+        )
         run = await _insert_created_run(
             conn,
             ctx,
@@ -350,9 +371,10 @@ async def _create_locked(
                 "system_id": str(targets.system_id),
             },
             label=label,
+            selected_build=selected_build,
         )
         await _flip_investigation_if_open(conn, ctx, inv, targets.investigation_id, project)
-        result = _created_result(run, expected_boot_failure, project)
+        result = _created_result(run, expected_boot_failure, project, selected_build)
         if recorder is not None:
             await recorder(conn, result)
     return result
@@ -370,8 +392,23 @@ async def _insert_created_run(
     target_kind: ResourceKind,
     audit_args: dict[str, str],
     label: str | None = None,
+    selected_build: InvestigationBuild | None = None,
 ) -> Run:
     now = datetime.now(UTC)
+    build_result = (
+        BuildStepResult.load(selected_build.build_result) if selected_build is not None else None
+    )
+    if selected_build is not None and build_result is None:
+        raise RuntimeError("investigation build contains an invalid build result")
+    if build_result is not None and selected_build is not None:
+        build_result = replace(
+            build_result,
+            build_ref=selected_build.build_ref,
+            expires_at=selected_build.expires_at.isoformat(),
+            artifact_versions={
+                name: artifact["version_id"] for name, artifact in selected_build.artifacts.items()
+            },
+        )
     run = await RUNS.insert(
         conn,
         Run(
@@ -384,12 +421,21 @@ async def _insert_created_run(
             investigation_id=investigation_id,
             system_id=system_id,
             target_kind=target_kind,
-            state=RunState.CREATED,
+            state=RunState.SUCCEEDED if selected_build is not None else RunState.CREATED,
             build_profile=dump_build_profile(build_profile),
             expected_boot_failure=expected_boot_failure,
             label=label,
+            kernel_ref=build_result.kernel_ref if build_result is not None else None,
+            debuginfo_ref=build_result.debuginfo_ref if build_result is not None else None,
+            build_ref=selected_build.build_ref if selected_build is not None else None,
         ),
     )
+    if build_result is not None:
+        await conn.execute(
+            "INSERT INTO run_steps (run_id, step, state, result) "
+            "VALUES (%s, 'build', 'succeeded', %s)",
+            (run.id, Jsonb(build_result.dump())),
+        )
     await audit.record(
         conn,
         ctx,
@@ -397,7 +443,7 @@ async def _insert_created_run(
             tool="runs.create",
             object_kind="runs",
             object_id=run.id,
-            transition="->created",
+            transition="->succeeded" if selected_build is not None else "->created",
             args=audit_args,
             project=project,
         ),
@@ -435,6 +481,7 @@ def _created_result(
     run: Run,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     project: str,
+    selected_build: InvestigationBuild | None = None,
 ) -> RunCreateResult:
     kind = str(expected_boot_failure["kind"]) if expected_boot_failure is not None else None
     return RunCreateResult(
@@ -445,7 +492,81 @@ def _created_result(
         system_id=run.system_id,
         expected_boot_failure_kind=kind,
         label=run.label,
+        build_ref=run.build_ref,
+        build_expires_at=(
+            selected_build.expires_at.isoformat() if selected_build is not None else None
+        ),
     )
+
+
+async def _resolve_selected_build(
+    conn: AsyncConnection,
+    investigation_id: UUID,
+    build_ref: str | None,
+    *,
+    target_kind: ResourceKind,
+    build_profile: BuildProfile,
+    object_id: str,
+) -> InvestigationBuild | None:
+    if build_ref is None:
+        return None
+    try:
+        parse_build_ref(build_ref)
+    except ValueError:
+        raise config_failure(object_id, data={"reason": "build_ref_not_found"}) from None
+    selected = await resolve_build(conn, investigation_id, build_ref)
+    if selected is None:
+        tombstone = await (
+            await conn.execute(
+                "SELECT expires_at, clock_timestamp() FROM investigation_build_tombstones "
+                "WHERE investigation_id = %s AND build_ref = %s",
+                (investigation_id, build_ref),
+            )
+        ).fetchone()
+        if tombstone is not None:
+            raise config_failure(
+                object_id,
+                data={
+                    "reason": "build_ref_expired",
+                    "expires_at": tombstone[0].isoformat(),
+                    "server_time": tombstone[1].isoformat(),
+                },
+            )
+        raise config_failure(object_id, data={"reason": "build_ref_not_found"})
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT clock_timestamp()")
+        row = await cur.fetchone()
+    if row is None:
+        raise RuntimeError("SELECT clock_timestamp() returned no row")
+    server_time = row[0]
+    if selected.expires_at <= server_time:
+        raise config_failure(
+            object_id,
+            data={
+                "reason": "build_ref_expired",
+                "expires_at": selected.expires_at.isoformat(),
+                "server_time": server_time.isoformat(),
+            },
+        )
+    if selected.state != "active":
+        raise config_failure(object_id, data={"reason": "build_ref_not_found"})
+    actual_profile = dump_build_profile(build_profile)
+    try:
+        expected_profile = dump_build_profile(BuildProfile.parse(selected.build_profile))
+    except CategorizedError as exc:
+        raise RuntimeError("investigation build contains an invalid build profile") from exc
+    if selected.target_kind != target_kind or expected_profile != actual_profile:
+        raise config_failure(
+            object_id,
+            data={
+                "reason": "build_ref_incompatible",
+                "expected_target_kind": selected.target_kind.value,
+                "actual_target_kind": target_kind.value,
+                "expected_arch": str(expected_profile["arch"]),
+                "actual_arch": str(actual_profile["arch"]),
+            },
+        )
+    return selected
 
 
 def _validate_unbound_target_kind(
@@ -506,6 +627,14 @@ async def _create_unbound(
             raise_config_error(object_id)
         if locked_inv.state not in INVESTIGATION_OPEN_FOR_RUN:
             raise_config_error(object_id, data={"current_status": locked_inv.state.value})
+        selected_build = await _resolve_selected_build(
+            conn,
+            investigation_id,
+            request.build_ref,
+            target_kind=target_kind,
+            build_profile=build_profile,
+            object_id=object_id,
+        )
         run = await _insert_created_run(
             conn,
             ctx,
@@ -520,9 +649,10 @@ async def _create_unbound(
                 "target_kind": target_kind.value,
             },
             label=label,
+            selected_build=selected_build,
         )
         await _flip_investigation_if_open(conn, ctx, locked_inv, investigation_id, project)
-        result = _created_result(run, expected_boot_failure, project)
+        result = _created_result(run, expected_boot_failure, project, selected_build)
         if recorder is not None:
             await recorder(conn, result)
     return result

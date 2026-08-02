@@ -13,6 +13,7 @@ from typing import cast
 
 import pytest
 
+from kdive.artifacts.read_model import ArtifactReadRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common.gdbmi.policy import debuginfo
@@ -43,6 +44,20 @@ def test_resolve_fetches_present_ref_to_dest(tmp_path: Path) -> None:
     assert result == dest
     assert dest.read_bytes() == b"ELFDATA"
     assert fetch.refs == ["runs/r1/vmlinux"]
+
+
+def test_resolve_reusable_ref_fetches_exact_version(tmp_path: Path) -> None:
+    seen: list[tuple[str, str]] = []
+    resolver = debuginfo.DebuginfoResolver(
+        read_debuginfo_ref=lambda run_id: ArtifactReadRef("build/vmlinux", "version-7"),
+        fetch_object=lambda ref: b"wrong-legacy",
+        fetch_versioned_object=lambda ref, version: seen.append((ref, version)) or b"exact",
+    )
+
+    dest = resolver.resolve("r1", tmp_path / "vmlinux")
+
+    assert dest.read_bytes() == b"exact"
+    assert seen == [("build/vmlinux", "version-7")]
 
 
 def test_resolve_none_ref_raises_no_debuginfo_before_fetch(tmp_path: Path) -> None:
@@ -231,6 +246,20 @@ def test_module_resolve_returns_path_and_identity() -> None:
     assert result.srcversion == "SRC123"
     assert result.build_id == "BID456"
     assert fetch.refs == ["runs/r1/kernel.tar"]
+
+
+def test_module_resolve_reusable_kernel_fetches_exact_version() -> None:
+    tar = _make_modules_tar({"lib/modules/6.0/foo.ko": b"ELF"})
+    seen: list[tuple[str, str]] = []
+    resolver = debuginfo.ModuleDebuginfoResolver(
+        read_kernel_ref=lambda run_id: ArtifactReadRef("build/kernel", "version-9"),
+        fetch_object=lambda ref: b"wrong-legacy",
+        fetch_versioned_object=lambda ref, version: seen.append((ref, version)) or tar,
+        read_identity=lambda path: (None, None),
+    )
+
+    assert resolver.resolve("r1", "foo").path.read_bytes() == b"ELF"
+    assert seen == [("build/kernel", "version-9")]
 
 
 def test_module_resolve_absent_ko_raises_no_module_debuginfo() -> None:

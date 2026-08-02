@@ -157,7 +157,11 @@ class ReconcileUploadStore(
     gc_repairs.ArtifactObjectDeleter,
     Protocol,
 ):
-    """Object-store surface required by the upload and artifact-retention reconciler lanes."""
+    """Object-store surface required by upload and artifact-retention reconciler lanes.
+
+    Investigation build generations additionally use the inherited store's exact-version
+    deletion operation; legacy artifact lanes retain bounded whole-key retirement.
+    """
 
 
 # The default (no-op) admission metrics (ADR-0190 D): a module-level singleton so it is a

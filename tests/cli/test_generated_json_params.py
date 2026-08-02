@@ -71,6 +71,12 @@ def test_target_tools_are_present_in_the_generated_surface() -> None:
     assert present >= _TARGET_TOOLS, _TARGET_TOOLS - present
 
 
+def test_runs_create_generated_verb_exposes_build_ref() -> None:
+    verb = next(verb for verb in GENERATED_VERBS if verb.tool == "runs.create")
+    flag = next(flag for flag in verb.flags if flag.name == "--build-ref")
+    assert flag.required is False
+
+
 @pytest.mark.parametrize("verb", _JSON_PARAM_VERBS, ids=lambda v: v.tool)
 def test_every_json_param_gets_a_json_flag(verb: GeneratedVerb) -> None:
     # Each ``json_params`` name is reachable as ``--<param>-json`` and lands under its

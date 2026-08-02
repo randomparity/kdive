@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import UUID
@@ -18,11 +18,15 @@ import kdive.config as config
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.reassembly import reassemble_chunked
 from kdive.artifacts.registration import register_artifact_row
-from kdive.artifacts.storage import HeadResult, StoredArtifact
+from kdive.artifacts.storage import HeadResult, MultipartCompletion, StoredArtifact
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.build_artifacts.validation import validate_external_artifacts
-from kdive.config.core_settings import UPLOAD_TTL_SECONDS, UPLOAD_WINDOW_MAX_TTL_MULTIPLE
+from kdive.config.core_settings import (
+    BUILD_ARTIFACT_RETENTION_DAYS,
+    UPLOAD_TTL_SECONDS,
+    UPLOAD_WINDOW_MAX_TTL_MULTIPLE,
+)
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS
 from kdive.domain.capacity.state import RunState
@@ -32,6 +36,7 @@ from kdive.domain.lifecycle.records import Run
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.serialization import JsonValue
+from kdive.services.runs.build_catalog import BuildPublication, publish_or_reuse_build
 from kdive.services.runs.steps import BuildStepResult
 from kdive.services.runs.steps import existing_build_result as _existing_build_result
 from kdive.store.objectstore import object_store_from_env
@@ -42,18 +47,26 @@ _log = logging.getLogger(__name__)
 class ExternalBuildStore(Protocol):
     """Object-store surface the external-build finalize path needs."""
 
-    def head(self, key: str) -> HeadResult | None: ...
-    def get_range(self, key: str, *, start: int, length: int) -> bytes: ...
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None: ...
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes: ...
     def delete_version(self, key: str, version_id: str) -> None: ...
     def create_multipart_upload(
         self, key: str, *, sensitivity: Sensitivity, retention_class: str
     ) -> str: ...
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str: ...
     def complete_multipart_upload(
         self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
-    ) -> str: ...
+    ) -> MultipartCompletion: ...
     def abort_multipart_upload(self, key: str, upload_id: str) -> None: ...
 
 
@@ -147,7 +160,12 @@ class CompleteBuildFinalizer:
                 conn, run.id, str(run.id), prepared, build_id=build_id, arch=_build_arch(run)
             )
             return await _finalize_external_build(
-                conn, ctx, validated, cmdline=cmdline, source_provenance=source_provenance
+                conn,
+                ctx,
+                validated,
+                cmdline=cmdline,
+                source_provenance=source_provenance,
+                object_store_factory=self.object_store_factory,
             )
         except _CompleteBuildAlreadyRecorded as exc:
             return exc.result
@@ -186,11 +204,17 @@ class CompleteBuildFinalizer:
     ) -> _ExternalBuildFinalization:
         window_deadline = prepared.manifest_row.deadline
         if prepared.store is not None:
-            window_deadline, chunk_heads = await _reassemble_chunked_artifacts(
-                conn, uid, run_id, prepared.manifest_row, prepared.store
+            window_deadline, chunk_heads, final_versions = await _reassemble_chunked_artifacts(
+                conn,
+                uid,
+                run_id,
+                prepared.run.investigation_id,
+                prepared.manifest_row,
+                prepared.store,
             )
         else:
             chunk_heads = {}
+            final_versions = {}
 
         try:
             validated = await asyncio.to_thread(
@@ -199,6 +223,7 @@ class CompleteBuildFinalizer:
                 prepared.keys,
                 build_id,
                 arch,
+                final_versions,
             )
         except CategorizedError as exc:
             raise CompleteBuildValidationError(exc) from exc
@@ -208,6 +233,10 @@ class CompleteBuildFinalizer:
             output=validated.output,
             keys=prepared.keys,
             heads=validated.heads,
+            verified_identities={
+                prepared.keys[entry.name]: _manifest_content_identity(entry)
+                for entry in prepared.manifest_row.entries
+            },
             store=prepared.store,
             chunked=prepared.has_chunks,
             chunk_heads=chunk_heads,
@@ -220,16 +249,42 @@ class CompleteBuildFinalizer:
         keys: Mapping[str, str],
         declared_build_id: str | None,
         arch: str,
+        exact_versions: Mapping[str, str],
     ) -> ValidatedUpload:
         if self.validate_complete_build is not None:
             return self.validate_complete_build(manifest, keys, declared_build_id, arch=arch)
+        store = self.object_store_factory()
         return validate_external_artifacts(
-            self.object_store_factory(),
+            _VersionPinnedStore(store, exact_versions),
             manifest=manifest,
             keys=keys,
             declared_build_id=declared_build_id,
             arch=arch,
         )
+
+
+@dataclass(slots=True)
+class _VersionPinnedStore:
+    """Bind every validation HEAD/range read to one captured immutable version."""
+
+    store: ExternalBuildStore
+    versions: Mapping[str, str]
+    _observed: dict[str, str] = field(default_factory=dict)
+
+    def head(self, key: str) -> HeadResult | None:
+        version_id = self.versions.get(key) or self._observed.get(key)
+        head = self.store.head(key, version_id=version_id) if version_id else self.store.head(key)
+        if head is not None:
+            self._observed[key] = head.version_id
+        return head
+
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
+        version_id = version_id or self.versions.get(key) or self._observed.get(key)
+        if version_id is None:
+            return self.store.get_range(key, start=start, length=length)
+        return self.store.get_range(key, start=start, length=length, version_id=version_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +302,7 @@ class _ExternalBuildFinalization:
     output: BuildOutput
     keys: dict[str, str]
     heads: dict[str, HeadResult]
+    verified_identities: dict[str, JsonValue]
     store: ExternalBuildStore | None
     chunked: bool
     chunk_heads: dict[str, HeadResult]
@@ -256,6 +312,19 @@ class _ExternalBuildFinalization:
     A manifest row carrying a different deadline at commit time is one a concurrent re-mint
     replaced, not the one this finalize read (ADR-0448 §2).
     """
+
+
+def _manifest_content_identity(entry: ManifestEntry) -> JsonValue:
+    """Return the validator-backed identity, excluding an advisory multipart whole hash."""
+    if entry.chunks is None:
+        return {"checksum_sha256": entry.sha256}
+    return {
+        "chunks": [
+            {"checksum_sha256": chunk.sha256, "size_bytes": chunk.size_bytes}
+            for chunk in entry.chunks
+        ],
+        "size_bytes": entry.size_bytes,
+    }
 
 
 async def _require_open_window(
@@ -296,9 +365,10 @@ async def _reassemble_chunked_artifacts(
     conn: AsyncConnection,
     uid: UUID,
     run_id: str,
+    investigation_id: UUID,
     manifest_row: upload_manifest.UploadManifest,
     store: ExternalBuildStore,
-) -> tuple[datetime, dict[str, HeadResult]]:
+) -> tuple[datetime, dict[str, HeadResult], dict[str, str]]:
     """Extend the window, reassemble chunked artifacts, and return their deadline and HEADs.
 
     The ``RUN`` lock taken here is transaction-scoped and this ``conn.transaction()`` is a
@@ -317,7 +387,11 @@ async def _reassemble_chunked_artifacts(
     """
     ttl = timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
     max_window = ttl * config.require(UPLOAD_WINDOW_MAX_TTL_MULTIPLE)
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, uid):
+    async with (
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
+        advisory_xact_lock(conn, LockScope.RUN, uid),
+    ):
         refreshed = await upload_manifest.refresh_deadline(
             conn, "runs", uid, ttl, max_window=max_window
         )
@@ -343,32 +417,33 @@ async def _reassemble_chunked_artifacts(
             max_window,
         )
     try:
-        chunk_heads = await _reassemble_artifacts(manifest_row, store)
+        chunk_heads, final_versions = await _reassemble_artifacts(manifest_row, store)
     except CategorizedError as exc:
         recorded = await _existing_build_result(conn, uid)
         if recorded is not None:
             raise _CompleteBuildAlreadyRecorded(recorded) from exc
         raise
-    return refreshed.deadline, chunk_heads
+    return refreshed.deadline, chunk_heads, final_versions
 
 
 async def _reassemble_artifacts(
     manifest_row: upload_manifest.UploadManifest,
     store: ExternalBuildStore,
-) -> dict[str, HeadResult]:
+) -> tuple[dict[str, HeadResult], dict[str, str]]:
     chunk_heads: dict[str, HeadResult] = {}
+    final_versions: dict[str, str] = {}
     for entry in manifest_row.entries:
         if entry.chunks is not None:
-            chunk_heads.update(
-                await asyncio.to_thread(
-                    reassemble_chunked,
-                    store,
-                    prefix=manifest_row.prefix,
-                    final_key=f"{manifest_row.prefix}{entry.name}",
-                    entry=entry,
-                )
+            heads, completion = await asyncio.to_thread(
+                reassemble_chunked,
+                store,
+                prefix=manifest_row.prefix,
+                final_key=f"{manifest_row.prefix}{entry.name}",
+                entry=entry,
             )
-    return chunk_heads
+            chunk_heads.update(heads)
+            final_versions[f"{manifest_row.prefix}{entry.name}"] = completion.version_id
+    return chunk_heads, final_versions
 
 
 def _require_created_run(run: Run) -> None:
@@ -400,8 +475,9 @@ async def _finalize_external_build(
     *,
     cmdline: str | None,
     source_provenance: dict[str, str | bool | list[str]] | None = None,
+    object_store_factory: ObjectStoreFactory,
 ) -> BuildStepResult:
-    result = BuildStepResult(
+    candidate = BuildStepResult(
         kernel_ref=finalization.output.kernel_ref,
         debuginfo_ref=finalization.output.debuginfo_ref,
         initrd_ref=finalization.keys.get("initrd"),
@@ -410,7 +486,13 @@ async def _finalize_external_build(
         build_provenance=source_provenance,
     )
     run = finalization.run
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
+    heads = _artifact_heads_by_key(finalization)
+    publication: BuildPublication | None = None
+    async with (
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.INVESTIGATION, run.investigation_id),
+        advisory_xact_lock(conn, LockScope.RUN, run.id),
+    ):
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("SELECT state FROM runs WHERE id = %s FOR UPDATE", (run.id,))
             row = await cur.fetchone()
@@ -418,24 +500,46 @@ async def _finalize_external_build(
             raise CompleteBuildConfigurationError({})
         state = RunState(row["state"])
         if state is RunState.SUCCEEDED:
-            return await _existing_build_result(conn, run.id) or result
+            return await _existing_build_result(conn, run.id) or candidate
         if state is not RunState.CREATED:
             raise CompleteBuildConfigurationError({"current_status": state.value})
         await _require_unreaped_window(conn, run.id, finalization.window_deadline)
-        await _insert_artifact_rows(conn, run.id, finalization)
+        publication = await publish_or_reuse_build(
+            conn,
+            run=run,
+            result=candidate,
+            heads=heads,
+            verified_identities=finalization.verified_identities,
+            retention=timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS)),
+        )
+        result = _published_result(publication)
+        if publication.created:
+            await _insert_published_artifact_rows(conn, run.investigation_id, result, heads)
+        await _insert_run_only_artifact_rows(conn, run.id, candidate, finalization)
         await _record_build_step(conn, run.id, result)
-        await _mark_run_succeeded(conn, run.id, finalization.output)
+        await _mark_run_succeeded(conn, run.id, result)
         await _record_complete_build_audit(conn, ctx, run)
         if not finalization.chunked:
             await upload_manifest.delete_manifest(conn, "runs", run.id)
-    if finalization.chunked and finalization.store is not None:
+    try:
         await conn.commit()
+    except Exception:
+        await conn.rollback()
+        raise
+    if finalization.chunked and finalization.store is not None:
         await _cleanup_chunks_and_manifest(
             conn,
             finalization.store,
             run.id,
             finalization.chunk_heads,
         )
+    if publication is not None and not publication.created:
+        try:
+            store = finalization.store or object_store_factory()
+        except CategorizedError as exc:
+            _log.warning("losing build cleanup setup failed: %s", exc)
+        else:
+            await _cleanup_losing_build_versions(store, candidate, heads)
     return result
 
 
@@ -475,15 +579,54 @@ async def _require_unreaped_window(
         raise CompleteBuildConfigurationError({"reason": UPLOAD_WINDOW_REPLACED})
 
 
-async def _insert_artifact_rows(
+def _artifact_heads_by_key(
+    finalization: _ExternalBuildFinalization,
+) -> dict[str, HeadResult]:
+    """Translate manifest names to the object keys required by the catalog publisher."""
+    return {finalization.keys[name]: head for name, head in finalization.heads.items()}
+
+
+def _published_result(publication: BuildPublication) -> BuildStepResult:
+    """Attach the selected generation metadata to its immutable stored build result."""
+    stored = BuildStepResult.load(publication.build.build_result)
+    if stored is None:  # Invariant: build_catalog stores BuildStepResult.dump().
+        raise RuntimeError("investigation build has an invalid stored build result")
+    return replace(
+        stored,
+        build_ref=publication.build.build_ref,
+        expires_at=publication.build.expires_at.isoformat(),
+        artifact_versions={
+            name: artifact["version_id"] for name, artifact in publication.build.artifacts.items()
+        },
+    )
+
+
+async def _insert_published_artifact_rows(
+    conn: AsyncConnection,
+    investigation_id: UUID,
+    result: BuildStepResult,
+    heads: Mapping[str, HeadResult],
+) -> None:
+    for key in result.refs().values():
+        head = heads[key]
+        stored = StoredArtifact(key, head.etag, Sensitivity.SENSITIVE, "build", head.version_id)
+        row = register_artifact_row(stored, owner_kind="investigations", owner_id=investigation_id)
+        await ARTIFACTS.insert(conn, row)
+
+
+async def _insert_run_only_artifact_rows(
     conn: AsyncConnection,
     run_id: UUID,
+    result: BuildStepResult,
     finalization: _ExternalBuildFinalization,
 ) -> None:
+    """Keep non-reusable uploaded provenance, such as effective config, Run-owned."""
+    reusable_keys = set(result.refs().values())
     for name, head in finalization.heads.items():
-        stored = StoredArtifact(
-            finalization.keys[name], head.etag, Sensitivity.SENSITIVE, "build", head.version_id
-        )
+        key = finalization.keys[name]
+        if key in reusable_keys:
+            continue
+        stored = StoredArtifact(key, head.etag, Sensitivity.SENSITIVE, "build", head.version_id)
         row = register_artifact_row(stored, owner_kind="runs", owner_id=run_id)
         await ARTIFACTS.insert(conn, row)
 
@@ -503,19 +646,34 @@ async def _record_build_step(
 async def _mark_run_succeeded(
     conn: AsyncConnection,
     run_id: UUID,
-    output: BuildOutput,
+    result: BuildStepResult,
 ) -> None:
     await conn.execute(
-        "UPDATE runs SET kernel_ref = %s, debuginfo_ref = %s, state = %s "
+        "UPDATE runs SET kernel_ref = %s, debuginfo_ref = %s, build_ref = %s, state = %s "
         "WHERE id = %s AND state = %s",
         (
-            output.kernel_ref,
-            output.debuginfo_ref or None,
+            result.kernel_ref,
+            result.debuginfo_ref,
+            result.build_ref,
             RunState.SUCCEEDED.value,
             run_id,
             RunState.CREATED.value,
         ),
     )
+
+
+async def _cleanup_losing_build_versions(
+    store: ExternalBuildStore,
+    result: BuildStepResult,
+    heads: Mapping[str, HeadResult],
+) -> None:
+    """Delete only a converged candidate's exact reusable object versions after commit."""
+    for key in result.refs().values():
+        head = heads[key]
+        try:
+            await asyncio.to_thread(store.delete_version, key, head.version_id)
+        except CategorizedError as exc:
+            _log.warning("losing build cleanup failed for %s: %s", key, exc)
 
 
 async def _record_complete_build_audit(

@@ -43,6 +43,7 @@ class FaultInjectRetrieve:
         *,
         vmcore_ref: str,
         debuginfo_ref: str,
+        debuginfo_version_id: str | None = None,
         expected_build_id: str,
         commands: list[str],
     ) -> CrashOutput:

@@ -12,7 +12,8 @@ vmcore retrieval, debuginfo staging, console parts, and artifact egress.
 
 The configured bucket must have bucket-wide versioning `Enabled`, with MFA Delete off and no
 MinIO prefix or folder exclusions. The runtime credential needs its existing object permissions
-plus `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. The standard
+plus `s3:GetObjectVersion`, `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and
+`s3:DeleteObjectVersion`. The standard
 S3 versioning response does not expose MinIO's prefix/folder exclusions, so the operator must
 verify that provider-specific policy separately for an external store.
 
@@ -24,6 +25,10 @@ The first upgrade to a version-aware image is a stop-old-first maintenance opera
    then verify that MFA Delete is off and no provider-specific exclusion policy applies.
 3. Enable versioning for the whole bucket and wait for the provider's documented activation
    barrier.
+4. Upload a disposable probe, record the `VersionId` returned by `put-object`, then fetch that exact
+   version with `aws s3api get-object --version-id "$version_id" --bucket "$bucket" --key
+   "$probe_key" /tmp/kdive-version-probe`. Delete that exact version after the bytes compare equal.
+   Do not start KDIVE until this exact-version read succeeds with the runtime identity.
 4. Run database migrations, then start only the new version-aware image and verify readiness.
 
 Do not run an old and new image together during this adoption. Suspending bucket versioning and a
@@ -49,6 +54,14 @@ For Kubernetes, scaling the three KDIVE Deployments to zero and waiting for thei
 must precede the hooked upgrade that runs migration 0094. For systemd or Compose, stop all three app
 services before the migrate one-shot. A normal rolling `helm upgrade` while old pods still write is
 not supported for the release containing 0094.
+
+### Migration 0095: stop-old-first Run schema expansion
+
+The release containing migration 0095 adds `runs.build_ref`. Older KDIVE processes use strict Run
+models with `SELECT *`, so they cannot read the expanded row shape. Stop every old server, worker,
+and reconciler before running migrations and start only the new image afterward. Migration 0095
+checks `pg_stat_activity` and refuses to run while another client remains connected to the KDIVE
+database. This release is not rolling-upgrade compatible; recover forward if migration has applied.
 
 ## Install paths
 

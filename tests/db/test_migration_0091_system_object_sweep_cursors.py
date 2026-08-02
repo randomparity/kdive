@@ -10,13 +10,13 @@ import pytest
 from kdive.db import migrate
 
 
-def test_0091_is_discovered_after_0090() -> None:
+def test_latest_migrations_are_discovered_in_order() -> None:
     migrations = migrate.discover_migrations()
 
     assert [(item.version, item.filename) for item in migrations[-3:]] == [
-        ("0092", "0092_image_publication_attempt.sql"),
-        ("0093", "0093_image_publication_attempt_contract.sql"),
-        ("0094", "0094_artifact_owner_triple_unique.sql"),
+        ("0095", "0095_investigation_builds.sql"),
+        ("0096", "0096_investigation_build_gc.sql"),
+        ("0097", "0097_investigation_build_tombstones.sql"),
     ]
 
 

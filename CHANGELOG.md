@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Reuse externally built kernel artifacts across Systems in one Investigation
 - Add column-agnostic render_envelope for generated verbs
 - Generate committed kdivectl verb descriptors from tool schemas
 - Unify --json on curated verbs onto the whole envelope

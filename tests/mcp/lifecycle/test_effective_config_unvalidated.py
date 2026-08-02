@@ -18,7 +18,12 @@ from unittest.mock import patch
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest
+from kdive.artifacts.storage import (
+    HeadResult,
+    MultipartCompletion,
+    PresignedUpload,
+    PresignPutRequest,
+)
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.kernel_config.gate import MISSING_BOOT_CONFIG_REASON
@@ -85,10 +90,12 @@ class _ValidationStore:
         self._blobs = blobs
         self._heads = heads
 
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
         return self._heads.get(key)
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
         return self._blobs[key][start : start + length]
 
     def delete_version(self, key: str, version_id: str) -> None:
@@ -100,11 +107,19 @@ class _ValidationStore:
         raise AssertionError("single-PUT path must not reassemble")
 
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str:
         raise AssertionError("single-PUT path must not reassemble")
 
-    def complete_multipart_upload(self, key: str, upload_id: str, parts: object) -> str:
+    def complete_multipart_upload(
+        self, key: str, upload_id: str, parts: object
+    ) -> MultipartCompletion:
         raise AssertionError("single-PUT path must not reassemble")
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
@@ -233,7 +248,8 @@ def test_bad_effective_config_uploads_completes_and_warns(migrated_url: str) -> 
 
         # The upload is never rejected: the Run still reaches SUCCEEDED and the config is stored.
         assert resp.status == "succeeded", resp
-        assert keys == {kernel_key, config_key}
+        # Reusable build artifacts are Investigation-owned; effective_config remains Run-owned.
+        assert keys == {config_key}
         assert run is not None and run.state is RunState.SUCCEEDED
         # ...but the success envelope now carries the non-blocking boot-config advisory.
         warning = cast("dict[str, Any]", resp.data["missing_boot_config"])

@@ -3171,6 +3171,15 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                 choices=(),
             ),
             GeneratedFlag(
+                name="--build-ref",
+                dest="build_ref",
+                required=False,
+                help="Reusable external build from this Investigation, in <64 lowercase hex digest>.<lowercase UUID> format. Use data.build_ref from runs.complete_build or runs.get. It must match target_kind and build_profile. Retention is measured in days per generation and never refreshed by reuse; data.expires_at is its absolute ISO-8601 UTC deadline and data.server_time is the reference clock. At or after expiry, reuse and a new/restaged install are rejected with build_ref_expired. Recover by calling runs.create without build_ref, then artifacts.create_run_upload and runs.complete_build.",
+                arg_type="str",
+                action=None,
+                choices=(),
+            ),
+            GeneratedFlag(
                 name="--idempotency-key",
                 dest="idempotency_key",
                 required=False,

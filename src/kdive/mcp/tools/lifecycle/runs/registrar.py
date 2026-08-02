@@ -164,6 +164,12 @@ def _register_runs_get(
         `runs.complete_build`. Compare it across runs to track which local source produced each
         build.
 
+        Reusable external builds expose `data.build_ref` and their absolute ISO-8601 UTC retention
+        deadline as `data.build_expires_at`; `data.server_time` is the database reference clock for
+        that deadline. Pass the handle to `runs.create` only inside this Investigation; reuse never
+        extends the deadline. At or after expiry, new/restaged install is rejected; recover by
+        calling `runs.create` without `build_ref` and uploading a new external build.
+
         Liveness: `data.liveness` tells a healthy guest from one that livelocked **after** a ready
         boot — a case `boot_outcome=ready` and `control.watch_for_crash` (which sees no crash
         signature) both miss. It appears only on a ready-booted local-libvirt Run, and is
@@ -285,6 +291,22 @@ def _register_runs_create(
             _RunReuseRequirementInput | None,
             Field(default=None, description="Optional System reuse assertion payload."),
         ] = None,
+        build_ref: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Reusable external build from this Investigation, in "
+                    "<64 lowercase hex digest>.<lowercase UUID> format. Use data.build_ref from "
+                    "runs.complete_build or runs.get. It must match target_kind and build_profile. "
+                    "Retention is measured in days per generation and never refreshed by reuse; "
+                    "data.expires_at is its absolute ISO-8601 UTC deadline and data.server_time is "
+                    "the reference clock. At or after expiry, reuse and a new/restaged install are "
+                    "rejected with build_ref_expired. Recover by calling runs.create without "
+                    "build_ref, then artifacts.create_run_upload and runs.complete_build."
+                ),
+            ),
+        ] = None,
         idempotency_key: Annotated[
             str | None,
             Field(
@@ -307,9 +329,17 @@ def _register_runs_create(
     ) -> ToolResponse:
         """Create a run, bound to a system or unbound against a target_kind.
 
-        After runs.create, read resource://kdive/contracts/external-build, call
-        artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline args are
-        passed later as the `cmdline` field on runs.complete_build.
+        Omit build_ref to create a new external upload: read
+        resource://kdive/contracts/external-build, call artifacts.create_run_upload, then
+        runs.complete_build. A same-Investigation compatible build_ref reuses validated artifacts;
+        a bound Run proceeds to runs.install, while an unbound Run proceeds to runs.bind. Missing
+        or malformed references report
+        build_ref_not_found; target/profile mismatches report build_ref_incompatible; expiry
+        reports build_ref_expired with data.expires_at and data.server_time and instructs you to
+        retry runs.create without the reference. Retention is measured in days per generation;
+        reuse does not refresh its absolute ISO-8601 UTC deadline. Upload and reuse have distinct
+        next actions: a new upload proceeds through artifacts.create_run_upload and
+        runs.complete_build, while a reused bound Run proceeds directly to runs.install.
         """
         return await _create_run(
             pool,
@@ -322,6 +352,7 @@ def _register_runs_create(
                 expected_boot_failure=expected_boot_failure,
                 reuse_requirement=reuse_requirement,
                 label=label,
+                build_ref=build_ref,
             ),
             resolver=resolver,
             idempotency_key=idempotency_key,
@@ -471,6 +502,10 @@ def _register_runs_complete_build(
     ) -> ToolResponse:
         """Finalize an externally built Run: validate the uploaded artifacts, mark it succeeded.
 
+        Success returns `data.build_ref`, the reusable same-Investigation handle, plus its absolute
+        ISO-8601 UTC retention deadline in `data.expires_at` and the reference clock in
+        `data.server_time`. Reuse it through `runs.create`; reuse does not refresh the deadline.
+
         The `kernel` tar's boot/vmlinuz member is validated against the Run's build-profile arch
         (declared at runs.create): a bzImage for x86_64, an ELF vmlinux for ppc64le. A payload that
         does not match the declared arch is rejected. See
@@ -564,6 +599,11 @@ def _register_runs_install(
         Pass `cmdline` and/or `crashkernel` to iterate boot parameters against the built kernel
         without a rebuild; `runs.get` reports the live variant as `data.installed_cmdline` and
         `data.installed_crashkernel`.
+
+        For a reusable build, a new or restaged install at or after `data.build_expires_at` fails
+        with `reason: "build_ref_expired"`, `data.expires_at`, and `data.server_time`. Recover by
+        calling `runs.create` without `build_ref`, then upload and complete a fresh external build.
+        An unchanged already-installed variant remains an idempotent no-op after expiry.
         """
         return await _install_run(
             pool,

@@ -176,7 +176,12 @@ def test_vmcore_introspector_is_protocol() -> None:
     # A minimal duck-typed implementation satisfies the structural protocol.
     class _Impl:
         def from_vmcore(
-            self, *, vmcore_ref: str, debuginfo_ref: str, expected_build_id: str
+            self,
+            *,
+            vmcore_ref: str,
+            debuginfo_ref: str,
+            debuginfo_version_id: str | None = None,
+            expected_build_id: str,
         ) -> IntrospectOutput:
             return IntrospectOutput(tasks={}, modules={}, sysinfo={}, truncated=False)
 
@@ -281,6 +286,7 @@ def _introspector(
     program: _FakeProgram | None = None,
     observed_build_id: str = "deadbeef",
     open_raises: CategorizedError | None = None,
+    fetch_versioned=None,
 ) -> LocalLibvirtVmcoreIntrospect:
     """Build an introspector with every seam injected as a fake (no drgn, no store)."""
     prog = program if program is not None else _FakeProgram()
@@ -292,6 +298,7 @@ def _introspector(
 
     return LocalLibvirtVmcoreIntrospect(
         fetch_object=lambda ref: ref.encode("utf-8"),
+        fetch_versioned_object=fetch_versioned,
         read_vmcore_build_id=lambda data: observed_build_id,
         secret_registry=SecretRegistry(),
         open_program=_open,
@@ -312,6 +319,22 @@ def test_from_vmcore_happy_path_populates_report() -> None:
     assert out.sysinfo["release"] == "6.8.0"
     assert cast("list[object]", out.tasks["tasks"])  # the canned blocked task is present
     assert out.truncated is False
+
+
+def test_from_vmcore_reusable_debuginfo_fetches_exact_version() -> None:
+    versioned: list[tuple[str, str]] = []
+    introspector = _introspector(
+        fetch_versioned=lambda ref, version: versioned.append((ref, version)) or b"VMLINUX"
+    )
+
+    introspector.from_vmcore(
+        vmcore_ref="v",
+        debuginfo_ref="d",
+        debuginfo_version_id="version-8",
+        expected_build_id="deadbeef",
+    )
+
+    assert versioned == [("d", "version-8")]
 
 
 @pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])

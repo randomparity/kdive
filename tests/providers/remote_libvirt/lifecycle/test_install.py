@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from uuid import uuid4
 
 import libvirt
@@ -101,10 +102,10 @@ class _FakeStore:
 
     def __init__(self) -> None:
         self.writes: list[ArtifactWriteRequest] = []
-        self.presigned: list[tuple[str, int]] = []
+        self.presigned: list[tuple[str, int, str | None]] = []
 
-    def presign_get(self, key: str, *, expires_in: int) -> str:
-        self.presigned.append((key, expires_in))
+    def presign_get(self, key: str, *, expires_in: int, version_id: str | None = None) -> str:
+        self.presigned.append((key, expires_in, version_id))
         return _URL
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
@@ -197,7 +198,19 @@ def test_install_composes_helper_argv_with_url_cmdline_and_method() -> None:
         "--method",
         "host_dump",
     ]
-    assert store.presigned == [("remote-libvirt/runs/r1/kernel", 3600)]
+    assert store.presigned == [("remote-libvirt/runs/r1/kernel", 3600, None)]
+
+
+def test_install_presigns_the_catalogued_kernel_version() -> None:
+    store = _FakeStore()
+    request = replace(
+        _request(CaptureMethod.HOST_DUMP, "console=ttyS0"),
+        artifact_versions={"kernel": "kernel-v1"},
+    )
+
+    _install(lambda _argv: AgentExecResult(0, b"ok", b""), store, SecretRegistry()).install(request)
+
+    assert store.presigned == [("remote-libvirt/runs/r1/kernel", 3600, "kernel-v1")]
 
 
 def test_install_carries_crashkernel_cmdline_only_for_kdump() -> None:

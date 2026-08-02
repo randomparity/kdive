@@ -42,7 +42,7 @@ class _FakeStore:
         self.size = size
         self.presigned_keys: list[str] = []
 
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
         if self.missing_head:
             return None
         return HeadResult(
@@ -54,9 +54,25 @@ class _FakeStore:
             version_id="test-version",
         )
 
-    def presign_get(self, key: str, *, expires_in: int) -> str:
+    def presign_get(self, key: str, *, expires_in: int, version_id: str | None = None) -> str:
         self.presigned_keys.append(key)
         return self.url
+
+
+class _VersionedStore(_FakeStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.versioned: list[tuple[str, str]] = []
+
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
+        assert version_id is not None
+        self.versioned.append((key, version_id))
+        return super().head(key)
+
+    def presign_get(self, key: str, *, expires_in: int, version_id: str | None = None) -> str:
+        assert version_id is not None
+        self.versioned.append((key, version_id))
+        return super().presign_get(key, expires_in=expires_in)
 
 
 def _ctx(
@@ -149,6 +165,58 @@ def test_fetch_raw_vmlinux_presigns_url(migrated_url: str) -> None:
         assert resp.data["size_bytes"] == 4096
         assert "content" not in resp.data
         assert store.presigned_keys == [_VMLINUX_REF]
+
+    asyncio.run(_run())
+
+
+def test_fetch_raw_reusable_vmlinux_presigns_exact_version(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run_with_vmlinux(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET build_ref = %s WHERE id = %s",
+                    (f"{'a' * 64}.{uuid4()}", run_id),
+                )
+                await conn.execute(
+                    "UPDATE run_steps SET result = result || "
+                    '\'{"artifact_versions": {"vmlinux": "version-7"}}\'::jsonb '
+                    "WHERE run_id = %s AND step = 'build'",
+                    (run_id,),
+                )
+            store = _VersionedStore()
+            response = await fetch_raw(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                asset=RawAsset.VMLINUX,
+                store_factory=lambda: store,
+            )
+        assert response.status == "available"
+        assert store.versioned == [(_VMLINUX_REF, "version-7")] * 2
+
+    asyncio.run(_run())
+
+
+def test_fetch_raw_reusable_vmlinux_without_version_fails_closed(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run_with_vmlinux(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET build_ref = %s WHERE id = %s",
+                    (f"{'b' * 64}.{uuid4()}", run_id),
+                )
+            store = _FakeStore()
+            response = await fetch_raw(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                asset=RawAsset.VMLINUX,
+                store_factory=lambda: store,
+            )
+        assert response.error_category == "infrastructure_failure"
+        assert store.presigned_keys == []
 
     asyncio.run(_run())
 

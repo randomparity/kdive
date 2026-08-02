@@ -1038,6 +1038,15 @@ def test_get_artifact_none_etag_omits_if_match() -> None:
     assert fetched.data == b"bytes"
 
 
+def test_get_artifact_names_the_immutable_version() -> None:
+    client = _RecordingClient()
+
+    ObjectStore(client, "bucket").get_artifact("t/build/kernel", None, version_id="kernel-v1")
+
+    assert client.last_kwargs is not None
+    assert client.last_kwargs["VersionId"] == "kernel-v1"
+
+
 class _StreamingBody:
     """Fake boto ``StreamingBody``: ``read(size)`` returns up to ``size`` bytes (``b""`` at
     true EOF) and ``close()`` records the close, mirroring the real body the reader wraps."""
@@ -1198,6 +1207,18 @@ def test_get_artifact_stream_none_etag_omits_if_match() -> None:
         pass
     assert client.last_kwargs is not None
     assert "IfMatch" not in client.last_kwargs
+
+
+def test_get_artifact_stream_names_the_immutable_version() -> None:
+    client = _StreamingClient(b"streamed")
+
+    with ObjectStore(client, "bucket").get_artifact_stream(
+        "t/build/kernel", None, version_id="kernel-v1"
+    ) as streamed:
+        assert streamed.reader.read() == b"streamed"
+
+    assert client.last_kwargs is not None
+    assert client.last_kwargs["VersionId"] == "kernel-v1"
 
 
 def test_register_artifact_row_maps_stored_and_owner() -> None:
@@ -1633,6 +1654,22 @@ def test_presign_get_mints_time_boxed_url_for_one_key() -> None:
     ]
 
 
+def test_presign_get_pins_an_immutable_object_version() -> None:
+    client = _FakePresignClient()
+    store = ObjectStore(client, "bucket")
+
+    store.presign_get("t/build/kernel", expires_in=600, version_id="kernel-v1")
+
+    assert client.calls == [
+        (
+            "get_object",
+            {"Bucket": "bucket", "Key": "t/build/kernel", "VersionId": "kernel-v1"},
+            600,
+            "GET",
+        )
+    ]
+
+
 @pytest.mark.parametrize("expires_in", [0, -1])
 def test_presign_get_rejects_non_positive_expiry(expires_in: int) -> None:
     store = ObjectStore(_FakePresignClient(), "bucket")
@@ -1729,7 +1766,7 @@ class _MpuClient:
 
     def complete_multipart_upload(self, **kw: object) -> dict[str, object]:
         self.calls.append(("complete", kw))
-        return {"ETag": '"final-etag"'}
+        return {"ETag": '"final-etag"', "VersionId": "final-version-1"}
 
     def abort_multipart_upload(self, **kw: object) -> None:
         self.calls.append(("abort", kw))
@@ -1747,15 +1784,20 @@ def test_multipart_reassembly_primitives_round_trip() -> None:
         "retention-class": "build",
     }
     etag1 = store.upload_part_copy(
-        "local/runs/x/vmlinux", uid, part_number=1, source_key="local/runs/x/vmlinux.part0001"
+        "local/runs/x/vmlinux",
+        uid,
+        part_number=1,
+        source_key="local/runs/x/vmlinux.part0001",
+        source_version_id="chunk-version-1",
     )
     assert etag1 == "etag-1"
     assert client.calls[1][1]["CopySource"] == {
         "Bucket": "bucket",
         "Key": "local/runs/x/vmlinux.part0001",
+        "VersionId": "chunk-version-1",
     }
     final = store.complete_multipart_upload("local/runs/x/vmlinux", uid, [(1, "etag-1")])
-    assert final == "final-etag"
+    assert final == ("final-etag", "final-version-1")
     assert client.calls[2][1]["MultipartUpload"] == {"Parts": [{"PartNumber": 1, "ETag": "etag-1"}]}
     store.abort_multipart_upload("local/runs/x/vmlinux", uid)
     assert client.calls[3][0] == "abort"
@@ -1783,7 +1825,13 @@ def test_multipart_calls_target_the_bound_bucket_key_and_upload() -> None:
     uid = store.create_multipart_upload(
         "runs/x/vmlinux", sensitivity=Sensitivity.SENSITIVE, retention_class="build"
     )
-    store.upload_part_copy("runs/x/vmlinux", uid, part_number=1, source_key="runs/x/part1")
+    store.upload_part_copy(
+        "runs/x/vmlinux",
+        uid,
+        part_number=1,
+        source_key="runs/x/part1",
+        source_version_id="part-version-1",
+    )
     store.complete_multipart_upload("runs/x/vmlinux", uid, [(1, "etag-1")])
     store.abort_multipart_upload("runs/x/vmlinux", uid)
 
@@ -1888,6 +1936,21 @@ def test_get_range_requests_the_inclusive_byte_range() -> None:
         "Bucket": "the-bucket",
         "Key": "t/vmcore/oid/core",
         "Range": "bytes=10-14",  # end == start + length - 1
+    }
+
+
+def test_get_range_names_the_observed_immutable_version() -> None:
+    client = _PaginatorClient([])
+
+    ObjectStore(client, "the-bucket").get_range(
+        "t/build/kernel", start=0, length=4, version_id="kernel-v1"
+    )
+
+    assert client.get_kwargs == {
+        "Bucket": "the-bucket",
+        "Key": "t/build/kernel",
+        "Range": "bytes=0-3",
+        "VersionId": "kernel-v1",
     }
 
 

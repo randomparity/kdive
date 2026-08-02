@@ -5,17 +5,29 @@ from __future__ import annotations
 import asyncio
 import io
 import tarfile
+import time
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
 from kdive.artifacts import upload_manifest
-from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest
-from kdive.artifacts.uploads import ManifestEntry
+from kdive.artifacts.storage import (
+    HeadResult,
+    MultipartCompletion,
+    PresignedUpload,
+    PresignPutRequest,
+)
+from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.results import BuildOutput
+from kdive.config.core_settings import BUILD_ARTIFACT_RETENTION_DAYS
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
@@ -32,6 +44,7 @@ from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.clock import STORE_MTIME
 from tests.mcp.complete_build_support import (
     FakeValidator as _FakeValidator,
 )
@@ -95,6 +108,14 @@ def _build_handlers(validator) -> CompleteBuildHandlers:
     return CompleteBuildHandlers(validate_complete_build=validator)
 
 
+class _DelayedValidator(_FakeValidator):
+    """Makes a response-clock regression observable without a real large upload."""
+
+    def __call__(self, manifest, keys, declared_build_id, *, arch: str = "x86_64"):
+        time.sleep(0.5)
+        return super().__call__(manifest, keys, declared_build_id, arch=arch)
+
+
 class _UploadStore:
     def presign_put(self, request: PresignPutRequest) -> PresignedUpload:
         return PresignedUpload(
@@ -114,10 +135,12 @@ class _ValidationStore:
         self._blobs = blobs
         self._heads = heads
 
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
         return self._heads.get(key)
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
         return self._blobs[key][start : start + length]
 
     def delete_version(self, key: str, version_id: str) -> None:
@@ -129,11 +152,19 @@ class _ValidationStore:
         raise AssertionError("single-PUT path must not reassemble")
 
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str:
         raise AssertionError("single-PUT path must not reassemble")
 
-    def complete_multipart_upload(self, key: str, upload_id: str, parts: object) -> str:
+    def complete_multipart_upload(
+        self, key: str, upload_id: str, parts: object
+    ) -> MultipartCompletion:
         raise AssertionError("single-PUT path must not reassemble")
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
@@ -196,6 +227,57 @@ def test_complete_build_finalizes_external_run(migrated_url: str) -> None:
                 run = await RUNS.get(conn, run_id)
         assert run is not None and run.state is RunState.SUCCEEDED
         assert run.kernel_ref is not None and run.kernel_ref.endswith("/kernel")
+
+    asyncio.run(_run())
+
+
+def test_complete_build_returns_reusable_build_deadline_contract(migrated_url: str) -> None:
+    """Completion and replay expose the persisted generation and database-clock deadline."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            first = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None
+            )
+            replay = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None
+            )
+
+        for response in (first, replay):
+            assert isinstance(response.data["build_ref"], str)
+            expires_at = datetime.fromisoformat(str(response.data["expires_at"]))
+            server_time = datetime.fromisoformat(str(response.data["server_time"]))
+            assert expires_at.tzinfo is UTC
+            assert server_time.tzinfo is UTC
+            assert expires_at > server_time
+        assert first.data["build_ref"] == replay.data["build_ref"]
+        assert first.data["expires_at"] == replay.data["expires_at"]
+
+    asyncio.run(_run())
+
+
+def test_complete_build_response_server_time_is_current_after_validation(
+    migrated_url: str,
+) -> None:
+    """The completion response clock and generation deadline begin after validation work."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            response = await _build_handlers(
+                _DelayedValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            ).complete_build(pool, _ctx(), str(run_id), build_id=None)
+            async with pool.connection() as conn:
+                row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+            assert row is not None
+
+        expires_at = datetime.fromisoformat(str(response.data["expires_at"]))
+        server_time = datetime.fromisoformat(str(response.data["server_time"]))
+        retention = timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS))
+        assert row[0] - server_time < timedelta(milliseconds=250)
+        assert expires_at - row[0] >= retention - timedelta(milliseconds=250)
 
     asyncio.run(_run())
 
@@ -625,7 +707,8 @@ def test_complete_build_writes_artifact_rows_and_deletes_manifest(migrated_url: 
             async with pool.connection() as conn:
                 async with conn.cursor(row_factory=dict_row) as cur:
                     await cur.execute(
-                        "SELECT object_key FROM artifacts WHERE owner_kind='runs' AND owner_id=%s",
+                        "SELECT object_key FROM artifacts WHERE owner_kind = 'investigations' "
+                        "AND owner_id = (SELECT investigation_id FROM runs WHERE id = %s)",
                         (run_id,),
                     )
                     rows = await cur.fetchall()
@@ -690,21 +773,12 @@ def test_complete_build_writes_effective_config_artifact(
             keys = await _artifact_keys(pool, run_id)
 
         assert resp.status == "succeeded", resp
-        assert keys == {kernel_key, config_key}
+        assert keys == {config_key}
 
     asyncio.run(_run())
 
 
 # --- Chunked reassembly at finalize (ADR-0104) ------------------------------------------
-
-from collections.abc import Sequence  # noqa: E402
-from datetime import UTC, datetime, timedelta  # noqa: E402
-
-import psycopg  # noqa: E402
-
-from kdive.artifacts.uploads import ChunkEntry  # noqa: E402
-from kdive.domain.catalog.artifacts import Sensitivity  # noqa: E402
-from tests.clock import STORE_MTIME  # noqa: E402
 
 _CHUNKED_KERNEL = ManifestEntry(
     "kernel", "whole", 8, chunks=(ChunkEntry("c0", 5), ChunkEntry("c1", 3))
@@ -718,7 +792,9 @@ class _ReassemblyStore:
         self.events: list[tuple[Any, ...]] = []
         self._delete_raises = delete_raises
 
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
+        if version_id is not None:
+            assert version_id == "final-version"
         if key.endswith(".part0001"):
             return HeadResult(5, "c0", "e", last_modified=STORE_MTIME, version_id="test-version")
         if key.endswith(".part0002"):
@@ -733,7 +809,9 @@ class _ReassemblyStore:
             )  # reassembled: composite/None checksum
         return None
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
         return _KERNEL_TAR[start : start + length]
 
     def create_multipart_upload(
@@ -743,16 +821,23 @@ class _ReassemblyStore:
         return "uid"
 
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str:
+        assert source_version_id in {"test-version", "chunk-version"}
         self.events.append(("copy", part_number, source_key))
         return f"etag-{part_number}"
 
     def complete_multipart_upload(
         self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
-    ) -> str:
+    ) -> MultipartCompletion:
         self.events.append(("complete", tuple(parts)))
-        return "final-etag"
+        return MultipartCompletion("final-etag", "final-version")
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         self.events.append(("abort", key))
@@ -790,7 +875,52 @@ def test_chunked_complete_build_reassembles_and_succeeds(migrated_url: str) -> N
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, run_id)
         assert run is not None and run.state is RunState.SUCCEEDED
-        assert keys == {f"local/runs/{run_id}/kernel"}
+        assert keys == set()
+
+    asyncio.run(_run())
+
+
+def test_production_validator_publishes_chunked_build_without_final_head_checksum(
+    migrated_url: str,
+) -> None:
+    """Verified chunk checksums remain the integrity evidence for a multipart final object."""
+    import hashlib
+
+    split = len(_KERNEL_TAR) // 2
+    chunks = (_KERNEL_TAR[:split], _KERNEL_TAR[split:])
+    entry = ManifestEntry(
+        "kernel",
+        hashlib.sha256(_KERNEL_TAR).hexdigest(),
+        len(_KERNEL_TAR),
+        chunks=tuple(ChunkEntry(hashlib.sha256(chunk).hexdigest(), len(chunk)) for chunk in chunks),
+    )
+
+    class _ProductionChunkStore(_ReassemblyStore):
+        def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
+            if key.endswith("/kernel"):
+                assert version_id == "final-version"
+            if key.endswith(".part0001"):
+                chunk = chunks[0]
+            elif key.endswith(".part0002"):
+                chunk = chunks[1]
+            elif key.endswith("/kernel"):
+                return HeadResult(
+                    len(_KERNEL_TAR), None, "multipart-etag", STORE_MTIME, "final-version"
+                )
+            else:
+                return None
+            return HeadResult(
+                len(chunk), hashlib.sha256(chunk).hexdigest(), "etag", STORE_MTIME, "chunk-version"
+            )
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool, entries=[entry])
+            store = _ProductionChunkStore()
+            handlers = CompleteBuildHandlers(object_store_factory=lambda: store)
+            first = await handlers.complete_build(pool, _ctx(), str(run_id), build_id=None)
+            assert first.status == "succeeded", first
+            assert first.data["build_ref"]
 
     asyncio.run(_run())
 

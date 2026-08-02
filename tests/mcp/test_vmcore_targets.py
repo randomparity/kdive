@@ -67,10 +67,18 @@ def test_resolve_run_vmcore_target_returns_port_inputs(migrated_url: str) -> Non
         async with _pool(migrated_url) as pool:
             run_id = await _built_run_with_core(pool)
             async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE run_steps SET result = result || "
+                    '\'{"artifact_versions": {"vmlinux": "version-7"}}\'::jsonb '
+                    "WHERE run_id = %s AND step = 'build'",
+                    (run_id,),
+                )
+            async with pool.connection() as conn:
                 resolved = await resolve_run_vmcore_target(conn, _ctx(), run_id)
 
         assert isinstance(resolved, RunVmcoreTarget)
         assert resolved.debuginfo_ref == "k/runs/r/vmlinux"
+        assert resolved.debuginfo_version_id == "version-7"
         assert resolved.build_id == "deadbeef"
         assert resolved.vmcore_ref.endswith("/vmcore-host_dump")
 

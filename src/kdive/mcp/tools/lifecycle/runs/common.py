@@ -82,6 +82,7 @@ def _run_recovery(run: Run) -> dict[str, JsonValue]:
         "investigation_id": str(run.investigation_id),
         "label": run.label,
         "outcome_note": run.outcome_note,
+        "build_ref": run.build_ref,
         # Every Run is the external-upload lane (the agent builds locally and uploads).
         "build_source": "external",
     }
@@ -333,6 +334,8 @@ def envelope_for_run(
     latest_console_ref: str | None = None,
     liveness: Liveness | None = None,
     vmcore_ref: str | None = None,
+    build_expires_at: str | None = None,
+    server_time: str | None = None,
 ) -> ToolResponse:
     """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`.
 
@@ -411,6 +414,11 @@ def envelope_for_run(
         **_console_manifest_data(console_manifest),
         **_liveness_data(liveness),
     }
+    if build_expires_at is not None:
+        data["build_expires_at"] = build_expires_at
+        if server_time is None:
+            raise ValueError("server_time is required with build_expires_at")
+        data["server_time"] = server_time
     return ToolResponse.success(
         str(run.id),
         run.state.value,

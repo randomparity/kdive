@@ -7,12 +7,16 @@ Console (system-owned), build-log (run-owned evidence), and system-owned uploads
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timedelta
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
+from psycopg.types.json import Jsonb
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.reconciler.cleanup import gc as gc_module
 from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
 from tests.reconciler.conftest import connect
 
@@ -25,6 +29,341 @@ class _RecordingStore:
         assert limit == 20
         self.deleted.append(key)
         return True
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.deleted.append(f"{key}@{version_id}")
+
+
+def test_expired_generation_reclaims_by_absolute_deadline(migrated_url: str) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        investigation_id = uuid4()
+        generation = uuid4()
+        digest = "b" * 64
+        build_ref = f"{digest}.{generation}"
+        key = f"builds/{generation}/kernel"
+        try:
+            await conn.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, 'p', 'proj', 't', 'active')",
+                (investigation_id,),
+            )
+            await conn.execute(
+                "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, '{}'::jsonb, "
+                "%s::jsonb, 'local-libvirt', '{}'::jsonb, now() - interval '1 second')",
+                (
+                    investigation_id,
+                    generation,
+                    build_ref,
+                    digest,
+                    Jsonb({"kernel": {"key": key, "version_id": "v1"}}),
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+                "retention_class) "
+                "VALUES ('investigations', %s, %s, 'etag', 'sensitive', 'build')",
+                (investigation_id, key),
+            )
+        finally:
+            await conn.close()
+
+        store = _RecordingStore()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
+            result = await conn.execute(
+                "SELECT 1 FROM investigation_builds WHERE generation = %s", (generation,)
+            )
+            assert await result.fetchone() is None
+        finally:
+            await conn.close()
+        assert store.deleted == [f"{key}@v1"]
+
+    asyncio.run(_run())
+
+
+def test_reclaiming_generation_retries_exact_versions_without_touching_fresh_generation(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        investigation_id = uuid4()
+        old_generation = uuid4()
+        fresh_generation = uuid4()
+        digest = "c" * 64
+        old_key = f"builds/{old_generation}/kernel"
+        fresh_key = f"builds/{fresh_generation}/kernel"
+        try:
+            await conn.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, 'p', 'proj', 't', 'active')",
+                (investigation_id,),
+            )
+            for generation, key, deadline in (
+                (old_generation, old_key, "now() - interval '1 second'"),
+                (fresh_generation, fresh_key, "now() + interval '1 day'"),
+            ):
+                await conn.execute(
+                    "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                    "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                    "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, "
+                    "'{}'::jsonb, %s::jsonb, 'local-libvirt', '{}'::jsonb, " + deadline + ")",
+                    (
+                        investigation_id,
+                        generation,
+                        f"{digest}.{generation}",
+                        digest,
+                        Jsonb({"kernel": {"key": key, "version_id": f"v-{generation}"}}),
+                    ),
+                )
+                await conn.execute(
+                    "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+                    "retention_class) VALUES "
+                    "('investigations', %s, %s, 'etag', 'sensitive', 'build')",
+                    (investigation_id, key),
+                )
+        finally:
+            await conn.close()
+
+        class _FailOnceStore(_RecordingStore):
+            failed = False
+
+            def delete_version(self, key: str, version_id: str) -> None:
+                self.deleted.append(f"{key}@{version_id}")
+                if not self.failed:
+                    self.failed = True
+                    raise RuntimeError("temporary store failure")
+
+        store = _FailOnceStore()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+            state = await (
+                await conn.execute(
+                    "SELECT state FROM investigation_builds WHERE generation = %s",
+                    (old_generation,),
+                )
+            ).fetchone()
+            assert state == ("reclaiming",)
+            await conn.execute(
+                "UPDATE investigation_builds SET reclaim_retry_at = now() - interval '1 second' "
+                "WHERE generation = %s",
+                (old_generation,),
+            )
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
+            remaining = await (
+                await conn.execute(
+                    "SELECT generation, state FROM investigation_builds ORDER BY generation"
+                )
+            ).fetchall()
+            assert remaining == [(fresh_generation, "active")]
+            keys = await (
+                await conn.execute(
+                    "SELECT object_key FROM artifacts WHERE owner_id = %s", (investigation_id,)
+                )
+            ).fetchall()
+            assert keys == [(fresh_key,)]
+        finally:
+            await conn.close()
+        assert all(not entry.startswith(fresh_key) for entry in store.deleted)
+
+    asyncio.run(_run())
+
+
+def test_generation_reclaim_pass_is_ordered_bounded_and_resumes(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        investigation_id = uuid4()
+        generations = [UUID(int=value) for value in (3, 1, 2)]
+        try:
+            await conn.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, 'p', 'proj', 't', 'active')",
+                (investigation_id,),
+            )
+            for generation in generations:
+                digest = f"{generation.int:064x}"
+                key = f"builds/{generation}/kernel"
+                await conn.execute(
+                    "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                    "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                    "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, "
+                    "'{}'::jsonb, %s::jsonb, 'local-libvirt', '{}'::jsonb, "
+                    "now() - interval '1 second')",
+                    (
+                        investigation_id,
+                        generation,
+                        f"{digest}.{generation}",
+                        digest,
+                        Jsonb({"kernel": {"key": key, "version_id": f"v-{generation}"}}),
+                    ),
+                )
+        finally:
+            await conn.close()
+
+        monkeypatch.setattr(gc_module, "_BUILD_GENERATIONS_PER_PASS", 2)
+        store = _RecordingStore()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 2
+            remaining = await (
+                await conn.execute(
+                    "SELECT generation FROM investigation_builds ORDER BY generation"
+                )
+            ).fetchall()
+            assert remaining == [(UUID(int=3),)]
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
+        finally:
+            await conn.close()
+        assert store.deleted == [
+            f"builds/{UUID(int=1)}/kernel@v-{UUID(int=1)}",
+            f"builds/{UUID(int=2)}/kernel@v-{UUID(int=2)}",
+            f"builds/{UUID(int=3)}/kernel@v-{UUID(int=3)}",
+        ]
+
+    asyncio.run(_run())
+
+
+def test_generation_scan_bounds_work_before_eligibility_and_pin_joins(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        try:
+            for value in range(1, 5):
+                investigation_id = UUID(int=value)
+                generation = UUID(int=value)
+                digest = f"{value:064x}"
+                await conn.execute(
+                    "INSERT INTO investigations (id, principal, project, title, state) "
+                    "VALUES (%s, 'p', 'proj', 't', 'active')",
+                    (investigation_id,),
+                )
+                await conn.execute(
+                    "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                    "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                    "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, "
+                    "'{}'::jsonb, '{}'::jsonb, 'local-libvirt', '{}'::jsonb, "
+                    "now() + %s)",
+                    (
+                        investigation_id,
+                        generation,
+                        f"{digest}.{generation}",
+                        digest,
+                        timedelta(seconds=-1 if value == 4 else 3600),
+                    ),
+                )
+
+            monkeypatch.setattr(gc_module, "_BUILD_GENERATION_SCAN_PER_PASS", 3)
+            assert await gc_module._generation_candidates(conn, expired=True) == []
+            cursor = await (
+                await conn.execute(
+                    "SELECT investigation_id, generation FROM investigation_build_gc_cursor "
+                    "WHERE lane = 'expired'"
+                )
+            ).fetchone()
+            assert cursor == (UUID(int=3), UUID(int=3))
+            assert await gc_module._generation_candidates(conn, expired=True) == [
+                (UUID(int=4), UUID(int=4))
+            ]
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_generation_scan_plan_uses_primary_key_before_bounded_limit(migrated_url: str) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        try:
+            await conn.execute("SET enable_seqscan = off")
+            plan_row = await (
+                await conn.execute(
+                    "EXPLAIN (ANALYZE, FORMAT JSON) "
+                    "SELECT investigation_id, generation FROM investigation_builds "
+                    "WHERE (investigation_id, generation) > (%s, %s) "
+                    "ORDER BY investigation_id, generation LIMIT %s",
+                    (UUID(int=0), UUID(int=0), gc_module._BUILD_GENERATION_SCAN_PER_PASS),
+                )
+            ).fetchone()
+            assert plan_row is not None
+            encoded = json.dumps(plan_row[0])
+            assert "Index" in encoded
+            assert "Seq Scan" not in encoded
+            assert "WindowAgg" not in encoded
+            assert "Hash Join" not in encoded
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_pinned_generation_does_not_consume_reclaim_budget(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        investigation_id = uuid4()
+        pinned_generation = UUID(int=1)
+        eligible_generation = UUID(int=2)
+        try:
+            await conn.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, 'p', 'proj', 't', 'active')",
+                (investigation_id,),
+            )
+            for generation in (pinned_generation, eligible_generation):
+                digest = f"{generation.int:064x}"
+                await conn.execute(
+                    "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                    "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                    "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, "
+                    "'{}'::jsonb, %s::jsonb, 'local-libvirt', '{}'::jsonb, "
+                    "now() - interval '1 second')",
+                    (
+                        investigation_id,
+                        generation,
+                        f"{digest}.{generation}",
+                        digest,
+                        Jsonb(
+                            {
+                                "kernel": {
+                                    "key": f"builds/{generation}/kernel",
+                                    "version_id": f"v-{generation}",
+                                }
+                            }
+                        ),
+                    ),
+                )
+            await conn.execute(
+                "INSERT INTO runs (id, investigation_id, state, build_profile, target_kind, "
+                "principal, project, build_ref) VALUES (%s, %s, 'created', '{}'::jsonb, "
+                "'local-libvirt', 'p', 'proj', %s)",
+                (uuid4(), investigation_id, f"{pinned_generation.int:064x}.{pinned_generation}"),
+            )
+        finally:
+            await conn.close()
+
+        monkeypatch.setattr(gc_module, "_BUILD_GENERATIONS_PER_PASS", 1)
+        store = _RecordingStore()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
+            rows = await (
+                await conn.execute(
+                    "SELECT generation FROM investigation_builds ORDER BY generation"
+                )
+            ).fetchall()
+            assert rows == [(pinned_generation,)]
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
 
 
 async def _seed_artifact(

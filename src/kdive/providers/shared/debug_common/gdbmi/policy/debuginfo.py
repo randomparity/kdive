@@ -27,17 +27,25 @@ from uuid import UUID
 import psycopg
 
 import kdive.config as config
-from kdive.artifacts.read_model import debuginfo_ref_for_run_sync, kernel_ref_for_run_sync
+from kdive.artifacts.read_model import (
+    ArtifactReadRef,
+    debuginfo_ref_for_run_sync,
+    kernel_ref_for_run_sync,
+)
 from kdive.config.core_settings import DATABASE_URL
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import AttachSeam, GdbMiAttachment
-from kdive.providers.shared.debug_common.crash_postmortem import default_fetch_object
+from kdive.providers.shared.debug_common.crash_postmortem import (
+    default_fetch_object,
+    default_fetch_versioned_object,
+)
 
-type _ReadDebuginfoRef = Callable[[str], str | None]
+type _ReadDebuginfoRef = Callable[[str], str | ArtifactReadRef | None]
 type _FetchObject = Callable[[str], bytes]
+type _FetchVersionedObject = Callable[[str, str], bytes]
 type _Attach = Callable[[Path], GdbMiAttachment]
 type _GdbMiEngineFactory = Callable[[], _GdbMiAttachEngine]
-type _ReadKernelRef = Callable[[str], str | None]
+type _ReadKernelRef = Callable[[str], str | ArtifactReadRef | None]
 type _ReadModuleIdentity = Callable[[Path], tuple[str | None, str | None]]
 type ModuleDebuginfoResolverSeam = Callable[[str, str], "ModuleDebuginfo"]
 
@@ -57,10 +65,15 @@ class DebuginfoResolver:
     """
 
     def __init__(
-        self, *, read_debuginfo_ref: _ReadDebuginfoRef, fetch_object: _FetchObject
+        self,
+        *,
+        read_debuginfo_ref: _ReadDebuginfoRef,
+        fetch_object: _FetchObject,
+        fetch_versioned_object: _FetchVersionedObject | None = None,
     ) -> None:
         self._read_debuginfo_ref = read_debuginfo_ref
         self._fetch_object = fetch_object
+        self._fetch_versioned_object = fetch_versioned_object
 
     def resolve(self, run_id: str, dest: Path) -> Path:
         """Fetch the Run's debuginfo (vmlinux) bytes to ``dest`` and return ``dest``.
@@ -83,11 +96,20 @@ class DebuginfoResolver:
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"run_id": run_id, "reason": "no_debuginfo"},
             )
-        dest.write_bytes(self._fetch_object(ref))
+        dest.write_bytes(self._fetch(ref))
         return dest
 
+    def _fetch(self, ref: str | ArtifactReadRef) -> bytes:
+        if isinstance(ref, str):
+            return self._fetch_object(ref)
+        if ref.version_id is None:
+            return self._fetch_object(ref.key)
+        if self._fetch_versioned_object is None:
+            raise RuntimeError("versioned debuginfo fetch seam is not configured")
+        return self._fetch_versioned_object(ref.key, ref.version_id)
 
-def real_read_debuginfo_ref(run_id: str) -> str | None:  # pragma: no cover - live_vm
+
+def real_read_debuginfo_ref(run_id: str) -> ArtifactReadRef | None:  # pragma: no cover - live_vm
     # ``run_id`` is the caller's ``str(session.run_id)`` (a UUID the handler already produced); a
     # non-UUID here is a programming error, not an operational path, so ``UUID()`` is allowed to
     # raise. The conversion lives only in this live DB seam — the resolver never parses ``run_id``.
@@ -118,10 +140,12 @@ class ModuleDebuginfoResolver:
         *,
         read_kernel_ref: _ReadKernelRef,
         fetch_object: _FetchObject,
+        fetch_versioned_object: _FetchVersionedObject | None = None,
         read_identity: _ReadModuleIdentity,
     ) -> None:
         self._read_kernel_ref = read_kernel_ref
         self._fetch_object = fetch_object
+        self._fetch_versioned_object = fetch_versioned_object
         self._read_identity = read_identity
         self._staged: dict[str, Path] = {}
 
@@ -147,7 +171,15 @@ class ModuleDebuginfoResolver:
         if ref is None:
             raise self._missing(run_id, module)
         root = Path(tempfile.mkdtemp(prefix="kdive-modules-"))
-        with tarfile.open(fileobj=io.BytesIO(self._fetch_object(ref)), mode="r:*") as tar:
+        if isinstance(ref, str):
+            data = self._fetch_object(ref)
+        elif ref.version_id is None:
+            data = self._fetch_object(ref.key)
+        elif self._fetch_versioned_object is not None:
+            data = self._fetch_versioned_object(ref.key, ref.version_id)
+        else:
+            raise RuntimeError("versioned module fetch seam is not configured")
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
             members = [m for m in tar.getmembers() if _is_modules_member(m.name)]
             tar.extractall(root, members=members, filter="data")
         self._staged[run_id] = root
@@ -173,7 +205,7 @@ def _is_modules_member(name: str) -> bool:
     return name.lstrip("./").startswith("lib/modules/")
 
 
-def real_read_kernel_ref(run_id: str) -> str | None:  # pragma: no cover - live_vm
+def real_read_kernel_ref(run_id: str) -> ArtifactReadRef | None:  # pragma: no cover - live_vm
     with psycopg.connect(config.require(DATABASE_URL)) as conn:
         return kernel_ref_for_run_sync(conn, UUID(run_id))
 
@@ -187,6 +219,7 @@ def real_module_debuginfo_resolver() -> ModuleDebuginfoResolverSeam:  # pragma: 
     return ModuleDebuginfoResolver(
         read_kernel_ref=real_read_kernel_ref,
         fetch_object=default_fetch_object,
+        fetch_versioned_object=default_fetch_versioned_object,
         read_identity=read_module_identity,
     ).resolve
 
@@ -267,7 +300,9 @@ def stage_and_attach(
     """
     if resolver is None:
         resolver = DebuginfoResolver(
-            read_debuginfo_ref=real_read_debuginfo_ref, fetch_object=default_fetch_object
+            read_debuginfo_ref=real_read_debuginfo_ref,
+            fetch_object=default_fetch_object,
+            fetch_versioned_object=default_fetch_versioned_object,
         )
     staging_dir = Path(tempfile.mkdtemp(prefix="kdive-debuginfo-"))
     try:

@@ -57,6 +57,25 @@ def test_runs_commands_and_redacts() -> None:
     assert script == "bt\nps\nquit\n"
 
 
+def test_reusable_debuginfo_fetches_exact_version() -> None:
+    versioned: list[tuple[str, str]] = []
+
+    run_crash_postmortem(
+        vmcore_ref="core-ref",
+        debuginfo_ref="debug-ref",
+        debuginfo_version_id="version-7",
+        expected_build_id="deadbeef",
+        commands=["bt"],
+        fetch_object=lambda ref: b"CORE",
+        fetch_versioned_object=lambda ref, version: versioned.append((ref, version)) or b"VMLINUX",
+        read_build_id=lambda data: "deadbeef",
+        run_crash=lambda vmlinux, core, script: _run(b"OK"),
+        secret_registry=SecretRegistry(),
+    )
+
+    assert versioned == [("debug-ref", "version-7")]
+
+
 def test_transcript_redacts_against_supplied_registry() -> None:
     # The supplied registry (not the process-global default) seeds the redactor: a value
     # registered here must be masked out of the crash transcript.

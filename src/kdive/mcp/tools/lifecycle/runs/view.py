@@ -31,6 +31,7 @@ from kdive.services.artifacts.listing import (
     list_run_console_artifacts,
 )
 from kdive.services.debug.sessions import active_session_ids_for_run
+from kdive.services.runs.build_catalog import resolve_build_expiry
 from kdive.services.runs.liveness import Liveness, derive_liveness
 from kdive.services.runs.steps import (
     READY_BOOT_OUTCOME,
@@ -60,6 +61,8 @@ class RunReadDetails:
     latest_console_id: str | None
     liveness: Liveness | None
     vmcore_artifact_id: str | None
+    build_expires_at: str | None
+    server_time: str | None
 
 
 async def get_run(
@@ -107,6 +110,8 @@ async def get_run(
             latest_console_ref=details.latest_console_id,
             liveness=details.liveness,
             vmcore_ref=details.vmcore_artifact_id,
+            build_expires_at=details.build_expires_at,
+            server_time=details.server_time,
         )
 
 
@@ -121,6 +126,7 @@ async def _load_run_read_details(
     system = await SYSTEMS.get(conn, run.system_id) if run.system_id is not None else None
     runtime = await resolver.runtime_for_run(conn, run.id) if system is not None else None
     progress = await _step_progress(conn, run.id) if run.state is RunState.SUCCEEDED else None
+    build_expires_at = await _build_expires_at(conn, run)
     return RunReadDetails(
         required_cmdline=_required_cmdline(system, runtime),
         failing_job=await _failing_job(conn, run),
@@ -132,7 +138,28 @@ async def _load_run_read_details(
         latest_console_id=await _latest_console_id(conn, run),
         liveness=await _liveness(conn, run, progress, secret_registry),
         vmcore_artifact_id=await redacted_vmcore_artifact_id(conn, run.id),
+        build_expires_at=build_expires_at,
+        server_time=await _server_time(conn) if build_expires_at is not None else None,
     )
+
+
+async def _server_time(conn: AsyncConnection) -> str:
+    row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+    if row is None:
+        raise RuntimeError("SELECT clock_timestamp() returned no row")
+    return row[0].isoformat()
+
+
+async def _build_expires_at(conn: AsyncConnection, run: Run) -> str | None:
+    if run.build_ref is None:
+        return None
+    expires_at = await resolve_build_expiry(
+        conn,
+        run_id=run.id,
+        investigation_id=run.investigation_id,
+        build_ref=run.build_ref,
+    )
+    return expires_at.isoformat() if expires_at is not None else None
 
 
 async def _latest_console_id(conn: AsyncConnection, run: Run) -> str | None:

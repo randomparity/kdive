@@ -151,7 +151,7 @@ def test_console_log_element_does_not_enable_append() -> None:
 
 
 @contextmanager
-def _stream_combined(_ref: str) -> Iterator[StreamedArtifact]:
+def _stream_combined(_ref: str, _version_id: str | None = None) -> Iterator[StreamedArtifact]:
     yield StreamedArtifact(io.BytesIO(_combined_kernel_tar()), Sensitivity.SENSITIVE, "build")
 
 
@@ -159,7 +159,7 @@ def _installer(conn: FakeLibvirtConn, staging_root: Path) -> LocalLibvirtInstall
     return LocalLibvirtInstall(
         connect=lambda: conn,
         stream_kernel=_stream_combined,
-        fetch_initrd=lambda ref, dest: dest.write_bytes(b"i"),
+        fetch_initrd=lambda ref, dest, version_id: dest.write_bytes(b"i"),
         readiness=lambda system_id: ReadinessResult(answered=True, ok=True),
         staging_root=staging_root,
         boot_window_polls=3,

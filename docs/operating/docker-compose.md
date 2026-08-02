@@ -34,7 +34,8 @@ Compose does it from the graph.
 The Compose-managed bucket supplies the ADR-0524 store contract. When replacing it with an
 external store, follow the stop-old-first adoption order and IAM requirements in
 [Installing KDIVE](install.md): quiesce old processes, grant and verify
-`s3:GetBucketVersioning`/`s3:ListBucketVersions`/`s3:DeleteObjectVersion`, verify bucket policy,
+`s3:GetObjectVersion`/`s3:GetBucketVersioning`/`s3:ListBucketVersions`/
+`s3:DeleteObjectVersion`, verify bucket policy,
 enable versioning without exclusions or MFA Delete, wait for activation, migrate, and start only
 the version-aware image. Suspension and live rollback to a pre-ADR-0524 image are unsupported.
 
