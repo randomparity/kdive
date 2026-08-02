@@ -13,7 +13,9 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope, _lock_key
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup import gc as gc_module
 from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
@@ -31,6 +33,76 @@ class _RecordingStore:
 
     def delete_version(self, key: str, version_id: str) -> None:
         self.deleted.append(f"{key}@{version_id}")
+
+
+def test_generation_mark_commits_and_releases_lock_before_exact_delete(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        investigation_id, generation = uuid4(), uuid4()
+        key = f"builds/{generation}/kernel"
+        seed = await connect(migrated_url)
+        try:
+            await seed.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, 'p', 'proj', 't', 'active')",
+                (investigation_id,),
+            )
+            digest = "d" * 64
+            await seed.execute(
+                "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, '{}'::jsonb, "
+                "%s::jsonb, 'local-libvirt', '{}'::jsonb, now() - interval '1 second')",
+                (
+                    investigation_id,
+                    generation,
+                    f"{digest}.{generation}",
+                    digest,
+                    Jsonb({"kernel": {"key": key, "version_id": "v1"}}),
+                ),
+            )
+        finally:
+            await seed.close()
+
+        class _ObserveThenFail(_RecordingStore):
+            observed_state: tuple[str] | None = None
+            observed_lock: tuple[bool] | None = None
+
+            def delete_version(self, key: str, version_id: str) -> None:
+                with psycopg.connect(migrated_url) as observer:
+                    self.observed_state = observer.execute(
+                        "SELECT state FROM investigation_builds WHERE generation = %s",
+                        (generation,),
+                    ).fetchone()
+                    self.observed_lock = observer.execute(
+                        "SELECT pg_try_advisory_xact_lock(%s)",
+                        (_lock_key(LockScope.INVESTIGATION, investigation_id),),
+                    ).fetchone()
+                raise RuntimeError("fail after observing committed mark")
+
+        store = _ObserveThenFail()
+        pool = AsyncConnectionPool(migrated_url, open=False)
+        await pool.open()
+        try:
+            async with pool.connection() as conn:
+                assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+        finally:
+            await pool.close()
+        assert store.observed_state == ("reclaiming",)
+        assert store.observed_lock == (True,)
+        check = await connect(migrated_url)
+        try:
+            row = await (
+                await check.execute(
+                    "SELECT state FROM investigation_builds WHERE generation = %s", (generation,)
+                )
+            ).fetchone()
+            assert row == ("reclaiming",)
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
 
 
 def test_expired_generation_reclaims_by_absolute_deadline(migrated_url: str) -> None:
@@ -69,14 +141,17 @@ def test_expired_generation_reclaims_by_absolute_deadline(migrated_url: str) -> 
                 (investigation_id, key),
             )
             await conn.execute(
-                "INSERT INTO jobs (id, kind, state, max_attempts, authorizing, dedup_key) "
-                "VALUES (%s, 'install', 'canceled', 3, '{}'::jsonb, %s)",
+                "INSERT INTO jobs (id, kind, state, attempt, max_attempts, worker_id, "
+                "lease_expires_at, authorizing, dedup_key) VALUES "
+                "(%s, 'install', 'running', 1, 3, 'worker-1', now() + interval '5 min', "
+                "'{}'::jsonb, %s)",
                 (job_id, f"fence-{job_id}"),
             )
             await conn.execute(
                 "INSERT INTO investigation_build_uses "
-                "(use_id, investigation_id, generation, job_id, attempt) "
-                "VALUES (%s, %s, %s, %s, 1)",
+                "(use_id, investigation_id, generation, job_id, attempt, holder_worker_id, "
+                "lease_expires_at) VALUES (%s, %s, %s, %s, 1, 'worker-1', "
+                "now() + interval '5 min')",
                 (use_id, investigation_id, generation, job_id),
             )
         finally:
@@ -92,6 +167,101 @@ def test_expired_generation_reclaims_by_absolute_deadline(migrated_url: str) -> 
                 "SELECT 1 FROM investigation_builds WHERE generation = %s", (generation,)
             )
             assert await result.fetchone() is None
+        finally:
+            await conn.close()
+        assert store.deleted == [f"{key}@v1"]
+
+    asyncio.run(_run())
+
+
+def test_dead_attempt_use_expires_while_live_reclaimed_and_recycled_attempts_pin(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        investigation_id, generation, job_id = uuid4(), uuid4(), uuid4()
+        digest = "e" * 64
+        key = f"builds/{generation}/kernel"
+        seed = await connect(migrated_url)
+        try:
+            await seed.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, 'p', 'proj', 't', 'active')",
+                (investigation_id,),
+            )
+            await seed.execute(
+                "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, '{}'::jsonb, "
+                "%s::jsonb, 'local-libvirt', '{}'::jsonb, now() - interval '1 second')",
+                (
+                    investigation_id,
+                    generation,
+                    f"{digest}.{generation}",
+                    digest,
+                    Jsonb({"kernel": {"key": key, "version_id": "v1"}}),
+                ),
+            )
+            await seed.execute(
+                "INSERT INTO jobs (id, kind, state, attempt, max_attempts, worker_id, "
+                "lease_expires_at, authorizing, dedup_key) VALUES "
+                "(%s, 'install', 'running', 1, 3, 'dead-worker', now() + interval '5 min', "
+                "'{}'::jsonb, %s)",
+                (job_id, f"use-{job_id}"),
+            )
+            old_use = uuid4()
+            await seed.execute(
+                "INSERT INTO investigation_build_uses (use_id, investigation_id, generation, "
+                "job_id, attempt, holder_worker_id, lease_expires_at) VALUES "
+                "(%s, %s, %s, %s, 1, 'dead-worker', now() + interval '5 min')",
+                (old_use, investigation_id, generation, job_id),
+            )
+        finally:
+            await seed.close()
+
+        store = _RecordingStore()
+        conn = await connect(migrated_url)
+        try:
+            # A reclaimed attempt cannot erase a still-live predecessor's overlap fence.
+            await conn.execute(
+                "UPDATE jobs SET attempt = 2, worker_id = 'new-worker', "
+                "lease_expires_at = now() + interval '5 min' WHERE id = %s",
+                (job_id,),
+            )
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+
+            # Process death is demonstrable once its unrenewed lease lapses; a later live
+            # attempt then owns its own independent fence.
+            await conn.execute(
+                "UPDATE investigation_build_uses SET lease_expires_at = now() - interval '1 sec' "
+                "WHERE use_id = %s",
+                (old_use,),
+            )
+            new_use = uuid4()
+            await conn.execute(
+                "INSERT INTO investigation_build_uses (use_id, investigation_id, generation, "
+                "job_id, attempt, holder_worker_id, lease_expires_at) VALUES "
+                "(%s, %s, %s, %s, 2, 'new-worker', now() + interval '5 min')",
+                (new_use, investigation_id, generation, job_id),
+            )
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+
+            # Recycling a terminal row back to attempt 1 does not collide with its stale
+            # attempt-1 record; holder identity plus use_id distinguish executions.
+            await conn.execute(
+                "UPDATE jobs SET attempt = 1, worker_id = 'recycled-worker' WHERE id = %s",
+                (job_id,),
+            )
+            recycled_use = uuid4()
+            await conn.execute(
+                "INSERT INTO investigation_build_uses (use_id, investigation_id, generation, "
+                "job_id, attempt, holder_worker_id, lease_expires_at) VALUES "
+                "(%s, %s, %s, %s, 1, 'recycled-worker', now() + interval '5 min')",
+                (recycled_use, investigation_id, generation, job_id),
+            )
+            await conn.execute(
+                "UPDATE investigation_build_uses SET lease_expires_at = now() - interval '1 sec'"
+            )
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
         finally:
             await conn.close()
         assert store.deleted == [f"{key}@v1"]

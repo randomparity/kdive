@@ -2373,6 +2373,40 @@ def test_reusable_create_idempotency_and_read_models(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_reclaimed_reusable_build_keeps_deadline_and_actionable_install_recovery(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            build_ref = await _seed_investigation_build(pool, inv_id)
+            created = await _create(pool, _ctx(), inv_id, sys_id, build_ref=build_ref)
+            deadline = created.data["build_expires_at"]
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "DELETE FROM investigation_builds WHERE investigation_id = %s "
+                    "AND build_ref = %s",
+                    (inv_id, build_ref),
+                )
+            read = await get_run(pool, _ctx(), created.object_id)
+            listed = await list_runs(pool, _ctx(), RunsListRequest(investigation_id=inv_id))
+            rejected = await _install(pool, _ctx(), created.object_id)
+
+        assert read.data["build_expires_at"] == deadline
+        assert listed.items[0].data["build_expires_at"] == deadline
+        assert rejected.data["reason"] == "build_ref_expired"
+        assert rejected.data["expires_at"] == deadline
+        assert rejected.data["server_time"]
+        assert rejected.data["investigation_id"] == inv_id
+        assert rejected.data["system_id"] == sys_id
+        assert rejected.data["target_kind"] == "local-libvirt"
+        assert rejected.data["build_profile"] == {"schema_version": 1, "arch": "x86_64"}
+        assert rejected.suggested_next_actions == ["runs.create"]
+
+    asyncio.run(_run())
+
+
 def test_create_with_label_echoes_and_persists(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -4845,6 +4879,11 @@ def test_queued_install_admitted_before_expiry_runs_after_expiry(migrated_url: s
                     "clock_timestamp() - interval '1 second' "
                     "WHERE investigation_id = %s AND build_ref = %s",
                     (run.investigation_id, build_ref),
+                )
+                await conn.execute(
+                    "UPDATE jobs SET state = 'running', worker_id = 'test-worker', attempt = 1, "
+                    "lease_expires_at = now() + interval '5 min' WHERE id = %s",
+                    (admitted.object_id,),
                 )
                 job = await JOBS.get(conn, UUID(admitted.object_id))
                 assert job is not None

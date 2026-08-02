@@ -143,7 +143,10 @@ async def _build_expires_at(conn: AsyncConnection, run: Run) -> str | None:
     if run.build_ref is None:
         return None
     build = await resolve_build(conn, run.investigation_id, run.build_ref)
-    return build.expires_at.isoformat() if build is not None else None
+    if build is not None:
+        return build.expires_at.isoformat()
+    result = await _existing_build_result(conn, run.id)
+    return result.expires_at if result is not None else None
 
 
 async def _latest_console_id(conn: AsyncConnection, run: Run) -> str | None:

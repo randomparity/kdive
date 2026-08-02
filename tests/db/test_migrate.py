@@ -197,6 +197,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0094",
         "0095",
         "0096",
+        "0097",
     ]
     assert second == []
 
@@ -267,6 +268,24 @@ def test_investigation_build_catalog_schema(pg_conn: psycopg.Connection) -> None
         "SELECT indexdef FROM pg_indexes WHERE indexname = 'investigation_builds_expires_at_idx'"
     ).fetchone()
     assert expiry_index is not None and "expires_at" in expiry_index[0]
+
+
+def test_investigation_build_use_leases_follow_worker_claims(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    columns = {
+        row[0]: row[1]
+        for row in pg_conn.execute(
+            "SELECT column_name, is_nullable FROM information_schema.columns "
+            "WHERE table_name = 'investigation_build_uses'"
+        ).fetchall()
+    }
+    assert columns["holder_worker_id"] == "NO"
+    assert columns["lease_expires_at"] == "NO"
+    assert frozenset({"job_id", "attempt"}) not in _unique_constraints(
+        pg_conn, "investigation_build_uses"
+    )
 
 
 def test_dedup_key_not_null(pg_conn: psycopg.Connection) -> None:
@@ -775,6 +794,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0094",
         "0095",
         "0096",
+        "0097",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1148,6 +1168,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0094",
         "0095",
         "0096",
+        "0097",
     ]
 
 

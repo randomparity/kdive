@@ -281,9 +281,15 @@ async def heartbeat(
     """
     async with conn.transaction(), conn.cursor() as cur:
         await cur.execute(
-            "UPDATE jobs SET heartbeat_at = now(), lease_expires_at = now() + %s "
+            "WITH renewed AS (UPDATE jobs SET heartbeat_at = now(), "
+            "lease_expires_at = now() + %s "
             "WHERE id = %s AND worker_id = %s AND state = %s "
-            "RETURNING id",
+            "RETURNING id, worker_id, attempt, lease_expires_at) "
+            ", refreshed_uses AS (UPDATE investigation_build_uses u "
+            "SET lease_expires_at = r.lease_expires_at FROM renewed r "
+            "WHERE u.job_id = r.id AND u.holder_worker_id = r.worker_id "
+            "AND u.attempt = r.attempt RETURNING u.use_id) "
+            "SELECT id FROM renewed",
             (lease, job_id, worker_id, JobState.RUNNING.value),
         )
         row = await cur.fetchone()

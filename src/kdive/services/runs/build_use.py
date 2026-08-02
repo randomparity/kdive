@@ -14,22 +14,40 @@ async def acquire_build_use(
 ) -> UUID | None:
     """Fence a reusable generation for this exact executing job attempt."""
     require_top_level_transaction(conn, "acquire_build_use")
-    run = await RUNS.get(conn, run_id)
-    if run is None or run.build_ref is None:
-        return None
     use_id = uuid4()
-    async with (
-        conn.transaction(),
-        advisory_xact_lock(conn, LockScope.INVESTIGATION, run.investigation_id),
-    ):
+    async with conn.transaction():
+        run = await RUNS.get(conn, run_id)
+        if run is None or run.build_ref is None:
+            return None
+        async with advisory_xact_lock(conn, LockScope.INVESTIGATION, run.investigation_id):
+            locked_run = await RUNS.get(conn, run_id)
+            if locked_run is None or locked_run.build_ref != run.build_ref:
+                raise RuntimeError("reusable build selection changed before install execution")
         build = await resolve_build(conn, run.investigation_id, run.build_ref)
         if build is None or build.state != "active":
             raise RuntimeError("reusable build became unavailable before install execution")
+        claim = await (
+            await conn.execute(
+                "SELECT worker_id, lease_expires_at FROM jobs WHERE id = %s "
+                "AND state = 'running' AND attempt = %s FOR UPDATE",
+                (job_id, attempt),
+            )
+        ).fetchone()
+        if claim is None or claim[0] is None or claim[1] is None:
+            raise RuntimeError("install job no longer has a live executing claim")
         await conn.execute(
             "INSERT INTO investigation_build_uses "
-            "(use_id, investigation_id, generation, job_id, attempt) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (use_id, run.investigation_id, build.generation, job_id, attempt),
+            "(use_id, investigation_id, generation, job_id, attempt, holder_worker_id, "
+            "lease_expires_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (
+                use_id,
+                run.investigation_id,
+                build.generation,
+                job_id,
+                attempt,
+                claim[0],
+                claim[1],
+            ),
         )
     return use_id
 

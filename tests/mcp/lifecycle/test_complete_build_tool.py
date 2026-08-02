@@ -854,6 +854,49 @@ def test_chunked_complete_build_reassembles_and_succeeds(migrated_url: str) -> N
     asyncio.run(_run())
 
 
+def test_production_validator_publishes_chunked_build_without_final_head_checksum(
+    migrated_url: str,
+) -> None:
+    """Verified chunk checksums remain the integrity evidence for a multipart final object."""
+    import hashlib
+
+    split = len(_KERNEL_TAR) // 2
+    chunks = (_KERNEL_TAR[:split], _KERNEL_TAR[split:])
+    entry = ManifestEntry(
+        "kernel",
+        hashlib.sha256(_KERNEL_TAR).hexdigest(),
+        len(_KERNEL_TAR),
+        chunks=tuple(ChunkEntry(hashlib.sha256(chunk).hexdigest(), len(chunk)) for chunk in chunks),
+    )
+
+    class _ProductionChunkStore(_ReassemblyStore):
+        def head(self, key: str) -> HeadResult | None:
+            if key.endswith(".part0001"):
+                chunk = chunks[0]
+            elif key.endswith(".part0002"):
+                chunk = chunks[1]
+            elif key.endswith("/kernel"):
+                return HeadResult(
+                    len(_KERNEL_TAR), None, "multipart-etag", STORE_MTIME, "final-version"
+                )
+            else:
+                return None
+            return HeadResult(
+                len(chunk), hashlib.sha256(chunk).hexdigest(), "etag", STORE_MTIME, "chunk-version"
+            )
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool, entries=[entry])
+            store = _ProductionChunkStore()
+            handlers = CompleteBuildHandlers(object_store_factory=lambda: store)
+            first = await handlers.complete_build(pool, _ctx(), str(run_id), build_id=None)
+            assert first.status == "succeeded", first
+            assert first.data["build_ref"]
+
+    asyncio.run(_run())
+
+
 def test_chunked_complete_build_still_extends_the_window_before_reassembly(
     migrated_url: str,
 ) -> None:

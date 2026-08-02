@@ -37,6 +37,7 @@ from kdive.serialization import JsonValue
 from kdive.services.runs.build_catalog import resolve_build
 from kdive.services.runs.steps import (
     build_baked_cmdline_extra,
+    existing_build_result,
     install_method_for,
     platform_owned_cmdline_token,
     step_progress,
@@ -231,11 +232,9 @@ async def _reusable_build_install_error(conn: AsyncConnection, run: Run) -> Tool
         return None
     build = await resolve_build(conn, run.investigation_id, run.build_ref)
     if build is None or build.state != "active":
-        return ToolResponse.failure(
-            str(run.id),
-            ErrorCategory.CONFIGURATION_ERROR,
-            suggested_next_actions=["runs.create"],
-            data={"reason": "build_ref_not_found"},
+        result = await existing_build_result(conn, run.id)
+        return await _expired_build_response(
+            conn, run, result.expires_at if result is not None else None
         )
     async with conn.cursor() as cur:
         await cur.execute("SELECT clock_timestamp()")
@@ -244,21 +243,36 @@ async def _reusable_build_install_error(conn: AsyncConnection, run: Run) -> Tool
         raise RuntimeError("SELECT clock_timestamp() returned no row")
     server_time = row[0]
     if build.expires_at <= server_time:
-        return ToolResponse.failure(
-            str(run.id),
-            ErrorCategory.CONFIGURATION_ERROR,
-            suggested_next_actions=["runs.create"],
-            data={
-                "reason": "build_ref_expired",
-                "expires_at": build.expires_at.isoformat(),
-                "server_time": server_time.isoformat(),
-                "investigation_id": str(run.investigation_id),
-                "build_profile": cast("JsonValue", run.build_profile),
-                "system_id": str(run.system_id) if run.system_id is not None else None,
-                "target_kind": run.target_kind,
-            },
+        return _expired_build_response_at(
+            run, build.expires_at.isoformat(), server_time.isoformat()
         )
     return None
+
+
+async def _expired_build_response(
+    conn: AsyncConnection, run: Run, expires_at: str | None
+) -> ToolResponse:
+    row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+    if row is None:
+        raise RuntimeError("SELECT clock_timestamp() returned no row")
+    return _expired_build_response_at(run, expires_at, row[0].isoformat())
+
+
+def _expired_build_response_at(run: Run, expires_at: str | None, server_time: str) -> ToolResponse:
+    return ToolResponse.failure(
+        str(run.id),
+        ErrorCategory.CONFIGURATION_ERROR,
+        suggested_next_actions=["runs.create"],
+        data={
+            "reason": "build_ref_expired",
+            "expires_at": expires_at,
+            "server_time": server_time,
+            "investigation_id": str(run.investigation_id),
+            "build_profile": cast("JsonValue", run.build_profile),
+            "system_id": str(run.system_id) if run.system_id is not None else None,
+            "target_kind": run.target_kind,
+        },
+    )
 
 
 async def boot_run(

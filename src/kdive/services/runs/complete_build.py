@@ -227,6 +227,9 @@ class CompleteBuildFinalizer:
             output=validated.output,
             keys=prepared.keys,
             heads=validated.heads,
+            verified_checksums={
+                prepared.keys[entry.name]: entry.sha256 for entry in prepared.manifest_row.entries
+            },
             store=prepared.store,
             chunked=prepared.has_chunks,
             chunk_heads=chunk_heads,
@@ -266,6 +269,7 @@ class _ExternalBuildFinalization:
     output: BuildOutput
     keys: dict[str, str]
     heads: dict[str, HeadResult]
+    verified_checksums: dict[str, str]
     store: ExternalBuildStore | None
     chunked: bool
     chunk_heads: dict[str, HeadResult]
@@ -464,6 +468,7 @@ async def _finalize_external_build(
             run=run,
             result=candidate,
             heads=heads,
+            verified_checksums=finalization.verified_checksums,
             retention=timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS)),
         )
         result = _published_result(publication)

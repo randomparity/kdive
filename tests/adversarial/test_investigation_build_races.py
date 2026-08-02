@@ -202,7 +202,7 @@ def test_reclaim_wins_and_real_install_rejects_reclaiming_reference(
             finally:
                 await reclaim_conn.close()
             assert response.status == "error"
-            assert response.data["reason"] == "build_ref_not_found"
+            assert response.data["reason"] == "build_ref_expired"
 
     with monkeypatch.context() as patched:
         patched.setattr(gc_module, "advisory_xact_lock", paused_lock)
@@ -309,8 +309,9 @@ def test_canceled_attempt_fence_acquired_after_selection_blocks_reclaim(
                 async with pool.connection() as conn:
                     await conn.execute(
                         "INSERT INTO investigation_build_uses "
-                        "(use_id, investigation_id, generation, job_id, attempt) "
-                        "VALUES (%s, %s, %s, %s, 1)",
+                        "(use_id, investigation_id, generation, job_id, attempt, "
+                        "holder_worker_id, lease_expires_at) "
+                        "VALUES (%s, %s, %s, %s, 1, 'test-worker', now() + interval '5 min')",
                         (use_id, investigation_id, generation, job_id),
                     )
                 release_selection.set()

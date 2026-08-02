@@ -10,7 +10,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.locks import LockScope, advisory_xact_lock, require_top_level_transaction
 from kdive.domain.capacity.state import ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
@@ -136,7 +136,8 @@ _UNPINNED_GENERATION_SQL = (
     "WHERE r.investigation_id = ib.investigation_id AND r.build_ref = ib.build_ref "
     "AND j.kind = 'install' AND j.state IN ('queued', 'running')) "
     "AND NOT EXISTS (SELECT 1 FROM investigation_build_uses u "
-    "WHERE u.investigation_id = ib.investigation_id AND u.generation = ib.generation)))"
+    "WHERE u.investigation_id = ib.investigation_id AND u.generation = ib.generation "
+    "AND u.lease_expires_at > now())))"
 )
 
 
@@ -156,6 +157,7 @@ async def _mark_generation_reclaiming(
     conn: AsyncConnection, investigation_id: UUID, generation: UUID
 ) -> dict[str, dict[str, str]] | None:
     """Fence one generation after rechecking its Run and install-job pins."""
+    require_top_level_transaction(conn, "mark Investigation build generation reclaiming")
     async with (
         conn.transaction(),
         advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
@@ -170,6 +172,11 @@ async def _mark_generation_reclaiming(
         if row is None:
             return None
         state, build_ref, artifacts = row
+        await conn.execute(
+            "DELETE FROM investigation_build_uses WHERE investigation_id = %s "
+            "AND generation = %s AND lease_expires_at <= now()",
+            (investigation_id, generation),
+        )
         if state == "active":
             pin = await (
                 await conn.execute(
@@ -181,7 +188,8 @@ async def _mark_generation_reclaiming(
                     "WHERE r.investigation_id = %s AND r.build_ref = %s "
                     "AND j.kind = 'install' AND j.state IN ('queued', 'running') "
                     "UNION ALL SELECT 1 FROM investigation_build_uses u "
-                    "WHERE u.investigation_id = %s AND u.generation = %s)",
+                    "WHERE u.investigation_id = %s AND u.generation = %s "
+                    "AND u.lease_expires_at > now())",
                     (
                         investigation_id,
                         build_ref,
@@ -208,6 +216,7 @@ async def _reclaim_generation(
     investigation_id: UUID,
     generation: UUID,
 ) -> int:
+    require_top_level_transaction(conn, "reclaim Investigation build generation")
     artifacts = await _mark_generation_reclaiming(conn, investigation_id, generation)
     if artifacts is None:
         return 0
@@ -260,63 +269,66 @@ async def _generation_candidates(
     closed_grace: timedelta | None = None,
     limit: int = _BUILD_GENERATIONS_PER_PASS,
 ) -> list[tuple[UUID, UUID]]:
-    if investigation_id is not None:
-        rows = await (
-            await conn.execute(
-                "SELECT ib.investigation_id, ib.generation FROM investigation_builds ib "
-                "WHERE ib.investigation_id = %s AND " + _UNPINNED_GENERATION_SQL + " "
-                "AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now()) "
-                "ORDER BY ib.generation LIMIT %s",
-                (investigation_id, limit),
+    require_top_level_transaction(conn, "select Investigation build reclaim candidates")
+    async with conn.transaction():
+        if investigation_id is not None:
+            rows = await (
+                await conn.execute(
+                    "SELECT ib.investigation_id, ib.generation FROM investigation_builds ib "
+                    "WHERE ib.investigation_id = %s AND " + _UNPINNED_GENERATION_SQL + " "
+                    "AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now()) "
+                    "ORDER BY ib.generation LIMIT %s",
+                    (investigation_id, limit),
+                )
+            ).fetchall()
+        elif expired or closed_grace is not None:
+            lane = "expired" if expired else "closed"
+            eligibility = (
+                "(ib.state = 'reclaiming' OR ib.expires_at <= now())"
+                if expired
+                else "(ib.state = 'reclaiming' OR (i.cleanup_pending_at IS NOT NULL "
+                "AND i.cleanup_pending_at < now() - %s))"
             )
-        ).fetchall()
-    elif expired or closed_grace is not None:
-        lane = "expired" if expired else "closed"
-        eligibility = (
-            "(ib.state = 'reclaiming' OR ib.expires_at <= now())"
-            if expired
-            else "(ib.state = 'reclaiming' OR (i.cleanup_pending_at IS NOT NULL "
-            "AND i.cleanup_pending_at < now() - %s))"
-        )
-        join = "" if expired else " JOIN investigations i ON i.id = ib.investigation_id"
-        params: tuple[object, ...] = (lane, limit) if expired else (lane, closed_grace, limit)
-        rows = await (
-            await conn.execute(
-                "WITH cursor AS (SELECT investigation_id, generation "
-                "FROM investigation_build_gc_cursor WHERE lane = %s), eligible AS ("
-                "SELECT ib.investigation_id, ib.generation, row_number() OVER "
-                "(PARTITION BY ib.investigation_id ORDER BY ib.generation) AS tenant_rank "
-                "FROM investigation_builds ib"
-                + join
-                + " WHERE "
-                + eligibility
-                + " AND "
-                + _UNPINNED_GENERATION_SQL
-                + " AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now())) "
-                "SELECT e.investigation_id, e.generation FROM eligible e CROSS JOIN cursor c "
-                "ORDER BY e.tenant_rank, CASE WHEN c.investigation_id IS NOT NULL AND "
-                "(e.investigation_id, e.generation) <= "
-                "(c.investigation_id, c.generation) THEN 1 ELSE 0 END, "
-                "e.investigation_id, e.generation LIMIT %s",
-                params,
-            )
-        ).fetchall()
-        if rows:
-            await conn.execute(
-                "UPDATE investigation_build_gc_cursor SET investigation_id = %s, generation = %s "
-                "WHERE lane = %s",
-                (*rows[-1], lane),
-            )
-    else:
-        rows = await (
-            await conn.execute(
-                "SELECT ib.investigation_id, ib.generation FROM investigation_builds ib WHERE "
-                + _UNPINNED_GENERATION_SQL
-                + " AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now())"
-                + " ORDER BY ib.investigation_id, ib.generation LIMIT %s",
-                (limit,),
-            )
-        ).fetchall()
+            join = "" if expired else " JOIN investigations i ON i.id = ib.investigation_id"
+            params: tuple[object, ...] = (lane, limit) if expired else (lane, closed_grace, limit)
+            rows = await (
+                await conn.execute(
+                    "WITH cursor AS (SELECT investigation_id, generation "
+                    "FROM investigation_build_gc_cursor WHERE lane = %s), eligible AS ("
+                    "SELECT ib.investigation_id, ib.generation, row_number() OVER "
+                    "(PARTITION BY ib.investigation_id ORDER BY ib.generation) AS tenant_rank "
+                    "FROM investigation_builds ib"
+                    + join
+                    + " WHERE "
+                    + eligibility
+                    + " AND "
+                    + _UNPINNED_GENERATION_SQL
+                    + " AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now())) "
+                    "SELECT e.investigation_id, e.generation FROM eligible e CROSS JOIN cursor c "
+                    "ORDER BY e.tenant_rank, CASE WHEN c.investigation_id IS NOT NULL AND "
+                    "(e.investigation_id, e.generation) <= "
+                    "(c.investigation_id, c.generation) THEN 1 ELSE 0 END, "
+                    "e.investigation_id, e.generation LIMIT %s",
+                    params,
+                )
+            ).fetchall()
+            if rows:
+                await conn.execute(
+                    "UPDATE investigation_build_gc_cursor SET investigation_id = %s, "
+                    "generation = %s "
+                    "WHERE lane = %s",
+                    (*rows[-1], lane),
+                )
+        else:
+            rows = await (
+                await conn.execute(
+                    "SELECT ib.investigation_id, ib.generation FROM investigation_builds ib WHERE "
+                    + _UNPINNED_GENERATION_SQL
+                    + " AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now())"
+                    + " ORDER BY ib.investigation_id, ib.generation LIMIT %s",
+                    (limit,),
+                )
+            ).fetchall()
     return [(row[0], row[1]) for row in rows]
 
 
@@ -456,7 +468,8 @@ async def gc_investigation_artifacts(
     per-object store failure is logged and retried next pass (leaving the marker set) and never
     aborts the sweep — the deferred, evidence-safe form ADR-0234 constraint (a)/(b) requires.
     """
-    async with conn.cursor() as cur:
+    require_top_level_transaction(conn, "reclaim closed-Investigation build artifacts")
+    async with conn.transaction(), conn.cursor() as cur:
         await cur.execute(
             "SELECT id FROM investigations "
             "WHERE cleanup_pending_at IS NOT NULL AND cleanup_pending_at < now() - %s "
@@ -479,7 +492,7 @@ async def gc_investigation_artifacts(
                 investigation_id,
                 generation,
             )
-        async with conn.cursor() as cur:
+        async with conn.transaction(), conn.cursor() as cur:
             await cur.execute(
                 "SELECT a.id, a.object_key FROM artifacts a JOIN runs r ON r.id = a.owner_id "
                 "WHERE a.owner_kind = 'runs' AND a.retention_class = ANY(%s) "
@@ -510,12 +523,13 @@ async def gc_investigation_artifacts(
             async with conn.transaction(), conn.cursor() as cur:
                 await cur.execute("DELETE FROM artifacts WHERE id = %s", (artifact_id,))
             deleted += 1
-        remaining_generation = await (
-            await conn.execute(
-                "SELECT 1 FROM investigation_builds WHERE investigation_id = %s LIMIT 1",
-                (investigation_id,),
-            )
-        ).fetchone()
+        async with conn.transaction():
+            remaining_generation = await (
+                await conn.execute(
+                    "SELECT 1 FROM investigation_builds WHERE investigation_id = %s LIMIT 1",
+                    (investigation_id,),
+                )
+            ).fetchone()
         if drained and remaining_generation is None:
             async with conn.transaction(), conn.cursor() as cur:
                 await cur.execute(
@@ -537,6 +551,7 @@ async def gc_expired_build_artifacts(
     gated on ``artifacts.created_at`` rather than the close marker. A per-object store failure is
     logged and retried next pass rather than aborting the sweep (like :func:`gc_report_artifacts`).
     """
+    require_top_level_transaction(conn, "reclaim expired build artifacts")
     deleted = 0
     for investigation_id, generation in await _generation_candidates(
         conn, expired=True, limit=_BUILD_GENERATIONS_PER_PASS
@@ -544,7 +559,7 @@ async def gc_expired_build_artifacts(
         deleted += await _reclaim_generation(
             conn, cast("ExactArtifactObjectDeleter", store), investigation_id, generation
         )
-    async with conn.cursor() as cur:
+    async with conn.transaction(), conn.cursor() as cur:
         await cur.execute(
             "SELECT id, object_key FROM artifacts "
             "WHERE owner_kind = 'runs' AND retention_class = ANY(%s) AND created_at < now() - %s",

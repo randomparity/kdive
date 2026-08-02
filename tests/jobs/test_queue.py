@@ -613,6 +613,35 @@ def test_heartbeat_renews_for_owner(migrated_url: str) -> None:
             claimed = await queue.dequeue(conn, "w1", lease=timedelta(seconds=10))
             assert claimed is not None
             assert claimed.lease_expires_at is not None
+            investigation_id, generation = uuid4(), uuid4()
+            digest = "f" * 64
+            await conn.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, 'p', 'proj', 't', 'active')",
+                (investigation_id,),
+            )
+            await conn.execute(
+                "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                "build_profile, expires_at) VALUES "
+                "(%s, %s, %s, %s, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, "
+                "'local-libvirt', '{}'::jsonb, now() + interval '1 day')",
+                (investigation_id, generation, f"{digest}.{generation}", digest),
+            )
+            use_id = uuid4()
+            await conn.execute(
+                "INSERT INTO investigation_build_uses (use_id, investigation_id, generation, "
+                "job_id, attempt, holder_worker_id, lease_expires_at) "
+                "VALUES (%s, %s, %s, %s, %s, 'w1', %s)",
+                (
+                    use_id,
+                    investigation_id,
+                    generation,
+                    claimed.id,
+                    claimed.attempt,
+                    claimed.lease_expires_at,
+                ),
+            )
             assert await queue.heartbeat(conn, claimed.id, "w1", lease=timedelta(minutes=5)) is True
             cur = await conn.execute(
                 "SELECT lease_expires_at FROM jobs WHERE id = %s", (claimed.id,)
@@ -620,6 +649,13 @@ def test_heartbeat_renews_for_owner(migrated_url: str) -> None:
             row = await cur.fetchone()
             assert row is not None
             assert row[0] > claimed.lease_expires_at
+            use_row = await (
+                await conn.execute(
+                    "SELECT lease_expires_at FROM investigation_build_uses WHERE use_id = %s",
+                    (use_id,),
+                )
+            ).fetchone()
+            assert use_row == row
 
     asyncio.run(_run())
 

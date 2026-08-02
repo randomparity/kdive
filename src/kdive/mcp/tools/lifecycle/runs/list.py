@@ -136,12 +136,14 @@ async def list_runs(
         if selected:
             async with pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT requested.run_id, ib.expires_at "
+                    "SELECT requested.run_id, "
+                    "COALESCE(ib.expires_at, (rs.result->>'expires_at')::timestamptz) "
                     "FROM unnest(%s::uuid[], %s::uuid[], %s::text[]) "
                     "AS requested(run_id, investigation_id, build_ref) "
-                    "JOIN investigation_builds ib "
+                    "LEFT JOIN investigation_builds ib "
                     "ON ib.investigation_id = requested.investigation_id "
-                    "AND ib.build_ref = requested.build_ref",
+                    "AND ib.build_ref = requested.build_ref "
+                    "LEFT JOIN run_steps rs ON rs.run_id = requested.run_id AND rs.step = 'build'",
                     (
                         [run.id for run in selected],
                         [run.investigation_id for run in selected],
@@ -149,7 +151,8 @@ async def list_runs(
                     ),
                 )
                 for run_id, expires_at in await cur.fetchall():
-                    build_deadlines[str(run_id)] = expires_at.isoformat()
+                    if expires_at is not None:
+                        build_deadlines[str(run_id)] = expires_at.isoformat()
         next_cursor = (
             _encode_ts_uuid_cursor(_RUNS_LIST_TAG, kept[-1]["created_at"], kept[-1]["id"])
             if truncated and kept
