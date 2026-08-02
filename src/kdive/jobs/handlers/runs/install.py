@@ -204,6 +204,9 @@ async def _build_install_plan(
             method=method,
             initrd_ref=initrd_ref,
             debuginfo_ref=debuginfo_ref,
+            artifact_versions=(
+                build_result.artifact_versions if build_result is not None else None
+            ),
         ),
         applied_extra=applied_extra,
         crashkernel=payload.crashkernel,

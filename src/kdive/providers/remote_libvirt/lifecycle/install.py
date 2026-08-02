@@ -108,7 +108,7 @@ def _category_for_helper_exit(exit_status: int) -> ErrorCategory:
 class _StorePort(Protocol):
     # Both methods: install() mints the GET and the InTargetArtifactChannel persists the
     # redacted transcript via put_artifact, and the one injected factory serves both.
-    def presign_get(self, key: str, *, expires_in: int) -> str: ...
+    def presign_get(self, key: str, *, expires_in: int, version_id: str | None = None) -> str: ...
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact: ...
 
 
@@ -206,7 +206,12 @@ class RemoteLibvirtInstall:
         """
         config = self._config_factory()
         validate_guest_routable_endpoint()
-        url = self._store_factory().presign_get(request.kernel_ref, expires_in=self._get_expiry_s)
+        versions = request.artifact_versions or {}
+        url = self._store_factory().presign_get(
+            request.kernel_ref,
+            expires_in=self._get_expiry_s,
+            version_id=versions.get("kernel"),
+        )
         argv = [
             _HELPER,
             "install",

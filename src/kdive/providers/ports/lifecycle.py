@@ -79,6 +79,7 @@ class InstallRequest:
     method: CaptureMethod = CaptureMethod.HOST_DUMP
     initrd_ref: str | None = None
     debuginfo_ref: str | None = None
+    artifact_versions: dict[str, str] | None = None
 
 
 class Provisioner(Protocol):

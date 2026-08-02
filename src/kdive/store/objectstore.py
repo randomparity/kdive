@@ -310,7 +310,9 @@ class ObjectStore:
             reply.required_nonempty_string("VersionId"),
         )
 
-    def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact:
+    def get_artifact(
+        self, key: str, etag: str | None, *, version_id: str | None = None
+    ) -> artifact_types.FetchedArtifact:
         """Fetch the object at ``key``, optionally guarded by an ``If-Match`` on ``etag``.
 
         When ``etag`` is a bare value (from :class:`StoredArtifact`), the GET is
@@ -327,7 +329,7 @@ class ObjectStore:
                 interpretable sensitivity metadata, or the get otherwise fails
                 (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
         """
-        resp, sensitivity, retention_class = self._open_get(key, etag)
+        resp, sensitivity, retention_class = self._open_get(key, etag, version_id=version_id)
         try:
             data = resp["Body"].read()
         except (BotoCoreError, ClientError) as err:
@@ -336,7 +338,9 @@ class ObjectStore:
             raise _infrastructure_error("get_object", key, err) from err
         return artifact_types.FetchedArtifact(data, sensitivity, retention_class)
 
-    def _open_get(self, key: str, etag: str | None) -> tuple[Any, Sensitivity, str]:
+    def _open_get(
+        self, key: str, etag: str | None, *, version_id: str | None = None
+    ) -> tuple[Any, Sensitivity, str]:
         """Issue the GET and parse the sensitivity metadata, shared by the buffered and
         streaming reads so their error taxonomy cannot drift (ADR-0400, refining ADR-0054).
 
@@ -351,6 +355,8 @@ class ObjectStore:
         get_kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": key}
         if etag is not None:
             get_kwargs["IfMatch"] = f'"{etag}"'
+        if version_id is not None:
+            get_kwargs["VersionId"] = version_id
         try:
             resp = self._client.get_object(**get_kwargs)
         except ClientError as err:
@@ -378,7 +384,7 @@ class ObjectStore:
 
     @contextmanager
     def get_artifact_stream(
-        self, key: str, etag: str | None
+        self, key: str, etag: str | None, *, version_id: str | None = None
     ) -> Iterator[artifact_types.StreamedArtifact]:
         """Yield a streaming reader over the object at ``key`` plus its sensitivity class.
 
@@ -393,7 +399,7 @@ class ObjectStore:
                 (``STALE_HANDLE``); the object lacks interpretable sensitivity metadata, the get
                 otherwise fails, or the body read fails mid-stream (``INFRASTRUCTURE_FAILURE``).
         """
-        resp, sensitivity, retention_class = self._open_get(key, etag)
+        resp, sensitivity, retention_class = self._open_get(key, etag, version_id=version_id)
         body = resp["Body"]
         try:
             # RawIOBase provides the read interface tarfile uses but is not a nominal
@@ -560,7 +566,7 @@ class ObjectStore:
         }
         return artifact_types.PresignedUpload(url=url, required_headers=headers)
 
-    def presign_get(self, key: str, *, expires_in: int) -> str:
+    def presign_get(self, key: str, *, expires_in: int, version_id: str | None = None) -> str:
         """Mint a time-boxed presigned GET URL for one object (ADR-0076, ADR-0078).
 
         The URL is a bearer capability scoped to ``key`` alone, expiring after
@@ -580,9 +586,12 @@ class ObjectStore:
                 details={"key": key},
             )
         try:
+            params = {"Bucket": self._bucket, "Key": key}
+            if version_id is not None:
+                params["VersionId"] = version_id
             return self._client.generate_presigned_url(
                 "get_object",
-                Params={"Bucket": self._bucket, "Key": key},
+                Params=params,
                 ExpiresIn=expires_in,
                 HttpMethod="GET",
             )

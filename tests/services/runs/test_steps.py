@@ -80,6 +80,17 @@ def test_initrd_ref_round_trips_through_dump_and_load() -> None:
     assert BuildStepResult.load(dumped) == result
 
 
+def test_artifact_versions_round_trip_through_dump_and_load() -> None:
+    result = BuildStepResult(
+        kernel_ref="k",
+        debuginfo_ref="d",
+        build_id="b",
+        artifact_versions={"kernel": "kernel-v1", "vmlinux": "debug-v1"},
+    )
+
+    assert BuildStepResult.load(result.dump()) == result
+
+
 def test_build_provenance_round_trips_through_dump_and_load() -> None:
     provenance: dict[str, str | bool | list[str]] = {
         "remote": "https://git.kernel.org/pub/scm/linux.git",
