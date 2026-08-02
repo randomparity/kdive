@@ -9,11 +9,12 @@ mutation-attributable without the MCP tool layer. The pure decision helpers are 
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, LiteralString
 from uuid import UUID, uuid4
 
 import pytest
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, SYSTEMS
@@ -160,6 +161,152 @@ async def _fetchone(pool: AsyncConnectionPool, query: LiteralString, params: tup
     rows = await _fetchall(pool, query, params)
     assert len(rows) == 1
     return rows[0]
+
+
+async def _seed_reusable_build(
+    pool: AsyncConnectionPool,
+    investigation_id: str,
+    *,
+    profile: dict[str, Any] | None = None,
+    state: str = "active",
+    expired: bool = False,
+    target_kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT,
+) -> str:
+    digest = "a" * 64
+    generation = uuid4()
+    build_ref = f"{digest}.{generation}"
+    result = {
+        "kernel_ref": "investigations/kernel",
+        "debuginfo_ref": "investigations/vmlinux",
+        "build_id": "build-1",
+        "cmdline": "console=ttyS0",
+        "build_ref": build_ref,
+    }
+    expires_at = datetime.now(UTC) + (timedelta(days=-1) if expired else timedelta(days=7))
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO investigation_builds "
+            "(investigation_id, generation, build_ref, content_digest, canonical_document, "
+            "build_result, artifacts, target_kind, build_profile, state, expires_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                investigation_id,
+                generation,
+                build_ref,
+                digest,
+                Jsonb({"version": 1}),
+                Jsonb(result),
+                Jsonb({}),
+                target_kind.value,
+                Jsonb(profile or {"schema_version": 1, "arch": "x86_64"}),
+                state,
+                expires_at,
+            ),
+        )
+    return build_ref
+
+
+def test_create_bound_run_reuses_investigation_build(migrated_url: str) -> None:  # noqa: F811
+    async def _run() -> None:
+        pool = await _pool_open(migrated_url)
+        try:
+            inv_id = await _seed_investigation(pool)
+            sys_id = await _seed_system(pool)
+            build_ref = await _seed_reusable_build(pool, inv_id)
+            result = await _create(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=sys_id,
+                    build_profile={"schema_version": 1},
+                    build_ref=build_ref,
+                ),
+            )
+            assert result.build_ref == build_ref
+            run = await _fetchone(
+                pool,
+                "SELECT state, kernel_ref, debuginfo_ref, build_ref FROM runs WHERE id = %s",
+                (result.run_id,),
+            )
+            assert run == (
+                "succeeded",
+                "investigations/kernel",
+                "investigations/vmlinux",
+                build_ref,
+            )
+            step = await _fetchone(
+                pool,
+                "SELECT state, result FROM run_steps WHERE run_id = %s AND step = 'build'",
+                (result.run_id,),
+            )
+            assert step[0] == "succeeded"
+            assert step[1]["build_ref"] == build_ref
+        finally:
+            await pool.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["malformed", "missing", "cross_investigation", "target", "profile", "expired", "reclaiming"],
+)
+def test_create_rejects_unusable_reusable_build(migrated_url: str, mode: str) -> None:  # noqa: F811
+    async def _run() -> None:
+        pool = await _pool_open(migrated_url)
+        try:
+            inv_id = await _seed_investigation(pool)
+            owner_id = await _seed_investigation(pool) if mode == "cross_investigation" else inv_id
+            build_ref = (
+                "not-a-build-ref"
+                if mode == "malformed"
+                else f"{'f' * 64}.{uuid4()}"
+                if mode == "missing"
+                else await _seed_reusable_build(
+                    pool,
+                    owner_id,
+                    profile=(
+                        {"schema_version": 1, "arch": "ppc64le"} if mode == "profile" else None
+                    ),
+                    state="reclaiming" if mode == "reclaiming" else "active",
+                    expired=mode == "expired",
+                    target_kind=(
+                        ResourceKind.FAULT_INJECT
+                        if mode == "target"
+                        else ResourceKind.LOCAL_LIBVIRT
+                    ),
+                )
+            )
+            with pytest.raises(RunCreateError) as caught:
+                await _create(
+                    pool,
+                    _ctx(),
+                    RunCreateRequest(
+                        investigation_id=inv_id,
+                        target_kind="local-libvirt",
+                        build_profile={"schema_version": 1},
+                        build_ref=build_ref,
+                    ),
+                )
+            expected = {
+                "cross_investigation": "build_ref_not_found",
+                "malformed": "build_ref_not_found",
+                "missing": "build_ref_not_found",
+                "target": "build_ref_incompatible",
+                "profile": "build_ref_incompatible",
+                "expired": "build_ref_expired",
+                "reclaiming": "build_ref_not_found",
+            }[mode]
+            assert caught.value.details["reason"] == expected
+            rows = await _fetchall(
+                pool, "SELECT id FROM runs WHERE investigation_id = %s", (inv_id,)
+            )
+            assert rows == []
+        finally:
+            await pool.close()
+
+    asyncio.run(_run())
 
 
 def test_create_bound_run_persists_run_audit_and_flips_investigation(migrated_url: str) -> None:  # noqa: F811

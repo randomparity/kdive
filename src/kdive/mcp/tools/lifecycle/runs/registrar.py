@@ -285,6 +285,17 @@ def _register_runs_create(
             _RunReuseRequirementInput | None,
             Field(default=None, description="Optional System reuse assertion payload."),
         ] = None,
+        build_ref: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Reusable external build from this Investigation, in "
+                    "<64 lowercase hex digest>.<lowercase UUID> format. Use data.build_ref from "
+                    "runs.complete_build or runs.get. It must match target_kind and build_profile."
+                ),
+            ),
+        ] = None,
         idempotency_key: Annotated[
             str | None,
             Field(
@@ -307,9 +318,12 @@ def _register_runs_create(
     ) -> ToolResponse:
         """Create a run, bound to a system or unbound against a target_kind.
 
-        After runs.create, read resource://kdive/contracts/external-build, call
-        artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline args are
-        passed later as the `cmdline` field on runs.complete_build.
+        Omit build_ref to create a new external upload: read
+        resource://kdive/contracts/external-build, call artifacts.create_run_upload, then
+        runs.complete_build. A same-Investigation compatible build_ref reuses validated artifacts
+        and proceeds directly to runs.install. Missing or malformed references report
+        build_ref_not_found; target/profile mismatches report build_ref_incompatible; expiry
+        reports build_ref_expired and instructs you to retry runs.create without the reference.
         """
         return await _create_run(
             pool,
@@ -322,6 +336,7 @@ def _register_runs_create(
                 expected_boot_failure=expected_boot_failure,
                 reuse_requirement=reuse_requirement,
                 label=label,
+                build_ref=build_ref,
             ),
             resolver=resolver,
             idempotency_key=idempotency_key,

@@ -31,6 +31,7 @@ from kdive.services.artifacts.listing import (
     list_run_console_artifacts,
 )
 from kdive.services.debug.sessions import active_session_ids_for_run
+from kdive.services.runs.build_catalog import resolve_build
 from kdive.services.runs.liveness import Liveness, derive_liveness
 from kdive.services.runs.steps import (
     READY_BOOT_OUTCOME,
@@ -60,6 +61,7 @@ class RunReadDetails:
     latest_console_id: str | None
     liveness: Liveness | None
     vmcore_artifact_id: str | None
+    build_expires_at: str | None
 
 
 async def get_run(
@@ -107,6 +109,7 @@ async def get_run(
             latest_console_ref=details.latest_console_id,
             liveness=details.liveness,
             vmcore_ref=details.vmcore_artifact_id,
+            build_expires_at=details.build_expires_at,
         )
 
 
@@ -132,7 +135,15 @@ async def _load_run_read_details(
         latest_console_id=await _latest_console_id(conn, run),
         liveness=await _liveness(conn, run, progress, secret_registry),
         vmcore_artifact_id=await redacted_vmcore_artifact_id(conn, run.id),
+        build_expires_at=await _build_expires_at(conn, run),
     )
+
+
+async def _build_expires_at(conn: AsyncConnection, run: Run) -> str | None:
+    if run.build_ref is None:
+        return None
+    build = await resolve_build(conn, run.investigation_id, run.build_ref)
+    return build.expires_at.isoformat() if build is not None else None
 
 
 async def _latest_console_id(conn: AsyncConnection, run: Run) -> str | None:

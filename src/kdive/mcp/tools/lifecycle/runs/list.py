@@ -130,15 +130,31 @@ async def list_runs(
             await cur.execute(query, (*params, capped + 1))
             rows = await cur.fetchall()
         kept, truncated = _paginate(rows, capped)
+        runs = [Run.model_validate(row) for row in kept]
+        build_deadlines: dict[str, str] = {}
+        async with pool.connection() as conn:
+            for run in runs:
+                if run.build_ref is None:
+                    continue
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT expires_at FROM investigation_builds "
+                        "WHERE investigation_id = %s AND build_ref = %s",
+                        (run.investigation_id, run.build_ref),
+                    )
+                    row = await cur.fetchone()
+                if row is not None:
+                    build_deadlines[str(run.id)] = row[0].isoformat()
         next_cursor = (
             _encode_ts_uuid_cursor(_RUNS_LIST_TAG, kept[-1]["created_at"], kept[-1]["id"])
             if truncated and kept
             else None
         )
         return _runs_collection(
-            [Run.model_validate(row) for row in kept],
+            runs,
             truncated=truncated,
             next_cursor=next_cursor,
+            build_deadlines=build_deadlines,
         )
 
 
@@ -147,13 +163,20 @@ def _runs_collection(
     *,
     truncated: bool,
     next_cursor: str | None,
+    build_deadlines: dict[str, str] | None = None,
 ) -> ToolResponse:
     """Render Runs into one collection envelope with the pagination payload."""
     data: dict[str, JsonValue] = {"truncated": truncated, "next_cursor": next_cursor}
     return ToolResponse.collection(
         "runs",
         "ok",
-        [envelope_for_run(run) for run in runs],
+        [
+            envelope_for_run(
+                run,
+                build_expires_at=(build_deadlines or {}).get(str(run.id)),
+            )
+            for run in runs
+        ],
         suggested_next_actions=["runs.get", "runs.create"],
         data=data,
     )
