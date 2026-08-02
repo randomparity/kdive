@@ -8,7 +8,7 @@
 
 List persistent reusable-build pins. Requires platform operator.
 
-Conditionally available only when the server has an authoritative worker-death verifier.
+Conditionally available only when durable worker-termination witnesses are configured.
 A stale job lease is diagnostic context only, never proof that its holder stopped. Pass an
 exact returned use id and holder to `ops.recover_build_use` only after operator review.
 
@@ -129,11 +129,11 @@ use `ops.reconcile_now` instead.
 
 Release one stranded build-use pin. Requires platform operator.
 
-Conditionally available only when the server has an authoritative worker-death verifier.
+Conditionally available only when durable worker-termination witnesses are configured.
 Recovery succeeds only when the supplied holder exactly matches the durable use row and
-the server's configured deployment verifier independently proves that exact worker
-incarnation terminated. Job heartbeat, lease expiry, object absence, and identity
-replacement are never death evidence.
+the exact worker incarnation already has a durable terminated registry row. This tool
+cannot publish termination evidence. Job heartbeat, lease expiry, object absence, and
+identity replacement are never death evidence.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
