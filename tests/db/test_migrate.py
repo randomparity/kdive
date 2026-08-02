@@ -196,6 +196,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0093",
         "0094",
         "0095",
+        "0096",
     ]
     assert second == []
 
@@ -224,6 +225,7 @@ def test_investigation_build_catalog_schema(pg_conn: psycopg.Connection) -> None
         "build_profile": "jsonb",
         "state": "text",
         "expires_at": "timestamp with time zone",
+        "reclaim_retry_at": "timestamp with time zone",
         "created_at": "timestamp with time zone",
         "updated_at": "timestamp with time zone",
     }
@@ -265,6 +267,20 @@ def test_investigation_build_catalog_schema(pg_conn: psycopg.Connection) -> None
         "SELECT indexdef FROM pg_indexes WHERE indexname = 'investigation_builds_expires_at_idx'"
     ).fetchone()
     assert expiry_index is not None and "expires_at" in expiry_index[0]
+
+
+def test_investigation_build_gc_cursor_schema(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+
+    assert _columns(pg_conn, "investigation_build_gc_cursor") == {
+        "lane": "text",
+        "investigation_id": "uuid",
+        "generation": "uuid",
+    }
+    lanes = pg_conn.execute(
+        "SELECT lane FROM investigation_build_gc_cursor ORDER BY lane"
+    ).fetchall()
+    assert lanes == [("closed",), ("expired",)]
 
 
 def test_dedup_key_not_null(pg_conn: psycopg.Connection) -> None:
@@ -772,6 +788,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0093",
         "0094",
         "0095",
+        "0096",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1144,6 +1161,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0093",
         "0094",
         "0095",
+        "0096",
     ]
 
 

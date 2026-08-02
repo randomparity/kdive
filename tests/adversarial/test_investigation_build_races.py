@@ -141,7 +141,10 @@ def test_reclaim_lock_wins_and_real_create_rejects_reference(
             finally:
                 await reclaim_conn.close()
             assert response.status == "error"
-            assert response.data["reason"] == "build_ref_not_found"
+            assert response.data["reason"] == "build_ref_expired"
+            assert response.data["expires_at"]
+            assert response.data["server_time"]
+            assert response.suggested_next_actions == ["runs.create"]
 
     with monkeypatch.context() as patched:
         patched.setattr(gc_module, "advisory_xact_lock", paused_lock)

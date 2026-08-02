@@ -141,6 +141,9 @@ Create and reclaim take the Investigation advisory lock. Reclaim rechecks for no
 whose `build_ref` selects the generation and for queued or running install jobs on any referencing
 Run. Either condition defers deletion. Otherwise reclaim marks the generation `reclaiming` before
 deleting its exact object versions. A partial object-store failure keeps that state for retry.
+Failed deletes receive a database-clock retry delay. Each global sweep advances a durable cursor,
+scans a bounded generation window, and takes at most one generation per Investigation before a
+second from any tenant.
 After deletion it removes only that generation's artifact rows and record, rechecking the state
 under the lock. A fresh publication of identical content uses a new generation and cannot be
 deleted or selected through the old record.
