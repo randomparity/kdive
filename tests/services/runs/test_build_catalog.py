@@ -127,10 +127,10 @@ def test_publication_uses_fixed_compact_sorted_content_digest(migrated_url: str)
     [
         "",
         "a" * 64,
-        f"{'A' * 64}.{uuid4()}",
-        f"{'a' * 63}.{uuid4()}",
+        f"{'A' * 64}.72e5033f-d02a-43e5-8307-993206b5e292",
+        f"{'a' * 63}.bb55e678-8773-4bf7-bf01-452f68350bda",
         f"{'a' * 64}.not-a-uuid",
-        f"{'a' * 64}.{str(uuid4()).upper()}",
+        f"{'a' * 64}.6E477264-3602-4545-826A-3900AC82765D",
     ],
 )
 def test_parse_build_ref_rejects_malformed_references(value: str) -> None:
