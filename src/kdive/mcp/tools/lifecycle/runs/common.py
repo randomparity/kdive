@@ -335,6 +335,7 @@ def envelope_for_run(
     liveness: Liveness | None = None,
     vmcore_ref: str | None = None,
     build_expires_at: str | None = None,
+    server_time: str | None = None,
 ) -> ToolResponse:
     """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`.
 
@@ -415,6 +416,9 @@ def envelope_for_run(
     }
     if build_expires_at is not None:
         data["build_expires_at"] = build_expires_at
+        if server_time is None:
+            raise ValueError("server_time is required with build_expires_at")
+        data["server_time"] = server_time
     return ToolResponse.success(
         str(run.id),
         run.state.value,

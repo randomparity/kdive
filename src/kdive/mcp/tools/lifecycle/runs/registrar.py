@@ -166,8 +166,10 @@ def _register_runs_get(
         build.
 
         Reusable external builds expose `data.build_ref` and their absolute ISO-8601 UTC retention
-        deadline as `data.build_expires_at`. Pass the handle to `runs.create` only inside this
-        Investigation; reuse never extends the deadline.
+        deadline as `data.build_expires_at`; `data.server_time` is the database reference clock for
+        that deadline. Pass the handle to `runs.create` only inside this Investigation; reuse never
+        extends the deadline. At or after expiry, new/restaged install is rejected; recover by
+        calling `runs.create` without `build_ref` and uploading a new external build.
 
         Liveness: `data.liveness` tells a healthy guest from one that livelocked **after** a ready
         boot — a case `boot_outcome=ready` and `control.watch_for_crash` (which sees no crash

@@ -132,6 +132,7 @@ async def list_runs(
         kept, truncated = _paginate(rows, capped)
         runs = [Run.model_validate(row) for row in kept]
         build_deadlines: dict[str, str] = {}
+        server_time: str | None = None
         selected = [run for run in runs if run.build_ref is not None]
         if selected:
             async with pool.connection() as conn, conn.cursor() as cur:
@@ -153,6 +154,11 @@ async def list_runs(
                 for run_id, expires_at in await cur.fetchall():
                     if expires_at is not None:
                         build_deadlines[str(run_id)] = expires_at.isoformat()
+                if build_deadlines:
+                    row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+                    if row is None:
+                        raise RuntimeError("SELECT clock_timestamp() returned no row")
+                    server_time = row[0].isoformat()
         next_cursor = (
             _encode_ts_uuid_cursor(_RUNS_LIST_TAG, kept[-1]["created_at"], kept[-1]["id"])
             if truncated and kept
@@ -163,6 +169,7 @@ async def list_runs(
             truncated=truncated,
             next_cursor=next_cursor,
             build_deadlines=build_deadlines,
+            server_time=server_time,
         )
 
 
@@ -172,9 +179,14 @@ def _runs_collection(
     truncated: bool,
     next_cursor: str | None,
     build_deadlines: dict[str, str] | None = None,
+    server_time: str | None = None,
 ) -> ToolResponse:
     """Render Runs into one collection envelope with the pagination payload."""
     data: dict[str, JsonValue] = {"truncated": truncated, "next_cursor": next_cursor}
+    if build_deadlines:
+        if server_time is None:
+            raise ValueError("server_time is required with build deadlines")
+        data["server_time"] = server_time
     return ToolResponse.collection(
         "runs",
         "ok",
@@ -182,6 +194,7 @@ def _runs_collection(
             envelope_for_run(
                 run,
                 build_expires_at=(build_deadlines or {}).get(str(run.id)),
+                server_time=server_time,
             )
             for run in runs
         ],
