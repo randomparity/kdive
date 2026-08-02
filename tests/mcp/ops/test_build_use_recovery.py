@@ -75,6 +75,11 @@ class _Verifier:
         return self.evidence
 
 
+class _FailingVerifier:
+    def verify_dead(self, worker_incarnation: str) -> str | None:
+        raise RuntimeError("authority unavailable with secret material")
+
+
 def test_recover_build_use_requires_operator_and_independent_death_proof(
     migrated_url: str,
 ) -> None:
@@ -138,7 +143,89 @@ def test_recover_build_use_requires_operator_and_independent_death_proof(
                 )[0]
             assert use_count == 0
             assert ledger == (holder, "operator-1", verifier.evidence, "worker host was replaced")
-            assert audit_count == 1
+            assert audit_count == 2  # authorized refusal and atomic successful recovery
+
+    asyncio.run(_run())
+
+
+def test_recover_build_use_audits_every_authorized_refusal(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            use_id, holder = await _seed(pool)
+            attempts = (
+                ("", holder, _Verifier("proof"), "invalid_input"),
+                ("dead", holder, _Verifier(None), "death_not_proven"),
+                ("dead", holder, _FailingVerifier(), "verifier_error"),
+                ("dead", holder, _Verifier("x" * 1025), "evidence_oversized"),
+                ("dead", holder + "-wrong", _Verifier("proof"), "use_or_holder_mismatch"),
+            )
+            expected_scopes: set[str] = set()
+            for reason, attempted_holder, verifier, outcome in attempts:
+                response = await build_uses.recover_build_use(
+                    pool,
+                    _ctx(operator=True),
+                    verifier,
+                    use_id=use_id,
+                    holder=attempted_holder,
+                    reason=reason,
+                )
+                assert response.error_category == "configuration_error"
+                async with pool.connection() as conn:
+                    rows = await (
+                        await conn.execute(
+                            "SELECT scope FROM platform_audit_log "
+                            "WHERE tool = 'ops.recover_build_use'"
+                        )
+                    ).fetchall()
+                expected_scopes.add(f"build-use-recovery:{outcome}")
+                assert {row[0] for row in rows} == expected_scopes
+
+            async with pool.connection() as conn:
+                assert (
+                    await (
+                        await conn.execute(
+                            "SELECT count(*) FROM investigation_build_uses WHERE use_id = %s",
+                            (use_id,),
+                        )
+                    ).fetchone()
+                )[0] == 1
+
+    asyncio.run(_run())
+
+
+def test_recovery_refusal_fails_closed_when_audit_write_fails(
+    migrated_url: str, monkeypatch
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            use_id, holder = await _seed(pool)
+
+            async def _fail_audit(*args, **kwargs):
+                raise RuntimeError("audit unavailable")
+
+            monkeypatch.setattr(build_uses.audit, "record_platform", _fail_audit)
+            try:
+                await build_uses.recover_build_use(
+                    pool,
+                    _ctx(operator=True),
+                    _Verifier(None),
+                    use_id=use_id,
+                    holder=holder,
+                    reason="dead",
+                )
+            except RuntimeError as exc:
+                assert str(exc) == "audit unavailable"
+            else:
+                raise AssertionError("audit failure must fail the recovery request")
+            async with pool.connection() as conn:
+                assert (
+                    await (
+                        await conn.execute(
+                            "SELECT count(*) FROM investigation_build_uses WHERE use_id = %s",
+                            (use_id,),
+                        )
+                    ).fetchone()
+                )[0] == 1
 
     asyncio.run(_run())
 

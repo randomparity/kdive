@@ -41,6 +41,31 @@ def _failure(use_id: UUID, message: str) -> ToolResponse:
     )
 
 
+async def _audit_refusal(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    use_id: UUID,
+    holder: str,
+    reason: str,
+    outcome: str,
+) -> None:
+    """Durably record a bounded server-derived refusal before returning it."""
+    async with pool.connection() as conn, conn.transaction():
+        await audit.record_platform(
+            conn,
+            principal=ctx.principal,
+            agent_session=ctx.agent_session,
+            event=audit.PlatformAuditEvent(
+                tool=_TOOL,
+                scope=f"build-use-recovery:{outcome}",
+                args={"use_id": use_id, "holder": holder, "reason": reason},
+                platform_role=held_platform_roles(ctx),
+                actor=actor_for(ctx),
+            ),
+        )
+
+
 async def list_build_uses(
     pool: AsyncConnectionPool, ctx: RequestContext, *, limit: int = 50
 ) -> ToolResponse:
@@ -114,13 +139,48 @@ async def recover_build_use(
         return ToolResponse.denied(str(use_id), missing_roles=[PlatformRole.PLATFORM_OPERATOR])
     clean_reason = reason.strip()
     if not clean_reason or len(clean_reason) > _MAX_REASON_CHARS or len(holder) > _MAX_HOLDER_CHARS:
+        await _audit_refusal(
+            pool,
+            ctx,
+            use_id=use_id,
+            holder=holder,
+            reason=clean_reason,
+            outcome="invalid_input",
+        )
         return _failure(use_id, "holder and reason must be non-empty and at most 512 characters")
     # Deployment verifiers may perform a bounded Docker/Kubernetes authority read. Keep that
     # network I/O off FastMCP's event loop; the transaction starts only after death is proven.
-    evidence = await asyncio.to_thread(verifier.verify_dead, holder)
+    try:
+        evidence = await asyncio.to_thread(verifier.verify_dead, holder)
+    except Exception:  # noqa: BLE001 -- the deployment authority is an external boundary
+        await _audit_refusal(
+            pool,
+            ctx,
+            use_id=use_id,
+            holder=holder,
+            reason=clean_reason,
+            outcome="verifier_error",
+        )
+        return _failure(use_id, "the authoritative worker-death verifier failed")
     if evidence is None:
+        await _audit_refusal(
+            pool,
+            ctx,
+            use_id=use_id,
+            holder=holder,
+            reason=clean_reason,
+            outcome="death_not_proven",
+        )
         return _failure(use_id, "the authoritative verifier did not prove this worker dead")
     if len(evidence) > 1024:
+        await _audit_refusal(
+            pool,
+            ctx,
+            use_id=use_id,
+            holder=holder,
+            reason=clean_reason,
+            outcome="evidence_oversized",
+        )
         return _failure(use_id, "authoritative worker-death evidence exceeds 1024 characters")
     async with pool.connection() as conn, conn.transaction():
         recovered = await recover_build_use_in_transaction(
@@ -132,6 +192,18 @@ async def recover_build_use(
             reason=clean_reason,
         )
         if not recovered:
+            await audit.record_platform(
+                conn,
+                principal=ctx.principal,
+                agent_session=ctx.agent_session,
+                event=audit.PlatformAuditEvent(
+                    tool=_TOOL,
+                    scope="build-use-recovery:use_or_holder_mismatch",
+                    args={"use_id": use_id, "holder": holder, "reason": clean_reason},
+                    platform_role=held_platform_roles(ctx),
+                    actor=actor_for(ctx),
+                ),
+            )
             return _failure(use_id, "build-use pin was absent or its exact holder did not match")
         await audit.record_platform(
             conn,
