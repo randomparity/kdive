@@ -25,6 +25,7 @@ from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.mcp.tools.lifecycle.runs.steps import install_run
 from kdive.security.audit import args_digest
 from kdive.services.runs import complete_build
 from kdive.services.runs.admission import RunCreateRequest, create_run
@@ -905,6 +906,67 @@ def test_complete_build_publishes_winner_under_investigation_then_run_lock(
         patched.setattr(complete_build, "advisory_xact_lock", traced_lock)
         asyncio.run(_run())
     assert trace == ["investigation", "run"]
+
+
+def test_real_completion_finalizer_and_install_do_not_cycle(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale completion replay and install serialize through the production dual-lock paths."""
+    acquired = asyncio.Event()
+    release = asyncio.Event()
+    original_lock = complete_build.advisory_xact_lock
+
+    @asynccontextmanager
+    async def paused_lock(conn, scope, key):
+        async with original_lock(conn, scope, key):
+            if scope.value == "investigation":
+                acquired.set()
+                await release.wait()
+            yield
+
+    async def keep_manifest(*args, **kwargs) -> None:
+        del args, kwargs
+
+    async def replay_completion(finalizer, stale_created_run):
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            return await finalizer.complete(
+                conn,
+                _ctx(),
+                stale_created_run,
+                build_id=None,
+                cmdline="console=ttyS0",
+            )
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool)
+            stale_created_run = await _run_by_id(pool, run_id)
+            finalizer = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(run_id))
+            )
+            with monkeypatch.context() as patched:
+                patched.setattr(upload_manifest, "delete_manifest", keep_manifest)
+                await _complete(pool, run_id, finalizer)
+                patched.setattr(complete_build, "advisory_xact_lock", paused_lock)
+                replay = asyncio.create_task(replay_completion(finalizer, stale_created_run))
+                await acquired.wait()
+                install = asyncio.create_task(
+                    install_run(
+                        pool,
+                        _ctx(),
+                        str(run_id),
+                        resolver=provider_resolver(),
+                    )
+                )
+                await asyncio.sleep(0)
+                assert not install.done()
+                release.set()
+                replay_result = await replay
+                install_result = await install
+            assert replay_result.build_ref is not None
+            assert install_result.status == "queued"
+
+    asyncio.run(_run())
 
 
 def test_chunked_completion_acquires_investigation_before_retained_run_lock(

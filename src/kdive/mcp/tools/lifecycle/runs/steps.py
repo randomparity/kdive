@@ -160,9 +160,11 @@ async def _restage_and_enqueue_install(
     """Enqueue install under Investigation→Run locks, re-staging changed variants.
 
     The whole decision — read the step ledger, delete the settled ``install``/``boot`` rows on a
-    re-stage, and enqueue — runs inside one per-Run advisory-lock transaction so a concurrent
-    ``runs.install`` cannot interleave read→delete→enqueue (ADR-0299/0300). The shared ledger-driven
-    recycle (``_locked_enqueue``) then carries the new cmdline + crashkernel into the recycled job.
+    re-stage, generation deadline check, and enqueue — runs inside one transaction taking the
+    Investigation advisory lock before the Run lock. Concurrent install, completion, and reclaim
+    operations therefore cannot interleave read→delete→enqueue or form a lock cycle
+    (ADR-0299/0300/0531). The shared ledger-driven recycle (``_locked_enqueue``) carries the new
+    cmdline + crashkernel into the recycled job.
     """
     # Omit → default 256M (recorded as ``None``): each install fully specifies its variant, so an
     # omitted reservation reverts to the platform default, like the cmdline's build-baked anchor.
