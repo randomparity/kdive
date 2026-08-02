@@ -101,20 +101,24 @@ class _LoserStore:
         self._url = url
         self._run_id = run_id
 
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
         if key.endswith(".part0001"):
             return HeadResult(5, "c0", "e", last_modified=STORE_MTIME, version_id="test-version")
         if key.endswith(".part0002"):
             return HeadResult(3, "c1", "e", last_modified=STORE_MTIME, version_id="test-version")
         return None
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
         return b""
 
     def create_multipart_upload(self, key, *, sensitivity: Sensitivity, retention_class) -> str:
         return "uid"
 
-    def upload_part_copy(self, key, upload_id, *, part_number, source_key) -> str:
+    def upload_part_copy(
+        self, key, upload_id, *, part_number, source_key, source_version_id
+    ) -> str:
         result = BuildStepResult(
             kernel_ref=f"local/runs/{self._run_id}/kernel",
             debuginfo_ref="",
@@ -134,8 +138,10 @@ class _LoserStore:
             )
         raise CategorizedError("chunk gone", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
 
-    def complete_multipart_upload(self, key, upload_id, parts) -> str:
-        return "final"
+    def complete_multipart_upload(self, key, upload_id, parts):
+        from kdive.artifacts.storage import MultipartCompletion
+
+        return MultipartCompletion("final", "final-version")
 
     def abort_multipart_upload(self, key, upload_id) -> None:
         pass

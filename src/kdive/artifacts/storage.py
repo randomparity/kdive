@@ -83,6 +83,13 @@ class StoredArtifact(NamedTuple):
     version_id: str
 
 
+class MultipartCompletion(NamedTuple):
+    """Identity returned when a multipart upload creates its final immutable version."""
+
+    etag: str
+    version_id: str
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class ArtifactWriteRequest:
     """Artifact write identity, metadata, and bytes."""

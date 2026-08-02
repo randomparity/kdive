@@ -1766,7 +1766,7 @@ class _MpuClient:
 
     def complete_multipart_upload(self, **kw: object) -> dict[str, object]:
         self.calls.append(("complete", kw))
-        return {"ETag": '"final-etag"'}
+        return {"ETag": '"final-etag"', "VersionId": "final-version-1"}
 
     def abort_multipart_upload(self, **kw: object) -> None:
         self.calls.append(("abort", kw))
@@ -1784,15 +1784,20 @@ def test_multipart_reassembly_primitives_round_trip() -> None:
         "retention-class": "build",
     }
     etag1 = store.upload_part_copy(
-        "local/runs/x/vmlinux", uid, part_number=1, source_key="local/runs/x/vmlinux.part0001"
+        "local/runs/x/vmlinux",
+        uid,
+        part_number=1,
+        source_key="local/runs/x/vmlinux.part0001",
+        source_version_id="chunk-version-1",
     )
     assert etag1 == "etag-1"
     assert client.calls[1][1]["CopySource"] == {
         "Bucket": "bucket",
         "Key": "local/runs/x/vmlinux.part0001",
+        "VersionId": "chunk-version-1",
     }
     final = store.complete_multipart_upload("local/runs/x/vmlinux", uid, [(1, "etag-1")])
-    assert final == "final-etag"
+    assert final == ("final-etag", "final-version-1")
     assert client.calls[2][1]["MultipartUpload"] == {"Parts": [{"PartNumber": 1, "ETag": "etag-1"}]}
     store.abort_multipart_upload("local/runs/x/vmlinux", uid)
     assert client.calls[3][0] == "abort"
@@ -1820,7 +1825,13 @@ def test_multipart_calls_target_the_bound_bucket_key_and_upload() -> None:
     uid = store.create_multipart_upload(
         "runs/x/vmlinux", sensitivity=Sensitivity.SENSITIVE, retention_class="build"
     )
-    store.upload_part_copy("runs/x/vmlinux", uid, part_number=1, source_key="runs/x/part1")
+    store.upload_part_copy(
+        "runs/x/vmlinux",
+        uid,
+        part_number=1,
+        source_key="runs/x/part1",
+        source_version_id="part-version-1",
+    )
     store.complete_multipart_upload("runs/x/vmlinux", uid, [(1, "etag-1")])
     store.abort_multipart_upload("runs/x/vmlinux", uid)
 
@@ -1925,6 +1936,21 @@ def test_get_range_requests_the_inclusive_byte_range() -> None:
         "Bucket": "the-bucket",
         "Key": "t/vmcore/oid/core",
         "Range": "bytes=10-14",  # end == start + length - 1
+    }
+
+
+def test_get_range_names_the_observed_immutable_version() -> None:
+    client = _PaginatorClient([])
+
+    ObjectStore(client, "the-bucket").get_range(
+        "t/build/kernel", start=0, length=4, version_id="kernel-v1"
+    )
+
+    assert client.get_kwargs == {
+        "Bucket": "the-bucket",
+        "Key": "t/build/kernel",
+        "Range": "bytes=0-3",
+        "VersionId": "kernel-v1",
     }
 
 

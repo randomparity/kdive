@@ -17,7 +17,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.artifacts import upload_manifest
-from kdive.artifacts.storage import HeadResult, chunk_key
+from kdive.artifacts.storage import HeadResult, MultipartCompletion, chunk_key
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.config.core_settings import BUILD_ARTIFACT_RETENTION_DAYS, UPLOAD_WINDOW_MAX_TTL_MULTIPLE
@@ -67,7 +67,7 @@ class _ChunkedStore:
         self.events: list[tuple[str, object]] = []
         self.deleted_versions: list[tuple[str, str]] = []
 
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
         if key.endswith(".part0001"):
             checksum = "wrong" if self.bad_head else "c0"
             return HeadResult(
@@ -77,7 +77,9 @@ class _ChunkedStore:
             return HeadResult(3, "c1", "e2", last_modified=STORE_MTIME, version_id="test-version")
         return HeadResult(8, None, "final", last_modified=STORE_MTIME, version_id="test-version")
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
         del key
         return (b"x" * 8)[start : start + length]
 
@@ -95,18 +97,24 @@ class _ChunkedStore:
         return "upload"
 
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str:
-        del key, upload_id
+        del key, upload_id, source_version_id
         self.events.append(("copy", source_key))
         return f"etag-{part_number}"
 
     def complete_multipart_upload(
         self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
-    ) -> str:
+    ) -> MultipartCompletion:
         del upload_id
         self.events.append(("complete", (key, tuple(parts))))
-        return "final"
+        return MultipartCompletion("final", "final-version")
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         del upload_id
@@ -137,12 +145,14 @@ class _VersionDeleteStore:
         if self.fail:
             raise CategorizedError("delete failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
 
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
         del key
         raise AssertionError("single-PUT cleanup never reads objects")
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
-        del key, start, length
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
+        del key, start, length, version_id
         raise AssertionError("single-PUT cleanup never reads objects")
 
     def create_multipart_upload(
@@ -152,14 +162,20 @@ class _VersionDeleteStore:
         raise AssertionError("single-PUT cleanup never reassembles")
 
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str:
-        del key, upload_id, part_number, source_key
+        del key, upload_id, part_number, source_key, source_version_id
         raise AssertionError("single-PUT cleanup never reassembles")
 
     def complete_multipart_upload(
         self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
-    ) -> str:
+    ) -> MultipartCompletion:
         del key, upload_id, parts
         raise AssertionError("single-PUT cleanup never reassembles")
 

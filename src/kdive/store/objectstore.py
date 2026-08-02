@@ -460,7 +460,7 @@ class ObjectStore:
                 "MFADelete", f"returned unsupported MFADelete state {mfa_delete!r}"
             )
 
-    def head(self, key: str) -> artifact_types.HeadResult | None:
+    def head(self, key: str, *, version_id: str | None = None) -> artifact_types.HeadResult | None:
         """Return the object's size/checksum/etag/mtime/sensitivity, or ``None`` if it is absent.
 
         Requests ``ChecksumMode="ENABLED"`` so a checksum written at PUT is returned. The
@@ -477,7 +477,10 @@ class ObjectStore:
                 (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`; see :class:`_StoreReply`).
         """
         try:
-            resp = self._client.head_object(Bucket=self._bucket, Key=key, ChecksumMode="ENABLED")
+            request = {"Bucket": self._bucket, "Key": key, "ChecksumMode": "ENABLED"}
+            if version_id is not None:
+                request["VersionId"] = version_id
+            resp = self._client.head_object(**request)
         except ClientError as err:
             status = err.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
             if status == 404:
@@ -504,7 +507,9 @@ class ObjectStore:
             content_encoding=metadata.get("content-encoding"),
         )
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
         """Return ``length`` bytes of ``key`` starting at ``start`` (an HTTP ranged GET).
 
         Raises:
@@ -513,9 +518,10 @@ class ObjectStore:
         """
         end = start + length - 1
         try:
-            resp = self._client.get_object(
-                Bucket=self._bucket, Key=key, Range=f"bytes={start}-{end}"
-            )
+            request = {"Bucket": self._bucket, "Key": key, "Range": f"bytes={start}-{end}"}
+            if version_id is not None:
+                request["VersionId"] = version_id
+            resp = self._client.get_object(**request)
             return resp["Body"].read()
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("get_range", key, err) from err
@@ -621,7 +627,13 @@ class ObjectStore:
         return resp["UploadId"]
 
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str:
         """Copy ``source_key`` into part ``part_number`` of ``key``'s multipart upload.
 
@@ -636,7 +648,11 @@ class ObjectStore:
                 Key=key,
                 UploadId=upload_id,
                 PartNumber=part_number,
-                CopySource={"Bucket": self._bucket, "Key": source_key},
+                CopySource={
+                    "Bucket": self._bucket,
+                    "Key": source_key,
+                    "VersionId": source_version_id,
+                },
             )
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("upload_part_copy", key, err) from err
@@ -644,7 +660,7 @@ class ObjectStore:
 
     def complete_multipart_upload(
         self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
-    ) -> str:
+    ) -> artifact_types.MultipartCompletion:
         """Complete ``key``'s multipart upload with the ordered ``(part_number, etag)`` list.
 
         Returns the final object ETag (a multipart ``-N`` form).
@@ -659,7 +675,11 @@ class ObjectStore:
             )
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("complete_multipart_upload", key, err) from err
-        return _normalize_etag(resp["ETag"])
+        reply = _StoreReply("complete_multipart_upload", self._bucket, key, resp)
+        return artifact_types.MultipartCompletion(
+            _normalize_etag(reply.required_nonempty_string("ETag")),
+            reply.required_nonempty_string("VersionId"),
+        )
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         """Abort ``key``'s multipart upload (best-effort cleanup of a failed reassembly).

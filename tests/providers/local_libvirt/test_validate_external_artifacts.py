@@ -69,13 +69,15 @@ class _FakeStore:
     def __init__(self, blobs: dict[str, bytes], heads: dict[str, HeadResult]) -> None:
         self._blobs = blobs
         self._heads = heads
-        self.range_calls: list[tuple[str, int, int]] = []
+        self.range_calls: list[tuple[str, int, int, str | None]] = []
 
     def head(self, key: str) -> HeadResult | None:
         return self._heads.get(key)
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
-        self.range_calls.append((key, start, length))
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
+        self.range_calls.append((key, start, length, version_id))
         return self._blobs[key][start : start + length]
 
 
@@ -221,6 +223,8 @@ def _validate_kernel_blob(blob: bytes, *, arch: str = "x86_64") -> None:
         declared_build_id=None,
         arch=arch,
     )
+    assert store.range_calls
+    assert {call[3] for call in store.range_calls} == {"test-version"}
 
 
 def test_non_gzip_kernel_is_build_failure() -> None:
@@ -331,6 +335,8 @@ def test_happy_path_kernel_only_returns_build_output() -> None:
         and out.output.build_id == ""
     )
     assert set(out.heads) == {"kernel"}
+    assert store.range_calls
+    assert {call[3] for call in store.range_calls} == {"test-version"}
 
 
 def test_build_id_mismatch_is_build_failure() -> None:

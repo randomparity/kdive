@@ -43,6 +43,14 @@ generation's objects. Reclaim marks one generation `reclaiming` before object de
 the record only if that generation remains reclaiming; a new generation has distinct rows and
 objects. The lock spans selection, publication, and the reclaim state transition.
 
+Validation is version-bound: the first HEAD captures each single-upload VersionId and every ranged
+semantic read names it. Chunk verification similarly captures each chunk VersionId, server-side
+copy names those exact versions, and multipart completion returns the final VersionId that later
+validation and publication use. Outstanding upload URLs may create newer versions, but cannot
+change the bytes a published generation validated. Install, raw download, GDB/module staging,
+crash, and drgn consumers all read the persisted VersionIds; key-only reads remain solely for
+legacy Run steps that predate version pins.
+
 Every path that takes both scopes follows the repository order Investigation → Run.
 `runs.complete_build` changes its final transaction to that order and rechecks the Run state and
 upload-window identity under both locks before publication. `runs.install` and generation reclaim

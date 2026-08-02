@@ -31,7 +31,9 @@ class _UntouchedStore:
     def head(self, key: str) -> HeadResult | None:
         raise AssertionError(f"store.head must not be called (key={key!r})")
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
         raise AssertionError(
             f"store.get_range must not be called (key={key!r}, start={start}, length={length})"
         )
