@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import socket
 import ssl
@@ -14,6 +13,16 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+
+import kdive.config as config
+from kdive.config.core_settings import (
+    DOCKER_DEATH_API,
+    POD_NAME,
+    POD_NAMESPACE,
+    POD_UID,
+    WORKER_DEATH_VERIFIER,
+    WORKER_INCARNATION_KIND,
+)
 
 _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _PROC_ROOT = Path("/proc")
@@ -43,7 +52,7 @@ def worker_incarnation_id(
     stat_path: Path | None = None,
 ) -> str:
     """Return the configured deployment's immutable worker-incarnation identity."""
-    kind = os.environ.get("KDIVE_WORKER_INCARNATION_KIND", "local")
+    kind = config.require(WORKER_INCARNATION_KIND)
     if kind == "docker":
         container_id = socket.gethostname()
         if not _CONTAINER_ID.fullmatch(container_id):
@@ -52,9 +61,9 @@ def worker_incarnation_id(
             )
         return f"docker:{container_id}"
     if kind == "kubernetes":
-        namespace = os.environ.get("KDIVE_POD_NAMESPACE", "")
-        name = os.environ.get("KDIVE_POD_NAME", "")
-        uid = os.environ.get("KDIVE_POD_UID", "")
+        namespace = config.get(POD_NAMESPACE) or ""
+        name = config.get(POD_NAME) or ""
+        uid = config.get(POD_UID) or ""
         if not namespace or not name or not uid or ":" in uid:
             raise RuntimeError("kubernetes worker identity requires pod namespace, name, and UID")
         return f"kubernetes:{namespace}:{name}:{uid}"
@@ -204,13 +213,13 @@ class KubernetesWorkerDeathVerifier:
 
 def worker_death_verifier_from_env() -> WorkerDeathVerifier | None:
     """Build the explicitly configured authority, or disable recovery when absent."""
-    kind = os.environ.get("KDIVE_WORKER_DEATH_VERIFIER", "disabled")
+    kind = config.require(WORKER_DEATH_VERIFIER)
     if kind == "disabled":
         return None
     if kind == "local":
         return LocalWorkerDeathVerifier()
     if kind == "docker":
-        endpoint = os.environ.get("KDIVE_DOCKER_DEATH_API", "http://worker-death-api:2375")
+        endpoint = config.require(DOCKER_DEATH_API)
         if not endpoint.startswith("http://"):
             raise RuntimeError("KDIVE_DOCKER_DEATH_API must use http:// on a private network")
         return DockerWorkerDeathVerifier(endpoint=endpoint)

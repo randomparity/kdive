@@ -13,7 +13,7 @@ error details while still routing the read through the registry.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from kdive.config.registry import RUNNABLE, Setting
 
@@ -78,6 +78,15 @@ def _positive_int(raw: str) -> int:
     if value < 1:
         raise ValueError(f"must be >= 1, got {value}")
     return value
+
+
+def _choice(*allowed: str) -> Callable[[str], str]:
+    def parse(raw: str) -> str:
+        if raw not in allowed:
+            raise ValueError(f"must be one of {', '.join(allowed)}")
+        return raw
+
+    return parse
 
 
 def _always(env: Mapping[str, str]) -> bool:
@@ -760,6 +769,61 @@ MCP_TRACE = Setting(
     help="Presence (1/true/yes) enables opt-in ASGI transport-trace logging (default off).",
 )
 
+WORKER_INCARNATION_KIND = Setting(
+    name="KDIVE_WORKER_INCARNATION_KIND",
+    parse=_choice("local", "docker", "kubernetes"),
+    default="local",
+    group="worker-death",
+    processes=_WORKER,
+    help="Immutable worker identity source: local process, Docker container, or Kubernetes Pod.",
+)
+WORKER_DEATH_VERIFIER = Setting(
+    name="KDIVE_WORKER_DEATH_VERIFIER",
+    parse=_choice("disabled", "local", "docker", "kubernetes"),
+    default="disabled",
+    group="worker-death",
+    processes=_SERVER,
+    help="Authoritative worker-death verifier; disabled omits build-use recovery tools.",
+)
+DOCKER_DEATH_API = Setting(
+    name="KDIVE_DOCKER_DEATH_API",
+    parse=_nonempty,
+    default="http://worker-death-api:2375",
+    group="worker-death",
+    processes=_SERVER,
+    help="Private inspect-only Docker authority endpoint used by the Docker death verifier.",
+)
+
+
+def _kubernetes_worker(env: Mapping[str, str]) -> bool:
+    return env.get("KDIVE_WORKER_INCARNATION_KIND", "local") == "kubernetes"
+
+
+POD_NAMESPACE = Setting(
+    name="KDIVE_POD_NAMESPACE",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_WORKER,
+    required_when=_kubernetes_worker,
+    help="Kubernetes worker Pod namespace supplied by the downward API.",
+)
+POD_NAME = Setting(
+    name="KDIVE_POD_NAME",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_WORKER,
+    required_when=_kubernetes_worker,
+    help="Kubernetes worker Pod name supplied by the downward API.",
+)
+POD_UID = Setting(
+    name="KDIVE_POD_UID",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_WORKER,
+    required_when=_kubernetes_worker,
+    help="Immutable Kubernetes worker Pod UID supplied by the downward API.",
+)
+
 SETTINGS = [
     DATABASE_URL,
     HTTP_HOST,
@@ -817,4 +881,10 @@ SETTINGS = [
     MCP_TOOL_GATEWAY,
     COMPACT_RESPONSES,
     MCP_TRACE,
+    WORKER_INCARNATION_KIND,
+    WORKER_DEATH_VERIFIER,
+    DOCKER_DEATH_API,
+    POD_NAMESPACE,
+    POD_NAME,
+    POD_UID,
 ]

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import kdive.config as config
 from kdive.processes.worker_incarnation import (
     DockerWorkerDeathVerifier,
     KubernetesWorkerDeathVerifier,
@@ -118,4 +119,5 @@ def test_verifier_factory_fails_closed_when_unconfigured(monkeypatch) -> None:
     monkeypatch.delenv("KDIVE_WORKER_DEATH_VERIFIER", raising=False)
     assert worker_death_verifier_from_env() is None
     monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "local")
+    config.reset()
     assert isinstance(worker_death_verifier_from_env(), LocalWorkerDeathVerifier)
