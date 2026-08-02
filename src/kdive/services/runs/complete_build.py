@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import UUID
@@ -18,7 +18,7 @@ import kdive.config as config
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.reassembly import reassemble_chunked
 from kdive.artifacts.registration import register_artifact_row
-from kdive.artifacts.storage import HeadResult, StoredArtifact
+from kdive.artifacts.storage import HeadResult, MultipartCompletion, StoredArtifact
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.build_artifacts.validation import validate_external_artifacts
@@ -48,18 +48,26 @@ _log = logging.getLogger(__name__)
 class ExternalBuildStore(Protocol):
     """Object-store surface the external-build finalize path needs."""
 
-    def head(self, key: str) -> HeadResult | None: ...
-    def get_range(self, key: str, *, start: int, length: int) -> bytes: ...
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None: ...
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes: ...
     def delete_version(self, key: str, version_id: str) -> None: ...
     def create_multipart_upload(
         self, key: str, *, sensitivity: Sensitivity, retention_class: str
     ) -> str: ...
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str: ...
     def complete_multipart_upload(
         self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
-    ) -> str: ...
+    ) -> MultipartCompletion: ...
     def abort_multipart_upload(self, key: str, upload_id: str) -> None: ...
 
 
@@ -200,7 +208,7 @@ class CompleteBuildFinalizer:
     ) -> _ExternalBuildFinalization:
         window_deadline = prepared.manifest_row.deadline
         if prepared.store is not None:
-            window_deadline, chunk_heads = await _reassemble_chunked_artifacts(
+            window_deadline, chunk_heads, final_versions = await _reassemble_chunked_artifacts(
                 conn,
                 uid,
                 run_id,
@@ -210,6 +218,7 @@ class CompleteBuildFinalizer:
             )
         else:
             chunk_heads = {}
+            final_versions = {}
 
         try:
             validated = await asyncio.to_thread(
@@ -218,6 +227,7 @@ class CompleteBuildFinalizer:
                 prepared.keys,
                 build_id,
                 arch,
+                final_versions,
             )
         except CategorizedError as exc:
             raise CompleteBuildValidationError(exc) from exc
@@ -243,16 +253,42 @@ class CompleteBuildFinalizer:
         keys: Mapping[str, str],
         declared_build_id: str | None,
         arch: str,
+        exact_versions: Mapping[str, str],
     ) -> ValidatedUpload:
         if self.validate_complete_build is not None:
             return self.validate_complete_build(manifest, keys, declared_build_id, arch=arch)
+        store = self.object_store_factory()
         return validate_external_artifacts(
-            self.object_store_factory(),
+            _VersionPinnedStore(store, exact_versions),
             manifest=manifest,
             keys=keys,
             declared_build_id=declared_build_id,
             arch=arch,
         )
+
+
+@dataclass(slots=True)
+class _VersionPinnedStore:
+    """Bind every validation HEAD/range read to one captured immutable version."""
+
+    store: ExternalBuildStore
+    versions: Mapping[str, str]
+    _observed: dict[str, str] = field(default_factory=dict)
+
+    def head(self, key: str) -> HeadResult | None:
+        version_id = self.versions.get(key) or self._observed.get(key)
+        head = self.store.head(key, version_id=version_id) if version_id else self.store.head(key)
+        if head is not None:
+            self._observed[key] = head.version_id
+        return head
+
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
+        version_id = version_id or self.versions.get(key) or self._observed.get(key)
+        if version_id is None:
+            return self.store.get_range(key, start=start, length=length)
+        return self.store.get_range(key, start=start, length=length, version_id=version_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,7 +372,7 @@ async def _reassemble_chunked_artifacts(
     investigation_id: UUID,
     manifest_row: upload_manifest.UploadManifest,
     store: ExternalBuildStore,
-) -> tuple[datetime, dict[str, HeadResult]]:
+) -> tuple[datetime, dict[str, HeadResult], dict[str, str]]:
     """Extend the window, reassemble chunked artifacts, and return their deadline and HEADs.
 
     The ``RUN`` lock taken here is transaction-scoped and this ``conn.transaction()`` is a
@@ -385,32 +421,33 @@ async def _reassemble_chunked_artifacts(
             max_window,
         )
     try:
-        chunk_heads = await _reassemble_artifacts(manifest_row, store)
+        chunk_heads, final_versions = await _reassemble_artifacts(manifest_row, store)
     except CategorizedError as exc:
         recorded = await _existing_build_result(conn, uid)
         if recorded is not None:
             raise _CompleteBuildAlreadyRecorded(recorded) from exc
         raise
-    return refreshed.deadline, chunk_heads
+    return refreshed.deadline, chunk_heads, final_versions
 
 
 async def _reassemble_artifacts(
     manifest_row: upload_manifest.UploadManifest,
     store: ExternalBuildStore,
-) -> dict[str, HeadResult]:
+) -> tuple[dict[str, HeadResult], dict[str, str]]:
     chunk_heads: dict[str, HeadResult] = {}
+    final_versions: dict[str, str] = {}
     for entry in manifest_row.entries:
         if entry.chunks is not None:
-            chunk_heads.update(
-                await asyncio.to_thread(
-                    reassemble_chunked,
-                    store,
-                    prefix=manifest_row.prefix,
-                    final_key=f"{manifest_row.prefix}{entry.name}",
-                    entry=entry,
-                )
+            heads, completion = await asyncio.to_thread(
+                reassemble_chunked,
+                store,
+                prefix=manifest_row.prefix,
+                final_key=f"{manifest_row.prefix}{entry.name}",
+                entry=entry,
             )
-    return chunk_heads
+            chunk_heads.update(heads)
+            final_versions[f"{manifest_row.prefix}{entry.name}"] = completion.version_id
+    return chunk_heads, final_versions
 
 
 def _require_created_run(run: Run) -> None:

@@ -16,7 +16,12 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.artifacts import upload_manifest
-from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest
+from kdive.artifacts.storage import (
+    HeadResult,
+    MultipartCompletion,
+    PresignedUpload,
+    PresignPutRequest,
+)
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.results import BuildOutput
 from kdive.config.core_settings import BUILD_ARTIFACT_RETENTION_DAYS
@@ -130,10 +135,12 @@ class _ValidationStore:
         self._blobs = blobs
         self._heads = heads
 
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
         return self._heads.get(key)
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
         return self._blobs[key][start : start + length]
 
     def delete_version(self, key: str, version_id: str) -> None:
@@ -145,11 +152,19 @@ class _ValidationStore:
         raise AssertionError("single-PUT path must not reassemble")
 
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str:
         raise AssertionError("single-PUT path must not reassemble")
 
-    def complete_multipart_upload(self, key: str, upload_id: str, parts: object) -> str:
+    def complete_multipart_upload(
+        self, key: str, upload_id: str, parts: object
+    ) -> MultipartCompletion:
         raise AssertionError("single-PUT path must not reassemble")
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
@@ -777,7 +792,9 @@ class _ReassemblyStore:
         self.events: list[tuple[Any, ...]] = []
         self._delete_raises = delete_raises
 
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
+        if version_id is not None:
+            assert version_id == "final-version"
         if key.endswith(".part0001"):
             return HeadResult(5, "c0", "e", last_modified=STORE_MTIME, version_id="test-version")
         if key.endswith(".part0002"):
@@ -792,7 +809,9 @@ class _ReassemblyStore:
             )  # reassembled: composite/None checksum
         return None
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
         return _KERNEL_TAR[start : start + length]
 
     def create_multipart_upload(
@@ -802,16 +821,23 @@ class _ReassemblyStore:
         return "uid"
 
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str:
+        assert source_version_id in {"test-version", "chunk-version"}
         self.events.append(("copy", part_number, source_key))
         return f"etag-{part_number}"
 
     def complete_multipart_upload(
         self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
-    ) -> str:
+    ) -> MultipartCompletion:
         self.events.append(("complete", tuple(parts)))
-        return "final-etag"
+        return MultipartCompletion("final-etag", "final-version")
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         self.events.append(("abort", key))
@@ -870,7 +896,9 @@ def test_production_validator_publishes_chunked_build_without_final_head_checksu
     )
 
     class _ProductionChunkStore(_ReassemblyStore):
-        def head(self, key: str) -> HeadResult | None:
+        def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
+            if key.endswith("/kernel"):
+                assert version_id == "final-version"
             if key.endswith(".part0001"):
                 chunk = chunks[0]
             elif key.endswith(".part0002"):

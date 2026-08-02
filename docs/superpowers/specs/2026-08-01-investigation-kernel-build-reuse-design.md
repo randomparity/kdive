@@ -60,6 +60,13 @@ Only the winner's artifact set gets new rows with `owner_kind='investigations'` 
 Investigation id. The existing owner-triple uniqueness constraint makes its registration
 replay-safe.
 
+The validated identity is immutable before publication. A single-upload validator binds every
+ranged content and build-id read to the VersionId returned by its first HEAD. For chunked input,
+each `UploadPartCopy` names the verified source VersionId, multipart completion captures the final
+VersionId, and final-object validation names that version. Every later build consumer receives the
+persisted `(key, VersionId)` pair; only legacy build steps without `artifact_versions` use a
+key-only fallback.
+
 An identical-content loser completes its source Run with the winner's build result and references,
 not its own uploaded keys. Its uploaded versions remain unregistered, are deleted exactly after the
 database commit, and fall to the existing Run-prefix orphan sweep if exact deletion fails. Loser

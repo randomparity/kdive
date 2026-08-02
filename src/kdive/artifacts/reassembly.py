@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from kdive.artifacts.chunks import verify_chunks
-from kdive.artifacts.storage import HeadResult, chunk_key
+from kdive.artifacts.storage import HeadResult, MultipartCompletion, chunk_key
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -23,17 +23,23 @@ class ReassemblyStore(Protocol):
         self, key: str, *, sensitivity: Sensitivity, retention_class: str
     ) -> str: ...
     def upload_part_copy(
-        self, key: str, upload_id: str, *, part_number: int, source_key: str
+        self,
+        key: str,
+        upload_id: str,
+        *,
+        part_number: int,
+        source_key: str,
+        source_version_id: str,
     ) -> str: ...
     def complete_multipart_upload(
         self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
-    ) -> str: ...
+    ) -> MultipartCompletion: ...
     def abort_multipart_upload(self, key: str, upload_id: str) -> None: ...
 
 
 def reassemble_chunked(
     store: ReassemblyStore, *, prefix: str, final_key: str, entry: ManifestEntry
-) -> dict[str, HeadResult]:
+) -> tuple[dict[str, HeadResult], MultipartCompletion]:
     """HEAD-verify each chunk, then ``Create``/``UploadPartCopy``/``Complete`` the final object.
 
     The chunks are copied server-side (no bytes transit the process) in declared order into
@@ -60,14 +66,16 @@ def reassemble_chunked(
     try:
         parts: list[tuple[int, str]] = []
         for part_number in range(1, len(entry.chunks) + 1):
+            source_key = chunk_key(prefix, entry.name, part_number)
             etag = store.upload_part_copy(
                 final_key,
                 upload_id,
                 part_number=part_number,
-                source_key=chunk_key(prefix, entry.name, part_number),
+                source_key=source_key,
+                source_version_id=chunk_heads[source_key].version_id,
             )
             parts.append((part_number, etag))
-        store.complete_multipart_upload(final_key, upload_id, parts)
+        completion = store.complete_multipart_upload(final_key, upload_id, parts)
     except BaseException:
         try:
             store.abort_multipart_upload(final_key, upload_id)
@@ -79,4 +87,4 @@ def reassemble_chunked(
                 exc_info=True,
             )
         raise
-    return chunk_heads
+    return chunk_heads, completion

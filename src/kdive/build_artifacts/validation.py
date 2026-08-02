@@ -245,7 +245,31 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
 class ValidatorStore(HeadStore, Protocol):
     """Object-store operations needed by external build validation."""
 
-    def get_range(self, key: str, *, start: int, length: int) -> bytes: ...
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes: ...
+
+
+class _ObservedVersionStore:
+    """Fence semantic reads to the immutable version returned by the first HEAD."""
+
+    def __init__(self, store: ValidatorStore) -> None:
+        self._store = store
+        self._versions: dict[str, str] = {}
+
+    def head(self, key: str) -> HeadResult | None:
+        head = self._store.head(key)
+        if head is not None:
+            self._versions[key] = head.version_id
+        return head
+
+    def get_range(
+        self, key: str, *, start: int, length: int, version_id: str | None = None
+    ) -> bytes:
+        del version_id
+        return self._store.get_range(
+            key, start=start, length=length, version_id=self._versions[key]
+        )
 
 
 def parse_gnu_build_id(notes: bytes) -> str:
@@ -291,6 +315,7 @@ def validate_external_artifacts(
     build-profile parse already gated it upstream).
     """
     boot_format = _resolve_boot_format(arch)
+    store = _ObservedVersionStore(store)
     by_name = {e.name: e for e in manifest}
     if "kernel" not in by_name or "kernel" not in keys:
         raise CategorizedError(

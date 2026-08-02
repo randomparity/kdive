@@ -46,6 +46,14 @@ Before deleting the catalog row, reclaim stores its Investigation, exact `build_
 a durable tombstone. Only the same Investigation consults that tombstone, preserving expired-handle
 recovery after GC while unknown and cross-Investigation handles remain not found.
 
+Validation is version-bound: the first HEAD captures each single-upload VersionId and every ranged
+semantic read names it. Chunk verification similarly captures each chunk VersionId, server-side
+copy names those exact versions, and multipart completion returns the final VersionId that later
+validation and publication use. Outstanding upload URLs may create newer versions, but cannot
+change the bytes a published generation validated. Install, raw download, GDB/module staging,
+crash, and drgn consumers all read the persisted VersionIds; key-only reads remain solely for
+legacy Run steps that predate version pins.
+
 Every path that takes both scopes follows the repository order Investigation → Run.
 `runs.complete_build` changes its final transaction to that order and rechecks the Run state and
 upload-window identity under both locks before publication. `runs.install` and generation reclaim
