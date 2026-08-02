@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID, uuid4
@@ -400,6 +400,12 @@ async def _insert_created_run(
     )
     if selected_build is not None and build_result is None:
         raise RuntimeError("investigation build contains an invalid build result")
+    if build_result is not None and selected_build is not None:
+        build_result = replace(
+            build_result,
+            build_ref=selected_build.build_ref,
+            expires_at=selected_build.expires_at.isoformat(),
+        )
     run = await RUNS.insert(
         conn,
         Run(
@@ -524,14 +530,18 @@ async def _resolve_selected_build(
             },
         )
     actual_profile = dump_build_profile(build_profile)
-    if selected.target_kind != target_kind or selected.build_profile != actual_profile:
+    try:
+        expected_profile = dump_build_profile(BuildProfile.parse(selected.build_profile))
+    except CategorizedError as exc:
+        raise RuntimeError("investigation build contains an invalid build profile") from exc
+    if selected.target_kind != target_kind or expected_profile != actual_profile:
         raise config_failure(
             object_id,
             data={
                 "reason": "build_ref_incompatible",
                 "expected_target_kind": selected.target_kind.value,
                 "actual_target_kind": target_kind.value,
-                "expected_arch": str(selected.build_profile["arch"]),
+                "expected_arch": str(expected_profile["arch"]),
                 "actual_arch": str(actual_profile["arch"]),
             },
         )

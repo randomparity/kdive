@@ -36,6 +36,7 @@ from kdive.services.runs.admission import (
     RunReuseRequirementInput,
     create_run,
 )
+from kdive.services.runs.bind import RunBindRequest, bind_run
 from kdive.services.runs.host_admission import RunCreateError
 from tests.db.conftest import migrated_url  # noqa: F401
 from tests.mcp.systems_support import provider_resolver
@@ -180,7 +181,6 @@ async def _seed_reusable_build(
         "debuginfo_ref": "investigations/vmlinux",
         "build_id": "build-1",
         "cmdline": "console=ttyS0",
-        "build_ref": build_ref,
     }
     expires_at = datetime.now(UTC) + (timedelta(days=-1) if expired else timedelta(days=7))
     async with pool.connection() as conn:
@@ -242,6 +242,73 @@ def test_create_bound_run_reuses_investigation_build(migrated_url: str) -> None:
             )
             assert step[0] == "succeeded"
             assert step[1]["build_ref"] == build_ref
+            assert step[1]["expires_at"] == result.build_expires_at
+        finally:
+            await pool.close()
+
+    asyncio.run(_run())
+
+
+def test_reusable_build_serves_two_systems_and_unbound_bind(migrated_url: str) -> None:  # noqa: F811
+    async def _run() -> None:
+        pool = await _pool_open(migrated_url)
+        try:
+            inv_id = await _seed_investigation(pool)
+            systems = [await _seed_system(pool) for _ in range(3)]
+            build_ref = await _seed_reusable_build(pool, inv_id)
+            runs = []
+            for system_id in systems[:2]:
+                runs.append(
+                    await _create(
+                        pool,
+                        _ctx(),
+                        RunCreateRequest(
+                            investigation_id=inv_id,
+                            system_id=system_id,
+                            build_profile={"schema_version": 1},
+                            build_ref=build_ref,
+                        ),
+                    )
+                )
+            unbound = await _create(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    target_kind="local-libvirt",
+                    build_profile={"schema_version": 1},
+                    build_ref=build_ref,
+                ),
+            )
+            bound = await bind_run(
+                pool,
+                _ctx(),
+                RunBindRequest(run_id=str(unbound.run_id), system_id=systems[2]),
+            )
+            assert str(bound.system_id) == systems[2]
+            step_results = await _fetchall(
+                pool,
+                "SELECT result FROM run_steps WHERE run_id = ANY(%s) AND step = 'build' "
+                "ORDER BY result::text",
+                ([run.run_id for run in [*runs, unbound]],),
+            )
+            assert len(step_results) == 3
+            assert step_results[0] == step_results[1] == step_results[2]
+            assert step_results[0][0] == {
+                "kernel_ref": "investigations/kernel",
+                "debuginfo_ref": "investigations/vmlinux",
+                "build_id": "build-1",
+                "cmdline": "console=ttyS0",
+                "build_ref": build_ref,
+                "expires_at": runs[0].build_expires_at,
+            }
+            manifests = await _fetchall(
+                pool,
+                "SELECT owner_id FROM upload_manifests WHERE owner_kind = 'runs' "
+                "AND owner_id = ANY(%s)",
+                ([run.run_id for run in [*runs, unbound]],),
+            )
+            assert manifests == []
         finally:
             await pool.close()
 
@@ -257,6 +324,7 @@ def test_create_rejects_unusable_reusable_build(migrated_url: str, mode: str) ->
         pool = await _pool_open(migrated_url)
         try:
             inv_id = await _seed_investigation(pool)
+            sys_id = await _seed_system(pool)
             owner_id = await _seed_investigation(pool) if mode == "cross_investigation" else inv_id
             build_ref = (
                 "not-a-build-ref"
@@ -284,7 +352,7 @@ def test_create_rejects_unusable_reusable_build(migrated_url: str, mode: str) ->
                     _ctx(),
                     RunCreateRequest(
                         investigation_id=inv_id,
-                        target_kind="local-libvirt",
+                        system_id=sys_id,
                         build_profile={"schema_version": 1},
                         build_ref=build_ref,
                     ),
@@ -303,6 +371,22 @@ def test_create_rejects_unusable_reusable_build(migrated_url: str, mode: str) ->
                 pool, "SELECT id FROM runs WHERE investigation_id = %s", (inv_id,)
             )
             assert rows == []
+            inv_state, last_run_at = await _fetchone(
+                pool,
+                "SELECT state, last_run_at FROM investigations WHERE id = %s",
+                (inv_id,),
+            )
+            assert inv_state == "open"
+            assert last_run_at is None
+            assert (
+                await _fetchall(
+                    pool, "SELECT object_id FROM audit_log WHERE object_id = %s", (inv_id,)
+                )
+                == []
+            )
+            assert (
+                await _fetchall(pool, "SELECT id FROM runs WHERE system_id = %s", (sys_id,)) == []
+            )
         finally:
             await pool.close()
 

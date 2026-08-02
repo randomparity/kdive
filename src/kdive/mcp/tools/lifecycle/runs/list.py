@@ -132,19 +132,24 @@ async def list_runs(
         kept, truncated = _paginate(rows, capped)
         runs = [Run.model_validate(row) for row in kept]
         build_deadlines: dict[str, str] = {}
-        async with pool.connection() as conn:
-            for run in runs:
-                if run.build_ref is None:
-                    continue
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT expires_at FROM investigation_builds "
-                        "WHERE investigation_id = %s AND build_ref = %s",
-                        (run.investigation_id, run.build_ref),
-                    )
-                    row = await cur.fetchone()
-                if row is not None:
-                    build_deadlines[str(run.id)] = row[0].isoformat()
+        selected = [run for run in runs if run.build_ref is not None]
+        if selected:
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT requested.run_id, ib.expires_at "
+                    "FROM unnest(%s::uuid[], %s::uuid[], %s::text[]) "
+                    "AS requested(run_id, investigation_id, build_ref) "
+                    "JOIN investigation_builds ib "
+                    "ON ib.investigation_id = requested.investigation_id "
+                    "AND ib.build_ref = requested.build_ref",
+                    (
+                        [run.id for run in selected],
+                        [run.investigation_id for run in selected],
+                        [run.build_ref for run in selected],
+                    ),
+                )
+                for run_id, expires_at in await cur.fetchall():
+                    build_deadlines[str(run_id)] = expires_at.isoformat()
         next_cursor = (
             _encode_ts_uuid_cursor(_RUNS_LIST_TAG, kept[-1]["created_at"], kept[-1]["id"])
             if truncated and kept

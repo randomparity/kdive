@@ -320,8 +320,9 @@ def _register_runs_create(
 
         Omit build_ref to create a new external upload: read
         resource://kdive/contracts/external-build, call artifacts.create_run_upload, then
-        runs.complete_build. A same-Investigation compatible build_ref reuses validated artifacts
-        and proceeds directly to runs.install. Missing or malformed references report
+        runs.complete_build. A same-Investigation compatible build_ref reuses validated artifacts;
+        a bound Run proceeds to runs.install, while an unbound Run proceeds to runs.bind. Missing
+        or malformed references report
         build_ref_not_found; target/profile mismatches report build_ref_incompatible; expiry
         reports build_ref_expired and instructs you to retry runs.create without the reference.
         """
