@@ -119,6 +119,8 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "ops.force_release": ("tests/mcp/ops/test_breakglass.py",),
     "ops.force_teardown": ("tests/mcp/ops/test_breakglass.py",),
     "ops.jobs_list": ("tests/mcp/ops/test_queue_tools.py",),
+    "ops.build_uses_list": ("tests/mcp/ops/test_build_use_recovery.py",),
+    "ops.recover_build_use": ("tests/mcp/ops/test_build_use_recovery.py",),
     "ops.reconcile_now": ("tests/mcp/ops/test_reconcile_now.py",),
     "ops.export_cost_classes": ("tests/mcp/ops/test_ops_tuning.py",),
     "ops.export_systems_toml": ("tests/mcp/ops/test_ops_tuning.py",),

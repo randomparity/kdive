@@ -130,6 +130,8 @@ visible to every authenticated token regardless of grants.
 | `ops.force_release` | plat-admin |  |  |  |  |  |  | ✓ |
 | `ops.force_teardown` | plat-admin |  |  |  |  |  |  | ✓ |
 | `ops.jobs_list` | plat-operator |  |  |  |  | ✓ |  |  |
+| `ops.build_uses_list` | plat-operator |  |  |  |  | ✓ |  |  |
+| `ops.recover_build_use` | plat-operator |  |  |  |  | ✓ |  |  |
 | `ops.reconcile_now` | plat-operator |  |  |  |  | ✓ |  |  |
 | `ops.reconcile_systems` | plat-admin |  |  |  |  |  |  | ✓ |
 | `ops.set_cost_class_coeff` | plat-operator |  |  |  |  | ✓ |  |  |

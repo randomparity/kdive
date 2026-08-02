@@ -14,7 +14,7 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import clamp_list_limit
+from kdive.mcp.tools._common import MAX_LIST_LIMIT, clamp_list_limit
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
@@ -22,6 +22,8 @@ from kdive.services.runs.build_use import recover_build_use_in_transaction
 
 _TOOL = "ops.recover_build_use"
 _LIST_TOOL = "ops.build_uses_list"
+_MAX_HOLDER_CHARS = 512
+_MAX_REASON_CHARS = 512
 
 
 class WorkerDeathVerifier(Protocol):
@@ -110,7 +112,7 @@ async def recover_build_use(
         await audit_platform_denial(pool, ctx, tool=_TOOL, scope="build-use-recovery")
         return ToolResponse.denied(str(use_id), missing_roles=[PlatformRole.PLATFORM_OPERATOR])
     clean_reason = reason.strip()
-    if not clean_reason or len(clean_reason) > 512 or len(holder) > 512:
+    if not clean_reason or len(clean_reason) > _MAX_REASON_CHARS or len(holder) > _MAX_HOLDER_CHARS:
         return _failure(use_id, "holder and reason must be non-empty and at most 512 characters")
     evidence = verifier.verify_dead(holder)
     if evidence is None:
@@ -150,7 +152,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, verifier: WorkerDeathVe
     async def ops_build_uses_list(
         limit: Annotated[
             int,
-            Field(description="Maximum oldest-first pin rows returned; server-capped at 100."),
+            Field(
+                description=(
+                    f"Maximum oldest-first pin rows returned; server-capped at {MAX_LIST_LIMIT}."
+                )
+            ),
         ] = 50,
     ) -> ToolResponse:
         """List persistent reusable-build pins. Requires platform operator.
@@ -165,13 +171,19 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, verifier: WorkerDeathVe
         use_id: Annotated[UUID, Field(description="Exact stranded build-use UUID.")],
         holder: Annotated[
             str,
-            Field(description="Exact worker incarnation recorded on that use row; max 512 chars."),
+            Field(
+                description=(
+                    "Exact worker incarnation recorded on that use row; "
+                    f"max {_MAX_HOLDER_CHARS} chars."
+                )
+            ),
         ],
         reason: Annotated[
             str,
             Field(
                 description=(
-                    "Operator justification retained in the recovery ledger; max 512 chars."
+                    "Operator justification retained in the recovery ledger; "
+                    f"max {_MAX_REASON_CHARS} chars."
                 )
             ),
         ],
