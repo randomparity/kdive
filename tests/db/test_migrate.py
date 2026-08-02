@@ -202,6 +202,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0099",
         "0100",
         "0101",
+        "0102",
     ]
     assert second == []
 
@@ -836,6 +837,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0099",
         "0100",
         "0101",
+        "0102",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1214,6 +1216,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0099",
         "0100",
         "0101",
+        "0102",
     ]
 
 

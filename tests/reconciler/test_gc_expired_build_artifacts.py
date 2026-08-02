@@ -833,3 +833,39 @@ def test_gc_retains_expired_build_row_until_retired_key_batch_completes(
         assert store.calls == [(key, 20)] * 3
 
     asyncio.run(_run())
+
+
+def test_public_ttl_gc_gives_legacy_lane_a_bounded_budget_during_generation_backlog(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kdive.reconciler.cleanup import gc as gc_module
+
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            legacy = [
+                await _seed_artifact(
+                    seed,
+                    owner_kind="runs",
+                    retention_class="build",
+                    age=timedelta(days=40),
+                )
+                for _ in range(5)
+            ]
+        finally:
+            await seed.close()
+
+        monkeypatch.setattr(gc_module, "_LEGACY_BUILD_ARTIFACTS_PER_PASS", 2)
+        store = _RecordingStore()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 2
+            assert len(store.deleted) == 2
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 2
+            assert len(store.deleted) == 4
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
+            assert set(store.deleted) == {key for _, key in legacy}
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
