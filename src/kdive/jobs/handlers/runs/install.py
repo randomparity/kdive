@@ -188,6 +188,16 @@ async def _build_install_plan(
     _log.info("install: run %s resolved cmdline %r (method %s)", run_id, cmdline, method.value)
     initrd_ref = build_result.initrd_ref if build_result is not None else None
     debuginfo_ref = build_result.debuginfo_ref if build_result is not None else None
+    refs = {"kernel": kernel_ref}
+    if initrd_ref is not None:
+        refs["initrd"] = initrd_ref
+    if debuginfo_ref is not None:
+        refs["vmlinux"] = debuginfo_ref
+    artifact_versions = _validated_artifact_versions(
+        run.build_ref,
+        refs,
+        build_result.artifact_versions if build_result is not None else None,
+    )
     return _InstallPlan(
         run=run,
         installer=installer,
@@ -199,13 +209,30 @@ async def _build_install_plan(
             method=method,
             initrd_ref=initrd_ref,
             debuginfo_ref=debuginfo_ref,
-            artifact_versions=(
-                build_result.artifact_versions if build_result is not None else None
-            ),
+            artifact_versions=artifact_versions,
         ),
         applied_extra=applied_extra,
         crashkernel=payload.crashkernel,
     )
+
+
+def _validated_artifact_versions(
+    build_ref: str | None,
+    refs: dict[str, str],
+    versions: dict[str, str] | None,
+) -> dict[str, str] | None:
+    """Require exact immutable versions for every reusable-build provider input."""
+    if build_ref is None:
+        return versions
+    missing = [name for name in refs if not versions or not versions.get(name)]
+    if missing:
+        raise CategorizedError(
+            "reusable build is missing immutable artifact versions",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"reason": "reusable_build_versions_incomplete", "missing": missing},
+        )
+    assert versions is not None  # The missing-version guard above proves the reusable map exists.
+    return {name: versions[name] for name in refs}
 
 
 async def _run_install_step(
