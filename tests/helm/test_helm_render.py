@@ -310,7 +310,7 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
     assert rule[0]["resources"] == ["pods"]
     assert rule[0]["verbs"] == ["get"]
     assert rule[0]["resourceNames"] == [f"kdive-kdive-worker-{ordinal}" for ordinal in range(32)]
-    assert rule[1]["resources"] == ["pods/finalizers"]
+    assert rule[1]["resources"] == ["pods"]
     assert rule[1]["verbs"] == ["patch"]
     assert rule[1]["resourceNames"] == rule[0]["resourceNames"]
     assert server["spec"]["template"]["spec"]["serviceAccountName"].endswith("-server")

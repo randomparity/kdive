@@ -59,7 +59,15 @@ def test_up_starts_stack_then_creates_binds_and_starts_exact_worker() -> None:
     asyncio.run(lifecycle.up())
 
     commands = _commands(events)
-    assert commands[0][0] == ("docker", "compose", "up", "-d")
+    assert commands[0][0] == (
+        "docker",
+        "compose",
+        "up",
+        "-d",
+        "--wait",
+        "--wait-timeout",
+        "120",
+    )
     assert commands[2][0][-3:] == ("create", "--no-recreate", "worker")
     assert commands[2][1] == {"KDIVE_WORKER_INCARNATION_NONCE": _NONCE}
     assert events[-1] == ("register-and-start", "a" * 64)

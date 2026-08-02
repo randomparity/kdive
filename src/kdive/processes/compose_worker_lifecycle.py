@@ -66,7 +66,7 @@ class ComposeWorkerLifecycle:
 
     async def up(self) -> None:
         """Start the non-worker graph, then create, bind, and start the worker."""
-        self._command((*_COMPOSE, "up", "-d"), None)
+        self._command((*_COMPOSE, "up", "-d", "--wait", "--wait-timeout", "120"), None)
         current = self._worker_id()
         if current is None:
             await self._create()

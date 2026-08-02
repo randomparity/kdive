@@ -37,6 +37,8 @@ The Helm worker Pod template carries `kdive.io/worker-termination-evidence` in i
 A bounded reconciler witness reads only configured StatefulSet ordinal names. It accepts only the
 same Pod UID in `Succeeded` or `Failed`, commits termination, and then removes its exact finalizer
 with resource-version-fenced JSON Patch. API/database failure leaves the Pod and pin retained.
+Kubernetes exposes Pod finalizers as metadata on the Pod rather than a separate finalizer
+subresource, so the witness has `patch pods` authority only for the fixed generated ordinal names.
 Node loss, force deletion, and manual finalizer removal are unsupported infrastructure bypasses and
 never become absence evidence.
 
