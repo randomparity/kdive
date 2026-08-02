@@ -371,9 +371,10 @@ and `KDIVE_REMOTE_LIBVIRT_MACHINE`.
 For S3, prefer IRSA/workload identity, or a managed Secret you `envFrom` onto the pods.
 The fixed `demoCredentials` are non-secret by design: the demo data they guard is
 throwaway `emptyDir` state.
-The server uses a dedicated service account with `get` permission only for the configured worker
-Pod names. Worker holders include the downward-API Pod UID, so `ops.recover_build_use` can prove a
-specific Pod incarnation terminated without trusting heartbeat age. Scaling `worker.replicas`
+The reconciler's termination witness uses a dedicated service account with `get` and `patch`
+permission only for the configured worker Pod names. The server has no Pod authority. Worker
+holders include the downward-API Pod UID, and the witness records a specific terminal Pod
+incarnation before removing its finalizer. Scaling `worker.replicas`
 does not shrink the Role's bounded `resourceNames`: `worker.deathVerificationOrdinalCeiling`
 defaults to 32 and is recovery history. Raise it before scaling beyond it, and never lower it after
 an ordinal has run. No cluster-wide Pod permission is required.

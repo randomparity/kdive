@@ -4,7 +4,7 @@ metadata:
   name: {{ include "kdive.fullname" . }}-server
   labels:
     {{- include "kdive.labels" . | nindent 4 }}
-automountServiceAccountToken: true
+automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -45,8 +45,6 @@ metadata:
   labels:
     {{- include "kdive.labels" . | nindent 4 }}
 subjects:
-  - kind: ServiceAccount
-    name: {{ include "kdive.fullname" . }}-server
   - kind: ServiceAccount
     name: {{ include "kdive.fullname" . }}-worker-termination-witness
 roleRef:

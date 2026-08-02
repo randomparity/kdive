@@ -198,10 +198,14 @@
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
 | `KDIVE_DOCKER_DEATH_API` | server | `http://worker-death-api:2375` | no | Private inspect-only Docker authority endpoint used by the Docker death verifier. |
+| `KDIVE_KUBERNETES_WITNESS_NAMESPACE` | reconciler | `` | no | Namespace watched by the bounded worker termination witness; blank disables it. |
+| `KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING` | reconciler | `0` | no | Maximum exclusive worker ordinal polled by the Kubernetes termination witness. |
+| `KDIVE_KUBERNETES_WITNESS_WORKER_NAME` | reconciler | `` | no | StatefulSet worker name prefix used with bounded ordinal Pod reads. |
 | `KDIVE_POD_NAME` | worker | — | conditional | Kubernetes worker Pod name supplied by the downward API. |
 | `KDIVE_POD_NAMESPACE` | worker | — | conditional | Kubernetes worker Pod namespace supplied by the downward API. |
 | `KDIVE_POD_UID` | worker | — | conditional | Immutable Kubernetes worker Pod UID supplied by the downward API. |
 | `KDIVE_WORKER_DEATH_VERIFIER` | server | `disabled` | no | Authoritative worker-death verifier; disabled omits build-use recovery tools. |
+| `KDIVE_WORKER_INCARNATION_ID` | worker | — | conditional | Lifecycle-gate-injected immutable Docker worker incarnation nonce. |
 | `KDIVE_WORKER_INCARNATION_KIND` | worker | `local` | no | Immutable worker identity source: local process, Docker container, or Kubernetes Pod. |
 
 # Test, tooling, and guest-helper variables

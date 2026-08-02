@@ -298,6 +298,7 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
     assert res.returncode == 0, res.stderr
     docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
     role = next(doc for doc in docs if doc.get("kind") == "Role")
+    binding = next(doc for doc in docs if doc.get("kind") == "RoleBinding")
     server = next(
         doc
         for doc in docs
@@ -313,6 +314,9 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
     assert rule[1]["resources"] == ["pods"]
     assert rule[1]["verbs"] == ["patch"]
     assert rule[1]["resourceNames"] == rule[0]["resourceNames"]
+    assert binding["subjects"] == [
+        {"kind": "ServiceAccount", "name": "kdive-kdive-worker-termination-witness"}
+    ]
     assert server["spec"]["template"]["spec"]["serviceAccountName"].endswith("-server")
     server_env = server["spec"]["template"]["spec"]["containers"][0]["env"]
     assert {item["name"]: item.get("value") for item in server_env}[
