@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
 
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
@@ -129,6 +130,122 @@ class ArtifactObjectDeleter(Protocol):
     """The bounded retired-key delete surface the artifact reapers need."""
 
     def delete_retired_key_batch(self, key: str, limit: int) -> bool: ...
+
+
+class ExactArtifactObjectDeleter(Protocol):
+    """The exact-version delete surface required by generation reclamation."""
+
+    def delete_version(self, key: str, version_id: str) -> None: ...
+
+
+async def _mark_generation_reclaiming(
+    conn: AsyncConnection, investigation_id: UUID, generation: UUID
+) -> dict[str, dict[str, str]] | None:
+    """Fence one generation after rechecking its Run and install-job pins."""
+    async with (
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
+    ):
+        row = await (
+            await conn.execute(
+                "SELECT state, build_ref, artifacts FROM investigation_builds "
+                "WHERE investigation_id = %s AND generation = %s FOR UPDATE",
+                (investigation_id, generation),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        state, build_ref, artifacts = row
+        if state == "active":
+            pin = await (
+                await conn.execute(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM runs r WHERE r.investigation_id = %s "
+                    "AND r.build_ref = %s AND r.state IN ('created', 'running') "
+                    "UNION ALL SELECT 1 FROM jobs j JOIN runs r "
+                    "ON r.id::text = j.payload->>'run_id' "
+                    "WHERE r.investigation_id = %s AND r.build_ref = %s "
+                    "AND j.kind = 'install' AND j.state IN ('queued', 'running'))",
+                    (investigation_id, build_ref, investigation_id, build_ref),
+                )
+            ).fetchone()
+            if pin is None or pin[0]:
+                return None
+            await conn.execute(
+                "UPDATE investigation_builds SET state = 'reclaiming' "
+                "WHERE investigation_id = %s AND generation = %s AND state = 'active'",
+                (investigation_id, generation),
+            )
+        return artifacts
+
+
+async def _reclaim_generation(
+    conn: AsyncConnection,
+    store: ExactArtifactObjectDeleter,
+    investigation_id: UUID,
+    generation: UUID,
+) -> int:
+    artifacts = await _mark_generation_reclaiming(conn, investigation_id, generation)
+    if artifacts is None:
+        return 0
+    for artifact in artifacts.values():
+        try:
+            await asyncio.to_thread(
+                store.delete_version, str(artifact["key"]), str(artifact["version_id"])
+            )
+        except Exception:  # noqa: BLE001 - preserve reclaiming state for a later pass
+            _log.warning(
+                "reconciler: deleting Investigation build generation %s failed; retry next pass",
+                generation,
+                exc_info=True,
+            )
+            return 0
+    keys = [str(artifact["key"]) for artifact in artifacts.values()]
+    async with (
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
+    ):
+        result = await conn.execute(
+            "DELETE FROM investigation_builds WHERE investigation_id = %s "
+            "AND generation = %s AND state = 'reclaiming' RETURNING generation",
+            (investigation_id, generation),
+        )
+        if await result.fetchone() is None:
+            return 0
+        await conn.execute(
+            "DELETE FROM artifacts WHERE owner_kind = 'investigations' AND owner_id = %s "
+            "AND object_key = ANY(%s)",
+            (investigation_id, keys),
+        )
+    return len(keys)
+
+
+async def _generation_candidates(
+    conn: AsyncConnection, *, investigation_id: UUID | None = None, expired: bool = False
+) -> list[tuple[UUID, UUID]]:
+    if investigation_id is not None:
+        rows = await (
+            await conn.execute(
+                "SELECT investigation_id, generation FROM investigation_builds "
+                "WHERE state IN ('active', 'reclaiming') AND investigation_id = %s",
+                (investigation_id,),
+            )
+        ).fetchall()
+    elif expired:
+        rows = await (
+            await conn.execute(
+                "SELECT investigation_id, generation FROM investigation_builds "
+                "WHERE state = 'reclaiming' OR (state = 'active' AND expires_at <= now())"
+            )
+        ).fetchall()
+    else:
+        rows = await (
+            await conn.execute(
+                "SELECT investigation_id, generation FROM investigation_builds "
+                "WHERE state IN ('active', 'reclaiming')"
+            )
+        ).fetchall()
+    return [(row[0], row[1]) for row in rows]
 
 
 async def gc_idempotency_keys(conn: AsyncConnection, retention: timedelta) -> int:
@@ -276,6 +393,15 @@ async def gc_investigation_artifacts(
         investigation_ids = [row[0] for row in await cur.fetchall()]
     deleted = 0
     for investigation_id in investigation_ids:
+        for candidate_investigation_id, generation in await _generation_candidates(
+            conn, investigation_id=investigation_id
+        ):
+            deleted += await _reclaim_generation(
+                conn,
+                cast("ExactArtifactObjectDeleter", store),
+                candidate_investigation_id,
+                generation,
+            )
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT a.id, a.object_key FROM artifacts a JOIN runs r ON r.id = a.owner_id "
@@ -307,7 +433,13 @@ async def gc_investigation_artifacts(
             async with conn.transaction(), conn.cursor() as cur:
                 await cur.execute("DELETE FROM artifacts WHERE id = %s", (artifact_id,))
             deleted += 1
-        if drained:
+        remaining_generation = await (
+            await conn.execute(
+                "SELECT 1 FROM investigation_builds WHERE investigation_id = %s LIMIT 1",
+                (investigation_id,),
+            )
+        ).fetchone()
+        if drained and remaining_generation is None:
             async with conn.transaction(), conn.cursor() as cur:
                 await cur.execute(
                     "UPDATE investigations SET cleanup_pending_at = NULL WHERE id = %s",
@@ -328,6 +460,11 @@ async def gc_expired_build_artifacts(
     gated on ``artifacts.created_at`` rather than the close marker. A per-object store failure is
     logged and retried next pass rather than aborting the sweep (like :func:`gc_report_artifacts`).
     """
+    deleted = 0
+    for investigation_id, generation in await _generation_candidates(conn, expired=True):
+        deleted += await _reclaim_generation(
+            conn, cast("ExactArtifactObjectDeleter", store), investigation_id, generation
+        )
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT id, object_key FROM artifacts "
@@ -335,7 +472,6 @@ async def gc_expired_build_artifacts(
             (list(_BUILD_RETENTION_CLASSES), retention),
         )
         candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
-    deleted = 0
     for artifact_id, object_key in candidates:
         try:
             complete = await asyncio.to_thread(store.delete_retired_key_batch, object_key, 20)

@@ -12,6 +12,7 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.gc import gc_investigation_artifacts
@@ -28,6 +29,9 @@ class _RecordingStore:
         assert limit == 20
         self.deleted.append(key)
         return True
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.deleted.append(f"{key}@{version_id}")
 
 
 async def _seed_investigation(
@@ -85,6 +89,177 @@ async def _marker(conn: psycopg.AsyncConnection, inv_id: UUID) -> object:
     row = await cur.fetchone()
     assert row is not None
     return row[0]
+
+
+async def _seed_generation(
+    conn: psycopg.AsyncConnection, investigation_id: UUID, *, expired: bool = False
+) -> tuple[UUID, str, list[tuple[str, str]]]:
+    generation = uuid4()
+    digest = "a" * 64
+    build_ref = f"{digest}.{generation}"
+    versions = [
+        (f"builds/{generation}/kernel", "v-kernel"),
+        (f"builds/{generation}/debug", "v-debug"),
+    ]
+    artifacts = {
+        "kernel": {"key": versions[0][0], "version_id": versions[0][1]},
+        "debuginfo": {"key": versions[1][0], "version_id": versions[1][1]},
+    }
+    await conn.execute(
+        "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+        "content_digest, canonical_document, build_result, artifacts, target_kind, "
+        "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, '{}'::jsonb, "
+        "%s::jsonb, 'local-libvirt', '{}'::jsonb, "
+        "CASE WHEN %s THEN now() - interval '1 second' ELSE now() + interval '1 day' END)",
+        (
+            investigation_id,
+            generation,
+            build_ref,
+            digest,
+            Jsonb(artifacts),
+            expired,
+        ),
+    )
+    for key, _version in versions:
+        await conn.execute(
+            "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+            "retention_class) VALUES ('investigations', %s, %s, 'etag', 'sensitive', 'build')",
+            (investigation_id, key),
+        )
+    return generation, build_ref, versions
+
+
+def test_closed_generation_reclaims_only_its_exact_versions(migrated_url: str) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        try:
+            investigation_id = await _seed_investigation(
+                conn, state="closed", marker_age=timedelta(days=2)
+            )
+            generation, _build_ref, versions = await _seed_generation(conn, investigation_id)
+        finally:
+            await conn.close()
+
+        store = _RecordingStore()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_investigation_artifacts(conn, store, timedelta(days=1)) == 2
+            row = await (
+                await conn.execute(
+                    "SELECT state FROM investigation_builds WHERE investigation_id = %s "
+                    "AND generation = %s",
+                    (investigation_id, generation),
+                )
+            ).fetchone()
+            assert row is None
+            assert await _marker(conn, investigation_id) is None
+        finally:
+            await conn.close()
+
+        assert sorted(store.deleted) == sorted(f"{key}@{version}" for key, version in versions)
+
+    asyncio.run(_run())
+
+
+def test_closed_generation_is_pinned_by_queued_install(migrated_url: str) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        try:
+            investigation_id = await _seed_investigation(
+                conn, state="closed", marker_age=timedelta(days=2)
+            )
+            generation, build_ref, _versions = await _seed_generation(conn, investigation_id)
+            run_id = await _seed_run(conn, investigation_id)
+            await conn.execute(
+                "UPDATE runs SET state = 'succeeded', build_ref = %s WHERE id = %s",
+                (build_ref, run_id),
+            )
+            await conn.execute(
+                "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, dedup_key) "
+                "VALUES ('install', %s::jsonb, 'queued', 3, '{}'::jsonb, %s)",
+                (Jsonb({"run_id": str(run_id)}), f"install-{run_id}"),
+            )
+        finally:
+            await conn.close()
+
+        store = _RecordingStore()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_investigation_artifacts(conn, store, timedelta(days=1)) == 0
+            row = await (
+                await conn.execute(
+                    "SELECT state FROM investigation_builds WHERE investigation_id = %s "
+                    "AND generation = %s",
+                    (investigation_id, generation),
+                )
+            ).fetchone()
+            assert row == ("active",)
+            assert await _marker(conn, investigation_id) is not None
+        finally:
+            await conn.close()
+        assert store.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_closed_generation_is_pinned_by_non_terminal_run(migrated_url: str) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        try:
+            investigation_id = await _seed_investigation(
+                conn, state="closed", marker_age=timedelta(days=2)
+            )
+            generation, build_ref, _versions = await _seed_generation(conn, investigation_id)
+            run_id = await _seed_run(conn, investigation_id)
+            await conn.execute("UPDATE runs SET build_ref = %s WHERE id = %s", (build_ref, run_id))
+        finally:
+            await conn.close()
+
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_investigation_artifacts(conn, _RecordingStore(), timedelta(days=1)) == 0
+            state = await (
+                await conn.execute(
+                    "SELECT state FROM investigation_builds WHERE generation = %s", (generation,)
+                )
+            ).fetchone()
+            assert state == ("active",)
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_settled_install_releases_generation_pin(migrated_url: str) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        try:
+            investigation_id = await _seed_investigation(
+                conn, state="closed", marker_age=timedelta(days=2)
+            )
+            _generation, build_ref, versions = await _seed_generation(conn, investigation_id)
+            run_id = await _seed_run(conn, investigation_id)
+            await conn.execute(
+                "UPDATE runs SET state = 'succeeded', build_ref = %s WHERE id = %s",
+                (build_ref, run_id),
+            )
+            await conn.execute(
+                "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, dedup_key) "
+                "VALUES ('install', %s::jsonb, 'failed', 3, '{}'::jsonb, %s)",
+                (Jsonb({"run_id": str(run_id)}), f"install-{run_id}"),
+            )
+        finally:
+            await conn.close()
+
+        store = _RecordingStore()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_investigation_artifacts(conn, store, timedelta(days=1)) == 2
+        finally:
+            await conn.close()
+        assert sorted(store.deleted) == sorted(f"{key}@{version}" for key, version in versions)
+
+    asyncio.run(_run())
 
 
 def test_reclaims_only_run_build_artifacts_of_closed_past_grace(migrated_url: str) -> None:
