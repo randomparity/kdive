@@ -197,7 +197,18 @@ async def _seed_reusable_build(
                 digest,
                 Jsonb({"version": 1}),
                 Jsonb(result),
-                Jsonb({}),
+                Jsonb(
+                    {
+                        "kernel": {
+                            "key": "investigations/kernel",
+                            "version_id": "kernel-v1",
+                        },
+                        "vmlinux": {
+                            "key": "investigations/vmlinux",
+                            "version_id": "vmlinux-v1",
+                        },
+                    }
+                ),
                 target_kind.value,
                 Jsonb(profile or {"schema_version": 1, "arch": "x86_64"}),
                 state,
@@ -244,6 +255,10 @@ def test_create_bound_run_reuses_investigation_build(migrated_url: str) -> None:
             assert step[0] == "succeeded"
             assert step[1]["build_ref"] == build_ref
             assert step[1]["expires_at"] == result.build_expires_at
+            assert step[1]["artifact_versions"] == {
+                "kernel": "kernel-v1",
+                "vmlinux": "vmlinux-v1",
+            }
         finally:
             await pool.close()
 
@@ -302,6 +317,10 @@ def test_reusable_build_serves_two_systems_and_unbound_bind(migrated_url: str) -
                 "cmdline": "console=ttyS0",
                 "build_ref": build_ref,
                 "expires_at": runs[0].build_expires_at,
+                "artifact_versions": {
+                    "kernel": "kernel-v1",
+                    "vmlinux": "vmlinux-v1",
+                },
             }
             manifests = await _fetchall(
                 pool,
@@ -412,7 +431,7 @@ def test_create_reports_expired_after_generation_was_reclaimed(
             sys_id = await _seed_system(pool)
             build_ref = await _seed_reusable_build(pool, inv_id, expired=True)
             async with pool.connection() as conn:
-                assert await gc_expired_build_artifacts(conn, _Store(), timedelta(days=30)) == 0
+                assert await gc_expired_build_artifacts(conn, _Store(), timedelta(days=30)) == 2
             with pytest.raises(RunCreateError) as caught:
                 await _create(
                     pool,

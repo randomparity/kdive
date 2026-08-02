@@ -405,6 +405,9 @@ async def _insert_created_run(
             build_result,
             build_ref=selected_build.build_ref,
             expires_at=selected_build.expires_at.isoformat(),
+            artifact_versions={
+                name: artifact["version_id"] for name, artifact in selected_build.artifacts.items()
+            },
         )
     run = await RUNS.insert(
         conn,

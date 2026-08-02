@@ -568,6 +568,9 @@ def _published_result(publication: BuildPublication) -> BuildStepResult:
         stored,
         build_ref=publication.build.build_ref,
         expires_at=publication.build.expires_at.isoformat(),
+        artifact_versions={
+            name: artifact["version_id"] for name, artifact in publication.build.artifacts.items()
+        },
     )
 
 

@@ -860,6 +860,11 @@ def test_complete_build_success_persists_run_step_artifacts_and_audit(migrated_u
         assert result.build_id == "build-id"
         assert result.cmdline == "console=ttyS0"
         assert result.build_provenance == provenance
+        assert result.artifact_versions == {
+            "initrd": "test-version",
+            "kernel": "test-version",
+            "vmlinux": "test-version",
+        }
         assert state == RunState.SUCCEEDED.value
         assert run_kernel == kernel
         assert run_debuginfo == debuginfo
