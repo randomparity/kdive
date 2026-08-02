@@ -235,6 +235,18 @@ def _validated_artifact_versions(
     return {name: versions[name] for name in refs}
 
 
+async def _wait_through_cancellation(task: asyncio.Task[object]) -> bool:
+    """Wait for a task to finish, retaining cancellation for its caller."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    task.result()
+    return cancelled
+
+
 async def _run_install_step(
     conn: AsyncConnection,
     run_id: UUID,
@@ -244,11 +256,17 @@ async def _run_install_step(
     claim = await claim_run_step(conn, run_id, "install")
     if not claim.claimed:
         return False
+    provider_task = asyncio.create_task(asyncio.to_thread(installer.install, request))
     try:
-        await asyncio.to_thread(installer.install, request)
+        cancelled = await _wait_through_cancellation(provider_task)
     except Exception:
-        await abandon_run_step_best_effort(conn, run_id, "install")
+        cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
+        await _wait_through_cancellation(cleanup)
         raise
+    if cancelled:
+        cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
+        await _wait_through_cancellation(cleanup)
+        raise asyncio.CancelledError
     return True
 
 

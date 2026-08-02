@@ -1,10 +1,12 @@
--- 0101_worker_incarnations.sql — permanent exact-worker termination evidence.
+-- Permanent exact-worker termination evidence and fence credentials (ADR-0533, #1803).
 CREATE TABLE worker_incarnations (
     incarnation text PRIMARY KEY,
     authority_kind text NOT NULL,
     authority_binding jsonb NOT NULL,
+    fence_protocol integer NOT NULL CHECK (fence_protocol > 0),
+    credential_hash bytea NOT NULL UNIQUE CHECK (octet_length(credential_hash) = 32),
     state text NOT NULL DEFAULT 'active',
-    recorded_at timestamptz NOT NULL DEFAULT now(),
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     terminated_at timestamptz,
     outcome text,
     CONSTRAINT worker_incarnations_incarnation_bounded

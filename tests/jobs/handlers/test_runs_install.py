@@ -74,6 +74,9 @@ def test_cancelled_install_waits_for_provider_thread_before_abandoning(
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
