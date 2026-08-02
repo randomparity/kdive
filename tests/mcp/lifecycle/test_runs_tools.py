@@ -1991,6 +1991,25 @@ def test_created_response_chains_to_the_upload_loop() -> None:
     assert resp.refs["external_build_contract"] == "resource://kdive/contracts/external-build"
 
 
+def test_created_response_with_reusable_build_chains_to_install() -> None:
+    base = _create_result()
+    resp = _created_response(
+        RunCreateResult(
+            run_id=base.run_id,
+            project=base.project,
+            investigation_id=base.investigation_id,
+            target_kind=base.target_kind,
+            build_ref=f"{'a' * 64}.{uuid4()}",
+            build_expires_at="2026-08-08T00:00:00+00:00",
+        )
+    )
+    assert resp.status == "succeeded"
+    assert resp.suggested_next_actions == ["runs.get", "runs.install"]
+    assert resp.data["build_ref"] is not None
+    assert resp.data["build_expires_at"] == "2026-08-08T00:00:00+00:00"
+    assert "external_build_contract" not in resp.refs
+
+
 def test_create_external_run_chains_to_upload_loop(migrated_url: str) -> None:
     """The build_profile source flows to the response: external create points at the upload loop."""
 

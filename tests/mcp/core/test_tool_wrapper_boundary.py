@@ -473,6 +473,20 @@ def test_runs_wrappers_roundtrip_create_and_validation_through_fastmcp(
     assert count == 1
 
 
+def test_runs_create_schema_describes_reusable_external_build(migrated_url: str) -> None:
+    async def _run():
+        async with _pool(migrated_url) as pool:
+            app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+            tools = {tool.name: tool for tool in await app.list_tools()}
+            return tools["runs.create"]
+
+    tool = asyncio.run(_run())
+    build_ref = tool.parameters["properties"]["build_ref"]
+    assert "64 lowercase hex digest" in build_ref["description"]
+    assert "same-Investigation compatible build_ref" in tool.description
+    assert "retry runs.create without the reference" in tool.description
+
+
 def test_systems_wrappers_roundtrip_provision_and_validation_through_fastmcp(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

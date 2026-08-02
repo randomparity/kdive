@@ -48,7 +48,10 @@ async def create_run(
             result = await _create_run(pool, ctx, request, resolver=resolver)
         except RunCreateError as exc:
             return ToolResponse.failure_from_error(
-                exc.object_id, exc, data=_vocab_for(exc, resolver)
+                exc.object_id,
+                exc,
+                suggested_next_actions=_failure_actions(exc),
+                data=_vocab_for(exc, resolver),
             )
         return _created_response(result)
     return await _create_run_keyed(pool, ctx, request, resolver=resolver, key=idempotency_key)
@@ -92,7 +95,12 @@ async def _create_run_keyed(
     try:
         result = await _create_run(pool, ctx, request, resolver=resolver, recorder=_record)
     except RunCreateError as exc:
-        return ToolResponse.failure_from_error(exc.object_id, exc, data=_vocab_for(exc, resolver))
+        return ToolResponse.failure_from_error(
+            exc.object_id,
+            exc,
+            suggested_next_actions=_failure_actions(exc),
+            data=_vocab_for(exc, resolver),
+        )
     except UniqueViolation:
         async with pool.connection() as conn:
             try:
@@ -117,6 +125,12 @@ def _vocab_for(exc: RunCreateError, resolver: ProviderResolver) -> dict[str, Jso
     return {"available_target_kinds": cast(list[JsonValue], ordered)}
 
 
+def _failure_actions(exc: RunCreateError) -> list[str] | None:
+    if exc.details.get("reason") == "build_ref_expired":
+        return ["runs.create"]
+    return None
+
+
 def _created_response(result: RunCreateResult) -> ToolResponse:
     data: dict[str, JsonValue] = {
         "project": result.project,
@@ -124,11 +138,18 @@ def _created_response(result: RunCreateResult) -> ToolResponse:
         "system_id": str(result.system_id) if result.system_id is not None else None,
         "target_kind": result.target_kind.value,
         "label": result.label,
+        "build_ref": result.build_ref,
+        "build_expires_at": result.build_expires_at,
     }
     if result.expected_boot_failure_kind is not None:
         data["expected_boot_failure"] = result.expected_boot_failure_kind
-    # Every run uploads prebuilt artifacts; point it at the generated contract + upload tool so
-    # the loop is self-describing (ADR-0234 §5).
+    if result.build_ref is not None:
+        return ToolResponse.success(
+            str(result.run_id),
+            "succeeded",
+            suggested_next_actions=["runs.get", "runs.install"],
+            data=data,
+        )
     return ToolResponse.success(
         str(result.run_id),
         "created",
