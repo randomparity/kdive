@@ -2378,6 +2378,76 @@ def test_reusable_create_idempotency_and_read_models(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_reclaimed_build_keeps_expiry_contract_for_reads_and_install(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            investigation_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            system_id = await _seed_system(pool)
+            build_ref = await _seed_investigation_build(pool, investigation_id)
+            created = await _create(pool, _ctx(), investigation_id, system_id, build_ref=build_ref)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE investigation_builds SET expires_at = "
+                    "clock_timestamp() - interval '1 second' WHERE build_ref = %s",
+                    (build_ref,),
+                )
+                await conn.execute(
+                    "UPDATE run_steps SET result = jsonb_set(result, '{expires_at}', "
+                    "to_jsonb((clock_timestamp() - interval '1 second')::text)) "
+                    "WHERE run_id = %s AND step = 'build'",
+                    (created.object_id,),
+                )
+                await conn.execute(
+                    "INSERT INTO investigation_build_tombstones "
+                    "(investigation_id, build_ref, expires_at) "
+                    "SELECT investigation_id, build_ref, expires_at FROM investigation_builds "
+                    "WHERE build_ref = %s",
+                    (build_ref,),
+                )
+                await conn.execute(
+                    "DELETE FROM investigation_builds WHERE build_ref = %s", (build_ref,)
+                )
+
+            read = await get_run(pool, _ctx(), created.object_id)
+            listed = await list_runs(
+                pool, _ctx(), RunsListRequest(investigation_id=investigation_id)
+            )
+            install = await _install(pool, _ctx(), created.object_id)
+            assert read.data["build_expires_at"]
+            assert read.data["server_time"]
+            assert listed.items[0].data["build_expires_at"]
+            assert listed.data["server_time"]
+            assert install.data["reason"] == "build_ref_expired"
+            assert install.data["expires_at"] <= install.data["server_time"]
+            assert install.suggested_next_actions == ["runs.create"]
+
+    asyncio.run(_run())
+
+
+def test_close_reclaimed_build_before_deadline_stays_not_found(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            investigation_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            system_id = await _seed_system(pool)
+            build_ref = await _seed_investigation_build(pool, investigation_id)
+            created = await _create(pool, _ctx(), investigation_id, system_id, build_ref=build_ref)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO investigation_build_tombstones "
+                    "(investigation_id, build_ref, expires_at) "
+                    "SELECT investigation_id, build_ref, expires_at FROM investigation_builds "
+                    "WHERE build_ref = %s",
+                    (build_ref,),
+                )
+                await conn.execute(
+                    "DELETE FROM investigation_builds WHERE build_ref = %s", (build_ref,)
+                )
+            install = await _install(pool, _ctx(), created.object_id)
+            assert install.data == {"reason": "build_ref_not_found"}
+
+    asyncio.run(_run())
+
+
 def test_create_with_label_echoes_and_persists(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

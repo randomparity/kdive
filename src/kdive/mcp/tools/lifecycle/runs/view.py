@@ -31,7 +31,7 @@ from kdive.services.artifacts.listing import (
     list_run_console_artifacts,
 )
 from kdive.services.debug.sessions import active_session_ids_for_run
-from kdive.services.runs.build_catalog import resolve_build
+from kdive.services.runs.build_catalog import resolve_build_expiry
 from kdive.services.runs.liveness import Liveness, derive_liveness
 from kdive.services.runs.steps import (
     READY_BOOT_OUTCOME,
@@ -153,8 +153,13 @@ async def _server_time(conn: AsyncConnection) -> str:
 async def _build_expires_at(conn: AsyncConnection, run: Run) -> str | None:
     if run.build_ref is None:
         return None
-    build = await resolve_build(conn, run.investigation_id, run.build_ref)
-    return build.expires_at.isoformat() if build is not None else None
+    expires_at = await resolve_build_expiry(
+        conn,
+        run_id=run.id,
+        investigation_id=run.investigation_id,
+        build_ref=run.build_ref,
+    )
+    return expires_at.isoformat() if expires_at is not None else None
 
 
 async def _latest_console_id(conn: AsyncConnection, run: Run) -> str | None:
