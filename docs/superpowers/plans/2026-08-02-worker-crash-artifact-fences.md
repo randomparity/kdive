@@ -25,6 +25,11 @@
 
 ### Task 1: Reconcile the migration tail and install database authority
 
+The preserved branch intentionally starts with two independent red conditions: duplicate migration
+versions after merging `main`, and the committed cancellation regression. No commit containing only one
+fix can pass `just ci`. This first integration-baseline commit therefore fixes both before recording a
+new green node; later commits return to one behavior slice each.
+
 **Files:**
 - Remove with `gio trash`: `src/kdive/db/schema/0096_investigation_build_safety.sql`, `src/kdive/db/schema/0097_investigation_build_use_leases.sql`, `src/kdive/db/schema/0098_investigation_build_tombstones.sql`
 - Rename/rewrite: preserved #1803 migrations as unique `0098`–`0105` files under `src/kdive/db/schema/`
@@ -116,7 +121,7 @@ REVOKE INSERT, UPDATE, DELETE ON investigation_build_uses FROM PUBLIC;
 
 - [ ] **Step 7: Run migration tests green**
 
-Run the Step 2 command.
+Run: `uv run python -m pytest tests/db/test_migrate.py tests/db/test_migration_0091_system_object_sweep_cursors.py tests/db/test_worker_fence_authority.py -q`
 
 Expected: all pass; permission-denied cases roll back their transaction before the next assertion.
 
@@ -124,7 +129,7 @@ Expected: all pass; permission-denied cases roll back their transaction before t
 
 Run: `just ci`
 
-Commit explicit migration, install-handler, and test paths with: `feat: enforce worker fence database authority`
+Commit explicit migration, install-handler, and test paths with: `fix: restore worker fence integration baseline`
 
 ---
 
