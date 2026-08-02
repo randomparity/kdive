@@ -75,9 +75,12 @@ incarnation. A recovery audit copies the immutable termination facts before dele
 
 Postgres functions verify `session_user` membership, validate bounded inputs, acquire the incarnation
 advisory lock, and perform each transition transactionally. Runtime roles receive no direct mutation
-grant on the protected tables. Supported Compose and Helm manifests provide distinct secret-backed
-DSNs; the shared migration credential is not injected into runtime workloads. Local development setup
-creates equivalent credentials rather than weakening the checks.
+grant on the protected tables. The lifecycle authority mints a random 256-bit credential for each
+incarnation, stores only its hash, and delivers the plaintext once before worker startup. Worker
+functions derive the holder from the credential hash and derive job/attempt ownership from the locked
+claim; they never trust a caller-supplied holder. Supported Compose and Helm manifests provide distinct
+secret-backed DSNs; the shared migration credential is not injected into runtime workloads. Local
+development setup creates equivalent credentials rather than weakening the checks.
 
 ### Claim and upgrade protocol
 
@@ -105,19 +108,27 @@ starting, injects a random 128-bit nonce, binds it to the full container ID, reg
 witness role, starts, and later persists terminal outcome before removal. Create, stop, recreate, and
 remove are serialized; a missing registry or database fails before destructive runtime action.
 
-The Kubernetes Pod template carries its finalizer at initial creation. The witness scans only the
-configured StatefulSet ordinal range and validates namespace, name, UID, resource version, finalizer,
-and terminal phase. For a terminal Pod absent from the incarnation table, it registers the exact Pod UID
-and immediately terminates it in one database transaction. It then removes only its own finalizer with
-a resource-version and UID test. API/database failure leaves the Pod unchanged. Ordinal history can
-increase but not decrease.
+The Kubernetes Pod template carries its finalizer at initial creation and uses the Pod UID as its
+incarnation. Before the worker claim loop starts, a controller validates the fixed StatefulSet
+name/ordinal and UID, registers that exact binding, and writes the one-time incarnation credential to a
+Pod-UID-owned Secret; an init gate blocks until that exact Secret is mounted. The witness scans only the
+configured ordinal range and validates namespace, name, UID, resource version, finalizer, and terminal
+phase. A terminal Pod that never entered the worker process is already authority-bound by this pre-start
+record, so the witness terminates that existing identity rather than synthesizing a post-hoc holder. It
+removes only its own finalizer with resource-version, UID, and binding tests. API/database failure leaves
+the Pod unchanged. Ordinal history can increase but not decrease.
 
 ### Recovery, GC, and tenancy
 
 Operator recovery resolves the caller's project authorization before selecting a use. Inputs and pages
-have explicit limits. The reconciler function accepts one exact use, verifies the holder and immutable
-terminal evidence under lock, writes a bounded audit record, and deletes the use atomically. A missing,
-active, mismatched, or malformed identity is a refusal, not a retry-by-time fallback.
+have explicit limits: identity 512 bytes; binding serialization bounded before persistence; actor 255,
+evidence 1024, and reason 512 bytes; list pages at most 100 rows with an opaque cursor. Witness and GC
+passes use a configured row count with a hard ceiling of 1,000 rows on the database clock; exhaustion
+retains work and publishes the continuation cursor. The reconciler function accepts one exact use,
+joins through investigation to the authoritative project, verifies the holder and immutable terminal
+evidence under lock, writes the full immutable use/termination/actor tuple, and deletes the use
+atomically. Audit rows are permanent and page by stable key. A missing, active, mismatched, malformed,
+or cross-project identity is a refusal, not a retry-by-time fallback.
 
 GC treats every use row as a pin regardless of lease age. It scans with durable cursors and fixed batch
 budgets and deletes only exact object versions after finding no use for the generation. A database or

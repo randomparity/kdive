@@ -20,10 +20,15 @@ thread stopped consuming an exact object version.
 
 Postgres is the enforcement boundary. Migrations create non-login server, worker, reconciler, and
 lifecycle-witness roles. Direct mutation of worker incarnations, build uses, and recovery evidence is
-revoked from process roles. Bounded `SECURITY DEFINER` functions expose only the transitions each role
-needs: workers acquire and release their own attempt's use; lifecycle witnesses register exact runtime
-bindings and publish terminal evidence; reconcilers recover a use only from a matching terminated
-incarnation; server/operator paths request and audit recovery but cannot publish termination.
+revoked from process roles. Each lifecycle authority mints a random 256-bit per-incarnation credential,
+stores only its hash with the immutable runtime binding, and delivers the plaintext once to that exact
+worker before its claim loop. Bounded `SECURITY DEFINER` functions expose only the transitions each role
+needs. Worker functions require the credential and derive the holder from its hash; callers cannot name
+another holder. Acquisition additionally derives the charged attempt from the holder's currently
+claimed job. Release accepts a use identifier but deletes it only when the credential-derived holder,
+job, and attempt all match. Lifecycle witnesses register exact runtime bindings and publish terminal
+evidence; reconcilers recover a use only from a matching terminated incarnation; server/operator paths
+request and audit recovery but cannot publish termination.
 
 Every worker incarnation carries the incompatible artifact-fence protocol version. A database trigger
 rejects every job transition to `running` unless the claimed worker has an active incarnation with the
@@ -37,18 +42,31 @@ requires a matching immutable termination row and deletes one exact `(use_id, ho
 fence in the same audited transaction.
 
 The Compose lifecycle gate and Kubernetes witness are the only supported runtime authorities. Compose
-serializes create, stop, recreate, and remove around evidence persistence. The Kubernetes witness
-handles configured worker ordinals, including terminal Pods that never registered, by atomically
-recording the Pod UID binding and termination before removing the exact finalizer. API or database
-failure retains the runtime object and fence. Bounds apply to identities, bindings, configured ordinals,
-per-pass work, and stored audit text.
+serializes create, stop, recreate, and remove around evidence persistence. For Kubernetes, the Pod UID
+is the incarnation identifier. A controller observes the initially-finalized Pending Pod, validates its
+fixed StatefulSet name/ordinal and UID, registers that UID, and places the one-time credential in a
+Pod-UID-owned Secret before the worker starts. An init gate blocks worker startup until that exact
+Secret is mounted. Thus a terminal Pod that never reached worker registration still has a pre-start,
+authority-bound identity; the witness may terminate it but may not invent a different holder after the
+fact. The witness compare-and-sets namespace, name, UID, resource version, and credential-record state
+before removing the finalizer. API or database failure retains the runtime object and fence.
+
+Identity text is at most 512 bytes; serialized authority bindings and Kubernetes names are capped before
+persistence; recovery actor, evidence, and reason retain their schema caps of 255, 1024, and 512 bytes.
+List requests return at most 100 rows per request using an opaque stable cursor. Each witness or GC pass
+processes at most a configured count with a hard ceiling of 1,000 rows, measured on the database clock;
+exhaustion retains remaining rows and returns/logs the cursor for another pass. Every protected lookup
+joins use -> generation -> investigation -> project before mutation. A recovery audit permanently keeps
+`use_id`, project, investigation, generation, job, attempt, holder, authority kind/binding, outcome,
+termination time, actor, reason, and database-recorded recovery time. Audit/list pages use stable keys;
+permanent growth is operationally monitored and never handled by deleting evidence.
 
 ## Consequences
 
-Supported deployments need distinct database credentials and a stop-old-first upgrade. Startup and
-lifecycle operations fail closed when a required role credential, protocol registration, runtime
-object, or evidence write is unavailable. The migration owner remains separate from every runtime
-role.
+Supported deployments need distinct database credentials, authority delivery of per-incarnation
+credentials, and a stop-old-first upgrade. Startup and lifecycle operations fail closed when a required
+role credential, incarnation credential, protocol registration, runtime object, or evidence write is
+unavailable. The migration owner remains separate from every runtime role.
 
 Worker-incarnation rows and recovery audit rows are permanent. Build-use rows remain until normal
 provider completion or evidence-backed recovery. Host-root Docker operations, force-deleted Pods,
@@ -69,3 +87,9 @@ ADR-0532 is superseded. ADR-0531 continues to govern reusable-build ownership an
   enforcement is the only common claim boundary across mixed versions.
 - **Expiring incarnation tombstones.** Reuse or delayed writes after expiry can turn old evidence into a
   false proof. Permanent bounded rows preserve monotonic identity.
+- **Do nothing and retain crash pins forever.** This avoids false deletion but lets one crash consume
+  storage without bound and leaves no supported recovery action, violating eventual bounded recovery.
+- **Let the lifecycle witness release every use.** This removes the worker credential but makes normal
+  successful completion depend on a separate control-plane round trip and strands all pins whenever the
+  witness is unavailable. Authority-minted per-incarnation credentials preserve exact ownership while
+  keeping ordinary release local to the completed provider attempt.
