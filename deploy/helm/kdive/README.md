@@ -47,6 +47,13 @@ use the normal rolling path.
 
 ## Upgrade
 
+**The release containing migration 0095 is stop-old-first.** Scale the server, worker, and
+reconciler workloads to zero and wait for every old Pod to terminate before the migrate hook runs.
+Migration 0095 refuses to run while another database client is connected because pre-0095 strict
+Run projections cannot tolerate the new `runs.build_ref` column. Run the hooked upgrade only after
+the old Pods are gone, then restore the desired replicas with the new image. Do not use a rolling
+upgrade or roll back to a pre-0095 image after migration.
+
 **Do not upgrade with bare `helm upgrade --reuse-values`.** `--reuse-values` carries the
 previous release's merged values and *ignores the fresh `values.yaml` defaults*, so any
 config default added in a newer chart (e.g. `config.KDIVE_LOCAL_LIBVIRT_ENABLED: "false"`,

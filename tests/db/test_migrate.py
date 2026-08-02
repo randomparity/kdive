@@ -270,6 +270,24 @@ def test_investigation_build_catalog_schema(pg_conn: psycopg.Connection) -> None
     assert expiry_index is not None and "expires_at" in expiry_index[0]
 
 
+def test_0095_declares_stop_old_first_projection_boundary(pg_conn: psycopg.Connection) -> None:
+    sql_text = (migrate.SCHEMA_DIR / "0095_investigation_builds.sql").read_text()
+    assert "pg_stat_activity" in sql_text
+    assert "requires stop-old-first" in sql_text
+
+    migrate.apply_migrations(pg_conn)
+    all_columns = [
+        row[0]
+        for row in pg_conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'runs' ORDER BY ordinal_position"
+        ).fetchall()
+    ]
+    assert "build_ref" in all_columns
+    prior_projection = [name for name in all_columns if name != "build_ref"]
+    assert len(prior_projection) + 1 == len(all_columns)
+
+
 def test_investigation_build_gc_cursor_schema(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
 

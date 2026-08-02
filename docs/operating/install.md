@@ -55,6 +55,14 @@ must precede the hooked upgrade that runs migration 0094. For systemd or Compose
 services before the migrate one-shot. A normal rolling `helm upgrade` while old pods still write is
 not supported for the release containing 0094.
 
+### Migration 0095: stop-old-first Run schema expansion
+
+The release containing migration 0095 adds `runs.build_ref`. Older KDIVE processes use strict Run
+models with `SELECT *`, so they cannot read the expanded row shape. Stop every old server, worker,
+and reconciler before running migrations and start only the new image afterward. Migration 0095
+checks `pg_stat_activity` and refuses to run while another client remains connected to the KDIVE
+database. This release is not rolling-upgrade compatible; recover forward if migration has applied.
+
 ## Install paths
 
 ### From source

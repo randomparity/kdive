@@ -1,4 +1,20 @@
 -- 0095_investigation_builds.sql — immutable external build generations (ADR-0531, #1519).
+-- This release is stop-old-first: pre-0095 processes use strict SELECT * Run projections and
+-- cannot tolerate the build_ref column. Refuse the migration while another client is connected.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_stat_activity
+        WHERE datid = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND pid <> pg_backend_pid()
+          AND backend_type = 'client backend'
+    ) THEN
+        RAISE EXCEPTION
+            'migration 0095 requires stop-old-first: disconnect every KDIVE process before retry';
+    END IF;
+END
+$$;
+
 CREATE TABLE investigation_builds (
     investigation_id uuid NOT NULL REFERENCES investigations(id),
     generation uuid NOT NULL,
