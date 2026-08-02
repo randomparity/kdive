@@ -98,6 +98,10 @@ worker:
   # Highest StatefulSet ordinal for which the server retains namespaced Pod-read authority.
   # This is recovery history, not current scale: never lower it after an ordinal has run.
   deathVerificationOrdinalCeiling: 32
+  # One-time first upgrade from a chart without the persisted ceiling annotation. Leave zero on
+  # new installs and after adoption; set explicitly to at least the configured ceiling only for
+  # that upgrade. The template rejects later reuse.
+  deathVerificationAdoptionCeiling: 0
   persistence:
     build:
       size: 10Gi

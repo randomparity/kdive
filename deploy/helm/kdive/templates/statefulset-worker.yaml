@@ -2,6 +2,8 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: {{ include "kdive.fullname" . }}-worker
+  annotations:
+    kdive.io/death-verification-ordinal-ceiling: {{ include "kdive.effectiveDeathCeiling" . | quote }}
   labels:
     {{- include "kdive.labels" . | nindent 4 }}
 spec:
@@ -24,6 +26,8 @@ spec:
       app: {{ include "kdive.fullname" . }}-worker
   template:
     metadata:
+      finalizers:
+        - kdive.io/worker-termination-evidence
       labels:
         app: {{ include "kdive.fullname" . }}-worker
         {{- include "kdive.labels" . | nindent 8 }}

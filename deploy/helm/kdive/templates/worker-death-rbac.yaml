@@ -6,6 +6,14 @@ metadata:
     {{- include "kdive.labels" . | nindent 4 }}
 automountServiceAccountToken: true
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kdive.fullname" . }}-worker-termination-witness
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+automountServiceAccountToken: true
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -17,7 +25,14 @@ rules:
     resources: ["pods"]
     verbs: ["get"]
     resourceNames:
-      {{- range $ordinal := until (int .Values.worker.deathVerificationOrdinalCeiling) }}
+      {{- range $ordinal := until (int (include "kdive.effectiveDeathCeiling" .)) }}
+      - {{ printf "%s-worker-%d" (include "kdive.fullname" $) $ordinal | quote }}
+      {{- end }}
+  - apiGroups: [""]
+    resources: ["pods/finalizers"]
+    verbs: ["patch"]
+    resourceNames:
+      {{- range $ordinal := until (int (include "kdive.effectiveDeathCeiling" .)) }}
       - {{ printf "%s-worker-%d" (include "kdive.fullname" $) $ordinal | quote }}
       {{- end }}
 ---
@@ -30,6 +45,8 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: {{ include "kdive.fullname" . }}-server
+  - kind: ServiceAccount
+    name: {{ include "kdive.fullname" . }}-worker-termination-witness
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

@@ -14,6 +14,9 @@ import kdive.config as config
 from kdive.config.core_settings import (
     BUILD_ARTIFACT_RETENTION_DAYS,
     INVESTIGATION_CLEANUP_GRACE_DAYS,
+    KUBERNETES_WITNESS_NAMESPACE,
+    KUBERNETES_WITNESS_ORDINAL_CEILING,
+    KUBERNETES_WITNESS_WORKER_NAME,
     REPORT_ARTIFACT_RETENTION_DAYS,
 )
 from kdive.db.pool import create_pool
@@ -104,7 +107,14 @@ async def run_reconciler_with_composition(
     upload_store: ObjectStore,
 ) -> None:
     from kdive.observability.console_telemetry import ConsoleTelemetry
+    from kdive.processes.kubernetes_termination_witness import (
+        KubernetesTerminationWitness,
+        patch_finalizers,
+        read_pod,
+        run_witness,
+    )
     from kdive.reconciler.loop import Reconciler
+    from kdive.services.runs.worker_incarnations import terminate_worker_incarnation
 
     console_hosting = await provider_composition.build_reconciler_console_hosting(
         console_telemetry=ConsoleTelemetry(
@@ -123,10 +133,33 @@ async def run_reconciler_with_composition(
         ),
     )
     hosting_task = start_console_hosting(console_hosting, stop)
+    witness_task: asyncio.Task[None] | None = None
+    witness_namespace = config.require(KUBERNETES_WITNESS_NAMESPACE)
+    witness_name = config.require(KUBERNETES_WITNESS_WORKER_NAME)
+    witness_ceiling = config.require(KUBERNETES_WITNESS_ORDINAL_CEILING)
+    if witness_namespace and witness_name and witness_ceiling:
+
+        async def terminate(incarnation: str, outcome: str) -> None:
+            terminal_outcome = "succeeded" if outcome.endswith("succeeded") else "failed"
+            async with pool.connection() as conn:
+                await terminate_worker_incarnation(conn, incarnation, terminal_outcome)
+
+        witness = KubernetesTerminationWitness(
+            namespace=witness_namespace,
+            worker_name=witness_name,
+            ordinal_ceiling=witness_ceiling,
+            read_pod=read_pod,
+            patch_finalizers=lambda namespace, name, operations: asyncio.to_thread(
+                patch_finalizers, namespace, name, operations
+            ),
+            terminate=terminate,
+        )
+        witness_task = asyncio.create_task(run_witness(witness, stop))
     try:
         await reconciler.run(stop)
     finally:
-        await cancel(*([hosting_task] if hosting_task else []))
+        tasks = [task for task in (hosting_task, witness_task) if task is not None]
+        await cancel(*tasks)
         if console_hosting is not None:
             await console_hosting.close()
 

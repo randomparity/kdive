@@ -276,4 +276,26 @@ named template that a rendered manifest (the ConfigMap) includes.
 {{- if lt $deathCeiling (int .Values.worker.replicas) -}}
 {{- fail "worker.deathVerificationOrdinalCeiling must cover worker.replicas" -}}
 {{- end -}}
+{{- $existing := lookup "apps/v1" "StatefulSet" .Release.Namespace (printf "%s-worker" (include "kdive.fullname" .)) -}}
+{{- $adoption := int .Values.worker.deathVerificationAdoptionCeiling -}}
+{{- if $existing -}}
+  {{- $annotations := default dict $existing.metadata.annotations -}}
+  {{- $prior := index $annotations "kdive.io/death-verification-ordinal-ceiling" | default "" -}}
+  {{- if eq $prior "" -}}
+    {{- if lt $adoption $deathCeiling -}}
+      {{- fail "worker.deathVerificationAdoptionCeiling must cover the configured ceiling on first upgrade from an unannotated StatefulSet" -}}
+    {{- end -}}
+  {{- else -}}
+    {{- if ne $adoption 0 -}}
+      {{- fail "worker.deathVerificationAdoptionCeiling is only valid for first unannotated-chart adoption" -}}
+    {{- end -}}
+    {{- if lt $deathCeiling (int $prior) -}}
+      {{- fail "worker.deathVerificationOrdinalCeiling cannot decrease below its persisted value" -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "kdive.effectiveDeathCeiling" -}}
+{{- max (int .Values.worker.deathVerificationOrdinalCeiling) (int .Values.worker.deathVerificationAdoptionCeiling) -}}
 {{- end -}}

@@ -310,6 +310,9 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
     assert rule[0]["resources"] == ["pods"]
     assert rule[0]["verbs"] == ["get"]
     assert rule[0]["resourceNames"] == [f"kdive-kdive-worker-{ordinal}" for ordinal in range(32)]
+    assert rule[1]["resources"] == ["pods/finalizers"]
+    assert rule[1]["verbs"] == ["patch"]
+    assert rule[1]["resourceNames"] == rule[0]["resourceNames"]
     assert server["spec"]["template"]["spec"]["serviceAccountName"].endswith("-server")
     server_env = server["spec"]["template"]["spec"]["containers"][0]["env"]
     assert {item["name"]: item.get("value") for item in server_env}[
@@ -318,6 +321,19 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
     worker_env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
     env_by_name = {item["name"]: item for item in worker_env}
     assert env_by_name["KDIVE_POD_UID"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.uid"
+    assert worker["spec"]["template"]["metadata"]["finalizers"] == [
+        "kdive.io/worker-termination-evidence"
+    ]
+    assert worker["metadata"]["annotations"]["kdive.io/death-verification-ordinal-ceiling"] == "32"
+
+    reconciler = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-reconciler")
+    )
+    assert reconciler["spec"]["template"]["spec"]["serviceAccountName"].endswith(
+        "-worker-termination-witness"
+    )
 
 
 def test_worker_death_authority_ceiling_survives_scale_down_and_is_bounded() -> None:
