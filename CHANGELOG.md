@@ -14,7 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Reuse externally built kernel artifacts across Systems in one Investigation
 - Add column-agnostic render_envelope for generated verbs
 - Generate committed kdivectl verb descriptors from tool schemas
 - Unify --json on curated verbs onto the whole envelope
@@ -87,6 +86,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fence active publication attempts
 - Bind native staging allocation
 - Reserve staging capacity atomically
+- Add investigation build catalog
+- Publish reusable external builds
+- Reuse investigation builds at run creation
+- Pin reusable builds during install
+- Reclaim investigation build generations
 
 ### Changed
 
@@ -340,6 +344,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct rootfs allocator mutation proof
 - Reject merge queue for ordering guard
 - Mark merge queue evaluation implemented
+- Design investigation kernel build reuse
+- Define reusable build convergence
+- Retain reusable build expiry contract
+- Make expired build recovery terminating
+- Isolate reusable build generations
+- Scope kernel reuse to external builds
+- Make expired build recovery actionable
+- Fence reusable builds during install
+- Order reusable build lifecycle locks
+- Plan investigation kernel build reuse
+- Make kernel reuse plan checkpoints executable
+- Publish reusable build contract
+- Require exact-version object reads
+- Refresh reusable build run reference
+- Bound reusable build lifecycle scope
+- Enforce stop-old-first build schema upgrade
+- Record reduced branch review proof
 
 ### Fixed
 
@@ -592,6 +613,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adopt concurrent artifact claims
 - Satisfy decision record guard
 - Bound identity writes by reservation
+- Fence reusable build finalization
+- Harden reusable run creation contract
+- Replay admitted installs after build expiry
+- Bound investigation build reclamation
+- Pin reusable artifact reads to versions
+- Preserve reusable build content identity
+- Persist reusable artifact version pins
+- Complete reusable build deadline contracts
+- Bound investigation build garbage collection
+- Pin reusable artifact reads to versions
+- Bind build validation to object versions
+- Preserve reclaimed build expiry recovery
+- Require reusable build artifact versions
+- Preserve reusable build expiry after reclaim
 
 ### Build
 
