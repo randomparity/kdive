@@ -339,11 +339,9 @@ services:
   # Inspect-only authority used by the server to prove a specific worker container stopped.
   # The proxy is reachable only on an internal network and rejects all write API methods.
   worker-death-api:
-    image: tecnativa/docker-socket-proxy:0.2.0@sha256:083bd0ed8783e366d745f332f0e4489816dd35d984bef8f16e6d89484a22c082
-    environment:
-      CONTAINERS: "1"
-      POST: "0"
-      LOG_LEVEL: warning
+    image: ${KDIVE_IMAGE:-kdive:dev}
+    entrypoint: ["python", "-m", "kdive.processes.docker_death_api"]
+    user: root
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:

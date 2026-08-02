@@ -176,8 +176,8 @@ def test_worker_death_verifier_uses_inspect_only_private_proxy() -> None:
 
     assert services["worker"]["environment"]["KDIVE_WORKER_INCARNATION_KIND"] == "docker"
     assert services["server"]["environment"]["KDIVE_WORKER_DEATH_VERIFIER"] == "docker"
-    assert proxy["environment"]["CONTAINERS"] == "1"
-    assert proxy["environment"]["POST"] == "0"
+    assert proxy["entrypoint"] == ["python", "-m", "kdive.processes.docker_death_api"]
+    assert proxy["user"] == "root"
     assert proxy["networks"] == {"worker-death": None}
     assert model["networks"]["worker-death"]["internal"] is True
 
