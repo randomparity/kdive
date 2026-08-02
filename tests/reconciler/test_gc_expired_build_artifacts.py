@@ -271,6 +271,7 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
                     confirmed_worker_id="dead-worker",
                     recovered_by="operator:test",
                     evidence=" ",
+                    reason="dead worker cleanup",
                 )
             assert not await recover_build_use_after_confirmed_worker_death(
                 conn,
@@ -278,6 +279,7 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
                 confirmed_worker_id="wrong-worker",
                 recovered_by="operator:test",
                 evidence="operator checked the wrong process",
+                reason="dead worker cleanup",
             )
             assert await recover_build_use_after_confirmed_worker_death(
                 conn,
@@ -285,6 +287,7 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
                 confirmed_worker_id="dead-worker",
                 recovered_by="operator:test",
                 evidence="operator confirmed host process exited",
+                reason="dead worker cleanup",
             )
             assert await recover_build_use_after_confirmed_worker_death(
                 conn,
@@ -292,6 +295,7 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
                 confirmed_worker_id="recycled-worker",
                 recovered_by="operator:test",
                 evidence="operator confirmed replacement process exited",
+                reason="dead worker cleanup",
             )
             recoveries = await (
                 await conn.execute(

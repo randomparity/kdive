@@ -68,6 +68,7 @@ async def recover_build_use_after_confirmed_worker_death(
     confirmed_worker_id: str,
     recovered_by: str,
     evidence: str,
+    reason: str,
 ) -> bool:
     """Release a stranded use only after external proof that its worker process died.
 
@@ -75,24 +76,50 @@ async def recover_build_use_after_confirmed_worker_death(
     continue after heartbeat loss and job reclaim. This explicit operator/reconciler path records
     the independently obtained evidence before removing the persistent pin.
     """
-    if not recovered_by.strip() or not evidence.strip():
-        raise ValueError("recovered_by and independent worker-death evidence must be non-empty")
+    if not recovered_by.strip() or not evidence.strip() or not reason.strip():
+        raise ValueError("actor, independent worker-death evidence, and reason must be non-empty")
+    if len(recovered_by) > 255 or len(evidence) > 1024 or len(reason) > 512:
+        raise ValueError("recovery actor, evidence, or reason exceeds its storage bound")
     require_top_level_transaction(conn, "recover_build_use_after_confirmed_worker_death")
     async with conn.transaction():
-        row = await (
-            await conn.execute(
-                "SELECT investigation_id, generation, job_id, attempt, holder_worker_id "
-                "FROM investigation_build_uses WHERE use_id = %s FOR UPDATE",
-                (use_id,),
-            )
-        ).fetchone()
-        if row is None or row[4] != confirmed_worker_id:
-            return False
-        await conn.execute(
-            "INSERT INTO investigation_build_use_recoveries "
-            "(use_id, investigation_id, generation, job_id, attempt, holder_worker_id, "
-            "recovered_by, evidence) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (use_id, *row, recovered_by, evidence),
+        return await recover_build_use_in_transaction(
+            conn,
+            use_id,
+            confirmed_worker_id=confirmed_worker_id,
+            recovered_by=recovered_by,
+            evidence=evidence,
+            reason=reason,
         )
-        await conn.execute("DELETE FROM investigation_build_uses WHERE use_id = %s", (use_id,))
+
+
+async def recover_build_use_in_transaction(
+    conn: AsyncConnection,
+    use_id: UUID,
+    *,
+    confirmed_worker_id: str,
+    recovered_by: str,
+    evidence: str,
+    reason: str,
+) -> bool:
+    """Record and delete one exact use inside the caller's audit transaction."""
+    if not recovered_by.strip() or not evidence.strip() or not reason.strip():
+        raise ValueError("actor, independent worker-death evidence, and reason must be non-empty")
+    if len(recovered_by) > 255 or len(evidence) > 1024 or len(reason) > 512:
+        raise ValueError("recovery actor, evidence, or reason exceeds its storage bound")
+    row = await (
+        await conn.execute(
+            "SELECT investigation_id, generation, job_id, attempt, holder_worker_id "
+            "FROM investigation_build_uses WHERE use_id = %s FOR UPDATE",
+            (use_id,),
+        )
+    ).fetchone()
+    if row is None or row[4] != confirmed_worker_id:
+        return False
+    await conn.execute(
+        "INSERT INTO investigation_build_use_recoveries "
+        "(use_id, investigation_id, generation, job_id, attempt, holder_worker_id, "
+        "recovered_by, evidence, reason) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (use_id, *row, recovered_by, evidence, reason),
+    )
+    await conn.execute("DELETE FROM investigation_build_uses WHERE use_id = %s", (use_id,))
     return True

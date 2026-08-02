@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import socket
 from typing import TYPE_CHECKING
 
 from psycopg_pool import AsyncConnectionPool
@@ -15,6 +14,7 @@ from kdive.processes.runtime import (
     readiness,
     run_process_runtime,
 )
+from kdive.processes.worker_incarnation import worker_incarnation_id
 
 if TYPE_CHECKING:
     from kdive.health.heartbeat import Heartbeat
@@ -32,7 +32,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
     from kdive.store.objectstore import object_store_from_env
 
     stop = install_stop()
-    worker_id = f"{socket.gethostname()}:{os.getpid()}"
+    worker_id = worker_incarnation_id(os.getpid())
 
     def build_probe(pool: AsyncConnectionPool) -> HealthProbe:
         return build_worker_probe(
