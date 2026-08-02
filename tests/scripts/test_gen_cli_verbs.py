@@ -68,6 +68,14 @@ def test_every_live_tool_is_covered() -> None:
     assert set(covered) == live
 
 
+def test_catalog_includes_conditional_recovery_when_runtime_verifier_is_disabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "disabled")
+    live = {tool.name for tool in gen._registry_tools()}
+    assert {"ops.build_uses_list", "ops.recover_build_use"} <= live
+
+
 def test_check_detects_a_stale_committed_module(tmp_path) -> None:
     """A committed module that no longer matches a fresh generation fails the check."""
     stale = tmp_path / "_generated_verbs.py"

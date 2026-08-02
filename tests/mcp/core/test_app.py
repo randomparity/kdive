@@ -34,9 +34,19 @@ def _verifier() -> JWTVerifier:
     return JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
 
 
+class _CatalogDeathVerifier:
+    def verify_dead(self, worker_incarnation: str) -> str | None:
+        raise RuntimeError("catalog verifier must not execute")
+
+
 def test_build_app_registers_jobs_tools() -> None:
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    app = build_app(
+        pool,
+        verifier=_verifier(),
+        secret_registry=SecretRegistry(),
+        worker_death_verifier=_CatalogDeathVerifier(),
+    )
 
     async def _run() -> None:
         # Verified against fastmcp 3.4.0: FastMCP.list_tools() is async and returns
@@ -438,7 +448,12 @@ def test_exposure_map_covers_every_registered_tool() -> None:
     )
 
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    app = build_app(
+        pool,
+        verifier=_verifier(),
+        secret_registry=SecretRegistry(),
+        worker_death_verifier=_CatalogDeathVerifier(),
+    )
 
     async def _run() -> set[str]:
         return {t.name for t in await app.list_tools()}
@@ -488,7 +503,12 @@ _EXPECTED_STEP_MATURITY: dict[str, str] = {
 
 def _built_app() -> FastMCP:
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    return build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    return build_app(
+        pool,
+        verifier=_verifier(),
+        secret_registry=SecretRegistry(),
+        worker_death_verifier=_CatalogDeathVerifier(),
+    )
 
 
 def _rendered_prompt_body(app: FastMCP, name: str) -> str:

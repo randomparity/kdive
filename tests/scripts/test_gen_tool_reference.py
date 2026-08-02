@@ -177,3 +177,11 @@ def test_live_registry_extraction_is_offline(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     assert gen_tool_reference._registry_tools()
+
+
+def test_registry_catalog_keeps_conditionally_available_recovery_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "disabled")
+    names = {tool.name for tool in gen_tool_reference._registry_tools()}
+    assert {"ops.build_uses_list", "ops.recover_build_use"} <= names

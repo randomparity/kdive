@@ -24,6 +24,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import SystemState
 from kdive.mcp.assembly.app import build_app
+from kdive.mcp.assembly.schema_catalog import CatalogWorkerDeathVerifier
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_WAIT_S, MAX_WAIT_S
 from kdive.profiles.build import BuildProfile
@@ -178,7 +179,12 @@ def _build_tools() -> list[FunctionTool]:
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     kp = make_keypair()
     verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
-    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
+    app = build_app(
+        pool,
+        verifier=verifier,
+        secret_registry=SecretRegistry(),
+        worker_death_verifier=CatalogWorkerDeathVerifier(),
+    )
     # list_tools() is typed as Sequence[mcp.types.Tool] but the fastmcp runtime
     # returns list[FunctionTool] — cast to the concrete type so the rest of the
     # module can access .fn / .meta / .annotations without type errors.

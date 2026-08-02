@@ -2,6 +2,20 @@
 
 # `ops` tools
 
+## `ops.build_uses_list`
+
+`implemented` · `read-only`
+
+List persistent reusable-build pins. Requires platform operator.
+
+Conditionally available only when the server has an authoritative worker-death verifier.
+A stale job lease is diagnostic context only, never proof that its holder stopped. Pass an
+exact returned use id and holder to `ops.recover_build_use` only after operator review.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `limit` | integer | no | Maximum oldest-first pin rows returned; server-capped at 200. |
+
 ## `ops.diagnostics`
 
 `implemented`
@@ -108,6 +122,24 @@ short of restoring the file and re-running. Cordoned/pruned identities are audit
 
 This is the config-catalog pass. For runtime-drift cleanup that never prunes rows,
 use `ops.reconcile_now` instead.
+
+## `ops.recover_build_use`
+
+`implemented`
+
+Release one stranded build-use pin. Requires platform operator.
+
+Conditionally available only when the server has an authoritative worker-death verifier.
+Recovery succeeds only when the supplied holder exactly matches the durable use row and
+the server's configured deployment verifier independently proves that exact worker
+incarnation terminated. Job heartbeat, lease expiry, object absence, and identity
+replacement are never death evidence.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `holder` | string | yes | Exact worker incarnation recorded on that use row; max 512 chars. |
+| `reason` | string | yes | Operator justification retained in the recovery ledger; max 512 chars. |
+| `use_id` | string | yes | Exact stranded build-use UUID. |
 
 ## `ops.set_cost_class_coeff`
 

@@ -164,6 +164,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, verifier: WorkerDeathVe
     ) -> ToolResponse:
         """List persistent reusable-build pins. Requires platform operator.
 
+        Conditionally available only when the server has an authoritative worker-death verifier.
         A stale job lease is diagnostic context only, never proof that its holder stopped. Pass an
         exact returned use id and holder to `ops.recover_build_use` only after operator review.
         """
@@ -193,9 +194,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, verifier: WorkerDeathVe
     ) -> ToolResponse:
         """Release one stranded build-use pin. Requires platform operator.
 
+        Conditionally available only when the server has an authoritative worker-death verifier.
         Recovery succeeds only when the supplied holder exactly matches the durable use row and
-        the server's authoritative local-process verifier independently proves that exact worker
-        incarnation dead. Job heartbeat or lease expiry is never death evidence.
+        the server's configured deployment verifier independently proves that exact worker
+        incarnation terminated. Job heartbeat, lease expiry, object absence, and identity
+        replacement are never death evidence.
         """
         return await recover_build_use(
             pool, current_context(), verifier, use_id=use_id, holder=holder, reason=reason
