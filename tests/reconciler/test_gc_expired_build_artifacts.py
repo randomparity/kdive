@@ -21,6 +21,10 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup import gc as gc_module
 from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
 from kdive.services.runs.build_use import recover_build_use_after_confirmed_worker_death
+from kdive.services.runs.worker_incarnations import (
+    register_worker_incarnation,
+    terminate_worker_incarnation,
+)
 from tests.reconciler.conftest import connect
 
 
@@ -282,6 +286,9 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
                 evidence="operator checked the wrong process",
                 reason="dead worker cleanup",
             )
+            for holder in ("dead-worker", "recycled-worker"):
+                await register_worker_incarnation(conn, holder, "local", {"test_identity": holder})
+                await terminate_worker_incarnation(conn, holder, "failed")
             assert await recover_build_use_after_confirmed_worker_death(
                 conn,
                 old_use,
@@ -308,12 +315,12 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
                 (
                     "dead-worker",
                     "operator:test",
-                    "operator confirmed host process exited",
+                    "local: durable exact-incarnation termination (failed)",
                 ),
                 (
                     "recycled-worker",
                     "operator:test",
-                    "operator confirmed replacement process exited",
+                    "local: durable exact-incarnation termination (failed)",
                 ),
             ]
             assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1

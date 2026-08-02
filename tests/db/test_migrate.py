@@ -203,6 +203,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0100",
         "0101",
         "0102",
+        "0103",
     ]
     assert second == []
 
@@ -324,6 +325,26 @@ def test_investigation_build_use_leases_follow_worker_claims(
     assert frozenset({"job_id", "attempt"}) not in _unique_constraints(
         pg_conn, "investigation_build_uses"
     )
+
+
+def test_worker_incarnation_tombstones_are_permanent_and_bounded(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    assert _columns(pg_conn, "worker_incarnations") == {
+        "incarnation": "text",
+        "authority_kind": "text",
+        "authority_binding": "jsonb",
+        "state": "text",
+        "recorded_at": "timestamp with time zone",
+        "terminated_at": "timestamp with time zone",
+        "outcome": "text",
+    }
+    assert pg_conn.execute(
+        "SELECT confdeltype FROM pg_constraint WHERE conrelid = "
+        "'investigation_build_use_recoveries'::regclass AND contype = 'f' "
+        "AND confrelid = 'worker_incarnations'::regclass"
+    ).fetchone() == ("a",)
 
 
 def test_dedup_key_not_null(pg_conn: psycopg.Connection) -> None:
@@ -838,6 +859,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0100",
         "0101",
         "0102",
+        "0103",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1217,6 +1239,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0100",
         "0101",
         "0102",
+        "0103",
     ]
 
 

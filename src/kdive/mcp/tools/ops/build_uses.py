@@ -20,6 +20,10 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
 from kdive.services.runs.build_use import recover_build_use_in_transaction
+from kdive.services.runs.worker_incarnations import (
+    IncarnationConflict,
+    terminate_worker_incarnation,
+)
 
 _TOOL = "ops.recover_build_use"
 _LIST_TOOL = "ops.build_uses_list"
@@ -182,6 +186,37 @@ async def recover_build_use(
             outcome="evidence_oversized",
         )
         return _failure(use_id, "authoritative worker-death evidence exceeds 1024 characters")
+    async with pool.connection() as conn:
+        match = await (
+            await conn.execute(
+                "SELECT 1 FROM investigation_build_uses "
+                "WHERE use_id = %s AND holder_worker_id = %s",
+                (use_id, holder),
+            )
+        ).fetchone()
+    if match is None:
+        await _audit_refusal(
+            pool,
+            ctx,
+            use_id=use_id,
+            holder=holder,
+            reason=clean_reason,
+            outcome="use_or_holder_mismatch",
+        )
+        return _failure(use_id, "build-use pin was absent or its exact holder did not match")
+    try:
+        async with pool.connection() as conn:
+            await terminate_worker_incarnation(conn, holder, "failed")
+    except IncarnationConflict:
+        await _audit_refusal(
+            pool,
+            ctx,
+            use_id=use_id,
+            holder=holder,
+            reason=clean_reason,
+            outcome="termination_evidence_conflict",
+        )
+        return _failure(use_id, "the exact worker has no matching durable termination record")
     async with pool.connection() as conn, conn.transaction():
         recovered = await recover_build_use_in_transaction(
             conn,

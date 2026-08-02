@@ -21,10 +21,10 @@ def test_0102_seeds_public_build_gc_lanes(pg_conn: psycopg.Connection) -> None:
     ]
 
 
-def test_0102_is_latest_migration() -> None:
-    migration = migrate.discover_migrations()[-1]
+def test_0102_precedes_worker_incarnation_migration() -> None:
+    migrations = migrate.discover_migrations()
 
-    assert (migration.version, migration.filename) == (
-        "0102",
-        "0102_build_artifact_gc_cursors.sql",
-    )
+    assert [(migration.version, migration.filename) for migration in migrations[-2:]] == [
+        ("0102", "0102_build_artifact_gc_cursors.sql"),
+        ("0103", "0103_worker_incarnations.sql"),
+    ]

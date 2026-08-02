@@ -777,6 +777,28 @@ WORKER_INCARNATION_KIND = Setting(
     processes=_WORKER,
     help="Immutable worker identity source: local process, Docker container, or Kubernetes Pod.",
 )
+
+
+def _docker_worker(env: Mapping[str, str]) -> bool:
+    return env.get("KDIVE_WORKER_INCARNATION_KIND", "local") == "docker"
+
+
+WORKER_INCARNATION_ID = Setting(
+    name="KDIVE_WORKER_INCARNATION_ID",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_WORKER,
+    required_when=_docker_worker,
+    help="Lifecycle-gate-injected immutable Docker worker incarnation nonce.",
+)
+WORKER_AUTHORITY_BINDING = Setting(
+    name="KDIVE_WORKER_AUTHORITY_BINDING",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_WORKER,
+    required_when=_docker_worker,
+    help="Lifecycle-gate-injected JSON binding for the exact Docker container authority.",
+)
 WORKER_DEATH_VERIFIER = Setting(
     name="KDIVE_WORKER_DEATH_VERIFIER",
     parse=_choice("disabled", "local", "docker", "kubernetes"),
@@ -882,6 +904,8 @@ SETTINGS = [
     COMPACT_RESPONSES,
     MCP_TRACE,
     WORKER_INCARNATION_KIND,
+    WORKER_INCARNATION_ID,
+    WORKER_AUTHORITY_BINDING,
     WORKER_DEATH_VERIFIER,
     DOCKER_DEATH_API,
     POD_NAMESPACE,

@@ -68,6 +68,11 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
             events.append(f"close(timeout={timeout})")
 
     monkeypatch.setattr("kdive.processes.worker.create_pool", lambda **kw: _FakePool())
+
+    async def _register(*args: object) -> None:
+        events.append("register")
+
+    monkeypatch.setattr("kdive.processes.worker.register_worker_incarnation", _register)
     monkeypatch.setattr("kdive.processes.worker.install_stop", lambda: asyncio.Event())
     monkeypatch.setattr("kdive.jobs.assembly.build_handler_registry", lambda **kw: object())
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: object())
@@ -93,7 +98,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
 
     asyncio.run(__main__._run_worker(SecretRegistry(), _fake_telemetry()))
 
-    assert events == [*_warm_open(), "run", _close()]
+    assert events == [*_warm_open(), "acquire(timeout=None)", "register", "run", _close()]
     config = constructed["config"]
     assert isinstance(config, WorkerConfig)
     assert config.heartbeat is not None

@@ -61,6 +61,7 @@ class LockScope(StrEnum):
     RUN = "run"
     INVENTORY = "inventory"
     IMAGE_PUBLISH = "image_publish"
+    WORKER_INCARNATION = "worker_incarnation"
 
 
 def _lock_key(scope: LockScope, key: UUID | str) -> int:

@@ -14,7 +14,8 @@ from kdive.processes.runtime import (
     readiness,
     run_process_runtime,
 )
-from kdive.processes.worker_incarnation import worker_incarnation_id
+from kdive.processes.worker_incarnation import worker_incarnation_registration
+from kdive.services.runs.worker_incarnations import register_worker_incarnation
 
 if TYPE_CHECKING:
     from kdive.health.heartbeat import Heartbeat
@@ -32,7 +33,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
     from kdive.store.objectstore import object_store_from_env
 
     stop = install_stop()
-    worker_id = worker_incarnation_id(os.getpid())
+    worker_id, authority_kind, authority_binding = worker_incarnation_registration(os.getpid())
 
     def build_probe(pool: AsyncConnectionPool) -> HealthProbe:
         return build_worker_probe(
@@ -42,6 +43,8 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
     async def run_worker_body(
         pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe
     ) -> None:
+        async with pool.connection() as conn:
+            await register_worker_incarnation(conn, worker_id, authority_kind, authority_binding)
         worker = Worker(
             pool,
             build_handler_registry(secret_registry=secret_registry),

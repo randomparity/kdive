@@ -36,11 +36,27 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     events: list[str] = []
     secret_registry = SecretRegistry()
     handler_registry = object()
-    pool = object()
+
+    class _ConnectionContext:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class _Pool:
+        def connection(self) -> _ConnectionContext:
+            return _ConnectionContext()
+
+    pool = _Pool()
     probe = object()
     stop = asyncio.Event()
 
     monkeypatch.setattr("kdive.processes.worker.create_pool", lambda **kw: pool)
+    monkeypatch.setattr(
+        "kdive.processes.worker.worker_incarnation_registration",
+        lambda pid: ("local:test", "local", {"host": "host", "pid": pid}),
+    )
     monkeypatch.setattr("kdive.processes.worker.install_stop", lambda: stop)
     monkeypatch.setattr("kdive.health.processes.server.build_postgres_ping", lambda value: value)
     monkeypatch.setattr(
@@ -93,10 +109,18 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
         assert built_probe["postgres_ping"] is pool
         store = cast(Callable[[], str], built_probe["store"])
         assert store() == "store"
+        monkeypatch.setattr(
+            "kdive.processes.worker.register_worker_incarnation",
+            lambda *args: _record_registration(events),
+        )
         await body(pool, "heartbeat", probe)
 
     monkeypatch.setattr("kdive.processes.worker.run_process_runtime", _runtime)
 
     asyncio.run(run_worker(secret_registry, _telemetry()))
 
-    assert events == ["init", "run"]
+    assert events == ["register", "init", "run"]
+
+
+async def _record_registration(events: list[str]) -> None:
+    events.append("register")

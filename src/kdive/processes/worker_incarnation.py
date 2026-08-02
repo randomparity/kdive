@@ -12,7 +12,7 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import kdive.config as config
 from kdive.config.core_settings import (
@@ -20,7 +20,9 @@ from kdive.config.core_settings import (
     POD_NAME,
     POD_NAMESPACE,
     POD_UID,
+    WORKER_AUTHORITY_BINDING,
     WORKER_DEATH_VERIFIER,
+    WORKER_INCARNATION_ID,
     WORKER_INCARNATION_KIND,
 )
 
@@ -54,12 +56,10 @@ def worker_incarnation_id(
     """Return the configured deployment's immutable worker-incarnation identity."""
     kind = config.require(WORKER_INCARNATION_KIND)
     if kind == "docker":
-        container_id = socket.gethostname()
-        if not _CONTAINER_ID.fullmatch(container_id):
-            raise RuntimeError(
-                "docker worker hostname must be its 12- or 64-character container ID"
-            )
-        return f"docker:{container_id}"
+        incarnation = config.require(WORKER_INCARNATION_ID)
+        if not incarnation.startswith("docker:") or len(incarnation) > 512:
+            raise RuntimeError("Docker worker incarnation must be a bounded docker: identity")
+        return incarnation
     if kind == "kubernetes":
         namespace = config.get(POD_NAMESPACE) or ""
         name = config.get(POD_NAME) or ""
@@ -72,6 +72,48 @@ def worker_incarnation_id(
     boot_id = boot_id_path.read_text(encoding="utf-8").strip()
     stat = (stat_path or (_PROC_ROOT / str(pid) / "stat")).read_text(encoding="utf-8")
     return f"{socket.gethostname()}:{pid}:{boot_id}:{_start_ticks(stat)}"
+
+
+def worker_incarnation_registration(
+    pid: int,
+    *,
+    boot_id_path: Path = _BOOT_ID,
+    stat_path: Path | None = None,
+) -> tuple[str, Literal["local", "docker", "kubernetes"], dict[str, Any]]:
+    """Return the exact identity and immutable authority binding registered at startup."""
+    kind = config.require(WORKER_INCARNATION_KIND)
+    incarnation = worker_incarnation_id(pid, boot_id_path=boot_id_path, stat_path=stat_path)
+    if kind == "docker":
+        try:
+            binding = json.loads(config.require(WORKER_AUTHORITY_BINDING))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Docker worker authority binding must be valid JSON") from exc
+        if not isinstance(binding, dict) or not binding:
+            raise RuntimeError("Docker worker authority binding must be a non-empty JSON object")
+        return incarnation, kind, binding
+    if kind == "kubernetes":
+        return (
+            incarnation,
+            kind,
+            {
+                "pod_namespace": config.require(POD_NAMESPACE),
+                "pod_name": config.require(POD_NAME),
+                "pod_uid": config.require(POD_UID),
+            },
+        )
+    if kind != "local":
+        raise RuntimeError(f"unsupported worker incarnation kind: {kind}")
+    host, raw_pid, boot_id, start_ticks = incarnation.rsplit(":", 3)
+    return (
+        incarnation,
+        kind,
+        {
+            "host": host,
+            "pid": int(raw_pid),
+            "boot_id": boot_id,
+            "start_ticks": start_ticks,
+        },
+    )
 
 
 @dataclass(frozen=True, slots=True)

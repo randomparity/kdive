@@ -11,6 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.ops import build_uses
 from kdive.security.authz.rbac import PlatformRole
+from kdive.services.runs.worker_incarnations import register_worker_incarnation
 
 
 def _ctx(*, operator: bool) -> RequestContext:
@@ -61,6 +62,13 @@ async def _seed(pool: AsyncConnectionPool) -> tuple[UUID, str]:
             "job_id, attempt, holder_worker_id, lease_expires_at) "
             "VALUES (%s, %s, %s, %s, 1, %s, now() - interval '1 sec')",
             (use_id, investigation_id, generation, job_id, holder),
+        )
+    async with pool.connection() as conn:
+        await register_worker_incarnation(
+            conn,
+            holder,
+            "local",
+            {"host": "host-a", "pid": 42, "boot_id": "boot-123", "start_ticks": "987"},
         )
     return use_id, holder
 
@@ -142,7 +150,12 @@ def test_recover_build_use_requires_operator_and_independent_death_proof(
                     ).fetchone()
                 )[0]
             assert use_count == 0
-            assert ledger == (holder, "operator-1", verifier.evidence, "worker host was replaced")
+            assert ledger == (
+                holder,
+                "operator-1",
+                "local: durable exact-incarnation termination (failed)",
+                "worker host was replaced",
+            )
             assert audit_count == 2  # authorized refusal and atomic successful recovery
 
     asyncio.run(_run())
