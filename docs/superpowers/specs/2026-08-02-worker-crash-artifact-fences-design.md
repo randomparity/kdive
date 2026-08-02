@@ -192,8 +192,10 @@ These actors already control the evidence boundary or are excluded deployment pa
    bounded scans, and exact-version deletion only after the last use is gone.
 6. Compose executable tests cover SIGKILL, create, stop, recreate, remove, database outage, and raw
    bypass refusal while preserving the exact container evidence.
-7. Helm/controller tests cover rollout, scale-down, terminal never-registered Pods, API/database
-   outage, UID replacement, finalizer fencing, ordinal bounds, and credential separation.
+7. Helm/controller tests cover rollout, scale-down, terminal Pods whose worker never started but whose
+   UID was lifecycle-registered before startup, API/database outage, UID replacement, finalizer
+   fencing, ordinal bounds, and credential separation. A truly unregistered terminal Pod cannot
+   produce termination evidence or authorize fence recovery.
 8. Deployment tests prove migration credentials are absent from runtime containers, role-specific
    credentials are wired, and the stop-old-first protocol is documented and structurally enforced.
 9. Focused suites pass, then the repository gate `just ci` passes without warnings.
