@@ -49,6 +49,16 @@ def _optional_str_list(value: object) -> list[str] | None:
     return [item for item in value if isinstance(item, str)]
 
 
+def _optional_str_map(value: object) -> dict[str, str] | None:
+    """Coerce persisted immutable-version identities to a non-empty string map."""
+    if not isinstance(value, Mapping):
+        return None
+    items = cast("Mapping[object, object]", value).items()
+    if not all(isinstance(key, str) and isinstance(item, str) and item for key, item in items):
+        return None
+    return {key: item for key, item in items if isinstance(key, str) and isinstance(item, str)}
+
+
 def _is_provenance_value(value: object) -> bool:
     """Whether ``value`` is an admissible provenance value: ``str``, ``bool``, or a ``list[str]``.
 
@@ -90,6 +100,7 @@ class BuildStepResult:
     build_provenance: dict[str, str | bool | list[str]] | None = None
     build_ref: str | None = None
     expires_at: str | None = None
+    artifact_versions: dict[str, str] | None = None
 
     @classmethod
     def load(cls, value: object) -> BuildStepResult | None:
@@ -105,6 +116,7 @@ class BuildStepResult:
             build_provenance=_optional_provenance_map(result.get("build_provenance")),
             build_ref=_optional_str(result.get("build_ref")),
             expires_at=_optional_str(result.get("expires_at")),
+            artifact_versions=_optional_str_map(result.get("artifact_versions")),
         )
 
     def dump(self) -> dict[str, str | dict[str, str | bool | list[str]]]:
@@ -125,6 +137,8 @@ class BuildStepResult:
             result["build_ref"] = self.build_ref
         if self.expires_at is not None:
             result["expires_at"] = self.expires_at
+        if self.artifact_versions is not None:
+            result["artifact_versions"] = dict(self.artifact_versions)
         return result
 
     def refs(self) -> dict[str, str]:

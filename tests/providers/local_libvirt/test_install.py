@@ -116,13 +116,15 @@ class _Fetch:
     """
 
     calls: list[tuple[str, Path]] = field(default_factory=list)
+    versions: list[str | None] = field(default_factory=list)
     fail: bool = False
     with_modules: bool = True
     boot_bytes: bytes = _X86_BOOT_MEMBER
     version: str = _MODULES_VERSION
 
-    def __call__(self, ref: str, dest: Path) -> None:
+    def __call__(self, ref: str, dest: Path, version_id: str | None = None) -> None:
         self.calls.append((ref, dest))
+        self.versions.append(version_id)
         tmp = dest.with_suffix(dest.suffix + ".part")
         tmp.write_bytes(
             _combined_kernel_tar_bytes(
@@ -149,10 +151,12 @@ class _StreamKernel:
     version: str = _MODULES_VERSION
     fail: bool = False
     refs: list[str] = field(default_factory=list)
+    versions: list[str | None] = field(default_factory=list)
 
     @contextmanager
-    def __call__(self, ref: str) -> Iterator[StreamedArtifact]:
+    def __call__(self, ref: str, version_id: str | None = None) -> Iterator[StreamedArtifact]:
         self.refs.append(ref)
+        self.versions.append(version_id)
         if self.fail:
             raise CategorizedError("synthetic fetch failure", category=ErrorCategory.STALE_HANDLE)
         data = _combined_kernel_tar_bytes(
@@ -227,7 +231,7 @@ class _RecordingFetch:
     events: list[str]
     refs: list[str] = field(default_factory=list)
 
-    def __call__(self, ref: str, dest: Path) -> None:
+    def __call__(self, ref: str, dest: Path, version_id: str | None = None) -> None:
         self.events.append("fetch")
         self.refs.append(ref)
 
@@ -317,6 +321,7 @@ def _request(
     method: CaptureMethod = CaptureMethod.HOST_DUMP,
     initrd_ref: str | None = None,
     debuginfo_ref: str | None = None,
+    artifact_versions: dict[str, str] | None = None,
 ) -> InstallRequest:
     return InstallRequest(
         system_id=_SYS,
@@ -326,10 +331,39 @@ def _request(
         method=method,
         initrd_ref=initrd_ref,
         debuginfo_ref=debuginfo_ref,
+        artifact_versions=artifact_versions,
     )
 
 
 # --- install: render + staging -------------------------------------------------------
+
+
+def test_install_reads_each_catalogued_artifact_version(tmp_path: Path) -> None:
+    fetch = _Fetch()
+    stream = _StreamKernel()
+    inst = _install(
+        conn=_conn_with_existing(),
+        fetch=fetch,
+        stream=stream,
+        staging_root=tmp_path,
+        kernel_writer=_FakeKernelWriter([]),
+    )
+
+    inst.install(
+        _request(
+            method=CaptureMethod.KDUMP,
+            initrd_ref=_INITRD_REF,
+            debuginfo_ref="runs/r/vmlinux",
+            artifact_versions={
+                "kernel": "kernel-v1",
+                "initrd": "initrd-v1",
+                "vmlinux": "vmlinux-v1",
+            },
+        )
+    )
+
+    assert stream.versions == ["kernel-v1"]
+    assert fetch.versions == ["initrd-v1", "vmlinux-v1"]
 
 
 def test_install_redefines_direct_kernel_os(tmp_path: Path) -> None:
@@ -1140,11 +1174,11 @@ def test_read_console_log_missing_is_empty(tmp_path: Path) -> None:
 def test_install_console_method_omits_initrd(tmp_path: Path) -> None:
     """CONSOLE method, no initrd_ref: no initrd fetched; no <initrd> in XML."""
 
-    def _initrd_must_not_run(_ref: str, _dest: Path) -> None:
+    def _initrd_must_not_run(_ref: str, _dest: Path, _version_id: str | None = None) -> None:
         raise AssertionError("initrd fetched when no initrd_ref given")
 
     @contextmanager
-    def _stream_combined(_ref: str) -> Iterator[StreamedArtifact]:
+    def _stream_combined(_ref: str, _version_id: str | None = None) -> Iterator[StreamedArtifact]:
         yield StreamedArtifact(
             io.BytesIO(_combined_kernel_tar_bytes()), Sensitivity.SENSITIVE, "build"
         )
@@ -1176,10 +1210,12 @@ class _FakeStore:
 
     data: bytes = b"bzimage-bytes"
     error: CategorizedError | None = None
-    calls: list[tuple[str, str | None]] = field(default_factory=list)
+    calls: list[tuple[str, str | None, str | None]] = field(default_factory=list)
 
-    def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
-        self.calls.append((key, etag))
+    def get_artifact(
+        self, key: str, etag: str | None, *, version_id: str | None = None
+    ) -> FetchedArtifact:
+        self.calls.append((key, etag, version_id))
         if self.error is not None:
             raise self.error
         return FetchedArtifact(self.data, Sensitivity.SENSITIVE, "build")
@@ -1203,7 +1239,15 @@ def test_stage_object_reads_unconditionally_with_none_etag(tmp_path: Path) -> No
 
     # ADR-0054 regression guard: the seam must read with etag=None (an empty/non-None etag
     # would 412 on a real store). This is the only place the etag argument is chosen.
-    assert store.calls == [(_KERNEL_REF, None)]
+    assert store.calls == [(_KERNEL_REF, None, None)]
+
+
+def test_stage_object_reads_the_catalogued_version(tmp_path: Path) -> None:
+    store = _FakeStore()
+
+    _stage_object(store, _KERNEL_REF, tmp_path / "kernel", version_id="kernel-v1")
+
+    assert store.calls == [(_KERNEL_REF, None, "kernel-v1")]
 
 
 def test_stage_object_propagates_store_error_and_leaves_dest_intact(tmp_path: Path) -> None:
@@ -1250,11 +1294,13 @@ class _FakeStreamStore:
 
     data: bytes = b"combined-tar-bytes"
     error: CategorizedError | None = None
-    calls: list[tuple[str, str | None]] = field(default_factory=list)
+    calls: list[tuple[str, str | None, str | None]] = field(default_factory=list)
 
     @contextmanager
-    def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
-        self.calls.append((key, etag))
+    def get_artifact_stream(
+        self, key: str, etag: str | None, *, version_id: str | None = None
+    ) -> Iterator[StreamedArtifact]:
+        self.calls.append((key, etag, version_id))
         if self.error is not None:
             raise self.error
         yield StreamedArtifact(io.BytesIO(self.data), Sensitivity.SENSITIVE, "build")
@@ -1268,7 +1314,16 @@ def test_stream_object_reads_unconditionally_with_none_etag() -> None:
 
     # ADR-0054/0400 regression guard: the streaming seam reads with etag=None (an empty/non-None
     # etag would 412 on a real store). This is the only place the etag argument is chosen.
-    assert store.calls == [(_KERNEL_REF, None)]
+    assert store.calls == [(_KERNEL_REF, None, None)]
+
+
+def test_stream_object_reads_the_catalogued_version() -> None:
+    store = _FakeStreamStore()
+
+    with _stream_object(store, _KERNEL_REF, version_id="kernel-v1"):
+        pass
+
+    assert store.calls == [(_KERNEL_REF, None, "kernel-v1")]
 
 
 def test_stream_object_propagates_store_error() -> None:
@@ -1278,7 +1333,7 @@ def test_stream_object_propagates_store_error() -> None:
         pass
 
     assert excinfo.value.category is ErrorCategory.STALE_HANDLE
-    assert store.calls == [(_KERNEL_REF, None)]
+    assert store.calls == [(_KERNEL_REF, None, None)]
 
 
 def test_install_categorizes_staging_mkdir_failure(tmp_path: Path) -> None:

@@ -1038,6 +1038,15 @@ def test_get_artifact_none_etag_omits_if_match() -> None:
     assert fetched.data == b"bytes"
 
 
+def test_get_artifact_names_the_immutable_version() -> None:
+    client = _RecordingClient()
+
+    ObjectStore(client, "bucket").get_artifact("t/build/kernel", None, version_id="kernel-v1")
+
+    assert client.last_kwargs is not None
+    assert client.last_kwargs["VersionId"] == "kernel-v1"
+
+
 class _StreamingBody:
     """Fake boto ``StreamingBody``: ``read(size)`` returns up to ``size`` bytes (``b""`` at
     true EOF) and ``close()`` records the close, mirroring the real body the reader wraps."""
@@ -1198,6 +1207,18 @@ def test_get_artifact_stream_none_etag_omits_if_match() -> None:
         pass
     assert client.last_kwargs is not None
     assert "IfMatch" not in client.last_kwargs
+
+
+def test_get_artifact_stream_names_the_immutable_version() -> None:
+    client = _StreamingClient(b"streamed")
+
+    with ObjectStore(client, "bucket").get_artifact_stream(
+        "t/build/kernel", None, version_id="kernel-v1"
+    ) as streamed:
+        assert streamed.reader.read() == b"streamed"
+
+    assert client.last_kwargs is not None
+    assert client.last_kwargs["VersionId"] == "kernel-v1"
 
 
 def test_register_artifact_row_maps_stored_and_owner() -> None:
@@ -1630,6 +1651,22 @@ def test_presign_get_mints_time_boxed_url_for_one_key() -> None:
     assert url == client.minted_url
     assert client.calls == [
         ("get_object", {"Bucket": "bucket", "Key": "t/vmcore/abc/core"}, 600, "GET")
+    ]
+
+
+def test_presign_get_pins_an_immutable_object_version() -> None:
+    client = _FakePresignClient()
+    store = ObjectStore(client, "bucket")
+
+    store.presign_get("t/build/kernel", expires_in=600, version_id="kernel-v1")
+
+    assert client.calls == [
+        (
+            "get_object",
+            {"Bucket": "bucket", "Key": "t/build/kernel", "VersionId": "kernel-v1"},
+            600,
+            "GET",
+        )
     ]
 
 

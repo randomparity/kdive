@@ -96,8 +96,8 @@ class _LibvirtConn(Protocol):
 
 
 type Connect = Callable[[], _LibvirtConn]
-type Fetch = Callable[[str, Path], None]
-type StreamFetch = Callable[[str], contextlib.AbstractContextManager[StreamedArtifact]]
+type Fetch = Callable[[str, Path, str | None], None]
+type StreamFetch = Callable[[str, str | None], contextlib.AbstractContextManager[StreamedArtifact]]
 type Readiness = Callable[[UUID], ReadinessResult]
 
 
@@ -379,7 +379,8 @@ class LocalLibvirtInstaller:
             # extract_kernel_bundle makes over boot/vmlinuz, so the combined tar is decompressed
             # once, not twice, and never lands on disk (ADR-0399/0400).
             needs_modules = request.method in KDUMP_FAMILY or request.debuginfo_ref is not None
-            with self._stream_kernel(request.kernel_ref) as streamed:
+            versions = request.artifact_versions or {}
+            with self._stream_kernel(request.kernel_ref, versions.get("kernel")) as streamed:
                 modules_found = extract_kernel_bundle(
                     streamed.reader, kernel_path, modules_tar if needs_modules else None
                 )
@@ -387,7 +388,12 @@ class LocalLibvirtInstaller:
             modules_injected = False
             if modules_found:
                 self._inject_built_modules(
-                    request.system_id, modules_tar, kernel_path, request.debuginfo_ref, vmlinux
+                    request.system_id,
+                    modules_tar,
+                    kernel_path,
+                    request.debuginfo_ref,
+                    versions.get("vmlinux"),
+                    vmlinux,
                 )
                 modules_injected = True
             return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
@@ -424,7 +430,8 @@ class LocalLibvirtInstaller:
         if request.initrd_ref is None:
             return None
         initrd_path = staging_dir / "initrd"
-        self._fetch_initrd(request.initrd_ref, initrd_path)
+        versions = request.artifact_versions or {}
+        self._fetch_initrd(request.initrd_ref, initrd_path, versions.get("initrd"))
         return initrd_path
 
     @staticmethod
@@ -445,6 +452,7 @@ class LocalLibvirtInstaller:
         modules_tar: Path,
         kernel_image: Path,
         debuginfo_ref: str | None,
+        debuginfo_version_id: str | None,
         vmlinux: Path,
     ) -> None:
         """Force-off the domain, then stage the built kernel into its overlay (ADR-0203/0207).
@@ -482,7 +490,7 @@ class LocalLibvirtInstaller:
         self._booter.force_off_if_active(system_id)
         vmlinux_ref: Path | None = None
         if debuginfo_ref is not None:
-            self._fetch_modules(debuginfo_ref, vmlinux)
+            self._fetch_modules(debuginfo_ref, vmlinux, debuginfo_version_id)
             vmlinux_ref = vmlinux
         self._kernel_writer.inject(overlay_path(system_id), kernel_image, modules_tar, vmlinux_ref)
 
@@ -632,10 +640,14 @@ class LocalLibvirtInstall:
 
 
 class _ObjectReader(Protocol):
-    def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact: ...
+    def get_artifact(
+        self, key: str, etag: str | None, *, version_id: str | None = None
+    ) -> FetchedArtifact: ...
 
 
-def _stage_object(store: _ObjectReader, ref: str, dest: Path) -> None:
+def _stage_object(
+    store: _ObjectReader, ref: str, dest: Path, version_id: str | None = None
+) -> None:
     """Read object ``ref`` from the store and write it to ``dest`` via temp-then-rename.
 
     ``ref`` is a key the system itself produced (the Run's ``initrd_ref`` or a debuginfo run's
@@ -652,22 +664,22 @@ def _stage_object(store: _ObjectReader, ref: str, dest: Path) -> None:
             ``INFRASTRUCTURE_FAILURE`` with the destination path so the failure is not an
             opaque ``OSError`` out of the seam.
     """
-    data = store.get_artifact(ref, None).data
+    data = store.get_artifact(ref, None, version_id=version_id).data
     write_staged_bytes(dest, data)
 
 
-def _real_fetch(ref: str, dest: Path) -> None:  # pragma: no cover - live_vm
-    _stage_object(object_store_from_env(), ref, dest)
+def _real_fetch(ref: str, dest: Path, version_id: str | None) -> None:  # pragma: no cover - live_vm
+    _stage_object(object_store_from_env(), ref, dest, version_id=version_id)
 
 
 class _ObjectStreamReader(Protocol):
     def get_artifact_stream(
-        self, key: str, etag: str | None
+        self, key: str, etag: str | None, *, version_id: str | None = None
     ) -> contextlib.AbstractContextManager[StreamedArtifact]: ...
 
 
 def _stream_object(
-    store: _ObjectStreamReader, ref: str
+    store: _ObjectStreamReader, ref: str, version_id: str | None = None
 ) -> contextlib.AbstractContextManager[StreamedArtifact]:
     """Open a streaming read of the system-produced key ``ref``.
 
@@ -677,13 +689,14 @@ def _stream_object(
     so the tar is never materialized as bytes or written to disk. The ``etag=None`` intent lives
     at this one call site so a host-free unit test pins it (guarding an empty-etag regression).
     """
-    return store.get_artifact_stream(ref, None)
+    return store.get_artifact_stream(ref, None, version_id=version_id)
 
 
 def _real_stream(
     ref: str,
+    version_id: str | None,
 ) -> contextlib.AbstractContextManager[StreamedArtifact]:  # pragma: no cover - live_vm
-    return _stream_object(object_store_from_env(), ref)
+    return _stream_object(object_store_from_env(), ref, version_id=version_id)
 
 
 __all__ = [
