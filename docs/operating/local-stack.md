@@ -27,7 +27,8 @@ Production-like deployments may replace these containers with managed Postgres, 
 S3-compatible object storage, and a real OIDC issuer. The KDIVE processes only require the
 environment variables documented in [the config reference](../guide/reference/config.md).
 An external bucket must provide the same bucket-wide state and grant
-`s3:GetBucketVersioning`, `s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. Adopt it in a
+`s3:GetObjectVersion`, `s3:GetBucketVersioning`, `s3:ListBucketVersions`, and
+`s3:DeleteObjectVersion`. Adopt it in a
 stop-old-first window: quiesce old processes, grant and verify IAM and the no-exclusions/MFA-off
 policy, enable versioning, wait for activation, migrate, then start only the new image. Suspending
 versioning or rolling back live to a pre-ADR-0524 image is unsupported; see

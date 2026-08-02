@@ -63,7 +63,7 @@ off, and no MinIO prefix/folder exclusions), and applies database migrations.
 > wait failure. `minio-init`'s exit code still propagates, so a bucket creation, version enable,
 > or version-policy verification failure fails `just stack-up` before any KDIVE process starts.
 
-For an external bucket, the runtime identity also needs `s3:GetBucketVersioning`,
+For an external bucket, the runtime identity also needs `s3:GetObjectVersion`, `s3:GetBucketVersioning`,
 `s3:ListBucketVersions`, and `s3:DeleteObjectVersion`. First adoption is stop-old-first: quiesce
 all old processes, grant and verify IAM, verify whole-bucket/no-exclusions/MFA-off policy, enable
 versioning, wait for activation, migrate, and start only the version-aware image. Suspending
