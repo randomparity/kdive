@@ -59,3 +59,40 @@ async def release_build_use(conn: AsyncConnection, use_id: UUID | None) -> None:
     require_top_level_transaction(conn, "release_build_use")
     async with conn.transaction():
         await conn.execute("DELETE FROM investigation_build_uses WHERE use_id = %s", (use_id,))
+
+
+async def recover_build_use_after_confirmed_worker_death(
+    conn: AsyncConnection,
+    use_id: UUID,
+    *,
+    confirmed_worker_id: str,
+    recovered_by: str,
+    evidence: str,
+) -> bool:
+    """Release a stranded use only after external proof that its worker process died.
+
+    Time and the job lease are deliberately not evidence: ADR-0018 permits the old handler to
+    continue after heartbeat loss and job reclaim. This explicit operator/reconciler path records
+    the independently obtained evidence before removing the persistent pin.
+    """
+    if not recovered_by.strip() or not evidence.strip():
+        raise ValueError("recovered_by and independent worker-death evidence must be non-empty")
+    require_top_level_transaction(conn, "recover_build_use_after_confirmed_worker_death")
+    async with conn.transaction():
+        row = await (
+            await conn.execute(
+                "SELECT investigation_id, generation, job_id, attempt, holder_worker_id "
+                "FROM investigation_build_uses WHERE use_id = %s FOR UPDATE",
+                (use_id,),
+            )
+        ).fetchone()
+        if row is None or row[4] != confirmed_worker_id:
+            return False
+        await conn.execute(
+            "INSERT INTO investigation_build_use_recoveries "
+            "(use_id, investigation_id, generation, job_id, attempt, holder_worker_id, "
+            "recovered_by, evidence) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (use_id, *row, recovered_by, evidence),
+        )
+        await conn.execute("DELETE FROM investigation_build_uses WHERE use_id = %s", (use_id,))
+    return True

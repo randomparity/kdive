@@ -19,6 +19,7 @@ from kdive.db.locks import LockScope, _lock_key
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup import gc as gc_module
 from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
+from kdive.services.runs.build_use import recover_build_use_after_confirmed_worker_death
 from tests.reconciler.conftest import connect
 
 
@@ -174,7 +175,7 @@ def test_expired_generation_reclaims_by_absolute_deadline(migrated_url: str) -> 
     asyncio.run(_run())
 
 
-def test_dead_attempt_use_expires_while_live_reclaimed_and_recycled_attempts_pin(
+def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
     migrated_url: str,
 ) -> None:
     async def _run() -> None:
@@ -229,8 +230,8 @@ def test_dead_attempt_use_expires_while_live_reclaimed_and_recycled_attempts_pin
             )
             assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
 
-            # Process death is demonstrable once its unrenewed lease lapses; a later live
-            # attempt then owns its own independent fence.
+            # A lapsed heartbeat does not prove the first handler stopped (ADR-0018). A later
+            # attempt therefore owns an independent fence without erasing its predecessor.
             await conn.execute(
                 "UPDATE investigation_build_uses SET lease_expires_at = now() - interval '1 sec' "
                 "WHERE use_id = %s",
@@ -245,8 +246,12 @@ def test_dead_attempt_use_expires_while_live_reclaimed_and_recycled_attempts_pin
             )
             assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
 
-            # Recycling a terminal row back to attempt 1 does not collide with its stale
-            # attempt-1 record; holder identity plus use_id distinguish executions.
+            # Attempt 2 may complete while attempt 1 is still consuming the generation.
+            await conn.execute("DELETE FROM investigation_build_uses WHERE use_id = %s", (new_use,))
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+
+            # Recycling a terminal row back to attempt 1 does not collide with the still-live
+            # predecessor. Worker identity plus use_id distinguish physical executions.
             await conn.execute(
                 "UPDATE jobs SET attempt = 1, worker_id = 'recycled-worker' WHERE id = %s",
                 (job_id,),
@@ -258,9 +263,54 @@ def test_dead_attempt_use_expires_while_live_reclaimed_and_recycled_attempts_pin
                 "(%s, %s, %s, %s, 1, 'recycled-worker', now() + interval '5 min')",
                 (recycled_use, investigation_id, generation, job_id),
             )
-            await conn.execute(
-                "UPDATE investigation_build_uses SET lease_expires_at = now() - interval '1 sec'"
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+            with pytest.raises(ValueError, match="independent worker-death evidence"):
+                await recover_build_use_after_confirmed_worker_death(
+                    conn,
+                    old_use,
+                    confirmed_worker_id="dead-worker",
+                    recovered_by="operator:test",
+                    evidence=" ",
+                )
+            assert not await recover_build_use_after_confirmed_worker_death(
+                conn,
+                old_use,
+                confirmed_worker_id="wrong-worker",
+                recovered_by="operator:test",
+                evidence="operator checked the wrong process",
             )
+            assert await recover_build_use_after_confirmed_worker_death(
+                conn,
+                old_use,
+                confirmed_worker_id="dead-worker",
+                recovered_by="operator:test",
+                evidence="operator confirmed host process exited",
+            )
+            assert await recover_build_use_after_confirmed_worker_death(
+                conn,
+                recycled_use,
+                confirmed_worker_id="recycled-worker",
+                recovered_by="operator:test",
+                evidence="operator confirmed replacement process exited",
+            )
+            recoveries = await (
+                await conn.execute(
+                    "SELECT holder_worker_id, recovered_by, evidence "
+                    "FROM investigation_build_use_recoveries ORDER BY holder_worker_id"
+                )
+            ).fetchall()
+            assert recoveries == [
+                (
+                    "dead-worker",
+                    "operator:test",
+                    "operator confirmed host process exited",
+                ),
+                (
+                    "recycled-worker",
+                    "operator:test",
+                    "operator confirmed replacement process exited",
+                ),
+            ]
             assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
         finally:
             await conn.close()

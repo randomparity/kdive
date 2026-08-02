@@ -136,8 +136,7 @@ _UNPINNED_GENERATION_SQL = (
     "WHERE r.investigation_id = ib.investigation_id AND r.build_ref = ib.build_ref "
     "AND j.kind = 'install' AND j.state IN ('queued', 'running')) "
     "AND NOT EXISTS (SELECT 1 FROM investigation_build_uses u "
-    "WHERE u.investigation_id = ib.investigation_id AND u.generation = ib.generation "
-    "AND u.lease_expires_at > now())))"
+    "WHERE u.investigation_id = ib.investigation_id AND u.generation = ib.generation)))"
 )
 
 
@@ -172,11 +171,6 @@ async def _mark_generation_reclaiming(
         if row is None:
             return None
         state, build_ref, artifacts = row
-        await conn.execute(
-            "DELETE FROM investigation_build_uses WHERE investigation_id = %s "
-            "AND generation = %s AND lease_expires_at <= now()",
-            (investigation_id, generation),
-        )
         if state == "active":
             pin = await (
                 await conn.execute(
@@ -188,8 +182,7 @@ async def _mark_generation_reclaiming(
                     "WHERE r.investigation_id = %s AND r.build_ref = %s "
                     "AND j.kind = 'install' AND j.state IN ('queued', 'running') "
                     "UNION ALL SELECT 1 FROM investigation_build_uses u "
-                    "WHERE u.investigation_id = %s AND u.generation = %s "
-                    "AND u.lease_expires_at > now())",
+                    "WHERE u.investigation_id = %s AND u.generation = %s)",
                     (
                         investigation_id,
                         build_ref,
@@ -246,6 +239,14 @@ async def _reclaim_generation(
         conn.transaction(),
         advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
     ):
+        await conn.execute(
+            "INSERT INTO investigation_build_tombstones "
+            "(investigation_id, build_ref, expires_at) "
+            "SELECT investigation_id, build_ref, expires_at FROM investigation_builds "
+            "WHERE investigation_id = %s AND generation = %s AND state = 'reclaiming' "
+            "ON CONFLICT (investigation_id, build_ref) DO NOTHING",
+            (investigation_id, generation),
+        )
         result = await conn.execute(
             "DELETE FROM investigation_builds WHERE investigation_id = %s "
             "AND generation = %s AND state = 'reclaiming' RETURNING generation",
