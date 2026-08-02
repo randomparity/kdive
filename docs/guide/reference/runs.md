@@ -62,12 +62,6 @@ Success returns `data.build_ref`, the reusable same-Investigation handle, plus i
 ISO-8601 UTC retention deadline in `data.expires_at` and the reference clock in
 `data.server_time`. Reuse it through `runs.create`; reuse does not refresh the deadline.
 
-`runs.create`, `runs.get`, and `runs.list` also return `data.server_time` whenever they expose
-`data.build_expires_at` (one collection-level clock for `runs.list`). Compute remaining retention
-as `build_expires_at - server_time`. Retention is per generation; at or after the deadline a new or
-restaged install is rejected. Recover with `runs.create` without `build_ref`, then upload and
-complete a new external build.
-
 The `kernel` tar's boot/vmlinuz member is validated against the Run's build-profile arch
 (declared at runs.create): a bzImage for x86_64, an ELF vmlinux for ppc64le. A payload that
 does not match the declared arch is rejected. See
@@ -194,8 +188,10 @@ freeform claim: `client_attested: true` with the `source_label`/`source_ref` pas
 build.
 
 Reusable external builds expose `data.build_ref` and their absolute ISO-8601 UTC retention
-deadline as `data.build_expires_at`. Pass the handle to `runs.create` only inside this
-Investigation; reuse never extends the deadline.
+deadline as `data.build_expires_at`; `data.server_time` is the database reference clock for
+that deadline. Pass the handle to `runs.create` only inside this Investigation; reuse never
+extends the deadline. At or after expiry, new/restaged install is rejected; recover by
+calling `runs.create` without `build_ref` and uploading a new external build.
 
 Liveness: `data.liveness` tells a healthy guest from one that livelocked **after** a ready
 boot — a case `boot_outcome=ready` and `control.watch_for_crash` (which sees no crash

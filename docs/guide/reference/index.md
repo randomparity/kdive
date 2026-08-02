@@ -71,6 +71,7 @@
 | [`jobs.cancel`](jobs.md#jobscancel) | `implemented` |
 | [`jobs.list`](jobs.md#jobslist) | `implemented` |
 | [`jobs.wait`](jobs.md#jobswait) | `implemented` |
+| [`ops.build_uses_list`](ops.md#opsbuild_uses_list) | `implemented` |
 | [`ops.diagnostics`](ops.md#opsdiagnostics) | `implemented` |
 | [`ops.export_cost_classes`](ops.md#opsexport_cost_classes) | `implemented` |
 | [`ops.export_systems_toml`](ops.md#opsexport_systems_toml) | `implemented` |
@@ -79,6 +80,7 @@
 | [`ops.jobs_list`](ops.md#opsjobs_list) | `implemented` |
 | [`ops.reconcile_now`](ops.md#opsreconcile_now) | `implemented` |
 | [`ops.reconcile_systems`](ops.md#opsreconcile_systems) | `implemented` |
+| [`ops.recover_build_use`](ops.md#opsrecover_build_use) | `implemented` |
 | [`ops.set_cost_class_coeff`](ops.md#opsset_cost_class_coeff) | `implemented` |
 | [`ops.set_host_capacity`](ops.md#opsset_host_capacity) | `implemented` |
 | [`ops.set_queue_paused`](ops.md#opsset_queue_paused) | `implemented` |
