@@ -479,6 +479,42 @@ def test_runs_get_documents_build_provenance_shape() -> None:
     assert "client_attested" in description
 
 
+def test_reusable_build_contract_is_agent_visible() -> None:
+    """The tool schema must carry the complete reusable-build lifecycle contract."""
+    tools = {t.name: t for t in TOOLS}
+    create = tools["runs.create"]
+    create_text = (
+        (create.description or "")
+        + " "
+        + create.parameters["properties"]["build_ref"]["description"]
+    ).lower()
+
+    assert "64 lowercase hex" in create_text
+    assert "lowercase uuid" in create_text
+    assert "same-investigation" in create_text
+    assert "target_kind" in create_text
+    assert "build_profile" in create_text
+    assert "expires_at" in create_text
+    assert "server_time" in create_text
+    assert "iso-8601 utc" in create_text
+    assert "days" in create_text
+    assert "per generation" in create_text
+    assert "build_ref_expired" in create_text
+    assert "runs.create without" in create_text
+    assert "artifacts.create_run_upload" in create_text
+    assert "runs.complete_build" in create_text
+    assert "runs.install" in create_text
+
+    complete_text = (tools["runs.complete_build"].description or "").lower()
+    assert "data.build_ref" in complete_text
+    assert "data.expires_at" in complete_text
+    assert "data.server_time" in complete_text
+
+    get_text = (tools["runs.get"].description or "").lower()
+    assert "data.build_ref" in get_text
+    assert "data.build_expires_at" in get_text
+
+
 def test_jobs_wait_description_conveys_retry_contract() -> None:
     # #941: an agent calling jobs.wait reads only the wrapper docstring + Field text, so the
     # transport-reset retry contract must be surfaced there rather than living only on the inner

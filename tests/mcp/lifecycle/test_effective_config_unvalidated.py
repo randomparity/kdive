@@ -233,7 +233,8 @@ def test_bad_effective_config_uploads_completes_and_warns(migrated_url: str) -> 
 
         # The upload is never rejected: the Run still reaches SUCCEEDED and the config is stored.
         assert resp.status == "succeeded", resp
-        assert keys == {kernel_key, config_key}
+        # Reusable build artifacts are Investigation-owned; effective_config remains Run-owned.
+        assert keys == {config_key}
         assert run is not None and run.state is RunState.SUCCEEDED
         # ...but the success envelope now carries the non-blocking boot-config advisory.
         warning = cast("dict[str, Any]", resp.data["missing_boot_config"])

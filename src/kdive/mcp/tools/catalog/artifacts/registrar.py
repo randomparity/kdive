@@ -219,7 +219,9 @@ def _register_artifacts_create_run_upload(
 
         Read-back: uploaded build artifacts are not returned by `artifacts.list` (that lists a
         System's redacted artifacts). To confirm what the Run holds after `runs.complete_build`,
-        read the Run with `runs.get`.
+        read the Run with `runs.get`. Completion publishes one Investigation-owned immutable build
+        and returns `data.build_ref`; pass that handle to `runs.create` for compatible Runs in the
+        same Investigation instead of uploading the same build again.
         """
         return await artifact_uploads.create_run_upload(
             pool,
