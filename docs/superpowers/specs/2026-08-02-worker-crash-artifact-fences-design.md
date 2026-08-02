@@ -68,19 +68,21 @@ incarnation. A recovery audit copies the immutable termination facts before dele
 | Actor | Allowed security-sensitive operation | Denied operation |
 |---|---|---|
 | server/operator | submit and audit a bounded recovery request | publish termination; directly delete uses |
-| worker | register local identity through its constrained path; acquire/release its own current attempt | terminate an identity; release another attempt; mutate evidence |
+| worker | authenticate an authority-registered active identity; acquire/release its own current attempt | create, rebind, activate, or terminate an identity; release another attempt; mutate evidence |
 | lifecycle witness | register an exact Docker/Pod binding; terminate that same binding | claim jobs; acquire/release uses; recover pins |
 | reconciler | recover one exact use after matching terminal evidence | create or alter termination evidence |
 | migration owner | install schema and grants outside runtime containers | participate in normal runtime |
 
 Postgres functions verify `session_user` membership, validate bounded inputs, acquire the incarnation
 advisory lock, and perform each transition transactionally. Runtime roles receive no direct mutation
-grant on the protected tables. The lifecycle authority mints a random 256-bit credential for each
-incarnation, stores only its hash, and delivers the plaintext once before worker startup. Worker
-functions derive the holder from the credential hash and derive job/attempt ownership from the locked
-claim; they never trust a caller-supplied holder. Supported Compose and Helm manifests provide distinct
-secret-backed DSNs; the shared migration credential is not injected into runtime workloads. Local
-development setup creates equivalent credentials rather than weakening the checks.
+grant on the protected tables. The lifecycle authority alone registers the exact runtime binding,
+mints a random 256-bit credential for each incarnation, stores only its hash, and delivers the plaintext
+once before worker startup. The worker can authenticate that existing active incarnation but cannot
+create, rebind, or reactivate one. Worker functions derive the holder from the credential hash and
+derive job/attempt ownership from the locked claim; they never trust a caller-supplied holder. Supported
+Compose and Helm manifests provide distinct secret-backed DSNs; the shared migration credential is not
+injected into runtime workloads. Local development setup creates equivalent supervisor-owned
+credentials rather than weakening the checks.
 
 ### Claim and upgrade protocol
 
@@ -183,7 +185,7 @@ These actors already control the evidence boundary or are excluded deployment pa
    remains until the thread exits; a process-death simulation proves the committed row remains.
 2. Overlapping attempts hold distinct uses; releasing or recovering one cannot unpin the other.
 3. SQL-role tests prove worker, server, reconciler, and witness allow/deny matrices, including a worker
-   unable to terminate itself or delete another use.
+   unable to create, rebind, activate, or terminate an incarnation or delete another use.
 4. Claim tests prove an unregistered, terminated, and old-protocol worker cannot transition a job to
    running; a current active worker can.
 5. Recovery/GC races prove termination-versus-use ordering, atomic audit+delete, tenant isolation,
