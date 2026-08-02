@@ -309,6 +309,7 @@ async def _postmortem_crash(
                 crash.run_crash_postmortem,
                 vmcore_ref=resolved.vmcore_ref,
                 debuginfo_ref=resolved.debuginfo_ref,
+                debuginfo_version_id=resolved.debuginfo_version_id,
                 expected_build_id=resolved.build_id,
                 commands=commands,
             )
