@@ -157,7 +157,7 @@ async def _restage_and_enqueue_install(
     cmdline: str | None,
     crashkernel: str | None,
 ) -> ToolResponse:
-    """Enqueue install, re-staging when the requested cmdline or crashkernel differs from installed.
+    """Enqueue install under Investigation→Run locks, re-staging changed variants.
 
     The whole decision — read the step ledger, delete the settled ``install``/``boot`` rows on a
     re-stage, and enqueue — runs inside one per-Run advisory-lock transaction so a concurrent
@@ -191,6 +191,9 @@ async def _restage_and_enqueue_install(
         progress = await step_progress(conn, run.id)
         if progress.install == RUN_STEP_RUNNING or progress.boot == RUN_STEP_RUNNING:
             return _config_error(str(run.id), data={"reason": "step_in_progress"})
+        prior = await queue.get_by_dedup_key(conn, f"{run.id}:install")
+        if prior is not None and prior.state in {JobState.QUEUED, JobState.RUNNING}:
+            return run_job_envelope(prior, run.id)
         variant_changed = (
             progress.installed_cmdline != requested_cmdline
             or progress.installed_crashkernel != requested_crashkernel
