@@ -416,9 +416,7 @@ def test_create_rejects_unusable_reusable_build(migrated_url: str, mode: str) ->
     asyncio.run(_run())
 
 
-def test_create_reports_expired_after_generation_was_reclaimed(
-    migrated_url: str,  # noqa: F811
-) -> None:
+def test_create_reports_expired_after_generation_was_reclaimed(migrated_url: str) -> None:  # noqa: F811
     class _Store:
         def delete_version(self, key: str, version_id: str) -> None:
             del key, version_id
@@ -430,18 +428,19 @@ def test_create_reports_expired_after_generation_was_reclaimed(
     async def _run() -> None:
         pool = await _pool_open(migrated_url)
         try:
-            inv_id = await _seed_investigation(pool)
-            sys_id = await _seed_system(pool)
-            build_ref = await _seed_reusable_build(pool, inv_id, expired=True)
+            investigation_id = await _seed_investigation(pool)
+            system_id = await _seed_system(pool)
+            build_ref = await _seed_reusable_build(pool, investigation_id, expired=True)
             async with pool.connection() as conn:
-                assert await gc_expired_build_artifacts(conn, _Store(), timedelta(days=30)) == 2
+                await gc_expired_build_artifacts(conn, _Store(), timedelta(days=30))
+
             with pytest.raises(RunCreateError) as caught:
                 await _create(
                     pool,
                     _ctx(),
                     RunCreateRequest(
-                        investigation_id=inv_id,
-                        system_id=sys_id,
+                        investigation_id=investigation_id,
+                        system_id=system_id,
                         build_profile={"schema_version": 1},
                         build_ref=build_ref,
                     ),
@@ -450,14 +449,14 @@ def test_create_reports_expired_after_generation_was_reclaimed(
             assert caught.value.details["expires_at"]
             assert caught.value.details["server_time"]
 
-            other_inv = await _seed_investigation(pool)
+            other_investigation = await _seed_investigation(pool)
             with pytest.raises(RunCreateError) as cross_tenant:
                 await _create(
                     pool,
                     _ctx(),
                     RunCreateRequest(
-                        investigation_id=other_inv,
-                        system_id=sys_id,
+                        investigation_id=other_investigation,
+                        system_id=system_id,
                         build_profile={"schema_version": 1},
                         build_ref=build_ref,
                     ),

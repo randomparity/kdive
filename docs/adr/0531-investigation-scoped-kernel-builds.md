@@ -89,9 +89,10 @@ Install is the artifact-use fence. `runs.install` acquires the Investigation loc
 lock and atomically checks the generation deadline while enqueueing. A new or restaged install at
 or after expiry fails with the same timestamps and recreate/re-upload recovery as expired reuse; an
 idempotent no-op for the already installed variant remains callable because it reads no artifact.
-Garbage collection defers while an install job for a referencing Run is queued or running. The job
-therefore keeps the generation through every provider/object-store read even when it starts after
-the deadline; success materializes the kernel onto the System, while failure releases the fence.
+Garbage collection defers while an install job for a referencing Run is queued or running. This
+closes the admission-to-handler path for ordinary job completion and failure. Proving and recovering
+artifact-use fences across worker process death or a provider thread that outlives its job state is
+separate platform work tracked by [#1803](https://github.com/randomparity/kdive/issues/1803).
 
 ## Consequences
 
@@ -108,13 +109,10 @@ the deadline; success materializes the kernel onto the System, while failure rel
   deadline. Looking up or reusing a build does not extend retention.
 - Reuse bypasses build upload and validation because it selects an already validated immutable
   record. Install, boot, and debug behavior remain unchanged.
-- A queued install and every independently executing install attempt pin their generation. A
-  canceled or lease-overlapped shared job cannot release another attempt's fence. A delayed first
-  install or restage after expiry must recreate and upload; an already-installed unchanged variant
-  remains an idempotent no-op. Heartbeat or job-lease expiry is not evidence that an attempt
-  stopped (ADR-0018), so use rows persist until their handlers exit. An operator/reconciler may
-  recover a genuinely dead attempt only with independently obtained worker-death evidence, which
-  is retained in a recovery ledger.
+- A queued or running install pins its generation. A delayed first install or restage after expiry
+  must recreate and upload; an already-installed unchanged variant remains an idempotent no-op.
+- Worker-crash and provider-thread-lifetime fencing is intentionally outside this decision and is
+  tracked by [#1803](https://github.com/randomparity/kdive/issues/1803).
 - The schema gains an investigation-build catalog and a nullable `runs.build_ref` audit link.
 
 ## Considered & rejected

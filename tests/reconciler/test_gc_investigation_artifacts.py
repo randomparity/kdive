@@ -12,7 +12,6 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 import psycopg
-import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -96,7 +95,7 @@ async def _seed_generation(
     conn: psycopg.AsyncConnection, investigation_id: UUID, *, expired: bool = False
 ) -> tuple[UUID, str, list[tuple[str, str]]]:
     generation = uuid4()
-    digest = f"{generation.int:064x}"
+    digest = "a" * 64
     build_ref = f"{digest}.{generation}"
     versions = [
         (f"builds/{generation}/kernel", "v-kernel"),
@@ -487,114 +486,5 @@ def test_idempotent_after_full_drain(migrated_url: str) -> None:
 
         assert first == 1
         assert second == 0  # marker cleared, nothing left to do
-
-    asyncio.run(_run())
-
-
-def test_close_driven_generation_budget_is_fair_across_investigations(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from kdive.reconciler.cleanup import gc as gc_module
-
-    async def _run() -> None:
-        conn = await connect(migrated_url)
-        first_id, later_id = UUID(int=1), UUID(int=2)
-        try:
-            for investigation_id in (first_id, later_id):
-                await conn.execute(
-                    "INSERT INTO investigations "
-                    "(id, principal, project, title, state, cleanup_pending_at) "
-                    "VALUES (%s, 'p', 'proj', 't', 'closed', now() - interval '2 days')",
-                    (investigation_id,),
-                )
-            for _ in range(3):
-                await _seed_generation(conn, first_id)
-            later_generation, _ref, _versions = await _seed_generation(conn, later_id)
-        finally:
-            await conn.close()
-
-        class _FirstFails(_RecordingStore):
-            def delete_version(self, key: str, version_id: str) -> None:
-                self.deleted.append(f"{key}@{version_id}")
-                if str(later_generation) not in key:
-                    raise RuntimeError("early tenant failure")
-
-        monkeypatch.setattr(gc_module, "_BUILD_GENERATIONS_PER_PASS", 2)
-        store = _FirstFails()
-        conn = await connect(migrated_url)
-        try:
-            assert await gc_investigation_artifacts(conn, store, timedelta(days=1)) == 2
-        finally:
-            await conn.close()
-        assert any(str(later_generation) in call for call in store.deleted)
-
-    asyncio.run(_run())
-
-
-def test_public_close_gc_bounds_legacy_calls_and_advances_fairly(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from kdive.reconciler.cleanup import gc as gc_module
-
-    async def _run() -> None:
-        seed = await connect(migrated_url)
-        try:
-            investigation_id = await _seed_investigation(
-                seed, state="closed", marker_age=timedelta(days=2)
-            )
-            run_id = await _seed_run(seed, investigation_id)
-            keys = [
-                (
-                    await _seed_artifact(
-                        seed, owner_kind="runs", owner_id=run_id, retention_class="build"
-                    )
-                )[1]
-                for _ in range(5)
-            ]
-        finally:
-            await seed.close()
-
-        monkeypatch.setattr(gc_module, "_LEGACY_BUILD_ARTIFACTS_PER_PASS", 2)
-        store = _RecordingStore()
-        conn = await connect(migrated_url)
-        try:
-            assert await gc_investigation_artifacts(conn, store, timedelta(days=1)) == 2
-            assert len(store.deleted) == 2
-            assert await gc_investigation_artifacts(conn, store, timedelta(days=1)) == 2
-            assert len(store.deleted) == 4
-            assert await gc_investigation_artifacts(conn, store, timedelta(days=1)) == 1
-            assert set(store.deleted) == set(keys)
-        finally:
-            await conn.close()
-
-    asyncio.run(_run())
-
-
-def test_public_close_gc_bounds_marker_cleanup_and_resumes_from_cursor(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from kdive.reconciler.cleanup import gc as gc_module
-
-    async def _run() -> None:
-        seed = await connect(migrated_url)
-        try:
-            investigation_ids = [
-                await _seed_investigation(seed, state="closed", marker_age=timedelta(days=2))
-                for _ in range(5)
-            ]
-        finally:
-            await seed.close()
-
-        monkeypatch.setattr(gc_module, "_CLOSED_INVESTIGATIONS_PER_PASS", 2)
-        conn = await connect(migrated_url)
-        try:
-            await gc_investigation_artifacts(conn, _RecordingStore(), timedelta(days=1))
-            assert sum([await _marker(conn, item) is None for item in investigation_ids]) == 2
-            await gc_investigation_artifacts(conn, _RecordingStore(), timedelta(days=1))
-            assert sum([await _marker(conn, item) is None for item in investigation_ids]) == 4
-            await gc_investigation_artifacts(conn, _RecordingStore(), timedelta(days=1))
-            assert all([await _marker(conn, item) is None for item in investigation_ids])
-        finally:
-            await conn.close()
 
     asyncio.run(_run())

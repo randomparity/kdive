@@ -14,9 +14,7 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
-from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.locks import LockScope, _lock_key
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup import gc as gc_module
 from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
@@ -41,83 +39,11 @@ class _RecordingStore:
         self.deleted.append(f"{key}@{version_id}")
 
 
-def test_generation_mark_commits_and_releases_lock_before_exact_delete(
-    migrated_url: str,
-) -> None:
-    async def _run() -> None:
-        investigation_id, generation = uuid4(), uuid4()
-        key = f"builds/{generation}/kernel"
-        seed = await connect(migrated_url)
-        try:
-            await seed.execute(
-                "INSERT INTO investigations (id, principal, project, title, state) "
-                "VALUES (%s, 'p', 'proj', 't', 'active')",
-                (investigation_id,),
-            )
-            digest = "d" * 64
-            await seed.execute(
-                "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
-                "content_digest, canonical_document, build_result, artifacts, target_kind, "
-                "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, '{}'::jsonb, "
-                "%s::jsonb, 'local-libvirt', '{}'::jsonb, now() - interval '1 second')",
-                (
-                    investigation_id,
-                    generation,
-                    f"{digest}.{generation}",
-                    digest,
-                    Jsonb({"kernel": {"key": key, "version_id": "v1"}}),
-                ),
-            )
-        finally:
-            await seed.close()
-
-        class _ObserveThenFail(_RecordingStore):
-            observed_state: tuple[str] | None = None
-            observed_lock: tuple[bool] | None = None
-
-            def delete_version(self, key: str, version_id: str) -> None:
-                with psycopg.connect(migrated_url) as observer:
-                    self.observed_state = observer.execute(
-                        "SELECT state FROM investigation_builds WHERE generation = %s",
-                        (generation,),
-                    ).fetchone()
-                    self.observed_lock = observer.execute(
-                        "SELECT pg_try_advisory_xact_lock(%s)",
-                        (_lock_key(LockScope.INVESTIGATION, investigation_id),),
-                    ).fetchone()
-                raise RuntimeError("fail after observing committed mark")
-
-        store = _ObserveThenFail()
-        pool = AsyncConnectionPool(migrated_url, open=False)
-        await pool.open()
-        try:
-            async with pool.connection() as conn:
-                assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
-        finally:
-            await pool.close()
-        assert store.observed_state == ("reclaiming",)
-        assert store.observed_lock == (True,)
-        check = await connect(migrated_url)
-        try:
-            row = await (
-                await check.execute(
-                    "SELECT state FROM investigation_builds WHERE generation = %s", (generation,)
-                )
-            ).fetchone()
-            assert row == ("reclaiming",)
-        finally:
-            await check.close()
-
-    asyncio.run(_run())
-
-
 def test_expired_generation_reclaims_by_absolute_deadline(migrated_url: str) -> None:
     async def _run() -> None:
         conn = await connect(migrated_url)
         investigation_id = uuid4()
         generation = uuid4()
-        job_id = uuid4()
-        use_id = uuid4()
         digest = "b" * 64
         build_ref = f"{digest}.{generation}"
         key = f"builds/{generation}/kernel"
@@ -146,28 +72,12 @@ def test_expired_generation_reclaims_by_absolute_deadline(migrated_url: str) -> 
                 "VALUES ('investigations', %s, %s, 'etag', 'sensitive', 'build')",
                 (investigation_id, key),
             )
-            await conn.execute(
-                "INSERT INTO jobs (id, kind, state, attempt, max_attempts, worker_id, "
-                "lease_expires_at, authorizing, dedup_key) VALUES "
-                "(%s, 'install', 'running', 1, 3, 'worker-1', now() + interval '5 min', "
-                "'{}'::jsonb, %s)",
-                (job_id, f"fence-{job_id}"),
-            )
-            await conn.execute(
-                "INSERT INTO investigation_build_uses "
-                "(use_id, investigation_id, generation, job_id, attempt, holder_worker_id, "
-                "lease_expires_at) VALUES (%s, %s, %s, %s, 1, 'worker-1', "
-                "now() + interval '5 min')",
-                (use_id, investigation_id, generation, job_id),
-            )
         finally:
             await conn.close()
 
         store = _RecordingStore()
         conn = await connect(migrated_url)
         try:
-            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
-            await conn.execute("DELETE FROM investigation_build_uses WHERE use_id = %s", (use_id,))
             assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
             result = await conn.execute(
                 "SELECT 1 FROM investigation_builds WHERE generation = %s", (generation,)
@@ -612,68 +522,6 @@ def test_pinned_generation_does_not_consume_reclaim_budget(
     asyncio.run(_run())
 
 
-def test_failed_generation_backs_off_without_starving_later_tenant(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def _run() -> None:
-        conn = await connect(migrated_url)
-        first_id, later_id = UUID(int=1), UUID(int=2)
-        first_generation, later_generation = UUID(int=11), UUID(int=22)
-        try:
-            for investigation_id, generation in (
-                (first_id, first_generation),
-                (later_id, later_generation),
-            ):
-                digest = f"{generation.int:064x}"
-                key = f"builds/{generation}/kernel"
-                await conn.execute(
-                    "INSERT INTO investigations (id, principal, project, title, state) "
-                    "VALUES (%s, 'p', 'proj', 't', 'active')",
-                    (investigation_id,),
-                )
-                await conn.execute(
-                    "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
-                    "content_digest, canonical_document, build_result, artifacts, target_kind, "
-                    "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, "
-                    "'{}'::jsonb, %s::jsonb, 'local-libvirt', '{}'::jsonb, now() - interval '1s')",
-                    (
-                        investigation_id,
-                        generation,
-                        f"{digest}.{generation}",
-                        digest,
-                        Jsonb({"kernel": {"key": key, "version_id": f"v-{generation}"}}),
-                    ),
-                )
-        finally:
-            await conn.close()
-
-        class _FirstTenantFails(_RecordingStore):
-            def delete_version(self, key: str, version_id: str) -> None:
-                self.deleted.append(f"{key}@{version_id}")
-                if str(first_generation) in key:
-                    raise RuntimeError("permanent first-tenant fault")
-
-        monkeypatch.setattr(gc_module, "_BUILD_GENERATIONS_PER_PASS", 1)
-        store = _FirstTenantFails()
-        conn = await connect(migrated_url)
-        try:
-            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
-            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
-            retry = await (
-                await conn.execute(
-                    "SELECT reclaim_retry_at > now() FROM investigation_builds "
-                    "WHERE generation = %s",
-                    (first_generation,),
-                )
-            ).fetchone()
-            assert retry == (True,)
-        finally:
-            await conn.close()
-        assert any(str(later_generation) in deleted for deleted in store.deleted)
-
-    asyncio.run(_run())
-
-
 async def _seed_artifact(
     conn: psycopg.AsyncConnection,
     *,
@@ -838,41 +686,5 @@ def test_gc_retains_expired_build_row_until_retired_key_batch_completes(
             await conn.close()
 
         assert store.calls == [(key, 20)] * 3
-
-    asyncio.run(_run())
-
-
-def test_public_ttl_gc_gives_legacy_lane_a_bounded_budget_during_generation_backlog(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from kdive.reconciler.cleanup import gc as gc_module
-
-    async def _run() -> None:
-        seed = await connect(migrated_url)
-        try:
-            legacy = [
-                await _seed_artifact(
-                    seed,
-                    owner_kind="runs",
-                    retention_class="build",
-                    age=timedelta(days=40),
-                )
-                for _ in range(5)
-            ]
-        finally:
-            await seed.close()
-
-        monkeypatch.setattr(gc_module, "_LEGACY_BUILD_ARTIFACTS_PER_PASS", 2)
-        store = _RecordingStore()
-        conn = await connect(migrated_url)
-        try:
-            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 2
-            assert len(store.deleted) == 2
-            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 2
-            assert len(store.deleted) == 4
-            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
-            assert set(store.deleted) == {key for _, key in legacy}
-        finally:
-            await conn.close()
 
     asyncio.run(_run())

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from datetime import datetime
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -14,7 +14,6 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.capture import KDUMP_FAMILY
-from kdive.domain.cmdline import cmdline_extra_error
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.lifecycle.run_steps import RUN_STEP_RUNNING, RUN_STEP_SUCCEEDED
@@ -33,11 +32,9 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
-from kdive.serialization import JsonValue
-from kdive.services.runs.build_catalog import resolve_build
+from kdive.services.runs.build_catalog import resolve_build, resolve_build_expiry
 from kdive.services.runs.steps import (
     build_baked_cmdline_extra,
-    existing_build_result,
     install_method_for,
     platform_owned_cmdline_token,
     step_progress,
@@ -89,14 +86,13 @@ async def install_run(
     uid = _as_uuid(run_id)
     if uid is None:
         return _invalid_uuid_error("run_id", run_id)
-    cmdline_error = cmdline_extra_error(cmdline)
-    if cmdline_error is not None:
-        return _config_error(run_id, data={"reason": cmdline_error})
     owned = platform_owned_cmdline_token(cmdline)
     if owned is not None:
         return _config_error(
             run_id, data={"reason": "cmdline_overrides_platform_args", "token": owned}
         )
+    if cmdline is not None and not cmdline.strip():
+        return _config_error(run_id, data={"reason": "cmdline_blank"})
     crashkernel_error = _crashkernel_error(run_id, crashkernel)
     if crashkernel_error is not None:
         return crashkernel_error
@@ -232,45 +228,43 @@ async def _reusable_build_install_error(conn: AsyncConnection, run: Run) -> Tool
         return None
     build = await resolve_build(conn, run.investigation_id, run.build_ref)
     if build is None or build.state != "active":
-        result = await existing_build_result(conn, run.id)
-        return await _expired_build_response(
-            conn, run, result.expires_at if result is not None else None
+        expires_at = await resolve_build_expiry(
+            conn,
+            run_id=run.id,
+            investigation_id=run.investigation_id,
+            build_ref=run.build_ref,
         )
-    async with conn.cursor() as cur:
-        await cur.execute("SELECT clock_timestamp()")
-        row = await cur.fetchone()
-    if row is None:
-        raise RuntimeError("SELECT clock_timestamp() returned no row")
-    server_time = row[0]
+        server_time = await _database_time(conn)
+        if expires_at is not None and expires_at <= server_time:
+            return _expired_build_response(run, expires_at, server_time)
+        return ToolResponse.failure(
+            str(run.id),
+            ErrorCategory.CONFIGURATION_ERROR,
+            suggested_next_actions=["runs.create"],
+            data={"reason": "build_ref_not_found"},
+        )
+    server_time = await _database_time(conn)
     if build.expires_at <= server_time:
-        return _expired_build_response_at(
-            run, build.expires_at.isoformat(), server_time.isoformat()
-        )
+        return _expired_build_response(run, build.expires_at, server_time)
     return None
 
 
-async def _expired_build_response(
-    conn: AsyncConnection, run: Run, expires_at: str | None
-) -> ToolResponse:
+async def _database_time(conn: AsyncConnection) -> datetime:
     row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
     if row is None:
         raise RuntimeError("SELECT clock_timestamp() returned no row")
-    return _expired_build_response_at(run, expires_at, row[0].isoformat())
+    return row[0]
 
 
-def _expired_build_response_at(run: Run, expires_at: str | None, server_time: str) -> ToolResponse:
+def _expired_build_response(run: Run, expires_at: datetime, server_time: datetime) -> ToolResponse:
     return ToolResponse.failure(
         str(run.id),
         ErrorCategory.CONFIGURATION_ERROR,
         suggested_next_actions=["runs.create"],
         data={
             "reason": "build_ref_expired",
-            "expires_at": expires_at,
-            "server_time": server_time,
-            "investigation_id": str(run.investigation_id),
-            "build_profile": cast("JsonValue", run.build_profile),
-            "system_id": str(run.system_id) if run.system_id is not None else None,
-            "target_kind": run.target_kind,
+            "expires_at": expires_at.isoformat(),
+            "server_time": server_time.isoformat(),
         },
     )
 

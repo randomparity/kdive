@@ -7,7 +7,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -124,6 +124,42 @@ async def resolve_build(
 ) -> InvestigationBuild | None:
     """Return a build generation only when it belongs to ``investigation_id``."""
     return await INVESTIGATION_BUILDS.get(conn, investigation_id, build_ref)
+
+
+async def resolve_build_expiry(
+    conn: AsyncConnection,
+    *,
+    run_id: UUID,
+    investigation_id: UUID,
+    build_ref: str,
+) -> datetime | None:
+    """Resolve a reusable deadline after catalog reclamation without crossing tenants."""
+    row = await (
+        await conn.execute(
+            "SELECT expires_at FROM investigation_builds "
+            "WHERE investigation_id = %s AND build_ref = %s",
+            (investigation_id, build_ref),
+        )
+    ).fetchone()
+    if row is not None:
+        return row[0]
+    row = await (
+        await conn.execute(
+            "SELECT (result->>'expires_at')::timestamptz FROM run_steps "
+            "WHERE run_id = %s AND step = 'build' AND result->>'build_ref' = %s",
+            (run_id, build_ref),
+        )
+    ).fetchone()
+    if row is not None and row[0] is not None:
+        return row[0]
+    row = await (
+        await conn.execute(
+            "SELECT expires_at FROM investigation_build_tombstones "
+            "WHERE investigation_id = %s AND build_ref = %s",
+            (investigation_id, build_ref),
+        )
+    ).fetchone()
+    return None if row is None else row[0]
 
 
 def _artifact_versions(

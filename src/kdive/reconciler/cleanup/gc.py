@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
-from typing import LiteralString, Protocol, cast
+from typing import Protocol, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -126,10 +126,6 @@ _SYSTEM_ARTIFACT_KEYS_PER_PASS = 10
 _SYSTEM_ARTIFACT_CURSOR_LANE = "row-backed"
 _BUILD_GENERATIONS_PER_PASS = 50
 _BUILD_GENERATION_SCAN_PER_PASS = 200
-_LEGACY_BUILD_ARTIFACTS_PER_PASS = 50
-_LEGACY_BUILD_ARTIFACT_SCAN_PER_PASS = 200
-_CLOSED_INVESTIGATIONS_PER_PASS = 50
-_CLOSED_INVESTIGATION_SCAN_PER_PASS = 200
 BUILD_GENERATION_RETRY_BACKOFF = timedelta(minutes=5)
 
 _UNPINNED_GENERATION_SQL = (
@@ -139,9 +135,7 @@ _UNPINNED_GENERATION_SQL = (
     "AND NOT EXISTS (SELECT 1 FROM jobs j JOIN runs r "
     "ON r.id::text = j.payload->>'run_id' "
     "WHERE r.investigation_id = ib.investigation_id AND r.build_ref = ib.build_ref "
-    "AND j.kind = 'install' AND j.state IN ('queued', 'running')) "
-    "AND NOT EXISTS (SELECT 1 FROM investigation_build_uses u "
-    "WHERE u.investigation_id = ib.investigation_id AND u.generation = ib.generation)))"
+    "AND j.kind = 'install' AND j.state IN ('queued', 'running'))))"
 )
 
 
@@ -185,16 +179,12 @@ async def _mark_generation_reclaiming(
                     "UNION ALL SELECT 1 FROM jobs j JOIN runs r "
                     "ON r.id::text = j.payload->>'run_id' "
                     "WHERE r.investigation_id = %s AND r.build_ref = %s "
-                    "AND j.kind = 'install' AND j.state IN ('queued', 'running') "
-                    "UNION ALL SELECT 1 FROM investigation_build_uses u "
-                    "WHERE u.investigation_id = %s AND u.generation = %s)",
+                    "AND j.kind = 'install' AND j.state IN ('queued', 'running'))",
                     (
                         investigation_id,
                         build_ref,
                         investigation_id,
                         build_ref,
-                        investigation_id,
-                        generation,
                     ),
                 )
             ).fetchone()
@@ -515,30 +505,70 @@ async def gc_investigation_artifacts(
     aborts the sweep — the deferred, evidence-safe form ADR-0234 constraint (a)/(b) requires.
     """
     require_top_level_transaction(conn, "reclaim closed-Investigation build artifacts")
+    async with conn.transaction(), conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id FROM investigations "
+            "WHERE cleanup_pending_at IS NOT NULL AND cleanup_pending_at < now() - %s "
+            "ORDER BY id",
+            (grace,),
+        )
+        investigation_ids = [row[0] for row in await cur.fetchall()]
     deleted = 0
     generation_candidates = await _generation_candidates(
         conn, closed_grace=grace, limit=_BUILD_GENERATIONS_PER_PASS
     )
+    generations_by_investigation: dict[UUID, list[UUID]] = {}
     for investigation_id, generation in generation_candidates:
-        deleted += await _reclaim_generation(
-            conn, cast("ExactArtifactObjectDeleter", store), investigation_id, generation
-        )
-    candidates = await _closed_legacy_candidates(conn, grace)
-    deleted += await _delete_legacy_candidates(conn, store, candidates, "investigation")
-    for investigation_id in await _closed_investigation_candidates(conn, grace):
+        generations_by_investigation.setdefault(investigation_id, []).append(generation)
+    for investigation_id in investigation_ids:
+        for generation in generations_by_investigation.get(investigation_id, []):
+            deleted += await _reclaim_generation(
+                conn,
+                cast("ExactArtifactObjectDeleter", store),
+                investigation_id,
+                generation,
+            )
+        async with conn.transaction(), conn.cursor() as cur:
+            await cur.execute(
+                "SELECT a.id, a.object_key FROM artifacts a JOIN runs r ON r.id = a.owner_id "
+                "WHERE a.owner_kind = 'runs' AND a.retention_class = ANY(%s) "
+                "AND r.investigation_id = %s",
+                (list(_BUILD_RETENTION_CLASSES), investigation_id),
+            )
+            candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
+        drained = True
+        for artifact_id, object_key in candidates:
+            try:
+                complete = await asyncio.to_thread(store.delete_retired_key_batch, object_key, 20)
+            except Exception:  # noqa: BLE001 - one object failure must not starve the rest
+                _log.warning(
+                    "reconciler: deleting investigation artifact object %s failed; retry next pass",
+                    object_key,
+                    exc_info=True,
+                )
+                drained = False
+                continue
+            if not complete:
+                _log.info(
+                    "reconciler: investigation artifact object %s has more retired versions; "
+                    "retry next pass",
+                    object_key,
+                )
+                drained = False
+                continue
+            async with conn.transaction(), conn.cursor() as cur:
+                await cur.execute("DELETE FROM artifacts WHERE id = %s", (artifact_id,))
+            deleted += 1
         async with conn.transaction():
-            remaining = await (
+            remaining_generation = await (
                 await conn.execute(
-                    "SELECT EXISTS (SELECT 1 FROM investigation_builds "
-                    "WHERE investigation_id = %s) OR EXISTS ("
-                    "SELECT 1 FROM artifacts a JOIN runs r ON r.id = a.owner_id "
-                    "WHERE a.owner_kind = 'runs' AND a.retention_class = ANY(%s) "
-                    "AND r.investigation_id = %s)",
-                    (investigation_id, list(_BUILD_RETENTION_CLASSES), investigation_id),
+                    "SELECT 1 FROM investigation_builds WHERE investigation_id = %s LIMIT 1",
+                    (investigation_id,),
                 )
             ).fetchone()
-            if remaining is not None and not remaining[0]:
-                await conn.execute(
+        if drained and remaining_generation is None:
+            async with conn.transaction(), conn.cursor() as cur:
+                await cur.execute(
                     "UPDATE investigations SET cleanup_pending_at = NULL WHERE id = %s",
                     (investigation_id,),
                 )
@@ -565,27 +595,19 @@ async def gc_expired_build_artifacts(
         deleted += await _reclaim_generation(
             conn, cast("ExactArtifactObjectDeleter", store), investigation_id, generation
         )
-    candidates = await _expired_legacy_candidates(conn, retention)
-    deleted += await _delete_legacy_candidates(conn, store, candidates, "expired build")
-    if deleted:
-        _log.info("reconciler: GC'd %d build artifact(s) past TTL", deleted)
-    return deleted
-
-
-async def _delete_legacy_candidates(
-    conn: AsyncConnection,
-    store: ArtifactObjectDeleter,
-    candidates: list[tuple[UUID, str]],
-    description: str,
-) -> int:
-    deleted = 0
+    async with conn.transaction(), conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id, object_key FROM artifacts "
+            "WHERE owner_kind = 'runs' AND retention_class = ANY(%s) AND created_at < now() - %s",
+            (list(_BUILD_RETENTION_CLASSES), retention),
+        )
+        candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
     for artifact_id, object_key in candidates:
         try:
             complete = await asyncio.to_thread(store.delete_retired_key_batch, object_key, 20)
         except Exception:  # noqa: BLE001 - one object failure must not starve the rest
             _log.warning(
-                "reconciler: deleting %s artifact object %s failed; retry next pass",
-                description,
+                "reconciler: deleting expired build artifact object %s failed; retry next pass",
                 object_key,
                 exc_info=True,
             )
@@ -600,116 +622,9 @@ async def _delete_legacy_candidates(
         async with conn.transaction(), conn.cursor() as cur:
             await cur.execute("DELETE FROM artifacts WHERE id = %s", (artifact_id,))
         deleted += 1
+    if deleted:
+        _log.info("reconciler: GC'd %d build artifact(s) past TTL", deleted)
     return deleted
-
-
-async def _cursor_scan(
-    conn: AsyncConnection,
-    lane: str,
-    forward_sql: LiteralString,
-    wrap_sql: LiteralString,
-    limit: int,
-) -> list[UUID]:
-    """Scan a bounded, wrapping keyset page and durably advance its lane cursor."""
-    async with conn.transaction():
-        cursor_row = await (
-            await conn.execute(
-                "SELECT after_id FROM build_artifact_gc_cursors WHERE lane = %s FOR UPDATE",
-                (lane,),
-            )
-        ).fetchone()
-        if cursor_row is None:
-            raise RuntimeError(f"build_artifact_gc_cursors has no {lane!r} lane")
-        after_id = cursor_row[0]
-        rows = await (await conn.execute(forward_sql, (after_id, after_id, limit))).fetchall()
-        if after_id is not None and len(rows) < limit:
-            rows += await (await conn.execute(wrap_sql, (after_id, limit - len(rows)))).fetchall()
-        if rows:
-            await conn.execute(
-                "UPDATE build_artifact_gc_cursors SET after_id = %s, updated_at = now() "
-                "WHERE lane = %s",
-                (rows[-1][0], lane),
-            )
-    return [row[0] for row in rows]
-
-
-async def _closed_legacy_candidates(
-    conn: AsyncConnection, grace: timedelta
-) -> list[tuple[UUID, str]]:
-    scanned = await _cursor_scan(
-        conn,
-        "closed-legacy-artifacts",
-        "SELECT id FROM artifacts WHERE owner_kind = 'runs' "
-        "AND retention_class IN ('build', 'kernel-build') "
-        "AND (%s::uuid IS NULL OR id > %s::uuid) ORDER BY id LIMIT %s",
-        "SELECT id FROM artifacts WHERE owner_kind = 'runs' "
-        "AND retention_class IN ('build', 'kernel-build') "
-        "AND id <= %s::uuid ORDER BY id LIMIT %s",
-        _LEGACY_BUILD_ARTIFACT_SCAN_PER_PASS,
-    )
-    if not scanned:
-        return []
-    async with conn.transaction():
-        rows = await (
-            await conn.execute(
-                "SELECT a.id, a.object_key FROM artifacts a JOIN runs r ON r.id = a.owner_id "
-                "JOIN investigations i ON i.id = r.investigation_id "
-                "WHERE a.id = ANY(%s) AND i.cleanup_pending_at IS NOT NULL "
-                "AND i.cleanup_pending_at < now() - %s ORDER BY a.id LIMIT %s",
-                (scanned, grace, _LEGACY_BUILD_ARTIFACTS_PER_PASS),
-            )
-        ).fetchall()
-    return [(row[0], str(row[1])) for row in rows]
-
-
-async def _expired_legacy_candidates(
-    conn: AsyncConnection, retention: timedelta
-) -> list[tuple[UUID, str]]:
-    scanned = await _cursor_scan(
-        conn,
-        "expired-legacy-artifacts",
-        "SELECT id FROM artifacts WHERE owner_kind = 'runs' "
-        "AND retention_class IN ('build', 'kernel-build') "
-        "AND (%s::uuid IS NULL OR id > %s::uuid) ORDER BY id LIMIT %s",
-        "SELECT id FROM artifacts WHERE owner_kind = 'runs' "
-        "AND retention_class IN ('build', 'kernel-build') "
-        "AND id <= %s::uuid ORDER BY id LIMIT %s",
-        _LEGACY_BUILD_ARTIFACT_SCAN_PER_PASS,
-    )
-    if not scanned:
-        return []
-    async with conn.transaction():
-        rows = await (
-            await conn.execute(
-                "SELECT id, object_key FROM artifacts WHERE id = ANY(%s) "
-                "AND created_at < now() - %s ORDER BY id LIMIT %s",
-                (scanned, retention, _LEGACY_BUILD_ARTIFACTS_PER_PASS),
-            )
-        ).fetchall()
-    return [(row[0], str(row[1])) for row in rows]
-
-
-async def _closed_investigation_candidates(conn: AsyncConnection, grace: timedelta) -> list[UUID]:
-    scanned = await _cursor_scan(
-        conn,
-        "closed-investigations",
-        "SELECT id FROM investigations WHERE cleanup_pending_at IS NOT NULL "
-        "AND (%s::uuid IS NULL OR id > %s::uuid) ORDER BY id LIMIT %s",
-        "SELECT id FROM investigations WHERE cleanup_pending_at IS NOT NULL "
-        "AND id <= %s::uuid ORDER BY id LIMIT %s",
-        _CLOSED_INVESTIGATION_SCAN_PER_PASS,
-    )
-    if not scanned:
-        return []
-    async with conn.transaction():
-        rows = await (
-            await conn.execute(
-                "SELECT id FROM investigations WHERE id = ANY(%s) "
-                "AND cleanup_pending_at < now() - %s ORDER BY id LIMIT %s",
-                (scanned, grace, _CLOSED_INVESTIGATIONS_PER_PASS),
-            )
-        ).fetchall()
-    return [row[0] for row in rows]
 
 
 async def reap_console_collectors(conn: AsyncConnection, registry: CollectorRegistry) -> int:

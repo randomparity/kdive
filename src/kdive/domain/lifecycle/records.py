@@ -150,9 +150,9 @@ class InvestigationBuild(DomainBase):
     build_profile: SerializedBuildProfile
     state: Literal["active", "reclaiming"]
     expires_at: datetime
+    reclaim_retry_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
-    reclaim_retry_at: datetime | None = None
 
 
 class ExpectedBootFailure(DomainBase):

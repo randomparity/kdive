@@ -47,7 +47,8 @@ The canonical build document is versioned and includes the target kind, normaliz
 kernel checksum, optional initrd and debuginfo checksums, build id, cmdline, and normalized
 provenance. A chunked artifact uses its ordered validated chunk checksum-and-size vector plus total
 size, excluding its advisory whole-object hash. Canonical JSON uses sorted keys and compact
-separators; SHA-256 over its UTF-8 bytes is the `content_digest`. Object keys and etags are excluded because they describe storage placement
+separators; SHA-256 over its UTF-8 bytes is the `content_digest`. Object keys and etags are excluded
+because they describe storage placement
 rather than content. Finalization already requires the object store's SHA-256 for every artifact.
 The generation suffix prevents an expired or partially reclaimed physical set from being mistaken
 for a fresh publication of the same content.
@@ -147,12 +148,9 @@ Create and reclaim take the Investigation advisory lock. Reclaim rechecks for no
 whose `build_ref` selects the generation and for queued or running install jobs on any referencing
 Run. Either condition defers deletion. Otherwise reclaim marks the generation `reclaiming` before
 deleting its exact object versions. A partial object-store failure keeps that state for retry.
-Failed deletes receive a database-clock retry delay. The global pass first keyset-scans at most 200
-catalog primary-key rows from a durable cursor, then evaluates expiry/close eligibility and pin
-joins only for that bounded set. Rank ordering within the set takes one generation per
-Investigation before a second from any tenant; the cursor advances past scanned ineligible or
-pinned rows so one tenant cannot make later catalog rows unreachable. Partial indexes support the
-live Run build-reference and queued/running install-job pin lookups.
+Failed deletes receive a database-clock retry delay. Each global sweep advances a durable cursor,
+scans a bounded generation window, and takes at most one generation per Investigation before a
+second from any tenant.
 After deletion it removes only that generation's artifact rows and record, rechecking the state
 under the lock. A fresh publication of identical content uses a new generation and cannot be
 deleted or selected through the old record.
@@ -165,19 +163,11 @@ checks the generation deadline and enqueues or recycles the install job. A first
 at or after expiry returns `build_ref_expired` with `expires_at`, `server_time`, and `runs.create`
 as the first recovery action. The caller recreates without the expired reference and follows the
 upload flow. An unchanged already-succeeded install is an idempotent no-op and remains callable
-after expiry because it performs no artifact read. Once admission enqueues work, the queued job
-closes the gap until execution. Each executing install attempt records its own durable
-generation-use row before resolving artifact references and removes only that row after provider
-consumption. GC waits for every row independently of the shared job state, so cancellation or
-lease overlap cannot expose an older still-running attempt. A cleanup fault leaks a safe pin rather
-than permitting deletion. Job-heartbeat expiry never removes a use row: ADR-0018 permits the old
-handler to continue after its claim is reclaimed. A genuinely dead attempt is recovered only by
-an explicit operator/reconciler action naming the exact worker and recording independently obtained
-worker-death evidence in the durable recovery ledger.
-
-Caller-controlled build and install cmdline extras are trimmed and limited to 4096 printable
-characters at MCP ingress and at the service/worker boundaries before hashing, persistence, or
-provider use.
+after expiry because it performs no artifact read. Once admission enqueues work, queued/running job
+state fences the ordinary admission-to-handler path. A failed job releases that fence, and retry
+after expiry follows recovery instead of reading possibly reclaimed objects. Worker process death
+and provider threads that outlive job state require a platform-level fence and recovery design;
+that boundary is tracked by [#1803](https://github.com/randomparity/kdive/issues/1803).
 
 The Investigation lock makes create-versus-reclaim deterministic. Concurrent source completions
 of identical content converge through the active-digest query under that lock and artifact
@@ -189,26 +179,10 @@ during upload or validation.
 
 ### Boundaries and actors
 
-The authenticated tenant controls `build_ref`, build profile, Investigation id, uploaded bytes,
-build metadata, and outstanding upload URLs. The MCP server is the authorization and tenancy
-boundary. It canonicalizes manifests and issues upload and exact-version download capabilities.
-Workers consume those capabilities and cross the provider boundary when installing or debugging a
-System. Postgres supplies the reference clock and is the state of record for deadlines, immutable
-object-version identities, per-attempt use pins, tombstones, cleanup cursors, and recovery audit.
-
-The S3-compatible object store is an independent backend actor. Its response supplies the
-`VersionId` that identifies the bytes subsequently validated, copied, read, signed, and deleted.
-Runtime credentials cross an IAM boundary and therefore need the exact-version actions as well as
-ordinary object actions. A platform operator is a privileged actor only for recovery of a pin left
-by a terminated worker. The configured death verifier crosses a deployment authority boundary:
-same-host `/proc`, the Compose container engine, or the Kubernetes API. Its evidence must identify
-the immutable worker incarnation that acquired the pin and prove that incarnation is absent; a
-heartbeat or expired job lease is not death evidence.
-
-The change widens `runs.create` so it can select existing sensitive artifacts and widens artifact
-lifetime from one Run to its Investigation. It also makes correct retention depend on three
-separate clocks and identities: database-clock eligibility, an exact object-store version, and the
-worker incarnation holding each use pin.
+The existing authenticated tenant controls `build_ref`, build profile, Investigation id, uploaded
+bytes, and build metadata. The server controls tenancy lookup and canonicalization; the worker and
+object store control validated checksums. The change widens `runs.create` so it can select existing
+sensitive artifacts and widens artifact lifetime from one Run to its Investigation.
 
 ### Controls
 
@@ -216,70 +190,12 @@ worker incarnation holding each use pin.
 - Resolution includes the requested Investigation id in the SQL predicate; missing and cross-
   tenant references return the same error.
 - The server derives `build_ref`; callers cannot register an arbitrary content set.
-- Validation captures a non-empty object-store `VersionId`; ranged validation, multipart copy,
-  final validation, provider reads, presigned downloads, debug reads, and deletion all name the
-  persisted version. Missing or malformed version responses fail closed. Upload URLs are scoped to
-  one owner/key and expire; completion never trusts a URL or current key contents as proof of the
-  version that was validated.
-- Deployment IAM grants only the version actions used by the configured flow. External-bucket
-  operators run the documented exact-version preflight before readiness; a failed preflight blocks
-  deployment rather than silently falling back to the latest object.
 - Exact build-profile and target-kind equality prevents installing a validated build under an
   incompatible Run contract.
 - The Investigation lock serializes create, completion, close, and reclaim; database uniqueness
   guards generation identity and artifact-row replay.
-- Postgres computes absolute expiry and `server_time`; process clocks cannot extend or shorten a
-  generation. Each install attempt creates its own durable use pin before the first object read and
-  removes only that pin after provider consumption. Queued jobs remain separate admission pins.
-- A stale use pin can be removed only by the authorized recovery operation naming its exact holder
-  and supplying verifier-produced deployment evidence. The verifier compares immutable
-  incarnation identity, proves termination through its configured least-privilege authority, and
-  records success and refusal outcomes for audit. If no authoritative verifier is configured, the
-  recovery operation is not advertised or registered and retention fails safe.
-- GC scans bounded pages through durable fair cursors, rechecks eligibility and pins under the
-  Investigation lock, and deletes only persisted exact versions. Failed deletion retains the row
-  for retry. Final deletion writes a same-Investigation tombstone, preserving expired-reference
-  recovery without disclosing whether another tenant's handle exists.
 - Responses expose references and scalar reasons, never artifact bytes, object-store credentials,
   or another Investigation's existence.
-
-### Failures and recovery
-
-- A replaced object key, malformed `VersionId`, denied exact-version read, or version-copy mismatch
-  stops completion or consumption without publishing mutable/latest bytes. The tenant retries the
-  documented upload flow after the backend or IAM fault is corrected.
-- An upload URL may outlive a failed client attempt, but it cannot select or overwrite a published
-  generation. The upload reaper uses the existing owner/deadline fences and exact versions.
-- Worker cancellation, lease loss, or heartbeat age leaves the use pin intact. A live worker,
-  mismatched pod/container incarnation, unavailable deployment authority, or unverifiable response
-  refuses operator recovery. Confirmed termination permits only the named pin to be removed and
-  leaves an evidence-bearing audit record.
-- Database unavailability stops deadline decisions. A generation that expires while pinned remains
-  readable by that admitted attempt, rejects new consumption, and becomes reclaimable after every
-  pin clears. Tombstones retain only the reference and deadline needed for same-Investigation
-  recovery guidance.
-- Reusable-build GC object errors and process interruption leave retryable catalog/artifact rows.
-  Its per-pass row and object-call caps plus independent build-lane cursors prevent one large or
-  repeatedly failing reusable-build lane from starving the other reusable-build cleanup lane.
-  This bound does not describe unrelated report-artifact or idempotency-key repair lanes.
-
-### Threat-control acceptance map
-
-- **Object store and IAM:** tests reject absent or malformed versions, bind validation, copy,
-  reads, and deletion to the captured version, and exercise the documented exact-version
-  permission preflight.
-- **Upload capability:** tests show an outstanding or reused URL cannot change the version selected
-  by completion and that owner/deadline cleanup remains exact.
-- **Worker and provider:** install and debug tests assert the persisted version reaches every
-  consumer and pins span the complete provider read.
-- **Operator recovery:** same-host, Compose, and Helm tests refuse live and identity-mismatched
-  workers, release only a confirmed-dead incarnation's pin, expose no callable recovery without
-  authority, and retain actor and evidence in the audit record.
-- **Database clock and retention:** deadline-boundary races, independent overlapping pins, and
-  same-Investigation tombstone tests prove fail-safe retention and non-disclosure.
-- **Reconciler and object deletion:** public-repair tests use backlogs above every cap, prove lane
-  fairness and durable cursor progress, bind each delete to an exact version, and prove retries
-  survive interruption.
 
 ### Out of scope
 

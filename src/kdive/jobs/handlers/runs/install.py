@@ -25,7 +25,6 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.lifecycle import Installer, InstallRequest
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
-from kdive.services.runs.build_use import acquire_build_use, release_build_use
 from kdive.services.runs.steps import (
     cmdline_for,
     existing_build_result,
@@ -64,17 +63,13 @@ async def install_handler(
     longer has a registered worker handler, so compatibility decoding stays out of this boundary.
     """
     payload = _install_payload_context(job)
-    use_id = await acquire_build_use(conn, payload.run_id, job_id=job.id, attempt=job.attempt)
-    try:
-        plan = await _resolve_install_plan(conn, payload, resolver)
-        job_ctx = job_context_from_job(job, plan.run.project)
-        claimed = await _run_install_step(conn, payload.run_id, plan.installer, plan.request)
-        if not claimed:
-            return str(payload.run_id)
-        await _complete_install_step(conn, job_ctx, plan)
+    plan = await _resolve_install_plan(conn, payload, resolver)
+    job_ctx = job_context_from_job(job, plan.run.project)
+    claimed = await _run_install_step(conn, payload.run_id, plan.installer, plan.request)
+    if not claimed:
         return str(payload.run_id)
-    finally:
-        await release_build_use(conn, use_id)
+    await _complete_install_step(conn, job_ctx, plan)
+    return str(payload.run_id)
 
 
 def _install_payload_context(job: Job) -> _InstallPayloadContext:
@@ -193,6 +188,16 @@ async def _build_install_plan(
     _log.info("install: run %s resolved cmdline %r (method %s)", run_id, cmdline, method.value)
     initrd_ref = build_result.initrd_ref if build_result is not None else None
     debuginfo_ref = build_result.debuginfo_ref if build_result is not None else None
+    refs = {"kernel": kernel_ref}
+    if initrd_ref is not None:
+        refs["initrd"] = initrd_ref
+    if debuginfo_ref is not None:
+        refs["vmlinux"] = debuginfo_ref
+    artifact_versions = _validated_artifact_versions(
+        run.build_ref,
+        refs,
+        build_result.artifact_versions if build_result is not None else None,
+    )
     return _InstallPlan(
         run=run,
         installer=installer,
@@ -204,13 +209,30 @@ async def _build_install_plan(
             method=method,
             initrd_ref=initrd_ref,
             debuginfo_ref=debuginfo_ref,
-            artifact_versions=(
-                build_result.artifact_versions if build_result is not None else None
-            ),
+            artifact_versions=artifact_versions,
         ),
         applied_extra=applied_extra,
         crashkernel=payload.crashkernel,
     )
+
+
+def _validated_artifact_versions(
+    build_ref: str | None,
+    refs: dict[str, str],
+    versions: dict[str, str] | None,
+) -> dict[str, str] | None:
+    """Require exact immutable versions for every reusable-build provider input."""
+    if build_ref is None:
+        return versions
+    missing = [name for name in refs if not versions or not versions.get(name)]
+    if missing:
+        raise CategorizedError(
+            "reusable build is missing immutable artifact versions",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"reason": "reusable_build_versions_incomplete", "missing": missing},
+        )
+    assert versions is not None  # The missing-version guard above proves the reusable map exists.
+    return {name: versions[name] for name in refs}
 
 
 async def _run_install_step(

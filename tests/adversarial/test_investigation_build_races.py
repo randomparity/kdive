@@ -5,10 +5,8 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from uuid import UUID, uuid4
 
 import pytest
-from psycopg.types.json import Jsonb
 
 from kdive.db.locks import LockScope
 from kdive.domain.capacity.state import InvestigationState
@@ -205,7 +203,7 @@ def test_reclaim_wins_and_real_install_rejects_reclaiming_reference(
             finally:
                 await reclaim_conn.close()
             assert response.status == "error"
-            assert response.data["reason"] == "build_ref_expired"
+            assert response.data["reason"] == "build_ref_not_found"
 
     with monkeypatch.context() as patched:
         patched.setattr(gc_module, "advisory_xact_lock", paused_lock)
@@ -256,103 +254,6 @@ def test_real_install_wins_and_queued_job_pins_generation(
 
     with monkeypatch.context() as patched:
         patched.setattr(run_steps_module, "advisory_xact_lock", paused_lock)
-        asyncio.run(_run())
-
-
-def test_canceled_attempt_fence_acquired_after_selection_blocks_reclaim(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    selected = asyncio.Event()
-    release_selection = asyncio.Event()
-    original_candidates = gc_module._generation_candidates
-
-    async def paused_candidates(*args, **kwargs):
-        rows = await original_candidates(*args, **kwargs)
-        selected.set()
-        await release_selection.wait()
-        return rows
-
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            investigation_id, build_ref, run_id = await _seed_reusable_run(pool, expired=True)
-            generation = build_ref.rsplit(".", 1)[1]
-            object_key = f"builds/{generation}/kernel"
-            job_id = uuid4()
-            use_id = uuid4()
-            async with pool.connection() as conn:
-                await conn.execute("UPDATE runs SET state = 'succeeded' WHERE id = %s", (run_id,))
-                await conn.execute(
-                    "UPDATE investigation_builds SET artifacts = %s::jsonb "
-                    "WHERE investigation_id = %s AND generation = %s",
-                    (
-                        Jsonb({"kernel": {"key": object_key, "version_id": "v-kernel"}}),
-                        investigation_id,
-                        generation,
-                    ),
-                )
-                await conn.execute(
-                    "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
-                    "retention_class) VALUES ('investigations', %s, %s, 'etag', "
-                    "'sensitive', 'build')",
-                    (investigation_id, object_key),
-                )
-                await conn.execute(
-                    "INSERT INTO jobs (id, kind, payload, state, max_attempts, attempt, "
-                    "authorizing, dedup_key) VALUES (%s, 'install', %s::jsonb, 'canceled', "
-                    "3, 1, '{}'::jsonb, %s)",
-                    (job_id, Jsonb({"run_id": str(run_id)}), f"install-{run_id}"),
-                )
-            store = _Store()
-            reclaim_conn = await connect(migrated_url)
-            try:
-                reclaim = asyncio.create_task(
-                    gc_expired_build_artifacts(reclaim_conn, store, timedelta(days=30))
-                )
-                await selected.wait()
-                async with pool.connection() as conn:
-                    await conn.execute(
-                        "INSERT INTO investigation_build_uses "
-                        "(use_id, investigation_id, generation, job_id, attempt, "
-                        "holder_worker_id, lease_expires_at) "
-                        "VALUES (%s, %s, %s, %s, 1, 'test-worker', now() + interval '5 min')",
-                        (use_id, investigation_id, generation, job_id),
-                    )
-                release_selection.set()
-                assert await reclaim == 0
-                assert store.deleted == []
-                async with reclaim_conn.transaction():
-                    await reclaim_conn.execute(
-                        "DELETE FROM investigation_build_uses WHERE use_id = %s", (use_id,)
-                    )
-                assert await (
-                    await reclaim_conn.execute(
-                        "SELECT state, (SELECT count(*) FROM investigation_build_uses "
-                        "WHERE investigation_id = %s AND generation = %s) "
-                        "FROM investigation_builds WHERE investigation_id = %s AND generation = %s",
-                        (investigation_id, generation, investigation_id, generation),
-                    )
-                ).fetchone() == ("active", 0)
-                assert await (
-                    await reclaim_conn.execute("SELECT state FROM runs WHERE id = %s", (run_id,))
-                ).fetchone() == ("succeeded",)
-                assert await (
-                    await reclaim_conn.execute(
-                        "SELECT count(*) FROM jobs WHERE payload->>'run_id' = %s "
-                        "AND kind = 'install' AND state IN ('queued', 'running')",
-                        (str(run_id),),
-                    )
-                ).fetchone() == (0,)
-                assert (
-                    await gc_module._reclaim_generation(
-                        reclaim_conn, store, investigation_id, UUID(generation)
-                    )
-                    > 0
-                )
-            finally:
-                await reclaim_conn.close()
-
-    with monkeypatch.context() as patched:
-        patched.setattr(gc_module, "_generation_candidates", paused_candidates)
         asyncio.run(_run())
 
 

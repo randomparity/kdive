@@ -214,20 +214,6 @@ def test_unique_constraints_present(pg_conn: psycopg.Connection) -> None:
     assert frozenset({"dedup_key"}) in _unique_constraints(pg_conn, "jobs")
 
 
-def test_investigation_build_gc_pin_indexes_present(pg_conn: psycopg.Connection) -> None:
-    migrate.apply_migrations(pg_conn)
-    definitions = {
-        row[0]: row[1]
-        for row in pg_conn.execute(
-            "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public' "
-            "AND indexname IN ('runs_live_build_ref_idx', 'jobs_live_install_run_id_idx')"
-        ).fetchall()
-    }
-    assert set(definitions) == {"runs_live_build_ref_idx", "jobs_live_install_run_id_idx"}
-    assert "investigation_id, build_ref" in definitions["runs_live_build_ref_idx"]
-    assert "payload ->> 'run_id'" in definitions["jobs_live_install_run_id_idx"]
-
-
 def test_investigation_build_catalog_schema(pg_conn: psycopg.Connection) -> None:
     """Migration 0095 persists immutable, generation-scoped build records."""
     migrate.apply_migrations(pg_conn)
@@ -284,10 +270,45 @@ def test_investigation_build_catalog_schema(pg_conn: psycopg.Connection) -> None
         "CREATE INDEX investigation_builds_active_digest_idx ON public.investigation_builds "
         "USING btree (investigation_id, content_digest) WHERE (state = 'active'::text)",
     )
+    expiry_index = pg_conn.execute(
+        "SELECT indexdef FROM pg_indexes WHERE indexname = 'investigation_builds_expires_at_idx'"
+    ).fetchone()
+    assert expiry_index is not None and "expires_at" in expiry_index[0]
+
+
+def test_0095_declares_stop_old_first_projection_boundary(pg_conn: psycopg.Connection) -> None:
+    sql_text = (migrate.SCHEMA_DIR / "0095_investigation_builds.sql").read_text()
+    assert "pg_stat_activity" in sql_text
+    assert "requires stop-old-first" in sql_text
+
+    migrate.apply_migrations(pg_conn)
+    all_columns = [
+        row[0]
+        for row in pg_conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'runs' ORDER BY ordinal_position"
+        ).fetchall()
+    ]
+    assert "build_ref" in all_columns
+    prior_projection = [name for name in all_columns if name != "build_ref"]
+    assert len(prior_projection) + 1 == len(all_columns)
+
+
+def test_investigation_build_gc_cursor_schema(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+
+    assert _columns(pg_conn, "investigation_build_gc_cursor") == {
+        "lane": "text",
+        "investigation_id": "uuid",
+        "generation": "uuid",
+    }
+    lanes = pg_conn.execute(
+        "SELECT lane FROM investigation_build_gc_cursor ORDER BY lane"
+    ).fetchall()
+    assert lanes == [("closed",), ("expired",)]
 
 
 def test_investigation_build_tombstone_schema(pg_conn: psycopg.Connection) -> None:
-    """Reclaimed handles remain recognizable only within their owning Investigation."""
     migrate.apply_migrations(pg_conn)
 
     assert _columns(pg_conn, "investigation_build_tombstones") == {
@@ -303,28 +324,6 @@ def test_investigation_build_tombstone_schema(pg_conn: psycopg.Connection) -> No
         "WHERE c.conrelid = 'investigation_build_tombstones'::regclass AND c.contype = 'p'"
     ).fetchone()
     assert primary_key == (["investigation_id", "build_ref"],)
-    expiry_index = pg_conn.execute(
-        "SELECT indexdef FROM pg_indexes WHERE indexname = 'investigation_builds_expires_at_idx'"
-    ).fetchone()
-    assert expiry_index is not None and "expires_at" in expiry_index[0]
-
-
-def test_investigation_build_use_leases_follow_worker_claims(
-    pg_conn: psycopg.Connection,
-) -> None:
-    migrate.apply_migrations(pg_conn)
-    columns = {
-        row[0]: row[1]
-        for row in pg_conn.execute(
-            "SELECT column_name, is_nullable FROM information_schema.columns "
-            "WHERE table_name = 'investigation_build_uses'"
-        ).fetchall()
-    }
-    assert columns["holder_worker_id"] == "NO"
-    assert columns["lease_expires_at"] == "NO"
-    assert frozenset({"job_id", "attempt"}) not in _unique_constraints(
-        pg_conn, "investigation_build_uses"
-    )
 
 
 def test_worker_incarnation_tombstones_are_permanent_and_bounded(
