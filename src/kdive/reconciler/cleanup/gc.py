@@ -129,15 +129,15 @@ _BUILD_GENERATION_SCAN_PER_PASS = 200
 BUILD_GENERATION_RETRY_BACKOFF = timedelta(minutes=5)
 
 _UNPINNED_GENERATION_SQL = (
-    "(ib.state = 'reclaiming' OR (ib.state = 'active' "
+    "((ib.state = 'reclaiming' OR (ib.state = 'active' "
     "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.investigation_id = ib.investigation_id "
     "AND r.build_ref = ib.build_ref AND r.state IN ('created', 'running')) "
     "AND NOT EXISTS (SELECT 1 FROM jobs j JOIN runs r "
     "ON r.id::text = j.payload->>'run_id' "
     "WHERE r.investigation_id = ib.investigation_id AND r.build_ref = ib.build_ref "
-    "AND j.kind = 'install' AND j.state IN ('queued', 'running')) "
+    "AND j.kind = 'install' AND j.state IN ('queued', 'running')))) "
     "AND NOT EXISTS (SELECT 1 FROM investigation_build_uses u "
-    "WHERE u.investigation_id = ib.investigation_id AND u.generation = ib.generation)))"
+    "WHERE u.investigation_id = ib.investigation_id AND u.generation = ib.generation))"
 )
 
 
@@ -156,7 +156,7 @@ class ExactArtifactObjectDeleter(Protocol):
 async def _mark_generation_reclaiming(
     conn: AsyncConnection, investigation_id: UUID, generation: UUID
 ) -> dict[str, dict[str, str]] | None:
-    """Fence one generation after rechecking its Run and install-job pins."""
+    """Fence one generation after rechecking its Run, install-job, and use pins."""
     require_top_level_transaction(conn, "mark Investigation build generation reclaiming")
     async with (
         conn.transaction(),
@@ -172,6 +172,15 @@ async def _mark_generation_reclaiming(
         if row is None:
             return None
         state, build_ref, artifacts = row
+        use = await (
+            await conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM investigation_build_uses "
+                "WHERE investigation_id = %s AND generation = %s)",
+                (investigation_id, generation),
+            )
+        ).fetchone()
+        if use is None or use[0]:
+            return None
         if state == "active":
             pin = await (
                 await conn.execute(
@@ -181,16 +190,12 @@ async def _mark_generation_reclaiming(
                     "UNION ALL SELECT 1 FROM jobs j JOIN runs r "
                     "ON r.id::text = j.payload->>'run_id' "
                     "WHERE r.investigation_id = %s AND r.build_ref = %s "
-                    "AND j.kind = 'install' AND j.state IN ('queued', 'running') "
-                    "UNION ALL SELECT 1 FROM investigation_build_uses u "
-                    "WHERE u.investigation_id = %s AND u.generation = %s)",
+                    "AND j.kind = 'install' AND j.state IN ('queued', 'running'))",
                     (
                         investigation_id,
                         build_ref,
                         investigation_id,
                         build_ref,
-                        investigation_id,
-                        generation,
                     ),
                 )
             ).fetchone()

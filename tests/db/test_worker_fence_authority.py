@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from threading import Event
+from time import monotonic, sleep
 from uuid import UUID, uuid4
 
 import psycopg
@@ -116,8 +117,9 @@ def _seed_claim(
     project: str = "project-a",
     attempt: int = 1,
 ) -> tuple[UUID, UUID, UUID]:
-    investigation_id, generation, job_id = uuid4(), uuid4(), uuid4()
+    investigation_id, generation, run_id, job_id = uuid4(), uuid4(), uuid4(), uuid4()
     digest = "d" * 64
+    build_ref = f"{digest}.{generation}"
     conn.execute(
         "INSERT INTO investigations (id, principal, project, title, state) "
         "VALUES (%s, 'principal', %s, 'title', 'active')",
@@ -129,14 +131,27 @@ def _seed_claim(
         "build_profile, expires_at) VALUES "
         "(%s, %s, %s, %s, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, "
         "'local-libvirt', '{}'::jsonb, now() + interval '1 day')",
-        (investigation_id, generation, f"{digest}.{generation}", digest),
+        (investigation_id, generation, build_ref, digest),
+    )
+    conn.execute(
+        "INSERT INTO runs (id, investigation_id, state, build_profile, target_kind, "
+        "principal, project, build_ref) VALUES "
+        "(%s, %s, 'running', '{}'::jsonb, 'local-libvirt', 'principal', %s, %s)",
+        (run_id, investigation_id, project, build_ref),
     )
     conn.execute(
         "INSERT INTO jobs (id, kind, state, attempt, max_attempts, worker_id, "
-        "lease_expires_at, authorizing, dedup_key) VALUES "
+        "lease_expires_at, payload, authorizing, dedup_key) VALUES "
         "(%s, 'install', 'running', %s, 3, %s, now() + interval '5 minutes', "
-        "'{}'::jsonb, %s)",
-        (job_id, attempt, holder, f"worker-fence-{job_id}"),
+        "%s, %s, %s)",
+        (
+            job_id,
+            attempt,
+            holder,
+            Jsonb({"run_id": str(run_id)}),
+            Jsonb({"principal": "principal", "project": project}),
+            f"worker-fence-{job_id}",
+        ),
     )
     return investigation_id, generation, job_id
 
@@ -278,6 +293,17 @@ def test_concurrent_exact_runtime_role_creation_is_idempotent(
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(apply_role_migration)
             assert started.wait(timeout=2)
+            deadline = monotonic() + 2
+            while monotonic() < deadline:
+                blocked = pg_conn.execute(
+                    "SELECT %s = ANY(pg_blocking_pids(%s))",
+                    (creator.info.backend_pid, contender.info.backend_pid),
+                ).fetchone()
+                if blocked == (True,):
+                    break
+                sleep(0.01)
+            else:
+                pytest.fail("role migration did not block on concurrent exact role creation")
             with pytest.raises(TimeoutError):
                 future.result(timeout=0.5)
             creator.commit()
@@ -286,6 +312,91 @@ def test_concurrent_exact_runtime_role_creation_is_idempotent(
         creator.rollback()
         contender.close()
         creator.close()
+        for role in roles.values():
+            if pg_conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone():
+                pg_conn.execute(SQL("DROP OWNED BY {}").format(Identifier(role)))
+                pg_conn.execute(SQL("DROP ROLE {}").format(Identifier(role)))
+
+
+def test_runtime_role_grant_closes_validation_to_drop_window(
+    pg_conn: psycopg.Connection, postgres_url: str
+) -> None:
+    """A validated role owns its schema capability before another session can drop it."""
+    migrate.apply_migrations(pg_conn)
+    suffix = pg_conn.info.dbname[-10:].replace("-", "_")
+    roles = {
+        "kdive_server": f"kdive_drop_server_{suffix}",
+        "kdive_worker": f"kdive_drop_worker_{suffix}",
+        "kdive_reconciler": f"kdive_drop_reconciler_{suffix}",
+        "kdive_lifecycle_witness": f"kdive_drop_witness_{suffix}",
+    }
+    role_sql = (migrate.SCHEMA_DIR / "0104_worker_fence_roles.sql").read_bytes()
+    for canonical, isolated in roles.items():
+        role_sql = role_sql.replace(canonical.encode(), isolated.encode())
+    pause_key = uuid4().int % (2**63 - 1)
+    role_sql = role_sql.replace(
+        b"$$;\n\nREVOKE",
+        f"$$;\n\nSELECT pg_advisory_xact_lock({pause_key});\n\nREVOKE".encode(),
+        1,
+    )
+
+    for role in roles.values():
+        pg_conn.execute(
+            SQL(
+                "CREATE ROLE {} NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB "
+                "NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+            ).format(Identifier(role))
+        )
+
+    blocker = psycopg.connect(postgres_url)
+    contender = psycopg.connect(postgres_url, autocommit=True)
+    dropper = psycopg.connect(postgres_url, autocommit=True)
+    started = Event()
+
+    def apply_role_migration() -> None:
+        started.set()
+        contender.execute(role_sql)
+
+    try:
+        blocker.execute("SELECT pg_advisory_xact_lock(%s)", (pause_key,))
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future = executor.submit(apply_role_migration)
+            assert started.wait(timeout=2)
+            deadline = monotonic() + 2
+            while monotonic() < deadline:
+                blocked = pg_conn.execute(
+                    "SELECT %s = ANY(pg_blocking_pids(%s))",
+                    (blocker.info.backend_pid, contender.info.backend_pid),
+                ).fetchone()
+                if blocked == (True,):
+                    break
+                sleep(0.01)
+            else:
+                pytest.fail("role migration did not reach the post-validation pause")
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.5)
+            drop_future = executor.submit(
+                dropper.execute,
+                SQL("DROP ROLE {}").format(Identifier(roles["kdive_server"])),
+            )
+            drop_was_blocked = True
+            try:
+                drop_future.result(timeout=0.5)
+                drop_was_blocked = False
+            except TimeoutError:
+                pass
+            finally:
+                blocker.commit()
+            if drop_was_blocked:
+                future.result(timeout=2)
+                with pytest.raises(psycopg.errors.DependentObjectsStillExist):
+                    drop_future.result(timeout=2)
+            assert drop_was_blocked
+    finally:
+        blocker.rollback()
+        dropper.close()
+        contender.close()
+        blocker.close()
         for role in roles.values():
             if pg_conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone():
                 pg_conn.execute(SQL("DROP OWNED BY {}").format(Identifier(role)))
@@ -342,6 +453,103 @@ def test_acquire_persists_attempt_and_lease_from_locked_claim(
         (use_id,),
     ).fetchone()
     assert row == (job_id, 3, holder, lease[0])
+
+
+def test_acquire_refuses_generation_outside_claimed_run(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """A valid worker claim cannot pin a different Run's generation."""
+    holder, credential = "docker:wrong-generation", b"g" * 32
+    _register(role_dsn, holder, credential)
+    _claimed_investigation, _claimed_generation, job_id = _seed_claim(pg_conn, holder=holder)
+    other_investigation, other_generation, _other_job = _seed_claim(pg_conn, holder=holder)
+
+    assert not _acquire(
+        role_dsn,
+        uuid4(),
+        other_investigation,
+        other_generation,
+        job_id,
+        1,
+        credential,
+    )
+
+
+def test_acquire_refuses_claim_with_mismatched_authorizing_project(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """The job, Run, and Investigation must retain one authoritative project."""
+    holder, credential = "docker:wrong-project", b"p" * 32
+    _register(role_dsn, holder, credential)
+    investigation_id, generation, job_id = _seed_claim(pg_conn, holder=holder, project="project-a")
+    pg_conn.execute(
+        "UPDATE jobs SET authorizing = %s WHERE id = %s",
+        (Jsonb({"principal": "principal", "project": "project-b"}), job_id),
+    )
+
+    assert not _acquire(
+        role_dsn,
+        uuid4(),
+        investigation_id,
+        generation,
+        job_id,
+        1,
+        credential,
+    )
+
+
+def test_reclaiming_generation_serializes_before_acquisition(
+    pg_conn: psycopg.Connection, postgres_url: str, role_dsn: RoleDsns
+) -> None:
+    """Acquisition waits for the generation lock and then refuses reclaiming state."""
+    holder, credential = "docker:reclaim-race", b"q" * 32
+    _register(role_dsn, holder, credential)
+    investigation_id, generation, job_id = _seed_claim(pg_conn, holder=holder)
+    use_id = uuid4()
+    connected = Event()
+    worker_pid: list[int] = []
+
+    def acquire() -> bool:
+        with psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker:
+            worker_pid.append(worker.info.backend_pid)
+            connected.set()
+            row = worker.execute(
+                "SELECT public.acquire_investigation_build_use(%s, %s, %s, %s, %s, %s)",
+                (use_id, investigation_id, generation, job_id, 1, credential),
+            ).fetchone()
+        assert row is not None
+        return bool(row[0])
+
+    with (
+        psycopg.connect(postgres_url) as reclaim,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        reclaim.execute(
+            "UPDATE investigation_builds SET state = 'reclaiming' "
+            "WHERE investigation_id = %s AND generation = %s",
+            (investigation_id, generation),
+        )
+        future = executor.submit(acquire)
+        assert connected.wait(timeout=2)
+        deadline = monotonic() + 2
+        while monotonic() < deadline:
+            blocked = pg_conn.execute(
+                "SELECT %s = ANY(pg_blocking_pids(%s))",
+                (reclaim.info.backend_pid, worker_pid[0]),
+            ).fetchone()
+            if blocked == (True,):
+                break
+            sleep(0.01)
+        else:
+            pytest.fail("acquisition did not block on the reclaiming generation row")
+        with pytest.raises(TimeoutError):
+            future.result(timeout=0.5)
+        reclaim.commit()
+        assert future.result(timeout=2) is False
+
+    assert pg_conn.execute(
+        "SELECT count(*) FROM investigation_build_uses WHERE use_id = %s", (use_id,)
+    ).fetchone() == (0,)
 
 
 def test_acquire_refuses_replaced_attempt(pg_conn: psycopg.Connection, role_dsn: RoleDsns) -> None:

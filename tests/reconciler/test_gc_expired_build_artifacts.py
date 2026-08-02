@@ -309,6 +309,23 @@ def test_reclaiming_generation_retries_exact_versions_without_touching_fresh_gen
                 "WHERE generation = %s",
                 (old_generation,),
             )
+            job_id, use_id = uuid4(), uuid4()
+            await conn.execute(
+                "INSERT INTO jobs (id, kind, state, attempt, max_attempts, authorizing, dedup_key) "
+                "VALUES (%s, 'install', 'succeeded', 1, 3, '{}'::jsonb, %s)",
+                (job_id, f"reclaiming-use-{job_id}"),
+            )
+            await conn.execute(
+                "INSERT INTO investigation_build_uses (use_id, investigation_id, generation, "
+                "job_id, attempt, holder_worker_id, lease_expires_at) VALUES "
+                "(%s, %s, %s, %s, 1, 'worker:retry-pin', now() - interval '1 day')",
+                (use_id, investigation_id, old_generation, job_id),
+            )
+            deleted_before_pin = list(store.deleted)
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+            assert store.deleted == deleted_before_pin
+
+            await conn.execute("DELETE FROM investigation_build_uses WHERE use_id = %s", (use_id,))
             assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
             remaining = await (
                 await conn.execute(

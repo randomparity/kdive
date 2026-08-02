@@ -130,6 +130,8 @@ SET search_path = ''
 AS $$
 DECLARE
     v_holder text;
+    v_claim_investigation uuid;
+    v_claim_generation uuid;
     v_claim_attempt integer;
     v_claim_lease timestamptz;
 BEGIN
@@ -163,14 +165,33 @@ BEGIN
     IF NOT FOUND THEN
         RETURN false;
     END IF;
-    SELECT j.attempt, j.lease_expires_at INTO v_claim_attempt, v_claim_lease
+    SELECT
+        b.investigation_id,
+        b.generation,
+        j.attempt,
+        j.lease_expires_at
+    INTO
+        v_claim_investigation,
+        v_claim_generation,
+        v_claim_attempt,
+        v_claim_lease
     FROM public.jobs AS j
+    JOIN public.runs AS r ON r.id::text = j.payload->>'run_id'
+    JOIN public.investigations AS i
+      ON i.id = r.investigation_id AND i.project = r.project
+    JOIN public.investigation_builds AS b
+      ON b.investigation_id = r.investigation_id AND b.build_ref = r.build_ref
     WHERE j.id = p_job_id
+      AND j.kind = 'install'
       AND j.state = 'running'
       AND j.worker_id = v_holder
       AND j.attempt = p_attempt
       AND j.lease_expires_at IS NOT NULL
-    FOR UPDATE;
+      AND j.authorizing->>'project' = i.project
+      AND b.investigation_id = p_investigation_id
+      AND b.generation = p_generation
+      AND b.state = 'active'
+    FOR UPDATE OF j, r, i, b;
     IF NOT FOUND THEN
         RETURN false;
     END IF;
@@ -178,8 +199,8 @@ BEGIN
         use_id, investigation_id, generation, job_id, attempt, holder_worker_id, lease_expires_at
     ) VALUES (
         p_use_id,
-        p_investigation_id,
-        p_generation,
+        v_claim_investigation,
+        v_claim_generation,
         p_job_id,
         v_claim_attempt,
         v_holder,

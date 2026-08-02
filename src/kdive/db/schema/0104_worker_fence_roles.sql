@@ -60,6 +60,9 @@ BEGIN
         IF NOT FOUND OR NOT COALESCE(v_attributes_match, false) THEN
             RAISE EXCEPTION 'runtime role % has incompatible attributes or memberships', v_role;
         END IF;
+        -- Establish a database dependency before validating the next cluster-global role. This
+        -- closes the post-validation window in which another database could drop the role.
+        EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', v_role);
     END LOOP;
 END
 $$;
@@ -67,6 +70,3 @@ $$;
 REVOKE ALL ON TABLE public.worker_incarnations FROM PUBLIC;
 REVOKE ALL ON TABLE public.investigation_build_uses FROM PUBLIC;
 REVOKE ALL ON TABLE public.investigation_build_use_recoveries FROM PUBLIC;
-
-GRANT USAGE ON SCHEMA public TO kdive_server, kdive_worker, kdive_reconciler,
-    kdive_lifecycle_witness;
