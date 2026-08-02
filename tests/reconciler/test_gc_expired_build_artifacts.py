@@ -11,6 +11,7 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
@@ -25,6 +26,143 @@ class _RecordingStore:
         assert limit == 20
         self.deleted.append(key)
         return True
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.deleted.append(f"{key}@{version_id}")
+
+
+def test_expired_generation_reclaims_by_absolute_deadline(migrated_url: str) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        investigation_id = uuid4()
+        generation = uuid4()
+        digest = "b" * 64
+        build_ref = f"{digest}.{generation}"
+        key = f"builds/{generation}/kernel"
+        try:
+            await conn.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, 'p', 'proj', 't', 'active')",
+                (investigation_id,),
+            )
+            await conn.execute(
+                "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, '{}'::jsonb, "
+                "%s::jsonb, 'local-libvirt', '{}'::jsonb, now() - interval '1 second')",
+                (
+                    investigation_id,
+                    generation,
+                    build_ref,
+                    digest,
+                    Jsonb({"kernel": {"key": key, "version_id": "v1"}}),
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+                "retention_class) "
+                "VALUES ('investigations', %s, %s, 'etag', 'sensitive', 'build')",
+                (investigation_id, key),
+            )
+        finally:
+            await conn.close()
+
+        store = _RecordingStore()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
+            result = await conn.execute(
+                "SELECT 1 FROM investigation_builds WHERE generation = %s", (generation,)
+            )
+            assert await result.fetchone() is None
+        finally:
+            await conn.close()
+        assert store.deleted == [f"{key}@v1"]
+
+    asyncio.run(_run())
+
+
+def test_reclaiming_generation_retries_exact_versions_without_touching_fresh_generation(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        investigation_id = uuid4()
+        old_generation = uuid4()
+        fresh_generation = uuid4()
+        digest = "c" * 64
+        old_key = f"builds/{old_generation}/kernel"
+        fresh_key = f"builds/{fresh_generation}/kernel"
+        try:
+            await conn.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, 'p', 'proj', 't', 'active')",
+                (investigation_id,),
+            )
+            for generation, key, deadline in (
+                (old_generation, old_key, "now() - interval '1 second'"),
+                (fresh_generation, fresh_key, "now() + interval '1 day'"),
+            ):
+                await conn.execute(
+                    "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                    "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                    "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, "
+                    "'{}'::jsonb, %s::jsonb, 'local-libvirt', '{}'::jsonb, " + deadline + ")",
+                    (
+                        investigation_id,
+                        generation,
+                        f"{digest}.{generation}",
+                        digest,
+                        Jsonb({"kernel": {"key": key, "version_id": f"v-{generation}"}}),
+                    ),
+                )
+                await conn.execute(
+                    "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+                    "retention_class) VALUES "
+                    "('investigations', %s, %s, 'etag', 'sensitive', 'build')",
+                    (investigation_id, key),
+                )
+        finally:
+            await conn.close()
+
+        class _FailOnceStore(_RecordingStore):
+            failed = False
+
+            def delete_version(self, key: str, version_id: str) -> None:
+                self.deleted.append(f"{key}@{version_id}")
+                if not self.failed:
+                    self.failed = True
+                    raise RuntimeError("temporary store failure")
+
+        store = _FailOnceStore()
+        conn = await connect(migrated_url)
+        try:
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+            state = await (
+                await conn.execute(
+                    "SELECT state FROM investigation_builds WHERE generation = %s",
+                    (old_generation,),
+                )
+            ).fetchone()
+            assert state == ("reclaiming",)
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
+            remaining = await (
+                await conn.execute(
+                    "SELECT generation, state FROM investigation_builds ORDER BY generation"
+                )
+            ).fetchall()
+            assert remaining == [(fresh_generation, "active")]
+            keys = await (
+                await conn.execute(
+                    "SELECT object_key FROM artifacts WHERE owner_id = %s", (investigation_id,)
+                )
+            ).fetchall()
+            assert keys == [(fresh_key,)]
+        finally:
+            await conn.close()
+        assert all(not entry.startswith(fresh_key) for entry in store.deleted)
+
+    asyncio.run(_run())
 
 
 async def _seed_artifact(
