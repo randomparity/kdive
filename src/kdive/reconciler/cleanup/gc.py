@@ -124,6 +124,17 @@ _SYSTEM_TEARDOWN_ARTIFACT_PATTERNS: tuple[str, ...] = (
 )
 _SYSTEM_ARTIFACT_KEYS_PER_PASS = 10
 _SYSTEM_ARTIFACT_CURSOR_LANE = "row-backed"
+_BUILD_GENERATIONS_PER_PASS = 50
+
+_UNPINNED_GENERATION_SQL = (
+    "(ib.state = 'reclaiming' OR (ib.state = 'active' "
+    "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.investigation_id = ib.investigation_id "
+    "AND r.build_ref = ib.build_ref AND r.state IN ('created', 'running')) "
+    "AND NOT EXISTS (SELECT 1 FROM jobs j JOIN runs r "
+    "ON r.id::text = j.payload->>'run_id' "
+    "WHERE r.investigation_id = ib.investigation_id AND r.build_ref = ib.build_ref "
+    "AND j.kind = 'install' AND j.state IN ('queued', 'running'))))"
+)
 
 
 class ArtifactObjectDeleter(Protocol):
@@ -221,28 +232,38 @@ async def _reclaim_generation(
 
 
 async def _generation_candidates(
-    conn: AsyncConnection, *, investigation_id: UUID | None = None, expired: bool = False
+    conn: AsyncConnection,
+    *,
+    investigation_id: UUID | None = None,
+    expired: bool = False,
+    limit: int = _BUILD_GENERATIONS_PER_PASS,
 ) -> list[tuple[UUID, UUID]]:
     if investigation_id is not None:
         rows = await (
             await conn.execute(
-                "SELECT investigation_id, generation FROM investigation_builds "
-                "WHERE state IN ('active', 'reclaiming') AND investigation_id = %s",
-                (investigation_id,),
+                "SELECT ib.investigation_id, ib.generation FROM investigation_builds ib "
+                "WHERE ib.investigation_id = %s AND " + _UNPINNED_GENERATION_SQL + " "
+                "ORDER BY ib.generation LIMIT %s",
+                (investigation_id, limit),
             )
         ).fetchall()
     elif expired:
         rows = await (
             await conn.execute(
-                "SELECT investigation_id, generation FROM investigation_builds "
-                "WHERE state = 'reclaiming' OR (state = 'active' AND expires_at <= now())"
+                "SELECT ib.investigation_id, ib.generation FROM investigation_builds ib "
+                "WHERE (ib.state = 'reclaiming' OR ib.expires_at <= now()) AND "
+                + _UNPINNED_GENERATION_SQL
+                + " ORDER BY ib.investigation_id, ib.generation LIMIT %s",
+                (limit,),
             )
         ).fetchall()
     else:
         rows = await (
             await conn.execute(
-                "SELECT investigation_id, generation FROM investigation_builds "
-                "WHERE state IN ('active', 'reclaiming')"
+                "SELECT ib.investigation_id, ib.generation FROM investigation_builds ib WHERE "
+                + _UNPINNED_GENERATION_SQL
+                + " ORDER BY ib.investigation_id, ib.generation LIMIT %s",
+                (limit,),
             )
         ).fetchall()
     return [(row[0], row[1]) for row in rows]
@@ -387,15 +408,23 @@ async def gc_investigation_artifacts(
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT id FROM investigations "
-            "WHERE cleanup_pending_at IS NOT NULL AND cleanup_pending_at < now() - %s",
+            "WHERE cleanup_pending_at IS NOT NULL AND cleanup_pending_at < now() - %s "
+            "ORDER BY id",
             (grace,),
         )
         investigation_ids = [row[0] for row in await cur.fetchall()]
     deleted = 0
+    remaining_generation_budget = _BUILD_GENERATIONS_PER_PASS
     for investigation_id in investigation_ids:
-        for candidate_investigation_id, generation in await _generation_candidates(
-            conn, investigation_id=investigation_id
-        ):
+        generation_candidates = (
+            await _generation_candidates(
+                conn, investigation_id=investigation_id, limit=remaining_generation_budget
+            )
+            if remaining_generation_budget > 0
+            else []
+        )
+        remaining_generation_budget -= len(generation_candidates)
+        for candidate_investigation_id, generation in generation_candidates:
             deleted += await _reclaim_generation(
                 conn,
                 cast("ExactArtifactObjectDeleter", store),
@@ -461,7 +490,9 @@ async def gc_expired_build_artifacts(
     logged and retried next pass rather than aborting the sweep (like :func:`gc_report_artifacts`).
     """
     deleted = 0
-    for investigation_id, generation in await _generation_candidates(conn, expired=True):
+    for investigation_id, generation in await _generation_candidates(
+        conn, expired=True, limit=_BUILD_GENERATIONS_PER_PASS
+    ):
         deleted += await _reclaim_generation(
             conn, cast("ExactArtifactObjectDeleter", store), investigation_id, generation
         )
