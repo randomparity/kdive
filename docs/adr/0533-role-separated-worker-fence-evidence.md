@@ -44,12 +44,15 @@ fence in the same audited transaction.
 The Compose lifecycle gate and Kubernetes witness are the only supported runtime authorities. Compose
 serializes create, stop, recreate, and remove around evidence persistence. For Kubernetes, the Pod UID
 is the incarnation identifier. A controller observes the initially-finalized Pending Pod, validates its
-fixed StatefulSet name/ordinal and UID, registers that UID, and places the one-time credential in a
-Pod-UID-owned Secret before the worker starts. An init gate blocks worker startup until that exact
-Secret is mounted. Thus a terminal Pod that never reached worker registration still has a pre-start,
-authority-bound identity; the witness may terminate it but may not invent a different holder after the
-fact. The witness compare-and-sets namespace, name, UID, resource version, and credential-record state
-before removing the finalizer. API or database failure retains the runtime object and fence.
+fixed StatefulSet name/ordinal and UID, and registers that UID before worker startup. A worker init
+client presents a short-lived projected service-account token bound by Kubernetes to that Pod UID; the
+controller verifies it with TokenReview plus a live UID/resource-version read, consumes the credential
+once, and returns it over authenticated cluster TLS into an init-only tmpfs handoff. The long-running
+worker receives neither the projected token nor an API-readable Secret. Thus a terminal Pod whose
+worker never started still has a pre-start, authority-bound identity; the witness may terminate it but
+may not invent a different holder after the fact. The witness compare-and-sets namespace, name, UID,
+resource version, and credential-record state before removing the finalizer. API or database failure
+retains the runtime object and fence.
 
 Identity text is at most 512 bytes; serialized authority bindings and Kubernetes names are capped before
 persistence; recovery actor, evidence, and reason retain their schema caps of 255, 1024, and 512 bytes.

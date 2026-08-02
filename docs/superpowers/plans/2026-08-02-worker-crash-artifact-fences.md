@@ -36,10 +36,14 @@
 - Produces SQL roles `kdive_server`, `kdive_worker`, `kdive_reconciler`, `kdive_lifecycle_witness`.
 - Produces guarded functions `register_worker_incarnation`, `authenticate_worker_incarnation`, `terminate_worker_incarnation`, `acquire_investigation_build_use`, `release_investigation_build_use`, and `recover_investigation_build_use`.
 - Protected tables retain no direct runtime-role mutation grants.
+- Claim-trigger activation is deliberately deferred to Task 3, after credential-aware worker code exists.
 
 - [ ] **Step 1: Write failing migration and role tests**
 
-Add tests that assert migration versions are unique and end in the new monotonic tail, then connect with each role and exercise an allow/deny matrix. The test helper executes the named operation after `SET LOCAL ROLE`, rolls back the savepoint after an expected `InsufficientPrivilege`, and returns whether it succeeded:
+Add tests that assert migration versions are unique and end in the new monotonic tail. Create distinct
+LOGIN principals with only one intended non-login runtime-role membership, plus an unprivileged login,
+and open a fresh connection as each for guarded-function checks. Use `SET LOCAL ROLE` only for direct
+table-grant assertions; it cannot model `session_user`:
 
 ```python
 @pytest.mark.parametrize(
@@ -51,8 +55,9 @@ Add tests that assert migration versions are unique and end in the new monotonic
         ("kdive_reconciler", "direct_delete_use", False),
     ],
 )
-def test_worker_fence_role_matrix(role: str, operation: str, allowed: bool, pg_conn) -> None:
-    assert _role_operation_succeeds(pg_conn, role, operation) is allowed
+def test_worker_fence_role_matrix(role: str, operation: str, allowed: bool, role_dsn) -> None:
+    with psycopg.connect(role_dsn(role)) as role_conn:
+        assert _login_operation_succeeds(role_conn, operation) is allowed
 ```
 
 - [ ] **Step 2: Run the red tests**
@@ -63,7 +68,11 @@ Expected: failure from duplicate migration versions and missing roles/functions.
 
 - [ ] **Step 3: Build a unique immutable migration tail**
 
-Keep `main` 0095–0097 unchanged. Consolidate use rows, recovery audit, bounds/indexes/cursors, incarnation protocol and credential hash, role creation, revokes/grants, guarded functions, and claim trigger into versions 0098 onward. Security-definer functions must set an empty `search_path`, schema-qualify objects, validate bounds, and check `session_user` role membership.
+Keep `main` 0095–0097 unchanged. Consolidate use rows, recovery audit, bounds/indexes/cursors,
+incarnation protocol and credential hash, role creation, revokes/grants, and guarded functions into
+versions 0098–0105. Do not activate the incompatible claim trigger in this task. Security-definer
+functions must set an empty `search_path`, schema-qualify objects, validate bounds, and check
+`session_user` role membership.
 
 Core protected shape:
 
@@ -100,6 +109,7 @@ Commit explicit migration/test paths with: `feat: enforce worker fence database 
 ### Task 2: Bind worker operations to authority-minted incarnation credentials
 
 **Files:**
+- Create: `src/kdive/db/schema/0106_worker_fence_protocol_claim.sql`
 - Modify: `src/kdive/services/runs/worker_incarnations.py`
 - Modify: `src/kdive/services/runs/build_use.py`
 - Modify: `src/kdive/processes/worker_incarnation.py`
@@ -175,7 +185,10 @@ Expected: old/unregistered claims still succeed or the new API is absent.
 
 - [ ] **Step 3: Route every claim through the database protocol gate**
 
-The guarded claim function resolves the incarnation from the credential, verifies `active` plus the exact protocol, then performs the existing `FOR UPDATE SKIP LOCKED` claim. Preserve FIFO, lane selection, attempt charging, and lease semantics.
+Add migration 0106 only after the credential-aware startup/dequeue code and red tests are present. Its
+trigger denies direct old-style running transitions. The guarded claim function resolves the
+incarnation from the credential, verifies `active` plus the exact protocol, then performs the existing
+`FOR UPDATE SKIP LOCKED` claim. Preserve FIFO, lane selection, attempt charging, and lease semantics.
 
 - [ ] **Step 4: Run queue tests and mutation check**
 
@@ -206,24 +219,37 @@ Expected: FAIL because the task finishes/abandons before the provider thread is 
 
 - [ ] **Step 2: Supervise the provider task explicitly**
 
-Use this cancellation shape around the thread-backed task:
+Use a cancellation-resistant drain around the thread-backed task. Every cancellation is recorded while
+the same shielded task continues to be awaited; cleanup and the outer use release run only after the
+thread is done:
 
 ```python
+async def _wait_through_cancellation(task: asyncio.Task[object]) -> bool:
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    task.result()
+    return cancelled
+
 provider_task = asyncio.create_task(asyncio.to_thread(installer.install, request))
 try:
-    await asyncio.shield(provider_task)
-except asyncio.CancelledError:
-    try:
-        await provider_task
-    finally:
-        await abandon_run_step_best_effort(conn, run_id, "install")
-    raise
+    cancelled = await _wait_through_cancellation(provider_task)
 except Exception:
-    await abandon_run_step_best_effort(conn, run_id, "install")
+    cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
+    await _wait_through_cancellation(cleanup)
     raise
+if cancelled:
+    cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
+    await _wait_through_cancellation(cleanup)
+    raise asyncio.CancelledError
 ```
 
-Acquire the build use immediately before this block and release in an outer `finally`, so process death preserves the separately committed row.
+Acquire the build use immediately before this block and release in an outer `finally`, so process death
+preserves the separately committed row. Add a test that cancels twice while the provider remains blocked
+and asserts neither abandonment nor use release occurs until thread exit.
 
 - [ ] **Step 3: Run cancellation, overlap, and GC tests green**
 
@@ -303,13 +329,15 @@ Commit with: `feat: preserve compose worker termination evidence`
 - Modify: `tests/helm/test_helm_render.py`
 
 **Interfaces:**
-- Controller registers the exact Pending Pod UID and provisions a UID-owned credential Secret before the init gate permits worker start.
+- Controller registers the exact Pending Pod UID; an init client exchanges a Pod-UID-bound projected token for the one-time credential before worker start.
 - Witness terminates only an existing lifecycle-registered UID and patches only its finalizer with UID/resourceVersion/binding tests.
 - Truly unregistered terminal Pods remain finalized and cannot authorize recovery.
 
 - [ ] **Step 1: Add failing controller/witness tests**
 
-Cover pre-start registration, never-started-but-registered terminal Pod, truly unregistered terminal Pod, UID replacement, rollout, scale-down, API/database failure, ordinal ceiling decrease, Secret ownership, and exact JSON Patch tests.
+Cover pre-start registration, never-started-but-registered terminal Pod, truly unregistered terminal
+Pod, invalid/audience-mismatched/unbound tokens, one-time consume replay, UID replacement, rollout,
+scale-down, API/database failure, ordinal ceiling decrease, and exact JSON Patch tests.
 
 - [ ] **Step 2: Run red Kubernetes/Helm tests**
 
@@ -317,11 +345,20 @@ Run: `uv run python -m pytest tests/processes/test_kubernetes_termination_witnes
 
 - [ ] **Step 3: Implement bounded controller phases**
 
-Use explicit states: observe fixed ordinal → validate UID/finalizer → ensure authority registration → ensure UID-owned Secret → worker init gate; and terminal observe → verify existing binding → persist termination → patch exact finalizer. Each pass handles at most the configured count capped at 1,000 and leaves retryable state on failure.
+Use explicit states: observe fixed ordinal → validate UID/finalizer → ensure authority registration;
+then init exchange → TokenReview with fixed audience → live UID/resource-version read → atomic one-time
+credential consume → init-only tmpfs handoff → worker gate. Terminal processing is observe → verify
+existing binding → persist termination → patch exact finalizer. Each pass handles at most the configured
+count capped at 1,000 and leaves retryable state on failure. Ordinal reuse cannot overwrite a credential:
+registration and consumption compare the exact UID, and a consumed credential is never reissued.
 
 - [ ] **Step 4: Minimize RBAC and prove rendering**
 
-Grant only fixed-namespace Pod get/list and resource-version-fenced patch plus the minimum UID-owned Secret operations. Keep worker service account unable to read other worker Secrets or patch Pods. Run Step 2 green and server-side Helm rendering if a cluster API is configured.
+Grant the controller fixed-namespace Pod get/list, TokenReview create, and resource-version-fenced Pod
+patch. Mount the short-lived fixed-audience projected token only in the init container; do not mount it
+in the worker. No credential Secret API permission is required. Keep the worker unable to read Pods,
+tokens, or other credentials. Run Step 2 green and server-side Helm rendering if a cluster API is
+configured.
 
 - [ ] **Step 5: Run `just ci` and commit**
 

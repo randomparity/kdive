@@ -112,13 +112,17 @@ remove are serialized; a missing registry or database fails before destructive r
 
 The Kubernetes Pod template carries its finalizer at initial creation and uses the Pod UID as its
 incarnation. Before the worker claim loop starts, a controller validates the fixed StatefulSet
-name/ordinal and UID, registers that exact binding, and writes the one-time incarnation credential to a
-Pod-UID-owned Secret; an init gate blocks until that exact Secret is mounted. The witness scans only the
-configured ordinal range and validates namespace, name, UID, resource version, finalizer, and terminal
-phase. A terminal Pod that never entered the worker process is already authority-bound by this pre-start
-record, so the witness terminates that existing identity rather than synthesizing a post-hoc holder. It
-removes only its own finalizer with resource-version, UID, and binding tests. API/database failure leaves
-the Pod unchanged. Ordinal history can increase but not decrease.
+name/ordinal and UID and registers that exact binding. An init client presents a short-lived projected
+service-account token that Kubernetes binds to the Pod UID. The controller verifies TokenReview plus a
+live UID/resource-version read, atomically consumes the one-time credential, and returns it over
+authenticated cluster TLS into an init-only tmpfs handoff. The worker receives the credential but never
+the projected token or an API-readable Secret. Ordinal replacement cannot reuse a credential because
+the UID, token binding, registration row, and one-time consume predicate must all match. The witness
+scans only the configured ordinal range and validates namespace, name, UID, resource version, finalizer,
+and terminal phase. A terminal Pod that never entered the worker process is already authority-bound by
+this pre-start record, so the witness terminates that existing identity rather than synthesizing a
+post-hoc holder. It removes only its own finalizer with resource-version, UID, and binding tests.
+API/database failure leaves the Pod unchanged. Ordinal history can increase but not decrease.
 
 ### Recovery, GC, and tenancy
 
@@ -169,6 +173,7 @@ of scope and may strand, but never release, pins.
 | old worker → job claim | direct state transition | database trigger requires current active protocol incarnation | claim rejected; job remains queued |
 | reconciler → use deletion | use and holder ids | reconciler-only function, matching terminal row, atomic audit+delete | refusal; use retained |
 | runtime API → witness | Docker JSON or Pod JSON | schema/type/length validation, exact ID/UID/name/resource version | no absence inference |
+| Pod init → credential controller | bound projected token, Pod UID | TokenReview, live UID/resource-version check, one-time consume, cluster TLS | no credential; worker remains gated |
 | GC → object store | stored key plus immutable version | tenant-scoped DB selection, no-use predicate, exact-version delete, batch bound | tombstone retained for retry |
 
 The design adds role-specific DSN boundaries and widens the Compose/Kubernetes witness boundary to
@@ -193,9 +198,9 @@ These actors already control the evidence boundary or are excluded deployment pa
 6. Compose executable tests cover SIGKILL, create, stop, recreate, remove, database outage, and raw
    bypass refusal while preserving the exact container evidence.
 7. Helm/controller tests cover rollout, scale-down, terminal Pods whose worker never started but whose
-   UID was lifecycle-registered before startup, API/database outage, UID replacement, finalizer
-   fencing, ordinal bounds, and credential separation. A truly unregistered terminal Pod cannot
-   produce termination evidence or authorize fence recovery.
+   UID was lifecycle-registered before startup, bound-token rejection, one-time credential consumption,
+   API/database outage, UID replacement, finalizer fencing, ordinal bounds, and credential separation.
+   A truly unregistered terminal Pod cannot produce termination evidence or authorize fence recovery.
 8. Deployment tests prove migration credentials are absent from runtime containers, role-specific
    credentials are wired, and the stop-old-first protocol is documented and structurally enforced.
 9. Focused suites pass, then the repository gate `just ci` passes without warnings.
