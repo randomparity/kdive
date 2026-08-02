@@ -7,6 +7,7 @@ Console (system-owned), build-log (run-owned evidence), and system-owned uploads
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -463,6 +464,80 @@ def test_generation_reclaim_pass_is_ordered_bounded_and_resumes(
             f"builds/{UUID(int=2)}/kernel@v-{UUID(int=2)}",
             f"builds/{UUID(int=3)}/kernel@v-{UUID(int=3)}",
         ]
+
+    asyncio.run(_run())
+
+
+def test_generation_scan_bounds_work_before_eligibility_and_pin_joins(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        try:
+            for value in range(1, 5):
+                investigation_id = UUID(int=value)
+                generation = UUID(int=value)
+                digest = f"{value:064x}"
+                await conn.execute(
+                    "INSERT INTO investigations (id, principal, project, title, state) "
+                    "VALUES (%s, 'p', 'proj', 't', 'active')",
+                    (investigation_id,),
+                )
+                await conn.execute(
+                    "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                    "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                    "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, "
+                    "'{}'::jsonb, '{}'::jsonb, 'local-libvirt', '{}'::jsonb, "
+                    "now() + %s)",
+                    (
+                        investigation_id,
+                        generation,
+                        f"{digest}.{generation}",
+                        digest,
+                        timedelta(seconds=-1 if value == 4 else 3600),
+                    ),
+                )
+
+            monkeypatch.setattr(gc_module, "_BUILD_GENERATION_SCAN_PER_PASS", 3)
+            assert await gc_module._generation_candidates(conn, expired=True) == []
+            cursor = await (
+                await conn.execute(
+                    "SELECT investigation_id, generation FROM investigation_build_gc_cursor "
+                    "WHERE lane = 'expired'"
+                )
+            ).fetchone()
+            assert cursor == (UUID(int=3), UUID(int=3))
+            assert await gc_module._generation_candidates(conn, expired=True) == [
+                (UUID(int=4), UUID(int=4))
+            ]
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_generation_scan_plan_uses_primary_key_before_bounded_limit(migrated_url: str) -> None:
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        try:
+            await conn.execute("SET enable_seqscan = off")
+            plan_row = await (
+                await conn.execute(
+                    "EXPLAIN (ANALYZE, FORMAT JSON) "
+                    "SELECT investigation_id, generation FROM investigation_builds "
+                    "WHERE (investigation_id, generation) > (%s, %s) "
+                    "ORDER BY investigation_id, generation LIMIT %s",
+                    (UUID(int=0), UUID(int=0), gc_module._BUILD_GENERATION_SCAN_PER_PASS),
+                )
+            ).fetchone()
+            assert plan_row is not None
+            encoded = json.dumps(plan_row[0])
+            assert "Index" in encoded
+            assert "Seq Scan" not in encoded
+            assert "WindowAgg" not in encoded
+            assert "Hash Join" not in encoded
+        finally:
+            await conn.close()
 
     asyncio.run(_run())
 

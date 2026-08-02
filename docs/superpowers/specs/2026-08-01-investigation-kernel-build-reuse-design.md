@@ -140,8 +140,12 @@ Create and reclaim take the Investigation advisory lock. Reclaim rechecks for no
 whose `build_ref` selects the generation and for queued or running install jobs on any referencing
 Run. Either condition defers deletion. Otherwise reclaim marks the generation `reclaiming` before
 deleting its exact object versions. A partial object-store failure keeps that state for retry.
-Failed deletes receive a database-clock retry delay. The global bounded pass rotates a durable
-cursor and takes at most one generation per Investigation before a second from any tenant.
+Failed deletes receive a database-clock retry delay. The global pass first keyset-scans at most 200
+catalog primary-key rows from a durable cursor, then evaluates expiry/close eligibility and pin
+joins only for that bounded set. Rank ordering within the set takes one generation per
+Investigation before a second from any tenant; the cursor advances past scanned ineligible or
+pinned rows so one tenant cannot make later catalog rows unreachable. Partial indexes support the
+live Run build-reference and queued/running install-job pin lookups.
 After deletion it removes only that generation's artifact rows and record, rechecking the state
 under the lock. A fresh publication of identical content uses a new generation and cannot be
 deleted or selected through the old record.

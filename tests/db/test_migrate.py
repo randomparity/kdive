@@ -200,6 +200,8 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0097",
         "0098",
         "0099",
+        "0100",
+        "0101",
     ]
     assert second == []
 
@@ -208,6 +210,20 @@ def test_unique_constraints_present(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
     assert frozenset({"run_id", "step"}) in _unique_constraints(pg_conn, "run_steps")
     assert frozenset({"dedup_key"}) in _unique_constraints(pg_conn, "jobs")
+
+
+def test_investigation_build_gc_pin_indexes_present(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    definitions = {
+        row[0]: row[1]
+        for row in pg_conn.execute(
+            "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public' "
+            "AND indexname IN ('runs_live_build_ref_idx', 'jobs_live_install_run_id_idx')"
+        ).fetchall()
+    }
+    assert set(definitions) == {"runs_live_build_ref_idx", "jobs_live_install_run_id_idx"}
+    assert "investigation_id, build_ref" in definitions["runs_live_build_ref_idx"]
+    assert "payload ->> 'run_id'" in definitions["jobs_live_install_run_id_idx"]
 
 
 def test_investigation_build_catalog_schema(pg_conn: psycopg.Connection) -> None:
@@ -818,6 +834,8 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0097",
         "0098",
         "0099",
+        "0100",
+        "0101",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1194,6 +1212,8 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0097",
         "0098",
         "0099",
+        "0100",
+        "0101",
     ]
 
 
