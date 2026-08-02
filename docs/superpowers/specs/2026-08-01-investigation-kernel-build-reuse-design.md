@@ -258,10 +258,10 @@ worker incarnation holding each use pin.
   readable by that admitted attempt, rejects new consumption, and becomes reclaimable after every
   pin clears. Tombstones retain only the reference and deadline needed for same-Investigation
   recovery guidance.
-- GC object errors and process interruption leave retryable catalog/artifact rows. Per-pass row and
-  object-call caps plus independent lane cursors prevent a large or repeatedly failing tenant lane
-  from starving legacy cleanup or reconciler repairs. No public repair performs an unbounded
-  backlog scan.
+- Reusable-build GC object errors and process interruption leave retryable catalog/artifact rows.
+  Its per-pass row and object-call caps plus independent build-lane cursors prevent one large or
+  repeatedly failing reusable-build lane from starving the other reusable-build cleanup lane.
+  This bound does not describe unrelated report-artifact or idempotency-key repair lanes.
 
 ### Threat-control acceptance map
 
