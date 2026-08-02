@@ -4,12 +4,12 @@ ALTER TABLE investigation_build_use_recoveries
 
 ALTER TABLE investigation_build_use_recoveries
     ADD CONSTRAINT investigation_build_use_recoveries_holder_bounded
-        CHECK (length(holder_worker_id) <= 512),
+        CHECK (octet_length(holder_worker_id) <= 512),
     ADD CONSTRAINT investigation_build_use_recoveries_actor_bounded
-        CHECK (length(recovered_by) <= 255),
+        CHECK (octet_length(recovered_by) <= 255),
     ADD CONSTRAINT investigation_build_use_recoveries_evidence_bounded
-        CHECK (length(evidence) <= 1024),
+        CHECK (octet_length(evidence) <= 1024),
     ADD CONSTRAINT investigation_build_use_recoveries_reason_nonempty
         CHECK (length(btrim(reason)) > 0),
     ADD CONSTRAINT investigation_build_use_recoveries_reason_bounded
-        CHECK (length(reason) <= 512);
+        CHECK (octet_length(reason) <= 512);

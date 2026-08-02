@@ -120,8 +120,12 @@ async def recover_build_use_in_transaction(
         raise ValueError("recovery actor, evidence, or reason exceeds its storage bound")
     row = await (
         await conn.execute(
-            "SELECT investigation_id, generation, job_id, attempt, holder_worker_id "
-            "FROM investigation_build_uses WHERE use_id = %s FOR UPDATE",
+            "SELECT u.investigation_id, u.generation, u.job_id, u.attempt, "
+            "u.holder_worker_id, i.project FROM investigation_build_uses u "
+            "JOIN investigation_builds b ON b.investigation_id = u.investigation_id "
+            "AND b.generation = u.generation "
+            "JOIN investigations i ON i.id = b.investigation_id "
+            "WHERE u.use_id = %s FOR UPDATE OF u, b, i",
             (use_id,),
         )
     ).fetchone()
@@ -143,13 +147,14 @@ async def recover_build_use_in_transaction(
         )
         await conn.execute(
             "INSERT INTO investigation_build_use_recoveries "
-            "(use_id, investigation_id, generation, job_id, attempt, holder_worker_id, "
+            "(use_id, project, investigation_id, generation, job_id, attempt, holder_worker_id, "
             "recovered_by, evidence, reason, authority_kind, authority_binding, "
             "termination_outcome, terminated_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 use_id,
-                *row,
+                row[5],
+                *row[:5],
                 recovered_by,
                 durable_evidence,
                 reason,
@@ -159,5 +164,10 @@ async def recover_build_use_in_transaction(
                 termination[3],
             ),
         )
-        await conn.execute("DELETE FROM investigation_build_uses WHERE use_id = %s", (use_id,))
+        await conn.execute(
+            "DELETE FROM investigation_build_uses WHERE use_id = %s "
+            "AND investigation_id = %s AND generation = %s AND job_id = %s "
+            "AND attempt = %s AND holder_worker_id = %s",
+            (use_id, *row[:5]),
+        )
     return True

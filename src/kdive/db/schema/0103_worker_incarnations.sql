@@ -3,18 +3,25 @@ CREATE TABLE worker_incarnations (
     incarnation text PRIMARY KEY,
     authority_kind text NOT NULL,
     authority_binding jsonb NOT NULL,
-    fence_protocol integer NOT NULL CHECK (fence_protocol > 0),
-    credential_hash bytea NOT NULL UNIQUE CHECK (octet_length(credential_hash) = 32),
+    -- Task 1 installs the authority schema before Task 2 routes legacy owner calls through the
+    -- guarded witness API. Defaults keep that staged baseline executable, but deliberately create
+    -- no deliverable credential: only explicit witness registration can authenticate later.
+    fence_protocol integer NOT NULL DEFAULT 1 CHECK (fence_protocol > 0),
+    credential_hash bytea NOT NULL UNIQUE DEFAULT sha256(
+        convert_to(gen_random_uuid()::text || gen_random_uuid()::text, 'UTF8')
+    ) CHECK (octet_length(credential_hash) = 32),
     state text NOT NULL DEFAULT 'active',
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     terminated_at timestamptz,
     outcome text,
     CONSTRAINT worker_incarnations_incarnation_bounded
-        CHECK (length(incarnation) BETWEEN 1 AND 512),
+        CHECK (octet_length(incarnation) BETWEEN 1 AND 512),
     CONSTRAINT worker_incarnations_authority_kind_bounded
         CHECK (authority_kind IN ('local', 'docker', 'kubernetes')),
     CONSTRAINT worker_incarnations_binding_object
         CHECK (jsonb_typeof(authority_binding) = 'object'),
+    CONSTRAINT worker_incarnations_binding_bounded
+        CHECK (octet_length(authority_binding::text) <= 4096),
     CONSTRAINT worker_incarnations_state_bounded
         CHECK (state IN ('active', 'terminated')),
     CONSTRAINT worker_incarnations_outcome_bounded
@@ -33,6 +40,8 @@ ALTER TABLE investigation_build_use_recoveries
         CHECK (authority_kind IN ('local', 'docker', 'kubernetes')),
     ADD CONSTRAINT investigation_build_use_recoveries_binding_object
         CHECK (jsonb_typeof(authority_binding) = 'object'),
+    ADD CONSTRAINT investigation_build_use_recoveries_binding_bounded
+        CHECK (octet_length(authority_binding::text) <= 4096),
     ADD CONSTRAINT investigation_build_use_recoveries_outcome_bounded
         CHECK (termination_outcome IN ('succeeded', 'failed', 'killed')),
     ADD CONSTRAINT investigation_build_use_recoveries_incarnation_fkey

@@ -366,6 +366,38 @@ def test_worker_incarnation_tombstones_are_permanent_and_bounded(
         "'investigation_build_use_recoveries'::regclass AND contype = 'f' "
         "AND confrelid = 'worker_incarnations'::regclass"
     ).fetchone() == ("a",)
+    constraints = {
+        row[0]: row[1]
+        for row in pg_conn.execute(
+            "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid IN "
+            "('worker_incarnations'::regclass, "
+            "'investigation_build_use_recoveries'::regclass) AND contype = 'c'"
+        ).fetchall()
+    }
+    assert "octet_length(incarnation)" in constraints["worker_incarnations_incarnation_bounded"]
+    assert (
+        "octet_length((authority_binding)::text)"
+        in constraints["worker_incarnations_binding_bounded"]
+    )
+    recovery_columns = _columns(pg_conn, "investigation_build_use_recoveries")
+    assert recovery_columns["project"] == "text"
+
+
+def test_staged_legacy_incarnations_get_unusable_unique_credentials(
+    pg_conn: psycopg.Connection,
+) -> None:
+    """Pre-Task-2 owner inserts stay executable without minting a deliverable credential."""
+    migrate.apply_migrations(pg_conn)
+    pg_conn.execute(
+        "INSERT INTO worker_incarnations (incarnation, authority_kind, authority_binding) VALUES "
+        "('legacy:a', 'local', '{}'::jsonb), ('legacy:b', 'local', '{}'::jsonb)"
+    )
+    rows = pg_conn.execute(
+        "SELECT fence_protocol, octet_length(credential_hash), credential_hash "
+        "FROM worker_incarnations WHERE incarnation LIKE 'legacy:%' ORDER BY incarnation"
+    ).fetchall()
+    assert [row[:2] for row in rows] == [(1, 32), (1, 32)]
+    assert rows[0][2] != rows[1][2]
 
 
 def test_dedup_key_not_null(pg_conn: psycopg.Connection) -> None:

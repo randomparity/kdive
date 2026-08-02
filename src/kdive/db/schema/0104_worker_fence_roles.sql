@@ -1,18 +1,66 @@
 -- Runtime roles are separate non-login capabilities (ADR-0533, #1803).
+-- A cluster-global name collision is safe only when it is already the exact capability shape.
 DO $$
+DECLARE
+    v_role text;
+    v_attributes_match boolean;
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'kdive_server') THEN
-        CREATE ROLE kdive_server NOLOGIN;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'kdive_worker') THEN
-        CREATE ROLE kdive_worker NOLOGIN;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'kdive_reconciler') THEN
-        CREATE ROLE kdive_reconciler NOLOGIN;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'kdive_lifecycle_witness') THEN
-        CREATE ROLE kdive_lifecycle_witness NOLOGIN;
-    END IF;
+    FOREACH v_role IN ARRAY ARRAY[
+        'kdive_server',
+        'kdive_worker',
+        'kdive_reconciler',
+        'kdive_lifecycle_witness'
+    ] LOOP
+        SELECT
+            NOT r.rolcanlogin
+            AND NOT r.rolinherit
+            AND NOT r.rolsuper
+            AND NOT r.rolcreaterole
+            AND NOT r.rolcreatedb
+            AND NOT r.rolreplication
+            AND NOT r.rolbypassrls
+            AND NOT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_auth_members AS membership
+                WHERE membership.member = r.oid
+            )
+        INTO v_attributes_match
+        FROM pg_catalog.pg_roles AS r
+        WHERE r.rolname = v_role;
+
+        IF NOT FOUND THEN
+            BEGIN
+                EXECUTE format(
+                    'CREATE ROLE %I NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB '
+                    'NOCREATEROLE NOREPLICATION NOBYPASSRLS',
+                    v_role
+                );
+            EXCEPTION
+                WHEN unique_violation OR duplicate_object THEN
+                    -- Another database can migrate against the same cluster concurrently.
+                    NULL;
+            END;
+
+            SELECT
+                NOT r.rolcanlogin
+                AND NOT r.rolinherit
+                AND NOT r.rolsuper
+                AND NOT r.rolcreaterole
+                AND NOT r.rolcreatedb
+                AND NOT r.rolreplication
+                AND NOT r.rolbypassrls
+                AND NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_auth_members AS membership
+                    WHERE membership.member = r.oid
+                )
+            INTO v_attributes_match
+            FROM pg_catalog.pg_roles AS r
+            WHERE r.rolname = v_role;
+        END IF;
+
+        IF NOT FOUND OR NOT COALESCE(v_attributes_match, false) THEN
+            RAISE EXCEPTION 'runtime role % has incompatible attributes or memberships', v_role;
+        END IF;
+    END LOOP;
 END
 $$;
 

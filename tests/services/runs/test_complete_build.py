@@ -1163,19 +1163,28 @@ def test_completion_stamps_generation_from_postgres_wall_clock(
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool)
+            async with pool.connection() as conn:
+                before_row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+            assert before_row is not None
             result = await _complete(
                 pool,
                 run_id,
                 CompleteBuildFinalizer(validate_complete_build=_DelayedValidator(_output(run_id))),
             )
             async with pool.connection() as conn:
-                row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+                row = await (
+                    await conn.execute(
+                        "SELECT expires_at FROM investigation_builds WHERE build_ref = %s",
+                        (result.build_ref,),
+                    )
+                ).fetchone()
             assert row is not None
 
         expires_at = datetime.fromisoformat(str(result.expires_at))
-        observed = row[0]
+        stored_expires_at = row[0]
         retention = timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS))
-        assert expires_at - observed >= retention - timedelta(milliseconds=250)
+        assert expires_at - before_row[0] >= retention + timedelta(milliseconds=450)
+        assert expires_at == stored_expires_at
 
     asyncio.run(_run())
 

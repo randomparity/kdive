@@ -3,6 +3,7 @@
 -- worker process is dead. Keep that evidence after the use row and generation are gone.
 CREATE TABLE investigation_build_use_recoveries (
     use_id uuid PRIMARY KEY,
+    project text NOT NULL,
     investigation_id uuid NOT NULL,
     generation uuid NOT NULL,
     job_id uuid NOT NULL,

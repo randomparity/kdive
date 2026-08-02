@@ -135,7 +135,9 @@ _UNPINNED_GENERATION_SQL = (
     "AND NOT EXISTS (SELECT 1 FROM jobs j JOIN runs r "
     "ON r.id::text = j.payload->>'run_id' "
     "WHERE r.investigation_id = ib.investigation_id AND r.build_ref = ib.build_ref "
-    "AND j.kind = 'install' AND j.state IN ('queued', 'running'))))"
+    "AND j.kind = 'install' AND j.state IN ('queued', 'running')) "
+    "AND NOT EXISTS (SELECT 1 FROM investigation_build_uses u "
+    "WHERE u.investigation_id = ib.investigation_id AND u.generation = ib.generation)))"
 )
 
 
@@ -179,12 +181,16 @@ async def _mark_generation_reclaiming(
                     "UNION ALL SELECT 1 FROM jobs j JOIN runs r "
                     "ON r.id::text = j.payload->>'run_id' "
                     "WHERE r.investigation_id = %s AND r.build_ref = %s "
-                    "AND j.kind = 'install' AND j.state IN ('queued', 'running'))",
+                    "AND j.kind = 'install' AND j.state IN ('queued', 'running') "
+                    "UNION ALL SELECT 1 FROM investigation_build_uses u "
+                    "WHERE u.investigation_id = %s AND u.generation = %s)",
                     (
                         investigation_id,
                         build_ref,
                         investigation_id,
                         build_ref,
+                        investigation_id,
+                        generation,
                     ),
                 )
             ).fetchone()
