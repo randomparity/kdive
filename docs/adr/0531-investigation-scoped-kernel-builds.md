@@ -42,6 +42,9 @@ failed delete to the existing prefix-orphan sweep. It never registers or deletes
 generation's objects. Reclaim marks one generation `reclaiming` before object deletion and deletes
 the record only if that generation remains reclaiming; a new generation has distinct rows and
 objects. The lock spans selection, publication, and the reclaim state transition.
+Before deleting the catalog row, reclaim stores its Investigation, exact `build_ref`, and expiry in
+a durable tombstone. Only the same Investigation consults that tombstone, preserving expired-handle
+recovery after GC while unknown and cross-Investigation handles remain not found.
 
 Validation is version-bound: the first HEAD captures each single-upload VersionId and every ranged
 semantic read names it. Chunk verification similarly captures each chunk VersionId, server-side

@@ -28,6 +28,7 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, Investigation, System
+from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
 from kdive.security.audit import args_digest
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
@@ -409,6 +410,58 @@ def test_create_rejects_unusable_reusable_build(migrated_url: str, mode: str) ->
             assert (
                 await _fetchall(pool, "SELECT id FROM runs WHERE system_id = %s", (sys_id,)) == []
             )
+        finally:
+            await pool.close()
+
+    asyncio.run(_run())
+
+
+def test_create_reports_expired_after_generation_was_reclaimed(migrated_url: str) -> None:  # noqa: F811
+    class _Store:
+        def delete_version(self, key: str, version_id: str) -> None:
+            del key, version_id
+
+        def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+            del key, limit
+            return True
+
+    async def _run() -> None:
+        pool = await _pool_open(migrated_url)
+        try:
+            investigation_id = await _seed_investigation(pool)
+            system_id = await _seed_system(pool)
+            build_ref = await _seed_reusable_build(pool, investigation_id, expired=True)
+            async with pool.connection() as conn:
+                await gc_expired_build_artifacts(conn, _Store(), timedelta(days=30))
+
+            with pytest.raises(RunCreateError) as caught:
+                await _create(
+                    pool,
+                    _ctx(),
+                    RunCreateRequest(
+                        investigation_id=investigation_id,
+                        system_id=system_id,
+                        build_profile={"schema_version": 1},
+                        build_ref=build_ref,
+                    ),
+                )
+            assert caught.value.details["reason"] == "build_ref_expired"
+            assert caught.value.details["expires_at"]
+            assert caught.value.details["server_time"]
+
+            other_investigation = await _seed_investigation(pool)
+            with pytest.raises(RunCreateError) as cross_tenant:
+                await _create(
+                    pool,
+                    _ctx(),
+                    RunCreateRequest(
+                        investigation_id=other_investigation,
+                        system_id=system_id,
+                        build_profile={"schema_version": 1},
+                        build_ref=build_ref,
+                    ),
+                )
+            assert cross_tenant.value.details == {"reason": "build_ref_not_found"}
         finally:
             await pool.close()
 

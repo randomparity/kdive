@@ -197,6 +197,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0094",
         "0095",
         "0096",
+        "0097",
     ]
     assert second == []
 
@@ -281,6 +282,24 @@ def test_investigation_build_gc_cursor_schema(pg_conn: psycopg.Connection) -> No
         "SELECT lane FROM investigation_build_gc_cursor ORDER BY lane"
     ).fetchall()
     assert lanes == [("closed",), ("expired",)]
+
+
+def test_investigation_build_tombstone_schema(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+
+    assert _columns(pg_conn, "investigation_build_tombstones") == {
+        "investigation_id": "uuid",
+        "build_ref": "text",
+        "expires_at": "timestamp with time zone",
+        "reclaimed_at": "timestamp with time zone",
+    }
+    primary_key = pg_conn.execute(
+        "SELECT array_agg(a.attname ORDER BY key.ordinality) FROM pg_constraint c "
+        "CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS key(attnum, ordinality) "
+        "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = key.attnum "
+        "WHERE c.conrelid = 'investigation_build_tombstones'::regclass AND c.contype = 'p'"
+    ).fetchone()
+    assert primary_key == (["investigation_id", "build_ref"],)
 
 
 def test_dedup_key_not_null(pg_conn: psycopg.Connection) -> None:
@@ -789,6 +808,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0094",
         "0095",
         "0096",
+        "0097",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1162,6 +1182,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0094",
         "0095",
         "0096",
+        "0097",
     ]
 
 

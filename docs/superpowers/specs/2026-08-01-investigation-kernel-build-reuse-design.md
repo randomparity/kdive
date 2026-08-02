@@ -154,6 +154,9 @@ second from any tenant.
 After deletion it removes only that generation's artifact rows and record, rechecking the state
 under the lock. A fresh publication of identical content uses a new generation and cannot be
 deleted or selected through the old record.
+The final catalog-row delete writes a durable `(investigation_id, build_ref, expires_at)`
+tombstone. Selection consults it only after an exact same-Investigation catalog miss, preserving
+expired recovery after GC without turning unknown or cross-Investigation handles into an oracle.
 
 `runs.install` acquires the Investigation lock before the existing Run lock. In that transaction it
 checks the generation deadline and enqueues or recycles the install job. A first install or restage

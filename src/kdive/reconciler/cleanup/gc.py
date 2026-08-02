@@ -234,6 +234,14 @@ async def _reclaim_generation(
         conn.transaction(),
         advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
     ):
+        await conn.execute(
+            "INSERT INTO investigation_build_tombstones "
+            "(investigation_id, build_ref, expires_at) "
+            "SELECT investigation_id, build_ref, expires_at FROM investigation_builds "
+            "WHERE investigation_id = %s AND generation = %s AND state = 'reclaiming' "
+            "ON CONFLICT (investigation_id, build_ref) DO NOTHING",
+            (investigation_id, generation),
+        )
         result = await conn.execute(
             "DELETE FROM investigation_builds WHERE investigation_id = %s "
             "AND generation = %s AND state = 'reclaiming' RETURNING generation",
