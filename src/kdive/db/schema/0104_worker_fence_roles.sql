@@ -70,3 +70,8 @@ $$;
 REVOKE ALL ON TABLE public.worker_incarnations FROM PUBLIC;
 REVOKE ALL ON TABLE public.investigation_build_uses FROM PUBLIC;
 REVOKE ALL ON TABLE public.investigation_build_use_recoveries FROM PUBLIC;
+REVOKE ALL ON TABLE
+    public.worker_incarnations,
+    public.investigation_build_uses,
+    public.investigation_build_use_recoveries
+FROM kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness;

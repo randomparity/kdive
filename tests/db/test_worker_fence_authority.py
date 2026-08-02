@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from threading import Event
 from time import monotonic, sleep
+from typing import LiteralString
 from uuid import UUID, uuid4
 
 import psycopg
@@ -65,6 +66,69 @@ def role_dsn(pg_conn: psycopg.Connection) -> Iterator[RoleDsns]:
 
     for login in logins.values():
         pg_conn.execute(SQL("DROP ROLE IF EXISTS {}").format(Identifier(login)))
+
+
+@pytest.fixture
+def residual_privilege_role_dsn(pg_conn: psycopg.Connection) -> Iterator[RoleDsns]:
+    """Apply the authority migrations over compatible roles carrying residual grants."""
+    suffix = pg_conn.info.dbname[-10:].replace("-", "_")
+    roles = {
+        "kdive_server": f"kdive_acl_server_{suffix}",
+        "kdive_worker": f"kdive_acl_worker_{suffix}",
+        "kdive_reconciler": f"kdive_acl_reconciler_{suffix}",
+        "kdive_lifecycle_witness": f"kdive_acl_witness_{suffix}",
+    }
+    logins = {role: f"{isolated}_login" for role, isolated in roles.items()}
+    role_list = SQL(", ").join(Identifier(role) for role in roles.values())
+    for role in roles.values():
+        pg_conn.execute(
+            SQL(
+                "CREATE ROLE {} NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB "
+                "NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+            ).format(Identifier(role))
+        )
+    for canonical, login in logins.items():
+        pg_conn.execute(
+            SQL("CREATE ROLE {} LOGIN PASSWORD {} IN ROLE {}").format(
+                Identifier(login),
+                Literal(_LOGIN_AUTHENTICATION),
+                Identifier(roles[canonical]),
+            )
+        )
+
+    try:
+        pg_conn.execute(SQL("ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO {}").format(role_list))
+        pg_conn.execute(
+            SQL("ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO {}").format(role_list)
+        )
+        for migration in migrate.discover_migrations():
+            pg_conn.execute(migration.sql.encode())
+            if migration.version == "0103":
+                break
+        pg_conn.execute(
+            SQL(
+                "GRANT ALL ON TABLE worker_incarnations, investigation_build_uses, "
+                "investigation_build_use_recoveries TO {}"
+            ).format(role_list)
+        )
+        for filename in ("0104_worker_fence_roles.sql", "0105_worker_fence_functions.sql"):
+            role_sql = (migrate.SCHEMA_DIR / filename).read_bytes()
+            for canonical, isolated in roles.items():
+                role_sql = role_sql.replace(canonical.encode(), isolated.encode())
+            pg_conn.execute(role_sql)
+        yield RoleDsns(dict(pg_conn.info.get_parameters()), logins)
+    finally:
+        pg_conn.execute(
+            SQL("ALTER DEFAULT PRIVILEGES REVOKE ALL ON TABLES FROM {}").format(role_list)
+        )
+        pg_conn.execute(
+            SQL("ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM {}").format(role_list)
+        )
+        for login in logins.values():
+            pg_conn.execute(SQL("DROP ROLE IF EXISTS {}").format(Identifier(login)))
+        for role in roles.values():
+            pg_conn.execute(SQL("DROP OWNED BY {}").format(Identifier(role)))
+            pg_conn.execute(SQL("DROP ROLE {}").format(Identifier(role)))
 
 
 def _login_operation_succeeds(conn: psycopg.Connection, operation: str) -> bool:
@@ -232,6 +296,82 @@ def test_worker_fence_roles_and_login_memberships_are_exact(
         for role, login in role_dsn.logins.items()
     }
     assert dict(login_memberships) == expected
+
+
+def test_migration_upgrade_scrubs_residual_table_mutation_grants(
+    residual_privilege_role_dsn: RoleDsns,
+) -> None:
+    """Compatible runtime roles lose explicit and default protected-table mutation grants."""
+    tables = [
+        "worker_incarnations",
+        "investigation_build_uses",
+        "investigation_build_use_recoveries",
+    ]
+    for role in residual_privilege_role_dsn.logins:
+        with psycopg.connect(residual_privilege_role_dsn(role), autocommit=True) as runtime:
+            for table in tables:
+                for privilege in ("INSERT", "UPDATE", "DELETE"):
+                    effective = runtime.execute(
+                        "SELECT has_table_privilege(current_user, %s, %s)",
+                        (table, privilege),
+                    ).fetchone()
+                    assert effective == (False,)
+
+    denied_mutations: dict[str, LiteralString] = {
+        "kdive_server": "DELETE FROM worker_incarnations",
+        "kdive_worker": "DELETE FROM investigation_build_uses",
+        "kdive_reconciler": "DELETE FROM investigation_build_use_recoveries",
+        "kdive_lifecycle_witness": "UPDATE worker_incarnations SET state = 'terminated'",
+    }
+    for role, operation in denied_mutations.items():
+        with (
+            psycopg.connect(residual_privilege_role_dsn(role), autocommit=True) as runtime,
+            pytest.raises(psycopg.errors.InsufficientPrivilege),
+        ):
+            runtime.execute(SQL(operation))
+
+
+def test_migration_upgrade_resets_guarded_function_matrix(
+    pg_conn: psycopg.Connection, residual_privilege_role_dsn: RoleDsns
+) -> None:
+    """Default EXECUTE residue is removed before the intended guarded grants are restored."""
+    allowed = {
+        "register_worker_incarnation(text,text,jsonb,bytea,integer)": {"kdive_lifecycle_witness"},
+        "authenticate_worker_incarnation(bytea)": {"kdive_worker"},
+        "terminate_worker_incarnation(text,text)": {"kdive_lifecycle_witness"},
+        "acquire_investigation_build_use(uuid,uuid,uuid,uuid,integer,bytea)": {"kdive_worker"},
+        "release_investigation_build_use(uuid,bytea)": {"kdive_worker"},
+        "recover_investigation_build_use(uuid,text,text,text)": {"kdive_reconciler"},
+    }
+    for signature, allowed_roles in allowed.items():
+        for canonical, login in residual_privilege_role_dsn.logins.items():
+            privilege = pg_conn.execute(
+                "SELECT has_function_privilege(%s, %s, 'EXECUTE')",
+                (login, signature),
+            ).fetchone()
+            assert privilege == (canonical in allowed_roles,)
+
+    credential = b"u" * 32
+    with psycopg.connect(
+        residual_privilege_role_dsn("kdive_lifecycle_witness"), autocommit=True
+    ) as witness:
+        witness.execute(
+            "SELECT public.register_worker_incarnation(%s, 'docker', '{}'::jsonb, %s, 1)",
+            ("docker:upgrade-authority", credential),
+        )
+    with psycopg.connect(residual_privilege_role_dsn("kdive_worker"), autocommit=True) as worker:
+        authenticated = worker.execute(
+            "SELECT incarnation FROM public.authenticate_worker_incarnation(%s)", (credential,)
+        ).fetchone()
+    assert authenticated == ("docker:upgrade-authority",)
+    with psycopg.connect(
+        residual_privilege_role_dsn("kdive_reconciler"), autocommit=True
+    ) as reconciler:
+        recovered = reconciler.execute(
+            "SELECT public.recover_investigation_build_use(%s, 'project', 'actor', 'reason')",
+            (uuid4(),),
+        ).fetchone()
+    assert recovered == (False,)
 
 
 @pytest.mark.parametrize(

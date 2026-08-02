@@ -370,6 +370,14 @@ REVOKE ALL ON FUNCTION terminate_worker_incarnation(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION acquire_investigation_build_use(uuid, uuid, uuid, uuid, integer, bytea) FROM PUBLIC;
 REVOKE ALL ON FUNCTION release_investigation_build_use(uuid, bytea) FROM PUBLIC;
 REVOKE ALL ON FUNCTION recover_investigation_build_use(uuid, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION
+    register_worker_incarnation(text, text, jsonb, bytea, integer),
+    authenticate_worker_incarnation(bytea),
+    terminate_worker_incarnation(text, text),
+    acquire_investigation_build_use(uuid, uuid, uuid, uuid, integer, bytea),
+    release_investigation_build_use(uuid, bytea),
+    recover_investigation_build_use(uuid, text, text, text)
+FROM kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness;
 
 GRANT EXECUTE ON FUNCTION register_worker_incarnation(text, text, jsonb, bytea, integer)
     TO kdive_lifecycle_witness;
