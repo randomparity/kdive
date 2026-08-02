@@ -324,6 +324,17 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
     assert env_by_name["KDIVE_POD_UID"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.uid"
 
 
+def test_zero_worker_helm_render_grants_no_pod_read() -> None:
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "worker.replicas=0")
+    assert res.returncode == 0, res.stderr
+    role = next(
+        doc
+        for doc in yaml.safe_load_all(res.stdout)
+        if isinstance(doc, dict) and doc.get("kind") == "Role"
+    )
+    assert role["rules"] == []
+
+
 def test_bundled_without_ack_fails_to_render() -> None:
     res = _template("bundledBackends=true")
     assert res.returncode != 0

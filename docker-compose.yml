@@ -239,9 +239,9 @@ services:
     environment:
       <<: *backends
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9465
-      # Docker's default hostname is the immutable full container ID. The worker persists
-      # that identity with each build-use pin; the server verifies it through the restricted
-      # inspect-only proxy below.
+      # Docker's default hostname is the immutable 12-character container-ID prefix. The worker
+      # persists it with each build-use pin; inspect resolves that prefix and the server confirms
+      # the returned full ID starts with the exact persisted value.
       KDIVE_WORKER_INCARNATION_KIND: docker
     healthcheck:
       <<: *readyz_cadence
