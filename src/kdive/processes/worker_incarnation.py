@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import json
+import os
+import re
 import socket
+import ssl
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Protocol
 
 _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _PROC_ROOT = Path("/proc")
+_CONTAINER_ID = re.compile(r"[0-9a-f]{12}(?:[0-9a-f]{52})?")
+_KUBE_NAME = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?")
+
+
+class WorkerDeathVerifier(Protocol):
+    """Deployment authority capable of proving an immutable worker incarnation dead."""
+
+    def verify_dead(self, worker_incarnation: str) -> str | None: ...
 
 
 def _start_ticks(stat: str) -> str:
@@ -25,7 +42,24 @@ def worker_incarnation_id(
     boot_id_path: Path = _BOOT_ID,
     stat_path: Path | None = None,
 ) -> str:
-    """Return ``host:pid:boot-id:start-ticks`` for this exact Linux process."""
+    """Return the configured deployment's immutable worker-incarnation identity."""
+    kind = os.environ.get("KDIVE_WORKER_INCARNATION_KIND", "local")
+    if kind == "docker":
+        container_id = socket.gethostname()
+        if not _CONTAINER_ID.fullmatch(container_id):
+            raise RuntimeError(
+                "docker worker hostname must be its 12- or 64-character container ID"
+            )
+        return f"docker:{container_id}"
+    if kind == "kubernetes":
+        namespace = os.environ.get("KDIVE_POD_NAMESPACE", "")
+        name = os.environ.get("KDIVE_POD_NAME", "")
+        uid = os.environ.get("KDIVE_POD_UID", "")
+        if not namespace or not name or not uid or ":" in uid:
+            raise RuntimeError("kubernetes worker identity requires pod namespace, name, and UID")
+        return f"kubernetes:{namespace}:{name}:{uid}"
+    if kind != "local":
+        raise RuntimeError(f"unsupported worker incarnation kind: {kind}")
     boot_id = boot_id_path.read_text(encoding="utf-8").strip()
     stat = (stat_path or (_PROC_ROOT / str(pid) / "stat")).read_text(encoding="utf-8")
     return f"{socket.gethostname()}:{pid}:{boot_id}:{_start_ticks(stat)}"
@@ -61,3 +95,122 @@ class LocalWorkerDeathVerifier:
         if current_start != expected_start:
             return "local-proc: exact worker incarnation absent (pid start changed)"
         return None
+
+
+type InspectContainer = Callable[[str], Mapping[str, Any] | None]
+
+
+def _docker_inspect(endpoint: str, container_id: str) -> Mapping[str, Any] | None:
+    quoted = urllib.parse.quote(container_id, safe="")
+    try:
+        with urllib.request.urlopen(
+            f"{endpoint.rstrip('/')}/containers/{quoted}/json", timeout=3
+        ) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+
+
+@dataclass(frozen=True, slots=True)
+class DockerWorkerDeathVerifier:
+    """Prove container termination through a read-only Docker API authority."""
+
+    endpoint: str = "http://worker-death-api:2375"
+    inspect: InspectContainer | None = None
+
+    def verify_dead(self, worker_incarnation: str) -> str | None:
+        prefix = "docker:"
+        container_id = worker_incarnation.removeprefix(prefix)
+        if not worker_incarnation.startswith(prefix) or not _CONTAINER_ID.fullmatch(container_id):
+            return None
+        try:
+            state = (self.inspect or (lambda value: _docker_inspect(self.endpoint, value)))(
+                container_id
+            )
+        except OSError, ValueError:
+            return None
+        if state is None:
+            return "docker: exact container incarnation absent"
+        inspected_id = state.get("Id")
+        if not isinstance(inspected_id, str) or not inspected_id.startswith(container_id):
+            return None
+        container_state = state.get("State")
+        if isinstance(container_state, Mapping) and container_state.get("Running") is False:
+            return "docker: exact container incarnation stopped"
+        return None
+
+
+type ReadPod = Callable[[str, str], Mapping[str, Any] | None]
+
+
+def _read_kubernetes_pod(namespace: str, name: str) -> Mapping[str, Any] | None:
+    token_path = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
+    ca_path = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+    token = token_path.read_text(encoding="utf-8").strip()
+    quoted_namespace = urllib.parse.quote(namespace, safe="")
+    quoted_name = urllib.parse.quote(name, safe="")
+    request = urllib.request.Request(
+        f"https://kubernetes.default.svc/api/v1/namespaces/{quoted_namespace}/pods/{quoted_name}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(
+            request, timeout=3, context=ssl.create_default_context(cafile=str(ca_path))
+        ) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+
+
+@dataclass(frozen=True, slots=True)
+class KubernetesWorkerDeathVerifier:
+    """Prove pod-incarnation termination through namespaced Kubernetes pod reads."""
+
+    read_pod: ReadPod = _read_kubernetes_pod
+
+    def verify_dead(self, worker_incarnation: str) -> str | None:
+        try:
+            kind, namespace, name, uid = worker_incarnation.split(":", 3)
+        except ValueError:
+            return None
+        if (
+            kind != "kubernetes"
+            or not _KUBE_NAME.fullmatch(namespace)
+            or not _KUBE_NAME.fullmatch(name)
+            or not uid
+        ):
+            return None
+        try:
+            pod = self.read_pod(namespace, name)
+        except OSError, ValueError:
+            return None
+        if pod is None:
+            return "kubernetes: exact pod incarnation absent"
+        metadata = pod.get("metadata")
+        if not isinstance(metadata, Mapping) or metadata.get("uid") != uid:
+            return "kubernetes: exact pod incarnation absent"
+        status = pod.get("status")
+        if isinstance(status, Mapping) and status.get("phase") in {"Succeeded", "Failed"}:
+            return "kubernetes: exact pod incarnation terminated"
+        return None
+
+
+def worker_death_verifier_from_env() -> WorkerDeathVerifier | None:
+    """Build the explicitly configured authority, or disable recovery when absent."""
+    kind = os.environ.get("KDIVE_WORKER_DEATH_VERIFIER", "disabled")
+    if kind == "disabled":
+        return None
+    if kind == "local":
+        return LocalWorkerDeathVerifier()
+    if kind == "docker":
+        endpoint = os.environ.get("KDIVE_DOCKER_DEATH_API", "http://worker-death-api:2375")
+        if not endpoint.startswith("http://"):
+            raise RuntimeError("KDIVE_DOCKER_DEATH_API must use http:// on a private network")
+        return DockerWorkerDeathVerifier(endpoint=endpoint)
+    if kind == "kubernetes":
+        return KubernetesWorkerDeathVerifier()
+    raise RuntimeError(f"unsupported KDIVE_WORKER_DEATH_VERIFIER: {kind}")

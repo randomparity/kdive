@@ -293,6 +293,37 @@ def test_renders_three_app_workloads_against_external_backends() -> None:
     assert "pre-install" in res.stdout
 
 
+def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac() -> None:
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "worker.replicas=2")
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+    role = next(doc for doc in docs if doc.get("kind") == "Role")
+    server = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-server")
+    )
+    worker = next(doc for doc in docs if doc.get("kind") == "StatefulSet")
+
+    rule = role["rules"]
+    assert rule == [
+        {
+            "apiGroups": [""],
+            "resources": ["pods"],
+            "verbs": ["get"],
+            "resourceNames": ["kdive-kdive-worker-0", "kdive-kdive-worker-1"],
+        }
+    ]
+    assert server["spec"]["template"]["spec"]["serviceAccountName"].endswith("-server")
+    server_env = server["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert {item["name"]: item.get("value") for item in server_env}[
+        "KDIVE_WORKER_DEATH_VERIFIER"
+    ] == "kubernetes"
+    worker_env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
+    env_by_name = {item["name"]: item for item in worker_env}
+    assert env_by_name["KDIVE_POD_UID"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.uid"
+
+
 def test_bundled_without_ack_fails_to_render() -> None:
     res = _template("bundledBackends=true")
     assert res.returncode != 0

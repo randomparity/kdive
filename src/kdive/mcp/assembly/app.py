@@ -24,6 +24,10 @@ from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.schema.tool_index import build_instructions
 from kdive.mcp.verbosity import compact_responses_enabled
+from kdive.processes.worker_incarnation import (
+    WorkerDeathVerifier,
+    worker_death_verifier_from_env,
+)
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
@@ -40,6 +44,7 @@ def build_app(
     secret_registry: SecretRegistry,
     tracer: Tracer | None = None,
     meter: Meter | None = None,
+    worker_death_verifier: WorkerDeathVerifier | None = None,
 ) -> FastMCP:
     """Construct the FastMCP app and register every plane's tools.
 
@@ -93,6 +98,11 @@ def build_app(
             object_store_assembly
             if object_store_assembly is not None
             else build_object_store_assembly()
+        ),
+        worker_death_verifier=(
+            worker_death_verifier
+            if worker_death_verifier is not None
+            else worker_death_verifier_from_env()
         ),
     )
     for register in build_plane_registrars(assembly):

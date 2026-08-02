@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Protocol
 from uuid import UUID
 
@@ -114,7 +115,9 @@ async def recover_build_use(
     clean_reason = reason.strip()
     if not clean_reason or len(clean_reason) > _MAX_REASON_CHARS or len(holder) > _MAX_HOLDER_CHARS:
         return _failure(use_id, "holder and reason must be non-empty and at most 512 characters")
-    evidence = verifier.verify_dead(holder)
+    # Deployment verifiers may perform a bounded Docker/Kubernetes authority read. Keep that
+    # network I/O off FastMCP's event loop; the transaction starts only after death is proven.
+    evidence = await asyncio.to_thread(verifier.verify_dead, holder)
     if evidence is None:
         return _failure(use_id, "the authoritative verifier did not prove this worker dead")
     if len(evidence) > 1024:

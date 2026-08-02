@@ -118,6 +118,17 @@ def test_resource_host_and_mutation_tools_are_registered() -> None:
     asyncio.run(_run())
 
 
+def test_build_use_recovery_is_not_advertised_without_death_authority(monkeypatch) -> None:
+    monkeypatch.delenv("KDIVE_WORKER_DEATH_VERIFIER", raising=False)
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+    names = {tool.name for tool in asyncio.run(app.list_tools())}
+
+    assert "ops.build_uses_list" not in names
+    assert "ops.recover_build_use" not in names
+
+
 def test_build_app_registers_doc_resources() -> None:
     # ADR-0151: build_app registers the operator docs the tool surface cites as MCP
     # resources, so ListMcpResources returns them and each reads back the canonical doc.

@@ -52,7 +52,7 @@ from kdive.mcp.tools.ops.security import breakglass as ops_breakglass_tools
 from kdive.mcp.tools.ops.security import secrets as ops_secrets_tools
 from kdive.mcp.tools.reports import generate as reports_generate
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
-from kdive.processes.worker_incarnation import LocalWorkerDeathVerifier
+from kdive.processes.worker_incarnation import WorkerDeathVerifier
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import DumpVolumeReaper, InfraReaper
@@ -69,6 +69,7 @@ class AppAssembly:
     reaper: InfraReaper
     dump_volume_reaper: DumpVolumeReaper
     object_stores: ObjectStoreAssembly
+    worker_death_verifier: WorkerDeathVerifier | None
 
 
 type PlaneRegistrar = Callable[[FastMCP, AsyncConnectionPool], None]
@@ -189,9 +190,9 @@ def _diagnostics_tools_registrar() -> PlaneRegistrar:
     return _register
 
 
-def _build_use_recovery_registrar() -> PlaneRegistrar:
+def _build_use_recovery_registrar(verifier: WorkerDeathVerifier) -> PlaneRegistrar:
     def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
-        ops_build_uses_tools.register(app, pool, verifier=LocalWorkerDeathVerifier())
+        ops_build_uses_tools.register(app, pool, verifier=verifier)
 
     return _register
 
@@ -241,6 +242,11 @@ def _register_lifecycle_prompts(app: FastMCP, _pool: AsyncConnectionPool) -> Non
 
 def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
     """Build plane registrars from the narrow dependencies each group actually uses."""
+    recovery = (
+        (_build_use_recovery_registrar(assembly.worker_death_verifier),)
+        if assembly.worker_death_verifier is not None
+        else ()
+    )
     return (
         _gateway_tools_registrar(assembly.resolver),
         _pool_only_plane_registrar(jobs.register),
@@ -273,7 +279,7 @@ def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
         _debug_tools_registrar(assembly.resolver, assembly.secret_registry),
         _introspection_tools_registrar(assembly.resolver, assembly.secret_registry),
         _pool_only_plane_registrar(ops_queue_tools.register),
-        _build_use_recovery_registrar(),
+        *recovery,
         _pool_only_plane_registrar(ops_tuning_tools.register),
         _pool_only_plane_registrar(ops_audit_tools.register),
         _diagnostics_tools_registrar(),

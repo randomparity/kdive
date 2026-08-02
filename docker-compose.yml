@@ -185,6 +185,8 @@ services:
       # never published (no host mapping below), so the container network namespace is
       # its access boundary — the unauthenticated /readyz/metrics stay non-public.
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9464
+      KDIVE_WORKER_DEATH_VERIFIER: docker
+      KDIVE_DOCKER_DEATH_API: http://worker-death-api:2375
     healthcheck:
       <<: *readyz_cadence
       # urlopen raises HTTPError on /readyz's 503 (not-ready), so the broad except maps
@@ -215,6 +217,11 @@ services:
         condition: service_completed_successfully
       oidc:
         condition: service_started
+      worker-death-api:
+        condition: service_started
+    networks:
+      - default
+      - worker-death
 
   # The worker does real build/install I/O as a non-root user, so it needs writable,
   # correctly-owned volumes for the build workspace and install staging (ADR-0088
@@ -232,6 +239,10 @@ services:
     environment:
       <<: *backends
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9465
+      # Docker's default hostname is the immutable full container ID. The worker persists
+      # that identity with each build-use pin; the server verifies it through the restricted
+      # inspect-only proxy below.
+      KDIVE_WORKER_INCARNATION_KIND: docker
     healthcheck:
       <<: *readyz_cadence
       test:
@@ -324,6 +335,23 @@ services:
       - ./deploy/grafana/kdive-overview.json:/var/lib/grafana/dashboards/kdive-overview.json:ro
     ports:
       - "${KDIVE_GRAFANA_PORT:-3000}:3000"
+
+  # Inspect-only authority used by the server to prove a specific worker container stopped.
+  # The proxy is reachable only on an internal network and rejects all write API methods.
+  worker-death-api:
+    image: tecnativa/docker-socket-proxy:0.2.0@sha256:083bd0ed8783e366d745f332f0e4489816dd35d984bef8f16e6d89484a22c082
+    environment:
+      CONTAINERS: "1"
+      POST: "0"
+      LOG_LEVEL: warning
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - worker-death
+
+networks:
+  worker-death:
+    internal: true
 
 volumes:
   kdive-build:

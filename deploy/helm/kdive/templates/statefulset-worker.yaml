@@ -43,6 +43,20 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["worker"]
           env:
+            - name: KDIVE_WORKER_INCARNATION_KIND
+              value: kubernetes
+            - name: KDIVE_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: KDIVE_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KDIVE_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             {{- include "kdive.auxEnv" 9465 | nindent 12 }}
             {{- include "kdive.secretsEnv" . | nindent 12 }}
             {{- include "kdive.systemsEnv" . | nindent 12 }}

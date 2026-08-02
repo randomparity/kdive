@@ -56,6 +56,9 @@ _DUMMY_S3_ENDPOINT_URL = "http://minio.test:9000"
 _DUMMY_S3_BUCKET = "kdive-test"
 os.environ.setdefault("KDIVE_S3_ENDPOINT_URL", _DUMMY_S3_ENDPOINT_URL)
 os.environ.setdefault("KDIVE_S3_BUCKET", _DUMMY_S3_BUCKET)
+# App-schema tests exercise the complete supported same-host surface. Production has no default:
+# deployments must explicitly select an authoritative worker-death verifier.
+os.environ.setdefault("KDIVE_WORKER_DEATH_VERIFIER", "local")
 
 # The RESOLVED configuration: a real ``KDIVE_S3_*`` from the environment, else the dummies above.
 # ``s3_backend_env`` re-pins these, never the dummy constants — the live_vm jobs export the running

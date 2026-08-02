@@ -169,6 +169,19 @@ def _services() -> dict[str, Any]:
     return _config()["services"]
 
 
+def test_worker_death_verifier_uses_inspect_only_private_proxy() -> None:
+    model = _config()
+    services = model["services"]
+    proxy = services["worker-death-api"]
+
+    assert services["worker"]["environment"]["KDIVE_WORKER_INCARNATION_KIND"] == "docker"
+    assert services["server"]["environment"]["KDIVE_WORKER_DEATH_VERIFIER"] == "docker"
+    assert proxy["environment"]["CONTAINERS"] == "1"
+    assert proxy["environment"]["POST"] == "0"
+    assert proxy["networks"] == {"worker-death": None}
+    assert model["networks"]["worker-death"]["internal"] is True
+
+
 def _minio_init_script() -> str:
     entrypoint = _services()["minio-init"]["entrypoint"]
     assert entrypoint[:2] == ["/bin/sh", "-c"]

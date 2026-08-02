@@ -371,3 +371,7 @@ and `KDIVE_REMOTE_LIBVIRT_MACHINE`.
 For S3, prefer IRSA/workload identity, or a managed Secret you `envFrom` onto the pods.
 The fixed `demoCredentials` are non-secret by design: the demo data they guard is
 throwaway `emptyDir` state.
+The server uses a dedicated service account with `get` permission only for the configured worker
+Pod names. Worker holders include the downward-API Pod UID, so `ops.recover_build_use` can prove a
+specific Pod incarnation terminated without trusting heartbeat age. Scaling `worker.replicas`
+updates the Role's `resourceNames`; no cluster-wide Pod permission is required.
