@@ -227,8 +227,9 @@ class CompleteBuildFinalizer:
             output=validated.output,
             keys=prepared.keys,
             heads=validated.heads,
-            verified_checksums={
-                prepared.keys[entry.name]: entry.sha256 for entry in prepared.manifest_row.entries
+            verified_identities={
+                prepared.keys[entry.name]: _manifest_content_identity(entry)
+                for entry in prepared.manifest_row.entries
             },
             store=prepared.store,
             chunked=prepared.has_chunks,
@@ -269,7 +270,7 @@ class _ExternalBuildFinalization:
     output: BuildOutput
     keys: dict[str, str]
     heads: dict[str, HeadResult]
-    verified_checksums: dict[str, str]
+    verified_identities: dict[str, JsonValue]
     store: ExternalBuildStore | None
     chunked: bool
     chunk_heads: dict[str, HeadResult]
@@ -279,6 +280,19 @@ class _ExternalBuildFinalization:
     A manifest row carrying a different deadline at commit time is one a concurrent re-mint
     replaced, not the one this finalize read (ADR-0448 §2).
     """
+
+
+def _manifest_content_identity(entry: ManifestEntry) -> JsonValue:
+    """Return the validator-backed identity, excluding an advisory multipart whole hash."""
+    if entry.chunks is None:
+        return {"checksum_sha256": entry.sha256}
+    return {
+        "chunks": [
+            {"checksum_sha256": chunk.sha256, "size_bytes": chunk.size_bytes}
+            for chunk in entry.chunks
+        ],
+        "size_bytes": entry.size_bytes,
+    }
 
 
 async def _require_open_window(
@@ -468,7 +482,7 @@ async def _finalize_external_build(
             run=run,
             result=candidate,
             heads=heads,
-            verified_checksums=finalization.verified_checksums,
+            verified_identities=finalization.verified_identities,
             retention=timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS)),
         )
         result = _published_result(publication)

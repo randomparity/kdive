@@ -512,7 +512,25 @@ async def _resolve_selected_build(
     except ValueError:
         raise config_failure(object_id, data={"reason": "build_ref_not_found"}) from None
     selected = await resolve_build(conn, investigation_id, build_ref)
-    if selected is None or selected.state != "active":
+    if selected is None:
+        tombstone = await (
+            await conn.execute(
+                "SELECT expires_at, clock_timestamp() FROM investigation_build_tombstones "
+                "WHERE investigation_id = %s AND build_ref = %s",
+                (investigation_id, build_ref),
+            )
+        ).fetchone()
+        if tombstone is not None:
+            raise config_failure(
+                object_id,
+                data={
+                    "reason": "build_ref_expired",
+                    "expires_at": tombstone[0].isoformat(),
+                    "server_time": tombstone[1].isoformat(),
+                },
+            )
+        raise config_failure(object_id, data={"reason": "build_ref_not_found"})
+    if selected.state != "active":
         raise config_failure(object_id, data={"reason": "build_ref_not_found"})
     async with conn.cursor() as cur:
         await cur.execute("SELECT clock_timestamp()")

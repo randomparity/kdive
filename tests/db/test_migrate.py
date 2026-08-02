@@ -198,6 +198,8 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0095",
         "0096",
         "0097",
+        "0098",
+        "0099",
     ]
     assert second == []
 
@@ -264,6 +266,25 @@ def test_investigation_build_catalog_schema(pg_conn: psycopg.Connection) -> None
         "CREATE INDEX investigation_builds_active_digest_idx ON public.investigation_builds "
         "USING btree (investigation_id, content_digest) WHERE (state = 'active'::text)",
     )
+
+
+def test_investigation_build_tombstone_schema(pg_conn: psycopg.Connection) -> None:
+    """Reclaimed handles remain recognizable only within their owning Investigation."""
+    migrate.apply_migrations(pg_conn)
+
+    assert _columns(pg_conn, "investigation_build_tombstones") == {
+        "investigation_id": "uuid",
+        "build_ref": "text",
+        "expires_at": "timestamp with time zone",
+        "reclaimed_at": "timestamp with time zone",
+    }
+    primary_key = pg_conn.execute(
+        "SELECT array_agg(a.attname ORDER BY key.ordinality) FROM pg_constraint c "
+        "CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS key(attnum, ordinality) "
+        "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = key.attnum "
+        "WHERE c.conrelid = 'investigation_build_tombstones'::regclass AND c.contype = 'p'"
+    ).fetchone()
+    assert primary_key == (["investigation_id", "build_ref"],)
     expiry_index = pg_conn.execute(
         "SELECT indexdef FROM pg_indexes WHERE indexname = 'investigation_builds_expires_at_idx'"
     ).fetchone()
@@ -795,6 +816,8 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0095",
         "0096",
         "0097",
+        "0098",
+        "0099",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1169,6 +1192,8 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0095",
         "0096",
         "0097",
+        "0098",
+        "0099",
     ]
 
 

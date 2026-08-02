@@ -39,22 +39,17 @@ def canonical_build_document(
     result: BuildStepResult,
     heads: Mapping[str, HeadResult],
     *,
-    verified_checksums: Mapping[str, str] | None = None,
+    verified_identities: Mapping[str, JsonValue] | None = None,
 ) -> dict[str, JsonValue]:
     """Build content identity from validator-backed checksums, including multipart evidence."""
     checksums: dict[str, JsonValue] = {}
     for name, key in sorted(result.refs().items()):
         head = heads.get(key)
-        checksum = (
-            verified_checksums.get(key)
-            if verified_checksums is not None
-            else head.checksum_sha256
-            if head is not None
-            else None
-        )
-        if head is None or checksum is None:
+        identity = verified_identities.get(key) if verified_identities is not None else None
+        checksum = head.checksum_sha256 if head is not None else None
+        if head is None or (identity is None and checksum is None):
             raise ValueError(f"validated HEAD checksum is required for {name}")
-        checksums[name] = {"checksum_sha256": checksum}
+        checksums[name] = identity or {"checksum_sha256": checksum}
     document = {
         "version": _CANONICAL_DOCUMENT_VERSION,
         "target_kind": run.target_kind.value,
@@ -81,12 +76,12 @@ async def publish_or_reuse_build(
     run: Run,
     result: BuildStepResult,
     heads: Mapping[str, HeadResult],
-    verified_checksums: Mapping[str, str] | None = None,
+    verified_identities: Mapping[str, JsonValue] | None = None,
     retention: timedelta,
 ) -> BuildPublication:
     """Select or insert one immutable build generation under the caller's Investigation lock."""
     canonical_document = canonical_build_document(
-        run, result, heads, verified_checksums=verified_checksums
+        run, result, heads, verified_identities=verified_identities
     )
     encoded_document = json.dumps(canonical_document, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(encoded_document.encode("utf-8")).hexdigest()

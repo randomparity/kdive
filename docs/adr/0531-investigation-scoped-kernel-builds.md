@@ -27,7 +27,9 @@ Finalizing an external build creates an investigation-owned build record with im
 Its public
 `build_ref` is `<content_digest>.<generation>`. `content_digest` is the lowercase hexadecimal
 SHA-256 of a versioned canonical document containing the validated artifact checksums and build
-metadata; `generation` is an opaque UUID minted for one publication lifetime. The artifact catalog
+metadata. A chunked artifact uses its ordered validator-backed `(checksum, size)` vector and total
+size; its advisory whole-object hash is excluded. `generation` is an opaque UUID minted for one
+publication lifetime. The artifact catalog
 rows use `owner_kind='investigations'` and the Investigation id.
 
 The record stores one exact validated artifact set. Under the Investigation lock, a finalizer first
@@ -40,6 +42,9 @@ failed delete to the existing prefix-orphan sweep. It never registers or deletes
 generation's objects. Reclaim marks one generation `reclaiming` before object deletion and deletes
 the record only if that generation remains reclaiming; a new generation has distinct rows and
 objects. The lock spans selection, publication, and the reclaim state transition.
+Before deleting the catalog row, reclaim stores its Investigation, exact `build_ref`, and expiry in
+a durable tombstone. Only the same Investigation consults that tombstone, preserving expired-handle
+recovery after GC while unknown and cross-Investigation handles remain not found.
 
 Every path that takes both scopes follows the repository order Investigation → Run.
 `runs.complete_build` changes its final transaction to that order and rechecks the Run state and
@@ -98,7 +103,10 @@ the deadline; success materializes the kernel onto the System, while failure rel
 - A queued install and every independently executing install attempt pin their generation. A
   canceled or lease-overlapped shared job cannot release another attempt's fence. A delayed first
   install or restage after expiry must recreate and upload; an already-installed unchanged variant
-  remains an idempotent no-op.
+  remains an idempotent no-op. Heartbeat or job-lease expiry is not evidence that an attempt
+  stopped (ADR-0018), so use rows persist until their handlers exit. An operator/reconciler may
+  recover a genuinely dead attempt only with independently obtained worker-death evidence, which
+  is retained in a recovery ledger.
 - The schema gains an investigation-build catalog and a nullable `runs.build_ref` audit link.
 
 ## Considered & rejected

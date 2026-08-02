@@ -45,8 +45,9 @@ key to a composite owner whose deletion timing differs from Run retention.
 
 The canonical build document is versioned and includes the target kind, normalized build profile,
 kernel checksum, optional initrd and debuginfo checksums, build id, cmdline, and normalized
-provenance. Canonical JSON uses sorted keys and compact separators; SHA-256 over its UTF-8 bytes is
-the `content_digest`. Object keys and etags are excluded because they describe storage placement
+provenance. A chunked artifact uses its ordered validated chunk checksum-and-size vector plus total
+size, excluding its advisory whole-object hash. Canonical JSON uses sorted keys and compact
+separators; SHA-256 over its UTF-8 bytes is the `content_digest`. Object keys and etags are excluded because they describe storage placement
 rather than content. Finalization already requires the object store's SHA-256 for every artifact.
 The generation suffix prevents an expired or partially reclaimed physical set from being mistaken
 for a fresh publication of the same content.
@@ -144,6 +145,9 @@ cursor and takes at most one generation per Investigation before a second from a
 After deletion it removes only that generation's artifact rows and record, rechecking the state
 under the lock. A fresh publication of identical content uses a new generation and cannot be
 deleted or selected through the old record.
+The final catalog-row delete writes a durable `(investigation_id, build_ref, expires_at)`
+tombstone. Selection consults it only after an exact same-Investigation catalog miss, preserving
+expired recovery after GC without turning unknown or cross-Investigation handles into an oracle.
 
 `runs.install` acquires the Investigation lock before the existing Run lock. In that transaction it
 checks the generation deadline and enqueues or recycles the install job. A first install or restage
@@ -155,7 +159,10 @@ closes the gap until execution. Each executing install attempt records its own d
 generation-use row before resolving artifact references and removes only that row after provider
 consumption. GC waits for every row independently of the shared job state, so cancellation or
 lease overlap cannot expose an older still-running attempt. A cleanup fault leaks a safe pin rather
-than permitting deletion.
+than permitting deletion. Job-heartbeat expiry never removes a use row: ADR-0018 permits the old
+handler to continue after its claim is reclaimed. A genuinely dead attempt is recovered only by
+an explicit operator/reconciler action naming the exact worker and recording independently obtained
+worker-death evidence in the durable recovery ledger.
 
 Caller-controlled build and install cmdline extras are trimmed and limited to 4096 printable
 characters at MCP ingress and at the service/worker boundaries before hashing, persistence, or
