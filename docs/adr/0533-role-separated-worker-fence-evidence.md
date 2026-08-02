@@ -21,14 +21,14 @@ thread stopped consuming an exact object version.
 Postgres is the enforcement boundary. Migrations create non-login server, worker, reconciler, and
 lifecycle-witness roles. Direct mutation of worker incarnations, build uses, and recovery evidence is
 revoked from process roles. Each lifecycle authority mints a random 256-bit per-incarnation credential,
-stores only its hash with the immutable runtime binding, and delivers the plaintext once to that exact
-worker before its claim loop. Bounded `SECURITY DEFINER` functions expose only the transitions each role
-needs. Worker functions require the credential and derive the holder from its hash; callers cannot name
-another holder. Acquisition additionally derives the charged attempt from the holder's currently
-claimed job. Release accepts a use identifier but deletes it only when the credential-derived holder,
-job, and attempt all match. Lifecycle witnesses register exact runtime bindings and publish terminal
-evidence; reconcilers recover a use only from a matching terminated incarnation; server/operator paths
-request and audit recovery but cannot publish termination.
+stores its hash with the immutable runtime binding, and keeps a controller-key-encrypted delivery
+envelope only until that exact runtime acknowledges receipt. Bounded `SECURITY DEFINER` functions expose
+only the transitions each role needs. Worker functions require the credential and derive the holder
+from its hash; callers cannot name another holder. Acquisition additionally derives the charged attempt
+from the holder's currently claimed job. Release accepts a use identifier but deletes it only when the
+credential-derived holder, job, and attempt all match. Lifecycle witnesses register exact runtime
+bindings and publish terminal evidence; reconcilers recover a use only from a matching terminated
+incarnation; server/operator paths request and audit recovery but cannot publish termination.
 
 Every worker incarnation carries the incompatible artifact-fence protocol version. A database trigger
 rejects every job transition to `running` unless the claimed worker has an active incarnation with the
@@ -47,14 +47,16 @@ is the incarnation identifier. A controller observes the initially-finalized Pen
 fixed StatefulSet name/ordinal and UID, and registers that UID before worker startup. A worker init
 client presents a short-lived projected service-account token bound by Kubernetes to that Pod UID; the
 controller verifies it with TokenReview plus a live UID/resource-version read, consumes the credential
-once, and returns it over authenticated cluster TLS into an init-only tmpfs handoff. The long-running
-worker receives neither the projected token nor an API-readable Secret. Thus a terminal Pod whose
-worker never started still has a pre-start, authority-bound identity; the witness may terminate it but
-may not invent a different holder after the fact. The witness compare-and-sets namespace, name, UID,
-resource version, and credential-record state before removing the finalizer. API or database failure
-retains the runtime object and fence. A lost response after credential consumption is not replayed: the
-init remains gated, normal Pod termination/finalizer evidence closes that unused incarnation, and the
-StatefulSet replacement receives a fresh UID and credential.
+idempotently from the encrypted envelope over authenticated cluster TLS into an init-only tmpfs
+handoff. Delivery and acknowledgment both repeat TokenReview and the live UID/resource-version check.
+An authenticated acknowledgment irreversibly clears the envelope; a lost response or acknowledgment
+is retried only by the same live Pod and returns the same credential. The long-running worker receives
+neither the projected token, the controller envelope key, nor an API-readable Secret. Thus a terminal
+Pod whose worker never started still has a pre-start, authority-bound identity; the witness may
+terminate it but may not invent a different holder after the fact. Termination also clears any
+unacknowledged envelope. The witness compare-and-sets namespace, name, UID, resource version, and
+credential-record state before removing the finalizer. API or database failure retains the runtime
+object and fence; timeout alone never becomes termination evidence.
 
 Identity text is at most 512 bytes; serialized authority bindings and Kubernetes names are capped before
 persistence; recovery actor, evidence, and reason retain their schema caps of 255, 1024, and 512 bytes.

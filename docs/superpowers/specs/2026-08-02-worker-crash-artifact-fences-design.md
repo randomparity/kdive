@@ -75,14 +75,14 @@ incarnation. A recovery audit copies the immutable termination facts before dele
 
 Postgres functions verify `session_user` membership, validate bounded inputs, acquire the incarnation
 advisory lock, and perform each transition transactionally. Runtime roles receive no direct mutation
-grant on the protected tables. The lifecycle authority alone registers the exact runtime binding,
-mints a random 256-bit credential for each incarnation, stores only its hash, and delivers the plaintext
-once before worker startup. The worker can authenticate that existing active incarnation but cannot
-create, rebind, or reactivate one. Worker functions derive the holder from the credential hash and
-derive job/attempt ownership from the locked claim; they never trust a caller-supplied holder. Supported
-Compose and Helm manifests provide distinct secret-backed DSNs; the shared migration credential is not
-injected into runtime workloads. Local development setup creates equivalent supervisor-owned
-credentials rather than weakening the checks.
+grant on the protected tables. The lifecycle authority alone registers the exact runtime binding and
+mints a random 256-bit credential for each incarnation. Postgres keeps its hash plus a
+controller-key-encrypted delivery envelope until the exact runtime acknowledges receipt. The worker can
+authenticate that existing active incarnation but cannot create, rebind, or reactivate one. Worker
+functions derive the holder from the credential hash and derive job/attempt ownership from the locked
+claim; they never trust a caller-supplied holder. Supported Compose and Helm manifests provide distinct
+secret-backed DSNs; the shared migration credential and envelope key are not injected into workers.
+Local development setup creates equivalent supervisor-owned credentials rather than weakening checks.
 
 ### Claim and upgrade protocol
 
@@ -114,21 +114,19 @@ The Kubernetes Pod template carries its finalizer at initial creation and uses t
 incarnation. Before the worker claim loop starts, a controller validates the fixed StatefulSet
 name/ordinal and UID and registers that exact binding. An init client presents a short-lived projected
 service-account token that Kubernetes binds to the Pod UID. The controller verifies TokenReview plus a
-live UID/resource-version read, atomically consumes the one-time credential, and returns it over
-authenticated cluster TLS into an init-only tmpfs handoff. The worker receives the credential but never
-the projected token or an API-readable Secret. Ordinal replacement cannot reuse a credential because
-the UID, token binding, registration row, and one-time consume predicate must all match. The witness
+live UID/resource-version read and returns the credential idempotently from its encrypted envelope over
+authenticated cluster TLS into an init-only tmpfs handoff. The init acknowledges after the tmpfs write;
+delivery and acknowledgment repeat the token/UID/resource-version checks, and acknowledgment clears the
+envelope. A lost response or acknowledgment retries the same delivery only for the same live Pod. The
+worker receives the credential but never the projected token, envelope key, or an API-readable Secret.
+Ordinal replacement cannot reuse a credential because UID, token binding, and registration must all
+match; a new UID receives a new credential. The witness
 scans only the configured ordinal range and validates namespace, name, UID, resource version, finalizer,
 and terminal phase. A terminal Pod that never entered the worker process is already authority-bound by
 this pre-start record, so the witness terminates that existing identity rather than synthesizing a
 post-hoc holder. It removes only its own finalizer with resource-version, UID, and binding tests.
-API/database failure leaves the Pod unchanged. Ordinal history can increase but not decrease.
-
-Credential consumption and response delivery cannot be atomic. If the controller commits consumption
-but the response is lost, it refuses replay and the init remains gated. The Pod terminates through the
-normal finalizer/witness path, which records that unused incarnation's terminal evidence before
-deletion; the StatefulSet replacement has a fresh UID and receives a new credential. Operators recover
-by deleting the gated Pod normally, never by removing its finalizer or resetting consumption.
+API/database failure leaves the Pod unchanged. Termination clears any unacknowledged envelope. Ordinal
+history can increase but not decrease.
 
 ### Recovery, GC, and tenancy
 
@@ -153,8 +151,8 @@ object-store failure leaves the row/tombstone retryable and never widens the del
 - Provider cancellation: caller observes cancellation only after the provider thread exits; process
   death retains the use.
 - Witness database/API failure: runtime object and finalizer remain; no termination is inferred.
-- Consumed Kubernetes credential with lost response: replay is refused; worker remains gated; operator
-  normally deletes the Pod so witness evidence precedes replacement with a fresh UID.
+- Kubernetes credential delivery/acknowledgment loss: the same bound live Pod idempotently retries the
+  encrypted envelope; another UID is refused; timeout alone never authorizes termination.
 - Conflicting registration/termination replay: fail closed and preserve the first immutable facts.
 - Unauthorized SQL operation: permission denied, with no protected-table mutation.
 - Recovery mismatch: audited refusal where the operator surface requires it; use remains pinned.
@@ -181,7 +179,7 @@ of scope and may strand, but never release, pins.
 | old worker → job claim | direct state transition | database trigger requires current active protocol incarnation | claim rejected; job remains queued |
 | reconciler → use deletion | use and holder ids | reconciler-only function, matching terminal row, atomic audit+delete | refusal; use retained |
 | runtime API → witness | Docker JSON or Pod JSON | schema/type/length validation, exact ID/UID/name/resource version | no absence inference |
-| Pod init → credential controller | bound projected token, Pod UID | TokenReview, live UID/resource-version check, one-time consume, cluster TLS | no credential; worker remains gated |
+| Pod init → credential controller | bound projected token, Pod UID | TokenReview, live UID/resource-version check, idempotent encrypted envelope, authenticated acknowledgment, cluster TLS | no credential; worker remains gated |
 | GC → object store | stored key plus immutable version | tenant-scoped DB selection, no-use predicate, exact-version delete, batch bound | tombstone retained for retry |
 
 The design adds role-specific DSN boundaries and widens the Compose/Kubernetes witness boundary to
@@ -206,10 +204,10 @@ These actors already control the evidence boundary or are excluded deployment pa
 6. Compose executable tests cover SIGKILL, create, stop, recreate, remove, database outage, and raw
    bypass refusal while preserving the exact container evidence.
 7. Helm/controller tests cover rollout, scale-down, terminal Pods whose worker never started but whose
-   UID was lifecycle-registered before startup, bound-token rejection, one-time credential consumption,
-   dropped post-consume response and normal replacement recovery, API/database outage, UID replacement,
-   finalizer fencing, ordinal bounds, and credential separation. A truly unregistered terminal Pod
-   cannot produce termination evidence or authorize fence recovery.
+   UID was lifecycle-registered before startup, bound-token rejection, idempotent response/acknowledgment
+   loss, envelope clearing, API/database outage, UID replacement, finalizer fencing, ordinal bounds, and
+   credential separation. A truly unregistered terminal Pod cannot produce termination evidence or
+   authorize fence recovery.
 8. Deployment tests prove migration credentials are absent from runtime containers, role-specific
    credentials are wired, and the stop-old-first protocol is documented and structurally enforced.
 9. Focused suites pass, then the repository gate `just ci` passes without warnings.

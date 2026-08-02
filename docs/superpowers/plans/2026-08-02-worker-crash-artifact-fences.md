@@ -329,16 +329,17 @@ Commit with: `feat: preserve compose worker termination evidence`
 - Modify: `tests/helm/test_helm_render.py`
 
 **Interfaces:**
-- Controller registers the exact Pending Pod UID; an init client exchanges a Pod-UID-bound projected token for the one-time credential before worker start.
+- Controller registers the exact Pending Pod UID; an init client uses a Pod-UID-bound projected token to idempotently deliver and acknowledge the encrypted credential envelope before worker start.
 - Witness terminates only an existing lifecycle-registered UID and patches only its finalizer with UID/resourceVersion/binding tests.
 - Truly unregistered terminal Pods remain finalized and cannot authorize recovery.
 
 - [ ] **Step 1: Add failing controller/witness tests**
 
 Cover pre-start registration, never-started-but-registered terminal Pod, truly unregistered terminal
-Pod, invalid/audience-mismatched/unbound tokens, one-time consume replay, UID replacement, rollout,
-scale-down, API/database failure, a dropped response after committed consumption followed by normal
-finalized Pod deletion and fresh-UID replacement, ordinal ceiling decrease, and exact JSON Patch tests.
+Pod, invalid/audience-mismatched/unbound tokens, duplicate delivery before acknowledgment, dropped
+delivery and acknowledgment responses, envelope clearing after acknowledgment/termination, UID
+replacement, rollout, scale-down, API/database failure, ordinal ceiling decrease, and exact JSON Patch
+tests.
 
 - [ ] **Step 2: Run red Kubernetes/Helm tests**
 
@@ -347,21 +348,21 @@ Run: `uv run python -m pytest tests/processes/test_kubernetes_termination_witnes
 - [ ] **Step 3: Implement bounded controller phases**
 
 Use explicit states: observe fixed ordinal → validate UID/finalizer → ensure authority registration;
-then init exchange → TokenReview with fixed audience → live UID/resource-version read → atomic one-time
-credential consume → init-only tmpfs handoff → worker gate. Terminal processing is observe → verify
-existing binding → persist termination → patch exact finalizer. Each pass handles at most the configured
-count capped at 1,000 and leaves retryable state on failure. Ordinal reuse cannot overwrite a credential:
-registration and consumption compare the exact UID, and a consumed credential is never reissued.
-If delivery is lost after consumption, refuse replay and keep the init gated; normal Pod deletion runs
-the witness/finalizer path and the StatefulSet replacement starts with a fresh UID and credential.
+then init delivery → TokenReview with fixed audience → live UID/resource-version read → decrypt exact
+envelope → init-only tmpfs write → authenticated acknowledgment with repeated checks → envelope clear →
+worker gate. Delivery before acknowledgment is idempotent for the same live UID; another UID is refused.
+Terminal processing is observe → verify existing binding → persist termination and clear envelope →
+patch exact finalizer. Each pass handles at most the configured count capped at 1,000 and leaves
+retryable state on failure. Ordinal reuse cannot overwrite a credential because registration and every
+delivery/acknowledgment compare the exact UID.
 
 - [ ] **Step 4: Minimize RBAC and prove rendering**
 
 Grant the controller fixed-namespace Pod get/list, TokenReview create, and resource-version-fenced Pod
 patch. Mount the short-lived fixed-audience projected token only in the init container; do not mount it
-in the worker. No credential Secret API permission is required. Keep the worker unable to read Pods,
-tokens, or other credentials. Run Step 2 green and server-side Helm rendering if a cluster API is
-configured.
+in the worker. Store the envelope key only in the controller deployment. No credential Secret API
+permission is required. Keep the worker unable to read Pods, tokens, or other credentials. Run Step 2
+green and server-side Helm rendering if a cluster API is configured.
 
 - [ ] **Step 5: Run `just ci` and commit**
 
