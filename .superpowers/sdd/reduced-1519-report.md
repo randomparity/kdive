@@ -61,3 +61,5 @@
 - `0f02554c0`: migration 0095 refuses to run with other database clients connected; operator and
   Helm documentation require stop-old-first for the strict Run projection boundary.
 - `69c629c53`: removed the transient implementation plan while retaining ADR-0531 and its spec.
+- Review-fix focused suite: 595 passed, 1 live-VM environment skip. Lint, type, schema,
+  migration-order, docs, CLI, and commit-hook checks passed.
