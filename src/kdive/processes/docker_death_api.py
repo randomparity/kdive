@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import re
 import socket
@@ -10,16 +11,19 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 
-_INSPECT_PATH = re.compile(r"/containers/[0-9a-f]{12}(?:[0-9a-f]{52})?/json")
+_INSPECT_PATH = re.compile(r"/containers/[0-9a-f]{64}/json")
 _MAX_RESPONSE_BYTES = 1_048_576
 _DOCKER_SOCKET = "/var/run/docker.sock"
 _FULL_ID = re.compile(r"[0-9a-f]{64}")
 _NONCE = re.compile(r"[0-9a-f]{32}")
+_CREDENTIAL = re.compile(r"[0-9a-f]{64}")
 
 type Inspect = Callable[[str], Mapping[str, object] | None]
-type Register = Callable[[str, str], Awaitable[None]]
+type Register = Callable[[str, str, bytes], Awaitable[None]]
 type Terminate = Callable[[str, str], Awaitable[None]]
 type ContainerOperation = Callable[[str], Awaitable[None]]
+type Credential = Callable[[], str]
+type InjectCredential = Callable[[str, str], Awaitable[None]]
 
 
 def _nested_mapping(value: object) -> Mapping[str, object] | None:
@@ -34,6 +38,8 @@ class WorkerLifecycleGate:
     inspect: Inspect
     register: Register
     terminate: Terminate
+    credential: Credential
+    inject: InjectCredential
     start: ContainerOperation
     stop: ContainerOperation
     remove: ContainerOperation
@@ -72,7 +78,12 @@ class WorkerLifecycleGate:
         state = _nested_mapping(container.get("State"))
         if state is None or state.get("Status") != "created":
             raise RuntimeError("only a never-started worker may be registered")
-        await self.register(holder, container_id)
+        credential = self.credential()
+        if not _CREDENTIAL.fullmatch(credential):
+            raise RuntimeError("worker lifecycle credential must be a 256-bit lowercase hex value")
+        credential_hash = hashlib.sha256(credential.encode()).digest()
+        await self.register(holder, container_id, credential_hash)
+        await self.inject(container_id, credential)
         await self.start(container_id)
 
     async def reconcile(self, container_id: str) -> bool:
@@ -81,12 +92,16 @@ class WorkerLifecycleGate:
         state = _nested_mapping(container.get("State"))
         status = state.get("Status") if state is not None else None
         if status == "created":
-            await self.register(holder, container_id)
-            await self.start(container_id)
+            await self.register_and_start(container_id)
             return False
         if status == "running":
             # Exact idempotent registration proves the running container matches its active row.
-            await self.register(holder, container_id)
+            credential = self.credential()
+            if not _CREDENTIAL.fullmatch(credential):
+                raise RuntimeError(
+                    "worker lifecycle credential must be a 256-bit lowercase hex value"
+                )
+            await self.register(holder, container_id, hashlib.sha256(credential.encode()).digest())
             return False
         if status in {"exited", "dead"}:
             await self.terminate_and_remove(container_id)
@@ -136,7 +151,7 @@ class _Handler(BaseHTTPRequestHandler):
             connection.request("GET", self.path)
             response = connection.getresponse()
             body = response.read(_MAX_RESPONSE_BYTES + 1)
-        except OSError:
+        except OSError, http.client.HTTPException:
             self.send_error(502)
             return
         finally:

@@ -288,14 +288,14 @@ changelog:
 
 # Start the operator backing services (Postgres + MinIO + mock OIDC) for a live run.
 compose-up:
-    KDIVE_DATABASE_URL="${KDIVE_DATABASE_URL:-postgresql://kdive:kdive@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" uv run python -m kdive.processes.compose_worker_lifecycle up # pragma: allowlist secret
+    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:?set the lifecycle-witness DSN}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:?set the worker-role DSN}" uv run python -m kdive.processes.compose_worker_lifecycle up
 
 compose-recreate-worker:
-    KDIVE_DATABASE_URL="${KDIVE_DATABASE_URL:-postgresql://kdive:kdive@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" uv run python -m kdive.processes.compose_worker_lifecycle recreate # pragma: allowlist secret
+    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:?set the lifecycle-witness DSN}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:?set the worker-role DSN}" uv run python -m kdive.processes.compose_worker_lifecycle recreate
 
 # Stop the operator backing services and remove their volumes.
 compose-down:
-    KDIVE_DATABASE_URL="${KDIVE_DATABASE_URL:-postgresql://kdive:kdive@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" uv run python -m kdive.processes.compose_worker_lifecycle down --volumes # pragma: allowlist secret
+    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:?set the lifecycle-witness DSN}" uv run python -m kdive.processes.compose_worker_lifecycle down --volumes
 
 # Lint and format-check the shell scripts (recursively under scripts/).
 lint-shell:

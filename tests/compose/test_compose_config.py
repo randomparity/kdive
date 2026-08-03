@@ -196,6 +196,37 @@ def test_worker_requires_evidence_preserving_compose_wrapper() -> None:
     assert worker["environment"]["KDIVE_WORKER_INCARNATION_ID"] == f"docker:{'a' * 32}"
 
 
+def test_worker_receives_only_worker_database_authority_and_credential_handoff() -> None:
+    worker_dsn = "postgresql://worker-only@postgres/kdive"
+    model = _config(
+        {
+            "KDIVE_WORKER_DATABASE_URL": worker_dsn,
+            "KDIVE_MIGRATION_DATABASE_URL": "postgresql://migration-owner@postgres/kdive",
+            "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL": (
+                "postgresql://lifecycle-witness@localhost/kdive"
+            ),
+        }
+    )
+    worker = model["services"]["worker"]
+
+    assert worker["environment"]["KDIVE_DATABASE_URL"] == worker_dsn
+    assert "KDIVE_MIGRATION_DATABASE_URL" not in worker["environment"]
+    assert "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL" not in worker["environment"]
+    assert not any("INCARNATION_CREDENTIAL" in key for key in worker["environment"])
+    assert not any("ENVELOPE" in key for key in worker["environment"])
+    assert all("docker.sock" not in str(volume) for volume in worker.get("volumes", []))
+    assert all("worker-incarnation-credential" not in str(volume) for volume in worker["volumes"])
+
+
+def test_migrate_receives_migration_database_authority_only() -> None:
+    migration_dsn = "postgresql://migration-owner@postgres/kdive"
+    migrate = _config({"KDIVE_MIGRATION_DATABASE_URL": migration_dsn})["services"]["migrate"]
+
+    assert migrate["environment"]["KDIVE_DATABASE_URL"] == migration_dsn
+    assert "KDIVE_WORKER_DATABASE_URL" not in migrate["environment"]
+    assert "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL" not in migrate["environment"]
+
+
 def _minio_init_script() -> str:
     entrypoint = _services()["minio-init"]["entrypoint"]
     assert entrypoint[:2] == ["/bin/sh", "-c"]
@@ -338,8 +369,7 @@ def test_server_waits_for_the_issuer() -> None:
 
 @pytest.mark.parametrize("service", ("migrate", *_APP_SERVICES))
 def test_shared_backend_env_is_merged_into_every_app_service(service: str) -> None:
-    # The `x-backends` anchor is merged into each service via `<<: *backends`, so
-    # the DSN appears once in the source but on every process here.
+    # Shared non-database backends remain present beside each process-specific DSN.
     env = _services()[service]["environment"]
     assert env["KDIVE_DATABASE_URL"].startswith("postgresql://")
 

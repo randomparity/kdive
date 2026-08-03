@@ -38,6 +38,9 @@
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
 | `KDIVE_DATABASE_URL` | migrate, reconciler, server, worker | — | yes | Postgres DSN for the system-of-record. |
+| `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL` | — | — | no | secret (ref only) |
+| `KDIVE_MIGRATION_DATABASE_URL` | — | — | no | secret (ref only) |
+| `KDIVE_WORKER_DATABASE_URL` | — | — | no | secret (ref only) |
 
 ## debug
 

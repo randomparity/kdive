@@ -35,10 +35,8 @@ x-readyz-cadence: &readyz_cadence
   retries: 5
   start_period: 30s
 
-# Shared backend wiring, declared once and merged into every app service via
-# `<<: *backends`. The server adds its own HTTP bind vars on top.
+# Shared non-database backend wiring. Each process supplies its own database authority below.
 x-backends: &backends
-  KDIVE_DATABASE_URL: postgresql://kdive:kdive@postgres:5432/kdive  # pragma: allowlist secret — local dev only
   KDIVE_OIDC_ISSUER: http://oidc:8080/default
   KDIVE_OIDC_JWKS_URI: http://oidc:8080/default/jwks
   KDIVE_OIDC_AUDIENCE: kdive
@@ -163,6 +161,7 @@ services:
     command: ["migrate"]
     environment:
       <<: *backends
+      KDIVE_DATABASE_URL: ${KDIVE_MIGRATION_DATABASE_URL:-postgresql://kdive:kdive@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
     depends_on:
       postgres:
         condition: service_healthy
@@ -178,6 +177,7 @@ services:
     restart: on-failure
     environment:
       <<: *backends
+      KDIVE_DATABASE_URL: postgresql://kdive:kdive@postgres:5432/kdive  # pragma: allowlist secret — local dev only
       KDIVE_HTTP_HOST: 0.0.0.0
       KDIVE_HTTP_PORT: "8000"
       # Bind the aux health/metrics listener to all interfaces INSIDE the container so
@@ -244,6 +244,7 @@ services:
     restart: on-failure
     environment:
       <<: *backends
+      KDIVE_DATABASE_URL: ${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker:kdive-worker@postgres:5432/kdive}  # pragma: allowlist secret — operator supplies a role member
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9465
       KDIVE_WORKER_INCARNATION_KIND: docker
       KDIVE_WORKER_INCARNATION_ID: docker:${KDIVE_WORKER_INCARNATION_NONCE:-unmanaged}
@@ -282,6 +283,7 @@ services:
     restart: on-failure
     environment:
       <<: *backends
+      KDIVE_DATABASE_URL: postgresql://kdive:kdive@postgres:5432/kdive  # pragma: allowlist secret — local dev only
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9466
     healthcheck:
       <<: *readyz_cadence

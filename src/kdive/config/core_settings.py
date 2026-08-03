@@ -104,6 +104,31 @@ DATABASE_URL = Setting(
     suggest="a Postgres DSN, e.g. postgresql://host:5432/kdive",
 )
 
+MIGRATION_DATABASE_URL = Setting(
+    name="KDIVE_MIGRATION_DATABASE_URL",
+    parse=_nonempty,
+    secret=True,
+    group="database",
+    help="Compose supervisor input containing the migration-owner Postgres DSN.",
+    suggest="a migration-owner Postgres DSN",
+)
+WORKER_DATABASE_URL = Setting(
+    name="KDIVE_WORKER_DATABASE_URL",
+    parse=_nonempty,
+    secret=True,
+    group="database",
+    help="Compose supervisor input containing the worker-role Postgres DSN.",
+    suggest="a worker-role Postgres DSN",
+)
+LIFECYCLE_WITNESS_DATABASE_URL = Setting(
+    name="KDIVE_LIFECYCLE_WITNESS_DATABASE_URL",
+    parse=_nonempty,
+    secret=True,
+    group="database",
+    help="Postgres DSN used only by the Compose lifecycle witness authority.",
+    suggest="a lifecycle-witness Postgres DSN",
+)
+
 HTTP_HOST = Setting(
     name="KDIVE_HTTP_HOST",
     parse=_str,
@@ -865,6 +890,9 @@ KUBERNETES_WITNESS_ORDINAL_CEILING = Setting(
 
 SETTINGS = [
     DATABASE_URL,
+    MIGRATION_DATABASE_URL,
+    WORKER_DATABASE_URL,
+    LIFECYCLE_WITNESS_DATABASE_URL,
     HTTP_HOST,
     HTTP_PORT,
     LOG_LEVEL,

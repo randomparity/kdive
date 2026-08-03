@@ -14,6 +14,9 @@ image built by the repo [`Dockerfile`](../../Dockerfile) (`image: kdive:dev`).
 The dependency graph is self-contained, so a single `up` brings the whole stack:
 
 ```bash
+export KDIVE_MIGRATION_DATABASE_URL='postgresql://migration-member@postgres:5432/kdive'
+export KDIVE_WORKER_DATABASE_URL='postgresql://worker-member@postgres:5432/kdive'
+export KDIVE_LIFECYCLE_WITNESS_DATABASE_URL='postgresql://witness-member@localhost:5432/kdive'
 just compose-up   # builds the image, runs the backends + migrate, then gates the worker
 ```
 
@@ -22,6 +25,10 @@ worker lifecycle. They bind the exact full container ID to a random nonce in Pos
 start and record retained terminal inspect evidence before removal. Raw Compose/Docker lifecycle
 commands and host-launched workers bypass that chain and are unsupported. On a database failure,
 the wrapper leaves the never-started or terminal worker retained; restore Postgres and retry.
+The three role-specific login members are operator-provisioned. The migration owner and lifecycle
+witness DSNs are never present in the worker container; its random 256-bit incarnation credential is
+copied from a supervisor-owned file into the never-started container as UID 10001 with mode 0400 and
+is not placed in its environment or a shared mount.
 
 `docker compose up` resolves the graph rather than relying on the operator to order it:
 the app services pull in a healthy Postgres, the `minio-init` bucket-creation one-shot
@@ -102,7 +109,7 @@ host* (where `iss=http://localhost:8090/default` matches host-minted tokens).
 ## Teardown
 
 ```bash
-docker compose down -v   # stop everything and drop the named volumes
+just compose-down   # records worker termination, then drops the named volumes
 ```
 
 ## Image provenance — verify before you run a published image
