@@ -366,6 +366,7 @@ def residual_privilege_role_dsn(pg_conn: psycopg.Connection) -> Iterator[RoleDsn
             "0108_worker_fence_runtime_paths.sql",
             "0109_kubernetes_credential_envelopes.sql",
             "0110_idempotent_worker_termination.sql",
+            "0111_restrict_pinned_job_deletion.sql",
         ):
             role_sql = (migrate.SCHEMA_DIR / filename).read_bytes()
             for canonical, isolated in roles.items():
@@ -805,6 +806,113 @@ def test_server_role_recovers_one_exact_build_use_through_the_operator_tool(
     assert pg_conn.execute(
         "SELECT count(*) FROM platform_audit_log WHERE tool = 'ops.recover_build_use'"
     ).fetchone() == (4,)
+
+
+def test_reconciler_cannot_delete_job_while_build_use_is_pinned(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """Routine job cleanup cannot erase a live pin or forge recovery evidence."""
+    holder, credential = "docker:job-delete-blocked", b"b" * 32
+    _register(role_dsn, holder, credential)
+    investigation_id, generation, job_id = _seed_claim(pg_conn, holder=holder)
+    use_id = uuid4()
+    assert _acquire(
+        role_dsn,
+        use_id,
+        investigation_id,
+        generation,
+        job_id,
+        1,
+        credential,
+    )
+
+    with (
+        psycopg.connect(role_dsn("kdive_reconciler"), autocommit=True) as reconciler,
+        pytest.raises(psycopg.errors.ForeignKeyViolation),
+    ):
+        reconciler.execute("DELETE FROM jobs WHERE id = %s", (job_id,))
+
+    assert pg_conn.execute("SELECT count(*) FROM jobs WHERE id = %s", (job_id,)).fetchone() == (1,)
+    assert pg_conn.execute(
+        "SELECT job_id, holder_worker_id FROM investigation_build_uses WHERE use_id = %s",
+        (use_id,),
+    ).fetchone() == (job_id, holder)
+    assert pg_conn.execute(
+        "SELECT count(*) FROM investigation_build_use_recoveries WHERE use_id = %s",
+        (use_id,),
+    ).fetchone() == (0,)
+
+
+def test_reconciler_can_delete_job_after_worker_releases_build_use(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """An ordinary worker release removes the pin before routine job cleanup."""
+    holder, credential = "docker:job-delete-released", b"r" * 32
+    _register(role_dsn, holder, credential)
+    investigation_id, generation, job_id = _seed_claim(pg_conn, holder=holder)
+    use_id = uuid4()
+    assert _acquire(
+        role_dsn,
+        use_id,
+        investigation_id,
+        generation,
+        job_id,
+        1,
+        credential,
+    )
+
+    with psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker:
+        released = worker.execute(
+            "SELECT public.release_investigation_build_use(%s, %s)",
+            (use_id, credential),
+        ).fetchone()
+    assert released == (True,)
+    with psycopg.connect(role_dsn("kdive_reconciler"), autocommit=True) as reconciler:
+        reconciler.execute("DELETE FROM jobs WHERE id = %s", (job_id,))
+
+    assert pg_conn.execute("SELECT count(*) FROM jobs WHERE id = %s", (job_id,)).fetchone() == (0,)
+    assert pg_conn.execute(
+        "SELECT count(*) FROM investigation_build_uses WHERE use_id = %s", (use_id,)
+    ).fetchone() == (0,)
+
+
+def test_reconciler_can_delete_job_after_evidence_recovery(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """Evidence recovery removes the pin while preserving its immutable audit row."""
+    holder, credential = "docker:job-delete-recovered", b"e" * 32
+    _register(role_dsn, holder, credential)
+    investigation_id, generation, job_id = _seed_claim(pg_conn, holder=holder)
+    use_id = uuid4()
+    assert _acquire(
+        role_dsn,
+        use_id,
+        investigation_id,
+        generation,
+        job_id,
+        1,
+        credential,
+    )
+    with psycopg.connect(role_dsn("kdive_lifecycle_witness"), autocommit=True) as witness:
+        assert witness.execute(
+            "SELECT public.terminate_worker_incarnation(%s, 'docker', %s, 'killed')",
+            (holder, Jsonb({"container_id": "a" * 64})),
+        ).fetchone() == (True,)
+    with psycopg.connect(role_dsn("kdive_reconciler"), autocommit=True) as reconciler:
+        assert reconciler.execute(
+            "SELECT public.recover_investigation_build_use(%s, %s::text[], %s, %s, %s)",
+            (use_id, ["project-a"], holder, "reconciler:test", "worker terminated"),
+        ).fetchone() == (True,)
+        reconciler.execute("DELETE FROM jobs WHERE id = %s", (job_id,))
+
+    assert pg_conn.execute("SELECT count(*) FROM jobs WHERE id = %s", (job_id,)).fetchone() == (0,)
+    assert pg_conn.execute(
+        "SELECT count(*) FROM investigation_build_uses WHERE use_id = %s", (use_id,)
+    ).fetchone() == (0,)
+    assert pg_conn.execute(
+        "SELECT job_id, holder_worker_id FROM investigation_build_use_recoveries WHERE use_id = %s",
+        (use_id,),
+    ).fetchone() == (job_id, holder)
 
 
 def test_reconciler_role_generation_gc_honors_exact_use_pins(
