@@ -94,13 +94,15 @@ rotate runtime credentials; start witnesses; start current workers; verify regis
 processing. If ordering is wrong, jobs remain queued and startup/claim fails visibly.
 
 Claim and heartbeat leases are PostgreSQL intervals applied once to a `clock_timestamp()` reference
-captured for the invocation. The computed deadline must be after that reference and at most one hour
-later, so calendar and time-zone fields are judged by their actual elapsed result rather than abstract
-interval ordering. The bound applies to each function invocation for one exact job attempt; a later
-successful heartbeat starts a new bounded lease and there is no cumulative per-job time limit. A
-deadline outside the bound raises SQLSTATE `22023` before job state, attempt, heartbeat, or lease data
-changes. The caller recovers by retrying that claim or heartbeat with an interval whose computed
-deadline is valid; the production worker requests five minutes.
+captured after blocking ownership locks and immediately before mutation. Claim first validates the
+active incarnation under its lock; heartbeat also locks and verifies the exact running job attempt.
+The computed deadline must be after the post-lock reference and at most one hour later, so calendar
+and time-zone fields are judged by their actual elapsed result rather than abstract interval ordering.
+The bound applies to each function invocation for one exact job attempt; a later successful heartbeat
+starts a new bounded lease and there is no cumulative per-job time limit. A deadline outside the bound
+raises SQLSTATE `22023` before job state, attempt, heartbeat, or lease data changes. The caller recovers
+by retrying that claim or heartbeat with an interval whose computed deadline is valid; the production
+worker requests five minutes.
 
 ### Provider cancellation
 

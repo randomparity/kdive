@@ -60,23 +60,6 @@ BEGIN
        OR p_accepted_lanes IS NULL THEN
         RAISE EXCEPTION 'worker claim facts are invalid' USING ERRCODE = '22023';
     END IF;
-    v_server_time := clock_timestamp();
-    BEGIN
-        v_lease_deadline := v_server_time + p_lease;
-    EXCEPTION WHEN datetime_field_overflow THEN
-        RAISE EXCEPTION
-            'worker claim lease deadline must be after server time and at most 1 hour later; '
-            'retry with a valid lease'
-            USING ERRCODE = '22023';
-    END;
-    IF p_lease IS NULL
-       OR v_lease_deadline <= v_server_time
-       OR v_lease_deadline > v_server_time + interval '1 hour' THEN
-        RAISE EXCEPTION
-            'worker claim lease deadline must be after server time and at most 1 hour later; '
-            'retry with a valid lease'
-            USING ERRCODE = '22023';
-    END IF;
     SELECT w.incarnation INTO v_incarnation
     FROM public.worker_incarnations AS w
     WHERE w.credential_hash = p_credential_hash;
@@ -98,6 +81,23 @@ BEGIN
         RETURN;
     END IF;
 
+    v_server_time := clock_timestamp();
+    BEGIN
+        v_lease_deadline := v_server_time + p_lease;
+    EXCEPTION WHEN datetime_field_overflow THEN
+        RAISE EXCEPTION
+            'worker claim lease deadline must be after server time and at most 1 hour later; '
+            'retry with a valid lease'
+            USING ERRCODE = '22023';
+    END;
+    IF p_lease IS NULL
+       OR v_lease_deadline <= v_server_time
+       OR v_lease_deadline > v_server_time + interval '1 hour' THEN
+        RAISE EXCEPTION
+            'worker claim lease deadline must be after server time and at most 1 hour later; '
+            'retry with a valid lease'
+            USING ERRCODE = '22023';
+    END IF;
     RETURN QUERY
     UPDATE public.jobs
     SET state = 'running',

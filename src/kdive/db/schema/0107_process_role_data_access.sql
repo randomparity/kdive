@@ -136,23 +136,6 @@ BEGIN
        OR p_attempt < 1 THEN
         RAISE EXCEPTION 'worker heartbeat facts are invalid' USING ERRCODE = '22023';
     END IF;
-    v_server_time := clock_timestamp();
-    BEGIN
-        v_lease_deadline := v_server_time + p_lease;
-    EXCEPTION WHEN datetime_field_overflow THEN
-        RAISE EXCEPTION
-            'worker heartbeat lease deadline must be after server time and at most 1 hour later; '
-            'retry with a valid lease'
-            USING ERRCODE = '22023';
-    END;
-    IF p_lease IS NULL
-       OR v_lease_deadline <= v_server_time
-       OR v_lease_deadline > v_server_time + interval '1 hour' THEN
-        RAISE EXCEPTION
-            'worker heartbeat lease deadline must be after server time and at most 1 hour later; '
-            'retry with a valid lease'
-            USING ERRCODE = '22023';
-    END IF;
     SELECT w.incarnation INTO v_incarnation
     FROM public.worker_incarnations AS w
     WHERE w.credential_hash = p_credential_hash;
@@ -173,6 +156,33 @@ BEGIN
         RETURN false;
     END IF;
 
+    PERFORM 1 FROM public.jobs
+    WHERE id = p_job_id
+      AND worker_id = v_incarnation
+      AND attempt = p_attempt
+      AND state = 'running'
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    v_server_time := clock_timestamp();
+    BEGIN
+        v_lease_deadline := v_server_time + p_lease;
+    EXCEPTION WHEN datetime_field_overflow THEN
+        RAISE EXCEPTION
+            'worker heartbeat lease deadline must be after server time and at most 1 hour later; '
+            'retry with a valid lease'
+            USING ERRCODE = '22023';
+    END;
+    IF p_lease IS NULL
+       OR v_lease_deadline <= v_server_time
+       OR v_lease_deadline > v_server_time + interval '1 hour' THEN
+        RAISE EXCEPTION
+            'worker heartbeat lease deadline must be after server time and at most 1 hour later; '
+            'retry with a valid lease'
+            USING ERRCODE = '22023';
+    END IF;
     UPDATE public.jobs
     SET heartbeat_at = v_server_time, lease_expires_at = v_lease_deadline
     WHERE id = p_job_id

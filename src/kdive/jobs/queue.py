@@ -215,9 +215,10 @@ async def dequeue(
     matches ``worker_id``, and uses the fixed current fence protocol.
 
     ``lease`` is one PostgreSQL interval applied to ``clock_timestamp()`` captured by the database
-    for this invocation. The computed deadline must be after that reference and no more than one
-    hour later. SQLSTATE ``22023`` is raised before any job mutation when it is outside that elapsed
-    bound; retry with an interval whose computed deadline is valid.
+    after the blocking incarnation fence and immediately before this claim. The computed deadline
+    must be after that reference and no more than one hour later. SQLSTATE ``22023`` is raised
+    before any job mutation when it is outside that elapsed bound; retry with an interval whose
+    computed deadline is valid.
 
     ``ORDER BY created_at`` is FIFO over *when the attempt was queued*, not when the row was first
     inserted: :func:`enqueue`'s ``recycle_terminal`` re-dates ``created_at`` (ADR-0447), so a
@@ -277,10 +278,11 @@ async def heartbeat(
 ) -> bool:
     """Renew ``job_id`` when the credential owns its exact running attempt.
 
-    ``lease`` is applied to the PostgreSQL ``clock_timestamp()`` captured for this invocation. Its
-    computed deadline must be after that reference and no more than one hour later. This is a
-    per-heartbeat limit, not a total job runtime limit. SQLSTATE ``22023`` leaves the row unchanged;
-    retry with an interval whose computed deadline is valid.
+    ``lease`` is applied to the PostgreSQL ``clock_timestamp()`` captured after the blocking
+    incarnation fence and exact running-attempt row lock. Its computed deadline must be after that
+    post-lock reference and no more than one hour later. This is a per-heartbeat limit, not a total
+    job runtime limit. SQLSTATE ``22023`` leaves the row unchanged; retry with an interval whose
+    computed deadline is valid.
 
     Returns:
         ``True`` when a row matched; ``False`` when the job is no longer this worker's

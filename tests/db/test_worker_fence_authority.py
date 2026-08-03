@@ -797,6 +797,148 @@ def test_worker_lease_uses_postgres_clock_at_each_function_invocation(
         assert heartbeat[0] >= heartbeat_reference[0]
 
 
+def test_worker_claim_lease_clock_starts_after_incarnation_lock_contention(
+    pg_conn: psycopg.Connection, postgres_url: str, role_dsn: RoleDsns
+) -> None:
+    """A blocked claim receives its short lease only after the incarnation lock is acquired."""
+    holder, credential = "docker:contended-claim", b"l" * 32
+    _register(role_dsn, holder, credential)
+    job_id = _seed_queued_job(pg_conn)
+    connected = Event()
+    claimant_pid: list[int] = []
+
+    def claim() -> tuple[UUID, object, object] | None:
+        with psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker:
+            claimant_pid.append(worker.info.backend_pid)
+            connected.set()
+            return worker.execute(
+                "SELECT id, heartbeat_at, lease_expires_at FROM public.claim_worker_job("
+                "%s, %s, interval '200 milliseconds', %s::text[])",
+                (holder, credential, ["default"]),
+            ).fetchone()
+
+    with (
+        psycopg.connect(postgres_url) as blocker,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        blocker.execute(
+            "SELECT pg_advisory_xact_lock("
+            "hashtextextended('kdive:worker-incarnation:' || %s, 1803))",
+            (holder,),
+        )
+        future = executor.submit(claim)
+        try:
+            assert connected.wait(timeout=2)
+            deadline = monotonic() + 2
+            while monotonic() < deadline:
+                blocked = pg_conn.execute(
+                    "SELECT %s = ANY(pg_blocking_pids(%s))",
+                    (blocker.info.backend_pid, claimant_pid[0]),
+                ).fetchone()
+                if blocked == (True,):
+                    break
+                sleep(0.01)
+            else:
+                pytest.fail("claim did not block on the incarnation lock")
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.4)
+            held_until = pg_conn.execute("SELECT clock_timestamp()").fetchone()
+            assert held_until is not None
+        finally:
+            blocker.commit()
+        claimed = future.result(timeout=2)
+
+    assert claimed is not None
+    assert claimed[0] == job_id
+    assert pg_conn.execute(
+        "SELECT heartbeat_at >= %s, lease_expires_at > %s, "
+        "lease_expires_at > heartbeat_at, "
+        "lease_expires_at <= heartbeat_at + interval '200 milliseconds' "
+        "FROM jobs WHERE id = %s",
+        (held_until[0], held_until[0], job_id),
+    ).fetchone() == (True, True, True, True)
+
+
+def test_worker_heartbeat_lease_clock_starts_after_incarnation_and_job_lock_contention(
+    pg_conn: psycopg.Connection, postgres_url: str, role_dsn: RoleDsns
+) -> None:
+    """A heartbeat starts its short lease after both ownership locks are acquired."""
+    holder, credential = "docker:contended-heartbeat", b"n" * 32
+    _register(role_dsn, holder, credential)
+    _investigation, _generation, job_id = _seed_claim(pg_conn, holder=holder, attempt=1)
+    connected = Event()
+    heartbeat_pid: list[int] = []
+
+    def heartbeat() -> bool:
+        with psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker:
+            heartbeat_pid.append(worker.info.backend_pid)
+            connected.set()
+            row = worker.execute(
+                "SELECT public.heartbeat_worker_job(%s, %s, 1, interval '200 milliseconds')",
+                (job_id, credential),
+            ).fetchone()
+        assert row is not None
+        return bool(row[0])
+
+    with (
+        psycopg.connect(postgres_url) as incarnation_blocker,
+        psycopg.connect(postgres_url) as job_blocker,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        job_blocker.execute("SELECT 1 FROM jobs WHERE id = %s FOR UPDATE", (job_id,))
+        incarnation_blocker.execute(
+            "SELECT pg_advisory_xact_lock("
+            "hashtextextended('kdive:worker-incarnation:' || %s, 1803))",
+            (holder,),
+        )
+        future = executor.submit(heartbeat)
+        try:
+            assert connected.wait(timeout=2)
+            deadline = monotonic() + 2
+            while monotonic() < deadline:
+                blocked = pg_conn.execute(
+                    "SELECT %s = ANY(pg_blocking_pids(%s))",
+                    (incarnation_blocker.info.backend_pid, heartbeat_pid[0]),
+                ).fetchone()
+                if blocked == (True,):
+                    break
+                sleep(0.01)
+            else:
+                pytest.fail("heartbeat did not block on the incarnation lock")
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.4)
+            incarnation_blocker.commit()
+
+            deadline = monotonic() + 2
+            while monotonic() < deadline:
+                blocked = pg_conn.execute(
+                    "SELECT %s = ANY(pg_blocking_pids(%s))",
+                    (job_blocker.info.backend_pid, heartbeat_pid[0]),
+                ).fetchone()
+                if blocked == (True,):
+                    break
+                sleep(0.01)
+            else:
+                pytest.fail("heartbeat did not block on its exact running job row")
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.4)
+            held_until = pg_conn.execute("SELECT clock_timestamp()").fetchone()
+            assert held_until is not None
+        finally:
+            incarnation_blocker.commit()
+            job_blocker.commit()
+        renewed = future.result(timeout=2)
+
+    assert renewed is True
+    assert pg_conn.execute(
+        "SELECT heartbeat_at >= %s, lease_expires_at > %s, "
+        "lease_expires_at > heartbeat_at, "
+        "lease_expires_at <= heartbeat_at + interval '200 milliseconds' "
+        "FROM jobs WHERE id = %s",
+        (held_until[0], held_until[0], job_id),
+    ).fetchone() == (True, True, True, True)
+
+
 def test_worker_job_function_execute_authority_is_exact(
     pg_conn: psycopg.Connection, role_dsn: RoleDsns
 ) -> None:
