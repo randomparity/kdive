@@ -1,13 +1,23 @@
 """Bounded exact-UID worker Pod termination witness."""
 
 import asyncio
+import hashlib
 import urllib.error
 from email.message import Message
+
+import pytest
+from psycopg import AsyncConnection, sql
 
 from kdive.processes.kubernetes_termination_witness import (
     KubernetesTerminationWitness,
     run_witness,
 )
+from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
+    register_worker_incarnation,
+    terminate_worker_incarnation,
+)
+from tests.reconciler.conftest import connect
 
 
 def _pod(*, uid: str, phase: str, resource_version: str = "7") -> dict[str, object]:
@@ -25,8 +35,8 @@ def test_terminal_exact_uid_commits_before_finalizer_patch() -> None:
     events: list[tuple[object, ...]] = []
     pod = _pod(uid="uid-1", phase="Failed")
 
-    async def terminate(holder: str, outcome: str) -> bool:
-        events.append(("terminate", holder, outcome))
+    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> bool:
+        events.append(("terminate", holder, binding, outcome))
         return True
 
     async def patch(namespace: str, name: str, operations: list[dict[str, object]]) -> None:
@@ -45,6 +55,7 @@ def test_terminal_exact_uid_commits_before_finalizer_patch() -> None:
     assert events[0] == (
         "terminate",
         "kubernetes:kdive:kdive-worker-0:uid-1",
+        {"namespace": "kdive", "name": "kdive-worker-0", "uid": "uid-1"},
         "kubernetes_pod_failed",
     )
     assert events[1][0:3] == ("patch", "kdive", "kdive-worker-0")
@@ -64,7 +75,7 @@ def test_unregistered_terminal_pod_retains_finalizer_and_cannot_publish_evidence
     patched = False
     terminated: list[str] = []
 
-    async def terminate(holder: str, outcome: str) -> bool:
+    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> bool:
         terminated.append(holder)
         return False
 
@@ -94,7 +105,7 @@ def test_live_absent_replaced_and_malformed_pods_fail_closed() -> None:
         "kdive-worker-2": {"metadata": {"uid": "bad"}, "status": {"phase": "Failed"}},
     }
 
-    async def terminate(holder: str, outcome: str) -> bool:
+    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> bool:
         terminated.append(holder)
         return False
 
@@ -117,7 +128,7 @@ def test_live_absent_replaced_and_malformed_pods_fail_closed() -> None:
 def test_database_failure_preserves_finalizer() -> None:
     patched = False
 
-    async def terminate(holder: str, outcome: str) -> bool:
+    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> bool:
         raise RuntimeError("database unavailable")
 
     async def patch(namespace: str, name: str, operations: list[dict[str, object]]) -> None:
@@ -150,7 +161,7 @@ def test_patch_conflict_rereads_fresh_resource_version_before_removal() -> None:
         reads += 1
         return _pod(uid="uid", phase="Failed", resource_version=str(reads))
 
-    async def terminate(holder: str, outcome: str) -> bool:
+    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> bool:
         return True
 
     async def patch(namespace: str, name: str, operations: list[dict[str, object]]) -> None:
@@ -184,7 +195,7 @@ def test_witness_loop_survives_authority_failure_and_retries() -> None:
         stop.set()
         return None
 
-    async def terminate(holder: str, outcome: str) -> bool:
+    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> bool:
         return False
 
     witness = KubernetesTerminationWitness(
@@ -197,3 +208,131 @@ def test_witness_loop_survives_authority_failure_and_retries() -> None:
     )
     asyncio.run(run_witness(witness, stop, interval=0))
     assert reads == 2
+
+
+async def _witness_connection(url: str) -> AsyncConnection:
+    connection = await connect(url)
+    await connection.execute(
+        sql.SQL("SET SESSION AUTHORIZATION {}").format(sql.Identifier("kdive_lifecycle_witness"))
+    )
+    return connection
+
+
+def test_committed_termination_retries_finalizer_patch_on_second_sweep(
+    migrated_url: str,
+) -> None:
+    async def run() -> None:
+        holder = "kubernetes:kdive:kdive-worker-0:uid-retry"
+        binding = {"namespace": "kdive", "name": "kdive-worker-0", "uid": "uid-retry"}
+        witness_connection = await _witness_connection(migrated_url)
+        admin = await connect(migrated_url)
+        patch_attempts = 0
+        try:
+            await register_worker_incarnation(
+                witness_connection,
+                holder,
+                "kubernetes",
+                binding,
+                hashlib.sha256(b"retry-credential").digest(),
+                CURRENT_WORKER_FENCE_PROTOCOL,
+            )
+
+            async def terminate(
+                incarnation: str, exact_binding: dict[str, str], outcome: str
+            ) -> bool:
+                return await terminate_worker_incarnation(
+                    witness_connection, incarnation, "kubernetes", exact_binding, "failed"
+                )
+
+            async def patch(namespace: str, name: str, operations: list[dict[str, object]]) -> None:
+                nonlocal patch_attempts
+                patch_attempts += 1
+                if patch_attempts == 1:
+                    raise RuntimeError("Kubernetes API unavailable after database commit")
+
+            witness = KubernetesTerminationWitness(
+                namespace="kdive",
+                worker_name="kdive-worker",
+                ordinal_ceiling=1,
+                read_pod=lambda namespace, name: _pod(uid="uid-retry", phase="Failed"),
+                patch_finalizers=patch,
+                terminate=terminate,
+            )
+            with pytest.raises(RuntimeError, match="API unavailable"):
+                await witness.sweep_once()
+            first_evidence = await (
+                await admin.execute(
+                    "SELECT state, authority_binding, outcome, terminated_at "
+                    "FROM worker_incarnations WHERE incarnation = %s",
+                    (holder,),
+                )
+            ).fetchone()
+
+            assert await witness.sweep_once() == 1
+            second_evidence = await (
+                await admin.execute(
+                    "SELECT state, authority_binding, outcome, terminated_at "
+                    "FROM worker_incarnations WHERE incarnation = %s",
+                    (holder,),
+                )
+            ).fetchone()
+            assert patch_attempts == 2
+            assert second_evidence == first_evidence
+        finally:
+            await admin.close()
+            await witness_connection.close()
+
+    asyncio.run(run())
+
+
+def test_termination_confirmation_requires_exact_binding_and_outcome(migrated_url: str) -> None:
+    async def run() -> None:
+        holder = "kubernetes:kdive:kdive-worker-0:uid-exact"
+        binding = {"namespace": "kdive", "name": "kdive-worker-0", "uid": "uid-exact"}
+        witness = await _witness_connection(migrated_url)
+        admin = await connect(migrated_url)
+        try:
+            await register_worker_incarnation(
+                witness,
+                holder,
+                "kubernetes",
+                binding,
+                hashlib.sha256(b"exact-credential").digest(),
+                CURRENT_WORKER_FENCE_PROTOCOL,
+            )
+            assert await terminate_worker_incarnation(
+                witness, holder, "kubernetes", binding, "failed"
+            )
+            evidence = await (
+                await admin.execute(
+                    "SELECT state, authority_binding, outcome, terminated_at "
+                    "FROM worker_incarnations WHERE incarnation = %s",
+                    (holder,),
+                )
+            ).fetchone()
+            assert await terminate_worker_incarnation(
+                witness, holder, "kubernetes", binding, "failed"
+            )
+            assert not await terminate_worker_incarnation(
+                witness,
+                holder,
+                "kubernetes",
+                {**binding, "uid": "other-uid"},
+                "failed",
+            )
+            assert not await terminate_worker_incarnation(
+                witness, holder, "kubernetes", binding, "killed"
+            )
+            unchanged = await (
+                await admin.execute(
+                    "SELECT state, authority_binding, outcome, terminated_at "
+                    "FROM worker_incarnations WHERE incarnation = %s",
+                    (holder,),
+                )
+            ).fetchone()
+            assert unchanged == evidence
+        finally:
+            await admin.close()
+            await witness.close()
+
+    asyncio.run(run())

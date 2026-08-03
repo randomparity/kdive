@@ -342,12 +342,18 @@ async def _register(holder: str, container_id: str, credential_hash: bytes) -> N
         await conn.close()
 
 
-async def _terminate(holder: str, outcome: str) -> None:
+async def _terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
     if outcome not in {"succeeded", "failed", "killed"}:
         raise RuntimeError("Docker lifecycle produced an unsupported termination outcome")
     conn = await psycopg.AsyncConnection.connect(require(LIFECYCLE_WITNESS_DATABASE_URL))
     try:
-        await terminate_worker_incarnation(conn, holder, outcome)  # type: ignore[arg-type]
+        await terminate_worker_incarnation(
+            conn,
+            holder,
+            "docker",
+            binding,
+            outcome,  # type: ignore[arg-type]
+        )
     finally:
         await conn.close()
 

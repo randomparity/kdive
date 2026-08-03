@@ -100,15 +100,19 @@ async def authenticate_worker_incarnation(
 
 
 async def terminate_worker_incarnation(
-    conn: AsyncConnection, incarnation: str, outcome: TerminationOutcome
+    conn: AsyncConnection,
+    incarnation: str,
+    authority_kind: AuthorityKind,
+    binding: dict[str, Any],
+    outcome: TerminationOutcome,
 ) -> bool:
-    """Ask the lifecycle-witness authority to terminate one exact incarnation."""
+    """Terminate or confirm one exact immutable authority-bound incarnation."""
     require_top_level_transaction(conn, "terminate_worker_incarnation")
     async with conn.transaction():
         row = await (
             await conn.execute(
-                "SELECT public.terminate_worker_incarnation(%s, %s)",
-                (incarnation, outcome),
+                "SELECT public.terminate_worker_incarnation(%s, %s, %s, %s)",
+                (incarnation, authority_kind, Jsonb(binding), outcome),
             )
         ).fetchone()
     assert row is not None

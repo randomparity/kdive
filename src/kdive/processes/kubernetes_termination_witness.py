@@ -22,7 +22,7 @@ _MAX_PASS_COUNT = 1_000
 
 type ReadPod = Callable[[str, str], Mapping[str, Any] | None]
 type PatchFinalizers = Callable[[str, str, list[dict[str, object]]], Awaitable[None]]
-type TerminateIncarnation = Callable[[str, str], Awaitable[bool]]
+type TerminateIncarnation = Callable[[str, dict[str, str], str], Awaitable[bool]]
 
 _TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _CA = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
@@ -145,7 +145,8 @@ class KubernetesTerminationWitness:
                     break
                 uid, resource_version, phase, index = claim
                 holder = f"kubernetes:{self.namespace}:{name}:{uid}"
-                if not await self.terminate(holder, f"kubernetes_pod_{phase}"):
+                binding = {"namespace": self.namespace, "name": name, "uid": uid}
+                if not await self.terminate(holder, binding, f"kubernetes_pod_{phase}"):
                     break
                 operations: list[dict[str, object]] = [
                     {"op": "test", "path": "/metadata/uid", "value": uid},

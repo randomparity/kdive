@@ -20,7 +20,7 @@ _CREDENTIAL = re.compile(r"[0-9a-f]{64}")
 
 type Inspect = Callable[[str], Mapping[str, object] | None]
 type Register = Callable[[str, str, bytes], Awaitable[None]]
-type Terminate = Callable[[str, str], Awaitable[None]]
+type Terminate = Callable[[str, dict[str, str], str], Awaitable[None]]
 type ContainerOperation = Callable[[str], Awaitable[None]]
 type Credential = Callable[[], str]
 type InjectCredential = Callable[[str, str], Awaitable[None]]
@@ -122,7 +122,7 @@ class WorkerLifecycleGate:
             raise RuntimeError("exact worker container did not reach a retained terminal state")
         exit_code = state.get("ExitCode")
         outcome = "succeeded" if exit_code == 0 else "killed" if exit_code == 137 else "failed"
-        await self.terminate(holder, outcome)
+        await self.terminate(holder, {"container_id": container_id}, outcome)
         await self.remove(container_id)
 
 

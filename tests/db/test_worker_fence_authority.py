@@ -365,6 +365,7 @@ def residual_privilege_role_dsn(pg_conn: psycopg.Connection) -> Iterator[RoleDsn
             "0106_worker_fence_protocol_claim.sql",
             "0108_worker_fence_runtime_paths.sql",
             "0109_kubernetes_credential_envelopes.sql",
+            "0110_idempotent_worker_termination.sql",
         ):
             role_sql = (migrate.SCHEMA_DIR / filename).read_bytes()
             for canonical, isolated in roles.items():
@@ -396,7 +397,8 @@ def _login_operation_succeeds(conn: psycopg.Connection, operation: str) -> bool:
             )
         elif operation == "terminate_function":
             conn.execute(
-                "SELECT public.terminate_worker_incarnation(%s, %s)", ("missing", "failed")
+                "SELECT public.terminate_worker_incarnation(%s, %s, %s, %s)",
+                ("missing", "docker", Jsonb({"container_id": "a" * 64}), "failed"),
             )
         elif operation == "direct_delete_use":
             conn.execute("DELETE FROM investigation_build_uses")
@@ -569,8 +571,8 @@ def _seed_paginated_uses(pg_conn: psycopg.Connection, role_dsn: RoleDsns) -> _Pa
         )
     with psycopg.connect(role_dsn("kdive_lifecycle_witness"), autocommit=True) as witness:
         assert witness.execute(
-            "SELECT public.terminate_worker_incarnation(%s, 'killed')",
-            (recoverable_holder,),
+            "SELECT public.terminate_worker_incarnation(%s, 'docker', %s, 'killed')",
+            (recoverable_holder, Jsonb({"container_id": "a" * 64})),
         ).fetchone() == (True,)
     return _PaginatedUses(blocked, recoverable, foreign, recoverable_holder)
 
@@ -725,7 +727,8 @@ def test_server_role_recovers_one_exact_build_use_through_the_operator_tool(
     )
     with psycopg.connect(role_dsn("kdive_lifecycle_witness"), autocommit=True) as witness:
         assert witness.execute(
-            "SELECT public.terminate_worker_incarnation(%s, 'killed')", (holder,)
+            "SELECT public.terminate_worker_incarnation(%s, 'docker', %s, 'killed')",
+            (holder, Jsonb({"container_id": "a" * 64})),
         ).fetchone() == (True,)
 
     async def exercise() -> None:
@@ -1429,7 +1432,7 @@ def test_migration_upgrade_resets_guarded_function_matrix(
     allowed = {
         "register_worker_incarnation(text,text,jsonb,bytea,integer)": {"kdive_lifecycle_witness"},
         "authenticate_worker_incarnation(bytea)": {"kdive_worker"},
-        "terminate_worker_incarnation(text,text)": {"kdive_lifecycle_witness"},
+        "terminate_worker_incarnation(text,text,jsonb,text)": {"kdive_lifecycle_witness"},
         "acquire_investigation_build_use(uuid,uuid,uuid,uuid,integer,bytea)": {"kdive_worker"},
         "release_investigation_build_use(uuid,bytea)": {"kdive_worker"},
         "list_investigation_build_uses(text[],timestamptz,uuid,integer)": {"kdive_server"},
@@ -1865,7 +1868,8 @@ def test_termination_serializes_before_acquisition(
         ThreadPoolExecutor(max_workers=1) as executor,
     ):
         assert witness.execute(
-            "SELECT public.terminate_worker_incarnation(%s, 'killed')", (holder,)
+            "SELECT public.terminate_worker_incarnation(%s, 'docker', %s, 'killed')",
+            (holder, Jsonb({"container_id": "a" * 64})),
         ).fetchone() == (True,)
         future = executor.submit(acquire)
         assert started.wait(timeout=2)
@@ -1900,7 +1904,8 @@ def test_recovery_joins_and_persists_authoritative_project(
     )
     with psycopg.connect(role_dsn("kdive_lifecycle_witness"), autocommit=True) as witness:
         assert witness.execute(
-            "SELECT public.terminate_worker_incarnation(%s, 'killed')", (holder,)
+            "SELECT public.terminate_worker_incarnation(%s, 'docker', %s, 'killed')",
+            (holder, Jsonb({"container_id": "a" * 64})),
         ).fetchone() == (True,)
 
     with psycopg.connect(role_dsn("kdive_reconciler"), autocommit=True) as reconciler:

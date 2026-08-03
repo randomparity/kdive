@@ -80,7 +80,13 @@ async def _seed(pool: AsyncConnectionPool, *, terminated: bool = False) -> tuple
         )
     if terminated:
         async with pool.connection() as conn:
-            await terminate_worker_incarnation(conn, holder, "failed")
+            await terminate_worker_incarnation(
+                conn,
+                holder,
+                "local",
+                {"host": "host-a", "pid": 42, "boot_id": "boot-123", "start_ticks": "987"},
+                "failed",
+            )
     return use_id, holder
 
 
@@ -109,7 +115,18 @@ def test_recover_build_use_requires_operator_and_independent_death_proof(
             assert no_proof.error_category == "configuration_error"
 
             async with pool.connection() as conn:
-                await terminate_worker_incarnation(conn, holder, "failed")
+                await terminate_worker_incarnation(
+                    conn,
+                    holder,
+                    "local",
+                    {
+                        "host": "host-a",
+                        "pid": 42,
+                        "boot_id": "boot-123",
+                        "start_ticks": "987",
+                    },
+                    "failed",
+                )
 
             async with pool.connection() as conn:
                 expected_use = await (

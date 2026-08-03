@@ -58,7 +58,7 @@ def test_gate_commits_binding_before_start_and_termination_before_remove() -> No
     async def inject(value: str, credential: str) -> None:
         events.append(("inject", (value, credential)))
 
-    async def terminate(holder: str, outcome: str) -> None:
+    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
         events.append(("terminate", f"{holder}:{outcome}"))
 
     async def start(value: str) -> None:
@@ -124,7 +124,7 @@ def test_registration_outage_prevents_credential_injection_and_start() -> None:
         project="kdive",
         inspect=lambda value: state,
         register=register,
-        terminate=lambda holder, outcome: _done(),
+        terminate=lambda holder, binding, outcome: _done(),
         credential=lambda: _CREDENTIAL,
         inject=inject,
         start=start,
@@ -147,7 +147,7 @@ def test_termination_outage_retains_terminal_container() -> None:
         events.append("stop")
         state["State"] = {"Status": "exited", "ExitCode": 137}
 
-    async def terminate(holder: str, outcome: str) -> None:
+    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
         events.append("terminate")
         raise RuntimeError("database unavailable")
 
@@ -179,7 +179,7 @@ def test_gate_records_sigkill_as_killed_before_removal() -> None:
     state["State"] = {"Status": "exited", "ExitCode": 137, "OOMKilled": False}
     outcomes: list[str] = []
 
-    async def terminate(holder: str, outcome: str) -> None:
+    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
         outcomes.append(outcome)
 
     gate = WorkerLifecycleGate(
@@ -205,7 +205,7 @@ def test_gate_reconciles_retained_terminal_worker_before_requesting_replacement(
     state = _worker(container_id, nonce, status="exited")
     events: list[str] = []
 
-    async def terminate(holder: str, outcome: str) -> None:
+    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
         events.append("terminate")
 
     async def remove(value: str) -> None:
@@ -241,7 +241,7 @@ def test_gate_refuses_short_ids_and_wrong_exact_binding() -> None:
         project="kdive",
         inspect=lambda value: state,
         register=lambda holder, binding, credential_hash: _done(),
-        terminate=lambda holder, outcome: _done(),
+        terminate=lambda holder, binding, outcome: _done(),
         credential=lambda: _CREDENTIAL,
         inject=lambda value, credential: _done(),
         start=_done,
@@ -262,7 +262,7 @@ def test_runtime_absence_never_publishes_termination() -> None:
     container_id = "a" * 64
     terminated = False
 
-    async def terminate(holder: str, outcome: str) -> None:
+    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
         nonlocal terminated
         terminated = True
 
@@ -298,7 +298,7 @@ def test_gate_rejects_non_256_bit_hex_credentials(credential: str) -> None:
         project="kdive",
         inspect=lambda value: state,
         register=register,
-        terminate=lambda holder, outcome: _done(),
+        terminate=lambda holder, binding, outcome: _done(),
         credential=lambda: credential,
         inject=lambda value, supplied: _done(),
         start=_done,

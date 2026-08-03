@@ -210,7 +210,9 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
                 reason="dead worker cleanup",
             )
             for holder in ("dead-worker", "recycled-worker"):
-                await terminate_worker_incarnation(conn, holder, "failed")
+                await terminate_worker_incarnation(
+                    conn, holder, "local", {"test_identity": holder}, "failed"
+                )
             assert await recover_build_use_after_confirmed_worker_death(
                 conn,
                 old_use,

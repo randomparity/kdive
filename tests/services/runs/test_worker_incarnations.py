@@ -171,7 +171,13 @@ def test_terminated_incarnation_cannot_authenticate(migrated_url: str) -> None:
                 _credential_hash(credential),
                 _PROTOCOL,
             )
-            assert await terminate_worker_incarnation(witness, "docker:terminated", "killed")
+            assert await terminate_worker_incarnation(
+                witness,
+                "docker:terminated",
+                "docker",
+                {"container_id": "d" * 64},
+                "killed",
+            )
             with pytest.raises(incarnations.IncarnationAuthenticationError):
                 await incarnations.authenticate_worker_incarnation(worker, credential)
         finally:
@@ -220,7 +226,7 @@ def test_recovery_copies_exact_durable_termination_evidence(migrated_url: str) -
                 "(%s, %s, %s, %s, 1, %s, now() + interval '5 min')",
                 (use_id, investigation_id, generation, job_id, holder),
             )
-            assert await terminate_worker_incarnation(witness, holder, "killed")
+            assert await terminate_worker_incarnation(witness, holder, "docker", binding, "killed")
             assert await recover_build_use_after_confirmed_worker_death(
                 conn,
                 use_id,

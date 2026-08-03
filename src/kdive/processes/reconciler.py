@@ -176,11 +176,17 @@ async def run_reconciler_with_composition(
             finally:
                 await connection.close()
 
-        async def terminate(incarnation: str, outcome: str) -> bool:
+        async def terminate(
+            incarnation: str, authority_binding: dict[str, str], outcome: str
+        ) -> bool:
             terminal_outcome = "succeeded" if outcome.endswith("succeeded") else "failed"
             return await with_lifecycle_connection(
                 lambda connection: terminate_worker_incarnation(
-                    connection, incarnation, terminal_outcome
+                    connection,
+                    incarnation,
+                    "kubernetes",
+                    authority_binding,
+                    terminal_outcome,
                 )
             )
 

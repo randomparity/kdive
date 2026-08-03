@@ -515,10 +515,12 @@ def _gate(project: str, witness_dsn: str, credential_path: Path) -> WorkerLifecy
         finally:
             await conn.close()
 
-    async def terminate(holder: str, outcome: str) -> None:
+    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
         conn = await psycopg.AsyncConnection.connect(witness_dsn)
         try:
-            await terminate_worker_incarnation(conn, holder, cast(TerminationOutcome, outcome))
+            await terminate_worker_incarnation(
+                conn, holder, "docker", binding, cast(TerminationOutcome, outcome)
+            )
         finally:
             await conn.close()
 
