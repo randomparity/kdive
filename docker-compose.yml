@@ -72,6 +72,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    volumes:
+      - ./deploy/compose/bootstrap-migration-owner.sql:/docker-entrypoint-initdb.d/010-migration-owner.sql:ro
 
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
@@ -161,10 +163,26 @@ services:
     command: ["migrate"]
     environment:
       <<: *backends
-      KDIVE_DATABASE_URL: ${KDIVE_MIGRATION_DATABASE_URL:-postgresql://kdive:kdive@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
+      KDIVE_DATABASE_URL: ${KDIVE_MIGRATION_DATABASE_URL:-postgresql://kdive-migration:kdive-migration-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
     depends_on:
       postgres:
         condition: service_healthy
+
+  # The reference stack alone provisions these fixed local-development login members. Production
+  # deployments externally provision secret-backed members of the migration-created NOLOGIN
+  # capability roles. This one-shot runs after migrations create those capabilities and before any
+  # runtime process authenticates.
+  role-bootstrap:
+    image: postgres:17
+    entrypoint: ["/bin/bash", "/bootstrap/bootstrap-runtime-roles.sh"]
+    environment:
+      KDIVE_LOCAL_ROLE_BOOTSTRAP: ${KDIVE_LOCAL_ROLE_BOOTSTRAP:-1}
+      KDIVE_MIGRATION_DATABASE_URL: ${KDIVE_MIGRATION_DATABASE_URL:-postgresql://kdive-migration:kdive-migration-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
+    volumes:
+      - ./deploy/compose/bootstrap-runtime-roles.sh:/bootstrap/bootstrap-runtime-roles.sh:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   server:
     image: ${KDIVE_IMAGE:-kdive:dev}
@@ -177,7 +195,7 @@ services:
     restart: on-failure
     environment:
       <<: *backends
-      KDIVE_DATABASE_URL: postgresql://kdive:kdive@postgres:5432/kdive  # pragma: allowlist secret — local dev only
+      KDIVE_DATABASE_URL: ${KDIVE_SERVER_DATABASE_URL:-postgresql://kdive-server-member:kdive-server-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
       KDIVE_HTTP_HOST: 0.0.0.0
       KDIVE_HTTP_PORT: "8000"
       # Bind the aux health/metrics listener to all interfaces INSIDE the container so
@@ -213,6 +231,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      role-bootstrap:
+        condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
       oidc:
@@ -244,7 +264,7 @@ services:
     restart: on-failure
     environment:
       <<: *backends
-      KDIVE_DATABASE_URL: ${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker:kdive-worker@postgres:5432/kdive}  # pragma: allowlist secret — operator supplies a role member
+      KDIVE_DATABASE_URL: ${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker-member:kdive-worker-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9465
       KDIVE_WORKER_INCARNATION_KIND: docker
       KDIVE_WORKER_INCARNATION_ID: docker:${KDIVE_WORKER_INCARNATION_NONCE:-unmanaged}
@@ -269,6 +289,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      role-bootstrap:
+        condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
 
@@ -283,7 +305,7 @@ services:
     restart: on-failure
     environment:
       <<: *backends
-      KDIVE_DATABASE_URL: postgresql://kdive:kdive@postgres:5432/kdive  # pragma: allowlist secret — local dev only
+      KDIVE_DATABASE_URL: ${KDIVE_RECONCILER_DATABASE_URL:-postgresql://kdive-reconciler-member:kdive-reconciler-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9466
     healthcheck:
       <<: *readyz_cadence
@@ -300,6 +322,8 @@ services:
           sys.exit(0 if ok else 1)
     depends_on:
       migrate:
+        condition: service_completed_successfully
+      role-bootstrap:
         condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully

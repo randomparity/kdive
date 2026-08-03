@@ -51,6 +51,12 @@ pytestmark = pytest.mark.skipif(
 
 _COMPOSE_FILE = Path(__file__).resolve().parents[2] / "docker-compose.yml"
 _APP_SERVICES = ("server", "worker", "reconciler")
+_LOCAL_LOGIN_MEMBERS = {
+    "server": ("kdive-server-member", "kdive_server"),
+    "worker": ("kdive-worker-member", "kdive_worker"),
+    "reconciler": ("kdive-reconciler-member", "kdive_reconciler"),
+    "lifecycle-witness": ("kdive-witness-member", "kdive_lifecycle_witness"),
+}
 
 _VERSIONING_REPLIES = (
     (
@@ -225,6 +231,76 @@ def test_migrate_receives_migration_database_authority_only() -> None:
     assert migrate["environment"]["KDIVE_DATABASE_URL"] == migration_dsn
     assert "KDIVE_WORKER_DATABASE_URL" not in migrate["environment"]
     assert "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL" not in migrate["environment"]
+
+
+def test_clean_local_database_bootstraps_distinct_exact_login_members() -> None:
+    services = _services()
+    postgres = services["postgres"]
+    bootstrap = services["role-bootstrap"]
+
+    assert postgres["environment"] == {
+        "POSTGRES_DB": "kdive",
+        "POSTGRES_PASSWORD": "kdive",  # pragma: allowlist secret — asserted local default
+        "POSTGRES_USER": "kdive",
+    }
+    assert any(
+        volume["target"] == "/docker-entrypoint-initdb.d/010-migration-owner.sql"
+        and volume["read_only"] is True
+        for volume in postgres["volumes"]
+    )
+    migration_owner = (
+        _COMPOSE_FILE.parent / "deploy/compose/bootstrap-migration-owner.sql"
+    ).read_text()
+    assert 'CREATE ROLE "kdive-migration" LOGIN' in migration_owner
+    assert "kdive-migration-local" in migration_owner
+    assert bootstrap["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
+    assert bootstrap["entrypoint"] == ["/bin/bash", "/bootstrap/bootstrap-runtime-roles.sh"]
+    assert bootstrap["environment"]["KDIVE_LOCAL_ROLE_BOOTSTRAP"] == "1"
+    script = (_COMPOSE_FILE.parent / "deploy/compose/bootstrap-runtime-roles.sh").read_text()
+    for member, capability in _LOCAL_LOGIN_MEMBERS.values():
+        assert member in script
+        assert capability in script
+
+
+def test_every_runtime_waits_for_exact_local_role_bootstrap() -> None:
+    services = _services()
+    for service in _APP_SERVICES:
+        assert services[service]["depends_on"]["role-bootstrap"]["condition"] == (
+            "service_completed_successfully"
+        )
+
+
+def test_local_runtime_dsns_are_distinct_and_migration_owner_is_absent() -> None:
+    services = _services()
+    runtime = {name: services[name]["environment"]["KDIVE_DATABASE_URL"] for name in _APP_SERVICES}
+
+    assert len(set(runtime.values())) == len(runtime)
+    assert "kdive-server-member" in runtime["server"]
+    assert "kdive-worker-member" in runtime["worker"]
+    assert "kdive-reconciler-member" in runtime["reconciler"]
+    assert all("kdive-migration" not in dsn for dsn in runtime.values())
+
+
+def test_external_role_provisioning_can_disable_local_bootstrap_and_override_runtime_dsns() -> None:
+    model = _config(
+        {
+            "KDIVE_LOCAL_ROLE_BOOTSTRAP": "0",
+            "KDIVE_SERVER_DATABASE_URL": "postgresql://external-server@db/kdive",
+            "KDIVE_WORKER_DATABASE_URL": "postgresql://external-worker@db/kdive",
+            "KDIVE_RECONCILER_DATABASE_URL": "postgresql://external-reconciler@db/kdive",
+        }
+    )["services"]
+
+    assert model["role-bootstrap"]["environment"]["KDIVE_LOCAL_ROLE_BOOTSTRAP"] == "0"
+    assert model["server"]["environment"]["KDIVE_DATABASE_URL"] == (
+        "postgresql://external-server@db/kdive"
+    )
+    assert model["worker"]["environment"]["KDIVE_DATABASE_URL"] == (
+        "postgresql://external-worker@db/kdive"
+    )
+    assert model["reconciler"]["environment"]["KDIVE_DATABASE_URL"] == (
+        "postgresql://external-reconciler@db/kdive"
+    )
 
 
 def _minio_init_script() -> str:

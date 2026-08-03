@@ -288,19 +288,24 @@ changelog:
 
 # Start the operator backing services (Postgres + MinIO + mock OIDC) for a live run.
 compose-up:
-    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:?set the lifecycle-witness DSN}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:?set the worker-role DSN}" uv run python -m kdive.processes.compose_worker_lifecycle up
+    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker-member:kdive-worker-local@postgres:5432/kdive}" uv run python -m kdive.processes.compose_worker_lifecycle up # pragma: allowlist secret — local dev only
 
 compose-recreate-worker:
-    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:?set the lifecycle-witness DSN}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:?set the worker-role DSN}" uv run python -m kdive.processes.compose_worker_lifecycle recreate
+    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker-member:kdive-worker-local@postgres:5432/kdive}" uv run python -m kdive.processes.compose_worker_lifecycle recreate # pragma: allowlist secret — local dev only
 
 # Stop the operator backing services and remove their volumes.
 compose-down:
-    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:?set the lifecycle-witness DSN}" uv run python -m kdive.processes.compose_worker_lifecycle down --volumes
+    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" uv run python -m kdive.processes.compose_worker_lifecycle down --volumes # pragma: allowlist secret — local dev only
+
+# Run the isolated executable Compose/Docker lifecycle proof. The explicit environment makes
+# unavailable Docker a failure and guarantees that the sole carrier cannot report a skip as proof.
+test-compose-lifecycle:
+    KDIVE_RUN_COMPOSE_LIFECYCLE_PROOF=1 KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest tests/compose/test_compose_worker_lifecycle_live.py -m live_stack --strict-markers -q
 
 # Lint and format-check the shell scripts (recursively under scripts/).
 lint-shell:
-    shfmt -f scripts deploy/remote-libvirt-guest-helpers deploy/ansible/tests | xargs shellcheck
-    shfmt -i 2 -d scripts deploy/remote-libvirt-guest-helpers deploy/ansible/tests
+    shfmt -f scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/tests | xargs shellcheck
+    shfmt -i 2 -d scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/tests
 
 # Lint and syntax-check the Ansible automation (deploy/ansible).
 lint-ansible:

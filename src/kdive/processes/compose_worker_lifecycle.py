@@ -10,13 +10,15 @@ import json
 import os
 import re
 import secrets
+import selectors
 import stat
 import subprocess
 import tarfile
+import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Protocol
+from typing import IO, Protocol
 
 import psycopg
 
@@ -43,6 +45,29 @@ _PROFILE = ("--profile", "managed-worker")
 _PROJECT = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}")
 _FULL_ID = re.compile(r"[0-9a-f]{64}")
 _CREDENTIAL = re.compile(r"[0-9a-f]{64}")
+_INSPECT_TIMEOUT_SECONDS = 5
+_INSPECT_STDOUT_BYTES = 1_048_576
+_INSPECT_STDERR_BYTES = 65_536
+_COMMAND_STDOUT_BYTES = 1_048_576
+_COMMAND_STDERR_BYTES = 1_048_576
+_COMMAND_TIMEOUTS = {
+    "compose-up": 600,
+    "compose-create": 120,
+    "compose-ps": 30,
+    "compose-down": 120,
+    "start": 30,
+    "stop": 45,
+    "rm": 30,
+}
+
+
+class CommandOutputTooLarge(RuntimeError):
+    """A child command exceeded one of its bounded output streams."""
+
+    def __init__(self, stream: str, limit: int) -> None:
+        super().__init__(f"{stream} exceeded its {limit}-byte bound")
+        self.stream = stream
+        self.limit = limit
 
 
 class LifecycleGate(Protocol):
@@ -135,23 +160,162 @@ class ComposeWorkerLifecycle:
         self._command(args, None)
 
 
-def _command(argv: tuple[str, ...], extra_env: dict[str, str] | None = None) -> str:
-    result = subprocess.run(
+def _bounded_command(
+    argv: tuple[str, ...],
+    extra_env: dict[str, str] | None,
+    *,
+    timeout: float,
+    max_stdout_bytes: int,
+    max_stderr_bytes: int,
+) -> str:
+    process = subprocess.Popen(
         argv,
-        check=True,
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         env={**os.environ, **(extra_env or {})},
     )
-    return result.stdout
+    if process.stdout is None or process.stderr is None:  # pragma: no cover - Popen contract
+        process.kill()
+        raise RuntimeError("bounded lifecycle command did not expose output pipes")
+    streams: dict[int, tuple[str, int, IO[bytes]]] = {
+        process.stdout.fileno(): ("stdout", max_stdout_bytes, process.stdout),
+        process.stderr.fileno(): ("stderr", max_stderr_bytes, process.stderr),
+    }
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    selector = selectors.DefaultSelector()
+    for descriptor in streams:
+        selector.register(descriptor, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            ready = selector.select(remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            for key, _ in ready:
+                descriptor = key.fd
+                name, limit, stream = streams[descriptor]
+                chunk = os.read(descriptor, min(65_536, limit - len(output[name]) + 1))
+                if not chunk:
+                    selector.unregister(descriptor)
+                    stream.close()
+                    continue
+                output[name].extend(chunk)
+                if len(output[name]) > limit:
+                    raise CommandOutputTooLarge(name, limit)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        returncode = process.wait(timeout=remaining)
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        raise
+    finally:
+        selector.close()
+        for _, _, stream in streams.values():
+            if not stream.closed:
+                stream.close()
+    stdout = output["stdout"].decode("utf-8", errors="replace")
+    stderr = output["stderr"].decode("utf-8", errors="replace")
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, argv, output=stdout, stderr=stderr)
+    return stdout
+
+
+def _command_timeout(argv: tuple[str, ...]) -> int:
+    if len(argv) >= 3 and argv[:2] == _COMPOSE:
+        for operation in ("up", "create", "ps", "down"):
+            if operation in argv[2:]:
+                return _COMMAND_TIMEOUTS[f"compose-{operation}"]
+    if len(argv) >= 2 and argv[0] == "docker" and argv[1] in {"start", "stop", "rm"}:
+        return _COMMAND_TIMEOUTS[argv[1]]
+    return 120
+
+
+def _command(argv: tuple[str, ...], extra_env: dict[str, str] | None = None) -> str:
+    return _bounded_command(
+        argv,
+        extra_env,
+        timeout=_command_timeout(argv),
+        max_stdout_bytes=_COMMAND_STDOUT_BYTES,
+        max_stderr_bytes=_COMMAND_STDERR_BYTES,
+    )
+
+
+def _project_command(
+    project: str, argv: tuple[str, ...], extra_env: dict[str, str] | None = None
+) -> str:
+    return _command(argv, {"COMPOSE_PROJECT_NAME": project, **(extra_env or {})})
 
 
 def _inspect(container_id: str) -> Mapping[str, object] | None:
-    result = _command(("docker", "inspect", container_id), None)
-    decoded = json.loads(result)
+    if not _FULL_ID.fullmatch(container_id):
+        raise RuntimeError("Docker inspect requires an exact 64-character container ID")
+    try:
+        result = _bounded_command(
+            ("docker", "inspect", container_id),
+            None,
+            timeout=_INSPECT_TIMEOUT_SECONDS,
+            max_stdout_bytes=_INSPECT_STDOUT_BYTES,
+            max_stderr_bytes=_INSPECT_STDERR_BYTES,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Docker inspect exceeded its 5-second bound") from exc
+    except CommandOutputTooLarge as exc:
+        raise RuntimeError("Docker inspect output exceeded its bounded transport") from exc
+    try:
+        decoded = json.loads(result)
+    except (json.JSONDecodeError, RecursionError) as exc:
+        raise RuntimeError("Docker inspect returned invalid bounded JSON") from exc
+    return _bounded_inspect_schema(decoded)
+
+
+def _bounded_inspect_schema(decoded: object) -> Mapping[str, object] | None:
     if not isinstance(decoded, list) or len(decoded) != 1 or not isinstance(decoded[0], dict):
         return None
-    return decoded[0]
+    container = decoded[0]
+    container_id = container.get("Id")
+    config = container.get("Config")
+    state = container.get("State")
+    if (
+        not isinstance(container_id, str)
+        or not _FULL_ID.fullmatch(container_id)
+        or not isinstance(config, dict)
+        or not isinstance(state, dict)
+    ):
+        raise RuntimeError("Docker inspect identity does not match the bounded schema")
+    labels = config.get("Labels")
+    environment = config.get("Env")
+    status = state.get("Status")
+    exit_code = state.get("ExitCode")
+    if (
+        not isinstance(labels, dict)
+        or len(labels) > 256
+        or any(
+            not isinstance(key, str)
+            or len(key) > 1_024
+            or not isinstance(value, str)
+            or len(value) > 1_024
+            for key, value in labels.items()
+        )
+        or not isinstance(environment, list)
+        or len(environment) > 512
+        or any(not isinstance(value, str) or len(value) > 4_096 for value in environment)
+        or not isinstance(status, str)
+        or len(status) > 32
+        or not isinstance(exit_code, int)
+        or isinstance(exit_code, bool)
+    ):
+        raise RuntimeError("Docker inspect identity does not match the bounded schema")
+    return {
+        "Id": container_id,
+        "Config": {"Labels": labels, "Env": environment},
+        "State": {"Status": status, "ExitCode": exit_code},
+    }
 
 
 async def _docker_operation(operation: str, container_id: str) -> None:
@@ -305,7 +469,7 @@ def _lifecycle(project: str) -> ComposeWorkerLifecycle:
         remove=lambda container_id: _docker_operation("rm", container_id),
     )
     return ComposeWorkerLifecycle(
-        command=_command,
+        command=lambda argv, env: _project_command(project, argv, env),
         gate=gate,
         prepare_credential=lambda: _prepare_credential_file(credential_path),
         create_environment=lambda: {

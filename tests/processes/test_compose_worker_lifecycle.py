@@ -2,7 +2,10 @@
 
 import asyncio
 import io
+import subprocess
+import sys
 import tarfile
+import time
 from pathlib import Path
 from typing import cast
 
@@ -205,3 +208,204 @@ def test_generated_credential_is_durable_before_database_registration(
     assert compose_worker_lifecycle._credential(handoff) == _CREDENTIAL
     assert handoff.read_text(encoding="utf-8") == _CREDENTIAL
     assert handoff.stat().st_mode & 0o777 == 0o600
+
+
+def test_inspect_times_out_with_a_dedicated_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, object] = {}
+
+    def command(
+        argv: tuple[str, ...],
+        extra_env: dict[str, str] | None,
+        *,
+        timeout: float,
+        max_stdout_bytes: int,
+        max_stderr_bytes: int,
+    ) -> str:
+        observed.update(
+            argv=argv,
+            extra_env=extra_env,
+            timeout=timeout,
+            max_stdout_bytes=max_stdout_bytes,
+            max_stderr_bytes=max_stderr_bytes,
+        )
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    monkeypatch.setattr(compose_worker_lifecycle, "_bounded_command", command, raising=False)
+
+    with pytest.raises(RuntimeError, match="inspect.*second bound"):
+        compose_worker_lifecycle._inspect("a" * 64)
+
+    assert observed == {
+        "argv": ("docker", "inspect", "a" * 64),
+        "extra_env": None,
+        "timeout": 5,
+        "max_stdout_bytes": 1_048_576,
+        "max_stderr_bytes": 65_536,
+    }
+
+
+def test_inspect_refuses_oversized_output_before_json_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed = False
+
+    def command(*args: object, **kwargs: object) -> str:
+        raise compose_worker_lifecycle.CommandOutputTooLarge("stdout", 1_048_576)
+
+    def loads(value: str) -> object:
+        nonlocal parsed
+        parsed = True
+        return []
+
+    monkeypatch.setattr(compose_worker_lifecycle, "_bounded_command", command, raising=False)
+    monkeypatch.setattr(compose_worker_lifecycle.json, "loads", loads)
+
+    with pytest.raises(RuntimeError, match="inspect output exceeded"):
+        compose_worker_lifecycle._inspect("a" * 64)
+
+    assert parsed is False
+
+
+@pytest.mark.parametrize(("descriptor", "stream"), [(1, "stdout"), (2, "stderr")])
+def test_bounded_command_kills_oversized_output(descriptor: int, stream: str) -> None:
+    with pytest.raises(compose_worker_lifecycle.CommandOutputTooLarge) as raised:
+        compose_worker_lifecycle._bounded_command(
+            (sys.executable, "-c", f"import os; os.write({descriptor}, b'x' * 65)"),
+            None,
+            timeout=5,
+            max_stdout_bytes=64,
+            max_stderr_bytes=64,
+        )
+
+    assert raised.value.stream == stream
+    assert raised.value.limit == 64
+
+
+def test_bounded_command_kills_a_stalled_child_at_its_deadline() -> None:
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        compose_worker_lifecycle._bounded_command(
+            (sys.executable, "-c", "import time; time.sleep(10)"),
+            None,
+            timeout=0.1,
+            max_stdout_bytes=64,
+            max_stderr_bytes=64,
+        )
+
+    assert time.monotonic() - started < 2
+
+
+def test_inspect_returns_only_the_bounded_identity_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = (
+        '[{"Id":"' + "a" * 64 + '","Config":{"Labels":{'
+        '"com.docker.compose.project":"kdive",'
+        '"com.docker.compose.service":"worker",'
+        '"io.kdive.managed-worker":"true"},'
+        '"Env":["KDIVE_WORKER_INCARNATION_ID=docker:' + "0" * 32 + '"]},'
+        '"State":{"Status":"exited","ExitCode":137,"OOMKilled":false},'
+        '"UnboundedIgnored":{"nested":"value"}}]'
+    )
+    monkeypatch.setattr(
+        compose_worker_lifecycle,
+        "_bounded_command",
+        lambda *args, **kwargs: document,
+        raising=False,
+    )
+
+    assert compose_worker_lifecycle._inspect("a" * 64) == {
+        "Id": "a" * 64,
+        "Config": {
+            "Labels": {
+                "com.docker.compose.project": "kdive",
+                "com.docker.compose.service": "worker",
+                "io.kdive.managed-worker": "true",
+            },
+            "Env": [f"KDIVE_WORKER_INCARNATION_ID=docker:{'0' * 32}"],
+        },
+        "State": {"Status": "exited", "ExitCode": 137},
+    }
+
+
+def test_inspect_refuses_an_oversized_environment_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = (
+        '[{"Id":"'
+        + "a" * 64
+        + '","Config":{"Labels":{},"Env":['
+        + ",".join('"x"' for _ in range(513))
+        + ']},"State":{"Status":"created","ExitCode":0}}]'
+    )
+    monkeypatch.setattr(
+        compose_worker_lifecycle,
+        "_bounded_command",
+        lambda *args, **kwargs: document,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="bounded schema"):
+        compose_worker_lifecycle._inspect("a" * 64)
+
+
+def test_lifecycle_commands_use_operation_specific_deadlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deadlines: dict[tuple[str, ...], float] = {}
+
+    def command(
+        argv: tuple[str, ...],
+        extra_env: dict[str, str] | None,
+        *,
+        timeout: float,
+        max_stdout_bytes: int,
+        max_stderr_bytes: int,
+    ) -> str:
+        deadlines[argv] = timeout
+        return ""
+
+    monkeypatch.setattr(compose_worker_lifecycle, "_bounded_command", command, raising=False)
+    commands = (
+        ("docker", "compose", "up", "-d"),
+        ("docker", "compose", "--profile", "managed-worker", "create", "worker"),
+        ("docker", "compose", "--profile", "managed-worker", "ps", "-q", "worker"),
+        ("docker", "compose", "down"),
+        ("docker", "start", "a" * 64),
+        ("docker", "stop", "a" * 64),
+        ("docker", "rm", "a" * 64),
+    )
+    for argv in commands:
+        compose_worker_lifecycle._command(argv, None)
+
+    assert deadlines == {
+        commands[0]: 600,
+        commands[1]: 120,
+        commands[2]: 30,
+        commands[3]: 120,
+        commands[4]: 30,
+        commands[5]: 45,
+        commands[6]: 30,
+    }
+
+
+def test_project_command_pins_every_compose_operation_to_the_requested_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
+    monkeypatch.setattr(
+        compose_worker_lifecycle,
+        "_command",
+        lambda argv, env: observed.append((argv, env)) or "",
+    )
+
+    compose_worker_lifecycle._project_command(
+        "kdive-proof-a1b2", ("docker", "compose", "ps"), {"EXTRA": "value"}
+    )
+
+    assert observed == [
+        (
+            ("docker", "compose", "ps"),
+            {"COMPOSE_PROJECT_NAME": "kdive-proof-a1b2", "EXTRA": "value"},
+        )
+    ]

@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: kdive
+      POSTGRES_PASSWORD: kdive # pragma: allowlist secret — local proof only
+      POSTGRES_DB: kdive
+    command: ["postgres", "-c", "max_connections=100"]
+    ports:
+      - "127.0.0.1:${COMPOSE_PROOF_POSTGRES_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kdive -d kdive"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - proof-postgres:/var/lib/postgresql/data
+      - ${COMPOSE_PROOF_REPO_ROOT}/deploy/compose/bootstrap-migration-owner.sql:/docker-entrypoint-initdb.d/010-migration-owner.sql:ro
+
+  role-bootstrap:
+    image: postgres:17
+    profiles: ["bootstrap"]
+    entrypoint: ["/bin/bash", "/bootstrap/bootstrap-runtime-roles.sh"]
+    environment:
+      KDIVE_LOCAL_ROLE_BOOTSTRAP: "1"
+      KDIVE_MIGRATION_DATABASE_URL: postgresql://kdive-migration:kdive-migration-local@postgres:5432/kdive # pragma: allowlist secret — isolated local proof
+    volumes:
+      - ${COMPOSE_PROOF_REPO_ROOT}/deploy/compose/bootstrap-runtime-roles.sh:/bootstrap/bootstrap-runtime-roles.sh:ro
+
+  worker:
+    image: ${COMPOSE_PROOF_IMAGE}
+    profiles: ["managed-worker"]
+    user: "10001:10001"
+    labels:
+      io.kdive.managed-worker: "true"
+    entrypoint: ["python", "-c"]
+    command:
+      - |
+        import os, stat, time
+        path = "/run/kdive/worker-incarnation-credential"
+        value = open(path, encoding="utf-8").read()
+        assert os.getuid() == 10001
+        assert len(value) == 64
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o400
+        time.sleep(600)
+    environment:
+      KDIVE_WORKER_INCARNATION_ID: docker:${KDIVE_WORKER_INCARNATION_NONCE:-unmanaged}
+
+volumes:
+  proof-postgres:

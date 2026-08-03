@@ -21,6 +21,13 @@ from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCO
 
 _LOGIN_AUTHENTICATION = "worker-fence-test-authentication"
 _BINDING_MAX_BYTES = 4096
+_PROTECTED_TABLES = {
+    "investigation_build_use_recoveries",
+    "investigation_build_uses",
+    "schema_migrations",
+    "worker_incarnations",
+}
+_RUNTIME_DATA_ROLES = {"kdive_server", "kdive_worker", "kdive_reconciler"}
 
 
 @dataclass(frozen=True)
@@ -334,6 +341,52 @@ def test_migration_upgrade_scrubs_residual_table_mutation_grants(
             pytest.raises(psycopg.errors.InsufficientPrivilege),
         ):
             runtime.execute(SQL(operation))
+
+
+def test_runtime_roles_receive_data_access_without_crossing_fence_authority(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """Runtime processes can use ordinary data while guarded evidence stays API-only."""
+    ordinary_tables = {
+        str(row[0])
+        for row in pg_conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+        ).fetchall()
+    } - _PROTECTED_TABLES
+    sequences = {
+        str(row[0])
+        for row in pg_conn.execute(
+            "SELECT sequence_name FROM information_schema.sequences "
+            "WHERE sequence_schema = 'public'"
+        ).fetchall()
+    }
+    assert ordinary_tables
+
+    for role, login in role_dsn.logins.items():
+        for table in ordinary_tables:
+            privileges = pg_conn.execute(
+                "SELECT has_table_privilege(%s, %s, privilege) "
+                "FROM unnest(%s::text[]) AS privilege ORDER BY privilege",
+                (login, f"public.{table}", ["DELETE", "INSERT", "SELECT", "UPDATE"]),
+            ).fetchall()
+            expected = role in _RUNTIME_DATA_ROLES
+            assert privileges == [(expected,)] * 4, (role, table)
+        for table in _PROTECTED_TABLES:
+            privileges = pg_conn.execute(
+                "SELECT has_table_privilege(%s, %s, privilege) "
+                "FROM unnest(%s::text[]) AS privilege ORDER BY privilege",
+                (login, f"public.{table}", ["DELETE", "INSERT", "SELECT", "UPDATE"]),
+            ).fetchall()
+            assert privileges == [(False,)] * 4, (role, table)
+        for sequence in sequences:
+            privileges = pg_conn.execute(
+                "SELECT has_sequence_privilege(%s, %s, privilege) "
+                "FROM unnest(%s::text[]) AS privilege ORDER BY privilege",
+                (login, f"public.{sequence}", ["SELECT", "UPDATE", "USAGE"]),
+            ).fetchall()
+            expected = role in _RUNTIME_DATA_ROLES
+            assert privileges == [(expected,)] * 3, (role, sequence)
 
 
 def test_migration_upgrade_resets_guarded_function_matrix(
