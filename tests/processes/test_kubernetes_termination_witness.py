@@ -8,6 +8,7 @@ from email.message import Message
 import pytest
 from psycopg import AsyncConnection, sql
 
+import kdive.processes.lifecycle_witness as lifecycle_witness
 from kdive.processes.kubernetes_termination_witness import (
     KubernetesTerminationWitness,
     run_witness,
@@ -18,6 +19,12 @@ from kdive.services.runs.worker_incarnations import (
     terminate_worker_incarnation,
 )
 from tests.reconciler.conftest import connect
+
+
+def test_lifecycle_witness_process_exposes_its_runner() -> None:
+    assert lifecycle_witness.run_lifecycle_witness_body.__module__ == (
+        "kdive.processes.lifecycle_witness"
+    )
 
 
 def _pod(*, uid: str, phase: str, resource_version: str = "7") -> dict[str, object]:
