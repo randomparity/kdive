@@ -30,8 +30,8 @@ the literal `ops.build_uses_list` action with the last valid cursor or no cursor
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's data.next_cursor. A malformed or wrong-tool cursor is refused as invalid_cursor; retry with the returned cursor or omit it to restart from the oldest pin. |
-| `limit` | integer | no | Maximum oldest-first pin rows returned per request; this row-count limit has no clock, applies to one request, and is server-capped at 100. Higher values are clamped; the service may inspect one additional tenant-scoped row to set data.truncated. When truncated, pass data.next_cursor as cursor to continue. |
+| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's data.next_cursor. A malformed or wrong-tool cursor is refused as invalid_cursor; retry with the returned cursor in ops.build_uses_list or omit it to restart from the oldest pin. |
+| `limit` | integer | no | Maximum oldest-first pin rows returned per request; this row-count limit has no clock, applies to one request, and is server-capped at 100. Higher values are clamped; the service may inspect one additional tenant-scoped row to set data.truncated. When truncated, call ops.build_uses_list again with data.next_cursor as cursor to continue. |
 
 ## `ops.diagnostics`
 
@@ -163,8 +163,8 @@ reference clock; an empty or oversized field is refused without deletion.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `holder` | string | yes | Exact worker incarnation recorded on that use row; max 512 bytes in UTF-8 encoding. The byte limit has no clock and applies to this field in one recovery request; an empty or oversized value is refused without recovery, so retry with the exact bounded holder from `ops.build_uses_list`. |
-| `reason` | string | yes | Operator justification retained in the recovery ledger; max 512 bytes in UTF-8 encoding. The byte limit has no clock and applies to this field in one recovery request; an empty or oversized value is refused without recovery, so retry with a concise reason. |
+| `holder` | string | yes | Exact worker incarnation recorded on that use row; max 512 bytes in UTF-8 encoding. The byte limit has no clock and applies to this field in one recovery request; an empty or oversized value is refused without recovery, so retry with the exact bounded holder from ops.build_uses_list in ops.recover_build_use. |
+| `reason` | string | yes | Operator justification retained in the recovery ledger; max 512 bytes in UTF-8 encoding. The byte limit has no clock and applies to this field in one recovery request; an empty or oversized value is refused without recovery, so retry with a concise reason in ops.recover_build_use. |
 | `use_id` | string | yes | Exact stranded build-use UUID. |
 
 ## `ops.set_cost_class_coeff`

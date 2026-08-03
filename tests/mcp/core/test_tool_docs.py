@@ -554,6 +554,8 @@ def test_build_use_recovery_tools_state_complete_bounded_response_contract() -> 
     assert "clamped" in limit_text
     assert "data.next_cursor" in limit_text
     assert "invalid_cursor" in cursor_text
+    assert "ops.build_uses_list" in limit_text
+    assert "ops.build_uses_list" in cursor_text
 
     recovered = tools["ops.recover_build_use"]
     recovery_text = (recovered.description or "").lower()
@@ -568,6 +570,11 @@ def test_build_use_recovery_tools_state_complete_bounded_response_contract() -> 
         assert "no clock" in description
         assert "recovery request" in description
         assert "refused" in description
+    holder_text = recovered.parameters["properties"]["holder"]["description"].lower()
+    reason_text = recovered.parameters["properties"]["reason"]["description"].lower()
+    assert "ops.build_uses_list" in holder_text
+    assert "ops.recover_build_use" in holder_text
+    assert "ops.recover_build_use" in reason_text
 
 
 def test_jobs_wait_description_conveys_retry_contract() -> None:

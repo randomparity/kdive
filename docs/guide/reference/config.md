@@ -208,7 +208,7 @@
 | `KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_KEY` | reconciler | — | conditional | secret (ref only) |
 | `KDIVE_KUBERNETES_CREDENTIAL_ENVELOPE_KEY` | reconciler | — | conditional | secret (ref only) |
 | `KDIVE_KUBERNETES_WITNESS_NAMESPACE` | reconciler | `` | no | Namespace watched by the bounded worker termination witness; blank disables it. |
-| `KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING` | reconciler | `0` | no | Maximum exclusive worker ordinal polled by the Kubernetes termination witness; one configured witness pass may inspect at most 1,000 Pods. |
+| `KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING` | reconciler | `0` | no | Maximum exclusive worker ordinal polled by the Kubernetes termination witness. The unit is one exact Kubernetes Pod name per ordinal; the Kubernetes API result is the reference clock, not a database clock. This ceiling applies per reconciler pass and allows at most 1,000 Pods. A value above 1,000 is rejected at reconciler startup. This witness publishes no cursor: a terminal Pod whose durable transition or finalizer removal is not completed is retained and read again on the next scheduled pass. To recover, set KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING to an integer from 0 through 1,000 and restart the reconciler. |
 | `KDIVE_KUBERNETES_WITNESS_WORKER_NAME` | reconciler | `` | no | StatefulSet worker name prefix used with bounded ordinal Pod reads. |
 | `KDIVE_POD_NAME` | worker | — | conditional | Kubernetes worker Pod name supplied by the downward API. |
 | `KDIVE_POD_NAMESPACE` | worker | — | conditional | Kubernetes worker Pod namespace supplied by the downward API. |

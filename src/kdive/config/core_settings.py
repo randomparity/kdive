@@ -902,8 +902,14 @@ KUBERNETES_WITNESS_ORDINAL_CEILING = Setting(
     group="worker-death",
     processes=_RECONCILER,
     help=(
-        "Maximum exclusive worker ordinal polled by the Kubernetes termination witness; "
-        "one configured witness pass may inspect at most 1,000 Pods."
+        "Maximum exclusive worker ordinal polled by the Kubernetes termination witness. The unit "
+        "is one exact Kubernetes Pod name per ordinal; the Kubernetes API result is the reference "
+        "clock, not a database clock. This ceiling applies per reconciler pass and allows at most "
+        "1,000 Pods. A value above 1,000 is rejected at reconciler startup. This witness publishes "
+        "no cursor: a terminal Pod whose durable transition or finalizer removal is not completed "
+        "is retained and read again on the next scheduled pass. To recover, set "
+        "KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING to an integer from 0 through 1,000 and restart "
+        "the reconciler."
     ),
 )
 KUBERNETES_CREDENTIAL_BROKER_HOST = Setting(

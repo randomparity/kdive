@@ -244,7 +244,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
                     f"has no clock, applies to one request, and is server-capped at "
                     f"{_MAX_BUILD_USE_LIST_LIMIT}. Higher values are clamped; the service may "
                     "inspect one additional tenant-scoped row to set data.truncated. When "
-                    "truncated, pass data.next_cursor as cursor to continue."
+                    "truncated, call ops.build_uses_list again with data.next_cursor as cursor "
+                    "to continue."
                 )
             ),
         ] = 50,
@@ -254,7 +255,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
                 description=(
                     "Opaque continuation cursor from a prior page's data.next_cursor. A malformed "
                     "or wrong-tool cursor is refused as invalid_cursor; retry with the returned "
-                    "cursor or omit it to restart from the oldest pin."
+                    "cursor in ops.build_uses_list or omit it to restart from the oldest pin."
                 )
             ),
         ] = None,
@@ -294,7 +295,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
                     f"max {_MAX_HOLDER_BYTES} bytes in UTF-8 encoding. The byte limit has no "
                     "clock and applies to this field in one recovery request; an empty or "
                     "oversized value is refused without recovery, so retry with the exact "
-                    "bounded holder from `ops.build_uses_list`."
+                    "bounded holder from ops.build_uses_list in ops.recover_build_use."
                 )
             ),
         ],
@@ -306,7 +307,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
                     f"max {_MAX_REASON_BYTES} bytes in UTF-8 encoding. The byte limit has no "
                     "clock and applies to this field in one recovery request; an empty or "
                     "oversized value is refused without recovery, so retry with a concise "
-                    "reason."
+                    "reason in ops.recover_build_use."
                 )
             ),
         ],

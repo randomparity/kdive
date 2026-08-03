@@ -68,3 +68,24 @@ def test_kubernetes_witness_ceiling_is_bounded_to_one_thousand_rows(ceiling: str
 
     with pytest.raises(CategorizedError):
         config.validate("reconciler")
+
+
+def test_kubernetes_witness_ceiling_help_states_the_complete_pass_contract() -> None:
+    """The generated operator reference cannot omit this witness pass's limits or recovery."""
+    help_text = KUBERNETES_WITNESS_ORDINAL_CEILING.help.lower()
+
+    for fragment in (
+        "pod",
+        "kubernetes api",
+        "not a database clock",
+        "per reconciler pass",
+        "1,000",
+        "rejected at reconciler startup",
+        "no cursor",
+        "retained",
+        "next scheduled pass",
+        "integer from 0 through 1,000",
+        "kdive_kubernetes_witness_ordinal_ceiling",
+        "restart the reconciler",
+    ):
+        assert fragment in help_text
