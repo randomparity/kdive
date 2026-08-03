@@ -21,11 +21,16 @@ follow [`docs/operating/runbooks/kubernetes-deploy.md`](../../../docs/operating/
 
 ```sh
 helm install kdive deploy/helm/kdive \
-  --set config.KDIVE_DATABASE_URL='postgresql://<user>:<password>@<host>:5432/kdive' \
+  --values kdive-values.yaml \
   --set config.KDIVE_OIDC_ISSUER=https://idp.example/realms/kdive \
   --set config.KDIVE_OIDC_JWKS_URI=https://idp.example/realms/kdive/protocol/openid-connect/certs \
   --set config.KDIVE_S3_ENDPOINT_URL=https://s3.example
 ```
+
+The five `databaseCredentials.*` refs default to distinct keys in a `kdive-database` Secret;
+override them in `kdive-values.yaml` when the operator uses other names. See
+[Database credentials](#database-credentials). The chart never places a database DSN in the
+shared ConfigMap.
 
 The migrate Job runs as a `pre-install`/`pre-upgrade` hook — the external backend
 already exists, so migrations apply before the app rollout. Migrations must be
@@ -311,6 +316,31 @@ aux `/metrics` is never re-exposed off the cluster (keep it that way; do not Nod
 (endpoints, bucket, region, OIDC issuer). Do not put a database DSN with an embedded
 password or S3 secret keys into `config.*` in production.
 
+### Database credentials
+
+Create login members for the four non-login capability roles (`kdive_server`, `kdive_worker`,
+`kdive_reconciler`, and `kdive_lifecycle_witness`) and a separate migration owner. The migration
+owner needs the schema and role authority required by migrations; no runtime login may inherit it.
+On a new database, pre-create the exact capability roles and memberships or perform the equivalent
+two-stage migration and membership grant before allowing runtime Pods to start.
+
+Store the five DSNs in Kubernetes Secrets. One Secret with distinct keys is supported:
+
+```sh
+kubectl create secret generic kdive-database \
+  --from-file=migration-dsn=./migration.dsn \
+  --from-file=server-dsn=./server.dsn \
+  --from-file=worker-dsn=./worker.dsn \
+  --from-file=reconciler-dsn=./reconciler.dsn \
+  --from-file=lifecycle-witness-dsn=./lifecycle-witness.dsn
+```
+
+Point `databaseCredentials.migration`, `.server`, `.worker`, `.reconciler`, and
+`.lifecycleWitness` at their respective Secret names and keys. The chart rejects missing refs and
+any detectable reuse of the migration ref. The migration Job receives only the migration ref;
+runtime Pods receive only their process ref, with the lifecycle-witness ref additionally confined
+to the reconciler. Ref changes roll only affected runtime workloads.
+
 ### File-ref secrets (`secrets.secretName`)
 
 The file-ref secret backend (ADR-0027/ADR-0088 decision 3) resolves credentials from
@@ -358,7 +388,7 @@ helm install kdive deploy/helm/kdive \
   --set config.KDIVE_REMOTE_LIBVIRT_STORAGE_POOL=default \
   --set config.KDIVE_REMOTE_LIBVIRT_NETWORK=default \
   --set config.KDIVE_REMOTE_LIBVIRT_MACHINE=pc \
-  --set config.KDIVE_DATABASE_URL=... --set config.KDIVE_OIDC_ISSUER=...
+  --set config.KDIVE_OIDC_ISSUER=...
 ```
 
 The chart mounts the Secret **read-only** (`defaultMode 0440`) at `secrets.mountPath`

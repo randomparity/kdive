@@ -15,7 +15,7 @@ spec:
         app: {{ include "kdive.fullname" . }}-server
         {{- include "kdive.labels" . | nindent 8 }}
       annotations:
-        {{- include "kdive.configChecksum" . | nindent 8 }}
+        {{- include "kdive.processConfigChecksum" (dict "root" . "process" "server") | nindent 8 }}
         {{- include "kdive.scrapeAnnotations" 9464 | nindent 8 }}
     spec:
       serviceAccountName: {{ include "kdive.fullname" . }}-server
@@ -32,6 +32,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["server"]
           env:
+            {{- include "kdive.databaseEnv" .Values.databaseCredentials.server | nindent 12 }}
             - name: KDIVE_HTTP_HOST
               value: "0.0.0.0"
             - name: KDIVE_WORKER_DEATH_VERIFIER

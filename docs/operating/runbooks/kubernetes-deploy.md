@@ -97,10 +97,23 @@ remote-libvirt.
 
 ## 4. Install the chart
 
+Before install, create separate database login principals and a Secret containing the migration,
+server, worker, reconciler, and lifecycle-witness DSNs. The capability-role names and required
+membership shape are documented in the chart README. The examples use the chart's default Secret
+name and keys; production may use separate Secrets by overriding each `databaseCredentials.*` ref.
+
+```bash
+kubectl create secret generic kdive-database \
+  --from-file=migration-dsn=./migration.dsn \
+  --from-file=server-dsn=./server.dsn \
+  --from-file=worker-dsn=./worker.dsn \
+  --from-file=reconciler-dsn=./reconciler.dsn \
+  --from-file=lifecycle-witness-dsn=./lifecycle-witness.dsn
+```
+
 ```bash
 helm install kdive deploy/helm/kdive \
   --set image.repository=localhost:32000/kdive --set image.tag=$SHA \
-  --set config.KDIVE_DATABASE_URL='postgresql://kdive:<pw>@<pg-host>:5432/kdive' \
   --set config.KDIVE_OIDC_ISSUER='https://idp.example/realms/kdive' \
   --set config.KDIVE_OIDC_JWKS_URI='https://idp.example/realms/kdive/protocol/openid-connect/certs' \
   --set config.KDIVE_S3_ENDPOINT_URL='https://s3.example' \

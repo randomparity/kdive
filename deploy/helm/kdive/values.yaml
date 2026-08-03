@@ -25,6 +25,7 @@ observability:
   uiPort: 9090
 
 config:
+  # Deprecated and intentionally not rendered. Database credentials are Secret refs below.
   KDIVE_DATABASE_URL: ""
   KDIVE_OIDC_ISSUER: ""
   KDIVE_OIDC_JWKS_URI: ""
@@ -36,6 +37,26 @@ config:
   # leaked-domain sweep every pass on a missing socket. Disable it here (ADR-0127); remote
   # providers stay active. Set true only on a node that genuinely exposes a libvirt socket.
   KDIVE_LOCAL_LIBVIRT_ENABLED: "false"
+
+# Each process receives exactly one database login through a Secret key. The migration login owns
+# schema changes and must not be reused by a runtime process. A single Secret with distinct keys is
+# supported; use separate Secrets when that better matches the operator's rotation policy.
+databaseCredentials:
+  migration:
+    secretName: kdive-database # pragma: allowlist secret
+    key: migration-dsn
+  server:
+    secretName: kdive-database # pragma: allowlist secret
+    key: server-dsn
+  worker:
+    secretName: kdive-database # pragma: allowlist secret
+    key: worker-dsn
+  reconciler:
+    secretName: kdive-database # pragma: allowlist secret
+    key: reconciler-dsn
+  lifecycleWitness:
+    secretName: kdive-database # pragma: allowlist secret
+    key: lifecycle-witness-dsn
 
 # Optional declarative inventory (systems.toml, ADR-0112). Create a ConfigMap with a
 # `systems.toml` key and set configMapName to mount it on migrate/server/worker/reconciler.
@@ -92,9 +113,6 @@ workerCredentialBroker:
   envelopeKey:
     secretName: kdive-worker-credential-broker-envelope # pragma: allowlist secret
     key: envelope.key
-  lifecycleWitnessDatabase:
-    secretName: kdive-worker-credential-broker-database # pragma: allowlist secret
-    key: lifecycle-witness-dsn
 
 # The worker runs as a StatefulSet, not a Deployment (ADR-0514): each replica gets its OWN
 # build and install volume from volumeClaimTemplates, so scaling out no longer multi-attaches
@@ -134,6 +152,10 @@ demoCredentials:
     username: kdive
     password: kdive-demo # pragma: allowlist secret
     database: kdive
+    serverPassword: kdive-server-demo # pragma: allowlist secret
+    workerPassword: kdive-worker-demo # pragma: allowlist secret
+    reconcilerPassword: kdive-reconciler-demo # pragma: allowlist secret
+    lifecycleWitnessPassword: kdive-witness-demo # pragma: allowlist secret
   minio:
     rootUser: kdive
     rootPassword: kdive-demo-secret # pragma: allowlist secret

@@ -293,6 +293,97 @@ def test_renders_three_app_workloads_against_external_backends() -> None:
     assert "pre-install" in res.stdout
 
 
+def _container_env(doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    container = doc["spec"]["template"]["spec"]["containers"][0]
+    return {item["name"]: item for item in container.get("env", [])}
+
+
+def test_database_principals_are_distinct_secret_refs() -> None:
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://migration-owner/db")
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+    expected = {
+        "migrate": ("kdive-database", "migration-dsn"),
+        "server": ("kdive-database", "server-dsn"),
+        "worker": ("kdive-database", "worker-dsn"),
+        "reconciler": ("kdive-database", "reconciler-dsn"),
+    }
+    for suffix, (secret_name, key) in expected.items():
+        workload = next(
+            doc
+            for doc in docs
+            if doc.get("kind") in {"Deployment", "StatefulSet", "Job"}
+            and str(doc["metadata"]["name"]).endswith(f"-{suffix}")
+        )
+        ref = _container_env(workload)["KDIVE_DATABASE_URL"]["valueFrom"]["secretKeyRef"]
+        assert ref == {"name": secret_name, "key": key}
+
+    reconciler = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-reconciler")
+    )
+    witness = _container_env(reconciler)["KDIVE_LIFECYCLE_WITNESS_DATABASE_URL"]
+    assert witness["valueFrom"]["secretKeyRef"] == {
+        "name": "kdive-database",
+        "key": "lifecycle-witness-dsn",
+    }
+
+
+def test_shared_config_omits_database_credentials() -> None:
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://migration-owner/db")
+    assert res.returncode == 0, res.stderr
+    config = next(
+        doc
+        for doc in yaml.safe_load_all(res.stdout)
+        if isinstance(doc, dict)
+        and doc.get("kind") == "ConfigMap"
+        and str(doc["metadata"]["name"]).endswith("-config")
+    )
+    assert "KDIVE_DATABASE_URL" not in config["data"]
+    runtime_docs = [
+        doc
+        for doc in yaml.safe_load_all(res.stdout)
+        if isinstance(doc, dict) and doc.get("kind") in {"Deployment", "StatefulSet"}
+    ]
+    assert "migration-dsn" not in yaml.safe_dump_all(runtime_docs)
+
+
+@pytest.mark.parametrize(
+    "role", ["migration", "server", "worker", "reconciler", "lifecycleWitness"]
+)
+@pytest.mark.parametrize("field", ["secretName", "key"])
+def test_missing_database_credential_ref_is_rejected(role: str, field: str) -> None:
+    res = _template(f"databaseCredentials.{role}.{field}=")
+    assert res.returncode != 0
+    assert f"databaseCredentials.{role}" in res.stderr
+
+
+@pytest.mark.parametrize("role", ["server", "worker", "reconciler", "lifecycleWitness"])
+def test_runtime_database_credential_cannot_alias_migration_ref(role: str) -> None:
+    res = _template(f"databaseCredentials.{role}.key=migration-dsn")
+    assert res.returncode != 0
+    assert f"databaseCredentials.{role} must not alias databaseCredentials.migration" in res.stderr
+
+
+def test_database_principals_support_distinct_secrets_and_keys() -> None:
+    overrides = []
+    for role in ("migration", "server", "worker", "reconciler", "lifecycleWitness"):
+        overrides.extend(
+            [
+                f"databaseCredentials.{role}.secretName={role}-database",
+                f"databaseCredentials.{role}.key={role}-url",
+            ]
+        )
+    res = _template(*overrides)
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+    rendered = yaml.safe_dump_all(docs)
+    for role in ("migration", "server", "worker", "reconciler", "lifecycleWitness"):
+        assert f"name: {role}-database" in rendered
+        assert f"key: {role}-url" in rendered
+
+
 def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac() -> None:
     res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "worker.replicas=2")
     assert res.returncode == 0, res.stderr
@@ -393,10 +484,29 @@ def test_worker_credential_broker_is_private_tls_and_init_only() -> None:
         for item in reconciler["spec"]["template"]["spec"]["containers"][0]["env"]
         if item["name"] == "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL"
     )
-    assert (
-        lifecycle_dsn["valueFrom"]["secretKeyRef"]["name"]
-        == "kdive-worker-credential-broker-database"
+    assert lifecycle_dsn["valueFrom"]["secretKeyRef"]["name"] == "kdive-database"
+
+
+def test_worker_credential_broker_port_names_meet_kubernetes_limit() -> None:
+    res = _template()
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+    service = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Service"
+        and str(doc["metadata"]["name"]).endswith("-worker-credential-broker")
     )
+    reconciler = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-reconciler")
+    )
+    names = [service["spec"]["ports"][0]["name"]]
+    container_ports = reconciler["spec"]["template"]["spec"]["containers"][0]["ports"]
+    names.extend(port["name"] for port in container_ports if "name" in port)
+    assert all(len(name) <= 15 for name in names)
+    assert service["spec"]["ports"][0]["targetPort"] in names
 
 
 def test_worker_death_authority_ceiling_survives_scale_down_and_is_bounded() -> None:
@@ -452,6 +562,13 @@ def test_bundled_with_ack_uses_post_install_migrate() -> None:
     assert "post-install" in res.stdout
 
 
+def test_bundled_runtime_role_bootstrap_runs_after_migration() -> None:
+    jobs = _jobs_by_name("bundledBackends=true", "demoAcknowledged=true")
+    assert jobs["migrate"]["phase"] == "post-install,post-upgrade"
+    script = jobs["migrate"]["args"][0]
+    assert script.index("python -m kdive migrate") < script.index("GRANT {} TO {}")
+
+
 def test_external_render_omits_post_install_migrate_hook() -> None:
     # The migrate Job must stay pre-* on the external path (the bundled path runs it post-install
     # after the in-chart DB). Assert on the migrate Job's phase specifically, not a blanket output
@@ -464,21 +581,32 @@ def test_external_render_omits_post_install_migrate_hook() -> None:
 def test_bundled_path_wires_backends_into_config() -> None:
     res = _template("bundledBackends=true", "demoAcknowledged=true")
     assert res.returncode == 0, res.stderr
-    # The demo apps must reach the in-chart services, not render empty config.
-    dsn = (
-        "postgresql://kdive:kdive-demo@kdive-kdive-postgres:5432/kdive"  # pragma: allowlist secret
+    # The demo apps reach the in-chart database through distinct Secret keys.
+    secret = next(
+        doc
+        for doc in yaml.safe_load_all(res.stdout)
+        if isinstance(doc, dict)
+        and doc.get("kind") == "Secret"
+        and doc["metadata"]["name"] == "kdive-database"
     )
-    assert f'KDIVE_DATABASE_URL: "{dsn}"' in res.stdout
+    assert set(secret["stringData"]) == {
+        "migration-dsn",
+        "server-dsn",
+        "worker-dsn",
+        "reconciler-dsn",
+        "lifecycle-witness-dsn",
+    }
+    assert len(set(secret["stringData"].values())) == 5
     assert 'KDIVE_S3_ENDPOINT_URL: "http://kdive-kdive-minio:9000"' in res.stdout
     assert 'KDIVE_OIDC_ISSUER: "http://kdive-kdive-oidc:8080/default"' in res.stdout
     assert 'KDIVE_OIDC_JWKS_URI: "http://kdive-kdive-oidc:8080/default/jwks"' in res.stdout
     assert "wait-for-db" in res.stdout
 
 
-def test_external_path_passes_db_url_through_and_omits_demo_creds() -> None:
+def test_external_path_ignores_legacy_db_url_and_omits_demo_creds() -> None:
     res = _template("config.KDIVE_DATABASE_URL=postgresql://ext/db")
     assert res.returncode == 0, res.stderr
-    assert 'KDIVE_DATABASE_URL: "postgresql://ext/db"' in res.stdout
+    assert "postgresql://ext/db" not in res.stdout
     assert "AWS_ACCESS_KEY_ID" not in res.stdout
     assert "wait-for-db" not in res.stdout
 

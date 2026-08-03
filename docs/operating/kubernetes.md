@@ -24,8 +24,10 @@ correct only when installing a cut release.
 
 ## Secrets and values
 
-Backends are external. Supply their connection details and credentials through
-`KDIVE_*` settings and the chart's secret mounts rather than baking them into the image.
+Backends are external. Supply non-secret connection details through `KDIVE_*` settings and
+credentials through the chart's Secret references rather than baking them into the image.
+Database access uses five `databaseCredentials.*` refs: migration, server, worker, reconciler,
+and lifecycle witness. The migration credential is never present in a runtime Pod.
 Every setting is listed in [the config reference](../guide/reference/config.md); the
 chart's README documents which values map to which keys and how the secret is mounted
 (non-root containers read the env file at mode 0440 under an `fsGroup`).

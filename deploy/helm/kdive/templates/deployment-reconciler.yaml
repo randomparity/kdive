@@ -15,7 +15,7 @@ spec:
         app: {{ include "kdive.fullname" . }}-reconciler
         {{- include "kdive.labels" . | nindent 8 }}
       annotations:
-        {{- include "kdive.configChecksum" . | nindent 8 }}
+        {{- include "kdive.processConfigChecksum" (dict "root" . "process" "reconciler") | nindent 8 }}
         {{- include "kdive.scrapeAnnotations" 9466 | nindent 8 }}
     spec:
       serviceAccountName: {{ include "kdive.fullname" . }}-worker-termination-witness
@@ -32,11 +32,12 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["reconciler"]
           env:
+            {{- include "kdive.databaseEnv" .Values.databaseCredentials.reconciler | nindent 12 }}
             - name: KDIVE_LIFECYCLE_WITNESS_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.workerCredentialBroker.lifecycleWitnessDatabase.secretName | quote }}
-                  key: {{ .Values.workerCredentialBroker.lifecycleWitnessDatabase.key | quote }}
+                  name: {{ .Values.databaseCredentials.lifecycleWitness.secretName | quote }}
+                  key: {{ .Values.databaseCredentials.lifecycleWitness.key | quote }}
             - name: KDIVE_KUBERNETES_WITNESS_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -70,7 +71,7 @@ spec:
           # is not killed by liveness.
           ports:
             - containerPort: 9466
-            - name: worker-credential-broker
+            - name: cred-broker
               containerPort: {{ .Values.workerCredentialBroker.port }}
           {{- include "kdive.auxProbes" 9466 | nindent 10 }}
           volumeMounts:

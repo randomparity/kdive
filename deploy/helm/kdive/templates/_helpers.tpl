@@ -17,23 +17,11 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- end -}}
 
 {{/*
-On the bundledBackends demo path the apps must reach the in-chart Postgres/MinIO/OIDC.
-These helpers derive KDIVE_DATABASE_URL / KDIVE_S3_ENDPOINT_URL / KDIVE_OIDC_ISSUER /
-KDIVE_OIDC_JWKS_URI from the in-chart service names and the fixed demo credentials in
-.Values.demoCredentials, falling back to the operator-provided .Values.config.* on the
-external-backend path.
+On the bundledBackends demo path the apps must reach the in-chart MinIO/OIDC. These helpers
+derive the non-secret endpoint values from the in-chart services and fixed demo configuration,
+falling back to the operator-provided .Values.config.* on the external-backend path. Database
+DSNs are always wired separately through Secret refs.
 */}}
-{{- define "kdive.databaseUrl" -}}
-{{- if .Values.bundledBackends -}}
-{{- $c := .Values.demoCredentials.postgresql -}}
-{{- $userinfo := printf "%s:%s" $c.username $c.password -}}
-{{- $host := printf "%s-postgres:5432" (include "kdive.fullname" .) -}}
-{{- printf "postgresql://%s@%s/%s" $userinfo $host $c.database -}}
-{{- else -}}
-{{- .Values.config.KDIVE_DATABASE_URL -}}
-{{- end -}}
-{{- end -}}
-
 {{- define "kdive.s3Endpoint" -}}
 {{- if .Values.config.KDIVE_S3_ENDPOINT_URL -}}
 {{- /* An explicit override wins in BOTH modes. The bundled MinIO is reachable in-cluster as
@@ -107,6 +95,27 @@ change never rolls their emptyDir pods and demo data is preserved. Call with the
 */}}
 {{- define "kdive.configChecksum" -}}
 checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+{{- end -}}
+
+{{- define "kdive.processConfigChecksum" -}}
+{{- $root := index . "root" -}}
+{{- $process := index . "process" -}}
+{{- $ref := index $root.Values.databaseCredentials $process -}}
+{{- $witness := "" -}}
+{{- if eq $process "reconciler" -}}
+  {{- $witnessRef := $root.Values.databaseCredentials.lifecycleWitness -}}
+  {{- $witness = printf "%s\n%s" $witnessRef.secretName $witnessRef.key -}}
+{{- end -}}
+{{- $config := include (print $root.Template.BasePath "/configmap.yaml") $root -}}
+checksum/config: {{ printf "%s\n%s\n%s\n%s" $config $ref.secretName $ref.key $witness | sha256sum }}
+{{- end -}}
+
+{{- define "kdive.databaseEnv" -}}
+- name: KDIVE_DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ .secretName | quote }}
+      key: {{ .key | quote }}
 {{- end -}}
 
 {{/*
@@ -274,6 +283,19 @@ named template that a rendered manifest (the ConfigMap) includes.
 {{- end -}}
 {{- if and .Values.bundledBackends (ne (.Values.service.type | toString) "ClusterIP") -}}
 {{- fail "bundledBackends is demo-only and its issuer mints valid kdive tokens for any caller: service.type must stay ClusterIP (reach MCP via `kubectl port-forward`). Expose MCP only on the external-backend path, behind a real IdP." -}}
+{{- end -}}
+{{- $migration := .Values.databaseCredentials.migration -}}
+{{- range $name := list "migration" "server" "worker" "reconciler" "lifecycleWitness" -}}
+  {{- $ref := index $.Values.databaseCredentials $name -}}
+  {{- if or (not $ref.secretName) (not $ref.key) -}}
+    {{- fail (printf "databaseCredentials.%s.secretName and key are required" $name) -}}
+  {{- end -}}
+  {{- if and (ne $name "migration") (eq $ref.secretName $migration.secretName) (eq $ref.key $migration.key) -}}
+    {{- fail (printf "databaseCredentials.%s must not alias databaseCredentials.migration" $name) -}}
+  {{- end -}}
+  {{- if and $.Values.bundledBackends (ne $ref.secretName $migration.secretName) -}}
+    {{- fail (printf "databaseCredentials.%s.secretName must match databaseCredentials.migration.secretName with bundledBackends" $name) -}}
+  {{- end -}}
 {{- end -}}
 {{- $deathCeiling := int .Values.worker.deathVerificationOrdinalCeiling -}}
 {{- if or (lt $deathCeiling 1) (gt $deathCeiling 256) -}}

@@ -110,6 +110,29 @@ def test_config_checksum_is_stable_across_renders() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("credential", "affected"),
+    [
+        ("server", {"server"}),
+        ("worker", {"worker"}),
+        ("reconciler", {"reconciler"}),
+        ("lifecycleWitness", {"reconciler"}),
+    ],
+)
+def test_database_secret_ref_change_rolls_only_consumers(
+    credential: str, affected: set[str]
+) -> None:
+    before = _workloads()
+    after = _workloads(f"databaseCredentials.{credential}.key=rotated-{credential}-dsn")
+    for proc in _APP_PROCS:
+        before_checksum = _pod_annotations(before[proc])["checksum/config"]
+        after_checksum = _pod_annotations(after[proc])["checksum/config"]
+        if proc in affected:
+            assert before_checksum != after_checksum
+        else:
+            assert before_checksum == after_checksum
+
+
 def test_backend_pods_have_no_config_checksum_annotation() -> None:
     # postgres/minio/oidc do not consume the config ConfigMap; a checksum on them would roll
     # the emptyDir demo backends on a config change and wipe demo data (#470 acceptance).
