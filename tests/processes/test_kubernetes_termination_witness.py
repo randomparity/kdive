@@ -2,13 +2,17 @@
 
 import asyncio
 import hashlib
+import ssl
 import urllib.error
 from email.message import Message
+from typing import cast
 
 import pytest
 from psycopg import AsyncConnection, sql
 
+import kdive.processes.kubernetes_credential_broker as credential_broker
 import kdive.processes.lifecycle_witness as lifecycle_witness
+from kdive.processes.kubernetes_credential_broker import KubernetesCredentialBroker
 from kdive.processes.kubernetes_termination_witness import (
     KubernetesTerminationWitness,
     run_witness,
@@ -25,6 +29,93 @@ def test_lifecycle_witness_process_exposes_its_runner() -> None:
     assert lifecycle_witness.run_lifecycle_witness_body.__module__ == (
         "kdive.processes.lifecycle_witness"
     )
+
+
+def test_lifecycle_witness_propagates_broker_bind_failure_and_cleans_siblings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleaned: set[str] = set()
+
+    def fail_bind(host: str, port: int) -> None:
+        del host, port
+        raise OSError("address already in use")
+
+    monkeypatch.setattr(credential_broker, "_listening_socket", fail_bind)
+
+    async def sibling(name: str) -> None:
+        try:
+            await asyncio.Future()
+        finally:
+            cleaned.add(name)
+
+    async def run() -> None:
+        with pytest.raises(OSError, match="address already in use"):
+            await lifecycle_witness._supervise_authority_tasks(
+                asyncio.Event(),
+                (
+                    "broker",
+                    credential_broker.serve_broker(
+                        cast(KubernetesCredentialBroker, object()),
+                        asyncio.Event(),
+                        host="127.0.0.1",
+                        port=7443,
+                        ssl_context=cast(ssl.SSLContext, object()),
+                    ),
+                ),
+                ("pre-registration", sibling("pre-registration")),
+                ("termination-witness", sibling("termination-witness")),
+            )
+
+    asyncio.run(run())
+    assert cleaned == {"pre-registration", "termination-witness"}
+
+
+def test_lifecycle_witness_rejects_unexpected_clean_child_exit() -> None:
+    cleaned = asyncio.Event()
+
+    async def completed() -> None:
+        return
+
+    async def sibling() -> None:
+        try:
+            await asyncio.Future()
+        finally:
+            cleaned.set()
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="broker exited unexpectedly"):
+            await lifecycle_witness._supervise_authority_tasks(
+                asyncio.Event(), ("broker", completed()), ("sibling", sibling())
+            )
+
+    asyncio.run(run())
+    assert cleaned.is_set()
+
+
+def test_lifecycle_witness_normal_stop_cancels_and_awaits_children() -> None:
+    stop = asyncio.Event()
+    started = asyncio.Event()
+    cleaned: set[str] = set()
+
+    async def child(name: str) -> None:
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cleaned.add(name)
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            lifecycle_witness._supervise_authority_tasks(
+                stop, ("broker", child("broker")), ("witness", child("witness"))
+            )
+        )
+        await started.wait()
+        stop.set()
+        await task
+
+    asyncio.run(run())
+    assert cleaned == {"broker", "witness"}
 
 
 def _pod(*, uid: str, phase: str, resource_version: str = "7") -> dict[str, object]:

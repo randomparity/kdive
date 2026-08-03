@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Coroutine
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,7 +23,7 @@ from kdive.config.core_settings import (
 )
 from kdive.db.pool import create_pool
 from kdive.health.probe import BackendCheck, HealthProbe
-from kdive.processes.runtime import cancel, install_stop, run_process_runtime
+from kdive.processes.runtime import install_stop, run_process_runtime
 
 if TYPE_CHECKING:
     from kdive.health.heartbeat import Heartbeat
@@ -30,6 +31,32 @@ if TYPE_CHECKING:
     from kdive.security.secrets.secret_registry import SecretRegistry
 
 LIFECYCLE_WITNESS_HEARTBEAT_STALE_SECONDS = 10.0
+
+type AuthorityChild = tuple[str, Coroutine[object, object, None]]
+
+
+async def _supervise_authority_tasks(stop: asyncio.Event, *children: AuthorityChild) -> None:
+    """Stop all authority children together and surface every unexpected child exit."""
+    named_tasks = [(name, asyncio.create_task(child)) for name, child in children]
+    stop_task = asyncio.create_task(stop.wait())
+    tasks = [task for _, task in named_tasks]
+    try:
+        done, _ = await asyncio.wait([stop_task, *tasks], return_when=asyncio.FIRST_COMPLETED)
+        if stop_task in done:
+            return
+
+        failed_name, failed_task = next((name, task) for name, task in named_tasks if task in done)
+        if failed_task.cancelled():
+            raise RuntimeError(f"lifecycle authority {failed_name} was cancelled unexpectedly")
+        failure = failed_task.exception()
+        if failure is not None:
+            raise failure
+        raise RuntimeError(f"lifecycle authority {failed_name} exited unexpectedly")
+    finally:
+        stop_task.cancel()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(stop_task, *tasks, return_exceptions=True)
 
 
 async def run_lifecycle_witness(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
@@ -150,8 +177,10 @@ async def run_lifecycle_witness_body(pool: AsyncConnectionPool, stop: asyncio.Ev
         ),
         terminate=terminate,
     )
-    tasks = [
-        asyncio.create_task(
+    await _supervise_authority_tasks(
+        stop,
+        (
+            "credential broker",
             serve_broker(
                 broker,
                 stop,
@@ -162,12 +191,8 @@ async def run_lifecycle_witness_body(pool: AsyncConnectionPool, stop: asyncio.Ev
                     private_key=config.require(KUBERNETES_CREDENTIAL_BROKER_TLS_KEY),
                     ca=config.require(KUBERNETES_CREDENTIAL_BROKER_CA),
                 ),
-            )
+            ),
         ),
-        asyncio.create_task(run_pre_registration(broker, stop)),
-        asyncio.create_task(run_witness(witness, stop)),
-    ]
-    try:
-        await stop.wait()
-    finally:
-        await cancel(*tasks)
+        ("credential pre-registration", run_pre_registration(broker, stop)),
+        ("termination witness", run_witness(witness, stop)),
+    )
