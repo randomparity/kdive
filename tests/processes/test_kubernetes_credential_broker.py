@@ -5,15 +5,22 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import ipaddress
 import json
+import socket
 import ssl
 import urllib.request
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 import kdive.processes.kubernetes_credential_broker as credential_broker
 from kdive.processes.kubernetes_credential_broker import (
@@ -23,6 +30,7 @@ from kdive.processes.kubernetes_credential_broker import (
     BrokerRequest,
     KubernetesCredentialBroker,
     PodIdentity,
+    decode_reply,
     encode_request,
     read_frame,
     serve_broker,
@@ -255,6 +263,141 @@ def test_broker_refuses_to_start_without_operator_supplied_tls_material(tmp_path
         )
 
 
+def _tls_contexts(tmp_path: Path) -> tuple[ssl.SSLContext, ssl.SSLContext]:
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.now(UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(minutes=1))
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+            ),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    certificate_path = tmp_path / "broker.pem"
+    key_path = tmp_path / "broker-key.pem"
+    certificate_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    server_context = tls_server_context(
+        certificate=str(certificate_path),
+        private_key=str(key_path),
+        ca=str(certificate_path),
+    )
+    client_context = ssl.create_default_context(cafile=str(certificate_path))
+    client_context.minimum_version = ssl.TLSVersion.TLSv1_3
+    return server_context, client_context
+
+
+def _available_port() -> int:
+    with socket.socket() as candidate:
+        candidate.bind(("127.0.0.1", 0))
+        return int(candidate.getsockname()[1])
+
+
+def test_tls_handshakes_are_admitted_before_the_session_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def run() -> None:
+        session_limit = 2
+        server_context, client_context = _tls_contexts(tmp_path)
+        loop = asyncio.get_running_loop()
+        connect_accepted_socket = loop.connect_accepted_socket
+        active_handshakes = 0
+        peak_handshakes = 0
+        at_capacity = asyncio.Event()
+        handshake_timeouts: list[float | None] = []
+        shutdown_timeouts: list[float | None] = []
+
+        async def track_connect_accepted_socket(*args: Any, **kwargs: Any) -> Any:
+            nonlocal active_handshakes, peak_handshakes
+            active_handshakes += 1
+            peak_handshakes = max(peak_handshakes, active_handshakes)
+            handshake_timeouts.append(kwargs.get("ssl_handshake_timeout"))
+            shutdown_timeouts.append(kwargs.get("ssl_shutdown_timeout"))
+            if active_handshakes == session_limit:
+                at_capacity.set()
+            try:
+                return await connect_accepted_socket(*args, **kwargs)
+            finally:
+                active_handshakes -= 1
+
+        monkeypatch.setattr(loop, "connect_accepted_socket", track_connect_accepted_socket)
+        monkeypatch.setattr(
+            credential_broker, "MAX_CONCURRENT_SESSIONS", session_limit, raising=False
+        )
+        store = _Store()
+        broker = _broker(store, {"kdive-worker-0": _pod()})
+        assert await broker.pre_register_once() == 1
+        stop = asyncio.Event()
+        port = _available_port()
+        server = asyncio.create_task(
+            serve_broker(
+                broker,
+                stop,
+                host="127.0.0.1",
+                port=port,
+                ssl_context=server_context,
+            )
+        )
+        await asyncio.sleep(0)
+        incomplete: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
+        try:
+            for _ in range(session_limit + 2):
+                incomplete.append(await asyncio.open_connection("127.0.0.1", port))
+            await asyncio.wait_for(at_capacity.wait(), timeout=1)
+            assert peak_handshakes == session_limit
+            assert active_handshakes <= session_limit
+            assert set(handshake_timeouts) == {5}
+            assert set(shutdown_timeouts) == {5}
+
+            for _, writer in incomplete:
+                writer.close()
+            await asyncio.gather(*(writer.wait_closed() for _, writer in incomplete))
+            request = encode_request(
+                BrokerRequest("deliver", "bound-token", "kdive", "kdive-worker-0", "uid-1")
+            )
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    "127.0.0.1",
+                    port,
+                    ssl=client_context,
+                    server_hostname="localhost",
+                ),
+                timeout=3,
+            )
+            try:
+                await write_frame(writer, request, maximum=MAX_REQUEST_BYTES)
+                reply = decode_reply(
+                    await read_frame(reader, maximum=MAX_RESPONSE_BYTES, kind="response")
+                )
+                assert reply.credential == "a" * 64
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        finally:
+            for _, writer in incomplete:
+                writer.close()
+            stop.set()
+            await server
+
+    asyncio.run(run())
+
+
 class _TestWriter:
     def __init__(self) -> None:
         self.data = bytearray()
@@ -273,54 +416,16 @@ class _TestWriter:
         return None
 
 
-async def _captured_handler(
+def _session_handler(
     monkeypatch: pytest.MonkeyPatch,
     broker: KubernetesCredentialBroker,
-) -> tuple[
-    Callable[[asyncio.StreamReader, asyncio.StreamWriter], Coroutine[Any, Any, None]],
-    dict[str, Any],
-]:
-    callback: (
-        Callable[[asyncio.StreamReader, asyncio.StreamWriter], Coroutine[Any, Any, None]] | None
-    ) = None
-    server_kwargs: dict[str, Any] = {}
-
-    class _Server:
-        def close(self) -> None:
-            return None
-
-        async def wait_closed(self) -> None:
-            return None
-
-    async def start_server(
-        handler: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Coroutine[Any, Any, None]],
-        host: str,
-        port: int,
-        **kwargs: Any,
-    ) -> _Server:
-        nonlocal callback
-        callback = handler
-        server_kwargs.update(kwargs)
-        return _Server()
-
-    monkeypatch.setattr(credential_broker.asyncio, "start_server", start_server)
+) -> Callable[[asyncio.StreamReader, asyncio.StreamWriter], Coroutine[Any, Any, None]]:
     monkeypatch.setattr(credential_broker, "CONNECTION_TIMEOUT_SECONDS", 0.02, raising=False)
-    monkeypatch.setattr(credential_broker, "MAX_CONCURRENT_SESSIONS", 1, raising=False)
-    stop = asyncio.Event()
-    task = asyncio.create_task(
-        serve_broker(
-            broker,
-            stop,
-            host="127.0.0.1",
-            port=9443,
-            ssl_context=cast(ssl.SSLContext, object()),
-        )
-    )
-    await asyncio.sleep(0)
-    stop.set()
-    await task
-    assert callback is not None
-    return callback, server_kwargs
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await credential_broker._handle_session(broker, reader, writer)
+
+    return handle
 
 
 def _valid_reader() -> asyncio.StreamReader:
@@ -347,7 +452,7 @@ def test_partial_frames_are_closed_by_the_full_exchange_timeout(
     monkeypatch: pytest.MonkeyPatch, partial: bytes
 ) -> None:
     async def run() -> None:
-        handler, _ = await _captured_handler(monkeypatch, _broker(_Store(), {}))
+        handler = _session_handler(monkeypatch, _broker(_Store(), {}))
         reader = asyncio.StreamReader()
         reader.feed_data(partial)
         writer = _TestWriter()
@@ -378,7 +483,7 @@ def test_timed_out_application_operation_releases_capacity(
 
     async def run() -> None:
         broker = cast(KubernetesCredentialBroker, _BlockingBroker())
-        handler, _ = await _captured_handler(monkeypatch, broker)
+        handler = _session_handler(monkeypatch, broker)
         timed_out_writer = _TestWriter()
         timed_out = asyncio.create_task(
             handler(_valid_reader(), cast(asyncio.StreamWriter, timed_out_writer))
@@ -402,7 +507,7 @@ def test_success_and_error_release_capacity_for_the_next_request(
         store = _Store()
         broker = _broker(store, {"kdive-worker-0": _pod()})
         assert await broker.pre_register_once() == 1
-        handler, _ = await _captured_handler(monkeypatch, broker)
+        handler = _session_handler(monkeypatch, broker)
 
         first_writer = _TestWriter()
         await handler(first_reader(), cast(asyncio.StreamWriter, first_writer))
@@ -411,39 +516,5 @@ def test_success_and_error_release_capacity_for_the_next_request(
         valid_writer = _TestWriter()
         await handler(_valid_reader(), cast(asyncio.StreamWriter, valid_writer))
         assert valid_writer.data
-
-    asyncio.run(run())
-
-
-def test_over_capacity_connection_closes_promptly_and_valid_request_follows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def run() -> None:
-        store = _Store()
-        broker = _broker(store, {"kdive-worker-0": _pod()})
-        assert await broker.pre_register_once() == 1
-        handler, server_kwargs = await _captured_handler(monkeypatch, broker)
-        blocking_reader = asyncio.StreamReader()
-        blocking_writer = _TestWriter()
-        blocking = asyncio.create_task(
-            handler(blocking_reader, cast(asyncio.StreamWriter, blocking_writer))
-        )
-        await asyncio.sleep(0)
-
-        overloaded_writer = _TestWriter()
-        overloaded = asyncio.create_task(
-            handler(asyncio.StreamReader(), cast(asyncio.StreamWriter, overloaded_writer))
-        )
-        await asyncio.sleep(0.01)
-        assert overloaded.done()
-        assert overloaded_writer.closed.is_set()
-
-        blocking.cancel()
-        await asyncio.gather(blocking, return_exceptions=True)
-        valid_writer = _TestWriter()
-        await handler(_valid_reader(), cast(asyncio.StreamWriter, valid_writer))
-        assert valid_writer.data
-        assert server_kwargs["ssl_handshake_timeout"] > 0
-        assert server_kwargs["ssl_shutdown_timeout"] > 0
 
     asyncio.run(run())

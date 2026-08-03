@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import secrets
+import socket
 import ssl
 import urllib.error
 import urllib.request
@@ -345,45 +346,86 @@ async def serve_broker(
     ssl_context: ssl.SSLContext,
 ) -> None:
     """Serve only bounded internal TLS credential requests until reconciler shutdown."""
-    sessions = asyncio.BoundedSemaphore(MAX_CONCURRENT_SESSIONS)
-
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        if sessions.locked():
-            writer.close()
-            return
-        await sessions.acquire()
+    listener = _listening_socket(host, port)
+    loop = asyncio.get_running_loop()
+    accept_lock = asyncio.Lock()
+    async with asyncio.TaskGroup() as sessions:
+        workers = [
+            sessions.create_task(_accept_sessions(loop, listener, accept_lock, ssl_context, broker))
+            for _ in range(MAX_CONCURRENT_SESSIONS)
+        ]
         try:
-            try:
-                async with asyncio.timeout(CONNECTION_TIMEOUT_SECONDS):
-                    try:
-                        request = decode_request(
-                            await read_frame(reader, maximum=MAX_REQUEST_BYTES, kind="request")
-                        )
-                        reply = await broker.handle(request)
-                        await write_frame(writer, encode_reply(reply), maximum=MAX_RESPONSE_BYTES)
-                    except Exception:  # noqa: BLE001 -- malformed/internal peers receive no details
-                        _log.warning("worker credential broker rejected a request")
-                    writer.close()
-                    await writer.wait_closed()
-            except TimeoutError:
-                _log.warning("worker credential broker request timed out")
+            await stop.wait()
         finally:
-            writer.close()
-            sessions.release()
+            listener.close()
+            for worker in workers:
+                worker.cancel()
 
-    server = await asyncio.start_server(
-        handle,
-        host,
-        port,
-        ssl=ssl_context,
-        ssl_handshake_timeout=TLS_HANDSHAKE_TIMEOUT_SECONDS,
-        ssl_shutdown_timeout=TLS_SHUTDOWN_TIMEOUT_SECONDS,
-    )
+
+def _listening_socket(host: str, port: int) -> socket.socket:
+    listener = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
     try:
-        await stop.wait()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, port))
+        listener.listen(MAX_CONCURRENT_SESSIONS)
+        listener.setblocking(False)
+        return listener
+    except BaseException:
+        listener.close()
+        raise
+
+
+async def _accept_sessions(
+    loop: asyncio.AbstractEventLoop,
+    listener: socket.socket,
+    accept_lock: asyncio.Lock,
+    ssl_context: ssl.SSLContext,
+    broker: KubernetesCredentialBroker,
+) -> None:
+    while True:
+        async with accept_lock:
+            accepted, _ = await loop.sock_accept(listener)
+        transport: asyncio.BaseTransport | None = None
+        try:
+            reader = asyncio.StreamReader()
+            protocol = asyncio.StreamReaderProtocol(reader)
+            transport, _ = await loop.connect_accepted_socket(
+                lambda protocol=protocol: protocol,
+                accepted,
+                ssl=ssl_context,
+                ssl_handshake_timeout=TLS_HANDSHAKE_TIMEOUT_SECONDS,
+                ssl_shutdown_timeout=TLS_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            writer = asyncio.StreamWriter(transport, protocol, reader, loop)
+            await _handle_session(broker, reader, writer)
+        except ConnectionError, TimeoutError, ssl.SSLError:
+            _log.debug("worker credential broker TLS handshake rejected")
+        finally:
+            if transport is None:
+                accepted.close()
+
+
+async def _handle_session(
+    broker: KubernetesCredentialBroker,
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+) -> None:
+    try:
+        async with asyncio.timeout(CONNECTION_TIMEOUT_SECONDS):
+            try:
+                request = decode_request(
+                    await read_frame(reader, maximum=MAX_REQUEST_BYTES, kind="request")
+                )
+                reply = await broker.handle(request)
+                await write_frame(writer, encode_reply(reply), maximum=MAX_RESPONSE_BYTES)
+            except Exception:  # noqa: BLE001 -- malformed/internal peers receive no details
+                _log.warning("worker credential broker rejected a request")
+            writer.close()
+            await writer.wait_closed()
+    except TimeoutError:
+        _log.warning("worker credential broker request timed out")
     finally:
-        server.close()
-        await server.wait_closed()
+        writer.close()
 
 
 async def run_pre_registration(

@@ -213,8 +213,13 @@ of scope and may strand, but never release, pins.
 | reconciler → use deletion | use and holder ids | reconciler-only function, matching terminal row, atomic audit+delete | refusal; use retained |
 | runtime API → witness | Docker JSON or Pod JSON | schema/type/length validation, exact ID/UID/name/resource version | no absence inference |
 | Pod init → credential controller | bound projected token, Pod UID | TokenReview, live UID/resource-version check, idempotent encrypted envelope, authenticated acknowledgment, cluster TLS | no credential; worker remains gated |
-| compromised worker → credential broker | TLS connection and bounded request frame | 15-second whole-exchange timeout, 64-session ceiling, 5-second TLS handshake/shutdown timeouts, 16 KiB request and 4 KiB response caps | excess or incomplete connection closed without credential material |
+| compromised worker → credential broker | TCP connection, TLS handshake, and bounded request frame | bounded raw-listener backlog; 64 accept/session workers admit sockets before TLS allocation; 15-second whole-exchange timeout; 5-second TLS handshake/shutdown timeouts; 16 KiB request and 4 KiB response caps | excess remains in the kernel backlog or is refused; incomplete admitted connection closes without credential material |
 | GC → object store | stored key plus immutable version | tenant-scoped DB selection, no-use predicate, exact-version delete, batch bound | tombstone retained for retry |
+
+The broker's 64-session ceiling is a concurrent admitted-connection count per listener, with no
+reference clock. Excess connections remain in the bounded kernel backlog or are refused. An admitted
+connection that does not finish its TLS handshake closes after five seconds; the init client retries
+the broker initialization flow.
 
 The design adds role-specific DSN boundaries and widens the Compose/Kubernetes witness boundary to
 publish exact termination. It reuses existing RBAC, advisory-lock, audit, response-envelope, and
