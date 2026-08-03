@@ -370,6 +370,34 @@ def test_runtime_database_credential_cannot_alias_migration_ref(role: str) -> No
     assert f"databaseCredentials.{role} must not alias databaseCredentials.migration" in res.stderr
 
 
+@pytest.mark.parametrize(
+    ("role", "other"),
+    [
+        ("server", "worker"),
+        ("server", "reconciler"),
+        ("server", "lifecycleWitness"),
+        ("worker", "reconciler"),
+        ("worker", "lifecycleWitness"),
+        ("reconciler", "lifecycleWitness"),
+    ],
+)
+def test_runtime_database_credential_refs_are_pairwise_distinct(role: str, other: str) -> None:
+    default_keys = {
+        "server": "server-dsn",
+        "worker": "worker-dsn",
+        "reconciler": "reconciler-dsn",
+        "lifecycleWitness": "lifecycle-witness-dsn",
+    }
+    res = _template(
+        f"databaseCredentials.{role}.secretName=kdive-database",
+        f"databaseCredentials.{role}.key={default_keys[other]}",
+    )
+    assert res.returncode != 0
+    assert "must not alias" in res.stderr
+    assert f"databaseCredentials.{role}" in res.stderr
+    assert f"databaseCredentials.{other}" in res.stderr
+
+
 def test_database_principals_support_distinct_secrets_and_keys() -> None:
     overrides = []
     for role in ("migration", "server", "worker", "reconciler", "lifecycleWitness"):
@@ -406,10 +434,9 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
     assert rule[0]["resources"] == ["pods"]
     assert rule[0]["verbs"] == ["get"]
     assert rule[0]["resourceNames"] == [f"kdive-kdive-worker-{ordinal}" for ordinal in range(32)]
-    assert rule[1] == {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}
-    assert rule[2]["resources"] == ["pods"]
-    assert rule[2]["verbs"] == ["patch"]
-    assert rule[2]["resourceNames"] == rule[0]["resourceNames"]
+    assert rule[1]["resources"] == ["pods"]
+    assert rule[1]["verbs"] == ["patch"]
+    assert rule[1]["resourceNames"] == rule[0]["resourceNames"]
     assert binding["subjects"] == [
         {"kind": "ServiceAccount", "name": "kdive-kdive-worker-termination-witness"}
     ]

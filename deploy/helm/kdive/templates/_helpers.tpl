@@ -279,16 +279,18 @@ named template that a rendered manifest (the ConfigMap) includes.
 {{- if and .Values.bundledBackends (ne (.Values.service.type | toString) "ClusterIP") -}}
 {{- fail "bundledBackends is demo-only and its issuer mints valid kdive tokens for any caller: service.type must stay ClusterIP (reach MCP via `kubectl port-forward`). Expose MCP only on the external-backend path, behind a real IdP." -}}
 {{- end -}}
-{{- $migration := .Values.databaseCredentials.migration -}}
+{{- $databaseRefs := dict -}}
 {{- range $name := list "migration" "server" "worker" "reconciler" "lifecycleWitness" -}}
   {{- $ref := index $.Values.databaseCredentials $name -}}
   {{- if or (not $ref.secretName) (not $ref.key) -}}
     {{- fail (printf "databaseCredentials.%s.secretName and key are required" $name) -}}
   {{- end -}}
-  {{- if and (ne $name "migration") (eq $ref.secretName $migration.secretName) (eq $ref.key $migration.key) -}}
-    {{- fail (printf "databaseCredentials.%s must not alias databaseCredentials.migration" $name) -}}
+  {{- $identity := printf "%s/%s" $ref.secretName $ref.key -}}
+  {{- if hasKey $databaseRefs $identity -}}
+    {{- fail (printf "databaseCredentials.%s must not alias databaseCredentials.%s" $name (index $databaseRefs $identity)) -}}
   {{- end -}}
-  {{- if and $.Values.bundledBackends (ne $ref.secretName $migration.secretName) -}}
+  {{- $_ := set $databaseRefs $identity $name -}}
+  {{- if and $.Values.bundledBackends (ne $ref.secretName $.Values.databaseCredentials.migration.secretName) -}}
     {{- fail (printf "databaseCredentials.%s.secretName must match databaseCredentials.migration.secretName with bundledBackends" $name) -}}
   {{- end -}}
 {{- end -}}

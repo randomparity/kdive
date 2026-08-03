@@ -45,9 +45,6 @@ rules:
       - {{ printf "%s-worker-%d" (include "kdive.fullname" $) $ordinal | quote }}
       {{- end }}
   - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["list"]
-  - apiGroups: [""]
     # Pod metadata finalizers are patched on the Pod resource; Kubernetes exposes no
     # pods/finalizers subresource. Exact generated names keep this authority bounded.
     resources: ["pods"]
