@@ -84,10 +84,11 @@ def test_kubernetes_witness_ceiling_help_states_the_complete_pass_contract() -> 
         "valid inclusive range is 0..1,000",
         "every out-of-range value (negative or above 1,000) is rejected at reconciler startup",
         "no cursor",
-        "remaining finalized pods",
+        "remaining terminal pods",
         "next scheduled invocation",
         "set kdive_kubernetes_witness_ordinal_ceiling to an "
         "integer in the inclusive range 0..1,000",
         "restart the reconciler",
     ):
         assert fragment in help_text
+    assert "remaining finalized pods" not in help_text

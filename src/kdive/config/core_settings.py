@@ -908,7 +908,7 @@ KUBERNETES_WITNESS_ORDINAL_CEILING = Setting(
         "applies this limit per reconciler pass, processing at most 1,000 Pods. The valid "
         "inclusive range is 0..1,000; every out-of-range value (negative or above 1,000) "
         "is rejected at "
-        "reconciler startup. No cursor is published: remaining finalized Pods are retained for the "
+        "reconciler startup. No cursor is published: remaining terminal Pods are retained for the "
         "next scheduled invocation. To recover, set KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING to an "
         "integer in the inclusive range 0..1,000 and restart the reconciler."
     ),
