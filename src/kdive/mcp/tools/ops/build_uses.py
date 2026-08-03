@@ -14,16 +14,23 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import MAX_LIST_LIMIT, clamp_list_limit
+from kdive.mcp.tools._common import clamp_list_limit
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
-from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
+from kdive.security.authz.rbac import (
+    AuthorizationError,
+    PlatformRole,
+    Role,
+    projects_with_role,
+    require_platform_role,
+)
 from kdive.services.runs.build_use import recover_build_use_in_transaction
 
 _TOOL = "ops.recover_build_use"
 _LIST_TOOL = "ops.build_uses_list"
-_MAX_HOLDER_CHARS = 512
-_MAX_REASON_CHARS = 512
+_MAX_HOLDER_BYTES = 512
+_MAX_REASON_BYTES = 512
+_MAX_BUILD_USE_LIST_LIMIT = 100
 
 
 def _failure(use_id: UUID, message: str) -> ToolResponse:
@@ -68,14 +75,15 @@ async def list_build_uses(
     except AuthorizationError:
         await audit_platform_denial(pool, ctx, tool=_LIST_TOOL, scope="build-use-recovery")
         return ToolResponse.denied("build-uses", missing_roles=[PlatformRole.PLATFORM_OPERATOR])
-    capped = clamp_list_limit(limit)
+    capped = min(clamp_list_limit(limit), _MAX_BUILD_USE_LIST_LIMIT)
+    authorized_projects = tuple(sorted(set(projects_with_role(ctx, Role.VIEWER))))
     async with pool.connection() as conn:
         rows = await (
             await conn.execute(
                 "SELECT use_id, investigation_id, generation, job_id, attempt, "
-                "holder_worker_id, created_at FROM investigation_build_uses "
-                "ORDER BY created_at, use_id LIMIT %s",
-                (capped,),
+                "holder_worker_id, created_at "
+                "FROM public.list_investigation_build_uses(%s::text[], %s)",
+                (list(authorized_projects), capped),
             )
         ).fetchall()
         async with conn.transaction():
@@ -86,7 +94,7 @@ async def list_build_uses(
                 event=audit.PlatformAuditEvent(
                     tool=_LIST_TOOL,
                     scope="build-use-recovery",
-                    args={"limit": capped},
+                    args={"limit": capped, "project_count": len(authorized_projects)},
                     platform_role=held_platform_roles(ctx),
                     actor=actor_for(ctx),
                 ),
@@ -130,7 +138,12 @@ async def recover_build_use(
         await audit_platform_denial(pool, ctx, tool=_TOOL, scope="build-use-recovery")
         return ToolResponse.denied(str(use_id), missing_roles=[PlatformRole.PLATFORM_OPERATOR])
     clean_reason = reason.strip()
-    if not clean_reason or len(clean_reason) > _MAX_REASON_CHARS or len(holder) > _MAX_HOLDER_CHARS:
+    if (
+        not clean_reason
+        or not holder.strip()
+        or len(clean_reason.encode()) > _MAX_REASON_BYTES
+        or len(holder.encode()) > _MAX_HOLDER_BYTES
+    ):
         await _audit_refusal(
             pool,
             ctx,
@@ -139,11 +152,13 @@ async def recover_build_use(
             reason=clean_reason,
             outcome="invalid_input",
         )
-        return _failure(use_id, "holder and reason must be non-empty and at most 512 characters")
+        return _failure(use_id, "holder and reason must be non-empty and at most 512 UTF-8 bytes")
+    authorized_projects = tuple(sorted(set(projects_with_role(ctx, Role.VIEWER))))
     async with pool.connection() as conn, conn.transaction():
         recovered = await recover_build_use_in_transaction(
             conn,
             use_id,
+            authorized_projects=authorized_projects,
             confirmed_worker_id=holder,
             recovered_by=ctx.principal,
             evidence="durable worker-incarnation termination record",
@@ -191,16 +206,24 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             int,
             Field(
                 description=(
-                    f"Maximum oldest-first pin rows returned; server-capped at {MAX_LIST_LIMIT}."
+                    "Maximum oldest-first pin rows returned per request; this row-count limit "
+                    f"has no clock and is server-capped at {_MAX_BUILD_USE_LIST_LIMIT}. Higher "
+                    "values are clamped; repeat the tool to refresh diagnostics."
                 )
             ),
         ] = 50,
     ) -> ToolResponse:
-        """List persistent reusable-build pins. Requires platform operator.
+        """List persistent reusable-build pins. Requires platform operator and project viewer.
 
         Conditionally available only when durable worker-termination witnesses are configured.
+        Returns pins only from projects where the caller holds at least viewer; platform authority
+        alone grants no tenant-data access and therefore returns an empty list.
         A stale job lease is diagnostic context only, never proof that its holder stopped. Pass an
         exact returned use id and holder to `ops.recover_build_use` only after operator review.
+        Returns `data.limit` plus items containing `investigation_id`, `generation`, `job_id`,
+        `attempt`, `holder`, and PostgreSQL-clock `created_at`. Each request returns the bounded
+        oldest-first result described by `limit` and has no continuation cursor; repeat the tool
+        to refresh diagnostics.
         """
         return await list_build_uses(pool, current_context(), limit=limit)
 
@@ -212,7 +235,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(
                 description=(
                     "Exact worker incarnation recorded on that use row; "
-                    f"max {_MAX_HOLDER_CHARS} chars."
+                    f"max {_MAX_HOLDER_BYTES} bytes in UTF-8 encoding. The byte limit has no "
+                    "clock; an empty "
+                    "or oversized value is refused without recovery, so retry with the exact "
+                    "bounded holder from `ops.build_uses_list`."
                 )
             ),
         ],
@@ -221,14 +247,19 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(
                 description=(
                     "Operator justification retained in the recovery ledger; "
-                    f"max {_MAX_REASON_CHARS} chars."
+                    f"max {_MAX_REASON_BYTES} bytes in UTF-8 encoding. The byte limit has no "
+                    "clock; an empty "
+                    "or oversized value is refused without recovery, so retry with a concise "
+                    "reason."
                 )
             ),
         ],
     ) -> ToolResponse:
-        """Release one stranded build-use pin. Requires platform operator.
+        """Release one stranded build-use pin. Requires platform operator and project viewer.
 
         Conditionally available only when durable worker-termination witnesses are configured.
+        The caller must hold at least viewer on the pin's project. A missing pin and a pin outside
+        the caller's granted projects produce the same refusal shape.
         Recovery succeeds only when the supplied holder exactly matches the durable use row and
         the exact worker incarnation already has a durable terminated registry row. This tool
         cannot publish termination evidence. Job heartbeat, lease expiry, object absence, and

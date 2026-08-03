@@ -224,6 +224,7 @@ def test_recovery_copies_exact_durable_termination_evidence(migrated_url: str) -
             assert await recover_build_use_after_confirmed_worker_death(
                 conn,
                 use_id,
+                authorized_projects=("proj",),
                 confirmed_worker_id=holder,
                 recovered_by="operator:test",
                 evidence="untrusted caller text",

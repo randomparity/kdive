@@ -70,6 +70,13 @@ joins use -> generation -> investigation -> project before mutation. A recovery 
 termination time, actor, reason, and database-recorded recovery time. Audit/list pages use stable keys;
 permanent growth is operationally monitored and never handled by deleting evidence.
 
+### Amendment (2026-08-02): Runtime role paths are refined by ADR-0535 (#1803)
+
+[ADR-0535](0535-worker-fence-runtime-role-paths.md) partially supersedes the process-role authority
+mapping in this decision. It defines tenant-scoped server diagnostics and recovery, the exact
+security-definer transition available to the server and reconciler, and the reconciler's column-level
+generation-pin read. The credential-bound worker and lifecycle-witness authorities remain unchanged.
+
 ## Consequences
 
 Supported deployments need distinct database credentials, authority delivery of per-incarnation

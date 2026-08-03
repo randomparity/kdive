@@ -4,8 +4,11 @@ An install worker holds a durable reusable-build pin while it may read kernel ar
 job lease does not prove that worker stopped, so the reconciler and garbage collector do not remove
 the pin automatically.
 
-Use `ops.build_uses_list` with a platform-operator token to inspect a bounded oldest-first page of
-pins. Recovery is advertised only when `KDIVE_WORKER_DEATH_VERIFIER` selects an authoritative
+Use `ops.build_uses_list` with a token carrying platform operator and at least viewer on each intended
+project to inspect at most 100 oldest-first pins per request. The server reads them only through the
+database-capped, project-filtered diagnostic function. Platform authority alone returns an empty list;
+it never grants tenant-data access. Recovery is
+advertised only when `KDIVE_WORKER_DEATH_VERIFIER` selects an authoritative
 deployment verifier. `local` verifies hostname, boot ID, PID, and process start time against the
 server host's `/proc`. `docker` verifies the worker's immutable container ID through the reference
 Compose stack's inspect-only socket proxy. `kubernetes` verifies the worker Pod UID through the
@@ -24,8 +27,11 @@ deletion. Likewise, recover before deleting a terminal Pod because a later 404 f
 Pass the exact `use_id` and `holder` returned by the list tool plus a concise operator reason. A
 successful recovery atomically retains the generated evidence and reason in
 `investigation_build_use_recoveries`, writes the platform audit row, and deletes only that use pin.
-Both evidence and reason are bounded in the API and database. Repeat listing before recovery if the
-holder may have changed.
+The server has no direct mutation authority: the same request transaction invokes the exact
+role-gated, termination-evidence-checking function before it writes the platform audit row. Holder and
+reason are each bounded to 512 UTF-8 bytes in the API and database. Repeat listing before recovery if
+the holder may have changed. Recovery outside the caller's viewer-granted projects has the same
+refusal shape as a missing use and leaves the pin unchanged.
 
 When running the processes outside the reference Compose or Helm deployments, set both the worker
 identity kind and a matching server verifier only after supplying equivalent authority. Leave the

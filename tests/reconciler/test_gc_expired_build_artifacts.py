@@ -194,6 +194,7 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
                 await recover_build_use_after_confirmed_worker_death(
                     conn,
                     old_use,
+                    authorized_projects=("proj",),
                     confirmed_worker_id="dead-worker",
                     recovered_by="operator:test",
                     evidence=" ",
@@ -202,6 +203,7 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
             assert not await recover_build_use_after_confirmed_worker_death(
                 conn,
                 old_use,
+                authorized_projects=("proj",),
                 confirmed_worker_id="wrong-worker",
                 recovered_by="operator:test",
                 evidence="operator checked the wrong process",
@@ -212,6 +214,7 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
             assert await recover_build_use_after_confirmed_worker_death(
                 conn,
                 old_use,
+                authorized_projects=("proj",),
                 confirmed_worker_id="dead-worker",
                 recovered_by="operator:test",
                 evidence="operator confirmed host process exited",
@@ -220,6 +223,7 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
             assert await recover_build_use_after_confirmed_worker_death(
                 conn,
                 recycled_use,
+                authorized_projects=("proj",),
                 confirmed_worker_id="recycled-worker",
                 recovered_by="operator:test",
                 evidence="operator confirmed replacement process exited",

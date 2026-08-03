@@ -1,7 +1,8 @@
 # Worker-crash artifact-use fences design
 
 Issue: #1803
-Decision: [ADR-0533](../../adr/0533-role-separated-worker-fence-evidence.md)
+Decisions: [ADR-0533](../../adr/0533-role-separated-worker-fence-evidence.md),
+[ADR-0535](../../adr/0535-worker-fence-runtime-role-paths.md)
 Lease boundary: [ADR-0534](../../adr/0534-bound-worker-job-lease-requests.md)
 Branch: `feat/worker-crash-artifact-fences-1803`
 Base: `main`
@@ -68,15 +69,18 @@ incarnation. A recovery audit copies the immutable termination facts before dele
 
 | Actor | Allowed security-sensitive operation | Denied operation |
 |---|---|---|
-| server/operator | submit and audit a bounded recovery request | publish termination; directly delete uses |
+| server/operator | with platform operator plus project viewer, list through a 100-row tenant-scoped function and invoke/audit one exact tenant-scoped recovery | publish termination; inspect another tenant; directly read or mutate use rows |
 | worker | authenticate an authority-registered active identity; acquire/release its own current attempt | create, rebind, activate, or terminate an identity; release another attempt; mutate evidence |
 | lifecycle witness | register an exact Docker/Pod binding; terminate that same binding | claim jobs; acquire/release uses; recover pins |
-| reconciler | recover one exact use after matching terminal evidence | create or alter termination evidence |
+| reconciler | recover one exact use after matching terminal evidence; read only generation pin-key columns for GC | create or alter termination evidence; mutate uses outside the recovery function |
 | migration owner | install schema and grants outside runtime containers | participate in normal runtime |
 
 Postgres functions verify `session_user` membership, validate bounded inputs, acquire the incarnation
 advisory lock, and perform each transition transactionally. Runtime roles receive no direct mutation
-grant on the protected tables. The lifecycle authority alone registers the exact runtime binding and
+grant on the protected tables. The server receives no direct protected-table reads; its diagnostic
+function enforces the 100-row ceiling. The reconciler receives column-level read authority only for
+`investigation_build_uses.(investigation_id, generation)`, which is the exact GC pin predicate. The
+lifecycle authority alone registers the exact runtime binding and
 mints a random 256-bit credential for each incarnation. Postgres keeps its hash plus a
 controller-key-encrypted delivery envelope until the exact runtime acknowledges receipt. The worker can
 authenticate that existing active incarnation but cannot create, rebind, or reactivate one. Worker
@@ -144,11 +148,14 @@ history can increase but not decrease.
 
 ### Recovery, GC, and tenancy
 
-Operator recovery resolves the caller's project authorization before selecting a use. Inputs and pages
-have explicit limits: identity 512 bytes; binding serialization bounded before persistence; actor 255,
-evidence 1024, and reason 512 bytes; list pages at most 100 rows with an opaque cursor. Witness and GC
+Operator diagnostics and recovery derive the projects where the caller holds at least viewer, in
+addition to requiring platform operator. The list and recovery functions match only uses in that set;
+platform-only accounts receive an empty list, while foreign and missing recovery requests have the same
+refusal shape. Inputs and pages have explicit limits: identity 512 bytes; binding serialization bounded
+before persistence; actor 255, evidence 1024, and reason 512 bytes; list requests return at most 100
+oldest-first rows. Witness and GC
 passes use a configured row count with a hard ceiling of 1,000 rows on the database clock; exhaustion
-retains work and publishes the continuation cursor. The reconciler function accepts one exact use,
+retains work and publishes the continuation cursor. The recovery function accepts one exact use,
 joins through investigation to the authoritative project, verifies the holder and immutable terminal
 evidence under lock, writes the full immutable use/termination/actor tuple, and deletes the use
 atomically. Audit rows are permanent and page by stable key. A missing, active, mismatched, malformed,

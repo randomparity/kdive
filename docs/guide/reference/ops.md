@@ -6,15 +6,21 @@
 
 `implemented` · `read-only`
 
-List persistent reusable-build pins. Requires platform operator.
+List persistent reusable-build pins. Requires platform operator and project viewer.
 
 Conditionally available only when durable worker-termination witnesses are configured.
+Returns pins only from projects where the caller holds at least viewer; platform authority
+alone grants no tenant-data access and therefore returns an empty list.
 A stale job lease is diagnostic context only, never proof that its holder stopped. Pass an
 exact returned use id and holder to `ops.recover_build_use` only after operator review.
+Returns `data.limit` plus items containing `investigation_id`, `generation`, `job_id`,
+`attempt`, `holder`, and PostgreSQL-clock `created_at`. Each request returns the bounded
+oldest-first result described by `limit` and has no continuation cursor; repeat the tool
+to refresh diagnostics.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `limit` | integer | no | Maximum oldest-first pin rows returned; server-capped at 200. |
+| `limit` | integer | no | Maximum oldest-first pin rows returned per request; this row-count limit has no clock and is server-capped at 100. Higher values are clamped; repeat the tool to refresh diagnostics. |
 
 ## `ops.diagnostics`
 
@@ -127,9 +133,11 @@ use `ops.reconcile_now` instead.
 
 `implemented`
 
-Release one stranded build-use pin. Requires platform operator.
+Release one stranded build-use pin. Requires platform operator and project viewer.
 
 Conditionally available only when durable worker-termination witnesses are configured.
+The caller must hold at least viewer on the pin's project. A missing pin and a pin outside
+the caller's granted projects produce the same refusal shape.
 Recovery succeeds only when the supplied holder exactly matches the durable use row and
 the exact worker incarnation already has a durable terminated registry row. This tool
 cannot publish termination evidence. Job heartbeat, lease expiry, object absence, and
@@ -137,8 +145,8 @@ identity replacement are never death evidence.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `holder` | string | yes | Exact worker incarnation recorded on that use row; max 512 chars. |
-| `reason` | string | yes | Operator justification retained in the recovery ledger; max 512 chars. |
+| `holder` | string | yes | Exact worker incarnation recorded on that use row; max 512 bytes in UTF-8 encoding. The byte limit has no clock; an empty or oversized value is refused without recovery, so retry with the exact bounded holder from `ops.build_uses_list`. |
+| `reason` | string | yes | Operator justification retained in the recovery ledger; max 512 bytes in UTF-8 encoding. The byte limit has no clock; an empty or oversized value is refused without recovery, so retry with a concise reason. |
 | `use_id` | string | yes | Exact stranded build-use UUID. |
 
 ## `ops.set_cost_class_coeff`

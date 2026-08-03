@@ -36,9 +36,11 @@ worker, reconciler, and lifecycle-witness DSNs to use that external path; the bo
 performs no database mutation.
 
 The server, worker, and reconciler capabilities have ordinary application-table access. The
-lifecycle witness has none. The worker-incarnation and investigation-build-use evidence tables are
-also excluded from direct runtime access; their dedicated security-definer functions remain the only
-runtime path. New migrations must grant process-role access explicitly for each new relation.
+lifecycle witness has none. Protected worker-incarnation and investigation-build-use mutation remains
+security-definer-function-only. Server build-use diagnostics are capped and filtered to caller projects
+with at least viewer by their dedicated function;
+the reconciler has column-level read access only to the use table's exact investigation/generation pin
+key for GC. New migrations must grant process-role access explicitly for each new relation.
 
 The migration owner and lifecycle witness DSNs are never present in the worker container; its random
 256-bit incarnation credential is copied from a supervisor-owned file into the never-started container

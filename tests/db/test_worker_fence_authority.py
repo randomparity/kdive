@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
+from datetime import timedelta
 from threading import Event
 from time import monotonic, sleep
 from typing import LiteralString
@@ -15,8 +17,13 @@ import pytest
 from psycopg.conninfo import make_conninfo
 from psycopg.sql import SQL, Identifier, Literal
 from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.db import migrate
+from kdive.mcp.auth import RequestContext
+from kdive.mcp.tools.ops import build_uses
+from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
+from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
 
 _LOGIN_AUTHENTICATION = "worker-fence-test-authentication"
@@ -239,6 +246,38 @@ class RoleDsns:
         return make_conninfo(**parameters)
 
 
+class _RecordingGenerationStore:
+    """Record exact generation-version deletion attempted by the real GC path."""
+
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.deleted.append(f"{key}@{version_id}")
+
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        return True
+
+
+def _operator_context(
+    *,
+    platform_operator: bool = True,
+    project: str | None = "project-a",
+    project_role: Role | None = Role.VIEWER,
+) -> RequestContext:
+    projects = () if project is None else (project,)
+    roles = {} if project is None or project_role is None else {project: project_role}
+    return RequestContext(
+        principal="operator-1",
+        agent_session="session-1",
+        projects=projects,
+        roles=roles,
+        platform_roles=(
+            frozenset({PlatformRole.PLATFORM_OPERATOR}) if platform_operator else frozenset()
+        ),
+    )
+
+
 @pytest.fixture
 def role_dsn(pg_conn: psycopg.Connection) -> Iterator[RoleDsns]:
     """Create one uniquely named LOGIN principal for each non-login runtime role."""
@@ -316,6 +355,7 @@ def residual_privilege_role_dsn(pg_conn: psycopg.Connection) -> Iterator[RoleDsn
             "0104_worker_fence_roles.sql",
             "0105_worker_fence_functions.sql",
             "0106_worker_fence_protocol_claim.sql",
+            "0108_worker_fence_runtime_paths.sql",
         ):
             role_sql = (migrate.SCHEMA_DIR / filename).read_bytes()
             for canonical, isolated in roles.items():
@@ -452,6 +492,240 @@ def _acquire(
         ).fetchone()
     assert row is not None
     return bool(row[0])
+
+
+def test_server_role_lists_build_uses_through_the_operator_tool(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """The deployed server DSN can run bounded diagnostics without protected-table reads."""
+    holder, credential = "docker:list-role-path", b"l" * 32
+    foreign_holder, foreign_credential = "docker:list-role-foreign", b"f" * 32
+    _register(role_dsn, holder, credential)
+    _register(role_dsn, foreign_holder, foreign_credential)
+    investigation_id, generation, job_id = _seed_claim(pg_conn, holder=holder, project="project-a")
+    foreign_investigation, foreign_generation, foreign_job = _seed_claim(
+        pg_conn, holder=foreign_holder, project="project-b"
+    )
+    use_id, foreign_use = uuid4(), uuid4()
+    assert _acquire(
+        role_dsn,
+        use_id,
+        investigation_id,
+        generation,
+        job_id,
+        1,
+        credential,
+    )
+    assert _acquire(
+        role_dsn,
+        foreign_use,
+        foreign_investigation,
+        foreign_generation,
+        foreign_job,
+        1,
+        foreign_credential,
+    )
+
+    async def exercise() -> None:
+        pool = AsyncConnectionPool(role_dsn("kdive_server"), min_size=1, max_size=1, open=False)
+        await pool.open()
+        try:
+            denied = await build_uses.list_build_uses(
+                pool, _operator_context(platform_operator=False), limit=100
+            )
+            assert denied.error_category == "authorization_denied"
+            assert denied.items == []
+
+            platform_only = await build_uses.list_build_uses(
+                pool, _operator_context(project=None), limit=100
+            )
+            assert platform_only.status == "ok"
+            assert platform_only.items == []
+
+            membership_without_role = await build_uses.list_build_uses(
+                pool, _operator_context(project_role=None), limit=100
+            )
+            assert membership_without_role.status == "ok"
+            assert membership_without_role.items == []
+
+            listed = await build_uses.list_build_uses(pool, _operator_context(), limit=10_000)
+            assert listed.status == "ok"
+            assert listed.data["limit"] == 100
+            assert [item.object_id for item in listed.items] == [str(use_id)]
+            assert listed.items[0].data == {
+                "investigation_id": str(investigation_id),
+                "generation": str(generation),
+                "job_id": str(job_id),
+                "attempt": "1",
+                "holder": holder,
+                "created_at": listed.items[0].data["created_at"],
+            }
+        finally:
+            await pool.close()
+
+    asyncio.run(exercise())
+
+
+def test_server_role_recovers_one_exact_build_use_through_the_operator_tool(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """The server request and platform audit wrap the exact evidence-checked SQL transition."""
+    holder, credential = "docker:recover-role-path", b"r" * 32
+    _register(role_dsn, holder, credential)
+    investigation_id, generation, job_id = _seed_claim(pg_conn, holder=holder, project="project-b")
+    use_id = uuid4()
+    assert _acquire(
+        role_dsn,
+        use_id,
+        investigation_id,
+        generation,
+        job_id,
+        1,
+        credential,
+    )
+    with psycopg.connect(role_dsn("kdive_lifecycle_witness"), autocommit=True) as witness:
+        assert witness.execute(
+            "SELECT public.terminate_worker_incarnation(%s, 'killed')", (holder,)
+        ).fetchone() == (True,)
+
+    async def exercise() -> None:
+        pool = AsyncConnectionPool(role_dsn("kdive_server"), min_size=1, max_size=1, open=False)
+        await pool.open()
+        try:
+            denied = await build_uses.recover_build_use(
+                pool,
+                _operator_context(platform_operator=False),
+                use_id=use_id,
+                holder=holder,
+                reason="attempted cross-project recovery",
+            )
+            assert denied.error_category == "authorization_denied"
+            assert pg_conn.execute(
+                "SELECT count(*) FROM investigation_build_uses WHERE use_id = %s", (use_id,)
+            ).fetchone() == (1,)
+            cross_project = await build_uses.recover_build_use(
+                pool,
+                _operator_context(),
+                use_id=use_id,
+                holder=holder,
+                reason="confirmed lifecycle termination",
+            )
+            missing = await build_uses.recover_build_use(
+                pool,
+                _operator_context(),
+                use_id=uuid4(),
+                holder=holder,
+                reason="confirmed lifecycle termination",
+            )
+            assert cross_project.error_category == "configuration_error"
+            assert missing.error_category == cross_project.error_category
+            assert missing.status == cross_project.status
+            assert missing.detail == cross_project.detail
+            assert pg_conn.execute(
+                "SELECT count(*) FROM investigation_build_uses WHERE use_id = %s", (use_id,)
+            ).fetchone() == (1,)
+
+            platform_only = await build_uses.recover_build_use(
+                pool,
+                _operator_context(project=None),
+                use_id=use_id,
+                holder=holder,
+                reason="confirmed lifecycle termination",
+            )
+            assert platform_only.error_category == cross_project.error_category
+            assert platform_only.status == cross_project.status
+            assert platform_only.detail == cross_project.detail
+            recovered = await build_uses.recover_build_use(
+                pool,
+                _operator_context(project="project-b"),
+                use_id=use_id,
+                holder=holder,
+                reason="confirmed lifecycle termination",
+            )
+            assert recovered.status == "recovered"
+        finally:
+            await pool.close()
+
+    asyncio.run(exercise())
+    assert pg_conn.execute(
+        "SELECT project, investigation_id, generation, holder_worker_id, recovered_by, reason "
+        "FROM investigation_build_use_recoveries WHERE use_id = %s",
+        (use_id,),
+    ).fetchone() == (
+        "project-b",
+        investigation_id,
+        generation,
+        holder,
+        "operator-1",
+        "confirmed lifecycle termination",
+    )
+    assert pg_conn.execute(
+        "SELECT count(*) FROM platform_audit_log WHERE tool = 'ops.recover_build_use'"
+    ).fetchone() == (4,)
+
+
+def test_reconciler_role_generation_gc_honors_exact_use_pins(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """The deployed reconciler DSN can reclaim only an unpinned exact generation."""
+    holder = "docker:gc-role-path"
+    _register(role_dsn, holder, b"g" * 32)
+    pinned_investigation, eligible_investigation = uuid4(), uuid4()
+    pinned_generation, eligible_generation = uuid4(), uuid4()
+    pinned_job, pinned_use = uuid4(), uuid4()
+    for investigation_id, project in (
+        (pinned_investigation, "project-a"),
+        (eligible_investigation, "project-b"),
+    ):
+        pg_conn.execute(
+            "INSERT INTO investigations (id, principal, project, title, state) "
+            "VALUES (%s, 'principal', %s, 'title', 'active')",
+            (investigation_id, project),
+        )
+    for investigation_id, generation, digest, key in (
+        (pinned_investigation, pinned_generation, "a" * 64, "builds/pinned/kernel"),
+        (eligible_investigation, eligible_generation, "b" * 64, "builds/eligible/kernel"),
+    ):
+        pg_conn.execute(
+            "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+            "content_digest, canonical_document, build_result, artifacts, target_kind, "
+            "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, '{}'::jsonb, "
+            "%s, 'local-libvirt', '{}'::jsonb, now() - interval '1 second')",
+            (
+                investigation_id,
+                generation,
+                f"{digest}.{generation}",
+                digest,
+                Jsonb({"kernel": {"key": key, "version_id": f"v-{generation}"}}),
+            ),
+        )
+    pg_conn.execute(
+        "INSERT INTO jobs (id, kind, state, attempt, max_attempts, worker_id, "
+        "lease_expires_at, authorizing, dedup_key) VALUES "
+        "(%s, 'install', 'running', 1, 3, %s, now() + interval '5 minutes', "
+        "'{}'::jsonb, %s)",
+        (pinned_job, holder, f"gc-role-{pinned_job}"),
+    )
+    pg_conn.execute(
+        "INSERT INTO investigation_build_uses (use_id, investigation_id, generation, job_id, "
+        "attempt, holder_worker_id, lease_expires_at) VALUES "
+        "(%s, %s, %s, %s, 1, %s, now() + interval '5 minutes')",
+        (pinned_use, pinned_investigation, pinned_generation, pinned_job, holder),
+    )
+
+    async def exercise() -> list[str]:
+        store = _RecordingGenerationStore()
+        conn = await psycopg.AsyncConnection.connect(role_dsn("kdive_reconciler"), autocommit=True)
+        try:
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
+        finally:
+            await conn.close()
+        return store.deleted
+
+    assert asyncio.run(exercise()) == [f"builds/eligible/kernel@v-{eligible_generation}"]
+    assert pg_conn.execute(
+        "SELECT generation FROM investigation_builds ORDER BY generation"
+    ).fetchall() == [(pinned_generation,)]
 
 
 @pytest.mark.parametrize(
@@ -957,6 +1231,51 @@ def test_worker_job_function_execute_authority_is_exact(
             assert privilege == (role == "kdive_worker",), (role, signature)
 
 
+def test_protected_runtime_function_and_column_authority_is_exact(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """Diagnostics, recovery, and GC expose no more protected evidence than each role needs."""
+    allowed = {
+        "list_investigation_build_uses(text[],integer)": {"kdive_server"},
+        "recover_investigation_build_use(uuid,text[],text,text,text)": {
+            "kdive_server",
+            "kdive_reconciler",
+        },
+    }
+    for signature, allowed_roles in allowed.items():
+        for role, login in role_dsn.logins.items():
+            assert pg_conn.execute(
+                "SELECT has_function_privilege(%s, %s, 'EXECUTE')",
+                (login, signature),
+            ).fetchone() == (role in allowed_roles,), (role, signature)
+
+    columns = {
+        row[0]
+        for row in pg_conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'investigation_build_uses'"
+        ).fetchall()
+    }
+    for role, login in role_dsn.logins.items():
+        for column in columns:
+            expected = role == "kdive_reconciler" and column in {
+                "investigation_id",
+                "generation",
+            }
+            assert pg_conn.execute(
+                "SELECT has_column_privilege(%s, 'investigation_build_uses', %s, 'SELECT')",
+                (login, column),
+            ).fetchone() == (expected,), (role, column)
+
+    with psycopg.connect(role_dsn("kdive_server"), autocommit=True) as server:
+        for invalid_limit in (0, 101):
+            with pytest.raises(psycopg.errors.InvalidParameterValue, match="between 1 and 100"):
+                server.execute(
+                    "SELECT * FROM public.list_investigation_build_uses(%s::text[], %s)",
+                    (["project-a"], invalid_limit),
+                )
+
+
 def test_migration_upgrade_resets_guarded_function_matrix(
     pg_conn: psycopg.Connection, residual_privilege_role_dsn: RoleDsns
 ) -> None:
@@ -967,7 +1286,11 @@ def test_migration_upgrade_resets_guarded_function_matrix(
         "terminate_worker_incarnation(text,text)": {"kdive_lifecycle_witness"},
         "acquire_investigation_build_use(uuid,uuid,uuid,uuid,integer,bytea)": {"kdive_worker"},
         "release_investigation_build_use(uuid,bytea)": {"kdive_worker"},
-        "recover_investigation_build_use(uuid,text,text,text)": {"kdive_reconciler"},
+        "list_investigation_build_uses(text[],integer)": {"kdive_server"},
+        "recover_investigation_build_use(uuid,text[],text,text,text)": {
+            "kdive_server",
+            "kdive_reconciler",
+        },
         "claim_worker_job(text,bytea,interval,text[])": {"kdive_worker"},
     }
     for signature, allowed_roles in allowed.items():
@@ -995,7 +1318,8 @@ def test_migration_upgrade_resets_guarded_function_matrix(
         residual_privilege_role_dsn("kdive_reconciler"), autocommit=True
     ) as reconciler:
         recovered = reconciler.execute(
-            "SELECT public.recover_investigation_build_use(%s, 'project', 'actor', 'reason')",
+            "SELECT public.recover_investigation_build_use("
+            "%s, ARRAY['project-a'], 'holder', 'actor', 'reason')",
             (uuid4(),),
         ).fetchone()
     assert recovered == (False,)
@@ -1407,7 +1731,7 @@ def test_termination_serializes_before_acquisition(
 def test_recovery_joins_and_persists_authoritative_project(
     pg_conn: psycopg.Connection, role_dsn: RoleDsns
 ) -> None:
-    """A use ID cannot cross projects, and the accepted project's audit is permanent."""
+    """A holder mismatch cannot cross uses, and the database-derived project is permanent."""
     holder, credential = "docker:recover-holder", b"v" * 32
     _register(role_dsn, holder, credential)
     investigation_id, generation, job_id = _seed_claim(
@@ -1429,16 +1753,27 @@ def test_recovery_joins_and_persists_authoritative_project(
         ).fetchone() == (True,)
 
     with psycopg.connect(role_dsn("kdive_reconciler"), autocommit=True) as reconciler:
-        refused = reconciler.execute(
-            "SELECT public.recover_investigation_build_use(%s, %s, %s, %s)",
-            (use_id, "project-b", "reconciler:test", "worker terminated"),
+        foreign_scope = reconciler.execute(
+            "SELECT public.recover_investigation_build_use(%s, %s::text[], %s, %s, %s)",
+            (use_id, ["project-b"], holder, "reconciler:test", "worker terminated"),
+        ).fetchone()
+        holder_mismatch = reconciler.execute(
+            "SELECT public.recover_investigation_build_use(%s, %s::text[], %s, %s, %s)",
+            (
+                use_id,
+                ["project-a"],
+                "docker:other-holder",
+                "reconciler:test",
+                "worker terminated",
+            ),
         ).fetchone()
         recovered = reconciler.execute(
-            "SELECT public.recover_investigation_build_use(%s, %s, %s, %s)",
-            (use_id, "project-a", "reconciler:test", "worker terminated"),
+            "SELECT public.recover_investigation_build_use(%s, %s::text[], %s, %s, %s)",
+            (use_id, ["project-a"], holder, "reconciler:test", "worker terminated"),
         ).fetchone()
 
-    assert refused == (False,)
+    assert foreign_scope == (False,)
+    assert holder_mismatch == (False,)
     assert recovered == (True,)
     assert pg_conn.execute(
         "SELECT project, investigation_id, generation FROM investigation_build_use_recoveries "

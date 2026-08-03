@@ -11,7 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.ops import build_uses
-from kdive.security.authz.rbac import PlatformRole
+from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.runs.worker_incarnations import (
     register_worker_incarnation,
     terminate_worker_incarnation,
@@ -22,8 +22,8 @@ def _ctx(*, operator: bool) -> RequestContext:
     return RequestContext(
         principal="operator-1",
         agent_session="session-1",
-        projects=(),
-        roles={},
+        projects=("proj",),
+        roles={"proj": Role.VIEWER},
         platform_roles=(frozenset({PlatformRole.PLATFORM_OPERATOR}) if operator else frozenset()),
     )
 
@@ -251,6 +251,22 @@ def test_recover_build_use_refuses_mismatch_and_bounds_reason(migrated_url: str)
                 reason="x" * 513,
             )
             assert too_long.error_category == "configuration_error"
+            multibyte_holder = await build_uses.recover_build_use(
+                pool,
+                _ctx(operator=True),
+                use_id=use_id,
+                holder="é" * 300,
+                reason="dead",
+            )
+            assert multibyte_holder.error_category == "configuration_error"
+            multibyte_reason = await build_uses.recover_build_use(
+                pool,
+                _ctx(operator=True),
+                use_id=use_id,
+                holder=holder,
+                reason="é" * 300,
+            )
+            assert multibyte_reason.error_category == "configuration_error"
 
     asyncio.run(_run())
 
