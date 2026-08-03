@@ -286,6 +286,97 @@ def test_cancellation_during_release_drains_release_before_abandoning(
     assert order == ["release", "abandon"]
 
 
+@pytest.mark.parametrize(
+    ("provider_fails", "release_fails"),
+    [(False, False), (False, True), (True, False), (True, True)],
+)
+def test_provider_and_release_outcome_matrix_preserves_failure_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    provider_fails: bool,
+    release_fails: bool,
+) -> None:
+    run_id, use_id = uuid4(), uuid4()
+    credential = SecretStr("worker-test-incarnation-credential")
+    provider_error = CategorizedError(
+        "provider install failed",
+        category=ErrorCategory.INSTALL_FAILURE,
+    )
+    release_error = RuntimeError(f"release failed: {credential.get_secret_value()}")
+    active_uses: set[object] = set()
+    claim_running = True
+    order: list[str] = []
+
+    class Installer:
+        def install(self, request: object) -> None:
+            order.append("provider")
+            if provider_fails:
+                raise provider_error
+
+    async def claimed(*args: object) -> object:
+        return SimpleNamespace(claimed=True)
+
+    async def acquire(*args: object, **kwargs: object) -> object:
+        active_uses.add(use_id)
+        return use_id
+
+    async def abandon(*args: object) -> None:
+        nonlocal claim_running
+        assert claim_running
+        claim_running = False
+        order.append("abandon")
+
+    async def release(*args: object, **kwargs: object) -> bool:
+        order.append("release")
+        if release_fails:
+            raise release_error
+        active_uses.remove(use_id)
+        return True
+
+    monkeypatch.setattr(runs_install, "claim_run_step", claimed)
+    monkeypatch.setattr(runs_install, "acquire_build_use", acquire)
+    monkeypatch.setattr(runs_install, "abandon_run_step_best_effort", abandon)
+    monkeypatch.setattr(runs_install, "release_build_use", release)
+
+    async def exercise() -> None:
+        call = runs_install._run_install_step(
+            cast(AsyncConnection, object()),
+            run_id,
+            Installer(),
+            cast(InstallRequest, object()),
+            job_id=uuid4(),
+            attempt=1,
+            incarnation_credential=credential,
+        )
+        if provider_fails:
+            with pytest.raises(CategorizedError) as caught:
+                await call
+            assert caught.value is provider_error
+            assert caught.value.category is ErrorCategory.INSTALL_FAILURE
+        elif release_fails:
+            with pytest.raises(RuntimeError) as caught:
+                await call
+            assert caught.value is release_error
+        else:
+            assert await call
+
+    asyncio.run(exercise())
+    assert claim_running == (not provider_fails and not release_fails)
+    assert active_uses == ({use_id} if release_fails else set())
+    expected_order = ["provider"]
+    if provider_fails:
+        expected_order.append("abandon")
+    expected_order.append("release")
+    if release_fails and not provider_fails:
+        expected_order.append("abandon")
+    assert order == expected_order
+    if provider_fails and release_fails:
+        assert "build-use release failed" in caplog.text
+        assert "RuntimeError" in caplog.text
+        assert credential.get_secret_value() not in caplog.text
+
+
 def test_acquire_failure_abandons_claim_without_invoking_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
