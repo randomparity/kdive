@@ -56,7 +56,7 @@ def test_kubernetes_worker_identity_requires_all_downward_api_fields() -> None:
 
 @pytest.mark.parametrize("ceiling", ["-1", "1001"])
 def test_kubernetes_witness_ceiling_is_bounded_to_one_thousand_rows(ceiling: str) -> None:
-    """The reconciler rejects a configured witness pass outside its hard row ceiling."""
+    """The witness rejects a configured pass outside its hard row ceiling."""
     config.load(
         {
             "KDIVE_DATABASE_URL": "postgresql://db/kdive",
@@ -67,7 +67,7 @@ def test_kubernetes_witness_ceiling_is_bounded_to_one_thousand_rows(ceiling: str
     )
 
     with pytest.raises(CategorizedError):
-        config.validate("reconciler")
+        config.validate("lifecycle-witness")
 
 
 def test_kubernetes_witness_ceiling_help_states_the_complete_pass_contract() -> None:
@@ -78,17 +78,17 @@ def test_kubernetes_witness_ceiling_help_states_the_complete_pass_contract() -> 
         "pod",
         "kubernetes api",
         "no reference clock",
-        "each reconciler pass observes the kubernetes api",
-        "per reconciler pass",
+        "each witness pass observes the kubernetes api",
+        "per witness pass",
         "1,000",
         "valid inclusive range is 0..1,000",
-        "every out-of-range value (negative or above 1,000) is rejected at reconciler startup",
+        "every out-of-range value (negative or above 1,000) is rejected at witness startup",
         "no cursor",
         "remaining terminal pods",
         "next scheduled invocation",
         "set kdive_kubernetes_witness_ordinal_ceiling to an "
         "integer in the inclusive range 0..1,000",
-        "restart the reconciler",
+        "restart the lifecycle witness",
     ):
         assert fragment in help_text
     assert "remaining finalized pods" not in help_text

@@ -30,7 +30,7 @@ pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm not i
 CHART = str(Path(__file__).resolve().parents[2] / "deploy" / "helm" / "kdive")
 
 # The three app processes whose pods read config.* via envFrom (and must roll on a change).
-_APP_PROCS = ("server", "worker", "reconciler")
+_APP_PROCS = ("server", "worker", "reconciler", "witness")
 # The bundled-demo backends that do NOT consume the config ConfigMap (must NOT roll).
 _BACKEND_PROCS = ("postgres", "minio", "oidc")
 # Every workload kind carrying a pod template in this chart. The worker's per-replica scratch
@@ -116,7 +116,7 @@ def test_config_checksum_is_stable_across_renders() -> None:
         ("server", {"server"}),
         ("worker", {"worker"}),
         ("reconciler", {"reconciler"}),
-        ("lifecycleWitness", {"reconciler"}),
+        ("lifecycleWitness", {"witness"}),
     ],
 )
 def test_database_secret_ref_change_rolls_only_consumers(

@@ -296,3 +296,10 @@ def test_runnable_handler_requires_telemetry(handler, command) -> None:
     with pytest.raises(RuntimeError) as exc:
         handler(object(), object(), None)
     assert str(exc.value) == f"{command} command requires telemetry bootstrap"
+
+
+def test_lifecycle_witness_is_a_dedicated_runnable_command() -> None:
+    from kdive.__main__ import build_parser
+
+    args = build_parser().parse_args(["lifecycle-witness"])
+    assert args.command == "lifecycle-witness"

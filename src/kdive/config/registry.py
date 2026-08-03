@@ -16,7 +16,9 @@ from typing import Any
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 # The runnable subcommands a setting may declare it is consumed by.
-RUNNABLE: frozenset[str] = frozenset({"server", "worker", "reconciler", "migrate"})
+RUNNABLE: frozenset[str] = frozenset(
+    {"server", "worker", "reconciler", "lifecycle-witness", "migrate"}
+)
 
 
 def never_required(env: Mapping[str, str]) -> bool:

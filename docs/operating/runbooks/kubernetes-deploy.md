@@ -101,6 +101,8 @@ Before install, create separate database login principals and a Secret containin
 server, worker, reconciler, and lifecycle-witness DSNs. The capability-role names and required
 membership shape are documented in the chart README. The examples use the chart's default Secret
 name and keys; production may use separate Secrets by overriding each `databaseCredentials.*` ref.
+The chart deploys the witness separately from the reconciler so neither process receives the
+other's database principal or authority-bearing Secret mounts.
 
 ```bash
 kubectl create secret generic kdive-database \

@@ -1,6 +1,6 @@
 # kdive Helm chart
 
-Deploys the three kdive processes — server, worker, reconciler — plus a migrate
+Deploys four kdive processes — server, worker, reconciler, lifecycle witness — plus a migrate
 one-shot Job, against operator-provided Postgres/MinIO/OIDC backends. Implements
 ADR-0088 (deployment & packaging).
 
@@ -77,7 +77,7 @@ the chart renders `KDIVE_LOCAL_LIBVIRT_ENABLED` from a defensive `default "false
 bare `--reuse-values` no longer reintroduces the local-libvirt reaper crash-loop — but
 `-f kdive-values.yaml` is the general fix for *any* future config-default drift, so prefer it.
 
-A `helm upgrade` that changes a `config.*` value now rolls the server/worker/reconciler
+A `helm upgrade` that changes a `config.*` value rolls all four process workloads
 workloads automatically (a `checksum/config` pod annotation, ADR-0134) — no manual
 `kubectl rollout restart` is needed. The bundled Postgres/MinIO backends carry no such
 annotation, so a config change never rolls their `emptyDir` pods.
@@ -408,8 +408,10 @@ and `KDIVE_REMOTE_LIBVIRT_MACHINE`.
 For S3, prefer IRSA/workload identity, or a managed Secret you `envFrom` onto the pods.
 The fixed `demoCredentials` are non-secret by design: the demo data they guard is
 throwaway `emptyDir` state.
-The reconciler's termination witness uses a dedicated service account with `get` and `patch`
-permission only for the configured worker Pod names. The server has no Pod authority. Worker
+The lifecycle witness is a dedicated Deployment and process with its own database credential,
+envelope key, TLS private key, and service account. Its service account has `get` and `patch`
+permission only for the configured worker Pod names. The reconciler and server have no Pod
+authority or witness secrets. Worker
 holders include the downward-API Pod UID, and the witness records a specific terminal Pod
 incarnation before removing its finalizer. Scaling `worker.replicas`
 does not shrink the Role's bounded `resourceNames`: `worker.deathVerificationOrdinalCeiling`

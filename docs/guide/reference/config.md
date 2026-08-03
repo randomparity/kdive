@@ -37,7 +37,7 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_DATABASE_URL` | migrate, reconciler, server, worker | — | yes | Postgres DSN for the system-of-record. |
+| `KDIVE_DATABASE_URL` | lifecycle-witness, migrate, reconciler, server, worker | — | yes | Postgres DSN for the system-of-record. |
 | `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL` | — | — | no | secret (ref only) |
 | `KDIVE_MIGRATION_DATABASE_URL` | — | — | no | secret (ref only) |
 | `KDIVE_WORKER_DATABASE_URL` | — | — | no | secret (ref only) |
@@ -54,7 +54,7 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_FAULT_INJECT` | migrate, reconciler, server, worker | — | no | Presence (1/true/yes) registers the fault-injection provider. |
+| `KDIVE_FAULT_INJECT` | lifecycle-witness, migrate, reconciler, server, worker | — | no | Presence (1/true/yes) registers the fault-injection provider. |
 | `KDIVE_FAULT_INJECT_ALLOCATION_CAP` | reconciler, worker | `1` | no | Per-plane concurrent-Allocation cap. |
 | `KDIVE_FAULT_INJECT_SECRET_REF` | reconciler, worker | `fault-inject/console-sentinel` | no | secret (ref only) |
 | `KDIVE_FAULT_INJECT_SEED` | reconciler, worker | `0` | no | Deterministic fault-engine seed. |
@@ -121,13 +121,13 @@
 | `KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S` | reconciler, worker | `1800` | no | Native-KVM base window (seconds) for the customization boot's completion poll. 30 minutes. Foreign (TCG-emulated) guests scale this by tcg_deadline_multiplier(accel) (ADR-0341). This is a provisional default absorbing mirror/network fetch variance; a live-proof measurement will re-pin it. |
 | `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` | reconciler, worker | `10.0` | no | Multiplier applied to boot-readiness deadlines for non-KVM (TCG-emulated) guests, keyed off the System's persisted accelerator. KVM guests are unscaled (1.0); TCG and unknown accelerators scale by this factor. Must be >= 1.0; 1.0 disables scaling. |
 | `KDIVE_LIBVIRT_URI` | reconciler, worker | `qemu:///system` | no | libvirt connection URI for the local host. |
-| `KDIVE_LOCAL_LIBVIRT_ENABLED` | migrate, reconciler, server, worker | `true` | no | Whether the local-libvirt provider is composed (default on): its reconciler leaked-domain reaper and its provider-discovery registration and resolver runtime. Set to false on deployments with no local libvirt host (e.g. a remote-libvirt-only k8s deploy) so neither the leaked-domain sweep nor startup discovery fails on a missing socket. |
+| `KDIVE_LOCAL_LIBVIRT_ENABLED` | lifecycle-witness, migrate, reconciler, server, worker | `true` | no | Whether the local-libvirt provider is composed (default on): its reconciler leaked-domain reaper and its provider-discovery registration and resolver runtime. Set to false on deployments with no local libvirt host (e.g. a remote-libvirt-only k8s deploy) so neither the leaked-domain sweep nor startup discovery fails on a missing socket. |
 
 ## logging
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_LOG_LEVEL` | migrate, reconciler, server, worker | `INFO` | no | Structured-logging level (overridable by --log-level). |
+| `KDIVE_LOG_LEVEL` | lifecycle-witness, migrate, reconciler, server, worker | `INFO` | no | Structured-logging level (overridable by --log-level). |
 | `KDIVE_MCP_TRACE` | server | — | no | Presence (1/true/yes) enables opt-in ASGI transport-trace logging (default off). |
 
 ## mcp
@@ -157,10 +157,10 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_OTEL_ENABLED` | migrate, reconciler, server, worker | — | no | Presence (1/true/yes) enables OTLP export of logs/metrics/traces (default off). |
-| `KDIVE_OTEL_EXPORTER_OTLP_ENDPOINT` | migrate, reconciler, server, worker | — | no | OTLP/gRPC collector endpoint; required when KDIVE_OTEL_ENABLED is set. |
-| `KDIVE_OTEL_SERVICE_NAMESPACE` | migrate, reconciler, server, worker | `kdive` | no | service.namespace resource attribute on all emitted telemetry. |
-| `KDIVE_OTEL_TRACES_SAMPLER_RATIO` | migrate, reconciler, server, worker | `0.1` | no | Parent-based ratio trace sampler ratio in [0, 1] (default 0.1). |
+| `KDIVE_OTEL_ENABLED` | lifecycle-witness, migrate, reconciler, server, worker | — | no | Presence (1/true/yes) enables OTLP export of logs/metrics/traces (default off). |
+| `KDIVE_OTEL_EXPORTER_OTLP_ENDPOINT` | lifecycle-witness, migrate, reconciler, server, worker | — | no | OTLP/gRPC collector endpoint; required when KDIVE_OTEL_ENABLED is set. |
+| `KDIVE_OTEL_SERVICE_NAMESPACE` | lifecycle-witness, migrate, reconciler, server, worker | `kdive` | no | service.namespace resource attribute on all emitted telemetry. |
+| `KDIVE_OTEL_TRACES_SAMPLER_RATIO` | lifecycle-witness, migrate, reconciler, server, worker | `0.1` | no | Parent-based ratio trace sampler ratio in [0, 1] (default 0.1). |
 
 ## remote-libvirt
 
@@ -201,15 +201,15 @@
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
 | `KDIVE_DOCKER_DEATH_API` | server | `http://worker-death-api:2375` | no | Private inspect-only Docker authority endpoint used by the Docker death verifier. |
-| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_CA` | reconciler | — | conditional | Certificate-authority file reference trusted by the broker and init client. |
-| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST` | reconciler | — | conditional | Private reconciler bind host for the Kubernetes worker credential broker. |
-| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_PORT` | reconciler | — | conditional | Private TLS port for the Kubernetes worker credential broker. |
-| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_CERT` | reconciler | — | conditional | Reconciler-only file reference for the broker TLS certificate. |
-| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_KEY` | reconciler | — | conditional | secret (ref only) |
-| `KDIVE_KUBERNETES_CREDENTIAL_ENVELOPE_KEY` | reconciler | — | conditional | secret (ref only) |
-| `KDIVE_KUBERNETES_WITNESS_NAMESPACE` | reconciler | `` | no | Namespace watched by the bounded worker termination witness; blank disables it. |
-| `KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING` | reconciler | `0` | no | Maximum exclusive worker ordinal polled by the Kubernetes termination witness. The unit is one exact Kubernetes Pod name per ordinal; this count limit has no reference clock. Each reconciler pass observes the Kubernetes API for every configured Pod name and applies this limit per reconciler pass, processing at most 1,000 Pods. The valid inclusive range is 0..1,000; every out-of-range value (negative or above 1,000) is rejected at reconciler startup. No cursor is published: remaining terminal Pods are retained for the next scheduled invocation. To recover, set KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING to an integer in the inclusive range 0..1,000 and restart the reconciler. |
-| `KDIVE_KUBERNETES_WITNESS_WORKER_NAME` | reconciler | `` | no | StatefulSet worker name prefix used with bounded ordinal Pod reads. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_CA` | lifecycle-witness | — | conditional | Certificate-authority file reference trusted by the broker and init client. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST` | lifecycle-witness | — | conditional | Private lifecycle-witness bind host for the Kubernetes worker credential broker. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_PORT` | lifecycle-witness | — | conditional | Private TLS port for the Kubernetes worker credential broker. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_CERT` | lifecycle-witness | — | conditional | Lifecycle-witness-only file reference for the broker TLS certificate. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_KEY` | lifecycle-witness | — | conditional | secret (ref only) |
+| `KDIVE_KUBERNETES_CREDENTIAL_ENVELOPE_KEY` | lifecycle-witness | — | conditional | secret (ref only) |
+| `KDIVE_KUBERNETES_WITNESS_NAMESPACE` | lifecycle-witness | `` | no | Namespace watched by the dedicated bounded worker termination witness. |
+| `KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING` | lifecycle-witness | `0` | no | Maximum exclusive worker ordinal polled by the Kubernetes termination witness. The unit is one exact Kubernetes Pod name per ordinal; this count limit has no reference clock. Each witness pass observes the Kubernetes API for every configured Pod name and applies this limit per witness pass, processing at most 1,000 Pods. The valid inclusive range is 0..1,000; every out-of-range value (negative or above 1,000) is rejected at witness startup. No cursor is published: remaining terminal Pods are retained for the next scheduled invocation. To recover, set KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING to an integer in the inclusive range 0..1,000 and restart the lifecycle witness. |
+| `KDIVE_KUBERNETES_WITNESS_WORKER_NAME` | lifecycle-witness | `` | no | StatefulSet worker name prefix used with bounded ordinal Pod reads. |
 | `KDIVE_POD_NAME` | worker | — | conditional | Kubernetes worker Pod name supplied by the downward API. |
 | `KDIVE_POD_NAMESPACE` | worker | — | conditional | Kubernetes worker Pod namespace supplied by the downward API. |
 | `KDIVE_POD_UID` | worker | — | conditional | Immutable Kubernetes worker Pod UID supplied by the downward API. |

@@ -21,6 +21,7 @@ _SERVER = frozenset({"server"})
 _STORE_USERS = frozenset({"server", "worker", "reconciler"})
 _WORKER = frozenset({"worker"})
 _RECONCILER = frozenset({"reconciler"})
+_LIFECYCLE_WITNESS = frozenset({"lifecycle-witness"})
 _DISCOVERY = frozenset({"worker", "reconciler"})
 # The upload-orphan sweep's two knobs are read by both processes (ADR-0455 §2, §8): the reconciler
 # runs the sweep on its loop, and the server runs a full `reconcile_once` on demand via
@@ -884,15 +885,15 @@ KUBERNETES_WITNESS_NAMESPACE = Setting(
     parse=_str,
     default="",
     group="worker-death",
-    processes=_RECONCILER,
-    help="Namespace watched by the bounded worker termination witness; blank disables it.",
+    processes=_LIFECYCLE_WITNESS,
+    help="Namespace watched by the dedicated bounded worker termination witness.",
 )
 KUBERNETES_WITNESS_WORKER_NAME = Setting(
     name="KDIVE_KUBERNETES_WITNESS_WORKER_NAME",
     parse=_str,
     default="",
     group="worker-death",
-    processes=_RECONCILER,
+    processes=_LIFECYCLE_WITNESS,
     help="StatefulSet worker name prefix used with bounded ordinal Pod reads.",
 )
 KUBERNETES_WITNESS_ORDINAL_CEILING = Setting(
@@ -900,33 +901,33 @@ KUBERNETES_WITNESS_ORDINAL_CEILING = Setting(
     parse=_nonnegative_int_at_most(1_000),
     default="0",
     group="worker-death",
-    processes=_RECONCILER,
+    processes=_LIFECYCLE_WITNESS,
     help=(
         "Maximum exclusive worker ordinal polled by the Kubernetes termination witness. The unit "
         "is one exact Kubernetes Pod name per ordinal; this count limit has no reference clock. "
-        "Each reconciler pass observes the Kubernetes API for every configured Pod name and "
-        "applies this limit per reconciler pass, processing at most 1,000 Pods. The valid "
+        "Each witness pass observes the Kubernetes API for every configured Pod name and "
+        "applies this limit per witness pass, processing at most 1,000 Pods. The valid "
         "inclusive range is 0..1,000; every out-of-range value (negative or above 1,000) "
         "is rejected at "
-        "reconciler startup. No cursor is published: remaining terminal Pods are retained for the "
+        "witness startup. No cursor is published: remaining terminal Pods are retained for the "
         "next scheduled invocation. To recover, set KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING to an "
-        "integer in the inclusive range 0..1,000 and restart the reconciler."
+        "integer in the inclusive range 0..1,000 and restart the lifecycle witness."
     ),
 )
 KUBERNETES_CREDENTIAL_BROKER_HOST = Setting(
     name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST",
     parse=_nonempty,
     group="worker-death",
-    processes=_RECONCILER,
+    processes=_LIFECYCLE_WITNESS,
     required_when=_kubernetes_witness,
-    help="Private reconciler bind host for the Kubernetes worker credential broker.",
+    help="Private lifecycle-witness bind host for the Kubernetes worker credential broker.",
     suggest="the internal broker bind host, e.g. 0.0.0.0",
 )
 KUBERNETES_CREDENTIAL_BROKER_PORT = Setting(
     name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_PORT",
     parse=_positive_int,
     group="worker-death",
-    processes=_RECONCILER,
+    processes=_LIFECYCLE_WITNESS,
     required_when=_kubernetes_witness,
     help="Private TLS port for the Kubernetes worker credential broker.",
     suggest="a TCP port between 1 and 65535",
@@ -935,9 +936,9 @@ KUBERNETES_CREDENTIAL_BROKER_TLS_CERT = Setting(
     name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_CERT",
     parse=_nonempty,
     group="worker-death",
-    processes=_RECONCILER,
+    processes=_LIFECYCLE_WITNESS,
     required_when=_kubernetes_witness,
-    help="Reconciler-only file reference for the broker TLS certificate.",
+    help="Lifecycle-witness-only file reference for the broker TLS certificate.",
     suggest="a readable TLS certificate file path",
 )
 KUBERNETES_CREDENTIAL_BROKER_TLS_KEY = Setting(
@@ -945,16 +946,16 @@ KUBERNETES_CREDENTIAL_BROKER_TLS_KEY = Setting(
     parse=_nonempty,
     secret=True,
     group="worker-death",
-    processes=_RECONCILER,
+    processes=_LIFECYCLE_WITNESS,
     required_when=_kubernetes_witness,
-    help="Reconciler-only file reference for the broker TLS private key.",
+    help="Lifecycle-witness-only file reference for the broker TLS private key.",
     suggest="a readable TLS private-key file path",
 )
 KUBERNETES_CREDENTIAL_BROKER_CA = Setting(
     name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_CA",
     parse=_nonempty,
     group="worker-death",
-    processes=_RECONCILER,
+    processes=_LIFECYCLE_WITNESS,
     required_when=_kubernetes_witness,
     help="Certificate-authority file reference trusted by the broker and init client.",
     suggest="a readable TLS CA certificate file path",
@@ -964,9 +965,9 @@ KUBERNETES_CREDENTIAL_ENVELOPE_KEY = Setting(
     parse=_nonempty,
     secret=True,
     group="worker-death",
-    processes=_RECONCILER,
+    processes=_LIFECYCLE_WITNESS,
     required_when=_kubernetes_witness,
-    help="Reconciler-only Fernet key file for transient worker credential envelopes.",
+    help="Lifecycle-witness-only Fernet key file for transient worker credential envelopes.",
     suggest="a readable Fernet envelope-key file path",
 )
 

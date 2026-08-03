@@ -146,6 +146,11 @@ post-hoc holder. It removes only its own finalizer with resource-version, UID, a
 API/database failure leaves the Pod unchanged. Termination clears any unacknowledged envelope. Ordinal
 history can increase but not decrease.
 
+Kubernetes deploys this authority as a dedicated process and Pod. Only the lifecycle-witness
+Deployment receives the witness database principal, broker TLS private key, credential envelope key,
+projected service-account token, and bounded Pod RBAC. The reconciler Deployment receives none of
+those values and runs only drift repair under the reconciler database principal.
+
 ### Recovery, GC, and tenancy
 
 Operator diagnostics and recovery derive the projects where the caller holds at least viewer, in

@@ -18,12 +18,11 @@ spec:
         {{- include "kdive.processConfigChecksum" (dict "root" . "process" "reconciler") | nindent 8 }}
         {{- include "kdive.scrapeAnnotations" 9466 | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "kdive.fullname" . }}-worker-termination-witness
-      automountServiceAccountToken: true
+      serviceAccountName: {{ include "kdive.fullname" . }}-reconciler
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
-        # fsGroup so the non-root UID can read a mounted file-ref Secret via its group bit.
         fsGroup: 10001
       {{- include "kdive.minioVersioningBarrier" . | nindent 6 }}
       containers:
@@ -33,31 +32,6 @@ spec:
           args: ["reconciler"]
           env:
             {{- include "kdive.databaseEnv" .Values.databaseCredentials.reconciler | nindent 12 }}
-            - name: KDIVE_LIFECYCLE_WITNESS_DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.databaseCredentials.lifecycleWitness.secretName | quote }}
-                  key: {{ .Values.databaseCredentials.lifecycleWitness.key | quote }}
-            - name: KDIVE_KUBERNETES_WITNESS_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: KDIVE_KUBERNETES_WITNESS_WORKER_NAME
-              value: {{ include "kdive.fullname" . }}-worker
-            - name: KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING
-              value: {{ include "kdive.effectiveDeathCeiling" . | quote }}
-            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST
-              value: "0.0.0.0"
-            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_PORT
-              value: {{ .Values.workerCredentialBroker.port | quote }}
-            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_CERT
-              value: /run/kdive/worker-credential-broker-tls/{{ .Values.workerCredentialBroker.tls.certificateKey }}
-            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_KEY
-              value: /run/kdive/worker-credential-broker-tls/{{ .Values.workerCredentialBroker.tls.privateKey }}
-            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_CA
-              value: /run/kdive/worker-credential-broker-tls/{{ .Values.workerCredentialBroker.tls.caKey }}
-            - name: KDIVE_KUBERNETES_CREDENTIAL_ENVELOPE_KEY
-              value: /run/kdive/worker-credential-broker-envelope/{{ .Values.workerCredentialBroker.envelopeKey.key }}
             {{- include "kdive.auxEnv" 9466 | nindent 12 }}
             {{- include "kdive.secretsEnv" . | nindent 12 }}
             {{- include "kdive.systemsEnv" . | nindent 12 }}
@@ -65,38 +39,17 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "kdive.fullname" . }}-config
-          # No Service fronts the reconciler; its aux listener (ADR-0090 §5) is reached
-          # only by the pod-local kubelet/scrape. /readyz gates rollout progression (it
-          # withdraws nothing), /livez tracks the reconcile loop — a not-ready reconciler
-          # is not killed by liveness.
           ports:
             - containerPort: 9466
-            - name: cred-broker
-              containerPort: {{ .Values.workerCredentialBroker.port }}
           {{- include "kdive.auxProbes" 9466 | nindent 10 }}
-          volumeMounts:
-            - name: broker-tls
-              mountPath: /run/kdive/worker-credential-broker-tls
-              readOnly: true
-            - name: broker-envelope
-              mountPath: /run/kdive/worker-credential-broker-envelope
-              readOnly: true
           {{- if or .Values.secrets.secretName .Values.systems.configMapName .Values.fixtures.configMapName }}
+          volumeMounts:
             {{- include "kdive.secretsVolumeMount" . | nindent 12 }}
             {{- include "kdive.systemsVolumeMount" . | nindent 12 }}
             {{- include "kdive.fixturesVolumeMount" . | nindent 12 }}
           {{- end }}
-      volumes:
-        - name: broker-tls
-          secret:
-            secretName: {{ .Values.workerCredentialBroker.tls.secretName | quote }}
-        - name: broker-envelope
-          secret:
-            secretName: {{ .Values.workerCredentialBroker.envelopeKey.secretName | quote }}
-            items:
-              - key: {{ .Values.workerCredentialBroker.envelopeKey.key | quote }}
-                path: {{ .Values.workerCredentialBroker.envelopeKey.key | quote }}
       {{- if or .Values.secrets.secretName .Values.systems.configMapName .Values.fixtures.configMapName }}
+      volumes:
         {{- include "kdive.secretsVolume" . | nindent 8 }}
         {{- include "kdive.systemsVolume" . | nindent 8 }}
         {{- include "kdive.fixturesVolume" . | nindent 8 }}

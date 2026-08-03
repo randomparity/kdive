@@ -135,7 +135,11 @@ _AUX_PORTS = {"server": 9464, "worker": 9465, "reconciler": 9466}
 
 # The workload kind that carries each app process's pod template. The worker owns per-replica
 # scratch volumes, so it is a StatefulSet with volumeClaimTemplates (ADR-0514).
-_WORKLOAD_KINDS = {"server": "Deployment", "worker": "StatefulSet", "reconciler": "Deployment"}
+_WORKLOAD_KINDS = {
+    "server": "Deployment",
+    "worker": "StatefulSet",
+    "reconciler": "Deployment",
+}
 
 
 def _template(*set_args: str) -> subprocess.CompletedProcess[str]:
@@ -287,8 +291,8 @@ def _oidc_request_mappings(res: subprocess.CompletedProcess[str]) -> list[dict[s
 def test_renders_three_app_workloads_against_external_backends() -> None:
     res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
     assert res.returncode == 0, res.stderr
-    # server + reconciler are Deployments; the worker is a StatefulSet (ADR-0514).
-    assert res.stdout.count("kind: Deployment") == 2
+    # Server, reconciler, and lifecycle witness are Deployments; worker is a StatefulSet.
+    assert res.stdout.count("kind: Deployment") == 3
     assert res.stdout.count("kind: StatefulSet") == 1
     assert "pre-install" in res.stdout
 
@@ -318,12 +322,12 @@ def test_database_principals_are_distinct_secret_refs() -> None:
         ref = _container_env(workload)["KDIVE_DATABASE_URL"]["valueFrom"]["secretKeyRef"]
         assert ref == {"name": secret_name, "key": key}
 
-    reconciler = next(
+    witness_workload = next(
         doc
         for doc in docs
-        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-reconciler")
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-witness")
     )
-    witness = _container_env(reconciler)["KDIVE_LIFECYCLE_WITNESS_DATABASE_URL"]
+    witness = _container_env(witness_workload)["KDIVE_DATABASE_URL"]
     assert witness["valueFrom"]["secretKeyRef"] == {
         "name": "kdive-database",
         "key": "lifecycle-witness-dsn",
@@ -422,12 +426,12 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
     ]
     assert worker["metadata"]["annotations"]["kdive.io/death-verification-ordinal-ceiling"] == "32"
 
-    reconciler = next(
+    witness = next(
         doc
         for doc in docs
-        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-reconciler")
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-witness")
     )
-    assert reconciler["spec"]["template"]["spec"]["serviceAccountName"].endswith(
+    assert witness["spec"]["template"]["spec"]["serviceAccountName"].endswith(
         "-worker-termination-witness"
     )
 
@@ -453,15 +457,15 @@ def test_worker_credential_broker_is_private_tls_and_init_only() -> None:
         and str(doc["metadata"]["name"]).endswith("-worker-credential-broker")
     )
     worker = next(doc for doc in docs if doc.get("kind") == "StatefulSet")
-    reconciler = next(
+    witness = next(
         doc
         for doc in docs
-        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-reconciler")
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-witness")
     )
 
     assert service["spec"]["type"] == "ClusterIP"
     assert service["spec"].get("clusterIP") != "None"
-    assert policy["spec"]["podSelector"]["matchLabels"]["app"].endswith("-reconciler")
+    assert policy["spec"]["podSelector"]["matchLabels"]["app"].endswith("-witness")
     assert policy["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"]["app"].endswith(
         "-worker"
     )
@@ -477,14 +481,61 @@ def test_worker_credential_broker_is_private_tls_and_init_only() -> None:
         "credential-token" not in mount["name"] for mount in worker_container["volumeMounts"]
     )
     assert all("broker-envelope" not in mount["name"] for mount in worker_container["volumeMounts"])
-    reconciler_mounts = reconciler["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
-    assert any(mount["name"] == "broker-envelope" for mount in reconciler_mounts)
+    witness_mounts = witness["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    assert any(mount["name"] == "broker-envelope" for mount in witness_mounts)
     lifecycle_dsn = next(
         item
-        for item in reconciler["spec"]["template"]["spec"]["containers"][0]["env"]
-        if item["name"] == "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL"
+        for item in witness["spec"]["template"]["spec"]["containers"][0]["env"]
+        if item["name"] == "KDIVE_DATABASE_URL"
     )
     assert lifecycle_dsn["valueFrom"]["secretKeyRef"]["name"] == "kdive-database"
+
+
+def test_lifecycle_authority_is_isolated_from_reconciler() -> None:
+    res = _template()
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+    deployments = {
+        str(doc["metadata"]["name"]).rsplit("-", 1)[-1]: doc
+        for doc in docs
+        if doc.get("kind") == "Deployment"
+    }
+    reconciler = deployments["reconciler"]
+    witness = deployments["witness"]
+    reconciler_container = reconciler["spec"]["template"]["spec"]["containers"][0]
+    witness_container = witness["spec"]["template"]["spec"]["containers"][0]
+    reconciler_text = yaml.safe_dump(reconciler_container)
+    witness_text = yaml.safe_dump(witness_container)
+
+    assert reconciler_container["args"] == ["reconciler"]
+    assert "lifecycle-witness-dsn" not in reconciler_text
+    assert "broker-envelope" not in reconciler_text
+    assert "broker-tls" not in reconciler_text
+    assert witness_container["args"] == ["lifecycle-witness"]
+    assert witness_container["ports"][0]["containerPort"] == 9467
+    assert witness_container["readinessProbe"]["httpGet"] == {"path": "/readyz", "port": 9467}
+    assert "lifecycle-witness-dsn" in witness_text
+    assert "broker-envelope" in witness_text
+    assert "broker-tls" in witness_text
+    assert witness["spec"]["template"]["spec"]["serviceAccountName"].endswith(
+        "-worker-termination-witness"
+    )
+    assert reconciler["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+
+    service = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Service"
+        and str(doc["metadata"]["name"]).endswith("-worker-credential-broker")
+    )
+    policy = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "NetworkPolicy"
+        and str(doc["metadata"]["name"]).endswith("-worker-credential-broker")
+    )
+    assert service["spec"]["selector"]["app"].endswith("-witness")
+    assert policy["spec"]["podSelector"]["matchLabels"]["app"].endswith("-witness")
 
 
 def test_worker_credential_broker_port_names_meet_kubernetes_limit() -> None:
@@ -497,13 +548,13 @@ def test_worker_credential_broker_port_names_meet_kubernetes_limit() -> None:
         if doc.get("kind") == "Service"
         and str(doc["metadata"]["name"]).endswith("-worker-credential-broker")
     )
-    reconciler = next(
+    witness = next(
         doc
         for doc in docs
-        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-reconciler")
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-witness")
     )
     names = [service["spec"]["ports"][0]["name"]]
-    container_ports = reconciler["spec"]["template"]["spec"]["containers"][0]["ports"]
+    container_ports = witness["spec"]["template"]["spec"]["containers"][0]["ports"]
     names.extend(port["name"] for port in container_ports if "name" in port)
     assert all(len(name) <= 15 for name in names)
     assert service["spec"]["ports"][0]["targetPort"] in names
@@ -1102,9 +1153,9 @@ def test_bundled_renders_demo_backends() -> None:
         assert f"name: {name}\n" in res.stdout, name
     assert "mock-oauth2-server" in res.stdout
     assert "kind: NetworkPolicy" in res.stdout
-    # Five Deployments on the demo path: 2 app (server, reconciler) + 3 demo backends. The
+    # Six Deployments: 3 app (server, reconciler, witness) + 3 demo backends. The
     # worker is the one StatefulSet (ADR-0514).
-    assert res.stdout.count("kind: Deployment") == 5
+    assert res.stdout.count("kind: Deployment") == 6
     assert res.stdout.count("kind: StatefulSet") == 1
 
 
@@ -1168,7 +1219,7 @@ def test_external_path_has_no_demo_backends() -> None:
     assert res.returncode == 0, res.stderr
     assert "mock-oauth2-server" not in res.stdout
     assert res.stdout.count("kind: NetworkPolicy") == 1
-    assert res.stdout.count("kind: Deployment") == 2
+    assert res.stdout.count("kind: Deployment") == 3
     assert res.stdout.count("kind: StatefulSet") == 1
 
 

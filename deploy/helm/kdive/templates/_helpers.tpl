@@ -101,13 +101,8 @@ checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sh
 {{- $root := index . "root" -}}
 {{- $process := index . "process" -}}
 {{- $ref := index $root.Values.databaseCredentials $process -}}
-{{- $witness := "" -}}
-{{- if eq $process "reconciler" -}}
-  {{- $witnessRef := $root.Values.databaseCredentials.lifecycleWitness -}}
-  {{- $witness = printf "%s\n%s" $witnessRef.secretName $witnessRef.key -}}
-{{- end -}}
 {{- $config := include (print $root.Template.BasePath "/configmap.yaml") $root -}}
-checksum/config: {{ printf "%s\n%s\n%s\n%s" $config $ref.secretName $ref.key $witness | sha256sum }}
+checksum/config: {{ printf "%s\n%s\n%s" $config $ref.secretName $ref.key | sha256sum }}
 {{- end -}}
 
 {{- define "kdive.databaseEnv" -}}

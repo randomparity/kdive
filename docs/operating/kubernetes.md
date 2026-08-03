@@ -1,7 +1,7 @@
 # Running KDIVE on Kubernetes
 
-The Helm chart under `deploy/helm/kdive` deploys the three KDIVE processes
-(`server` / `worker` / `reconciler`) plus a `migrate` one-shot Job, against
+The Helm chart under `deploy/helm/kdive` deploys four KDIVE processes
+(`server` / `worker` / `reconciler` / `lifecycle-witness`) plus a `migrate` one-shot Job, against
 operator-provided Postgres, S3-compatible object storage, and an OIDC issuer.
 
 The chart's value and flag reference is
@@ -28,6 +28,8 @@ Backends are external. Supply non-secret connection details through `KDIVE_*` se
 credentials through the chart's Secret references rather than baking them into the image.
 Database access uses five `databaseCredentials.*` refs: migration, server, worker, reconciler,
 and lifecycle witness. The migration credential is never present in a runtime Pod.
+The lifecycle witness runs as a fourth, dedicated control-plane workload; the reconciler does not
+receive its database DSN, broker TLS private key, envelope key, or Kubernetes API token.
 Every setting is listed in [the config reference](../guide/reference/config.md); the
 chart's README documents which values map to which keys and how the secret is mounted
 (non-root containers read the env file at mode 0440 under an `fsGroup`).
