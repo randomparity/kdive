@@ -77,15 +77,17 @@ def test_kubernetes_witness_ceiling_help_states_the_complete_pass_contract() -> 
     for fragment in (
         "pod",
         "kubernetes api",
-        "not a database clock",
+        "no reference clock",
+        "each reconciler pass observes the kubernetes api",
         "per reconciler pass",
         "1,000",
-        "rejected at reconciler startup",
+        "valid inclusive range is 0..1,000",
+        "every out-of-range value (negative or above 1,000) is rejected at reconciler startup",
         "no cursor",
-        "retained",
-        "next scheduled pass",
-        "integer from 0 through 1,000",
-        "kdive_kubernetes_witness_ordinal_ceiling",
+        "remaining finalized pods",
+        "next scheduled invocation",
+        "set kdive_kubernetes_witness_ordinal_ceiling to an "
+        "integer in the inclusive range 0..1,000",
         "restart the reconciler",
     ):
         assert fragment in help_text
