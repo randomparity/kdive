@@ -13,10 +13,13 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from kdive.services.runs.build_use import acquire_build_use, release_build_use
-from kdive.services.runs.worker_incarnations import register_worker_incarnation
+from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
+    register_worker_incarnation,
+)
 from tests.reconciler.conftest import connect
 
-_PROTOCOL = 1
+_PROTOCOL = CURRENT_WORKER_FENCE_PROTOCOL
 
 
 def _credential(value: str) -> SecretStr:
@@ -175,8 +178,10 @@ def test_acquisition_refuses_a_replaced_claim(migrated_url: str) -> None:
         admin_conn = await connect(migrated_url)
         witness = await connect(migrated_url)
         stale_credential = _credential("stale-worker-credential")
+        replacement_credential = _credential("replacement-worker-credential")
         try:
             await _register(witness, "docker:stale", stale_credential, "d")
+            await _register(witness, "docker:replacement", replacement_credential, "e")
             run_id, job_id = await _seed_claim(admin_conn, "docker:stale")
             await admin_conn.execute(
                 "UPDATE jobs SET worker_id = 'docker:replacement', attempt = 2 WHERE id = %s",

@@ -13,7 +13,10 @@ from kdive.jobs.worker import WorkerConfig
 from kdive.observability.facade import Telemetry
 from kdive.processes.worker import run_worker
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.runs.worker_incarnations import WorkerIncarnation
+from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
+    WorkerIncarnation,
+)
 
 
 def _telemetry() -> Telemetry:
@@ -79,12 +82,14 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
             registry: object,
             *,
             worker_id: str,
+            incarnation_credential: SecretStr,
             secret_registry: SecretRegistry,
             config: WorkerConfig,
         ) -> None:
             assert worker_pool is pool
             assert registry is handler_registry
             assert secret_registry is secret_registry_arg
+            assert incarnation_credential is incarnation_credential_arg
             assert ":" in worker_id
             assert config.heartbeat == "heartbeat"
             assert config.readiness is not None
@@ -99,6 +104,7 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
             events.append("run")
 
     secret_registry_arg = secret_registry
+    incarnation_credential_arg = incarnation_credential
     monkeypatch.setattr("kdive.jobs.worker.Worker", _Worker)
 
     async def _runtime(**kwargs: object) -> None:
@@ -120,7 +126,7 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
                 incarnation="docker:nonce",
                 authority_kind="docker",
                 authority_binding={"container_id": "a" * 64},
-                fence_protocol=1,
+                fence_protocol=CURRENT_WORKER_FENCE_PROTOCOL,
             )
 
         monkeypatch.setattr("kdive.processes.worker.authenticate_worker_incarnation", authenticate)
@@ -165,7 +171,7 @@ def test_run_worker_refuses_a_credential_bound_to_another_identity(
             incarnation="docker:other",
             authority_kind="docker",
             authority_binding={"container_id": "b" * 64},
-            fence_protocol=1,
+            fence_protocol=CURRENT_WORKER_FENCE_PROTOCOL,
         )
 
     monkeypatch.setattr("kdive.processes.worker.authenticate_worker_incarnation", authenticate)

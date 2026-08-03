@@ -67,6 +67,7 @@ from kdive.services.runs.steps import StepProgress, ready_boot_outcome, step_pro
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.systems_support import provider_resolver
 from tests.support.object_store import INERT_OBJECT_STORE
+from tests.support.worker_fence import dequeue_as_current_worker
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _PROFILE: dict[str, Any] = {"schema_version": 1}
@@ -6224,7 +6225,8 @@ def test_cancel_leaves_terminal_build_job_untouched(migrated_url: str) -> None:
             run_id = await _seed_running_run(pool)
             job = await _enqueue_build_job(pool, run_id)
             async with pool.connection() as conn:
-                await JOBS.update_state(conn, job.id, JobState.RUNNING)
+                claimed = await dequeue_as_current_worker(conn, "runs-tools-worker")
+                assert claimed is not None and claimed.id == job.id
                 await JOBS.update_state(conn, job.id, JobState.SUCCEEDED)
             resp = await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
             assert resp.status == "canceled"
@@ -6241,7 +6243,8 @@ def test_cancel_running_run_with_running_build_job(migrated_url: str) -> None:
             run_id = await _seed_running_run(pool)
             job = await _enqueue_build_job(pool, run_id)
             async with pool.connection() as conn:
-                await JOBS.update_state(conn, job.id, JobState.RUNNING)
+                claimed = await dequeue_as_current_worker(conn, "runs-tools-worker")
+                assert claimed is not None and claimed.id == job.id
             resp = await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
             assert resp.status == "canceled"
             async with pool.connection() as conn:
@@ -6267,7 +6270,8 @@ def test_cancel_swallows_build_job_race_to_terminal(
             run_id = await _seed_running_run(pool)
             job = await _enqueue_build_job(pool, run_id)
             async with pool.connection() as conn:
-                await JOBS.update_state(conn, job.id, JobState.RUNNING)
+                claimed = await dequeue_as_current_worker(conn, "runs-tools-worker")
+                assert claimed is not None and claimed.id == job.id
                 await JOBS.update_state(conn, job.id, JobState.SUCCEEDED)
             stale = job.model_copy(update={"state": JobState.RUNNING})
 

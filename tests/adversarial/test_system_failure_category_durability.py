@@ -50,6 +50,7 @@ from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
 from tests.adversarial.conftest import seed_allocation, seed_resource
 from tests.mcp.systems_support import ctx as _ctx
 from tests.mcp.systems_support import provider_resolver
+from tests.support.worker_fence import dequeue_as_current_worker
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _WORKER = "worker-1"
@@ -147,7 +148,7 @@ async def _enqueue_provision(
 async def _claim(pool: AsyncConnectionPool) -> Job:
     """Claim the queued provision job exactly as the worker's `dequeue` does."""
     async with pool.connection() as conn:
-        job = await queue.dequeue(conn, _WORKER)
+        job = await dequeue_as_current_worker(conn, _WORKER)
     assert job is not None, "expected a claimable provision job"
     return job
 

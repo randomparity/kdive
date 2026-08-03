@@ -12,13 +12,14 @@ from pydantic import SecretStr
 
 import kdive.services.runs.worker_incarnations as incarnations
 from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
     IncarnationConflict,
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
 from tests.reconciler.conftest import connect
 
-_PROTOCOL = 1
+_PROTOCOL = CURRENT_WORKER_FENCE_PROTOCOL
 
 
 def _credential(value: str) -> SecretStr:

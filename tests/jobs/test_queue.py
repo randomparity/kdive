@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+from collections.abc import Sequence
 from datetime import timedelta
 from typing import Any, cast
 from uuid import uuid4
@@ -11,6 +13,7 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from pydantic import SecretStr
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
@@ -22,6 +25,7 @@ from kdive.jobs.payloads import (
     InstallPayload,
     SystemPayload,
 )
+from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 
@@ -47,6 +51,59 @@ async def _count_jobs(conn: psycopg.AsyncConnection) -> int:
     row = await cur.fetchone()
     assert row is not None  # COUNT(*) always returns one row
     return row[0]
+
+
+def _credential(value: str) -> SecretStr:
+    return SecretStr(hashlib.sha256(value.encode()).hexdigest())
+
+
+async def _register_worker(
+    conn: psycopg.AsyncConnection,
+    worker_id: str,
+    *,
+    credential: SecretStr | None = None,
+    protocol: int = CURRENT_WORKER_FENCE_PROTOCOL,
+    terminated: bool = False,
+) -> SecretStr:
+    credential = credential or _credential(worker_id)
+    await conn.execute(
+        "INSERT INTO worker_incarnations (incarnation, authority_kind, authority_binding, "
+        "fence_protocol, credential_hash, state, terminated_at, outcome) VALUES "
+        "(%s, 'local', '{}'::jsonb, %s, sha256(convert_to(%s, 'UTF8')), %s, "
+        "CASE WHEN %s THEN clock_timestamp() END, CASE WHEN %s THEN 'killed' END) "
+        "ON CONFLICT (incarnation) DO NOTHING",
+        (
+            worker_id,
+            protocol,
+            credential.get_secret_value(),
+            "terminated" if terminated else "active",
+            terminated,
+            terminated,
+        ),
+    )
+    return credential
+
+
+async def _dequeue(
+    conn: psycopg.AsyncConnection,
+    worker_id: str,
+    *,
+    incarnation_credential: SecretStr | None = None,
+    lease: timedelta = queue.DEFAULT_LEASE,
+    accepted_lanes: Sequence[str] = queue.DEFAULT_DISPATCH_LANES,
+) -> Job | None:
+    credential = (
+        incarnation_credential
+        if incarnation_credential is not None
+        else await _register_worker(conn, worker_id)
+    )
+    return await queue.dequeue(
+        conn,
+        worker_id,
+        incarnation_credential=credential,
+        lease=lease,
+        accepted_lanes=accepted_lanes,
+    )
 
 
 def test_enqueue_inserts_queued_job(migrated_url: str) -> None:
@@ -180,15 +237,117 @@ def test_dequeue_claims_only_accepted_dispatch_lanes(migrated_url: str) -> None:
                 "dk-provider-b",
                 dispatch_lane="provider-b",
             )
-            skipped = await queue.dequeue(conn, "w-a", accepted_lanes=("provider-c",))
+            skipped = await _dequeue(conn, "w-a", accepted_lanes=("provider-c",))
             assert skipped is None
             assert await queue.count_claimable(conn, accepted_lanes=("provider-c",)) == 0
             assert await queue.count_claimable(conn, accepted_lanes=("provider-b",)) == 1
 
-            claimed = await queue.dequeue(conn, "w-b", accepted_lanes=("provider-b",))
+            claimed = await _dequeue(conn, "w-b", accepted_lanes=("provider-b",))
             assert claimed is not None
             assert claimed.id == second.id
             assert claimed.dispatch_lane == "provider-b"
+
+    asyncio.run(_run())
+
+
+def test_dequeue_current_active_worker_claims_queued_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            queued = await queue.enqueue(
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-current-worker"
+            )
+            credential = await _register_worker(conn, "current-worker")
+
+            claimed = await _dequeue(
+                conn,
+                "current-worker",
+                incarnation_credential=credential,
+            )
+
+            assert claimed is not None
+            assert claimed.id == queued.id
+            assert claimed.state is JobState.RUNNING
+            assert claimed.worker_id == "current-worker"
+            assert claimed.attempt == 1
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "identity",
+    ["missing", "malformed", "wrong", "terminated", "old-protocol"],
+)
+def test_dequeue_refuses_worker_without_current_active_credential(
+    migrated_url: str, identity: str
+) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            queued = await queue.enqueue(
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, f"dk-refused-{identity}"
+            )
+            worker_id = f"refused-{identity}"
+            supplied = SecretStr("") if identity == "missing" else SecretStr("malformed")
+            if identity == "wrong":
+                await _register_worker(conn, worker_id)
+                supplied = await _register_worker(conn, "another-worker")
+            elif identity == "terminated":
+                supplied = await _register_worker(conn, worker_id, terminated=True)
+            elif identity == "old-protocol":
+                supplied = await _register_worker(
+                    conn,
+                    worker_id,
+                    protocol=CURRENT_WORKER_FENCE_PROTOCOL - 1,
+                )
+
+            assert (
+                await _dequeue(
+                    conn,
+                    worker_id,
+                    incarnation_credential=supplied,
+                )
+                is None
+            )
+            persisted = await (
+                await conn.execute(
+                    "SELECT state, worker_id, attempt FROM jobs WHERE id = %s", (queued.id,)
+                )
+            ).fetchone()
+            assert persisted == (JobState.QUEUED.value, None, 0)
+
+    asyncio.run(_run())
+
+
+def test_worker_role_direct_old_style_claim_is_denied(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            queued = await queue.enqueue(
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-old-style-update"
+            )
+            with pytest.raises(
+                psycopg.errors.InsufficientPrivilege,
+                match="current active worker fence protocol",
+            ):
+                await conn.execute(
+                    "UPDATE jobs SET state = 'running', worker_id = 'old-worker', "
+                    "attempt = attempt + 1, lease_expires_at = now() + interval '5 minutes' "
+                    "WHERE id = %s",
+                    (queued.id,),
+                )
+            await conn.execute("SET SESSION AUTHORIZATION kdive_worker")
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                await conn.execute(
+                    "UPDATE jobs SET state = 'running', worker_id = 'old-worker', "
+                    "attempt = attempt + 1, lease_expires_at = now() + interval '5 minutes' "
+                    "WHERE id = %s",
+                    (queued.id,),
+                )
+            await conn.execute("RESET SESSION AUTHORIZATION")
+            persisted = await (
+                await conn.execute(
+                    "SELECT state, worker_id, attempt FROM jobs WHERE id = %s", (queued.id,)
+                )
+            ).fetchone()
+            assert persisted == (JobState.QUEUED.value, None, 0)
 
     asyncio.run(_run())
 
@@ -229,7 +388,7 @@ def test_enqueue_recycle_terminal_resets_failed_job(migrated_url: str) -> None:
             assert recycled.result_ref is None
             assert await _count_jobs(conn) == 1
             # No longer wedged: a worker can claim the recycled job.
-            claimed = await queue.dequeue(conn, "w2")
+            claimed = await _dequeue(conn, "w2")
             assert claimed is not None
             assert claimed.id == failed.id
             assert claimed.attempt == 1
@@ -266,11 +425,11 @@ def test_enqueue_recycle_terminal_does_not_preempt_newer_work(migrated_url: str)
             assert recycled.id == stale.id  # still reset in place, not replaced
             assert recycled.created_at > newer.created_at  # re-dated to the recycle
 
-            first = await queue.dequeue(conn, "w-order")
+            first = await _dequeue(conn, "w-order")
             assert first is not None
             assert first.id == newer.id  # the newer job is not starved
 
-            second = await queue.dequeue(conn, "w-order")
+            second = await _dequeue(conn, "w-order")
             assert second is not None
             assert second.id == stale.id  # the recycled job still runs, just behind
 
@@ -303,7 +462,7 @@ def test_enqueue_stamps_a_first_insert_at_the_insert_not_the_transaction(migrate
             await inserter.close()
 
         async with await _connect(migrated_url) as reader:
-            first = await queue.dequeue(reader, "w-first")
+            first = await _dequeue(reader, "w-first")
             assert first is not None
             assert first.id == competitor.id  # not preempted by the later insert
 
@@ -347,7 +506,7 @@ def test_enqueue_recycle_terminal_redates_past_a_concurrent_enqueue(migrated_url
             await recycler.close()
 
         async with await _connect(migrated_url) as reader:
-            first = await queue.dequeue(reader, "w-txn")
+            first = await _dequeue(reader, "w-txn")
             assert first is not None
             assert first.id == newer.id  # not preempted by the job recycled after it
 
@@ -400,7 +559,7 @@ def test_enqueue_recycle_terminal_resets_succeeded_job_with_new_payload(migrated
             first = await queue.enqueue(
                 conn, JobKind.INSTALL, _install_payload(run_id, "a=1"), _AUTHORIZING, "dk-restage"
             )
-            claimed = await queue.dequeue(conn, "w1")
+            claimed = await _dequeue(conn, "w1")
             assert claimed is not None
             done = await queue.complete(conn, claimed.id, "w1", "result-ref")
             assert done is not None and done.state is JobState.SUCCEEDED
@@ -465,7 +624,7 @@ def test_enqueue_default_leaves_succeeded_job_untouched(migrated_url: str) -> No
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             await queue.enqueue(conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-ok")
-            claimed = await queue.dequeue(conn, "w1")
+            claimed = await _dequeue(conn, "w1")
             assert claimed is not None
             done = await queue.complete(conn, claimed.id, "w1", "result-ref")
             assert done is not None and done.state is JobState.SUCCEEDED
@@ -549,7 +708,7 @@ def test_dequeue_claims_oldest_and_charges_attempt(migrated_url: str) -> None:
                 "END WHERE id IN (%s, %s)",
                 (old.id, new.id, old.id, new.id),
             )
-            claimed = await queue.dequeue(conn, "w1")
+            claimed = await _dequeue(conn, "w1")
             assert claimed is not None
             assert claimed.dedup_key == "dk-old"  # FIFO by created_at
             assert claimed.state is JobState.RUNNING
@@ -563,7 +722,7 @@ def test_dequeue_claims_oldest_and_charges_attempt(migrated_url: str) -> None:
 def test_dequeue_empty_returns_none(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
-            assert await queue.dequeue(conn, "w1") is None
+            assert await _dequeue(conn, "w1") is None
 
     asyncio.run(_run())
 
@@ -574,7 +733,7 @@ def test_dequeue_concurrent_claims_distinct_jobs(migrated_url: str) -> None:
             await queue.enqueue(setup, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-1")
             await queue.enqueue(setup, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-2")
         async with await _connect(migrated_url) as a, await _connect(migrated_url) as b:
-            ja, jb = await asyncio.gather(queue.dequeue(a, "wa"), queue.dequeue(b, "wb"))
+            ja, jb = await asyncio.gather(_dequeue(a, "wa"), _dequeue(b, "wb"))
         assert ja is not None and jb is not None
         assert ja.id != jb.id  # SKIP LOCKED: no double-claim
 
@@ -585,10 +744,10 @@ def test_dequeue_skips_future_lease_reclaims_past_lease(migrated_url: str) -> No
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             await _insert_running_job(conn, "dk-future", lease_seconds=300)
-            assert await queue.dequeue(conn, "w1") is None  # live lease: not reclaimed
+            assert await _dequeue(conn, "w1") is None  # live lease: not reclaimed
 
             await _insert_running_job(conn, "dk-past", lease_seconds=-60)
-            reclaimed = await queue.dequeue(conn, "w1")
+            reclaimed = await _dequeue(conn, "w1")
             assert reclaimed is not None
             assert reclaimed.dedup_key == "dk-past"
             assert reclaimed.worker_id == "w1"
@@ -601,7 +760,7 @@ def test_dequeue_skips_exhausted_attempts(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             await _insert_running_job(conn, "dk-done", lease_seconds=-60, attempt=3, max_attempts=3)
-            assert await queue.dequeue(conn, "w1") is None  # attempt == max: left for reconciler
+            assert await _dequeue(conn, "w1") is None  # attempt == max: left for reconciler
 
     asyncio.run(_run())
 
@@ -610,7 +769,7 @@ def test_heartbeat_renews_for_owner(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             await queue.enqueue(conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-hb")
-            claimed = await queue.dequeue(conn, "w1", lease=timedelta(seconds=10))
+            claimed = await _dequeue(conn, "w1", lease=timedelta(seconds=10))
             assert claimed is not None
             assert claimed.lease_expires_at is not None
             investigation_id, generation = uuid4(), uuid4()
@@ -664,7 +823,7 @@ def test_heartbeat_false_for_non_owner(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             await queue.enqueue(conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-hb2")
-            claimed = await queue.dequeue(conn, "w1")
+            claimed = await _dequeue(conn, "w1")
             assert claimed is not None
             assert await queue.heartbeat(conn, claimed.id, "intruder") is False
 
@@ -675,7 +834,7 @@ def test_complete_for_owner_and_none_for_non_owner(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             await queue.enqueue(conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-c1")
-            claimed = await queue.dequeue(conn, "w1")
+            claimed = await _dequeue(conn, "w1")
             assert claimed is not None
             done = await queue.complete(conn, claimed.id, "w1", "s3://result")
             assert done is not None
@@ -683,7 +842,7 @@ def test_complete_for_owner_and_none_for_non_owner(migrated_url: str) -> None:
             assert done.result_ref == "s3://result"
 
             await queue.enqueue(conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-c2")
-            other = await queue.dequeue(conn, "w1")
+            other = await _dequeue(conn, "w1")
             assert other is not None
             assert await queue.complete(conn, other.id, "intruder", "s3://x") is None
 
@@ -696,7 +855,7 @@ def test_fail_requeues_below_max(migrated_url: str) -> None:
             await queue.enqueue(
                 conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-f1", max_attempts=3
             )
-            claimed = await queue.dequeue(conn, "w1")  # attempt -> 1
+            claimed = await _dequeue(conn, "w1")  # attempt -> 1
             assert claimed is not None
             out = await queue.fail(conn, claimed, ErrorCategory.INFRASTRUCTURE_FAILURE)
             assert out.state is JobState.QUEUED
@@ -725,7 +884,7 @@ def test_fail_terminal_dead_letters_below_max(migrated_url: str) -> None:
             await queue.enqueue(
                 conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-f3", max_attempts=3
             )
-            claimed = await queue.dequeue(conn, "w1")  # attempt -> 1, below max
+            claimed = await _dequeue(conn, "w1")  # attempt -> 1, below max
             assert claimed is not None
             out = await queue.fail(conn, claimed, ErrorCategory.NOT_IMPLEMENTED, terminal=True)
             assert out.state is JobState.FAILED
@@ -738,9 +897,10 @@ def test_fail_fence_miss_returns_input(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             await queue.enqueue(conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-f4")
-            claimed = await queue.dequeue(conn, "w1")
+            claimed = await _dequeue(conn, "w1")
             assert claimed is not None
             # Simulate a reclaim by another worker: change worker_id out from under it.
+            await _register_worker(conn, "w2")
             await conn.execute("UPDATE jobs SET worker_id = 'w2' WHERE id = %s", (claimed.id,))
             out = await queue.fail(conn, claimed, ErrorCategory.INFRASTRUCTURE_FAILURE)
             assert out is claimed  # fence missed: unchanged input returned

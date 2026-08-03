@@ -38,6 +38,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import jobs as jobs_tools
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import Role, RoleDenied
+from tests.support.worker_fence import register_worker
 
 WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
 
@@ -149,7 +150,11 @@ async def _mark_failed_without_category(pool: AsyncConnectionPool, job_id: str) 
 
 async def _mark_running(pool: AsyncConnectionPool, job_id: str) -> None:
     async with pool.connection() as conn, conn.transaction():
-        await conn.execute("UPDATE jobs SET state = 'running' WHERE id = %s", (job_id,))
+        await register_worker(conn, "jobs-tools-worker")
+        await conn.execute(
+            "UPDATE jobs SET state = 'running', worker_id = 'jobs-tools-worker' WHERE id = %s",
+            (job_id,),
+        )
 
 
 async def _audit_rows(pool: AsyncConnectionPool, job_id: str) -> list[tuple[Any, ...]]:
@@ -945,7 +950,14 @@ def test_list_jobs_malformed_cursor_is_config_error(migrated_url: str) -> None:
 
 async def _set_state(pool: AsyncConnectionPool, job_id: str, state: JobState) -> None:
     async with pool.connection() as conn:
-        await conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (state.value, job_id))
+        if state is JobState.RUNNING:
+            await register_worker(conn, "jobs-state-worker")
+            await conn.execute(
+                "UPDATE jobs SET state = %s, worker_id = 'jobs-state-worker' WHERE id = %s",
+                (state.value, job_id),
+            )
+        else:
+            await conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (state.value, job_id))
 
 
 async def _enqueue_provision(pool: AsyncConnectionPool, dedup: str) -> str:

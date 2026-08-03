@@ -21,6 +21,7 @@ from kdive.reconciler.cleanup import gc as gc_module
 from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
 from kdive.services.runs.build_use import recover_build_use_after_confirmed_worker_death
 from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
@@ -138,6 +139,15 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
         store = _RecordingStore()
         conn = await connect(migrated_url)
         try:
+            for holder in ("dead-worker", "new-worker", "recycled-worker"):
+                await register_worker_incarnation(
+                    conn,
+                    holder,
+                    "local",
+                    {"test_identity": holder},
+                    hashlib.sha256(holder.encode()).digest(),
+                    CURRENT_WORKER_FENCE_PROTOCOL,
+                )
             # A reclaimed attempt cannot erase a still-live predecessor's overlap fence.
             await conn.execute(
                 "UPDATE jobs SET attempt = 2, worker_id = 'new-worker', "
@@ -198,14 +208,6 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
                 reason="dead worker cleanup",
             )
             for holder in ("dead-worker", "recycled-worker"):
-                await register_worker_incarnation(
-                    conn,
-                    holder,
-                    "local",
-                    {"test_identity": holder},
-                    hashlib.sha256(holder.encode()).digest(),
-                    1,
-                )
                 await terminate_worker_incarnation(conn, holder, "failed")
             assert await recover_build_use_after_confirmed_worker_death(
                 conn,

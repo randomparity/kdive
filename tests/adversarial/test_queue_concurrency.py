@@ -26,6 +26,7 @@ from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, InstallPayload
 from tests.adversarial.conftest import count_rows, open_conn, open_conns
+from tests.support.worker_fence import dequeue_as_current_worker
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 
@@ -54,7 +55,7 @@ def test_concurrent_dequeue_claims_each_job_once(
                 )
         async with open_conns(migrated_url, workers) as conns:
             claimed = await asyncio.gather(
-                *(queue.dequeue(c, f"w{i}") for i, c in enumerate(conns))
+                *(dequeue_as_current_worker(c, f"w{i}") for i, c in enumerate(conns))
             )
         won = [j for j in claimed if j is not None]
         ids = [j.id for j in won]
@@ -82,13 +83,13 @@ def test_attempt_charging_caps_total_claims_across_reclaim(migrated_url: str) ->
             )
             claims = 0
             for _ in range(max_attempts + 5):  # try well past the cap
-                got = await queue.dequeue(conn, "w")
+                got = await dequeue_as_current_worker(conn, "w")
                 if got is None:
                     break
                 claims += 1
                 await _expire_lease(conn, job.id)
             assert claims == max_attempts, f"claimed {claims} times, cap is {max_attempts}"
-            assert await queue.dequeue(conn, "w") is None
+            assert await dequeue_as_current_worker(conn, "w") is None
 
     asyncio.run(_run())
 
@@ -101,10 +102,10 @@ def test_reclaimed_worker_cannot_finalize(migrated_url: str) -> None:
             job = await queue.enqueue(
                 conn, JobKind.INSTALL, _install_payload(), _AUTHORIZING, "dk", max_attempts=5
             )
-            claimed_a = await queue.dequeue(conn, "A")
+            claimed_a = await dequeue_as_current_worker(conn, "A")
             assert claimed_a is not None and claimed_a.worker_id == "A"
             await _expire_lease(conn, job.id)
-            claimed_b = await queue.dequeue(conn, "B")
+            claimed_b = await dequeue_as_current_worker(conn, "B")
             assert claimed_b is not None and claimed_b.worker_id == "B"
 
             # A lost the lease: every A-fenced write must miss. complete/heartbeat

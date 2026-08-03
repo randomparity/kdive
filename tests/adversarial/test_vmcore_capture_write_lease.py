@@ -55,6 +55,7 @@ from kdive.reconciler.cleanup.upload_orphans import repair_leaked_upload_objects
 from tests.capture_store import WrittenObjects
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.systems_support import provider_resolver
+from tests.support.worker_fence import dequeue_as_current_worker
 
 _AUTH = Authorizing(principal="alice", agent_session="s", project="proj")
 _METHOD = CaptureMethod.HOST_DUMP
@@ -428,7 +429,7 @@ async def _claimed_capture_job(pool: AsyncConnectionPool) -> tuple[str, Job]:
     """
     run_id, _job = await _seeded_capture_job(pool)
     async with pool.connection() as conn:
-        claimed = await queue.dequeue(conn, "w-capture-1", lease=timedelta(minutes=5))
+        claimed = await dequeue_as_current_worker(conn, "w-capture-1", lease=timedelta(minutes=5))
     assert claimed is not None, "the capture job must be claimable"
     return run_id, claimed
 

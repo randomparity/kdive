@@ -29,6 +29,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+from pydantic import SecretStr
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import JobState, RunState
@@ -85,12 +86,15 @@ class Worker:
         registry: HandlerRegistry,
         *,
         worker_id: str,
+        incarnation_credential: SecretStr,
         secret_registry: SecretRegistry,
         config: WorkerConfig = DEFAULT_WORKER_CONFIG,
     ) -> None:
         """Build a worker.
 
         Args:
+            incarnation_credential: Authority-minted credential for ``worker_id``. Every claim
+                authenticates it at the database boundary.
             config: Lease timing plus optional ``/livez`` heartbeat, readiness gate, and
                 per-job telemetry. ``None`` values in the config disable the optional
                 collaborators (always ready, no background liveness ticker, no-op telemetry).
@@ -116,6 +120,7 @@ class Worker:
         self._pool = pool
         self._registry = registry
         self._worker_id = worker_id
+        self._incarnation_credential = incarnation_credential
         self._lease = config.lease
         self._accepted_lanes = config.accepted_lanes
         self._heartbeat_interval = config.heartbeat_interval
@@ -144,7 +149,11 @@ class Worker:
             if await queue.is_queue_paused(conn):
                 return None
             job = await queue.dequeue(
-                conn, self._worker_id, lease=self._lease, accepted_lanes=self._accepted_lanes
+                conn,
+                self._worker_id,
+                incarnation_credential=self._incarnation_credential,
+                lease=self._lease,
+                accepted_lanes=self._accepted_lanes,
             )
             if self._telemetry.enabled:
                 self._telemetry.observe_queue_depth(

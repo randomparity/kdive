@@ -21,6 +21,7 @@ from kdive.config import require
 from kdive.config.core_settings import DATABASE_URL
 from kdive.processes.docker_death_api import WorkerLifecycleGate
 from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
@@ -126,7 +127,7 @@ async def _register(holder: str, container_id: str) -> None:
             "docker",
             {"container_id": container_id},
             secrets.token_bytes(32),
-            1,
+            CURRENT_WORKER_FENCE_PROTOCOL,
         )
     finally:
         await conn.close()

@@ -17,6 +17,7 @@ from psycopg.sql import SQL, Identifier, Literal
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
+from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
 
 _LOGIN_AUTHENTICATION = "worker-fence-test-authentication"
 _BINDING_MAX_BYTES = 4096
@@ -111,7 +112,11 @@ def residual_privilege_role_dsn(pg_conn: psycopg.Connection) -> Iterator[RoleDsn
                 "investigation_build_use_recoveries TO {}"
             ).format(role_list)
         )
-        for filename in ("0104_worker_fence_roles.sql", "0105_worker_fence_functions.sql"):
+        for filename in (
+            "0104_worker_fence_roles.sql",
+            "0105_worker_fence_functions.sql",
+            "0106_worker_fence_protocol_claim.sql",
+        ):
             role_sql = (migrate.SCHEMA_DIR / filename).read_bytes()
             for canonical, isolated in roles.items():
                 role_sql = role_sql.replace(canonical.encode(), isolated.encode())
@@ -169,7 +174,7 @@ def _register(
                 "docker",
                 Jsonb(binding or {"container_id": "a" * 64}),
                 credential_hash,
-                1,
+                CURRENT_WORKER_FENCE_PROTOCOL,
             ),
         )
 
@@ -342,6 +347,7 @@ def test_migration_upgrade_resets_guarded_function_matrix(
         "acquire_investigation_build_use(uuid,uuid,uuid,uuid,integer,bytea)": {"kdive_worker"},
         "release_investigation_build_use(uuid,bytea)": {"kdive_worker"},
         "recover_investigation_build_use(uuid,text,text,text)": {"kdive_reconciler"},
+        "claim_worker_job(text,bytea,interval,text[])": {"kdive_worker"},
     }
     for signature, allowed_roles in allowed.items():
         for canonical, login in residual_privilege_role_dsn.logins.items():
@@ -697,6 +703,7 @@ def test_acquire_refuses_replaced_attempt(pg_conn: psycopg.Connection, role_dsn:
     holder, replacement = "docker:stale", "docker:replacement"
     credential = b"s" * 32
     _register(role_dsn, holder, credential)
+    _register(role_dsn, replacement, b"t" * 32)
     investigation_id, generation, job_id = _seed_claim(pg_conn, holder=holder, attempt=1)
     pg_conn.execute(
         "UPDATE jobs SET worker_id = %s, attempt = 2 WHERE id = %s", (replacement, job_id)

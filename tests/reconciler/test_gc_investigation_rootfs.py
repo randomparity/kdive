@@ -34,6 +34,7 @@ from kdive.reconciler.cleanup.gc import (
 )
 from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
 from tests.reconciler.conftest import connect
+from tests.support.worker_fence import register_worker
 
 _TOKEN = "dGVzdC10b2tlbg"  # an arbitrary base64url content-address token
 
@@ -424,6 +425,7 @@ def test_a_dead_worker_recovers_via_the_abandoned_jobs_repair(
             await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1))
             job_id = (await _reclaim_jobs(conn, inv))[0]["id"]
             # A worker claimed it, then the process died: running, lease lapsed, attempt spent.
+            await register_worker(conn, "dead-worker")
             await conn.execute(
                 "UPDATE jobs SET state = 'running', worker_id = 'dead-worker', attempt = 1, "
                 "lease_expires_at = now() - interval '1 hour' WHERE id = %s",

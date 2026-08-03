@@ -1,4 +1,4 @@
-"""Connection-scoped operations over the durable ``jobs`` queue (ADR-0018).
+"""Connection-scoped operations over the durable ``jobs`` queue (ADR-0018, ADR-0533).
 
 ``enqueue`` admits a job idempotently on ``dedup_key``; ``dequeue`` claims the oldest
 eligible job with ``FOR UPDATE SKIP LOCKED``, charging an attempt and reclaiming a
@@ -19,6 +19,7 @@ from uuid import UUID
 from psycopg import AsyncConnection, sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from pydantic import SecretStr
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
@@ -192,6 +193,7 @@ async def dequeue(
     conn: AsyncConnection,
     worker_id: str,
     *,
+    incarnation_credential: SecretStr,
     lease: timedelta = DEFAULT_LEASE,
     accepted_lanes: Sequence[str] = DEFAULT_DISPATCH_LANES,
 ) -> Job | None:
@@ -208,6 +210,10 @@ async def dequeue(
     queued/lapsed jobs whose persisted lane is in this set, so provider- or pool-specific
     workers do not acquire work they cannot execute.
 
+    ``incarnation_credential`` is authority-minted for this exact worker. The guarded
+    database function derives the incarnation from its hash and claims only when it is active,
+    matches ``worker_id``, and uses the fixed current fence protocol.
+
     ``ORDER BY created_at`` is FIFO over *when the attempt was queued*, not when the row was first
     inserted: :func:`enqueue`'s ``recycle_terminal`` re-dates ``created_at`` (ADR-0447), so a
     revived job queues behind the work admitted while it was settled instead of preempting it.
@@ -219,26 +225,12 @@ async def dequeue(
         return None
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "UPDATE jobs SET "
-            "    state = %s, worker_id = %s, attempt = attempt + 1, "
-            "    lease_expires_at = now() + %s, heartbeat_at = now() "
-            "WHERE id = ( "
-            "    SELECT id FROM jobs "
-            "    WHERE (state = %s "
-            "           OR (state = %s AND lease_expires_at < now())) "
-            "      AND attempt < max_attempts "
-            "      AND dispatch_lane = ANY(%s::text[]) "
-            "    ORDER BY created_at "
-            "    FOR UPDATE SKIP LOCKED "
-            "    LIMIT 1 "
-            ") "
-            "RETURNING *",
+            "SELECT * FROM public.claim_worker_job("
+            "%s, sha256(convert_to(%s, 'UTF8')), %s, %s::text[])",
             (
-                JobState.RUNNING.value,
                 worker_id,
+                incarnation_credential.get_secret_value(),
                 lease,
-                JobState.QUEUED.value,
-                JobState.RUNNING.value,
                 list(accepted_lanes),
             ),
         )

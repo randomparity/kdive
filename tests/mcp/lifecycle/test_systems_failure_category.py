@@ -56,6 +56,7 @@ from tests.mcp.systems_support import (
 from tests.mcp.systems_support import (
     provisioning_profile as _provisioning_profile,
 )
+from tests.support.worker_fence import dequeue_as_current_worker, register_worker
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -418,7 +419,7 @@ async def _dead_letter(
             {"principal": "user-1", "agent_session": "s", "project": "proj"},
             dedup_key,
         )
-        claimed = await queue.dequeue(conn, "w1")
+        claimed = await dequeue_as_current_worker(conn, "w1")
         assert claimed is not None
         return await queue.fail(
             conn,
@@ -570,7 +571,7 @@ def test_latest_failed_job_for_system_does_not_skip_over_a_newer_success(
                     {"principal": "user-1", "agent_session": "s", "project": "proj"},
                     "dk-reprovision",
                 )
-                claimed = await queue.dequeue(conn, "w1")
+                claimed = await dequeue_as_current_worker(conn, "w1")
                 assert claimed is not None
                 assert await queue.complete(conn, claimed.id, "w1", None) is not None
                 found = await queue.latest_failed_job_for_system(conn, system_id)
@@ -654,6 +655,7 @@ def test_get_system_after_the_real_abandoned_job_sweep(migrated_url: str) -> Non
                     "dk-restore",
                 )
                 # A zombie: claimed, out of attempts, lease long lapsed.
+                await register_worker(conn, "w1")
                 await conn.execute(
                     "UPDATE jobs SET state = 'running', worker_id = 'w1', attempt = 3, "
                     "max_attempts = 3, lease_expires_at = now() - interval '1 hour'"

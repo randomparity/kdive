@@ -19,6 +19,8 @@ from kdive.processes.worker_incarnation import (
     worker_incarnation_id,
 )
 from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
+    WorkerIncarnation,
     authenticate_worker_incarnation,
 )
 
@@ -27,6 +29,20 @@ if TYPE_CHECKING:
     from kdive.health.probe import HealthProbe
     from kdive.observability.facade import Telemetry
     from kdive.security.secrets.secret_registry import SecretRegistry
+
+
+def _validate_worker_incarnation(
+    incarnation: WorkerIncarnation, *, configured_worker_id: str
+) -> str:
+    if incarnation.incarnation != configured_worker_id:
+        raise RuntimeError(
+            "authenticated worker incarnation does not match configured runtime identity"
+        )
+    if incarnation.fence_protocol != CURRENT_WORKER_FENCE_PROTOCOL:
+        raise RuntimeError(
+            "authenticated worker incarnation does not use the current fence protocol"
+        )
+    return incarnation.incarnation
 
 
 async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
@@ -52,14 +68,14 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
     ) -> None:
         async with pool.connection() as conn:
             incarnation = await authenticate_worker_incarnation(conn, incarnation_credential)
-        if incarnation.incarnation != configured_worker_id:
-            raise RuntimeError(
-                "authenticated worker incarnation does not match configured runtime identity"
-            )
+        worker_id = _validate_worker_incarnation(
+            incarnation, configured_worker_id=configured_worker_id
+        )
         worker = Worker(
             pool,
             build_handler_registry(secret_registry=secret_registry),
-            worker_id=incarnation.incarnation,
+            worker_id=worker_id,
+            incarnation_credential=incarnation_credential,
             secret_registry=secret_registry,
             config=WorkerConfig(
                 heartbeat=heartbeat,

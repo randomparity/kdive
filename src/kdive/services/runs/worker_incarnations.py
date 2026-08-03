@@ -14,6 +14,8 @@ from kdive.db.locks import require_top_level_transaction
 type AuthorityKind = Literal["local", "docker", "kubernetes"]
 type TerminationOutcome = Literal["succeeded", "failed", "killed"]
 
+CURRENT_WORKER_FENCE_PROTOCOL = 2
+
 
 class IncarnationConflict(RuntimeError):
     """An immutable incarnation was replayed with conflicting facts."""

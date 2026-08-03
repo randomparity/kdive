@@ -16,7 +16,10 @@ from kdive.processes.runtime import (
     POOL_OPEN_TIMEOUT_SECONDS,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.runs.worker_incarnations import WorkerIncarnation
+from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
+    WorkerIncarnation,
+)
 
 
 def _warm_open() -> list[str]:
@@ -79,7 +82,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
             incarnation="docker:nonce",
             authority_kind="docker",
             authority_binding={"container_id": "a" * 64},
-            fence_protocol=1,
+            fence_protocol=CURRENT_WORKER_FENCE_PROTOCOL,
         )
 
     monkeypatch.setattr("kdive.processes.worker.worker_incarnation_id", lambda pid: "docker:nonce")
@@ -112,6 +115,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
 
     assert events == [*_warm_open(), "acquire(timeout=None)", "authenticate", "run", _close()]
     config = constructed["config"]
+    assert constructed["incarnation_credential"] is credential
     assert isinstance(config, WorkerConfig)
     assert config.heartbeat is not None
     assert config.readiness is not None
@@ -119,3 +123,17 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     # Not merely present: `WorkerTelemetry.disabled()` is a non-None inert stand-in,
     # so wiring one would satisfy the check above (#1695).
     assert config.telemetry.enabled
+
+
+def test_worker_startup_refuses_old_fence_protocol() -> None:
+    from kdive.processes.worker import _validate_worker_incarnation
+
+    old = WorkerIncarnation(
+        incarnation="docker:old",
+        authority_kind="docker",
+        authority_binding={"container_id": "b" * 64},
+        fence_protocol=CURRENT_WORKER_FENCE_PROTOCOL - 1,
+    )
+
+    with pytest.raises(RuntimeError, match="fence protocol"):
+        _validate_worker_incarnation(old, configured_worker_id="docker:old")
