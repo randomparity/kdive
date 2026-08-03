@@ -243,14 +243,17 @@ def _token_review(token: str, audience: str) -> PodIdentity | None:
             response_value = json.load(response)
     except urllib.error.HTTPError:
         return None
-    return _token_review_identity(response_value)
+    return _token_review_identity(response_value, audience)
 
 
-def _token_review_identity(value: object) -> PodIdentity | None:
+def _token_review_identity(value: object, expected_audience: str) -> PodIdentity | None:
     if not isinstance(value, Mapping):
         return None
     status = value.get("status")
     if not isinstance(status, Mapping) or status.get("authenticated") is not True:
+        return None
+    audiences = status.get("audiences")
+    if audiences != [expected_audience]:
         return None
     user = status.get("user")
     if not isinstance(user, Mapping):

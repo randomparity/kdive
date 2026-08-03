@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from dataclasses import dataclass, field
+import io
+import json
+import urllib.request
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+import kdive.processes.kubernetes_credential_broker as credential_broker
 from kdive.processes.kubernetes_credential_broker import (
     BROKER_AUDIENCE,
     MAX_REQUEST_BYTES,
@@ -39,27 +44,36 @@ def _pod(
 
 @dataclass
 class _Store:
-    envelopes: dict[PodIdentity, bytes] = field(default_factory=dict)
-    acknowledged: set[PodIdentity] = field(default_factory=set)
+    envelopes: dict[tuple[str, str, str], bytes] = field(default_factory=dict)
+    acknowledged: set[tuple[str, str, str]] = field(default_factory=set)
     registrations: list[tuple[PodIdentity, bytes, bytes]] = field(default_factory=list)
+    pending_reads: list[PodIdentity] = field(default_factory=list)
+    acknowledgments: list[PodIdentity] = field(default_factory=list)
 
     async def register(
         self, identity: PodIdentity, credential_hash: bytes, envelope: bytes
     ) -> bool:
         self.registrations.append((identity, credential_hash, envelope))
-        self.envelopes.setdefault(identity, envelope)
+        self.envelopes.setdefault(_runtime_key(identity), envelope)
         return True
 
     async def pending_envelope(self, identity: PodIdentity) -> bytes | None:
-        return self.envelopes.get(identity)
+        self.pending_reads.append(identity)
+        return self.envelopes.get(_runtime_key(identity))
 
     async def acknowledge(self, identity: PodIdentity) -> bool:
-        if identity in self.acknowledged:
+        self.acknowledgments.append(identity)
+        key = _runtime_key(identity)
+        if key in self.acknowledged:
             return True
-        if self.envelopes.pop(identity, None) is None:
+        if self.envelopes.pop(key, None) is None:
             return False
-        self.acknowledged.add(identity)
+        self.acknowledged.add(key)
         return True
+
+
+def _runtime_key(identity: PodIdentity) -> tuple[str, str, str]:
+    return identity.namespace, identity.name, identity.uid
 
 
 def _broker(store: _Store, pods: dict[str, dict[str, object]]) -> KubernetesCredentialBroker:
@@ -117,6 +131,78 @@ def test_delivery_is_idempotent_before_ack_and_refused_after_durable_ack() -> No
     assert acknowledged.acknowledged is repeated_ack.acknowledged is True
     assert acknowledged.credential is repeated_ack.credential is refused.credential is None
     assert refused.refused is True
+
+
+def test_same_uid_uses_fresh_resource_versions_for_delivery_and_acknowledgment() -> None:
+    store = _Store()
+    pod = _pod()
+    broker = _broker(store, {"kdive-worker-0": pod})
+    request = BrokerRequest("deliver", "bound-token", "kdive", "kdive-worker-0", "uid-1")
+
+    assert asyncio.run(broker.pre_register_once()) == 1
+    metadata = cast(dict[str, object], pod["metadata"])
+    metadata["resourceVersion"] = "8"
+    assert asyncio.run(broker.handle(request)).credential == "a" * 64
+
+    metadata["resourceVersion"] = "9"
+    acknowledged = asyncio.run(
+        broker.handle(BrokerRequest("ack", "bound-token", "kdive", "kdive-worker-0", "uid-1"))
+    )
+    assert acknowledged.acknowledged is True
+    assert store.pending_reads == [PodIdentity("kdive", "kdive-worker-0", "uid-1", "8")]
+    assert store.acknowledgments == [PodIdentity("kdive", "kdive-worker-0", "uid-1", "9")]
+
+
+def test_broker_requests_exact_fixed_tokenreview_audience() -> None:
+    seen_audiences: list[str] = []
+
+    async def review(token: str, audience: str) -> PodIdentity | None:
+        seen_audiences.append(audience)
+        return await _token_identity(token, audience)
+
+    store = _Store()
+    broker = replace(_broker(store, {"kdive-worker-0": _pod()}), token_review=review)
+    assert asyncio.run(broker.pre_register_once()) == 1
+
+    reply = asyncio.run(
+        broker.handle(BrokerRequest("deliver", "bound-token", "kdive", "kdive-worker-0", "uid-1"))
+    )
+    assert reply.credential == "a" * 64
+    assert seen_audiences == [BROKER_AUDIENCE]
+
+
+def test_authenticated_tokenreview_with_mismatched_returned_audience_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    projected_token = tmp_path / "service-account-token"
+    projected_token.write_text("broker-token", encoding="utf-8")
+    requests: list[urllib.request.Request] = []
+    response = {
+        "status": {
+            "authenticated": True,
+            "audiences": ["other-audience"],
+            "user": {
+                "extra": {
+                    "authentication.kubernetes.io/pod-name": ["kdive-worker-0"],
+                    "authentication.kubernetes.io/pod-uid": ["uid-1"],
+                }
+            },
+        }
+    }
+
+    def urlopen(request: urllib.request.Request, *, timeout: float, context: object) -> io.BytesIO:
+        requests.append(request)
+        return io.BytesIO(json.dumps(response).encode())
+
+    monkeypatch.setattr(credential_broker, "_SERVICE_ACCOUNT_TOKEN", projected_token)
+    monkeypatch.setattr(credential_broker.ssl, "create_default_context", lambda **kwargs: object())
+    monkeypatch.setattr(credential_broker.urllib.request, "urlopen", urlopen)
+
+    assert credential_broker._token_review("bound-token", BROKER_AUDIENCE) is None
+    assert len(requests) == 1
+    request_data = requests[0].data
+    assert isinstance(request_data, bytes)
+    assert json.loads(request_data)["spec"]["audiences"] == [BROKER_AUDIENCE]
 
 
 @pytest.mark.parametrize(
