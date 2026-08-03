@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.tools._common import encode_ts_uuid_cursor
 from kdive.mcp.tools.ops import build_uses
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.runs.worker_incarnations import (
@@ -283,5 +285,24 @@ def test_list_build_uses_is_operator_only_and_bounded(migrated_url: str) -> None
             assert listed.items[0].object_id == str(use_id)
             assert listed.items[0].data["holder"] == holder
             assert listed.items[0].data["attempt"] == "1"
+
+    asyncio.run(_run())
+
+
+def test_list_build_uses_rejects_invalid_cursor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            cursors = (
+                "not-a-cursor",
+                "",
+                encode_ts_uuid_cursor("another.list", datetime.now(UTC), uuid4()),
+            )
+            for cursor in cursors:
+                invalid = await build_uses.list_build_uses(
+                    pool, _ctx(operator=True), limit=1, cursor=cursor
+                )
+                assert invalid.status == "error"
+                assert invalid.error_category == "configuration_error"
+                assert invalid.data["reason"] == "invalid_cursor"
 
     asyncio.run(_run())

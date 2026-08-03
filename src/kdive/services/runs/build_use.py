@@ -1,5 +1,7 @@
 """Durable per-attempt lifetime fences for reusable build artifacts."""
 
+from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
@@ -8,6 +10,49 @@ from pydantic import SecretStr
 from kdive.db.locks import LockScope, advisory_xact_lock, require_top_level_transaction
 from kdive.db.repositories import RUNS
 from kdive.services.runs.build_catalog import resolve_build
+
+
+@dataclass(frozen=True, slots=True)
+class BuildUseDiagnostic:
+    """One tenant-authorized persistent build-use diagnostic row."""
+
+    use_id: UUID
+    investigation_id: UUID
+    generation: UUID
+    job_id: UUID
+    attempt: int
+    holder_worker_id: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class BuildUseDiagnosticPage:
+    """One bounded keyset page returned by the protected diagnostic function."""
+
+    rows: tuple[BuildUseDiagnostic, ...]
+    truncated: bool
+
+
+async def list_build_uses_page(
+    conn: AsyncConnection,
+    *,
+    authorized_projects: tuple[str, ...],
+    limit: int,
+    after: tuple[datetime, UUID] | None,
+) -> BuildUseDiagnosticPage:
+    """Read one oldest-first tenant-scoped diagnostic page through the guarded SQL seam."""
+    after_created_at, after_use_id = after if after is not None else (None, None)
+    raw_rows = await (
+        await conn.execute(
+            "SELECT use_id, investigation_id, generation, job_id, attempt, "
+            "holder_worker_id, created_at, page_truncated "
+            "FROM public.list_investigation_build_uses("
+            "%s::text[], %s::timestamptz, %s::uuid, %s)",
+            (list(authorized_projects), after_created_at, after_use_id, limit),
+        )
+    ).fetchall()
+    rows = tuple(BuildUseDiagnostic(*row[:7]) for row in raw_rows)
+    return BuildUseDiagnosticPage(rows=rows, truncated=bool(raw_rows[0][7]) if raw_rows else False)
 
 
 async def acquire_build_use(

@@ -25,6 +25,16 @@ which it holds at least `viewer`. The function joins use to generation to invest
 only rows whose authoritative project is in that granted set. A platform-only caller supplies an empty
 set and receives an empty list.
 
+The list is stable-keyset-paginated over `(created_at, use_id) ASC`. The opaque MCP cursor carries the
+last returned boundary and is decoded into typed timestamp and UUID values before the function seeks
+strictly after it. The function internally inspects at most one extra matching row to determine
+truncation but returns no more than the requested, server-capped page. When more rows exist,
+`data.truncated=true` and `data.next_cursor` carries the last returned boundary. The terminal page has
+`data.truncated=false` and `data.next_cursor=null`; a valid boundary whose later rows disappeared is an
+empty terminal page. A malformed or wrong-tool cursor is an `invalid_cursor` configuration error,
+never a silent first-page restart. Every page reapplies the same authoritative project join, so the
+cursor is a continuation boundary rather than an authorization token.
+
 The server and reconciler may invoke one exact recovery function. Its inputs include the use UUID, the
 caller's authorized project set, the expected holder, actor, and reason. It returns false unless the
 use joins to a project in that set, the exact holder matches, and the immutable worker-incarnation row
@@ -42,28 +52,33 @@ it receives no worker credential functions and cannot publish termination eviden
 
 The MCP list and recovery surfaces require both `platform_operator` and at least `viewer` on the
 pin's project. The application derives and de-duplicates that project set from the verified request
-context before invoking either database function. List output remains capped at 100 rows. Holder and
-reason remain capped at 512 UTF-8 bytes. These are per-request limits with no reference clock; excess
-list limits are clamped, and invalid recovery inputs leave the use pinned for a corrected retry.
+context before invoking either database function. List output remains capped at 100 rows. This is a
+row-count limit per request with no reference clock; excess values are clamped, one additional
+tenant-scoped row may be inspected to establish truncation, and the caller continues with
+`data.next_cursor`. Holder and reason remain capped at 512 UTF-8 bytes; invalid recovery inputs leave
+the use pinned for a corrected retry.
 
 This decision partially supersedes ADR-0533's runtime process authority mapping. ADR-0533's worker,
 lifecycle-witness, protocol, deployment, and evidence decisions remain in force.
 
 ## Consequences
 
-Operators can diagnose and recover stranded pins under the deployed server credential without gaining
-cross-tenant visibility or direct table access. A platform operator must also receive an ordinary
-project role for each tenant whose pins it may inspect or recover. Platform-only operational accounts
-see no tenant pins.
+Operators can diagnose and recover every stranded pin under the deployed server credential without
+gaining cross-tenant visibility or direct table access. A blocked or unrecoverable first page cannot
+hide later pins because the operator follows the stable cursor to a terminal page. A platform operator
+must also receive an ordinary project role for each tenant whose pins it may inspect or recover.
+Platform-only operational accounts see no tenant pins.
 
 Generation garbage collection can preserve exact live pins under the reconciler credential without
 acquiring broader worker authority. Recovery continues to fail closed when authorization scope,
 holder identity, terminal evidence, audit persistence, or exact-row deletion does not hold.
 
 Runtime-role deployment tests must connect through the actual server, reconciler, worker, and witness
-DSNs. They prove direct protected-table access is denied, function grants are exact, mixed-project
-lists do not leak foreign rows, foreign and missing recovery requests have the same refusal shape, and
-generation garbage collection preserves only exact pinned generations.
+DSNs. They prove direct protected-table access is denied, function grants are exact, more than 100
+blocked pins cannot hide a later recoverable pin, mixed-project pages do not leak foreign rows,
+malformed cursors fail explicitly, terminal pages are unambiguous, foreign and missing recovery
+requests have the same refusal shape, and generation garbage collection preserves only exact pinned
+generations.
 
 ## Considered & rejected
 
@@ -73,6 +88,10 @@ generation garbage collection preserves only exact pinned generations.
   authority from project-data authority; combining them creates an implicit global tenant reader.
 - **Resolve the project after an unscoped list or lookup.** The returned row already discloses tenant
   data. Project filtering must happen inside the bounded definer query.
+- **Repeat a cursorless oldest-first page.** An unrecoverable prefix would return forever and make
+  every later pin unreachable through the supported recovery workflow.
+- **Use offsets.** Concurrent inserts or removals shift offsets and can repeat or skip a pin. The
+  existing total `(created_at, use_id)` order supplies a stable seek boundary.
 - **Give the reconciler worker-role membership.** Garbage collection needs two pin-key columns, not
   credential-bound acquisition and release authority.
 - **Treat lease expiry as recovery evidence.** A cancelled provider thread may continue after lease

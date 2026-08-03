@@ -4,6 +4,8 @@
 
 CREATE FUNCTION list_investigation_build_uses(
     p_authorized_projects text[],
+    p_after_created_at timestamptz,
+    p_after_use_id uuid,
     p_limit integer
 )
 RETURNS TABLE (
@@ -13,7 +15,8 @@ RETURNS TABLE (
     job_id uuid,
     attempt integer,
     holder_worker_id text,
-    created_at timestamptz
+    created_at timestamptz,
+    page_truncated boolean
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -27,28 +30,58 @@ BEGIN
     IF p_authorized_projects IS NULL THEN
         RAISE EXCEPTION 'authorized project scope is required' USING ERRCODE = '22023';
     END IF;
+    IF (p_after_created_at IS NULL) <> (p_after_use_id IS NULL) THEN
+        RAISE EXCEPTION 'build-use cursor boundary is incomplete' USING ERRCODE = '22023';
+    END IF;
     IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 THEN
         RAISE EXCEPTION 'build-use diagnostic limit must be between 1 and 100 rows'
             USING ERRCODE = '22023';
     END IF;
     RETURN QUERY
+    WITH page AS MATERIALIZED (
+        SELECT
+            u.use_id,
+            u.investigation_id,
+            u.generation,
+            u.job_id,
+            u.attempt,
+            u.holder_worker_id,
+            u.created_at
+        FROM public.investigation_build_uses AS u
+        JOIN public.investigation_builds AS b
+          ON b.investigation_id = u.investigation_id AND b.generation = u.generation
+        JOIN public.investigations AS i ON i.id = b.investigation_id
+        WHERE i.project = ANY(p_authorized_projects)
+          AND (
+              p_after_created_at IS NULL
+              OR (u.created_at, u.use_id) > (p_after_created_at, p_after_use_id)
+          )
+        ORDER BY u.created_at, u.use_id
+        LIMIT p_limit + 1
+    ), numbered AS (
+        SELECT
+            page.*,
+            row_number() OVER (ORDER BY page.created_at, page.use_id) AS page_row,
+            count(*) OVER () > p_limit AS page_truncated
+        FROM page
+    )
     SELECT
-        u.use_id,
-        u.investigation_id,
-        u.generation,
-        u.job_id,
-        u.attempt,
-        u.holder_worker_id,
-        u.created_at
-    FROM public.investigation_build_uses AS u
-    JOIN public.investigation_builds AS b
-      ON b.investigation_id = u.investigation_id AND b.generation = u.generation
-    JOIN public.investigations AS i ON i.id = b.investigation_id
-    WHERE i.project = ANY(p_authorized_projects)
-    ORDER BY u.created_at, u.use_id
-    LIMIT p_limit;
+        numbered.use_id,
+        numbered.investigation_id,
+        numbered.generation,
+        numbered.job_id,
+        numbered.attempt,
+        numbered.holder_worker_id,
+        numbered.created_at,
+        numbered.page_truncated
+    FROM numbered
+    WHERE numbered.page_row <= p_limit
+    ORDER BY numbered.created_at, numbered.use_id;
 END
 $$;
+
+CREATE INDEX investigation_build_uses_created_use_idx
+    ON investigation_build_uses (created_at, use_id);
 
 DROP FUNCTION recover_investigation_build_use(uuid, text, text, text);
 
@@ -154,14 +187,16 @@ BEGIN
 END
 $$;
 
-REVOKE ALL ON FUNCTION list_investigation_build_uses(text[], integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION
+    list_investigation_build_uses(text[], timestamptz, uuid, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION recover_investigation_build_use(uuid, text[], text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION
-    list_investigation_build_uses(text[], integer),
+    list_investigation_build_uses(text[], timestamptz, uuid, integer),
     recover_investigation_build_use(uuid, text[], text, text, text)
 FROM kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness;
 
-GRANT EXECUTE ON FUNCTION list_investigation_build_uses(text[], integer) TO kdive_server;
+GRANT EXECUTE ON FUNCTION list_investigation_build_uses(text[], timestamptz, uuid, integer)
+    TO kdive_server;
 GRANT EXECUTE ON FUNCTION recover_investigation_build_use(uuid, text[], text, text, text)
     TO kdive_server, kdive_reconciler;
 GRANT SELECT (investigation_id, generation) ON public.investigation_build_uses

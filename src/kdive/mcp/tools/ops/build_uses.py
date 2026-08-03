@@ -14,7 +14,10 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import clamp_list_limit
+from kdive.mcp.tools._common import InvalidCursor, clamp_list_limit
+from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
+from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
+from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
@@ -24,7 +27,7 @@ from kdive.security.authz.rbac import (
     projects_with_role,
     require_platform_role,
 )
-from kdive.services.runs.build_use import recover_build_use_in_transaction
+from kdive.services.runs.build_use import list_build_uses_page, recover_build_use_in_transaction
 
 _TOOL = "ops.recover_build_use"
 _LIST_TOOL = "ops.build_uses_list"
@@ -67,7 +70,11 @@ async def _audit_refusal(
 
 
 async def list_build_uses(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, limit: int = 50
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    limit: int = 50,
+    cursor: str | None = None,
 ) -> ToolResponse:
     """List a bounded oldest-first set of persistent pins for operator diagnosis."""
     try:
@@ -77,15 +84,32 @@ async def list_build_uses(
         return ToolResponse.denied("build-uses", missing_roles=[PlatformRole.PLATFORM_OPERATOR])
     capped = min(clamp_list_limit(limit), _MAX_BUILD_USE_LIST_LIMIT)
     authorized_projects = tuple(sorted(set(projects_with_role(ctx, Role.VIEWER))))
+    after = None
+    if cursor is not None:
+        try:
+            after = _decode_ts_uuid_cursor(_LIST_TOOL, cursor)
+        except InvalidCursor:
+            async with pool.connection() as conn, conn.transaction():
+                await audit.record_platform(
+                    conn,
+                    principal=ctx.principal,
+                    agent_session=ctx.agent_session,
+                    event=audit.PlatformAuditEvent(
+                        tool=_LIST_TOOL,
+                        scope="build-use-recovery:invalid_cursor",
+                        args={"limit": capped, "project_count": len(authorized_projects)},
+                        platform_role=held_platform_roles(ctx),
+                        actor=actor_for(ctx),
+                    ),
+                )
+            return _invalid_cursor_error("build-uses")
     async with pool.connection() as conn:
-        rows = await (
-            await conn.execute(
-                "SELECT use_id, investigation_id, generation, job_id, attempt, "
-                "holder_worker_id, created_at "
-                "FROM public.list_investigation_build_uses(%s::text[], %s)",
-                (list(authorized_projects), capped),
-            )
-        ).fetchall()
+        page = await list_build_uses_page(
+            conn,
+            authorized_projects=authorized_projects,
+            limit=capped,
+            after=after,
+        )
         async with conn.transaction():
             await audit.record_platform(
                 conn,
@@ -101,25 +125,30 @@ async def list_build_uses(
             )
     items = [
         ToolResponse.success(
-            str(row[0]),
+            str(row.use_id),
             "pinned",
             data={
-                "investigation_id": str(row[1]),
-                "generation": str(row[2]),
-                "job_id": str(row[3]),
-                "attempt": str(row[4]),
-                "holder": row[5],
-                "created_at": row[6].isoformat(),
+                "investigation_id": str(row.investigation_id),
+                "generation": str(row.generation),
+                "job_id": str(row.job_id),
+                "attempt": str(row.attempt),
+                "holder": row.holder_worker_id,
+                "created_at": row.created_at.isoformat(),
             },
         )
-        for row in rows
+        for row in page.rows
     ]
+    next_cursor = (
+        _encode_ts_uuid_cursor(_LIST_TOOL, page.rows[-1].created_at, page.rows[-1].use_id)
+        if page.truncated and page.rows
+        else None
+    )
     return ToolResponse.collection(
         "build-uses",
         "ok",
         items,
         suggested_next_actions=[_TOOL],
-        data={"limit": capped},
+        data={"limit": capped, "truncated": page.truncated, "next_cursor": next_cursor},
     )
 
 
@@ -208,24 +237,41 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
                 description=(
                     "Maximum oldest-first pin rows returned per request; this row-count limit "
                     f"has no clock and is server-capped at {_MAX_BUILD_USE_LIST_LIMIT}. Higher "
-                    "values are clamped; repeat the tool to refresh diagnostics."
+                    "values are clamped; the service may inspect one additional tenant-scoped "
+                    "row to set data.truncated. When truncated, pass data.next_cursor as cursor "
+                    "to continue."
                 )
             ),
         ] = 50,
+        cursor: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Opaque continuation cursor from a prior page's data.next_cursor. A malformed "
+                    "or wrong-tool cursor is refused as invalid_cursor; retry with the returned "
+                    "cursor or omit it to restart from the oldest pin."
+                )
+            ),
+        ] = None,
     ) -> ToolResponse:
         """List persistent reusable-build pins. Requires platform operator and project viewer.
 
         Conditionally available only when durable worker-termination witnesses are configured.
         Returns pins only from projects where the caller holds at least viewer; platform authority
-        alone grants no tenant-data access and therefore returns an empty list.
+        alone grants no tenant-data access and therefore returns an empty list. Keyset-paginated:
+        when `data.truncated` is true, pass `data.next_cursor` back as `cursor` for the next page.
+        A terminal page, including a valid cursor whose remaining rows disappeared, returns
+        `data.truncated=false` and `data.next_cursor=null`.
         A stale job lease is diagnostic context only, never proof that its holder stopped. Pass an
         exact returned use id and holder to `ops.recover_build_use` only after operator review.
         Returns `data.limit` plus items containing `investigation_id`, `generation`, `job_id`,
         `attempt`, `holder`, and PostgreSQL-clock `created_at`. Each request returns the bounded
-        oldest-first result described by `limit` and has no continuation cursor; repeat the tool
-        to refresh diagnostics.
+        oldest-first result described by `limit`. The row-count limit is per request and has no
+        reference clock; higher values are clamped, and one additional tenant-scoped row may be
+        inspected to establish `data.truncated`. Follow `data.next_cursor` to reach later pins, or
+        omit `cursor` to restart diagnostics.
         """
-        return await list_build_uses(pool, current_context(), limit=limit)
+        return await list_build_uses(pool, current_context(), limit=limit, cursor=cursor)
 
     @app.tool(name=_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def ops_recover_build_use(

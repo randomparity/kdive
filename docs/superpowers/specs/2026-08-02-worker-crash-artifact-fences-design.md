@@ -153,7 +153,12 @@ addition to requiring platform operator. The list and recovery functions match o
 platform-only accounts receive an empty list, while foreign and missing recovery requests have the same
 refusal shape. Inputs and pages have explicit limits: identity 512 bytes; binding serialization bounded
 before persistence; actor 255, evidence 1024, and reason 512 bytes; list requests return at most 100
-oldest-first rows. Witness and GC
+oldest-first rows and continue with an opaque stable `(created_at, use_id)` keyset cursor. A malformed
+or wrong-tool cursor is refused as `invalid_cursor`; a terminal page, including one whose remaining
+rows disappeared, returns `truncated=false` and `next_cursor=null`. Every continuation reapplies the
+same viewer-granted project scope. The list bound is a row count per request with no reference clock;
+higher values are clamped, one additional scoped row may be inspected to establish truncation, and
+the caller follows `next_cursor` to recover access to later rows. Witness and GC
 passes use a configured row count with a hard ceiling of 1,000 rows on the database clock; exhaustion
 retains work and publishes the continuation cursor. The recovery function accepts one exact use,
 joins through investigation to the authoritative project, verifies the holder and immutable terminal
@@ -179,7 +184,8 @@ object-store failure leaves the row/tombstone retryable and never widens the del
 - Unauthorized SQL operation: permission denied, with no protected-table mutation.
 - Recovery mismatch: audited refusal where the operator surface requires it; use remains pinned.
 - Bound exhaustion: stop at the documented page/pass bound and resume with the returned cursor or next
-  invocation.
+  invocation. For build-use diagnostics, follow `data.next_cursor` until `data.truncated=false`; omit
+  the cursor to restart after an invalid token.
 
 ## Threat model
 

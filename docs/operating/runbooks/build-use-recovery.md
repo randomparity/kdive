@@ -7,7 +7,15 @@ the pin automatically.
 Use `ops.build_uses_list` with a token carrying platform operator and at least viewer on each intended
 project to inspect at most 100 oldest-first pins per request. The server reads them only through the
 database-capped, project-filtered diagnostic function. Platform authority alone returns an empty list;
-it never grants tenant-data access. Recovery is
+it never grants tenant-data access. When `data.truncated` is true, pass the opaque
+`data.next_cursor` back as `cursor` and continue until a page returns `data.truncated=false` and
+`data.next_cursor=null`. This row-count limit is per request and has no reference clock; higher values
+are clamped, the service may inspect one additional tenant-scoped row to establish truncation, and
+following the cursor reaches later pins even when every pin on an earlier page remains active. A
+malformed or wrong-tool cursor returns
+`configuration_error` with `data.reason=invalid_cursor`; retry with the last returned cursor, or omit
+it to restart at the oldest pin. A valid cursor past rows that were removed returns an empty terminal
+page. Recovery is
 advertised only when `KDIVE_WORKER_DEATH_VERIFIER` selects an authoritative
 deployment verifier. `local` verifies hostname, boot ID, PID, and process start time against the
 server host's `/proc`. `docker` verifies the worker's immutable container ID through the reference

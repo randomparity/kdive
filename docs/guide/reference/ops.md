@@ -10,17 +10,23 @@ List persistent reusable-build pins. Requires platform operator and project view
 
 Conditionally available only when durable worker-termination witnesses are configured.
 Returns pins only from projects where the caller holds at least viewer; platform authority
-alone grants no tenant-data access and therefore returns an empty list.
+alone grants no tenant-data access and therefore returns an empty list. Keyset-paginated:
+when `data.truncated` is true, pass `data.next_cursor` back as `cursor` for the next page.
+A terminal page, including a valid cursor whose remaining rows disappeared, returns
+`data.truncated=false` and `data.next_cursor=null`.
 A stale job lease is diagnostic context only, never proof that its holder stopped. Pass an
 exact returned use id and holder to `ops.recover_build_use` only after operator review.
 Returns `data.limit` plus items containing `investigation_id`, `generation`, `job_id`,
 `attempt`, `holder`, and PostgreSQL-clock `created_at`. Each request returns the bounded
-oldest-first result described by `limit` and has no continuation cursor; repeat the tool
-to refresh diagnostics.
+oldest-first result described by `limit`. The row-count limit is per request and has no
+reference clock; higher values are clamped, and one additional tenant-scoped row may be
+inspected to establish `data.truncated`. Follow `data.next_cursor` to reach later pins, or
+omit `cursor` to restart diagnostics.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `limit` | integer | no | Maximum oldest-first pin rows returned per request; this row-count limit has no clock and is server-capped at 100. Higher values are clamped; repeat the tool to refresh diagnostics. |
+| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's data.next_cursor. A malformed or wrong-tool cursor is refused as invalid_cursor; retry with the returned cursor or omit it to restart from the oldest pin. |
+| `limit` | integer | no | Maximum oldest-first pin rows returned per request; this row-count limit has no clock and is server-capped at 100. Higher values are clamped; the service may inspect one additional tenant-scoped row to set data.truncated. When truncated, pass data.next_cursor as cursor to continue. |
 
 ## `ops.diagnostics`
 

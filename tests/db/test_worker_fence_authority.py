@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from threading import Event
 from time import monotonic, sleep
 from typing import LiteralString
@@ -259,6 +259,14 @@ class _RecordingGenerationStore:
         return True
 
 
+@dataclass(frozen=True)
+class _PaginatedUses:
+    blocked: tuple[UUID, ...]
+    recoverable: UUID
+    foreign: UUID
+    recoverable_holder: str
+
+
 def _operator_context(
     *,
     platform_operator: bool = True,
@@ -494,6 +502,78 @@ def _acquire(
     return bool(row[0])
 
 
+def _seed_paginated_uses(pg_conn: psycopg.Connection, role_dsn: RoleDsns) -> _PaginatedUses:
+    """Seed 100 blocked pins, one later recoverable pin, and one foreign pin."""
+    blocked_holder = "docker:page-blocked"
+    recoverable_holder = "docker:page-recoverable"
+    foreign_holder = "docker:page-foreign"
+    for holder, credential in (
+        (blocked_holder, b"b" * 32),
+        (recoverable_holder, b"r" * 32),
+        (foreign_holder, b"f" * 32),
+    ):
+        _register(role_dsn, holder, credential)
+
+    blocked_inv, blocked_generation, blocked_job = _seed_claim(
+        pg_conn, holder=blocked_holder, project="project-a"
+    )
+    recoverable_inv, recoverable_generation, recoverable_job = _seed_claim(
+        pg_conn, holder=recoverable_holder, project="project-a"
+    )
+    foreign_inv, foreign_generation, foreign_job = _seed_claim(
+        pg_conn, holder=foreign_holder, project="project-b"
+    )
+    local_ids = sorted(uuid4() for _ in range(101))
+    blocked, recoverable = tuple(local_ids[:100]), local_ids[100]
+    foreign = uuid4()
+    created_at = datetime.now(UTC) - timedelta(days=1)
+    rows = [
+        (
+            use_id,
+            blocked_inv,
+            blocked_generation,
+            blocked_job,
+            blocked_holder,
+            created_at,
+        )
+        for use_id in blocked
+    ]
+    rows.extend(
+        (
+            use_id,
+            investigation_id,
+            generation,
+            job_id,
+            holder,
+            created_at,
+        )
+        for use_id, investigation_id, generation, job_id, holder in (
+            (
+                recoverable,
+                recoverable_inv,
+                recoverable_generation,
+                recoverable_job,
+                recoverable_holder,
+            ),
+            (foreign, foreign_inv, foreign_generation, foreign_job, foreign_holder),
+        )
+    )
+    with pg_conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO investigation_build_uses "
+            "(use_id, investigation_id, generation, job_id, attempt, holder_worker_id, "
+            "lease_expires_at, created_at) VALUES (%s, %s, %s, %s, 1, %s, "
+            "now() + interval '5 minutes', %s)",
+            rows,
+        )
+    with psycopg.connect(role_dsn("kdive_lifecycle_witness"), autocommit=True) as witness:
+        assert witness.execute(
+            "SELECT public.terminate_worker_incarnation(%s, 'killed')",
+            (recoverable_holder,),
+        ).fetchone() == (True,)
+    return _PaginatedUses(blocked, recoverable, foreign, recoverable_holder)
+
+
 def test_server_role_lists_build_uses_through_the_operator_tool(
     pg_conn: psycopg.Connection, role_dsn: RoleDsns
 ) -> None:
@@ -564,6 +644,65 @@ def test_server_role_lists_build_uses_through_the_operator_tool(
             await pool.close()
 
     asyncio.run(exercise())
+
+
+def test_server_role_pages_past_blocked_pins_without_cross_tenant_leak(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """A blocked first page cannot hide a later recoverable pin in the caller's tenant."""
+    uses = _seed_paginated_uses(pg_conn, role_dsn)
+
+    async def exercise() -> None:
+        pool = AsyncConnectionPool(role_dsn("kdive_server"), min_size=1, max_size=1, open=False)
+        await pool.open()
+        try:
+            first = await build_uses.list_build_uses(pool, _operator_context(), limit=100)
+            assert [item.object_id for item in first.items] == [str(uid) for uid in uses.blocked]
+            assert first.data["truncated"] is True
+            cursor = first.data["next_cursor"]
+            assert isinstance(cursor, str)
+
+            blocked = await build_uses.recover_build_use(
+                pool,
+                _operator_context(),
+                use_id=uses.blocked[0],
+                holder="docker:page-blocked",
+                reason="prove the active prefix is not recoverable",
+            )
+            assert blocked.error_category == "configuration_error"
+
+            second = await build_uses.list_build_uses(
+                pool, _operator_context(), limit=100, cursor=cursor
+            )
+            assert [item.object_id for item in second.items] == [str(uses.recoverable)]
+            assert second.data["truncated"] is False
+            assert second.data["next_cursor"] is None
+            assert all(item.object_id != str(uses.foreign) for item in first.items + second.items)
+
+            recovered = await build_uses.recover_build_use(
+                pool,
+                _operator_context(),
+                use_id=uses.recoverable,
+                holder=uses.recoverable_holder,
+                reason="reached through the continuation page",
+            )
+            assert recovered.status == "recovered"
+
+            terminal = await build_uses.list_build_uses(
+                pool, _operator_context(), limit=100, cursor=cursor
+            )
+            assert terminal.items == []
+            assert terminal.data["truncated"] is False
+            assert terminal.data["next_cursor"] is None
+
+        finally:
+            await pool.close()
+
+    asyncio.run(exercise())
+    assert pg_conn.execute(
+        "SELECT count(*) FROM investigation_build_uses WHERE use_id = %s",
+        (uses.foreign,),
+    ).fetchone() == (1,)
 
 
 def test_server_role_recovers_one_exact_build_use_through_the_operator_tool(
@@ -1236,7 +1375,7 @@ def test_protected_runtime_function_and_column_authority_is_exact(
 ) -> None:
     """Diagnostics, recovery, and GC expose no more protected evidence than each role needs."""
     allowed = {
-        "list_investigation_build_uses(text[],integer)": {"kdive_server"},
+        "list_investigation_build_uses(text[],timestamptz,uuid,integer)": {"kdive_server"},
         "recover_investigation_build_use(uuid,text[],text,text,text)": {
             "kdive_server",
             "kdive_reconciler",
@@ -1271,9 +1410,15 @@ def test_protected_runtime_function_and_column_authority_is_exact(
         for invalid_limit in (0, 101):
             with pytest.raises(psycopg.errors.InvalidParameterValue, match="between 1 and 100"):
                 server.execute(
-                    "SELECT * FROM public.list_investigation_build_uses(%s::text[], %s)",
+                    "SELECT * FROM public.list_investigation_build_uses("
+                    "%s::text[], NULL, NULL, %s)",
                     (["project-a"], invalid_limit),
                 )
+        with pytest.raises(psycopg.errors.InvalidParameterValue, match="boundary is incomplete"):
+            server.execute(
+                "SELECT * FROM public.list_investigation_build_uses(%s::text[], now(), NULL, 100)",
+                (["project-a"],),
+            )
 
 
 def test_migration_upgrade_resets_guarded_function_matrix(
@@ -1286,7 +1431,7 @@ def test_migration_upgrade_resets_guarded_function_matrix(
         "terminate_worker_incarnation(text,text)": {"kdive_lifecycle_witness"},
         "acquire_investigation_build_use(uuid,uuid,uuid,uuid,integer,bytea)": {"kdive_worker"},
         "release_investigation_build_use(uuid,bytea)": {"kdive_worker"},
-        "list_investigation_build_uses(text[],integer)": {"kdive_server"},
+        "list_investigation_build_uses(text[],timestamptz,uuid,integer)": {"kdive_server"},
         "recover_investigation_build_use(uuid,text[],text,text,text)": {
             "kdive_server",
             "kdive_reconciler",
