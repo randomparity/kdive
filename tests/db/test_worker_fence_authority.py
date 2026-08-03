@@ -425,6 +425,17 @@ def _seed_claim(
     return investigation_id, generation, job_id
 
 
+def _seed_queued_job(conn: psycopg.Connection) -> UUID:
+    job_id = uuid4()
+    conn.execute(
+        "INSERT INTO jobs (id, kind, state, max_attempts, payload, authorizing, dedup_key) "
+        "VALUES (%s, 'install', 'queued', 3, '{}'::jsonb, "
+        '\'{"principal":"principal","project":"project-a"}\'::jsonb, %s)',
+        (job_id, f"worker-fence-lease-{job_id}"),
+    )
+    return job_id
+
+
 def _acquire(
     role_dsn: RoleDsns,
     use_id: UUID,
@@ -654,6 +665,116 @@ def test_worker_job_functions_fence_credential_holder_and_attempt(
             (fail_job, credential_a),
         ).fetchone()
         assert failed == ("failed", "build_failure")
+
+
+@pytest.mark.parametrize("lease", ["0 seconds", "-1 microsecond", "1 hour 1 microsecond"])
+def test_worker_claim_rejects_out_of_contract_lease_without_state_change(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns, lease: str
+) -> None:
+    """Hostile worker SQL cannot claim with an expired or over-limit lease."""
+    holder, credential = "docker:bounded-claim", b"c" * 32
+    _register(role_dsn, holder, credential)
+    job_id = _seed_queued_job(pg_conn)
+
+    with (
+        psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker,
+        pytest.raises(psycopg.errors.InvalidParameterValue, match="lease"),
+    ):
+        worker.execute(
+            "SELECT * FROM public.claim_worker_job(%s, %s, %s::interval, %s::text[])",
+            (holder, credential, lease, ["default"]),
+        )
+
+    assert pg_conn.execute(
+        "SELECT state, attempt, worker_id, lease_expires_at, heartbeat_at FROM jobs WHERE id = %s",
+        (job_id,),
+    ).fetchone() == ("queued", 0, None, None, None)
+
+
+@pytest.mark.parametrize("lease", ["0 seconds", "-1 microsecond", "1 hour 1 microsecond"])
+def test_worker_heartbeat_rejects_out_of_contract_lease_without_state_change(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns, lease: str
+) -> None:
+    """Hostile worker SQL cannot expire or overextend an owned running attempt."""
+    holder, credential = "docker:bounded-heartbeat", b"h" * 32
+    _register(role_dsn, holder, credential)
+    _investigation, _generation, job_id = _seed_claim(pg_conn, holder=holder, attempt=1)
+    before = pg_conn.execute(
+        "SELECT state, attempt, worker_id, lease_expires_at, heartbeat_at FROM jobs WHERE id = %s",
+        (job_id,),
+    ).fetchone()
+
+    with (
+        psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker,
+        pytest.raises(psycopg.errors.InvalidParameterValue, match="lease"),
+    ):
+        worker.execute(
+            "SELECT public.heartbeat_worker_job(%s, %s, 1, %s::interval)",
+            (job_id, credential, lease),
+        )
+
+    assert (
+        pg_conn.execute(
+            "SELECT state, attempt, worker_id, lease_expires_at, heartbeat_at "
+            "FROM jobs WHERE id = %s",
+            (job_id,),
+        ).fetchone()
+        == before
+    )
+
+
+def test_worker_claim_and_heartbeat_accept_one_hour_lease_ceiling(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """The one-hour lease ceiling is inclusive for current credential-bound paths."""
+    holder, credential = "docker:max-valid-lease", b"m" * 32
+    _register(role_dsn, holder, credential)
+    job_id = _seed_queued_job(pg_conn)
+
+    with psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker:
+        claimed = worker.execute(
+            "SELECT state, attempt FROM public.claim_worker_job("
+            "%s, %s, interval '1 hour', %s::text[])",
+            (holder, credential, ["default"]),
+        ).fetchone()
+        assert claimed == ("running", 1)
+        assert worker.execute(
+            "SELECT public.heartbeat_worker_job(%s, %s, 1, interval '1 hour')",
+            (job_id, credential),
+        ).fetchone() == (True,)
+
+
+def test_worker_lease_uses_postgres_clock_at_each_function_invocation(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """A caller's older transaction timestamp cannot backdate claim or heartbeat leases."""
+    holder, credential = "docker:invocation-clock", b"t" * 32
+    _register(role_dsn, holder, credential)
+    job_id = _seed_queued_job(pg_conn)
+
+    with psycopg.connect(role_dsn("kdive_worker")) as worker:
+        worker.execute("SELECT 1")  # establish a transaction timestamp before the boundary call
+        claim_reference = worker.execute("SELECT clock_timestamp()").fetchone()
+        assert claim_reference is not None
+        claimed = worker.execute(
+            "SELECT heartbeat_at FROM public.claim_worker_job("
+            "%s, %s, interval '5 minutes', %s::text[])",
+            (holder, credential, ["default"]),
+        ).fetchone()
+        assert claimed is not None
+        assert claimed[0] >= claim_reference[0]
+
+        heartbeat_reference = worker.execute("SELECT clock_timestamp()").fetchone()
+        assert heartbeat_reference is not None
+        assert worker.execute(
+            "SELECT public.heartbeat_worker_job(%s, %s, 1, interval '5 minutes')",
+            (job_id, credential),
+        ).fetchone() == (True,)
+        heartbeat = worker.execute(
+            "SELECT heartbeat_at FROM jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+        assert heartbeat is not None
+        assert heartbeat[0] >= heartbeat_reference[0]
 
 
 def test_worker_job_function_execute_authority_is_exact(

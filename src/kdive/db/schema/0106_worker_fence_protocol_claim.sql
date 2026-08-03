@@ -47,6 +47,7 @@ SET search_path = ''
 AS $$
 DECLARE
     v_incarnation text;
+    v_server_time timestamptz;
 BEGIN
     IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
         RAISE EXCEPTION 'worker authority is required' USING ERRCODE = '42501';
@@ -55,11 +56,17 @@ BEGIN
        OR octet_length(p_worker_id) NOT BETWEEN 1 AND 512
        OR p_credential_hash IS NULL
        OR octet_length(p_credential_hash) <> 32
-       OR p_lease IS NULL
        OR p_accepted_lanes IS NULL THEN
         RAISE EXCEPTION 'worker claim facts are invalid' USING ERRCODE = '22023';
     END IF;
-
+    IF p_lease IS NULL
+       OR p_lease <= interval '0 seconds'
+       OR p_lease > interval '1 hour' THEN
+        RAISE EXCEPTION
+            'worker claim lease must be greater than zero and at most 1 hour; '
+            'retry with a valid lease'
+            USING ERRCODE = '22023';
+    END IF;
     SELECT w.incarnation INTO v_incarnation
     FROM public.worker_incarnations AS w
     WHERE w.credential_hash = p_credential_hash;
@@ -81,19 +88,20 @@ BEGIN
         RETURN;
     END IF;
 
+    v_server_time := clock_timestamp();
     RETURN QUERY
     UPDATE public.jobs
     SET state = 'running',
         worker_id = v_incarnation,
         attempt = attempt + 1,
-        lease_expires_at = now() + p_lease,
-        heartbeat_at = now()
+        lease_expires_at = v_server_time + p_lease,
+        heartbeat_at = v_server_time
     WHERE id = (
         SELECT id
         FROM public.jobs
         WHERE (
             state = 'queued'
-            OR (state = 'running' AND lease_expires_at < now())
+            OR (state = 'running' AND lease_expires_at < v_server_time)
         )
           AND attempt < max_attempts
           AND dispatch_lane = ANY(p_accepted_lanes)

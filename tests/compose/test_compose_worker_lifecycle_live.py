@@ -34,21 +34,25 @@ _ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE_FILE = Path(__file__).with_name("fixtures") / "worker-lifecycle-live.yml"
 
 
-def _run(
-    argv: tuple[str, ...], env: dict[str, str], *, timeout: int = 120, allow_failure: bool = False
-) -> str:
-    try:
-        return lifecycle_module._bounded_command(
-            argv,
-            env,
-            timeout=timeout,
-            max_stdout_bytes=4_194_304,
-            max_stderr_bytes=4_194_304,
-        )
-    except subprocess.CalledProcessError:
-        if allow_failure:
-            return ""
-        raise
+def _run(argv: tuple[str, ...], env: dict[str, str], *, timeout: int = 120) -> str:
+    return lifecycle_module._bounded_command(
+        argv,
+        env,
+        timeout=timeout,
+        max_stdout_bytes=4_194_304,
+        max_stderr_bytes=4_194_304,
+    )
+
+
+def _docker_failure(operation: str, exc: subprocess.CalledProcessError) -> RuntimeError:
+    detail = str(exc.stderr).strip() or str(exc)
+    return RuntimeError(f"Docker {operation} failed: {detail}")
+
+
+def _is_exact_missing_image(exc: subprocess.CalledProcessError, image: str) -> bool:
+    return exc.returncode == 1 and str(exc.stderr).strip() == (
+        f"Error response from daemon: No such image: {image}"
+    )
 
 
 def _free_port() -> int:
@@ -158,7 +162,10 @@ def _cleanup_isolated_stack(
     except Exception as exc:  # noqa: BLE001 - cleanup must continue through every independent arm
         errors.append(exc)
     try:
-        _run(("docker", "image", "rm", image), env, timeout=60, allow_failure=True)
+        _run(("docker", "image", "rm", image), env, timeout=60)
+    except subprocess.CalledProcessError as exc:
+        if not _is_exact_missing_image(exc, image):
+            errors.append(_docker_failure("image removal", exc))
     except Exception as exc:  # noqa: BLE001 - cleanup must continue into the absence probes
         errors.append(exc)
 
@@ -187,15 +194,25 @@ def _cleanup_isolated_stack(
             "--filter",
             f"label=com.docker.compose.project={project}",
         ),
-        "image": ("docker", "image", "inspect", image),
     }
     for kind, argv in probes.items():
         try:
-            remaining = _run(argv, env, timeout=60, allow_failure=True).strip()
+            remaining = _run(argv, env, timeout=60).strip()
             if remaining:
                 errors.append(RuntimeError(f"isolated Compose {kind} remain: {remaining}"))
+        except subprocess.CalledProcessError as exc:
+            errors.append(_docker_failure(f"{kind} absence probe", exc))
         except Exception as exc:  # noqa: BLE001 - every postcondition is checked independently
             errors.append(exc)
+    try:
+        remaining_image = _run(("docker", "image", "inspect", image), env, timeout=60).strip()
+        if remaining_image:
+            errors.append(RuntimeError(f"isolated Compose image remains: {remaining_image}"))
+    except subprocess.CalledProcessError as exc:
+        if not _is_exact_missing_image(exc, image):
+            errors.append(_docker_failure("image absence probe", exc))
+    except Exception as exc:  # noqa: BLE001 - the credential postcondition must still run
+        errors.append(exc)
     if credential_path.exists():
         errors.append(RuntimeError(f"isolated Compose credential remains: {credential_path}"))
 
@@ -329,6 +346,123 @@ def test_isolated_cleanup_requires_exact_absence_on_success(
             image="kdive-lifecycle-proof:postcondition",
             credential_path=credential_path,
         )
+
+
+def test_cleanup_probe_failures_annotate_body_and_attempt_every_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = {"COMPOSE_PROJECT_NAME": "kdive-lifecycle-proof-probe-failure"}
+    image = "kdive-lifecycle-proof:probe-failure"
+    credential_path = tmp_path / "credential"
+    calls: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr(
+        "tests.compose.test_compose_worker_lifecycle_live._compose",
+        lambda _env, *args, timeout=120: "",
+    )
+
+    def command_failure(
+        argv: tuple[str, ...],
+        _env: dict[str, str] | None,
+        *,
+        timeout: float,
+        max_stdout_bytes: int,
+        max_stderr_bytes: int,
+    ) -> str:
+        calls.append(argv)
+        raise subprocess.CalledProcessError(
+            1,
+            argv,
+            output="",
+            stderr="permission denied while contacting Docker daemon",
+        )
+
+    monkeypatch.setattr(lifecycle_module, "_bounded_command", command_failure)
+    original = ValueError("body failed")
+    with pytest.raises(ValueError, match="body failed") as caught:
+        try:
+            raise original
+        finally:
+            _cleanup_isolated_stack(
+                env,
+                project=env["COMPOSE_PROJECT_NAME"],
+                image=image,
+                credential_path=credential_path,
+            )
+
+    assert caught.value is original
+    assert any("Docker" in note and "permission" in note for note in caught.value.__notes__)
+    assert calls == [
+        ("docker", "image", "rm", image),
+        (
+            "docker",
+            "ps",
+            "--all",
+            "--quiet",
+            "--filter",
+            f"label=com.docker.compose.project={env['COMPOSE_PROJECT_NAME']}",
+        ),
+        (
+            "docker",
+            "network",
+            "ls",
+            "--quiet",
+            "--filter",
+            f"label=com.docker.compose.project={env['COMPOSE_PROJECT_NAME']}",
+        ),
+        (
+            "docker",
+            "volume",
+            "ls",
+            "--quiet",
+            "--filter",
+            f"label=com.docker.compose.project={env['COMPOSE_PROJECT_NAME']}",
+        ),
+        ("docker", "image", "inspect", image),
+    ]
+
+
+def test_cleanup_accepts_only_exact_image_not_found_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = {"COMPOSE_PROJECT_NAME": "kdive-lifecycle-proof-missing-image"}
+    image = "kdive-lifecycle-proof:missing-image"
+    credential_path = tmp_path / "credential"
+
+    monkeypatch.setattr(
+        "tests.compose.test_compose_worker_lifecycle_live._compose",
+        lambda _env, *args, timeout=120: "",
+    )
+
+    def absent_image(
+        argv: tuple[str, ...],
+        _env: dict[str, str] | None,
+        *,
+        timeout: float,
+        max_stdout_bytes: int,
+        max_stderr_bytes: int,
+    ) -> str:
+        if argv[:3] == ("docker", "image", "rm") or argv[:3] == (
+            "docker",
+            "image",
+            "inspect",
+        ):
+            raise subprocess.CalledProcessError(
+                1,
+                argv,
+                output="",
+                stderr=f"Error response from daemon: No such image: {image}\n",
+            )
+        return ""
+
+    monkeypatch.setattr(lifecycle_module, "_bounded_command", absent_image)
+
+    _cleanup_isolated_stack(
+        env,
+        project=env["COMPOSE_PROJECT_NAME"],
+        image=image,
+        credential_path=credential_path,
+    )
 
 
 def test_migration_application_retries_postgres_init_restart(

@@ -2,6 +2,7 @@
 
 Issue: #1803
 Decision: [ADR-0533](../../adr/0533-role-separated-worker-fence-evidence.md)
+Lease boundary: [ADR-0534](../../adr/0534-bound-worker-job-lease-requests.md)
 Branch: `feat/worker-crash-artifact-fences-1803`
 Base: `main`
 Guardrails: focused pytest during TDD; `just ci` before each implementation/review commit
@@ -91,6 +92,14 @@ database trigger rejects a transition to `running` when `worker_id` is absent, u
 on an older protocol. The upgrade runbook therefore performs: stop old workers; install schema/grants;
 rotate runtime credentials; start witnesses; start current workers; verify registration; resume queue
 processing. If ordering is wrong, jobs remain queued and startup/claim fails visibly.
+
+Claim and heartbeat lease durations are PostgreSQL intervals greater than zero and at most one hour.
+The unit and ceiling apply to each function invocation for one exact job attempt; a later successful
+heartbeat starts a new bounded lease and there is no cumulative per-job time limit. Each invocation
+captures `clock_timestamp()` as its reference clock rather than inheriting the caller transaction's
+timestamp. An invalid interval raises SQLSTATE `22023` before job state, attempt, heartbeat, or lease
+data changes. The caller recovers by retrying that claim or heartbeat with a valid interval; the
+production worker requests five minutes.
 
 ### Provider cancellation
 

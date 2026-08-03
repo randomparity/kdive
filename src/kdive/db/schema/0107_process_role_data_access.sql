@@ -124,6 +124,7 @@ AS $$
 DECLARE
     v_incarnation text;
     v_lease_expires_at timestamptz;
+    v_server_time timestamptz;
 BEGIN
     IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
         RAISE EXCEPTION 'worker authority is required' USING ERRCODE = '42501';
@@ -132,12 +133,17 @@ BEGIN
        OR p_credential_hash IS NULL
        OR octet_length(p_credential_hash) <> 32
        OR p_attempt IS NULL
-       OR p_attempt < 1
-       OR p_lease IS NULL
-       OR p_lease <= interval '0 seconds' THEN
+       OR p_attempt < 1 THEN
         RAISE EXCEPTION 'worker heartbeat facts are invalid' USING ERRCODE = '22023';
     END IF;
-
+    IF p_lease IS NULL
+       OR p_lease <= interval '0 seconds'
+       OR p_lease > interval '1 hour' THEN
+        RAISE EXCEPTION
+            'worker heartbeat lease must be greater than zero and at most 1 hour; '
+            'retry with a valid lease'
+            USING ERRCODE = '22023';
+    END IF;
     SELECT w.incarnation INTO v_incarnation
     FROM public.worker_incarnations AS w
     WHERE w.credential_hash = p_credential_hash;
@@ -158,8 +164,9 @@ BEGIN
         RETURN false;
     END IF;
 
+    v_server_time := clock_timestamp();
     UPDATE public.jobs
-    SET heartbeat_at = now(), lease_expires_at = now() + p_lease
+    SET heartbeat_at = v_server_time, lease_expires_at = v_server_time + p_lease
     WHERE id = p_job_id
       AND worker_id = v_incarnation
       AND attempt = p_attempt

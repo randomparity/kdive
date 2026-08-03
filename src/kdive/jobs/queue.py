@@ -214,6 +214,10 @@ async def dequeue(
     database function derives the incarnation from its hash and claims only when it is active,
     matches ``worker_id``, and uses the fixed current fence protocol.
 
+    ``lease`` is one PostgreSQL interval for this claim: greater than zero and at most one hour,
+    measured from ``clock_timestamp()`` captured by the database for this invocation. SQLSTATE
+    ``22023`` is raised before any job mutation when it is invalid; retry with a valid interval.
+
     ``ORDER BY created_at`` is FIFO over *when the attempt was queued*, not when the row was first
     inserted: :func:`enqueue`'s ``recycle_terminal`` re-dates ``created_at`` (ADR-0447), so a
     revived job queues behind the work admitted while it was settled instead of preempting it.
@@ -271,6 +275,10 @@ async def heartbeat(
     lease: timedelta = DEFAULT_LEASE,
 ) -> bool:
     """Renew ``job_id`` when the credential owns its exact running attempt.
+
+    ``lease`` is one extension greater than zero and at most one hour, measured from the PostgreSQL
+    ``clock_timestamp()`` captured for this invocation. This is a per-heartbeat limit, not a total
+    job runtime limit. SQLSTATE ``22023`` leaves the row unchanged; retry with a valid interval.
 
     Returns:
         ``True`` when a row matched; ``False`` when the job is no longer this worker's
