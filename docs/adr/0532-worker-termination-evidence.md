@@ -64,3 +64,14 @@ exact-key or bounded diagnostic pages; there is no unbounded cleanup scan and no
 
 ADR-0531 remains authoritative for reusable-build ownership and retention. This ADR supersedes only
 its worker-termination recovery evidence mechanism.
+
+## Considered & rejected
+
+- **Heartbeat age or lease expiry.** Neither proves that the original worker process stopped using
+  an exact artifact version; reclaiming on either signal can race a live provider operation.
+- **Runtime-object absence.** Compose recreation and Kubernetes force deletion can erase the object
+  that would have supplied evidence, so absence cannot authorize recovery.
+- **Replacement-worker identity.** A replacement does not prove that the prior incarnation died and
+  therefore cannot release the prior incarnation's fence.
+- **Expiring termination tombstones.** A delayed fence creation or replay could outlive retention and
+  turn missing evidence into unsafe permission to reclaim.
