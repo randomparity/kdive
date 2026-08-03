@@ -9,7 +9,8 @@ UPGRADING: do NOT use bare `helm upgrade --reuse-values` — it ignores new char
 defaults and can run the new image without them (ADR-0134). Capture and re-apply instead:
   helm get values {{ .Release.Name }} -o yaml > {{ .Release.Name }}-values.yaml
   helm upgrade {{ .Release.Name }} <chart> -f {{ .Release.Name }}-values.yaml --set image.tag=<new>
-A config.* change rolls all four process workloads automatically (checksum/config annotation).
+A config.* change rolls server/worker/reconciler automatically (checksum/config annotation).
+The lifecycle-witness database ref rolls only that workload.
 Database DSNs come from databaseCredentials.* Secret refs. The migration ref is confined to the
 migrate hook; changing a runtime ref rolls only its consumer.
 {{- end }}

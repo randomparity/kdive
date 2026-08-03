@@ -77,10 +77,11 @@ the chart renders `KDIVE_LOCAL_LIBVIRT_ENABLED` from a defensive `default "false
 bare `--reuse-values` no longer reintroduces the local-libvirt reaper crash-loop — but
 `-f kdive-values.yaml` is the general fix for *any* future config-default drift, so prefer it.
 
-A `helm upgrade` that changes a `config.*` value rolls all four process workloads
+A `helm upgrade` that changes a shared `config.*` value rolls server, worker, and reconciler
 workloads automatically (a `checksum/config` pod annotation, ADR-0134) — no manual
 `kubectl rollout restart` is needed. The bundled Postgres/MinIO backends carry no such
-annotation, so a config change never rolls their `emptyDir` pods.
+annotation, so a config change never rolls their `emptyDir` pods. The lifecycle witness consumes
+only explicit authority settings; changing its database Secret ref rolls that workload alone.
 
 ### Migrating to chart 0.5.0 — the worker becomes a StatefulSet
 

@@ -517,6 +517,7 @@ def test_lifecycle_authority_is_isolated_from_reconciler() -> None:
     assert "lifecycle-witness-dsn" in witness_text
     assert "broker-envelope" in witness_text
     assert "broker-tls" in witness_text
+    assert "envFrom" not in witness_container
     assert witness["spec"]["template"]["spec"]["serviceAccountName"].endswith(
         "-worker-termination-witness"
     )

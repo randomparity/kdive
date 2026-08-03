@@ -30,7 +30,7 @@ pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm not i
 CHART = str(Path(__file__).resolve().parents[2] / "deploy" / "helm" / "kdive")
 
 # The three app processes whose pods read config.* via envFrom (and must roll on a change).
-_APP_PROCS = ("server", "worker", "reconciler", "witness")
+_APP_PROCS = ("server", "worker", "reconciler")
 # The bundled-demo backends that do NOT consume the config ConfigMap (must NOT roll).
 _BACKEND_PROCS = ("postgres", "minio", "oidc")
 # Every workload kind carrying a pod template in this chart. The worker's per-replica scratch
@@ -116,7 +116,6 @@ def test_config_checksum_is_stable_across_renders() -> None:
         ("server", {"server"}),
         ("worker", {"worker"}),
         ("reconciler", {"reconciler"}),
-        ("lifecycleWitness", {"witness"}),
     ],
 )
 def test_database_secret_ref_change_rolls_only_consumers(
@@ -131,6 +130,17 @@ def test_database_secret_ref_change_rolls_only_consumers(
             assert before_checksum != after_checksum
         else:
             assert before_checksum == after_checksum
+
+
+def test_lifecycle_witness_database_ref_change_rolls_only_witness() -> None:
+    before = _workloads()
+    after = _workloads("databaseCredentials.lifecycleWitness.key=rotated-witness-dsn")
+    assert (
+        _pod_annotations(before["witness"])["checksum/database-ref"]
+        != _pod_annotations(after["witness"])["checksum/database-ref"]
+    )
+    for proc in _APP_PROCS:
+        assert _pod_annotations(before[proc]) == _pod_annotations(after[proc])
 
 
 def test_backend_pods_have_no_config_checksum_annotation() -> None:

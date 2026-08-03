@@ -15,7 +15,7 @@ spec:
         app: {{ include "kdive.fullname" . }}-witness
         {{- include "kdive.labels" . | nindent 8 }}
       annotations:
-        {{- include "kdive.processConfigChecksum" (dict "root" . "process" "lifecycleWitness") | nindent 8 }}
+        checksum/database-ref: {{ printf "%s\n%s" .Values.databaseCredentials.lifecycleWitness.secretName .Values.databaseCredentials.lifecycleWitness.key | sha256sum }}
         {{- include "kdive.scrapeAnnotations" 9467 | nindent 8 }}
     spec:
       serviceAccountName: {{ include "kdive.fullname" . }}-worker-termination-witness
@@ -52,9 +52,6 @@ spec:
             - name: KDIVE_KUBERNETES_CREDENTIAL_ENVELOPE_KEY
               value: /run/kdive/worker-credential-broker-envelope/{{ .Values.workerCredentialBroker.envelopeKey.key }}
             {{- include "kdive.auxEnv" 9467 | nindent 12 }}
-          envFrom:
-            - configMapRef:
-                name: {{ include "kdive.fullname" . }}-config
           ports:
             - containerPort: 9467
             - name: cred-broker
