@@ -37,6 +37,17 @@ exclusions. A suspended, malformed, or excluded state makes the one-shot fail an
 start. A non-zero `migrate` exit also blocks app start. You do not order these services by hand —
 Compose does it from the graph.
 
+## Upgrading worker-fence authority
+
+For a deployment that already has workers, stop old workers before applying the worker-fence
+migrations. Then migrate the roles and fence protocol, rotate the distinct server, worker,
+reconciler, and lifecycle-witness credentials, start the lifecycle witnesses, and start only current
+workers. Verify that every current worker has registered its incarnation and that the server lists
+the recovery tools before resuming queue processing. Do not roll an old worker image back into this
+sequence: rollback cannot restore its ability to claim protocol-required jobs; recover forward with a
+current image. Raw Compose/Docker lifecycle commands and manual database changes bypass the witness
+and retain pins rather than releasing them.
+
 The Compose-managed bucket supplies the ADR-0524 store contract. When replacing it with an
 external store, follow the stop-old-first adoption order and IAM requirements in
 [Installing KDIVE](install.md): quiesce old processes, grant and verify

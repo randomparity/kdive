@@ -54,6 +54,15 @@ deadline raises SQLSTATE `22023` before job state or attempt data changes. Retry
 with an interval whose computed deadline is valid; the reference worker uses five minutes. Each
 heartbeat begins another bounded lease, so the ceiling is not a total job-runtime limit.
 
+## Upgrading worker-fence authority
+
+For an existing deployment, stop old workers; migrate the runtime roles and fence protocol; rotate
+the separate server, worker, reconciler, and lifecycle-witness login credentials; start the
+lifecycle witness; then start current workers. Verify registered current incarnations and the
+server's recovery-tool exposure before resuming queue processing. An image rollback cannot restore
+old claiming after the protocol migration, so recover forward with a current worker image. Do not use
+raw Compose/Docker lifecycle commands or manual SQL to bypass this order: those bypasses retain pins.
+
 `docker compose up` resolves the graph rather than relying on the operator to order it:
 the app services pull in a healthy Postgres, the `minio-init` bucket-creation one-shot
 (which itself waits for a healthy MinIO), the OIDC issuer, and the `migrate` one-shot. They

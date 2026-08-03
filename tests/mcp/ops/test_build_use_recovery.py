@@ -111,6 +111,24 @@ def test_recover_build_use_requires_operator_and_independent_death_proof(
             async with pool.connection() as conn:
                 await terminate_worker_incarnation(conn, holder, "failed")
 
+            async with pool.connection() as conn:
+                expected_use = await (
+                    await conn.execute(
+                        "SELECT investigation_id, generation, job_id, attempt, holder_worker_id "
+                        "FROM investigation_build_uses WHERE use_id = %s",
+                        (use_id,),
+                    )
+                ).fetchone()
+                expected_termination = await (
+                    await conn.execute(
+                        "SELECT authority_kind, authority_binding, outcome, terminated_at "
+                        "FROM worker_incarnations WHERE incarnation = %s",
+                        (holder,),
+                    )
+                ).fetchone()
+                assert expected_use is not None
+                assert expected_termination is not None
+
             recovered = await build_uses.recover_build_use(
                 pool,
                 _ctx(operator=True),
@@ -119,6 +137,7 @@ def test_recover_build_use_requires_operator_and_independent_death_proof(
                 reason="worker host was replaced",
             )
             assert recovered.status == "recovered"
+            assert recovered.suggested_next_actions == ["ops.build_uses_list"]
             async with pool.connection() as conn:
                 use_count = (
                     await (
@@ -130,7 +149,9 @@ def test_recover_build_use_requires_operator_and_independent_death_proof(
                 )[0]
                 ledger = await (
                     await conn.execute(
-                        "SELECT holder_worker_id, recovered_by, evidence, reason "
+                        "SELECT use_id, project, investigation_id, generation, job_id, attempt, "
+                        "holder_worker_id, recovered_by, evidence, reason, authority_kind, "
+                        "authority_binding, termination_outcome, terminated_at, recovered_at "
                         "FROM investigation_build_use_recoveries WHERE use_id = %s",
                         (use_id,),
                     )
@@ -144,12 +165,17 @@ def test_recover_build_use_requires_operator_and_independent_death_proof(
                     ).fetchone()
                 )[0]
             assert use_count == 0
-            assert ledger == (
-                holder,
+            assert ledger is not None
+            assert ledger[:-1] == (
+                use_id,
+                "proj",
+                *expected_use,
                 "operator-1",
                 "local: durable exact-incarnation termination (failed)",
                 "worker host was replaced",
+                *expected_termination,
             )
+            assert ledger[-1] >= expected_termination[-1]
             assert audit_count == 2  # missing durable evidence and atomic successful recovery
 
     asyncio.run(_run())

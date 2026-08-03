@@ -73,6 +73,18 @@ def _nonnegative_int(raw: str) -> int:
     return value
 
 
+def _nonnegative_int_at_most(maximum: int) -> Callable[[str], int]:
+    """Parse a nonnegative row count with an unbypassable pass ceiling."""
+
+    def parse(raw: str) -> int:
+        value = _nonnegative_int(raw)
+        if value > maximum:
+            raise ValueError(f"must be <= {maximum}, got {value}")
+        return value
+
+    return parse
+
+
 def _positive_int(raw: str) -> int:
     """Parse a count that is meaningless at zero or below."""
     value = int(raw)
@@ -885,11 +897,14 @@ KUBERNETES_WITNESS_WORKER_NAME = Setting(
 )
 KUBERNETES_WITNESS_ORDINAL_CEILING = Setting(
     name="KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING",
-    parse=_nonnegative_int,
+    parse=_nonnegative_int_at_most(1_000),
     default="0",
     group="worker-death",
     processes=_RECONCILER,
-    help="Maximum exclusive worker ordinal polled by the Kubernetes termination witness.",
+    help=(
+        "Maximum exclusive worker ordinal polled by the Kubernetes termination witness; "
+        "one configured witness pass may inspect at most 1,000 Pods."
+    ),
 )
 KUBERNETES_CREDENTIAL_BROKER_HOST = Setting(
     name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST",

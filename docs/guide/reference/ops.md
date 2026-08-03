@@ -16,17 +16,22 @@ A terminal page, including a valid cursor whose remaining rows disappeared, retu
 `data.truncated=false` and `data.next_cursor=null`.
 A stale job lease is diagnostic context only, never proof that its holder stopped. Pass an
 exact returned use id and holder to `ops.recover_build_use` only after operator review.
-Returns `data.limit` plus items containing `investigation_id`, `generation`, `job_id`,
-`attempt`, `holder`, and PostgreSQL-clock `created_at`. Each request returns the bounded
-oldest-first result described by `limit`. The row-count limit is per request and has no
-reference clock; higher values are clamped, and one additional tenant-scoped row may be
-inspected to establish `data.truncated`. Follow `data.next_cursor` to reach later pins, or
-omit `cursor` to restart diagnostics.
+Success returns `object_id=build-uses`, `status=ok`, empty `refs`, and
+`suggested_next_actions=[ops.recover_build_use]`. Its `data.count` is the returned item
+count; `data.limit`, `data.truncated`, and `data.next_cursor` describe the page. Each item
+has its use UUID as `object_id`, `status=pinned`, and `investigation_id`, `generation`,
+`job_id`, `attempt`, `holder`, and PostgreSQL-clock `created_at`. Each request returns the
+bounded oldest-first result described by `limit`. The row-count limit is per request and
+has no reference clock; higher values are clamped, and one additional tenant-scoped row may
+be inspected to establish `data.truncated`. Follow `data.next_cursor` to reach later pins,
+or omit `cursor` to restart diagnostics. On a malformed cursor the tool returns
+`status=error`, `error_category=configuration_error`, and `data.reason=invalid_cursor`; use
+the literal `ops.build_uses_list` action with the last valid cursor or no cursor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's data.next_cursor. A malformed or wrong-tool cursor is refused as invalid_cursor; retry with the returned cursor or omit it to restart from the oldest pin. |
-| `limit` | integer | no | Maximum oldest-first pin rows returned per request; this row-count limit has no clock and is server-capped at 100. Higher values are clamped; the service may inspect one additional tenant-scoped row to set data.truncated. When truncated, pass data.next_cursor as cursor to continue. |
+| `limit` | integer | no | Maximum oldest-first pin rows returned per request; this row-count limit has no clock, applies to one request, and is server-capped at 100. Higher values are clamped; the service may inspect one additional tenant-scoped row to set data.truncated. When truncated, pass data.next_cursor as cursor to continue. |
 
 ## `ops.diagnostics`
 
@@ -148,11 +153,18 @@ Recovery succeeds only when the supplied holder exactly matches the durable use 
 the exact worker incarnation already has a durable terminated registry row. This tool
 cannot publish termination evidence. Job heartbeat, lease expiry, object absence, and
 identity replacement are never death evidence.
+On success it returns the exact use UUID as `object_id`, `status=recovered`,
+`data.holder`, empty `refs`, and `suggested_next_actions=[ops.build_uses_list]` so the
+operator can confirm the remaining pins. A missing, active, mismatched, or foreign use has
+the same refusal shape: `status=error` and `error_category=configuration_error`, with the
+pin retained and literal retry action `ops.recover_build_use` after correcting the facts.
+The holder and reason limits are byte counts in UTF-8 for one recovery request and have no
+reference clock; an empty or oversized field is refused without deletion.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `holder` | string | yes | Exact worker incarnation recorded on that use row; max 512 bytes in UTF-8 encoding. The byte limit has no clock; an empty or oversized value is refused without recovery, so retry with the exact bounded holder from `ops.build_uses_list`. |
-| `reason` | string | yes | Operator justification retained in the recovery ledger; max 512 bytes in UTF-8 encoding. The byte limit has no clock; an empty or oversized value is refused without recovery, so retry with a concise reason. |
+| `holder` | string | yes | Exact worker incarnation recorded on that use row; max 512 bytes in UTF-8 encoding. The byte limit has no clock and applies to this field in one recovery request; an empty or oversized value is refused without recovery, so retry with the exact bounded holder from `ops.build_uses_list`. |
+| `reason` | string | yes | Operator justification retained in the recovery ledger; max 512 bytes in UTF-8 encoding. The byte limit has no clock and applies to this field in one recovery request; an empty or oversized value is refused without recovery, so retry with a concise reason. |
 | `use_id` | string | yes | Exact stranded build-use UUID. |
 
 ## `ops.set_cost_class_coeff`

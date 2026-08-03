@@ -385,3 +385,13 @@ incarnation before removing its finalizer. Scaling `worker.replicas`
 does not shrink the Role's bounded `resourceNames`: `worker.deathVerificationOrdinalCeiling`
 defaults to 32 and is recovery history. Raise it before scaling beyond it, and never lower it after
 an ordinal has run. No cluster-wide Pod permission is required.
+
+### Upgrading worker-fence authority
+
+For an existing release, stop old workers before the Helm upgrade. The upgrade migrates the runtime
+roles and fence protocol; then rotate the distinct server, worker, reconciler, and lifecycle-witness
+database credentials, start the witness, and start current workers. Verify the registered worker
+incarnations and the server's recovery-tool exposure before resuming queue processing. A rollback
+cannot restore old-worker claiming after the protocol migration; recover forward with a current
+worker image. Do not force-delete Pods, remove finalizers manually, or use database-owner access to
+bypass the witness: such bypasses retain pins rather than releasing them.

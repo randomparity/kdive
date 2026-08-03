@@ -464,6 +464,56 @@ def test_generation_scan_bounds_work_before_eligibility_and_pin_joins(
     asyncio.run(_run())
 
 
+def test_generation_scan_never_exceeds_the_hard_one_thousand_row_ceiling(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An oversized pass argument cannot make the cursor inspect over 1,000 generations."""
+
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        investigation_id = uuid4()
+        try:
+            await conn.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, 'p', 'proj', 't', 'active')",
+                (investigation_id,),
+            )
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                    "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                    "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, "
+                    "'{}'::jsonb, '{}'::jsonb, 'local-libvirt', '{}'::jsonb, "
+                    "now() - interval '1 second')",
+                    [
+                        (
+                            investigation_id,
+                            UUID(int=value),
+                            f"{value:064x}.{UUID(int=value)}",
+                            f"{value:064x}",
+                        )
+                        for value in range(1, 1_002)
+                    ],
+                )
+
+            monkeypatch.setattr(gc_module, "_BUILD_GENERATION_SCAN_PER_PASS", 1_001)
+            candidates = await gc_module._generation_candidates(conn, expired=True, limit=1_001)
+
+            assert len(candidates) == 1_000
+            assert candidates[-1] == (investigation_id, UUID(int=1_000))
+            cursor = await (
+                await conn.execute(
+                    "SELECT investigation_id, generation FROM investigation_build_gc_cursor "
+                    "WHERE lane = 'expired'"
+                )
+            ).fetchone()
+            assert cursor == (investigation_id, UUID(int=1_000))
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
 def test_generation_scan_plan_uses_primary_key_before_bounded_limit(migrated_url: str) -> None:
     async def _run() -> None:
         conn = await connect(migrated_url)

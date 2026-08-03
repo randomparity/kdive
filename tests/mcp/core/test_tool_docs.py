@@ -523,6 +523,53 @@ def test_reusable_build_contract_is_agent_visible() -> None:
     assert "data.build_expires_at" in get_text
 
 
+def test_build_use_recovery_tools_state_complete_bounded_response_contract() -> None:
+    """Recovery diagnostics expose their fields, cap, clock, refusal, and literal next tools."""
+    tools = {tool.name: tool for tool in TOOLS}
+    listed = tools["ops.build_uses_list"]
+    list_text = (listed.description or "").lower()
+    limit_text = listed.parameters["properties"]["limit"]["description"].lower()
+    cursor_text = listed.parameters["properties"]["cursor"]["description"].lower()
+
+    for field in (
+        "object_id",
+        "status",
+        "suggested_next_actions",
+        "data.count",
+        "data.limit",
+        "data.truncated",
+        "data.next_cursor",
+        "investigation_id",
+        "generation",
+        "job_id",
+        "attempt",
+        "holder",
+        "created_at",
+    ):
+        assert field in list_text
+    assert "ops.recover_build_use" in list_text
+    assert "100" in limit_text
+    assert "per request" in limit_text
+    assert "no clock" in limit_text
+    assert "clamped" in limit_text
+    assert "data.next_cursor" in limit_text
+    assert "invalid_cursor" in cursor_text
+
+    recovered = tools["ops.recover_build_use"]
+    recovery_text = (recovered.description or "").lower()
+    for field in ("object_id", "status=recovered", "data.holder", "suggested_next_actions"):
+        assert field in recovery_text
+    assert "ops.build_uses_list" in recovery_text
+    assert "same refusal shape" in recovery_text
+    for parameter in ("holder", "reason"):
+        description = recovered.parameters["properties"][parameter]["description"].lower()
+        assert "512" in description
+        assert "utf-8" in description
+        assert "no clock" in description
+        assert "recovery request" in description
+        assert "refused" in description
+
+
 def test_jobs_wait_description_conveys_retry_contract() -> None:
     # #941: an agent calling jobs.wait reads only the wrapper docstring + Field text, so the
     # transport-reset retry contract must be surfaced there rather than living only on the inner

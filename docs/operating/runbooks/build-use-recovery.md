@@ -41,6 +41,14 @@ reason are each bounded to 512 UTF-8 bytes in the API and database. Repeat listi
 the holder may have changed. Recovery outside the caller's viewer-granted projects has the same
 refusal shape as a missing use and leaves the pin unchanged.
 
+For a worker-fence upgrade, stop old workers; migrate the roles and fence protocol; rotate the
+distinct server, worker, reconciler, and lifecycle-witness credentials; start the witnesses; then
+start current workers. Verify their registered incarnations and recovery-tool exposure before
+resuming queue processing. Rollback cannot restore old-worker claiming after the protocol migration,
+so recover forward with a current image. Raw Docker/Compose commands, Pod force deletion, manual
+finalizer removal, and database-owner or manual SQL bypasses retain pins; they do not authorize
+recovery.
+
 When running the processes outside the reference Compose or Helm deployments, set both the worker
 identity kind and a matching server verifier only after supplying equivalent authority. Leave the
 verifier unset to omit both recovery tools from the MCP surface. Never expose the Compose proxy

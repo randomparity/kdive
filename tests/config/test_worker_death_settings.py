@@ -5,6 +5,7 @@ import pytest
 import kdive.config as config
 from kdive.config.core_settings import (
     DOCKER_DEATH_API,
+    KUBERNETES_WITNESS_ORDINAL_CEILING,
     POD_NAME,
     POD_NAMESPACE,
     POD_UID,
@@ -51,3 +52,19 @@ def test_kubernetes_worker_identity_requires_all_downward_api_fields() -> None:
         }
     )
     config.validate("worker")
+
+
+@pytest.mark.parametrize("ceiling", ["-1", "1001"])
+def test_kubernetes_witness_ceiling_is_bounded_to_one_thousand_rows(ceiling: str) -> None:
+    """The reconciler rejects a configured witness pass outside its hard row ceiling."""
+    config.load(
+        {
+            "KDIVE_DATABASE_URL": "postgresql://db/kdive",
+            "KDIVE_S3_ENDPOINT_URL": "http://minio:9000",
+            "KDIVE_S3_BUCKET": "kdive",
+            KUBERNETES_WITNESS_ORDINAL_CEILING.name: ceiling,
+        }
+    )
+
+    with pytest.raises(CategorizedError):
+        config.validate("reconciler")
