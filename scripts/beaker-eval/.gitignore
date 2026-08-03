@@ -1,0 +1,9 @@
+# Evidence logs record full Beaker request/response pairs. beaker-api.sh redacts
+# the credential fields it knows about, but the logs still carry system
+# inventory, power addresses and account names. Never commit one.
+*.log
+
+# curl cookie jars hold a live Beaker session token.
+cookies
+*-cookies
+*.cookies
