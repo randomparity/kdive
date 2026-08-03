@@ -40,6 +40,7 @@ from kdive.providers.core.runtime import ProviderRuntime, RootfsCapabilities
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.clock import STORE_MTIME
+from tests.support.worker_fence import incarnation_credential, register_worker
 
 _AUTHORIZING = Authorizing(principal="op", agent_session=None, project="platform")
 
@@ -319,6 +320,7 @@ def test_handler_dead_letters_validation_failure_with_named_category(
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
+                await register_worker(conn, "w1")
                 job = await queue.enqueue(
                     conn,
                     JobKind.IMAGE_BUILD,
@@ -327,7 +329,13 @@ def test_handler_dead_letters_validation_failure_with_named_category(
                     "dedup-fail",
                     max_attempts=1,
                 )
-            worker = Worker(pool, registry, worker_id="w1", secret_registry=SecretRegistry())
+            worker = Worker(
+                pool,
+                registry,
+                worker_id="w1",
+                incarnation_credential=incarnation_credential("w1"),
+                secret_registry=SecretRegistry(),
+            )
             await worker.run_once()
             async with pool.connection() as conn:
                 final = await JOBS.get(conn, job.id)

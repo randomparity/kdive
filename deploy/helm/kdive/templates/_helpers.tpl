@@ -17,23 +17,11 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- end -}}
 
 {{/*
-On the bundledBackends demo path the apps must reach the in-chart Postgres/MinIO/OIDC.
-These helpers derive KDIVE_DATABASE_URL / KDIVE_S3_ENDPOINT_URL / KDIVE_OIDC_ISSUER /
-KDIVE_OIDC_JWKS_URI from the in-chart service names and the fixed demo credentials in
-.Values.demoCredentials, falling back to the operator-provided .Values.config.* on the
-external-backend path.
+On the bundledBackends demo path the apps must reach the in-chart MinIO/OIDC. These helpers
+derive the non-secret endpoint values from the in-chart services and fixed demo configuration,
+falling back to the operator-provided .Values.config.* on the external-backend path. Database
+DSNs are always wired separately through Secret refs.
 */}}
-{{- define "kdive.databaseUrl" -}}
-{{- if .Values.bundledBackends -}}
-{{- $c := .Values.demoCredentials.postgresql -}}
-{{- $userinfo := printf "%s:%s" $c.username $c.password -}}
-{{- $host := printf "%s-postgres:5432" (include "kdive.fullname" .) -}}
-{{- printf "postgresql://%s@%s/%s" $userinfo $host $c.database -}}
-{{- else -}}
-{{- .Values.config.KDIVE_DATABASE_URL -}}
-{{- end -}}
-{{- end -}}
-
 {{- define "kdive.s3Endpoint" -}}
 {{- if .Values.config.KDIVE_S3_ENDPOINT_URL -}}
 {{- /* An explicit override wins in BOTH modes. The bundled MinIO is reachable in-cluster as
@@ -107,6 +95,22 @@ change never rolls their emptyDir pods and demo data is preserved. Call with the
 */}}
 {{- define "kdive.configChecksum" -}}
 checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+{{- end -}}
+
+{{- define "kdive.processConfigChecksum" -}}
+{{- $root := index . "root" -}}
+{{- $process := index . "process" -}}
+{{- $ref := index $root.Values.databaseCredentials $process -}}
+{{- $config := include (print $root.Template.BasePath "/configmap.yaml") $root -}}
+checksum/config: {{ printf "%s\n%s\n%s" $config $ref.secretName $ref.key | sha256sum }}
+{{- end -}}
+
+{{- define "kdive.databaseEnv" -}}
+- name: KDIVE_DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ .secretName | quote }}
+      key: {{ .key | quote }}
 {{- end -}}
 
 {{/*
@@ -229,6 +233,12 @@ render no MinIO-specific init container.
 {{- define "kdive.minioVersioningBarrier" -}}
 {{- if .Values.bundledBackends }}
 initContainers:
+{{ include "kdive.minioVersioningBarrierItem" . | nindent 2 }}
+{{- end }}
+{{- end -}}
+
+{{- define "kdive.minioVersioningBarrierItem" -}}
+{{- if .Values.bundledBackends }}
   - name: verify-minio-versioning
     image: {{ .Values.demo.mc.image }}
     command:
@@ -269,4 +279,48 @@ named template that a rendered manifest (the ConfigMap) includes.
 {{- if and .Values.bundledBackends (ne (.Values.service.type | toString) "ClusterIP") -}}
 {{- fail "bundledBackends is demo-only and its issuer mints valid kdive tokens for any caller: service.type must stay ClusterIP (reach MCP via `kubectl port-forward`). Expose MCP only on the external-backend path, behind a real IdP." -}}
 {{- end -}}
+{{- $databaseRefs := dict -}}
+{{- range $name := list "migration" "server" "worker" "reconciler" "lifecycleWitness" -}}
+  {{- $ref := index $.Values.databaseCredentials $name -}}
+  {{- if or (not $ref.secretName) (not $ref.key) -}}
+    {{- fail (printf "databaseCredentials.%s.secretName and key are required" $name) -}}
+  {{- end -}}
+  {{- $identity := printf "%s/%s" $ref.secretName $ref.key -}}
+  {{- if hasKey $databaseRefs $identity -}}
+    {{- fail (printf "databaseCredentials.%s must not alias databaseCredentials.%s" $name (index $databaseRefs $identity)) -}}
+  {{- end -}}
+  {{- $_ := set $databaseRefs $identity $name -}}
+  {{- if and $.Values.bundledBackends (ne $ref.secretName $.Values.databaseCredentials.migration.secretName) -}}
+    {{- fail (printf "databaseCredentials.%s.secretName must match databaseCredentials.migration.secretName with bundledBackends" $name) -}}
+  {{- end -}}
+{{- end -}}
+{{- $deathCeiling := int .Values.worker.deathVerificationOrdinalCeiling -}}
+{{- if or (lt $deathCeiling 1) (gt $deathCeiling 256) -}}
+{{- fail "worker.deathVerificationOrdinalCeiling must be between 1 and 256" -}}
+{{- end -}}
+{{- if lt $deathCeiling (int .Values.worker.replicas) -}}
+{{- fail "worker.deathVerificationOrdinalCeiling must cover worker.replicas" -}}
+{{- end -}}
+{{- $existing := lookup "apps/v1" "StatefulSet" .Release.Namespace (printf "%s-worker" (include "kdive.fullname" .)) -}}
+{{- $adoption := int .Values.worker.deathVerificationAdoptionCeiling -}}
+{{- if $existing -}}
+  {{- $annotations := default dict $existing.metadata.annotations -}}
+  {{- $prior := index $annotations "kdive.io/death-verification-ordinal-ceiling" | default "" -}}
+  {{- if eq $prior "" -}}
+    {{- if lt $adoption $deathCeiling -}}
+      {{- fail "worker.deathVerificationAdoptionCeiling must cover the configured ceiling on first upgrade from an unannotated StatefulSet" -}}
+    {{- end -}}
+  {{- else -}}
+    {{- if ne $adoption 0 -}}
+      {{- fail "worker.deathVerificationAdoptionCeiling is only valid for first unannotated-chart adoption" -}}
+    {{- end -}}
+    {{- if lt $deathCeiling (int $prior) -}}
+      {{- fail "worker.deathVerificationOrdinalCeiling cannot decrease below its persisted value" -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "kdive.effectiveDeathCeiling" -}}
+{{- max (int .Values.worker.deathVerificationOrdinalCeiling) (int .Values.worker.deathVerificationAdoptionCeiling) -}}
 {{- end -}}

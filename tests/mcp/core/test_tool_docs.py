@@ -24,6 +24,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import SystemState
 from kdive.mcp.assembly.app import build_app
+from kdive.mcp.assembly.schema_catalog import CatalogWorkerDeathVerifier
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_WAIT_S, MAX_WAIT_S
 from kdive.profiles.build import BuildProfile
@@ -119,6 +120,8 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "ops.force_release": ("tests/mcp/ops/test_breakglass.py",),
     "ops.force_teardown": ("tests/mcp/ops/test_breakglass.py",),
     "ops.jobs_list": ("tests/mcp/ops/test_queue_tools.py",),
+    "ops.build_uses_list": ("tests/mcp/ops/test_build_use_recovery.py",),
+    "ops.recover_build_use": ("tests/mcp/ops/test_build_use_recovery.py",),
     "ops.reconcile_now": ("tests/mcp/ops/test_reconcile_now.py",),
     "ops.export_cost_classes": ("tests/mcp/ops/test_ops_tuning.py",),
     "ops.export_systems_toml": ("tests/mcp/ops/test_ops_tuning.py",),
@@ -176,7 +179,12 @@ def _build_tools() -> list[FunctionTool]:
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     kp = make_keypair()
     verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
-    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
+    app = build_app(
+        pool,
+        verifier=verifier,
+        secret_registry=SecretRegistry(),
+        worker_death_verifier=CatalogWorkerDeathVerifier(),
+    )
     # list_tools() is typed as Sequence[mcp.types.Tool] but the fastmcp runtime
     # returns list[FunctionTool] — cast to the concrete type so the rest of the
     # module can access .fn / .meta / .annotations without type errors.
@@ -513,6 +521,60 @@ def test_reusable_build_contract_is_agent_visible() -> None:
     get_text = (tools["runs.get"].description or "").lower()
     assert "data.build_ref" in get_text
     assert "data.build_expires_at" in get_text
+
+
+def test_build_use_recovery_tools_state_complete_bounded_response_contract() -> None:
+    """Recovery diagnostics expose their fields, cap, clock, refusal, and literal next tools."""
+    tools = {tool.name: tool for tool in TOOLS}
+    listed = tools["ops.build_uses_list"]
+    list_text = (listed.description or "").lower()
+    limit_text = listed.parameters["properties"]["limit"]["description"].lower()
+    cursor_text = listed.parameters["properties"]["cursor"]["description"].lower()
+
+    for field in (
+        "object_id",
+        "status",
+        "suggested_next_actions",
+        "data.count",
+        "data.limit",
+        "data.truncated",
+        "data.next_cursor",
+        "investigation_id",
+        "generation",
+        "job_id",
+        "attempt",
+        "holder",
+        "created_at",
+    ):
+        assert field in list_text
+    assert "ops.recover_build_use" in list_text
+    assert "100" in limit_text
+    assert "per request" in limit_text
+    assert "no clock" in limit_text
+    assert "clamped" in limit_text
+    assert "data.next_cursor" in limit_text
+    assert "invalid_cursor" in cursor_text
+    assert "ops.build_uses_list" in limit_text
+    assert "ops.build_uses_list" in cursor_text
+
+    recovered = tools["ops.recover_build_use"]
+    recovery_text = (recovered.description or "").lower()
+    for field in ("object_id", "status=recovered", "data.holder", "suggested_next_actions"):
+        assert field in recovery_text
+    assert "ops.build_uses_list" in recovery_text
+    assert "same refusal shape" in recovery_text
+    for parameter in ("holder", "reason"):
+        description = recovered.parameters["properties"][parameter]["description"].lower()
+        assert "512" in description
+        assert "utf-8" in description
+        assert "no clock" in description
+        assert "recovery request" in description
+        assert "refused" in description
+    holder_text = recovered.parameters["properties"]["holder"]["description"].lower()
+    reason_text = recovered.parameters["properties"]["reason"]["description"].lower()
+    assert "ops.build_uses_list" in holder_text
+    assert "ops.recover_build_use" in holder_text
+    assert "ops.recover_build_use" in reason_text
 
 
 def test_jobs_wait_description_conveys_retry_contract() -> None:

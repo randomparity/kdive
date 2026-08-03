@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from psycopg import AsyncConnection
+from pydantic import SecretStr
 
 from kdive.db.idempotency import claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -25,6 +26,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.lifecycle import Installer, InstallRequest
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
+from kdive.services.runs.build_use import acquire_build_use, release_build_use
 from kdive.services.runs.steps import (
     cmdline_for,
     existing_build_result,
@@ -56,6 +58,7 @@ async def install_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
+    incarnation_credential: SecretStr,
 ) -> str | None:
     """Stage the built kernel for direct-kernel boot, recording the `install` step.
 
@@ -65,7 +68,15 @@ async def install_handler(
     payload = _install_payload_context(job)
     plan = await _resolve_install_plan(conn, payload, resolver)
     job_ctx = job_context_from_job(job, plan.run.project)
-    claimed = await _run_install_step(conn, payload.run_id, plan.installer, plan.request)
+    claimed = await _run_install_step(
+        conn,
+        payload.run_id,
+        plan.installer,
+        plan.request,
+        job_id=job.id,
+        attempt=job.attempt,
+        incarnation_credential=incarnation_credential,
+    )
     if not claimed:
         return str(payload.run_id)
     await _complete_install_step(conn, job_ctx, plan)
@@ -235,20 +246,101 @@ def _validated_artifact_versions(
     return {name: versions[name] for name in refs}
 
 
+async def _drain_through_cancellation(task: asyncio.Task[object]) -> bool:
+    """Drain a task, retaining cancellation without consuming its result."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                cancelled = True
+        except Exception:
+            # The caller reads task.result() after any ordered cleanup it requires.
+            pass
+    return cancelled
+
+
+async def _wait_through_cancellation(task: asyncio.Task[object]) -> bool:
+    """Wait for a task to finish, retaining cancellation for its caller."""
+    cancelled = await _drain_through_cancellation(task)
+    task.result()
+    return cancelled
+
+
+async def _abandon_claim_through_cancellation(conn: AsyncConnection, run_id: UUID) -> None:
+    cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
+    await _wait_through_cancellation(cleanup)
+
+
 async def _run_install_step(
     conn: AsyncConnection,
     run_id: UUID,
     installer: Installer,
     request: InstallRequest,
+    *,
+    job_id: UUID,
+    attempt: int,
+    incarnation_credential: SecretStr,
 ) -> bool:
     claim = await claim_run_step(conn, run_id, "install")
     if not claim.claimed:
         return False
     try:
-        await asyncio.to_thread(installer.install, request)
-    except Exception:
-        await abandon_run_step_best_effort(conn, run_id, "install")
+        use_id = await acquire_build_use(
+            conn,
+            run_id,
+            job_id=job_id,
+            attempt=attempt,
+            incarnation_credential=incarnation_credential,
+        )
+    except Exception, asyncio.CancelledError:
+        await _abandon_claim_through_cancellation(conn, run_id)
         raise
+    claim_abandoned = False
+    provider_error: Exception | None = None
+    provider_task = asyncio.create_task(asyncio.to_thread(installer.install, request))
+    try:
+        cancelled = await _wait_through_cancellation(provider_task)
+    except Exception as exc:
+        provider_error = exc
+        cancelled = False
+        await _abandon_claim_through_cancellation(conn, run_id)
+        claim_abandoned = True
+    if cancelled:
+        await _abandon_claim_through_cancellation(conn, run_id)
+        claim_abandoned = True
+
+    release = asyncio.create_task(
+        release_build_use(
+            conn,
+            use_id,
+            incarnation_credential=incarnation_credential,
+        )
+    )
+    release_cancelled = await _drain_through_cancellation(release)
+    release_error: BaseException | None = None
+    try:
+        release.result()
+    except (Exception, asyncio.CancelledError) as exc:
+        release_error = exc
+    if (release_cancelled or release_error is not None) and not claim_abandoned:
+        await _abandon_claim_through_cancellation(conn, run_id)
+        claim_abandoned = True
+
+    if provider_error is not None:
+        if release_error is not None:
+            _log.warning(
+                "build-use release failed after provider failure for run %s; "
+                "preserving provider outcome (%s)",
+                run_id,
+                type(release_error).__name__,
+            )
+        raise provider_error
+    if release_error is not None:
+        raise release_error
+    if cancelled or release_cancelled:
+        raise asyncio.CancelledError
     return True
 
 

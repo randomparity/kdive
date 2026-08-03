@@ -15,13 +15,14 @@ spec:
         app: {{ include "kdive.fullname" . }}-reconciler
         {{- include "kdive.labels" . | nindent 8 }}
       annotations:
-        {{- include "kdive.configChecksum" . | nindent 8 }}
+        {{- include "kdive.processConfigChecksum" (dict "root" . "process" "reconciler") | nindent 8 }}
         {{- include "kdive.scrapeAnnotations" 9466 | nindent 8 }}
     spec:
+      serviceAccountName: {{ include "kdive.fullname" . }}-reconciler
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
-        # fsGroup so the non-root UID can read a mounted file-ref Secret via its group bit.
         fsGroup: 10001
       {{- include "kdive.minioVersioningBarrier" . | nindent 6 }}
       containers:
@@ -30,6 +31,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["reconciler"]
           env:
+            {{- include "kdive.databaseEnv" .Values.databaseCredentials.reconciler | nindent 12 }}
             {{- include "kdive.auxEnv" 9466 | nindent 12 }}
             {{- include "kdive.secretsEnv" . | nindent 12 }}
             {{- include "kdive.systemsEnv" . | nindent 12 }}
@@ -37,10 +39,6 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "kdive.fullname" . }}-config
-          # No Service fronts the reconciler; its aux listener (ADR-0090 §5) is reached
-          # only by the pod-local kubelet/scrape. /readyz gates rollout progression (it
-          # withdraws nothing), /livez tracks the reconcile loop — a not-ready reconciler
-          # is not killed by liveness.
           ports:
             - containerPort: 9466
           {{- include "kdive.auxProbes" 9466 | nindent 10 }}

@@ -30,9 +30,7 @@ data:
   # k8s pod that has no libvirt socket (ADR-0127). A host that genuinely runs libvirtd sets it
   # "true" explicitly, which wins. The value is path-independent (bundled and external alike).
   KDIVE_LOCAL_LIBVIRT_ENABLED: {{ .Values.config.KDIVE_LOCAL_LIBVIRT_ENABLED | default "false" | quote }}
-  # Computed: bundled path derives these from the in-release services; external path
-  # passes .Values.config.* through (see the kdive.* helpers).
-  KDIVE_DATABASE_URL: {{ include "kdive.databaseUrl" . | quote }}
+  # Database DSNs are intentionally absent: every process receives its own Secret key.
   KDIVE_S3_ENDPOINT_URL: {{ include "kdive.s3Endpoint" . | quote }}
   KDIVE_OIDC_ISSUER: {{ include "kdive.oidcIssuer" . | quote }}
   KDIVE_OIDC_JWKS_URI: {{ include "kdive.oidcJwks" . | quote }}

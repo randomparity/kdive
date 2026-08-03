@@ -1,0 +1,17 @@
+{{- if .Values.bundledBackends }}
+{{- $db := .Values.demoCredentials.postgresql -}}
+{{- $host := printf "%s-postgres:5432" (include "kdive.fullname" .) -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.databaseCredentials.migration.secretName | quote }}
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  {{ .Values.databaseCredentials.migration.key }}: {{ printf "postgresql://%s:%s@%s/%s" $db.username $db.password $host $db.database | quote }} # pragma: allowlist secret
+  {{ .Values.databaseCredentials.server.key }}: {{ printf "postgresql://kdive-server-member:%s@%s/%s" $db.serverPassword $host $db.database | quote }} # pragma: allowlist secret
+  {{ .Values.databaseCredentials.worker.key }}: {{ printf "postgresql://kdive-worker-member:%s@%s/%s" $db.workerPassword $host $db.database | quote }} # pragma: allowlist secret
+  {{ .Values.databaseCredentials.reconciler.key }}: {{ printf "postgresql://kdive-reconciler-member:%s@%s/%s" $db.reconcilerPassword $host $db.database | quote }} # pragma: allowlist secret
+  {{ .Values.databaseCredentials.lifecycleWitness.key }}: {{ printf "postgresql://kdive-witness-member:%s@%s/%s" $db.lifecycleWitnessPassword $host $db.database | quote }} # pragma: allowlist secret
+{{- end }}

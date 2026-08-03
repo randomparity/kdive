@@ -24,7 +24,12 @@ def register_handlers(
     """Bind the `install`/`boot` job handlers."""
     registry.register(
         JobKind.INSTALL,
-        lambda conn, job: install_handler(conn, job, resolver=ports.resolver),
+        lambda conn, job: install_handler(
+            conn,
+            job,
+            resolver=ports.resolver,
+            incarnation_credential=ports.incarnation_credential,
+        ),
     )
     registry.register(
         JobKind.BOOT,

@@ -30,6 +30,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops import queue as ops_queue
 from kdive.security.authz.rbac import PlatformRole
 from tests.mcp.json_data import data_int
+from tests.support.worker_fence import register_worker
 
 
 def _ctx(
@@ -235,6 +236,7 @@ def test_jobs_list_filters_by_state(migrated_url: str) -> None:
                 running = await queue.enqueue(
                     conn, JobKind.INSTALL, _build_payload(), _authorizing("proj-a"), "dk-r"
                 )
+                await register_worker(conn, "w1")
                 await conn.execute(
                     "UPDATE jobs SET state = 'running', worker_id = 'w1' WHERE id = %s",
                     (running.id,),

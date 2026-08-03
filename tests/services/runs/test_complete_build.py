@@ -784,6 +784,38 @@ def _prefix(run_id: Any) -> str:
     return f"local/runs/{run_id}/"
 
 
+def test_complete_build_rejects_after_investigation_closes(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE investigations SET state = 'closed' WHERE id = "
+                    "(SELECT investigation_id FROM runs WHERE id = %s)",
+                    (run_id,),
+                )
+            with pytest.raises(CompleteBuildConfigurationError) as caught:
+                await _complete(
+                    pool,
+                    run_id,
+                    CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(run_id))),
+                )
+            assert caught.value.data == {"reason": "investigation_not_accepting_upload"}
+            async with pool.connection() as conn:
+                assert (
+                    await (
+                        await conn.execute(
+                            "SELECT 1 FROM investigation_builds WHERE investigation_id = "
+                            "(SELECT investigation_id FROM runs WHERE id = %s)",
+                            (run_id,),
+                        )
+                    ).fetchone()
+                    is None
+                )
+
+    asyncio.run(_run())
+
+
 def test_complete_build_success_persists_run_step_artifacts_and_audit(migrated_url: str) -> None:
     """A successful non-chunked finalize persists the run/step/artifact/audit rows verbatim.
 
@@ -1131,19 +1163,28 @@ def test_completion_stamps_generation_from_postgres_wall_clock(
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool)
+            async with pool.connection() as conn:
+                before_row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+            assert before_row is not None
             result = await _complete(
                 pool,
                 run_id,
                 CompleteBuildFinalizer(validate_complete_build=_DelayedValidator(_output(run_id))),
             )
             async with pool.connection() as conn:
-                row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+                row = await (
+                    await conn.execute(
+                        "SELECT expires_at FROM investigation_builds WHERE build_ref = %s",
+                        (result.build_ref,),
+                    )
+                ).fetchone()
             assert row is not None
 
         expires_at = datetime.fromisoformat(str(result.expires_at))
-        observed = row[0]
+        stored_expires_at = row[0]
         retention = timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS))
-        assert expires_at - observed >= retention - timedelta(milliseconds=250)
+        assert expires_at - before_row[0] >= retention + timedelta(milliseconds=450)
+        assert expires_at == stored_expires_at
 
     asyncio.run(_run())
 

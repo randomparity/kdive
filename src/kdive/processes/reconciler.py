@@ -126,7 +126,8 @@ async def run_reconciler_with_composition(
     try:
         await reconciler.run(stop)
     finally:
-        await cancel(*([hosting_task] if hosting_task else []))
+        if hosting_task is not None:
+            await cancel(hosting_task)
         if console_hosting is not None:
             await console_hosting.close()
 

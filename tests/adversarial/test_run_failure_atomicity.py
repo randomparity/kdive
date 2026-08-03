@@ -60,6 +60,11 @@ from tests.integration._seed import (
     seed_running_run,
     seed_system,
 )
+from tests.support.worker_fence import (
+    dequeue_as_current_worker,
+    incarnation_credential,
+    register_worker,
+)
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="proj")
 _WORKER = "w1"
@@ -113,13 +118,20 @@ async def _seed_run(pool: AsyncConnectionPool) -> str:
 
 
 def _worker(pool: AsyncConnectionPool, registry: HandlerRegistry) -> Worker:
-    return Worker(pool, registry, worker_id=_WORKER, secret_registry=SecretRegistry())
+    return Worker(
+        pool,
+        registry,
+        worker_id=_WORKER,
+        incarnation_credential=incarnation_credential(_WORKER),
+        secret_registry=SecretRegistry(),
+    )
 
 
 async def _enqueue(
     pool: AsyncConnectionPool, run_id: str, dedup_key: str, *, max_attempts: int
 ) -> Job:
     async with pool.connection() as conn:
+        await register_worker(conn, _WORKER)
         return await queue.enqueue(
             conn,
             JobKind.INSTALL,
@@ -313,7 +325,7 @@ def test_stale_worker_that_lost_its_lease_does_not_fail_the_run(migrated_url: st
             async def handler(conn: psycopg.AsyncConnection, claimed: Job) -> str:
                 await _lapse_lease(pool, claimed.id)
                 async with pool.connection() as other:
-                    reclaimed = await queue.dequeue(other, _RECLAIMER)
+                    reclaimed = await dequeue_as_current_worker(other, _RECLAIMER)
                 assert reclaimed is not None and reclaimed.id == claimed.id
                 raise CategorizedError(_REASON, category=_CATEGORY)
 

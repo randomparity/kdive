@@ -7,6 +7,7 @@ Console (system-owned), build-log (run-owned evidence), and system-owned uploads
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import timedelta
 from uuid import UUID, uuid4
@@ -18,6 +19,12 @@ from psycopg.types.json import Jsonb
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup import gc as gc_module
 from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
+from kdive.services.runs.build_use import recover_build_use_after_confirmed_worker_death
+from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
+    register_worker_incarnation,
+    terminate_worker_incarnation,
+)
 from tests.reconciler.conftest import connect
 
 
@@ -78,6 +85,171 @@ def test_expired_generation_reclaims_by_absolute_deadline(migrated_url: str) -> 
                 "SELECT 1 FROM investigation_builds WHERE generation = %s", (generation,)
             )
             assert await result.fetchone() is None
+        finally:
+            await conn.close()
+        assert store.deleted == [f"{key}@v1"]
+
+    asyncio.run(_run())
+
+
+def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        investigation_id, generation, job_id = uuid4(), uuid4(), uuid4()
+        digest = "e" * 64
+        key = f"builds/{generation}/kernel"
+        seed = await connect(migrated_url)
+        try:
+            await seed.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, 'p', 'proj', 't', 'active')",
+                (investigation_id,),
+            )
+            await seed.execute(
+                "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, '{}'::jsonb, "
+                "%s::jsonb, 'local-libvirt', '{}'::jsonb, now() - interval '1 second')",
+                (
+                    investigation_id,
+                    generation,
+                    f"{digest}.{generation}",
+                    digest,
+                    Jsonb({"kernel": {"key": key, "version_id": "v1"}}),
+                ),
+            )
+            await seed.execute(
+                "INSERT INTO jobs (id, kind, state, attempt, max_attempts, worker_id, "
+                "lease_expires_at, authorizing, dedup_key) VALUES "
+                "(%s, 'install', 'running', 1, 3, 'dead-worker', now() + interval '5 min', "
+                "'{}'::jsonb, %s)",
+                (job_id, f"use-{job_id}"),
+            )
+            old_use = uuid4()
+            await seed.execute(
+                "INSERT INTO investigation_build_uses (use_id, investigation_id, generation, "
+                "job_id, attempt, holder_worker_id, lease_expires_at) VALUES "
+                "(%s, %s, %s, %s, 1, 'dead-worker', now() + interval '5 min')",
+                (old_use, investigation_id, generation, job_id),
+            )
+        finally:
+            await seed.close()
+
+        store = _RecordingStore()
+        conn = await connect(migrated_url)
+        try:
+            for holder in ("dead-worker", "new-worker", "recycled-worker"):
+                await register_worker_incarnation(
+                    conn,
+                    holder,
+                    "local",
+                    {"test_identity": holder},
+                    hashlib.sha256(holder.encode()).digest(),
+                    CURRENT_WORKER_FENCE_PROTOCOL,
+                )
+            # A reclaimed attempt cannot erase a still-live predecessor's overlap fence.
+            await conn.execute(
+                "UPDATE jobs SET attempt = 2, worker_id = 'new-worker', "
+                "lease_expires_at = now() + interval '5 min' WHERE id = %s",
+                (job_id,),
+            )
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+
+            # A lapsed heartbeat does not prove the first handler stopped (ADR-0018). A later
+            # attempt therefore owns an independent fence without erasing its predecessor.
+            await conn.execute(
+                "UPDATE investigation_build_uses SET lease_expires_at = now() - interval '1 sec' "
+                "WHERE use_id = %s",
+                (old_use,),
+            )
+            new_use = uuid4()
+            await conn.execute(
+                "INSERT INTO investigation_build_uses (use_id, investigation_id, generation, "
+                "job_id, attempt, holder_worker_id, lease_expires_at) VALUES "
+                "(%s, %s, %s, %s, 2, 'new-worker', now() + interval '5 min')",
+                (new_use, investigation_id, generation, job_id),
+            )
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+
+            # Attempt 2 may complete while attempt 1 is still consuming the generation.
+            await conn.execute("DELETE FROM investigation_build_uses WHERE use_id = %s", (new_use,))
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+
+            # Recycling a terminal row back to attempt 1 does not collide with the still-live
+            # predecessor. Worker identity plus use_id distinguish physical executions.
+            await conn.execute(
+                "UPDATE jobs SET attempt = 1, worker_id = 'recycled-worker' WHERE id = %s",
+                (job_id,),
+            )
+            recycled_use = uuid4()
+            await conn.execute(
+                "INSERT INTO investigation_build_uses (use_id, investigation_id, generation, "
+                "job_id, attempt, holder_worker_id, lease_expires_at) VALUES "
+                "(%s, %s, %s, %s, 1, 'recycled-worker', now() + interval '5 min')",
+                (recycled_use, investigation_id, generation, job_id),
+            )
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+            with pytest.raises(ValueError, match="independent worker-death evidence"):
+                await recover_build_use_after_confirmed_worker_death(
+                    conn,
+                    old_use,
+                    authorized_projects=("proj",),
+                    confirmed_worker_id="dead-worker",
+                    recovered_by="operator:test",
+                    evidence=" ",
+                    reason="dead worker cleanup",
+                )
+            assert not await recover_build_use_after_confirmed_worker_death(
+                conn,
+                old_use,
+                authorized_projects=("proj",),
+                confirmed_worker_id="wrong-worker",
+                recovered_by="operator:test",
+                evidence="operator checked the wrong process",
+                reason="dead worker cleanup",
+            )
+            for holder in ("dead-worker", "recycled-worker"):
+                await terminate_worker_incarnation(
+                    conn, holder, "local", {"test_identity": holder}, "failed"
+                )
+            assert await recover_build_use_after_confirmed_worker_death(
+                conn,
+                old_use,
+                authorized_projects=("proj",),
+                confirmed_worker_id="dead-worker",
+                recovered_by="operator:test",
+                evidence="operator confirmed host process exited",
+                reason="dead worker cleanup",
+            )
+            assert await recover_build_use_after_confirmed_worker_death(
+                conn,
+                recycled_use,
+                authorized_projects=("proj",),
+                confirmed_worker_id="recycled-worker",
+                recovered_by="operator:test",
+                evidence="operator confirmed replacement process exited",
+                reason="dead worker cleanup",
+            )
+            recoveries = await (
+                await conn.execute(
+                    "SELECT holder_worker_id, recovered_by, evidence "
+                    "FROM investigation_build_use_recoveries ORDER BY holder_worker_id"
+                )
+            ).fetchall()
+            assert recoveries == [
+                (
+                    "dead-worker",
+                    "operator:test",
+                    "local: durable exact-incarnation termination (failed)",
+                ),
+                (
+                    "recycled-worker",
+                    "operator:test",
+                    "local: durable exact-incarnation termination (failed)",
+                ),
+            ]
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
         finally:
             await conn.close()
         assert store.deleted == [f"{key}@v1"]
@@ -153,6 +325,23 @@ def test_reclaiming_generation_retries_exact_versions_without_touching_fresh_gen
                 "WHERE generation = %s",
                 (old_generation,),
             )
+            job_id, use_id = uuid4(), uuid4()
+            await conn.execute(
+                "INSERT INTO jobs (id, kind, state, attempt, max_attempts, authorizing, dedup_key) "
+                "VALUES (%s, 'install', 'succeeded', 1, 3, '{}'::jsonb, %s)",
+                (job_id, f"reclaiming-use-{job_id}"),
+            )
+            await conn.execute(
+                "INSERT INTO investigation_build_uses (use_id, investigation_id, generation, "
+                "job_id, attempt, holder_worker_id, lease_expires_at) VALUES "
+                "(%s, %s, %s, %s, 1, 'worker:retry-pin', now() - interval '1 day')",
+                (use_id, investigation_id, old_generation, job_id),
+            )
+            deleted_before_pin = list(store.deleted)
+            assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 0
+            assert store.deleted == deleted_before_pin
+
+            await conn.execute("DELETE FROM investigation_build_uses WHERE use_id = %s", (use_id,))
             assert await gc_expired_build_artifacts(conn, store, timedelta(days=30)) == 1
             remaining = await (
                 await conn.execute(
@@ -271,6 +460,56 @@ def test_generation_scan_bounds_work_before_eligibility_and_pin_joins(
             assert await gc_module._generation_candidates(conn, expired=True) == [
                 (UUID(int=4), UUID(int=4))
             ]
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_generation_scan_never_exceeds_the_hard_one_thousand_row_ceiling(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An oversized pass argument cannot make the cursor inspect over 1,000 generations."""
+
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        investigation_id = uuid4()
+        try:
+            await conn.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, 'p', 'proj', 't', 'active')",
+                (investigation_id,),
+            )
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    "INSERT INTO investigation_builds (investigation_id, generation, build_ref, "
+                    "content_digest, canonical_document, build_result, artifacts, target_kind, "
+                    "build_profile, expires_at) VALUES (%s, %s, %s, %s, '{}'::jsonb, "
+                    "'{}'::jsonb, '{}'::jsonb, 'local-libvirt', '{}'::jsonb, "
+                    "now() - interval '1 second')",
+                    [
+                        (
+                            investigation_id,
+                            UUID(int=value),
+                            f"{value:064x}.{UUID(int=value)}",
+                            f"{value:064x}",
+                        )
+                        for value in range(1, 1_002)
+                    ],
+                )
+
+            monkeypatch.setattr(gc_module, "_BUILD_GENERATION_SCAN_PER_PASS", 1_001)
+            candidates = await gc_module._generation_candidates(conn, expired=True, limit=1_001)
+
+            assert len(candidates) == 1_000
+            assert candidates[-1] == (investigation_id, UUID(int=1_000))
+            cursor = await (
+                await conn.execute(
+                    "SELECT investigation_id, generation FROM investigation_build_gc_cursor "
+                    "WHERE lane = 'expired'"
+                )
+            ).fetchone()
+            assert cursor == (investigation_id, UUID(int=1_000))
         finally:
             await conn.close()
 

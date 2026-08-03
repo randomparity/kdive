@@ -135,7 +135,11 @@ _AUX_PORTS = {"server": 9464, "worker": 9465, "reconciler": 9466}
 
 # The workload kind that carries each app process's pod template. The worker owns per-replica
 # scratch volumes, so it is a StatefulSet with volumeClaimTemplates (ADR-0514).
-_WORKLOAD_KINDS = {"server": "Deployment", "worker": "StatefulSet", "reconciler": "Deployment"}
+_WORKLOAD_KINDS = {
+    "server": "Deployment",
+    "worker": "StatefulSet",
+    "reconciler": "Deployment",
+}
 
 
 def _template(*set_args: str) -> subprocess.CompletedProcess[str]:
@@ -287,10 +291,342 @@ def _oidc_request_mappings(res: subprocess.CompletedProcess[str]) -> list[dict[s
 def test_renders_three_app_workloads_against_external_backends() -> None:
     res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
     assert res.returncode == 0, res.stderr
-    # server + reconciler are Deployments; the worker is a StatefulSet (ADR-0514).
-    assert res.stdout.count("kind: Deployment") == 2
+    # Server, reconciler, and lifecycle witness are Deployments; worker is a StatefulSet.
+    assert res.stdout.count("kind: Deployment") == 3
     assert res.stdout.count("kind: StatefulSet") == 1
     assert "pre-install" in res.stdout
+
+
+def _container_env(doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    container = doc["spec"]["template"]["spec"]["containers"][0]
+    return {item["name"]: item for item in container.get("env", [])}
+
+
+def test_database_principals_are_distinct_secret_refs() -> None:
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://migration-owner/db")
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+    expected = {
+        "migrate": ("kdive-database", "migration-dsn"),
+        "server": ("kdive-database", "server-dsn"),
+        "worker": ("kdive-database", "worker-dsn"),
+        "reconciler": ("kdive-database", "reconciler-dsn"),
+    }
+    for suffix, (secret_name, key) in expected.items():
+        workload = next(
+            doc
+            for doc in docs
+            if doc.get("kind") in {"Deployment", "StatefulSet", "Job"}
+            and str(doc["metadata"]["name"]).endswith(f"-{suffix}")
+        )
+        ref = _container_env(workload)["KDIVE_DATABASE_URL"]["valueFrom"]["secretKeyRef"]
+        assert ref == {"name": secret_name, "key": key}
+
+    witness_workload = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-witness")
+    )
+    witness = _container_env(witness_workload)["KDIVE_DATABASE_URL"]
+    assert witness["valueFrom"]["secretKeyRef"] == {
+        "name": "kdive-database",
+        "key": "lifecycle-witness-dsn",
+    }
+
+
+def test_shared_config_omits_database_credentials() -> None:
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://migration-owner/db")
+    assert res.returncode == 0, res.stderr
+    config = next(
+        doc
+        for doc in yaml.safe_load_all(res.stdout)
+        if isinstance(doc, dict)
+        and doc.get("kind") == "ConfigMap"
+        and str(doc["metadata"]["name"]).endswith("-config")
+    )
+    assert "KDIVE_DATABASE_URL" not in config["data"]
+    runtime_docs = [
+        doc
+        for doc in yaml.safe_load_all(res.stdout)
+        if isinstance(doc, dict) and doc.get("kind") in {"Deployment", "StatefulSet"}
+    ]
+    assert "migration-dsn" not in yaml.safe_dump_all(runtime_docs)
+
+
+@pytest.mark.parametrize(
+    "role", ["migration", "server", "worker", "reconciler", "lifecycleWitness"]
+)
+@pytest.mark.parametrize("field", ["secretName", "key"])
+def test_missing_database_credential_ref_is_rejected(role: str, field: str) -> None:
+    res = _template(f"databaseCredentials.{role}.{field}=")
+    assert res.returncode != 0
+    assert f"databaseCredentials.{role}" in res.stderr
+
+
+@pytest.mark.parametrize("role", ["server", "worker", "reconciler", "lifecycleWitness"])
+def test_runtime_database_credential_cannot_alias_migration_ref(role: str) -> None:
+    res = _template(f"databaseCredentials.{role}.key=migration-dsn")
+    assert res.returncode != 0
+    assert f"databaseCredentials.{role} must not alias databaseCredentials.migration" in res.stderr
+
+
+@pytest.mark.parametrize(
+    ("role", "other"),
+    [
+        ("server", "worker"),
+        ("server", "reconciler"),
+        ("server", "lifecycleWitness"),
+        ("worker", "reconciler"),
+        ("worker", "lifecycleWitness"),
+        ("reconciler", "lifecycleWitness"),
+    ],
+)
+def test_runtime_database_credential_refs_are_pairwise_distinct(role: str, other: str) -> None:
+    default_keys = {
+        "server": "server-dsn",
+        "worker": "worker-dsn",
+        "reconciler": "reconciler-dsn",
+        "lifecycleWitness": "lifecycle-witness-dsn",
+    }
+    res = _template(
+        f"databaseCredentials.{role}.secretName=kdive-database",
+        f"databaseCredentials.{role}.key={default_keys[other]}",
+    )
+    assert res.returncode != 0
+    assert "must not alias" in res.stderr
+    assert f"databaseCredentials.{role}" in res.stderr
+    assert f"databaseCredentials.{other}" in res.stderr
+
+
+def test_database_principals_support_distinct_secrets_and_keys() -> None:
+    overrides = []
+    for role in ("migration", "server", "worker", "reconciler", "lifecycleWitness"):
+        overrides.extend(
+            [
+                f"databaseCredentials.{role}.secretName={role}-database",
+                f"databaseCredentials.{role}.key={role}-url",
+            ]
+        )
+    res = _template(*overrides)
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+    rendered = yaml.safe_dump_all(docs)
+    for role in ("migration", "server", "worker", "reconciler", "lifecycleWitness"):
+        assert f"name: {role}-database" in rendered
+        assert f"key: {role}-url" in rendered
+
+
+def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac() -> None:
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "worker.replicas=2")
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+    role = next(doc for doc in docs if doc.get("kind") == "Role")
+    binding = next(doc for doc in docs if doc.get("kind") == "RoleBinding")
+    server = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-server")
+    )
+    worker = next(doc for doc in docs if doc.get("kind") == "StatefulSet")
+
+    rule = role["rules"]
+    assert rule[0]["apiGroups"] == [""]
+    assert rule[0]["resources"] == ["pods"]
+    assert rule[0]["verbs"] == ["get"]
+    assert rule[0]["resourceNames"] == [f"kdive-kdive-worker-{ordinal}" for ordinal in range(32)]
+    assert rule[1]["resources"] == ["pods"]
+    assert rule[1]["verbs"] == ["patch"]
+    assert rule[1]["resourceNames"] == rule[0]["resourceNames"]
+    assert binding["subjects"] == [
+        {"kind": "ServiceAccount", "name": "kdive-kdive-worker-termination-witness"}
+    ]
+    assert server["spec"]["template"]["spec"]["serviceAccountName"].endswith("-server")
+    server_env = server["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert {item["name"]: item.get("value") for item in server_env}[
+        "KDIVE_WORKER_DEATH_VERIFIER"
+    ] == "kubernetes"
+    worker_env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
+    env_by_name = {item["name"]: item for item in worker_env}
+    assert env_by_name["KDIVE_POD_UID"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.uid"
+    assert worker["spec"]["template"]["metadata"]["finalizers"] == [
+        "kdive.io/worker-termination-evidence"
+    ]
+    assert worker["metadata"]["annotations"]["kdive.io/death-verification-ordinal-ceiling"] == "32"
+
+    witness = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-witness")
+    )
+    assert witness["spec"]["template"]["spec"]["serviceAccountName"].endswith(
+        "-worker-termination-witness"
+    )
+
+
+def test_worker_credential_broker_is_private_tls_and_init_only() -> None:
+    res = _template(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y",
+        "workerCredentialBroker.tls.secretName=broker-tls",
+        "workerCredentialBroker.envelopeKey.secretName=broker-envelope",
+    )
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+    service = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Service"
+        and str(doc["metadata"]["name"]).endswith("-worker-credential-broker")
+    )
+    policy = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "NetworkPolicy"
+        and str(doc["metadata"]["name"]).endswith("-worker-credential-broker")
+    )
+    worker = next(doc for doc in docs if doc.get("kind") == "StatefulSet")
+    witness = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-witness")
+    )
+
+    assert service["spec"]["type"] == "ClusterIP"
+    assert service["spec"].get("clusterIP") != "None"
+    assert policy["spec"]["podSelector"]["matchLabels"]["app"].endswith("-witness")
+    assert policy["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"]["app"].endswith(
+        "-worker"
+    )
+    assert worker["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+    init = worker["spec"]["template"]["spec"]["initContainers"][0]
+    worker_container = worker["spec"]["template"]["spec"]["containers"][0]
+    assert init["command"] == ["python", "-m", "kdive.processes.kubernetes_credential_init"]
+    assert any(
+        volume["emptyDir"].get("medium") == "Memory"
+        for volume in worker["spec"]["template"]["spec"]["volumes"]
+    )
+    assert all(
+        "credential-token" not in mount["name"] for mount in worker_container["volumeMounts"]
+    )
+    assert all("broker-envelope" not in mount["name"] for mount in worker_container["volumeMounts"])
+    witness_mounts = witness["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    assert any(mount["name"] == "broker-envelope" for mount in witness_mounts)
+    lifecycle_dsn = next(
+        item
+        for item in witness["spec"]["template"]["spec"]["containers"][0]["env"]
+        if item["name"] == "KDIVE_DATABASE_URL"
+    )
+    assert lifecycle_dsn["valueFrom"]["secretKeyRef"]["name"] == "kdive-database"
+
+
+def test_lifecycle_authority_is_isolated_from_reconciler() -> None:
+    res = _template()
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+    deployments = {
+        str(doc["metadata"]["name"]).rsplit("-", 1)[-1]: doc
+        for doc in docs
+        if doc.get("kind") == "Deployment"
+    }
+    reconciler = deployments["reconciler"]
+    witness = deployments["witness"]
+    reconciler_container = reconciler["spec"]["template"]["spec"]["containers"][0]
+    witness_container = witness["spec"]["template"]["spec"]["containers"][0]
+    reconciler_text = yaml.safe_dump(reconciler_container)
+    witness_text = yaml.safe_dump(witness_container)
+
+    assert reconciler_container["args"] == ["reconciler"]
+    assert "lifecycle-witness-dsn" not in reconciler_text
+    assert "broker-envelope" not in reconciler_text
+    assert "broker-tls" not in reconciler_text
+    assert witness_container["args"] == ["lifecycle-witness"]
+    assert witness_container["ports"][0]["containerPort"] == 9467
+    assert witness_container["readinessProbe"]["httpGet"] == {"path": "/readyz", "port": 9467}
+    assert "lifecycle-witness-dsn" in witness_text
+    assert "broker-envelope" in witness_text
+    assert "broker-tls" in witness_text
+    assert "envFrom" not in witness_container
+    assert witness["spec"]["template"]["spec"]["serviceAccountName"].endswith(
+        "-worker-termination-witness"
+    )
+    assert reconciler["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+
+    service = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Service"
+        and str(doc["metadata"]["name"]).endswith("-worker-credential-broker")
+    )
+    policy = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "NetworkPolicy"
+        and str(doc["metadata"]["name"]).endswith("-worker-credential-broker")
+    )
+    assert service["spec"]["selector"]["app"].endswith("-witness")
+    assert policy["spec"]["podSelector"]["matchLabels"]["app"].endswith("-witness")
+
+
+def test_worker_credential_broker_port_names_meet_kubernetes_limit() -> None:
+    res = _template()
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+    service = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Service"
+        and str(doc["metadata"]["name"]).endswith("-worker-credential-broker")
+    )
+    witness = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-witness")
+    )
+    names = [service["spec"]["ports"][0]["name"]]
+    container_ports = witness["spec"]["template"]["spec"]["containers"][0]["ports"]
+    names.extend(port["name"] for port in container_ports if "name" in port)
+    assert all(len(name) <= 15 for name in names)
+    assert service["spec"]["ports"][0]["targetPort"] in names
+
+
+def test_worker_death_authority_ceiling_survives_scale_down_and_is_bounded() -> None:
+    res = _template(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y",
+        "worker.replicas=0",
+        "worker.deathVerificationOrdinalCeiling=4",
+    )
+    assert res.returncode == 0, res.stderr
+    role = next(
+        doc
+        for doc in yaml.safe_load_all(res.stdout)
+        if isinstance(doc, dict) and doc.get("kind") == "Role"
+    )
+    assert role["rules"][0]["resourceNames"] == [
+        "kdive-kdive-worker-0",
+        "kdive-kdive-worker-1",
+        "kdive-kdive-worker-2",
+        "kdive-kdive-worker-3",
+    ]
+
+
+def test_worker_death_authority_ceiling_must_cover_replicas() -> None:
+    res = _template(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y",
+        "worker.replicas=3",
+        "worker.deathVerificationOrdinalCeiling=2",
+    )
+    assert res.returncode != 0
+    assert "deathVerificationOrdinalCeiling" in res.stderr
+
+
+@pytest.mark.parametrize("ceiling", [0, 257])
+def test_worker_death_authority_ceiling_is_bounded(ceiling: int) -> None:
+    res = _template(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y",
+        "worker.replicas=0",
+        f"worker.deathVerificationOrdinalCeiling={ceiling}",
+    )
+    assert res.returncode != 0
+    assert "between 1 and 256" in res.stderr
 
 
 def test_bundled_without_ack_fails_to_render() -> None:
@@ -305,6 +641,13 @@ def test_bundled_with_ack_uses_post_install_migrate() -> None:
     assert "post-install" in res.stdout
 
 
+def test_bundled_runtime_role_bootstrap_runs_after_migration() -> None:
+    jobs = _jobs_by_name("bundledBackends=true", "demoAcknowledged=true")
+    assert jobs["migrate"]["phase"] == "post-install,post-upgrade"
+    script = jobs["migrate"]["args"][0]
+    assert script.index("python -m kdive migrate") < script.index("GRANT {} TO {}")
+
+
 def test_external_render_omits_post_install_migrate_hook() -> None:
     # The migrate Job must stay pre-* on the external path (the bundled path runs it post-install
     # after the in-chart DB). Assert on the migrate Job's phase specifically, not a blanket output
@@ -317,21 +660,32 @@ def test_external_render_omits_post_install_migrate_hook() -> None:
 def test_bundled_path_wires_backends_into_config() -> None:
     res = _template("bundledBackends=true", "demoAcknowledged=true")
     assert res.returncode == 0, res.stderr
-    # The demo apps must reach the in-chart services, not render empty config.
-    dsn = (
-        "postgresql://kdive:kdive-demo@kdive-kdive-postgres:5432/kdive"  # pragma: allowlist secret
+    # The demo apps reach the in-chart database through distinct Secret keys.
+    secret = next(
+        doc
+        for doc in yaml.safe_load_all(res.stdout)
+        if isinstance(doc, dict)
+        and doc.get("kind") == "Secret"
+        and doc["metadata"]["name"] == "kdive-database"
     )
-    assert f'KDIVE_DATABASE_URL: "{dsn}"' in res.stdout
+    assert set(secret["stringData"]) == {
+        "migration-dsn",
+        "server-dsn",
+        "worker-dsn",
+        "reconciler-dsn",
+        "lifecycle-witness-dsn",
+    }
+    assert len(set(secret["stringData"].values())) == 5
     assert 'KDIVE_S3_ENDPOINT_URL: "http://kdive-kdive-minio:9000"' in res.stdout
     assert 'KDIVE_OIDC_ISSUER: "http://kdive-kdive-oidc:8080/default"' in res.stdout
     assert 'KDIVE_OIDC_JWKS_URI: "http://kdive-kdive-oidc:8080/default/jwks"' in res.stdout
     assert "wait-for-db" in res.stdout
 
 
-def test_external_path_passes_db_url_through_and_omits_demo_creds() -> None:
+def test_external_path_ignores_legacy_db_url_and_omits_demo_creds() -> None:
     res = _template("config.KDIVE_DATABASE_URL=postgresql://ext/db")
     assert res.returncode == 0, res.stderr
-    assert 'KDIVE_DATABASE_URL: "postgresql://ext/db"' in res.stdout
+    assert "postgresql://ext/db" not in res.stdout
     assert "AWS_ACCESS_KEY_ID" not in res.stdout
     assert "wait-for-db" not in res.stdout
 
@@ -663,7 +1017,11 @@ def test_no_service_exposes_an_aux_port() -> None:
         if isinstance(doc, dict) and doc.get("kind") == "Service":
             ports = doc["spec"].get("ports") or []
             published[doc["metadata"]["name"]] = {p.get("port") for p in ports}
-    assert published == {"kdive-kdive-server": {8000}, "kdive-kdive-worker": set()}
+    assert published == {
+        "kdive-kdive-server": {8000},
+        "kdive-kdive-worker": set(),
+        "kdive-kdive-worker-credential-broker": {9443},
+    }
     for name, ports in published.items():
         assert not ports & set(_AUX_PORTS.values()), name
 
@@ -823,9 +1181,9 @@ def test_bundled_renders_demo_backends() -> None:
         assert f"name: {name}\n" in res.stdout, name
     assert "mock-oauth2-server" in res.stdout
     assert "kind: NetworkPolicy" in res.stdout
-    # Five Deployments on the demo path: 2 app (server, reconciler) + 3 demo backends. The
+    # Six Deployments: 3 app (server, reconciler, witness) + 3 demo backends. The
     # worker is the one StatefulSet (ADR-0514).
-    assert res.stdout.count("kind: Deployment") == 5
+    assert res.stdout.count("kind: Deployment") == 6
     assert res.stdout.count("kind: StatefulSet") == 1
 
 
@@ -888,8 +1246,8 @@ def test_external_path_has_no_demo_backends() -> None:
     res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
     assert res.returncode == 0, res.stderr
     assert "mock-oauth2-server" not in res.stdout
-    assert "kind: NetworkPolicy" not in res.stdout
-    assert res.stdout.count("kind: Deployment") == 2
+    assert res.stdout.count("kind: NetworkPolicy") == 1
+    assert res.stdout.count("kind: Deployment") == 3
     assert res.stdout.count("kind: StatefulSet") == 1
 
 

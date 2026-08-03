@@ -19,6 +19,7 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
+from kdive.mcp.assembly.schema_catalog import CatalogWorkerDeathVerifier
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
 from kdive.store.objectstore import ObjectStore
@@ -407,6 +408,7 @@ def _registry_tools() -> list[Any]:
         verifier=verifier,
         object_store_assembly=object_stores,
         secret_registry=SecretRegistry(),
+        worker_death_verifier=CatalogWorkerDeathVerifier(),
     )
     # The erased `list` cast is intentional: the generator only reads duck-typed
     # attributes (name/description/meta/annotations/parameters), so it needs none

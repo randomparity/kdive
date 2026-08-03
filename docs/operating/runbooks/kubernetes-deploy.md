@@ -97,10 +97,25 @@ remote-libvirt.
 
 ## 4. Install the chart
 
+Before install, create separate database login principals and a Secret containing the migration,
+server, worker, reconciler, and lifecycle-witness DSNs. The capability-role names and required
+membership shape are documented in the chart README. The examples use the chart's default Secret
+name and keys; production may use separate Secrets by overriding each `databaseCredentials.*` ref.
+The chart deploys the witness separately from the reconciler so neither process receives the
+other's database principal or authority-bearing Secret mounts.
+
+```bash
+kubectl create secret generic kdive-database \
+  --from-file=migration-dsn=./migration.dsn \
+  --from-file=server-dsn=./server.dsn \
+  --from-file=worker-dsn=./worker.dsn \
+  --from-file=reconciler-dsn=./reconciler.dsn \
+  --from-file=lifecycle-witness-dsn=./lifecycle-witness.dsn
+```
+
 ```bash
 helm install kdive deploy/helm/kdive \
   --set image.repository=localhost:32000/kdive --set image.tag=$SHA \
-  --set config.KDIVE_DATABASE_URL='postgresql://kdive:<pw>@<pg-host>:5432/kdive' \
   --set config.KDIVE_OIDC_ISSUER='https://idp.example/realms/kdive' \
   --set config.KDIVE_OIDC_JWKS_URI='https://idp.example/realms/kdive/protocol/openid-connect/certs' \
   --set config.KDIVE_S3_ENDPOINT_URL='https://s3.example' \
@@ -144,6 +159,13 @@ A `helm upgrade` runs single-responsibility Jobs, so each failure names exactly 
 
 The validate Job renders only when `systems.configMapName` is set. Migrations are forward-only and
 must be backward-compatible (ADR-0015), so a rollback is image-only.
+
+When upgrading the worker-fence protocol, stop old workers before the migration. Migrate the roles
+and protocol, rotate the separate server, worker, reconciler, and lifecycle-witness credentials,
+start the lifecycle witness, then start current workers. Verify their registered incarnations and the
+server recovery tools before resuming queue processing. Rollback cannot restore old-worker claiming;
+recover forward with a current image. Force-deleting Pods, manually removing finalizers, or using
+database-owner credentials bypasses the authority path and retains pins.
 
 **Validate `systems.toml` against the running image (no DB/S3 needed):**
 

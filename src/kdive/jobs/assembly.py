@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from opentelemetry import metrics
+from pydantic import SecretStr
 
 from kdive.jobs.handlers import image_build, systems
 from kdive.jobs.handlers.artifacts import vmcore
@@ -25,6 +26,7 @@ class WorkerHandlerAssembly:
     """Provider/env ports assembled once for worker handler registration."""
 
     resolver: ProviderResolver
+    incarnation_credential: SecretStr
     secret_registry: SecretRegistry
     object_stores: ObjectStoreAssembly
 
@@ -35,6 +37,7 @@ type HandlerRegistrar = Callable[[HandlerRegistry], None]
 def build_handler_registry(
     *,
     secret_registry: SecretRegistry,
+    incarnation_credential: SecretStr,
     provider_composition: ProviderComposition | None = None,
 ) -> HandlerRegistry:
     """Build the worker's `HandlerRegistry` from provider-aware handler registrars."""
@@ -42,6 +45,7 @@ def build_handler_registry(
     registry = HandlerRegistry()
     assembly = WorkerHandlerAssembly(
         resolver=composition.build_provider_resolver(),
+        incarnation_credential=incarnation_credential,
         secret_registry=composition.secret_registry,
         object_stores=build_object_store_assembly(),
     )
@@ -70,6 +74,7 @@ def _system_handlers_registrar(
 def _run_handlers_registrar(
     *,
     resolver: ProviderResolver,
+    incarnation_credential: SecretStr,
     secret_registry: SecretRegistry,
     object_stores: ObjectStoreAssembly,
 ) -> HandlerRegistrar:
@@ -78,6 +83,7 @@ def _run_handlers_registrar(
             registry,
             ports=runs.RunHandlerPorts(
                 resolver=resolver,
+                incarnation_credential=incarnation_credential,
                 secret_registry=secret_registry,
                 artifact_store=object_stores.store,
             ),
@@ -203,6 +209,7 @@ def build_handler_registrars(assembly: WorkerHandlerAssembly) -> tuple[HandlerRe
         ),
         _run_handlers_registrar(
             resolver=assembly.resolver,
+            incarnation_credential=assembly.incarnation_credential,
             secret_registry=assembly.secret_registry,
             object_stores=assembly.object_stores,
         ),

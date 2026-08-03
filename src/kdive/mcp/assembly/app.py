@@ -24,6 +24,12 @@ from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.schema.tool_index import build_instructions
 from kdive.mcp.verbosity import compact_responses_enabled
+from kdive.processes.worker_incarnation import (
+    DockerWorkerDeathVerifier,
+    KubernetesWorkerDeathVerifier,
+    WorkerDeathVerifier,
+    worker_death_verifier_from_env,
+)
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
@@ -40,6 +46,7 @@ def build_app(
     secret_registry: SecretRegistry,
     tracer: Tracer | None = None,
     meter: Meter | None = None,
+    worker_death_verifier: WorkerDeathVerifier | None = None,
 ) -> FastMCP:
     """Construct the FastMCP app and register every plane's tools.
 
@@ -84,6 +91,19 @@ def build_app(
     app.add_middleware(DenialAuditMiddleware(pool))
     app.add_middleware(BindingErrorMiddleware())
 
+    configured_death_authority = worker_death_verifier_from_env()
+    durable_witness = (
+        worker_death_verifier
+        if worker_death_verifier is not None
+        else (
+            configured_death_authority
+            if isinstance(
+                configured_death_authority,
+                (DockerWorkerDeathVerifier, KubernetesWorkerDeathVerifier),
+            )
+            else None
+        )
+    )
     assembly = AppAssembly(
         resolver=resolver,
         secret_registry=composition.secret_registry,
@@ -94,6 +114,7 @@ def build_app(
             if object_store_assembly is not None
             else build_object_store_assembly()
         ),
+        worker_death_verifier=durable_witness,
     )
     for register in build_plane_registrars(assembly):
         register(app, pool)

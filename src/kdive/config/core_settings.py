@@ -13,13 +13,15 @@ error details while still routing the read through the registry.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from kdive.config.registry import RUNNABLE, Setting
 
 _SERVER = frozenset({"server"})
 _STORE_USERS = frozenset({"server", "worker", "reconciler"})
 _WORKER = frozenset({"worker"})
+_RECONCILER = frozenset({"reconciler"})
+_LIFECYCLE_WITNESS = frozenset({"lifecycle-witness"})
 _DISCOVERY = frozenset({"worker", "reconciler"})
 # The upload-orphan sweep's two knobs are read by both processes (ADR-0455 §2, §8): the reconciler
 # runs the sweep on its loop, and the server runs a full `reconcile_once` on demand via
@@ -72,12 +74,33 @@ def _nonnegative_int(raw: str) -> int:
     return value
 
 
+def _nonnegative_int_at_most(maximum: int) -> Callable[[str], int]:
+    """Parse a nonnegative row count with an unbypassable pass ceiling."""
+
+    def parse(raw: str) -> int:
+        value = _nonnegative_int(raw)
+        if value > maximum:
+            raise ValueError(f"must be <= {maximum}, got {value}")
+        return value
+
+    return parse
+
+
 def _positive_int(raw: str) -> int:
     """Parse a count that is meaningless at zero or below."""
     value = int(raw)
     if value < 1:
         raise ValueError(f"must be >= 1, got {value}")
     return value
+
+
+def _choice(*allowed: str) -> Callable[[str], str]:
+    def parse(raw: str) -> str:
+        if raw not in allowed:
+            raise ValueError(f"must be one of {', '.join(allowed)}")
+        return raw
+
+    return parse
 
 
 def _always(env: Mapping[str, str]) -> bool:
@@ -92,6 +115,31 @@ DATABASE_URL = Setting(
     required_when=_always,
     help="Postgres DSN for the system-of-record.",
     suggest="a Postgres DSN, e.g. postgresql://host:5432/kdive",
+)
+
+MIGRATION_DATABASE_URL = Setting(
+    name="KDIVE_MIGRATION_DATABASE_URL",
+    parse=_nonempty,
+    secret=True,
+    group="database",
+    help="Compose supervisor input containing the migration-owner Postgres DSN.",
+    suggest="a migration-owner Postgres DSN",
+)
+WORKER_DATABASE_URL = Setting(
+    name="KDIVE_WORKER_DATABASE_URL",
+    parse=_nonempty,
+    secret=True,
+    group="database",
+    help="Compose supervisor input containing the worker-role Postgres DSN.",
+    suggest="a worker-role Postgres DSN",
+)
+LIFECYCLE_WITNESS_DATABASE_URL = Setting(
+    name="KDIVE_LIFECYCLE_WITNESS_DATABASE_URL",
+    parse=_nonempty,
+    secret=True,
+    group="database",
+    help="Postgres DSN used only by the Compose lifecycle witness authority.",
+    suggest="a lifecycle-witness Postgres DSN",
 )
 
 HTTP_HOST = Setting(
@@ -760,8 +808,174 @@ MCP_TRACE = Setting(
     help="Presence (1/true/yes) enables opt-in ASGI transport-trace logging (default off).",
 )
 
+WORKER_INCARNATION_KIND = Setting(
+    name="KDIVE_WORKER_INCARNATION_KIND",
+    parse=_choice("local", "docker", "kubernetes"),
+    default="local",
+    group="worker-death",
+    processes=_WORKER,
+    help="Immutable worker identity source: local process, Docker container, or Kubernetes Pod.",
+)
+
+
+def _docker_worker(env: Mapping[str, str]) -> bool:
+    return env.get("KDIVE_WORKER_INCARNATION_KIND", "local") == "docker"
+
+
+WORKER_INCARNATION_ID = Setting(
+    name="KDIVE_WORKER_INCARNATION_ID",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_WORKER,
+    required_when=_docker_worker,
+    help="Lifecycle-gate-injected immutable Docker worker incarnation nonce.",
+)
+WORKER_DEATH_VERIFIER = Setting(
+    name="KDIVE_WORKER_DEATH_VERIFIER",
+    parse=_choice("disabled", "local", "docker", "kubernetes"),
+    default="disabled",
+    group="worker-death",
+    processes=_SERVER,
+    help="Authoritative worker-death verifier; disabled omits build-use recovery tools.",
+)
+DOCKER_DEATH_API = Setting(
+    name="KDIVE_DOCKER_DEATH_API",
+    parse=_nonempty,
+    default="http://worker-death-api:2375",
+    group="worker-death",
+    processes=_SERVER,
+    help="Private inspect-only Docker authority endpoint used by the Docker death verifier.",
+)
+
+
+def _kubernetes_worker(env: Mapping[str, str]) -> bool:
+    return env.get("KDIVE_WORKER_INCARNATION_KIND", "local") == "kubernetes"
+
+
+def _kubernetes_witness(env: Mapping[str, str]) -> bool:
+    return bool(env.get("KDIVE_KUBERNETES_WITNESS_NAMESPACE"))
+
+
+POD_NAMESPACE = Setting(
+    name="KDIVE_POD_NAMESPACE",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_WORKER,
+    required_when=_kubernetes_worker,
+    help="Kubernetes worker Pod namespace supplied by the downward API.",
+)
+POD_NAME = Setting(
+    name="KDIVE_POD_NAME",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_WORKER,
+    required_when=_kubernetes_worker,
+    help="Kubernetes worker Pod name supplied by the downward API.",
+)
+POD_UID = Setting(
+    name="KDIVE_POD_UID",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_WORKER,
+    required_when=_kubernetes_worker,
+    help="Immutable Kubernetes worker Pod UID supplied by the downward API.",
+)
+KUBERNETES_WITNESS_NAMESPACE = Setting(
+    name="KDIVE_KUBERNETES_WITNESS_NAMESPACE",
+    parse=_str,
+    default="",
+    group="worker-death",
+    processes=_LIFECYCLE_WITNESS,
+    help="Namespace watched by the dedicated bounded worker termination witness.",
+)
+KUBERNETES_WITNESS_WORKER_NAME = Setting(
+    name="KDIVE_KUBERNETES_WITNESS_WORKER_NAME",
+    parse=_str,
+    default="",
+    group="worker-death",
+    processes=_LIFECYCLE_WITNESS,
+    help="StatefulSet worker name prefix used with bounded ordinal Pod reads.",
+)
+KUBERNETES_WITNESS_ORDINAL_CEILING = Setting(
+    name="KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING",
+    parse=_nonnegative_int_at_most(1_000),
+    default="0",
+    group="worker-death",
+    processes=_LIFECYCLE_WITNESS,
+    help=(
+        "Maximum exclusive worker ordinal polled by the Kubernetes termination witness. The unit "
+        "is one exact Kubernetes Pod name per ordinal; this count limit has no reference clock. "
+        "Each witness pass observes the Kubernetes API for every configured Pod name and "
+        "applies this limit per witness pass, processing at most 1,000 Pods. The valid "
+        "inclusive range is 0..1,000; every out-of-range value (negative or above 1,000) "
+        "is rejected at "
+        "witness startup. No cursor is published: remaining terminal Pods are retained for the "
+        "next scheduled invocation. To recover, set KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING to an "
+        "integer in the inclusive range 0..1,000 and restart the lifecycle witness."
+    ),
+)
+KUBERNETES_CREDENTIAL_BROKER_HOST = Setting(
+    name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_LIFECYCLE_WITNESS,
+    required_when=_kubernetes_witness,
+    help="Private lifecycle-witness bind host for the Kubernetes worker credential broker.",
+    suggest="the internal broker bind host, e.g. 0.0.0.0",
+)
+KUBERNETES_CREDENTIAL_BROKER_PORT = Setting(
+    name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_PORT",
+    parse=_positive_int,
+    group="worker-death",
+    processes=_LIFECYCLE_WITNESS,
+    required_when=_kubernetes_witness,
+    help="Private TLS port for the Kubernetes worker credential broker.",
+    suggest="a TCP port between 1 and 65535",
+)
+KUBERNETES_CREDENTIAL_BROKER_TLS_CERT = Setting(
+    name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_CERT",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_LIFECYCLE_WITNESS,
+    required_when=_kubernetes_witness,
+    help="Lifecycle-witness-only file reference for the broker TLS certificate.",
+    suggest="a readable TLS certificate file path",
+)
+KUBERNETES_CREDENTIAL_BROKER_TLS_KEY = Setting(
+    name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_KEY",
+    parse=_nonempty,
+    secret=True,
+    group="worker-death",
+    processes=_LIFECYCLE_WITNESS,
+    required_when=_kubernetes_witness,
+    help="Lifecycle-witness-only file reference for the broker TLS private key.",
+    suggest="a readable TLS private-key file path",
+)
+KUBERNETES_CREDENTIAL_BROKER_CA = Setting(
+    name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_CA",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_LIFECYCLE_WITNESS,
+    required_when=_kubernetes_witness,
+    help="Certificate-authority file reference trusted by the broker and init client.",
+    suggest="a readable TLS CA certificate file path",
+)
+KUBERNETES_CREDENTIAL_ENVELOPE_KEY = Setting(
+    name="KDIVE_KUBERNETES_CREDENTIAL_ENVELOPE_KEY",
+    parse=_nonempty,
+    secret=True,
+    group="worker-death",
+    processes=_LIFECYCLE_WITNESS,
+    required_when=_kubernetes_witness,
+    help="Lifecycle-witness-only Fernet key file for transient worker credential envelopes.",
+    suggest="a readable Fernet envelope-key file path",
+)
+
 SETTINGS = [
     DATABASE_URL,
+    MIGRATION_DATABASE_URL,
+    WORKER_DATABASE_URL,
+    LIFECYCLE_WITNESS_DATABASE_URL,
     HTTP_HOST,
     HTTP_PORT,
     LOG_LEVEL,
@@ -817,4 +1031,20 @@ SETTINGS = [
     MCP_TOOL_GATEWAY,
     COMPACT_RESPONSES,
     MCP_TRACE,
+    WORKER_INCARNATION_KIND,
+    WORKER_INCARNATION_ID,
+    WORKER_DEATH_VERIFIER,
+    DOCKER_DEATH_API,
+    POD_NAMESPACE,
+    POD_NAME,
+    POD_UID,
+    KUBERNETES_WITNESS_NAMESPACE,
+    KUBERNETES_WITNESS_WORKER_NAME,
+    KUBERNETES_WITNESS_ORDINAL_CEILING,
+    KUBERNETES_CREDENTIAL_BROKER_HOST,
+    KUBERNETES_CREDENTIAL_BROKER_PORT,
+    KUBERNETES_CREDENTIAL_BROKER_TLS_CERT,
+    KUBERNETES_CREDENTIAL_BROKER_TLS_KEY,
+    KUBERNETES_CREDENTIAL_BROKER_CA,
+    KUBERNETES_CREDENTIAL_ENVELOPE_KEY,
 ]

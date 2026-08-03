@@ -37,7 +37,10 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_DATABASE_URL` | migrate, reconciler, server, worker | — | yes | Postgres DSN for the system-of-record. |
+| `KDIVE_DATABASE_URL` | lifecycle-witness, migrate, reconciler, server, worker | — | yes | Postgres DSN for the system-of-record. |
+| `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL` | — | — | no | secret (ref only) |
+| `KDIVE_MIGRATION_DATABASE_URL` | — | — | no | secret (ref only) |
+| `KDIVE_WORKER_DATABASE_URL` | — | — | no | secret (ref only) |
 
 ## debug
 
@@ -51,7 +54,7 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_FAULT_INJECT` | migrate, reconciler, server, worker | — | no | Presence (1/true/yes) registers the fault-injection provider. |
+| `KDIVE_FAULT_INJECT` | lifecycle-witness, migrate, reconciler, server, worker | — | no | Presence (1/true/yes) registers the fault-injection provider. |
 | `KDIVE_FAULT_INJECT_ALLOCATION_CAP` | reconciler, worker | `1` | no | Per-plane concurrent-Allocation cap. |
 | `KDIVE_FAULT_INJECT_SECRET_REF` | reconciler, worker | `fault-inject/console-sentinel` | no | secret (ref only) |
 | `KDIVE_FAULT_INJECT_SEED` | reconciler, worker | `0` | no | Deterministic fault-engine seed. |
@@ -118,13 +121,13 @@
 | `KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S` | reconciler, worker | `1800` | no | Native-KVM base window (seconds) for the customization boot's completion poll. 30 minutes. Foreign (TCG-emulated) guests scale this by tcg_deadline_multiplier(accel) (ADR-0341). This is a provisional default absorbing mirror/network fetch variance; a live-proof measurement will re-pin it. |
 | `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` | reconciler, worker | `10.0` | no | Multiplier applied to boot-readiness deadlines for non-KVM (TCG-emulated) guests, keyed off the System's persisted accelerator. KVM guests are unscaled (1.0); TCG and unknown accelerators scale by this factor. Must be >= 1.0; 1.0 disables scaling. |
 | `KDIVE_LIBVIRT_URI` | reconciler, worker | `qemu:///system` | no | libvirt connection URI for the local host. |
-| `KDIVE_LOCAL_LIBVIRT_ENABLED` | migrate, reconciler, server, worker | `true` | no | Whether the local-libvirt provider is composed (default on): its reconciler leaked-domain reaper and its provider-discovery registration and resolver runtime. Set to false on deployments with no local libvirt host (e.g. a remote-libvirt-only k8s deploy) so neither the leaked-domain sweep nor startup discovery fails on a missing socket. |
+| `KDIVE_LOCAL_LIBVIRT_ENABLED` | lifecycle-witness, migrate, reconciler, server, worker | `true` | no | Whether the local-libvirt provider is composed (default on): its reconciler leaked-domain reaper and its provider-discovery registration and resolver runtime. Set to false on deployments with no local libvirt host (e.g. a remote-libvirt-only k8s deploy) so neither the leaked-domain sweep nor startup discovery fails on a missing socket. |
 
 ## logging
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_LOG_LEVEL` | migrate, reconciler, server, worker | `INFO` | no | Structured-logging level (overridable by --log-level). |
+| `KDIVE_LOG_LEVEL` | lifecycle-witness, migrate, reconciler, server, worker | `INFO` | no | Structured-logging level (overridable by --log-level). |
 | `KDIVE_MCP_TRACE` | server | — | no | Presence (1/true/yes) enables opt-in ASGI transport-trace logging (default off). |
 
 ## mcp
@@ -154,10 +157,10 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_OTEL_ENABLED` | migrate, reconciler, server, worker | — | no | Presence (1/true/yes) enables OTLP export of logs/metrics/traces (default off). |
-| `KDIVE_OTEL_EXPORTER_OTLP_ENDPOINT` | migrate, reconciler, server, worker | — | no | OTLP/gRPC collector endpoint; required when KDIVE_OTEL_ENABLED is set. |
-| `KDIVE_OTEL_SERVICE_NAMESPACE` | migrate, reconciler, server, worker | `kdive` | no | service.namespace resource attribute on all emitted telemetry. |
-| `KDIVE_OTEL_TRACES_SAMPLER_RATIO` | migrate, reconciler, server, worker | `0.1` | no | Parent-based ratio trace sampler ratio in [0, 1] (default 0.1). |
+| `KDIVE_OTEL_ENABLED` | lifecycle-witness, migrate, reconciler, server, worker | — | no | Presence (1/true/yes) enables OTLP export of logs/metrics/traces (default off). |
+| `KDIVE_OTEL_EXPORTER_OTLP_ENDPOINT` | lifecycle-witness, migrate, reconciler, server, worker | — | no | OTLP/gRPC collector endpoint; required when KDIVE_OTEL_ENABLED is set. |
+| `KDIVE_OTEL_SERVICE_NAMESPACE` | lifecycle-witness, migrate, reconciler, server, worker | `kdive` | no | service.namespace resource attribute on all emitted telemetry. |
+| `KDIVE_OTEL_TRACES_SAMPLER_RATIO` | lifecycle-witness, migrate, reconciler, server, worker | `0.1` | no | Parent-based ratio trace sampler ratio in [0, 1] (default 0.1). |
 
 ## remote-libvirt
 
@@ -193,6 +196,27 @@
 | `KDIVE_UPLOAD_TTL_SECONDS` | reconciler, server | `86400` | no | Presigned upload-URL TTL in seconds. Also read by the reconciler (ADR-0455). |
 | `KDIVE_UPLOAD_WINDOW_MAX_TTL_MULTIPLE` | server | `3` | no | Cap on how long one minted upload window may live, as a multiple of KDIVE_UPLOAD_TTL_SECONDS measured from the mint (ADR-0511). The chunked runs.complete_build extends its window by a full TTL before server-side reassembly, and that extension commits even when the finalize then fails, so repeated failing retries would otherwise roll the window forward without bound. An extension is clamped to this multiple and never shortens an open window; 1 forbids extension entirely. Re-minting via artifacts.create_run_upload starts a new window and a fresh budget, so this bounds silent drift, not the agent's reach. |
 
+## worker-death
+
+| Variable | Processes | Default | Required | Value |
+|----------|-----------|---------|----------|-------|
+| `KDIVE_DOCKER_DEATH_API` | server | `http://worker-death-api:2375` | no | Private inspect-only Docker authority endpoint used by the Docker death verifier. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_CA` | lifecycle-witness | — | conditional | Certificate-authority file reference trusted by the broker and init client. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST` | lifecycle-witness | — | conditional | Private lifecycle-witness bind host for the Kubernetes worker credential broker. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_PORT` | lifecycle-witness | — | conditional | Private TLS port for the Kubernetes worker credential broker. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_CERT` | lifecycle-witness | — | conditional | Lifecycle-witness-only file reference for the broker TLS certificate. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_KEY` | lifecycle-witness | — | conditional | secret (ref only) |
+| `KDIVE_KUBERNETES_CREDENTIAL_ENVELOPE_KEY` | lifecycle-witness | — | conditional | secret (ref only) |
+| `KDIVE_KUBERNETES_WITNESS_NAMESPACE` | lifecycle-witness | `` | no | Namespace watched by the dedicated bounded worker termination witness. |
+| `KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING` | lifecycle-witness | `0` | no | Maximum exclusive worker ordinal polled by the Kubernetes termination witness. The unit is one exact Kubernetes Pod name per ordinal; this count limit has no reference clock. Each witness pass observes the Kubernetes API for every configured Pod name and applies this limit per witness pass, processing at most 1,000 Pods. The valid inclusive range is 0..1,000; every out-of-range value (negative or above 1,000) is rejected at witness startup. No cursor is published: remaining terminal Pods are retained for the next scheduled invocation. To recover, set KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING to an integer in the inclusive range 0..1,000 and restart the lifecycle witness. |
+| `KDIVE_KUBERNETES_WITNESS_WORKER_NAME` | lifecycle-witness | `` | no | StatefulSet worker name prefix used with bounded ordinal Pod reads. |
+| `KDIVE_POD_NAME` | worker | — | conditional | Kubernetes worker Pod name supplied by the downward API. |
+| `KDIVE_POD_NAMESPACE` | worker | — | conditional | Kubernetes worker Pod namespace supplied by the downward API. |
+| `KDIVE_POD_UID` | worker | — | conditional | Immutable Kubernetes worker Pod UID supplied by the downward API. |
+| `KDIVE_WORKER_DEATH_VERIFIER` | server | `disabled` | no | Authoritative worker-death verifier; disabled omits build-use recovery tools. |
+| `KDIVE_WORKER_INCARNATION_ID` | worker | — | conditional | Lifecycle-gate-injected immutable Docker worker incarnation nonce. |
+| `KDIVE_WORKER_INCARNATION_KIND` | worker | `local` | no | Immutable worker identity source: local process, Docker container, or Kubernetes Pod. |
+
 # Test, tooling, and guest-helper variables
 
 Non-registry `KDIVE_*` variables read outside the process config registry — by the gated test suites, the operator setup/live-stack shell scripts, the in-guest capture/install helpers, and the image/wheel build. Catalogued in `src/kdive/config/external_env.py`.
@@ -227,6 +251,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_PPC64LE_VMCORE` | — | Path to the retained real #1148 ppc64le vmcore for the live_vm drgn-open proof (#1150, ADR-0348, epic #1139); unset → that test skips (a set-but-missing/mismatched path fails). |
 | `KDIVE_REMOTE_BASE_IMAGE_VOLUME` | — | Name of the prebuilt remote-libvirt base-image storage volume for the remote live_stack test; unset → that test skips. |
 | `KDIVE_REQUIRE_DOCKER` | `0` | Set to 1 to fail (not skip) the disposable-Postgres/MinIO fixtures when Docker is absent. |
+| `KDIVE_RUN_COMPOSE_LIFECYCLE_PROOF` | — | Presence gate for the isolated executable Compose worker-lifecycle proof; the dedicated just recipe sets it to 1 and treats unavailable Docker as a failure. |
 | `KDIVE_SEAM_DOMAIN` | — | libvirt domain name for the in-target guest-agent seam live test. |
 | `KDIVE_SEAM_URI` | — | libvirt connection URI for the in-target guest-agent seam live test. |
 | `KDIVE_SSH_PARITY_DOMAIN` | — | Running, agent-ready remote-libvirt domain name for the SSH-parity bootstrap-key injection live test (#966); unset → that test skips. |
@@ -257,6 +282,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_KVM_NODE` | `/dev/kvm` | KVM device node `check-local-libvirt.sh` and `check-setup-deps.sh` probe for hardware virtualization (the latter for its native-arch advisory line). |
 | `KDIVE_LIMIT_KCU` | `1000000` | Budget ceiling (KCU) the setup-*-libvirt.sh scripts set for the project. |
 | `KDIVE_LIVE_SSH_PORT` | `22` | SSH port `check-ssh-reachable.sh` probes. |
+| `KDIVE_LOCAL_ROLE_BOOTSTRAP` | `1` | Whether the local Compose reference provisions its fixed development-only runtime login members after migration; set to 0 only with externally provisioned role DSNs. |
 | `KDIVE_MAX_ALLOC` | `4` | max_concurrent_allocations quota the setup-*-libvirt.sh scripts set. |
 | `KDIVE_MAX_SYS` | `4` | max_concurrent_systems quota the setup-*-libvirt.sh scripts set. |
 | `KDIVE_MCP_BASE` | — | Server MCP endpoint (must end in /mcp) the setup-*-libvirt.sh onboarding calls target. |
@@ -268,10 +294,12 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_PROJECT` | `demo` | Project the setup-*-libvirt.sh scripts and `scripts/live-stack/onboard.sh` onboard. |
 | `KDIVE_PROMETHEUS_PORT` | `9090` | Host port the compose `prometheus` service publishes (obs profile); an off-host grafana points at this port (#1261). |
 | `KDIVE_PYTHON` | `python3` | Python interpreter the setup-*-libvirt.sh scripts invoke (set to the project venv, e.g. /opt/kdive/.venv/bin/python, when not running inside the venv). |
+| `KDIVE_RECONCILER_DATABASE_URL` | `local Compose reconciler-member DSN` | Database login DSN supplied only to the Compose reconciler service; external deployments override the local development member. |
 | `KDIVE_REMOTE_PKI_DIR` | `/etc/pki/libvirt` | TLS PKI directory `check-remote-libvirt.sh` validates. |
 | `KDIVE_REMOTE_SSH_PORT` | `22` | SSH port `check-remote-libvirt.sh` connects on. |
 | `KDIVE_ROLE` | `admin` | Role `scripts/live-stack/onboard.sh` writes into the minted token's `roles` claim and the printed binding contract; a sub-CONTRIBUTOR value warns (allocations.request needs CONTRIBUTOR+). |
 | `KDIVE_ROOTFS_DIR` | `/var/lib/kdive/rootfs` | Per-System qcow2 overlay directory for the local-libvirt provider; `scripts/live-stack/lib.sh` reads this to locate and create guest disk overlays. |
+| `KDIVE_SERVER_DATABASE_URL` | `local Compose server-member DSN` | Database login DSN supplied only to the Compose server service; external deployments override the local development member. |
 | `KDIVE_SETUP_AUDITED` | `0` | When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of seed-project (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN). |
 | `KDIVE_SKIP_OBS` | `0` | When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability tier; the essential backend services (postgres, minio, oidc) still start. |
 | `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory written by `scripts/live-stack/lib.sh`; also consumed by `examples/local-libvirt/up.sh`, which overrides the default to an XDG state path via `examples/local-libvirt/env.sh`. |
@@ -287,6 +315,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_WARM_STORE_TARGET_NVR` | — | Supplied pinned guest-kernel NVR the warm-store refresh keys freshness on (the operator/CI computes it from the base image; no live distro query). Unset → the script dies. Same-NVR distro rebuilds need `KDIVE_WARM_STORE_FORCE`. |
 | `KDIVE_WORKER_AS_ROOT` | `1` | Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker as root via sudo (1) or as the current user (0). |
 | `KDIVE_WORKER_COUNT` | `1` | How many `kdive worker` processes `restart_host_processes()` in `scripts/live-stack/lib.sh` starts. A worker runs one job at a time, so this is the local stack's only job-concurrency knob; raise it to exercise cross-worker paths such as the rootfs fetch advisory lock. Each worker past the first gets its own aux health port and log file. Values above 8 are refused at bring-up (`MAX_WORKER_COUNT` in `scripts/live-stack/lib.sh`), because every worker is a root process with its own database pool and aux port. |
+| `KDIVE_WORKER_INCARNATION_NONCE` | — | Ephemeral 128-bit nonce generated by the reference Compose lifecycle gate and passed only to the never-started managed worker create; operators do not set it manually. |
 
 ## In-guest helpers
 

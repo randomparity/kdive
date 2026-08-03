@@ -9,6 +9,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.domain.capacity.state import RunState
+from kdive.domain.cmdline import MAX_CMDLINE_EXTRA_LENGTH
 from kdive.domain.external_provenance import PROVENANCE_FIELD_MAX_LEN
 from kdive.domain.labels import LABEL_MAX_LEN
 from kdive.domain.platform.arch_traits import default_crashkernel_summary
@@ -458,6 +459,8 @@ def _register_runs_complete_build(
                     "This value is not fixed at build: to try a different cmdline (e.g. nokaslr, "
                     "loglevel=8, maxcpus=1) against the already-built kernel, pass cmdline to "
                     "runs.install with no rebuild — no build-upload cycle needed."
+                    f" 1..{MAX_CMDLINE_EXTRA_LENGTH} printable characters; surrounding "
+                    "whitespace is trimmed."
                 ),
             ),
         ] = None,
@@ -569,6 +572,8 @@ def _register_runs_install(
                     "'dhash_entries=2') by calling runs.install with a new value then runs.boot, "
                     "using a distinct (or no) idempotency_key each time. Omit to reuse the "
                     "build-time cmdline."
+                    f" 1..{MAX_CMDLINE_EXTRA_LENGTH} printable characters; surrounding "
+                    "whitespace is trimmed."
                 )
             ),
         ] = None,

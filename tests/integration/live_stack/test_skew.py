@@ -217,11 +217,12 @@ def test_partition_under_warn_policy_never_skips() -> None:
 # --- aux URL derivation ---------------------------------------------------------------------
 
 
-def test_readyz_urls_cover_all_three_processes_on_the_stack_host() -> None:
-    # All three, not just the server: the #1630 local variant was a stale *worker*, which a
+def test_readyz_urls_cover_all_processes_on_the_stack_host() -> None:
+    # Every process, not just the server: the #1630 local variant was a stale *worker*, which a
     # server-only probe would miss entirely.
     urls = readyz_urls("http://127.0.0.1:8000/mcp")
     assert urls == {
+        "lifecycle-witness": "http://127.0.0.1:9467/readyz",
         "reconciler": "http://127.0.0.1:9466/readyz",
         "server": "http://127.0.0.1:9464/readyz",
         "worker": "http://127.0.0.1:9465/readyz",
@@ -350,7 +351,12 @@ def test_probe_stack_skew_degrades_to_unknown_when_nothing_answers() -> None:
     base = "http://127.0.0.1:8000/mcp"
     results = probe_stack_skew(base, fetch=nothing_answers)
     assert {r.verdict for r in results} == {SkewVerdict.UNKNOWN}
-    assert [r.process for r in results] == ["reconciler", "server", "worker"]
+    assert [r.process for r in results] == [
+        "lifecycle-witness",
+        "reconciler",
+        "server",
+        "worker",
+    ]
     # The injected transport is the one consulted, for every process — a `fetch` argument
     # accepted and then ignored would still satisfy the verdicts above on a host with no stack.
     # Derived from readyz_urls, which has its own tests: the port table is pinned there, and

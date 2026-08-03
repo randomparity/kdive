@@ -15,6 +15,7 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+from pydantic import SecretStr
 
 from kdive.db.repositories import JOBS
 from kdive.domain.capacity.state import JobState, RunState, SystemState
@@ -34,6 +35,7 @@ from kdive.jobs.worker import Worker, WorkerConfig
 from kdive.jobs.worker_telemetry import WorkerTelemetry
 from kdive.providers.local_libvirt.lifecycle.install import _open
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.integration._seed import (
     seed_granted_allocation,
     seed_running_run,
@@ -43,6 +45,7 @@ from tests.providers.remote_libvirt.conftest import libvirt_error
 from tests.support.otel import tracer_provider
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
+_INCARNATION_CREDENTIAL = SecretStr("worker-test-incarnation-credential")
 
 
 class _CountingHeartbeat:
@@ -97,7 +100,27 @@ def _unopened_pool(max_size: int = 4) -> AsyncConnectionPool:
 
 def _worker(pool: AsyncConnectionPool, registry: HandlerRegistry, **kwargs: Any) -> Worker:
     kwargs.setdefault("secret_registry", SecretRegistry())
+    kwargs.setdefault("incarnation_credential", _INCARNATION_CREDENTIAL)
     return Worker(pool, registry, **kwargs)
+
+
+async def _registered_worker(
+    pool: AsyncConnectionPool, registry: HandlerRegistry, **kwargs: Any
+) -> Worker:
+    worker_id = cast(str, kwargs["worker_id"])
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO worker_incarnations (incarnation, authority_kind, authority_binding, "
+            "fence_protocol, credential_hash) VALUES "
+            "(%s, 'local', '{}'::jsonb, %s, sha256(convert_to(%s, 'UTF8'))) "
+            "ON CONFLICT (incarnation) DO NOTHING",
+            (
+                worker_id,
+                CURRENT_WORKER_FENCE_PROTOCOL,
+                _INCARNATION_CREDENTIAL.get_secret_value(),
+            ),
+        )
+    return _worker(pool, registry, **kwargs)
 
 
 def test_init_rejects_pool_too_small_for_dispatch_plus_heartbeat() -> None:
@@ -143,7 +166,7 @@ def test_run_once_happy_path(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, handler)
-            worker = _worker(pool, reg, worker_id="w1")
+            worker = await _registered_worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-happy"
@@ -165,7 +188,9 @@ def test_run_once_happy_path(migrated_url: str) -> None:
 def test_run_once_unknown_kind_dead_letters(migrated_url: str) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
-            worker = _worker(pool, HandlerRegistry(), worker_id="w1")  # no handlers
+            worker = await _registered_worker(
+                pool, HandlerRegistry(), worker_id="w1"
+            )  # no handlers
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-unk"
@@ -191,7 +216,7 @@ def test_run_once_dedup_runs_handler_once(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, handler)
-            worker = _worker(pool, reg, worker_id="w1")
+            worker = await _registered_worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 first = await queue.enqueue(
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-dedup"
@@ -223,7 +248,7 @@ def test_run_once_dead_letters_after_max_attempts(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, always_raises)
-            worker = _worker(pool, reg, worker_id="w1")
+            worker = await _registered_worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn,
@@ -263,7 +288,7 @@ def test_run_once_terminal_error_dead_letters_at_once(migrated_url: str) -> None
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, terminal_raises)
-            worker = _worker(pool, reg, worker_id="w1")
+            worker = await _registered_worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn,
@@ -304,7 +329,7 @@ def test_run_once_non_retryable_category_dead_letters_at_once(migrated_url: str)
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, denied)
-            worker = _worker(pool, reg, worker_id="w1")
+            worker = await _registered_worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn,
@@ -347,7 +372,7 @@ def test_run_once_libvirt_connect_failure_during_install_still_requeues(migrated
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, install_via_provider)
-            worker = _worker(pool, reg, worker_id="w1")
+            worker = await _registered_worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn,
@@ -382,7 +407,7 @@ def test_run_once_retryable_category_still_requeues(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, transient)
-            worker = _worker(pool, reg, worker_id="w1")
+            worker = await _registered_worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn,
@@ -414,7 +439,7 @@ def test_terminal_run_job_failure_marks_owning_run_failed(migrated_url: str, kin
 
             reg = HandlerRegistry()
             reg.register(kind, raises_uncategorized)
-            worker = _worker(pool, reg, worker_id="w1")
+            worker = await _registered_worker(pool, reg, worker_id="w1")
             payload: RunPayload = (
                 RunPayload(run_id=run_id) if kind is JobKind.BOOT else InstallPayload(run_id=run_id)
             )
@@ -460,7 +485,12 @@ def test_failed_job_persists_redacted_failure_context(
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, always_raises)
-            worker = _worker(pool, reg, worker_id="w1", secret_registry=secret_registry)
+            worker = await _registered_worker(
+                pool,
+                reg,
+                worker_id="w1",
+                secret_registry=secret_registry,
+            )
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-context"
@@ -491,7 +521,7 @@ def test_invalid_persisted_payload_fails_as_configuration_error(migrated_url: st
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, handler)
-            worker = _worker(pool, reg, worker_id="w1")
+            worker = await _registered_worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn, conn.transaction():
                 cur = await conn.execute(
                     "INSERT INTO jobs "
@@ -531,12 +561,19 @@ def test_run_once_reclaims_lapsed_lease(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, handler)
-            worker = _worker(pool, reg, worker_id="w1")
+            worker = await _registered_worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-lapse"
                 )
                 # Simulate a dead worker holding a now-lapsed lease.
+                await conn.execute(
+                    "INSERT INTO worker_incarnations (incarnation, authority_kind, "
+                    "authority_binding, fence_protocol, credential_hash) VALUES "
+                    "('dead', 'local', '{}'::jsonb, %s, "
+                    "sha256(convert_to('dead-worker-credential', 'UTF8')))",
+                    (CURRENT_WORKER_FENCE_PROTOCOL,),
+                )
                 await conn.execute(
                     "UPDATE jobs SET state = 'running', worker_id = 'dead', "
                     "lease_expires_at = now() - interval '1 min' WHERE id = %s",
@@ -565,12 +602,19 @@ def test_heartbeat_renews_live_lease(migrated_url: str, monkeypatch: pytest.Monk
             async def observed_heartbeat(
                 conn: psycopg.AsyncConnection,
                 job_id: UUID,
-                worker_id: str,
                 *,
+                attempt: int,
+                incarnation_credential: SecretStr,
                 lease: timedelta = queue.DEFAULT_LEASE,
             ) -> bool:
                 nonlocal heartbeat_count
-                ok = await original_heartbeat(conn, job_id, worker_id, lease=lease)
+                ok = await original_heartbeat(
+                    conn,
+                    job_id,
+                    attempt=attempt,
+                    incarnation_credential=incarnation_credential,
+                    lease=lease,
+                )
                 heartbeat_count += 1
                 if heartbeat_count == 1:
                     first_heartbeat.set()
@@ -587,7 +631,7 @@ def test_heartbeat_renews_live_lease(migrated_url: str, monkeypatch: pytest.Monk
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, slow)
-            worker = _worker(
+            worker = await _registered_worker(
                 pool,
                 reg,
                 worker_id="w1",
@@ -644,7 +688,7 @@ def test_heartbeat_error_does_not_crash_dispatch(
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, handler)
-            worker = _worker(
+            worker = await _registered_worker(
                 pool,
                 reg,
                 worker_id="w1",
@@ -683,7 +727,7 @@ def test_run_once_claims_nothing_while_paused(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, handler)
-            worker = _worker(pool, reg, worker_id="w1")
+            worker = await _registered_worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-paused"
@@ -708,7 +752,7 @@ def test_resume_restores_claiming(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, handler)
-            worker = _worker(pool, reg, worker_id="w1")
+            worker = await _registered_worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-resume"
@@ -739,7 +783,7 @@ def test_paused_worker_completes_job_already_in_flight(migrated_url: str) -> Non
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, slow)
-            worker = _worker(
+            worker = await _registered_worker(
                 pool,
                 reg,
                 worker_id="w1",
@@ -778,7 +822,7 @@ def test_paused_worker_completes_job_already_in_flight(migrated_url: str) -> Non
 def test_run_survives_run_once_error(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
-            worker = _worker(
+            worker = await _registered_worker(
                 pool,
                 HandlerRegistry(),
                 worker_id="w1",
@@ -883,7 +927,12 @@ def test_run_once_dequeues_when_ready_again(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, handler)
-            worker = _worker(pool, reg, worker_id="w1", config=WorkerConfig(readiness=readiness))
+            worker = await _registered_worker(
+                pool,
+                reg,
+                worker_id="w1",
+                config=WorkerConfig(readiness=readiness),
+            )
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-notready"
@@ -908,7 +957,7 @@ def test_run_once_claims_only_configured_dispatch_lane(migrated_url: str) -> Non
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, handler)
-            worker = _worker(
+            worker = await _registered_worker(
                 pool,
                 reg,
                 worker_id="w1",
@@ -1077,7 +1126,7 @@ def test_no_heartbeat_means_no_ticker_task(monkeypatch: pytest.MonkeyPatch) -> N
 # --- Group I: time-to-claim + retries (ADR-0191 I) ---
 
 
-def _telemetry_worker(
+async def _telemetry_worker(
     pool: AsyncConnectionPool,
     registry: HandlerRegistry,
 ) -> tuple[Worker, InMemoryMetricReader]:
@@ -1085,7 +1134,9 @@ def _telemetry_worker(
     meter = MeterProvider(metric_readers=[reader]).get_meter("test")
     tracer = tracer_provider().get_tracer("test")
     telemetry = WorkerTelemetry(tracer=tracer, meter=meter)
-    w = _worker(pool, registry, worker_id="w1", config=WorkerConfig(telemetry=telemetry))
+    w = await _registered_worker(
+        pool, registry, worker_id="w1", config=WorkerConfig(telemetry=telemetry)
+    )
     return w, reader
 
 
@@ -1116,7 +1167,7 @@ def test_non_terminal_handler_error_records_retry(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, flaky)
-            worker, reader = _telemetry_worker(pool, reg)
+            worker, reader = await _telemetry_worker(pool, reg)
             async with pool.connection() as conn:
                 await queue.enqueue(
                     conn,
@@ -1153,7 +1204,7 @@ def test_terminal_handler_error_does_not_record_retry(migrated_url: str) -> None
 
             reg = HandlerRegistry()
             reg.register(JobKind.INSTALL, fatal)
-            worker, reader = _telemetry_worker(pool, reg)
+            worker, reader = await _telemetry_worker(pool, reg)
             async with pool.connection() as conn:
                 await queue.enqueue(
                     conn,

@@ -45,9 +45,11 @@ def test_per_process_default_ports_are_distinct() -> None:
     server = resolve_health_bind("server")
     worker = resolve_health_bind("worker")
     reconciler = resolve_health_bind("reconciler")
+    witness = resolve_health_bind("lifecycle-witness")
     assert server == ("127.0.0.1", 9464)
     assert worker == ("127.0.0.1", 9465)
     assert reconciler == ("127.0.0.1", 9466)
+    assert witness == ("127.0.0.1", 9467)
 
 
 def test_explicit_override_wins_for_every_process() -> None:

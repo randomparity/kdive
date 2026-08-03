@@ -2,6 +2,8 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: {{ include "kdive.fullname" . }}-worker
+  annotations:
+    kdive.io/death-verification-ordinal-ceiling: {{ include "kdive.effectiveDeathCeiling" . | quote }}
   labels:
     {{- include "kdive.labels" . | nindent 4 }}
 spec:
@@ -24,25 +26,77 @@ spec:
       app: {{ include "kdive.fullname" . }}-worker
   template:
     metadata:
+      finalizers:
+        - kdive.io/worker-termination-evidence
       labels:
         app: {{ include "kdive.fullname" . }}-worker
         {{- include "kdive.labels" . | nindent 8 }}
       annotations:
-        {{- include "kdive.configChecksum" . | nindent 8 }}
+        {{- include "kdive.processConfigChecksum" (dict "root" . "process" "worker") | nindent 8 }}
         {{- include "kdive.scrapeAnnotations" 9465 | nindent 8 }}
     spec:
+      serviceAccountName: {{ include "kdive.fullname" . }}-worker
+      automountServiceAccountToken: false
       securityContext:
         # fsGroup so the non-root worker UID owns the mounted PVCs (ADR-0088 §3).
         runAsNonRoot: true
         runAsUser: 10001
         fsGroup: 10001
-      {{- include "kdive.minioVersioningBarrier" . | nindent 6 }}
+      initContainers:
+        {{- include "kdive.minioVersioningBarrierItem" . | nindent 6 }}
+        - name: worker-credential
+          image: {{ include "kdive.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "kdive.processes.kubernetes_credential_init"]
+          env:
+            - name: KDIVE_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: KDIVE_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KDIVE_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST
+              value: {{ printf "%s-worker-credential-broker" (include "kdive.fullname" .) | quote }}
+            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_PORT
+              value: {{ .Values.workerCredentialBroker.port | quote }}
+            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_CA
+              value: /run/kdive/worker-credential-ca/{{ .Values.workerCredentialBroker.tls.caKey }}
+          volumeMounts:
+            - name: credential-token
+              mountPath: /run/kdive/worker-credential-token
+              readOnly: true
+            - name: credential-handoff
+              mountPath: /run/kdive
+            - name: credential-ca
+              mountPath: /run/kdive/worker-credential-ca
+              readOnly: true
       containers:
         - name: worker
           image: {{ include "kdive.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["worker"]
           env:
+            {{- include "kdive.databaseEnv" .Values.databaseCredentials.worker | nindent 12 }}
+            - name: KDIVE_WORKER_INCARNATION_KIND
+              value: kubernetes
+            - name: KDIVE_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: KDIVE_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KDIVE_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             {{- include "kdive.auxEnv" 9465 | nindent 12 }}
             {{- include "kdive.secretsEnv" . | nindent 12 }}
             {{- include "kdive.systemsEnv" . | nindent 12 }}
@@ -60,11 +114,29 @@ spec:
               mountPath: /var/lib/kdive/build
             - name: install
               mountPath: /var/lib/kdive/install
+            - name: credential-handoff
+              mountPath: /run/kdive
             {{- include "kdive.secretsVolumeMount" . | nindent 12 }}
             {{- include "kdive.systemsVolumeMount" . | nindent 12 }}
             {{- include "kdive.fixturesVolumeMount" . | nindent 12 }}
-      {{- if or .Values.secrets.secretName .Values.systems.configMapName .Values.fixtures.configMapName }}
       volumes:
+        - name: credential-handoff
+          emptyDir:
+            medium: Memory
+        - name: credential-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: {{ .Values.workerCredentialBroker.tokenAudience | quote }}
+                  expirationSeconds: 600
+                  path: token
+        - name: credential-ca
+          secret:
+            secretName: {{ .Values.workerCredentialBroker.tls.secretName | quote }}
+            items:
+              - key: {{ .Values.workerCredentialBroker.tls.caKey | quote }}
+                path: {{ .Values.workerCredentialBroker.tls.caKey | quote }}
+      {{- if or .Values.secrets.secretName .Values.systems.configMapName .Values.fixtures.configMapName }}
         {{- include "kdive.secretsVolume" . | nindent 8 }}
         {{- include "kdive.systemsVolume" . | nindent 8 }}
         {{- include "kdive.fixturesVolume" . | nindent 8 }}

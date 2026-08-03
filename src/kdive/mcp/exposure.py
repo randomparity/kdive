@@ -204,6 +204,8 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "ops.export_cost_classes": _PLAT_OP,
     "ops.export_systems_toml": _PLAT_OP,
     "ops.jobs_list": _PLAT_OP,
+    "ops.build_uses_list": _PLAT_OP,
+    "ops.recover_build_use": _PLAT_OP,
     "ops.reconcile_now": _PLAT_OP,
     "ops.set_cost_class_coeff": _PLAT_OP,
     "ops.set_host_capacity": _PLAT_OP,

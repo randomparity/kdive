@@ -126,16 +126,19 @@ _SYSTEM_ARTIFACT_KEYS_PER_PASS = 10
 _SYSTEM_ARTIFACT_CURSOR_LANE = "row-backed"
 _BUILD_GENERATIONS_PER_PASS = 50
 _BUILD_GENERATION_SCAN_PER_PASS = 200
+_MAX_BUILD_GENERATION_PASS_ROWS = 1_000
 BUILD_GENERATION_RETRY_BACKOFF = timedelta(minutes=5)
 
 _UNPINNED_GENERATION_SQL = (
-    "(ib.state = 'reclaiming' OR (ib.state = 'active' "
+    "((ib.state = 'reclaiming' OR (ib.state = 'active' "
     "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.investigation_id = ib.investigation_id "
     "AND r.build_ref = ib.build_ref AND r.state IN ('created', 'running')) "
     "AND NOT EXISTS (SELECT 1 FROM jobs j JOIN runs r "
     "ON r.id::text = j.payload->>'run_id' "
     "WHERE r.investigation_id = ib.investigation_id AND r.build_ref = ib.build_ref "
-    "AND j.kind = 'install' AND j.state IN ('queued', 'running'))))"
+    "AND j.kind = 'install' AND j.state IN ('queued', 'running')))) "
+    "AND NOT EXISTS (SELECT 1 FROM investigation_build_uses u "
+    "WHERE u.investigation_id = ib.investigation_id AND u.generation = ib.generation))"
 )
 
 
@@ -154,7 +157,7 @@ class ExactArtifactObjectDeleter(Protocol):
 async def _mark_generation_reclaiming(
     conn: AsyncConnection, investigation_id: UUID, generation: UUID
 ) -> dict[str, dict[str, str]] | None:
-    """Fence one generation after rechecking its Run and install-job pins."""
+    """Fence one generation after rechecking its Run, install-job, and use pins."""
     require_top_level_transaction(conn, "mark Investigation build generation reclaiming")
     async with (
         conn.transaction(),
@@ -170,6 +173,15 @@ async def _mark_generation_reclaiming(
         if row is None:
             return None
         state, build_ref, artifacts = row
+        use = await (
+            await conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM investigation_build_uses "
+                "WHERE investigation_id = %s AND generation = %s)",
+                (investigation_id, generation),
+            )
+        ).fetchone()
+        if use is None or use[0]:
+            return None
         if state == "active":
             pin = await (
                 await conn.execute(
@@ -266,6 +278,8 @@ async def _generation_candidates(
     limit: int = _BUILD_GENERATIONS_PER_PASS,
 ) -> list[tuple[UUID, UUID]]:
     require_top_level_transaction(conn, "select Investigation build reclaim candidates")
+    capped_limit = min(limit, _MAX_BUILD_GENERATION_PASS_ROWS)
+    capped_scan_limit = min(_BUILD_GENERATION_SCAN_PER_PASS, _MAX_BUILD_GENERATION_PASS_ROWS)
     async with conn.transaction():
         if investigation_id is not None:
             rows = await (
@@ -274,7 +288,7 @@ async def _generation_candidates(
                     "WHERE ib.investigation_id = %s AND " + _UNPINNED_GENERATION_SQL + " "
                     "AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now()) "
                     "ORDER BY ib.generation LIMIT %s",
-                    (investigation_id, limit),
+                    (investigation_id, capped_limit),
                 )
             ).fetchall()
         elif expired or closed_grace is not None:
@@ -299,7 +313,7 @@ async def _generation_candidates(
                     await conn.execute(
                         "SELECT investigation_id, generation FROM investigation_builds "
                         "ORDER BY investigation_id, generation LIMIT %s",
-                        (_BUILD_GENERATION_SCAN_PER_PASS,),
+                        (capped_scan_limit,),
                     )
                 ).fetchall()
             else:
@@ -308,10 +322,10 @@ async def _generation_candidates(
                         "SELECT investigation_id, generation FROM investigation_builds "
                         "WHERE (investigation_id, generation) > (%s, %s) "
                         "ORDER BY investigation_id, generation LIMIT %s",
-                        (*after, _BUILD_GENERATION_SCAN_PER_PASS),
+                        (*after, capped_scan_limit),
                     )
                 ).fetchall()
-                remaining = _BUILD_GENERATION_SCAN_PER_PASS - len(scanned)
+                remaining = capped_scan_limit - len(scanned)
                 if remaining:
                     scanned += await (
                         await conn.execute(
@@ -343,7 +357,7 @@ async def _generation_candidates(
                             [row[0] for row in scanned],
                             [row[1] for row in scanned],
                             *eligibility_params,
-                            limit,
+                            capped_limit,
                         ),
                     )
                 ).fetchall()
@@ -362,7 +376,7 @@ async def _generation_candidates(
                     + _UNPINNED_GENERATION_SQL
                     + " AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now())"
                     + " ORDER BY ib.investigation_id, ib.generation LIMIT %s",
-                    (limit,),
+                    (capped_limit,),
                 )
             ).fetchall()
     return [(row[0], row[1]) for row in rows]

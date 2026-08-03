@@ -12,6 +12,7 @@ import pytest
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
+from pydantic import SecretStr
 
 import kdive.mcp.assembly.app as app_module
 import kdive.mcp.assembly.tool_registration as tool_module
@@ -28,15 +29,27 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 
+_WORKER_CREDENTIAL = SecretStr("worker-test-incarnation-credential")
+
 
 def _verifier() -> JWTVerifier:
     kp = make_keypair()
     return JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
 
 
+class _CatalogDeathVerifier:
+    def verify_dead(self, worker_incarnation: str) -> str | None:
+        raise RuntimeError("catalog verifier must not execute")
+
+
 def test_build_app_registers_jobs_tools() -> None:
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    app = build_app(
+        pool,
+        verifier=_verifier(),
+        secret_registry=SecretRegistry(),
+        worker_death_verifier=_CatalogDeathVerifier(),
+    )
 
     async def _run() -> None:
         # Verified against fastmcp 3.4.0: FastMCP.list_tools() is async and returns
@@ -116,6 +129,37 @@ def test_resource_host_and_mutation_tools_are_registered() -> None:
         } <= names
 
     asyncio.run(_run())
+
+
+def test_build_use_recovery_is_not_advertised_without_durable_witness(monkeypatch) -> None:
+    monkeypatch.delenv("KDIVE_WORKER_DEATH_VERIFIER", raising=False)
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+    names = {tool.name for tool in asyncio.run(app.list_tools())}
+
+    assert "ops.build_uses_list" not in names
+    assert "ops.recover_build_use" not in names
+
+
+def test_build_use_recovery_is_not_advertised_for_legacy_local_verifier(monkeypatch) -> None:
+    monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "local")
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+    names = {tool.name for tool in asyncio.run(app.list_tools())}
+
+    assert "ops.recover_build_use" not in names
+
+
+def test_build_use_recovery_is_advertised_in_durable_witness_mode(monkeypatch) -> None:
+    monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "kubernetes")
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+    names = {tool.name for tool in asyncio.run(app.list_tools())}
+
+    assert {"ops.build_uses_list", "ops.recover_build_use"} <= names
 
 
 def test_build_app_registers_doc_resources() -> None:
@@ -338,7 +382,9 @@ def test_worker_registry_default_propagates_object_store_assembly_error(
     monkeypatch.setattr(handler_module, "build_object_store_assembly", build_object_store_assembly)
 
     with pytest.raises(CategorizedError) as caught:
-        build_handler_registry(secret_registry=SecretRegistry())
+        build_handler_registry(
+            secret_registry=SecretRegistry(), incarnation_credential=_WORKER_CREDENTIAL
+        )
 
     assert caught.value is error
 
@@ -347,7 +393,9 @@ def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     # The provisioning plane (#16) registers provision/teardown, the install + boot plane (#19)
     # registers install/boot, and the retrieve plane (#24) registers capture_vmcore — each
     # building its provider lazily from env (no libvirt/S3 connection at registration).
-    registry = build_handler_registry(secret_registry=SecretRegistry())
+    registry = build_handler_registry(
+        secret_registry=SecretRegistry(), incarnation_credential=_WORKER_CREDENTIAL
+    )
     assert isinstance(registry, HandlerRegistry)
     assert registry.get(JobKind.PROVISION) is not None
     assert registry.get(JobKind.TEARDOWN) is not None
@@ -378,6 +426,7 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
         assembly: handler_module.WorkerHandlerAssembly,
     ) -> tuple[handler_module.HandlerRegistrar, ...]:
         captured["resolver"] = assembly.resolver
+        captured["incarnation_credential"] = assembly.incarnation_credential
         captured["secret_registry"] = assembly.secret_registry
         captured["object_stores"] = assembly.object_stores
 
@@ -387,11 +436,13 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
 
     build_handler_registry(
         secret_registry=caller_registry,
+        incarnation_credential=_WORKER_CREDENTIAL,
         provider_composition=cast(Any, _FakeComposition()),
     )
 
     assert captured["resolver"] is resolver
     assert captured["secret_registry"] is caller_registry
+    assert captured["incarnation_credential"] is _WORKER_CREDENTIAL
     object_stores = captured["object_stores"]
     assert isinstance(object_stores, ObjectStoreAssembly)
     # S3 is a required backend (ADR-0337): the assembly carries one non-optional store.
@@ -427,7 +478,12 @@ def test_exposure_map_covers_every_registered_tool() -> None:
     )
 
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    app = build_app(
+        pool,
+        verifier=_verifier(),
+        secret_registry=SecretRegistry(),
+        worker_death_verifier=_CatalogDeathVerifier(),
+    )
 
     async def _run() -> set[str]:
         return {t.name for t in await app.list_tools()}
@@ -477,7 +533,12 @@ _EXPECTED_STEP_MATURITY: dict[str, str] = {
 
 def _built_app() -> FastMCP:
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    return build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    return build_app(
+        pool,
+        verifier=_verifier(),
+        secret_registry=SecretRegistry(),
+        worker_death_verifier=_CatalogDeathVerifier(),
+    )
 
 
 def _rendered_prompt_body(app: FastMCP, name: str) -> str:

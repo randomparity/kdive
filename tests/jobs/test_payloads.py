@@ -69,8 +69,17 @@ def test_install_payload_omits_absent_cmdline() -> None:
 
 
 def test_install_payload_rejects_blank_cmdline() -> None:
-    with pytest.raises(ValueError, match="cmdline must not be blank"):
+    with pytest.raises(ValueError, match="cmdline_blank"):
         InstallPayload(run_id=str(uuid4()), cmdline="   ")
+
+
+@pytest.mark.parametrize(
+    ("cmdline", "reason"),
+    [("x" * 4097, "cmdline_too_long"), ("panic=1\x00", "cmdline_not_printable")],
+)
+def test_install_payload_rejects_unsafe_cmdline(cmdline: str, reason: str) -> None:
+    with pytest.raises(ValueError, match=reason):
+        InstallPayload(run_id=str(uuid4()), cmdline=cmdline)
 
 
 def test_install_payload_round_trips_crashkernel_size_and_range() -> None:

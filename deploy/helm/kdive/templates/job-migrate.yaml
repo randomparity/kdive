@@ -52,7 +52,64 @@ spec:
         - name: migrate
           image: {{ include "kdive.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.bundledBackends }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              python -m kdive migrate
+              python - <<'PY'
+              import os
+              import psycopg
+              from psycopg import sql
+
+              roles = {
+                  "kdive-server-member": ("DEMO_DB_SERVER_PASSWORD", "kdive_server"),
+                  "kdive-worker-member": ("DEMO_DB_WORKER_PASSWORD", "kdive_worker"),
+                  "kdive-reconciler-member": (
+                      "DEMO_DB_RECONCILER_PASSWORD",
+                      "kdive_reconciler",
+                  ),
+                  "kdive-witness-member": (
+                      "DEMO_DB_LIFECYCLE_WITNESS_PASSWORD",
+                      "kdive_lifecycle_witness",
+                  ),
+              }
+              with psycopg.connect(os.environ["KDIVE_DATABASE_URL"], autocommit=True) as conn:
+                  for login, (password_env, capability) in roles.items():
+                      conn.execute(
+                          sql.SQL(
+                              "DO $$ BEGIN CREATE ROLE {} LOGIN INHERIT NOSUPERUSER "
+                              "NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; "
+                              "EXCEPTION WHEN duplicate_object THEN NULL; END $$"
+                          ).format(sql.Identifier(login))
+                      )
+                      conn.execute(
+                          sql.SQL("ALTER ROLE {} PASSWORD {}").format(
+                              sql.Identifier(login), sql.Literal(os.environ[password_env])
+                          )
+                      )
+                      conn.execute(
+                          sql.SQL("GRANT {} TO {}").format(
+                              sql.Identifier(capability), sql.Identifier(login)
+                          )
+                      )
+              PY
+          {{- else }}
           args: ["migrate"]
+          {{- end }}
+          env:
+            {{- include "kdive.databaseEnv" .Values.databaseCredentials.migration | nindent 12 }}
+            {{- if .Values.bundledBackends }}
+            - name: DEMO_DB_SERVER_PASSWORD
+              value: {{ .Values.demoCredentials.postgresql.serverPassword | quote }}
+            - name: DEMO_DB_WORKER_PASSWORD
+              value: {{ .Values.demoCredentials.postgresql.workerPassword | quote }}
+            - name: DEMO_DB_RECONCILER_PASSWORD
+              value: {{ .Values.demoCredentials.postgresql.reconcilerPassword | quote }}
+            - name: DEMO_DB_LIFECYCLE_WITNESS_PASSWORD
+              value: {{ .Values.demoCredentials.postgresql.lifecycleWitnessPassword | quote }}
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "kdive.fullname" . }}-config

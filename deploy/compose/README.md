@@ -11,11 +11,57 @@ image built by the repo [`Dockerfile`](../../Dockerfile) (`image: kdive:dev`).
 
 ## Bring-up
 
-The dependency graph is self-contained, so a single `up` brings the whole stack:
+The dependency graph is self-contained, so a single `up` brings the whole stack. The checked-in
+passwords below are allowlisted for local development only; never reuse them in a
+production deployment:
 
 ```bash
-docker compose up -d server worker reconciler   # builds the image, runs the backends + migrate first
+just compose-up   # builds the image, runs the backends + migrate, then gates the worker
 ```
+
+The `compose-up`, `compose-recreate-worker`, and `compose-down` recipes are the only supported
+worker lifecycle. They bind the exact full container ID to a random nonce in Postgres before
+start and record retained terminal inspect evidence before removal. Raw Compose/Docker lifecycle
+commands and host-launched workers bypass that chain and are unsupported. On a database failure,
+the wrapper leaves the never-started or terminal worker retained; restore Postgres and retry.
+On a clean local database, Postgres creates the separate `kdive-migration` owner first. Migrations
+create the four NOLOGIN capabilities, then the `role-bootstrap` one-shot creates distinct
+`kdive-server-member`, `kdive-worker-member`, `kdive-reconciler-member`, and
+`kdive-witness-member` logins, rotates their local-only secrets, removes every wrong capability
+membership, and grants each exact capability before a runtime process starts. The migration owner is
+absent from every runtime container. Production Compose-derived and Helm deployments retain the
+external-provisioning contract: operators provide secret-backed login members and do not run this
+explicitly local bootstrap. Set `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` and supply the migration, server,
+worker, reconciler, and lifecycle-witness DSNs to use that external path; the bootstrap one-shot then
+performs no database mutation.
+
+The server, worker, and reconciler capabilities have ordinary application-table access. The
+lifecycle witness has none. Protected worker-incarnation and investigation-build-use mutation remains
+security-definer-function-only. Server build-use diagnostics are capped and filtered to caller projects
+with at least viewer by their dedicated function;
+the reconciler has column-level read access only to the use table's exact investigation/generation pin
+key for GC. New migrations must grant process-role access explicitly for each new relation.
+
+The migration owner and lifecycle witness DSNs are never present in the worker container; its random
+256-bit incarnation credential is copied from a supervisor-owned file into the never-started container
+as UID 10001 with mode 0400 and is not placed in its environment or a shared mount.
+
+The worker's internal claim and heartbeat lease is a PostgreSQL interval applied once to the
+database's `clock_timestamp()` captured after the blocking incarnation lock and, for heartbeat, the
+exact running-attempt row lock. Its computed deadline must be after that post-lock reference and no
+more than one hour later; this elapsed bound includes calendar and time-zone effects. An out-of-range
+deadline raises SQLSTATE `22023` before job state or attempt data changes. Retry the same operation
+with an interval whose computed deadline is valid; the reference worker uses five minutes. Each
+heartbeat begins another bounded lease, so the ceiling is not a total job-runtime limit.
+
+## Upgrading worker-fence authority
+
+For an existing deployment, stop old workers; migrate the runtime roles and fence protocol; rotate
+the separate server, worker, reconciler, and lifecycle-witness login credentials; start the
+lifecycle witness; then start current workers. Verify registered current incarnations and the
+server's recovery-tool exposure before resuming queue processing. An image rollback cannot restore
+old claiming after the protocol migration, so recover forward with a current worker image. Do not use
+raw Compose/Docker lifecycle commands or manual SQL to bypass this order: those bypasses retain pins.
 
 `docker compose up` resolves the graph rather than relying on the operator to order it:
 the app services pull in a healthy Postgres, the `minio-init` bucket-creation one-shot
@@ -96,7 +142,7 @@ host* (where `iss=http://localhost:8090/default` matches host-minted tokens).
 ## Teardown
 
 ```bash
-docker compose down -v   # stop everything and drop the named volumes
+just compose-down   # records worker termination, then drops the named volumes
 ```
 
 ## Image provenance — verify before you run a published image

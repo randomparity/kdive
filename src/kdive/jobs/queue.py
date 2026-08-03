@@ -1,10 +1,10 @@
-"""Connection-scoped operations over the durable ``jobs`` queue (ADR-0018).
+"""Connection-scoped operations over the durable ``jobs`` queue (ADR-0018, ADR-0533).
 
 ``enqueue`` admits a job idempotently on ``dedup_key``; ``dequeue`` claims the oldest
 eligible job with ``FOR UPDATE SKIP LOCKED``, charging an attempt and reclaiming a
 lapsed lease; ``heartbeat`` renews a lease; ``complete`` and ``fail`` finalize a
-claimed job. Every post-claim write is fenced on ``worker_id`` + the running state
-so a worker that lost its lease cannot mutate a job another worker now owns. Each
+claimed job. Every worker write goes through a credential-bound database function
+that derives the active incarnation and fences the exact charged attempt. Each
 function wraps its statements in ``conn.transaction()`` so it self-commits on any
 connection, and all assume READ COMMITTED (psycopg's default).
 """
@@ -19,6 +19,7 @@ from uuid import UUID
 from psycopg import AsyncConnection, sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from pydantic import SecretStr
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
@@ -192,6 +193,7 @@ async def dequeue(
     conn: AsyncConnection,
     worker_id: str,
     *,
+    incarnation_credential: SecretStr,
     lease: timedelta = DEFAULT_LEASE,
     accepted_lanes: Sequence[str] = DEFAULT_DISPATCH_LANES,
 ) -> Job | None:
@@ -208,6 +210,16 @@ async def dequeue(
     queued/lapsed jobs whose persisted lane is in this set, so provider- or pool-specific
     workers do not acquire work they cannot execute.
 
+    ``incarnation_credential`` is authority-minted for this exact worker. The guarded
+    database function derives the incarnation from its hash and claims only when it is active,
+    matches ``worker_id``, and uses the fixed current fence protocol.
+
+    ``lease`` is one PostgreSQL interval applied to ``clock_timestamp()`` captured by the database
+    after the blocking incarnation fence and immediately before this claim. The computed deadline
+    must be after that reference and no more than one hour later. SQLSTATE ``22023`` is raised
+    before any job mutation when it is outside that elapsed bound; retry with an interval whose
+    computed deadline is valid.
+
     ``ORDER BY created_at`` is FIFO over *when the attempt was queued*, not when the row was first
     inserted: :func:`enqueue`'s ``recycle_terminal`` re-dates ``created_at`` (ADR-0447), so a
     revived job queues behind the work admitted while it was settled instead of preempting it.
@@ -219,26 +231,12 @@ async def dequeue(
         return None
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "UPDATE jobs SET "
-            "    state = %s, worker_id = %s, attempt = attempt + 1, "
-            "    lease_expires_at = now() + %s, heartbeat_at = now() "
-            "WHERE id = ( "
-            "    SELECT id FROM jobs "
-            "    WHERE (state = %s "
-            "           OR (state = %s AND lease_expires_at < now())) "
-            "      AND attempt < max_attempts "
-            "      AND dispatch_lane = ANY(%s::text[]) "
-            "    ORDER BY created_at "
-            "    FOR UPDATE SKIP LOCKED "
-            "    LIMIT 1 "
-            ") "
-            "RETURNING *",
+            "SELECT * FROM public.claim_worker_job("
+            "%s, sha256(convert_to(%s, 'UTF8')), %s, %s::text[])",
             (
-                JobState.RUNNING.value,
                 worker_id,
+                incarnation_credential.get_secret_value(),
                 lease,
-                JobState.QUEUED.value,
-                JobState.RUNNING.value,
                 list(accepted_lanes),
             ),
         )
@@ -271,9 +269,20 @@ async def count_claimable(
 
 
 async def heartbeat(
-    conn: AsyncConnection, job_id: UUID, worker_id: str, *, lease: timedelta = DEFAULT_LEASE
+    conn: AsyncConnection,
+    job_id: UUID,
+    *,
+    attempt: int,
+    incarnation_credential: SecretStr,
+    lease: timedelta = DEFAULT_LEASE,
 ) -> bool:
-    """Renew the lease for ``job_id`` if ``worker_id`` still owns the running job.
+    """Renew ``job_id`` when the credential owns its exact running attempt.
+
+    ``lease`` is applied to the PostgreSQL ``clock_timestamp()`` captured after the blocking
+    incarnation fence and exact running-attempt row lock. Its computed deadline must be after that
+    post-lock reference and no more than one hour later. This is a per-heartbeat limit, not a total
+    job runtime limit. SQLSTATE ``22023`` leaves the row unchanged; retry with an interval whose
+    computed deadline is valid.
 
     Returns:
         ``True`` when a row matched; ``False`` when the job is no longer this worker's
@@ -281,19 +290,22 @@ async def heartbeat(
     """
     async with conn.transaction(), conn.cursor() as cur:
         await cur.execute(
-            "UPDATE jobs SET heartbeat_at = now(), lease_expires_at = now() + %s "
-            "WHERE id = %s AND worker_id = %s AND state = %s "
-            "RETURNING id",
-            (lease, job_id, worker_id, JobState.RUNNING.value),
+            "SELECT public.heartbeat_worker_job(%s, sha256(convert_to(%s, 'UTF8')), %s, %s)",
+            (job_id, incarnation_credential.get_secret_value(), attempt, lease),
         )
         row = await cur.fetchone()
-    return row is not None
+    return row == (True,)
 
 
 async def complete(
-    conn: AsyncConnection, job_id: UUID, worker_id: str, result_ref: str | None
+    conn: AsyncConnection,
+    job_id: UUID,
+    result_ref: str | None,
+    *,
+    attempt: int,
+    incarnation_credential: SecretStr,
 ) -> Job | None:
-    """Mark ``job_id`` succeeded with ``result_ref`` if ``worker_id`` still owns it.
+    """Complete ``job_id`` when the credential owns its exact running attempt.
 
     Returns:
         The updated :class:`Job`, or ``None`` if the fence did not match (the worker
@@ -301,15 +313,12 @@ async def complete(
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "UPDATE jobs SET state = %s, result_ref = %s "
-            "WHERE id = %s AND worker_id = %s AND state = %s "
-            "RETURNING *",
+            "SELECT * FROM public.complete_worker_job(%s, sha256(convert_to(%s, 'UTF8')), %s, %s)",
             (
-                JobState.SUCCEEDED.value,
-                result_ref,
                 job_id,
-                worker_id,
-                JobState.RUNNING.value,
+                incarnation_credential.get_secret_value(),
+                attempt,
+                result_ref,
             ),
         )
         row = await cur.fetchone()
@@ -321,10 +330,11 @@ async def fail(
     job: Job,
     error_category: ErrorCategory,
     *,
+    incarnation_credential: SecretStr,
     terminal: bool = False,
     failure_context: Mapping[str, str] | None = None,
 ) -> Job:
-    """Dead-letter or requeue a claimed ``job``, fenced on its ``worker_id``.
+    """Dead-letter or requeue ``job`` through its credential and exact attempt fence.
 
     Dead-letters (``running → failed`` with ``error_category``) when ``terminal`` is
     set (a non-retryable failure, e.g. no handler for the kind) or the already-charged
@@ -340,28 +350,19 @@ async def fail(
         The job's post-write state, or the unchanged ``job`` when the fence missed
         (another worker reclaimed it).
     """
-    if terminal or job.attempt >= job.max_attempts:
-        query = (
-            "UPDATE jobs SET state = %s, error_category = %s, failure_context = %s "
-            "WHERE id = %s AND worker_id = %s AND state = %s RETURNING *"
-        )
-        params: tuple[object, ...] = (
-            JobState.FAILED.value,
-            error_category,
-            Jsonb(dict(failure_context or {})),
-            job.id,
-            job.worker_id,
-            JobState.RUNNING.value,
-        )
-    else:
-        query = (
-            "UPDATE jobs SET state = %s, worker_id = NULL, "
-            "    lease_expires_at = NULL, heartbeat_at = NULL, failure_context = '{}'::jsonb "
-            "WHERE id = %s AND worker_id = %s AND state = %s RETURNING *"
-        )
-        params = (JobState.QUEUED.value, job.id, job.worker_id, JobState.RUNNING.value)
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(query, params)
+        await cur.execute(
+            "SELECT * FROM public.fail_worker_job("
+            "%s, sha256(convert_to(%s, 'UTF8')), %s, %s, %s, %s)",
+            (
+                job.id,
+                incarnation_credential.get_secret_value(),
+                job.attempt,
+                error_category,
+                Jsonb(dict(failure_context or {})),
+                terminal,
+            ),
+        )
         row = await cur.fetchone()
     return job if row is None else Job.model_validate(row)
 

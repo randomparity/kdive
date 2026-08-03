@@ -25,6 +25,7 @@ observability:
   uiPort: 9090
 
 config:
+  # Deprecated and intentionally not rendered. Database credentials are Secret refs below.
   KDIVE_DATABASE_URL: ""
   KDIVE_OIDC_ISSUER: ""
   KDIVE_OIDC_JWKS_URI: ""
@@ -36,6 +37,26 @@ config:
   # leaked-domain sweep every pass on a missing socket. Disable it here (ADR-0127); remote
   # providers stay active. Set true only on a node that genuinely exposes a libvirt socket.
   KDIVE_LOCAL_LIBVIRT_ENABLED: "false"
+
+# Each process receives exactly one database login through a Secret key. The migration login owns
+# schema changes and must not be reused by a runtime process. A single Secret with distinct keys is
+# supported; use separate Secrets when that better matches the operator's rotation policy.
+databaseCredentials:
+  migration:
+    secretName: kdive-database # pragma: allowlist secret
+    key: migration-dsn
+  server:
+    secretName: kdive-database # pragma: allowlist secret
+    key: server-dsn
+  worker:
+    secretName: kdive-database # pragma: allowlist secret
+    key: worker-dsn
+  reconciler:
+    secretName: kdive-database # pragma: allowlist secret
+    key: reconciler-dsn
+  lifecycleWitness:
+    secretName: kdive-database # pragma: allowlist secret
+    key: lifecycle-witness-dsn
 
 # Optional declarative inventory (systems.toml, ADR-0112). Create a ConfigMap with a
 # `systems.toml` key and set configMapName to mount it on migrate/server/worker/reconciler.
@@ -79,6 +100,20 @@ server:
 reconciler:
   replicas: 1
 
+# Reconciler-only TLS server, envelope key, and lifecycle-witness DSN for the pre-worker init
+# handoff. The operator creates all three Secrets; only the init container receives the public CA.
+workerCredentialBroker:
+  port: 9443
+  tokenAudience: kdive-worker-credential-broker
+  tls:
+    secretName: kdive-worker-credential-broker-tls # pragma: allowlist secret
+    certificateKey: tls.crt
+    privateKey: tls.key # pragma: allowlist secret
+    caKey: ca.crt
+  envelopeKey:
+    secretName: kdive-worker-credential-broker-envelope # pragma: allowlist secret
+    key: envelope.key
+
 # The worker runs as a StatefulSet, not a Deployment (ADR-0514): each replica gets its OWN
 # build and install volume from volumeClaimTemplates, so scaling out no longer multi-attaches
 # one pair of ReadWriteOnce claims. The default is 2 because the job queue is built for
@@ -95,6 +130,13 @@ reconciler:
 # if you wire one up, do not scale the worker down without reinstalling those Systems.
 worker:
   replicas: 2
+  # Highest StatefulSet ordinal for which the server retains namespaced Pod-read authority.
+  # This is recovery history, not current scale: never lower it after an ordinal has run.
+  deathVerificationOrdinalCeiling: 32
+  # One-time first upgrade from a chart without the persisted ceiling annotation. Leave zero on
+  # new installs and after adoption; set explicitly to at least the configured ceiling only for
+  # that upgrade. The template rejects later reuse.
+  deathVerificationAdoptionCeiling: 0
   persistence:
     build:
       size: 10Gi
@@ -110,6 +152,10 @@ demoCredentials:
     username: kdive
     password: kdive-demo # pragma: allowlist secret
     database: kdive
+    serverPassword: kdive-server-demo # pragma: allowlist secret
+    workerPassword: kdive-worker-demo # pragma: allowlist secret
+    reconcilerPassword: kdive-reconciler-demo # pragma: allowlist secret
+    lifecycleWitnessPassword: kdive-witness-demo # pragma: allowlist secret
   minio:
     rootUser: kdive
     rootPassword: kdive-demo-secret # pragma: allowlist secret

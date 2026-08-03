@@ -17,6 +17,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+from pydantic import SecretStr
 
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, JOBS, RESOURCES, RUNS, SYSTEMS
 from kdive.domain.capacity.state import (
@@ -67,9 +68,11 @@ from kdive.services.runs.steps import StepProgress, ready_boot_outcome, step_pro
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.systems_support import provider_resolver
 from tests.support.object_store import INERT_OBJECT_STORE
+from tests.support.worker_fence import dequeue_as_current_worker, incarnation_credential
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _PROFILE: dict[str, Any] = {"schema_version": 1}
+_INSTALL_CREDENTIAL = incarnation_credential("runs-install-handler")
 
 
 @pytest.fixture(autouse=True)
@@ -4695,6 +4698,25 @@ async def _install_step_crashkernel(pool: AsyncConnectionPool, run_id: str) -> o
         return row[0].get("crashkernel")
 
 
+async def _install_handler(
+    conn: AsyncConnection,
+    job: Job,
+    *,
+    resolver: Any,
+    incarnation_credential: SecretStr = _INSTALL_CREDENTIAL,
+) -> str | None:
+    await conn.set_autocommit(True)
+    try:
+        return await runs_handlers.install_handler(
+            conn,
+            job,
+            resolver=resolver,
+            incarnation_credential=incarnation_credential,
+        )
+    finally:
+        await conn.set_autocommit(False)
+
+
 def test_install_handler_applies_and_records_crashkernel(migrated_url: str) -> None:
     # A kdump System's install honors the per-install crashkernel (ADR-0300): the composed cmdline
     # carries crashkernel=512M (not the default 256M) and the value is recorded on the install step.
@@ -4708,7 +4730,7 @@ def test_install_handler_applies_and_records_crashkernel(migrated_url: str) -> N
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install", crashkernel="512M")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -4732,7 +4754,7 @@ def test_install_handler_records_no_crashkernel_when_default(migrated_url: str) 
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -4754,7 +4776,7 @@ def test_install_handler_rejects_crashkernel_on_non_kdump_system(migrated_url: s
             installer = _FakeInstaller()
             with pytest.raises(CategorizedError) as exc:
                 async with pool.connection() as conn:
-                    await runs_handlers.install_handler(
+                    await _install_handler(
                         conn,
                         job,
                         resolver=provider_resolver(
@@ -4809,7 +4831,7 @@ def test_install_handler_refuses_crashkernel_when_config_lacks_crash_symbols(
                 pytest.raises(CategorizedError) as exc,
             ):
                 async with pool.connection() as conn:
-                    await runs_handlers.install_handler(
+                    await _install_handler(
                         conn,
                         job,
                         resolver=provider_resolver(
@@ -4847,7 +4869,7 @@ def test_install_handler_arms_crashkernel_when_config_supports_it(migrated_url: 
             installer = _FakeInstaller()
             with patch("kdive.kernel_config.gate.load_effective_config", _fake_load):
                 async with pool.connection() as conn:
-                    await runs_handlers.install_handler(
+                    await _install_handler(
                         conn,
                         job,
                         resolver=provider_resolver(
@@ -4867,7 +4889,7 @@ def test_install_handler_records_step_run_stays_succeeded(migrated_url: str) -> 
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                result = await runs_handlers.install_handler(
+                result = await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -4916,13 +4938,16 @@ def test_queued_install_admitted_before_expiry_runs_after_expiry(migrated_url: s
                     "WHERE investigation_id = %s AND build_ref = %s",
                     (run.investigation_id, build_ref),
                 )
-                job = await JOBS.get(conn, UUID(admitted.object_id))
+                job = await dequeue_as_current_worker(conn, "test-worker")
                 assert job is not None
+                assert str(job.id) == admitted.object_id
+                await conn.commit()
                 installer = _FakeInstaller()
-                result = await runs_handlers.install_handler(
+                result = await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
+                    incarnation_credential=incarnation_credential("test-worker"),
                 )
         assert result == run_id
         assert len(installer.calls) == 1
@@ -4937,13 +4962,13 @@ def test_install_handler_replay_does_not_restage(migrated_url: str) -> None:
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
                 )
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -4979,7 +5004,7 @@ def test_install_handler_concurrent_dispatch_invokes_once(migrated_url: str) -> 
 
             async def _dispatch() -> None:
                 async with pool.connection() as conn:
-                    await runs_handlers.install_handler(
+                    await _install_handler(
                         conn,
                         job,
                         resolver=provider_resolver(
@@ -5011,7 +5036,7 @@ def test_install_handler_failure_records_no_step(migrated_url: str) -> None:
             installer = _FakeInstaller(error=ErrorCategory.INSTALL_FAILURE)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.install_handler(
+                    await _install_handler(
                         conn,
                         job,
                         resolver=provider_resolver(
@@ -5047,7 +5072,7 @@ def test_install_handler_cleanup_failure_preserves_provider_category(
             monkeypatch.setattr(run_handler_common, "abandon_run_step", _fail_cleanup)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.install_handler(
+                    await _install_handler(
                         conn,
                         job,
                         resolver=provider_resolver(
@@ -5070,7 +5095,7 @@ def test_install_handler_missing_kernel_ref_is_config_error(migrated_url: str) -
             installer = _FakeInstaller()
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError):
-                    await runs_handlers.install_handler(
+                    await _install_handler(
                         conn,
                         job,
                         resolver=provider_resolver(
@@ -5207,6 +5232,7 @@ def test_register_handlers_binds_install_and_boot() -> None:
                 booter=_FakeBooter(),
                 profile_policy=_LOCAL_POLICY,
             ),
+            incarnation_credential=_INSTALL_CREDENTIAL,
             secret_registry=SecretRegistry(),
             artifact_store=cast(Any, object()),
         ),
@@ -5791,7 +5817,7 @@ def test_install_handler_forwards_console_method_for_bare_system(migrated_url: s
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -5811,7 +5837,7 @@ def test_install_handler_forwards_host_dump_for_preserve_on_crash(migrated_url: 
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -5831,7 +5857,7 @@ def test_install_handler_forwards_initrd_ref_from_build_ledger(migrated_url: str
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -5849,7 +5875,7 @@ def test_install_handler_no_initrd_when_ledger_initrd_blank(migrated_url: str) -
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -5870,7 +5896,7 @@ def test_install_handler_forwards_ledger_cmdline_to_installer(migrated_url: str)
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -5892,7 +5918,7 @@ def test_install_handler_forwards_default_cmdline_when_ledger_has_none(migrated_
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -5915,7 +5941,7 @@ def test_install_handler_payload_cmdline_overrides_ledger(migrated_url: str) -> 
             )
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -5940,7 +5966,7 @@ def test_step_progress_reads_installed_cmdline(migrated_url: str) -> None:
             )
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -5977,7 +6003,7 @@ def test_install_handler_rejects_retired_composite_phase_job(migrated_url: str) 
                     PayloadValidationError,
                     match="build_install_boot payload contract is retired",
                 ):
-                    await runs_handlers.install_handler(
+                    await _install_handler(
                         conn,
                         phase_job,
                         resolver=provider_resolver(
@@ -6033,7 +6059,7 @@ def test_install_handler_records_build_extra_when_no_override(migrated_url: str)
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(
+                await _install_handler(
                     conn,
                     job,
                     resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
@@ -6219,7 +6245,8 @@ def test_cancel_leaves_terminal_build_job_untouched(migrated_url: str) -> None:
             run_id = await _seed_running_run(pool)
             job = await _enqueue_build_job(pool, run_id)
             async with pool.connection() as conn:
-                await JOBS.update_state(conn, job.id, JobState.RUNNING)
+                claimed = await dequeue_as_current_worker(conn, "runs-tools-worker")
+                assert claimed is not None and claimed.id == job.id
                 await JOBS.update_state(conn, job.id, JobState.SUCCEEDED)
             resp = await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
             assert resp.status == "canceled"
@@ -6236,7 +6263,8 @@ def test_cancel_running_run_with_running_build_job(migrated_url: str) -> None:
             run_id = await _seed_running_run(pool)
             job = await _enqueue_build_job(pool, run_id)
             async with pool.connection() as conn:
-                await JOBS.update_state(conn, job.id, JobState.RUNNING)
+                claimed = await dequeue_as_current_worker(conn, "runs-tools-worker")
+                assert claimed is not None and claimed.id == job.id
             resp = await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
             assert resp.status == "canceled"
             async with pool.connection() as conn:
@@ -6262,7 +6290,8 @@ def test_cancel_swallows_build_job_race_to_terminal(
             run_id = await _seed_running_run(pool)
             job = await _enqueue_build_job(pool, run_id)
             async with pool.connection() as conn:
-                await JOBS.update_state(conn, job.id, JobState.RUNNING)
+                claimed = await dequeue_as_current_worker(conn, "runs-tools-worker")
+                assert claimed is not None and claimed.id == job.id
                 await JOBS.update_state(conn, job.id, JobState.SUCCEEDED)
             stale = job.model_copy(update={"state": JobState.RUNNING})
 

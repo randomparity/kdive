@@ -45,6 +45,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 from kdive.cli.reserved_flags import RESERVED_CLI_FLAGS, derive_cli_flag
 from kdive.mcp.assembly.app import build_app
+from kdive.mcp.assembly.schema_catalog import CatalogWorkerDeathVerifier
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
 from kdive.store.objectstore import ObjectStore
@@ -255,6 +256,7 @@ def _registry_tools() -> list[Any]:
         verifier=verifier,
         object_store_assembly=object_stores,
         secret_registry=SecretRegistry(),
+        worker_death_verifier=CatalogWorkerDeathVerifier(),
     )
     return cast(list[Any], asyncio.run(app.list_tools()))
 

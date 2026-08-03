@@ -198,8 +198,46 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0095",
         "0096",
         "0097",
+        "0098",
+        "0099",
+        "0100",
+        "0101",
+        "0102",
+        "0103",
+        "0104",
+        "0105",
+        "0106",
+        "0107",
+        "0108",
+        "0109",
+        "0110",
+        "0111",
     ]
     assert second == []
+
+
+def test_investigation_build_migration_tail_is_unique_and_monotonic() -> None:
+    """The #1803 migrations follow main's immutable 0095–0097 prefix."""
+    migrations = migrate.discover_migrations()
+    versions = [migration.version for migration in migrations]
+
+    assert len(versions) == len(set(versions))
+    assert [(migration.version, migration.filename) for migration in migrations[-14:]] == [
+        ("0098", "0098_investigation_build_safety.sql"),
+        ("0099", "0099_investigation_build_use_recovery.sql"),
+        ("0100", "0100_build_use_recovery_bounds.sql"),
+        ("0101", "0101_investigation_build_gc_indexes.sql"),
+        ("0102", "0102_build_artifact_gc_cursors.sql"),
+        ("0103", "0103_worker_incarnations.sql"),
+        ("0104", "0104_worker_fence_roles.sql"),
+        ("0105", "0105_worker_fence_functions.sql"),
+        ("0106", "0106_worker_fence_protocol_claim.sql"),
+        ("0107", "0107_process_role_data_access.sql"),
+        ("0108", "0108_worker_fence_runtime_paths.sql"),
+        ("0109", "0109_kubernetes_credential_envelopes.sql"),
+        ("0110", "0110_idempotent_worker_termination.sql"),
+        ("0111", "0111_restrict_pinned_job_deletion.sql"),
+    ]
 
 
 def test_unique_constraints_present(pg_conn: psycopg.Connection) -> None:
@@ -318,6 +356,62 @@ def test_investigation_build_tombstone_schema(pg_conn: psycopg.Connection) -> No
         "WHERE c.conrelid = 'investigation_build_tombstones'::regclass AND c.contype = 'p'"
     ).fetchone()
     assert primary_key == (["investigation_id", "build_ref"],)
+
+
+def test_worker_incarnation_tombstones_are_permanent_and_bounded(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    assert _columns(pg_conn, "worker_incarnations") == {
+        "incarnation": "text",
+        "authority_kind": "text",
+        "authority_binding": "jsonb",
+        "fence_protocol": "integer",
+        "credential_hash": "bytea",
+        "credential_envelope": "bytea",
+        "credential_acknowledged_at": "timestamp with time zone",
+        "state": "text",
+        "recorded_at": "timestamp with time zone",
+        "terminated_at": "timestamp with time zone",
+        "outcome": "text",
+    }
+    assert pg_conn.execute(
+        "SELECT confdeltype FROM pg_constraint WHERE conrelid = "
+        "'investigation_build_use_recoveries'::regclass AND contype = 'f' "
+        "AND confrelid = 'worker_incarnations'::regclass"
+    ).fetchone() == ("a",)
+    constraints = {
+        row[0]: row[1]
+        for row in pg_conn.execute(
+            "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid IN "
+            "('worker_incarnations'::regclass, "
+            "'investigation_build_use_recoveries'::regclass) AND contype = 'c'"
+        ).fetchall()
+    }
+    assert "octet_length(incarnation)" in constraints["worker_incarnations_incarnation_bounded"]
+    assert (
+        "octet_length((authority_binding)::text)"
+        in constraints["worker_incarnations_binding_bounded"]
+    )
+    recovery_columns = _columns(pg_conn, "investigation_build_use_recoveries")
+    assert recovery_columns["project"] == "text"
+
+
+def test_staged_legacy_incarnations_get_unusable_unique_credentials(
+    pg_conn: psycopg.Connection,
+) -> None:
+    """Pre-Task-2 owner inserts stay executable without minting a deliverable credential."""
+    migrate.apply_migrations(pg_conn)
+    pg_conn.execute(
+        "INSERT INTO worker_incarnations (incarnation, authority_kind, authority_binding) VALUES "
+        "('legacy:a', 'local', '{}'::jsonb), ('legacy:b', 'local', '{}'::jsonb)"
+    )
+    rows = pg_conn.execute(
+        "SELECT fence_protocol, octet_length(credential_hash), credential_hash "
+        "FROM worker_incarnations WHERE incarnation LIKE 'legacy:%' ORDER BY incarnation"
+    ).fetchall()
+    assert [row[:2] for row in rows] == [(1, 32), (1, 32)]
+    assert rows[0][2] != rows[1][2]
 
 
 def test_dedup_key_not_null(pg_conn: psycopg.Connection) -> None:
@@ -827,6 +921,20 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0095",
         "0096",
         "0097",
+        "0098",
+        "0099",
+        "0100",
+        "0101",
+        "0102",
+        "0103",
+        "0104",
+        "0105",
+        "0106",
+        "0107",
+        "0108",
+        "0109",
+        "0110",
+        "0111",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1201,6 +1309,20 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0095",
         "0096",
         "0097",
+        "0098",
+        "0099",
+        "0100",
+        "0101",
+        "0102",
+        "0103",
+        "0104",
+        "0105",
+        "0106",
+        "0107",
+        "0108",
+        "0109",
+        "0110",
+        "0111",
     ]
 
 

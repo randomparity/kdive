@@ -28,6 +28,7 @@ PROCESS_DEFAULT_PORTS: dict[str, int] = {
     "server": 9464,
     "worker": 9465,
     "reconciler": 9466,
+    "lifecycle-witness": 9467,
 }
 
 

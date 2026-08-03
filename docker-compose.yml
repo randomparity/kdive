@@ -35,10 +35,8 @@ x-readyz-cadence: &readyz_cadence
   retries: 5
   start_period: 30s
 
-# Shared backend wiring, declared once and merged into every app service via
-# `<<: *backends`. The server adds its own HTTP bind vars on top.
+# Shared non-database backend wiring. Each process supplies its own database authority below.
 x-backends: &backends
-  KDIVE_DATABASE_URL: postgresql://kdive:kdive@postgres:5432/kdive  # pragma: allowlist secret — local dev only
   KDIVE_OIDC_ISSUER: http://oidc:8080/default
   KDIVE_OIDC_JWKS_URI: http://oidc:8080/default/jwks
   KDIVE_OIDC_AUDIENCE: kdive
@@ -74,6 +72,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    volumes:
+      - ./deploy/compose/bootstrap-migration-owner.sql:/docker-entrypoint-initdb.d/010-migration-owner.sql:ro
 
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
@@ -163,9 +163,26 @@ services:
     command: ["migrate"]
     environment:
       <<: *backends
+      KDIVE_DATABASE_URL: ${KDIVE_MIGRATION_DATABASE_URL:-postgresql://kdive-migration:kdive-migration-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
     depends_on:
       postgres:
         condition: service_healthy
+
+  # The reference stack alone provisions these fixed local-development login members. Production
+  # deployments externally provision secret-backed members of the migration-created NOLOGIN
+  # capability roles. This one-shot runs after migrations create those capabilities and before any
+  # runtime process authenticates.
+  role-bootstrap:
+    image: postgres:17
+    entrypoint: ["/bin/bash", "/bootstrap/bootstrap-runtime-roles.sh"]
+    environment:
+      KDIVE_LOCAL_ROLE_BOOTSTRAP: ${KDIVE_LOCAL_ROLE_BOOTSTRAP:-1}
+      KDIVE_MIGRATION_DATABASE_URL: ${KDIVE_MIGRATION_DATABASE_URL:-postgresql://kdive-migration:kdive-migration-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
+    volumes:
+      - ./deploy/compose/bootstrap-runtime-roles.sh:/bootstrap/bootstrap-runtime-roles.sh:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   server:
     image: ${KDIVE_IMAGE:-kdive:dev}
@@ -178,6 +195,7 @@ services:
     restart: on-failure
     environment:
       <<: *backends
+      KDIVE_DATABASE_URL: ${KDIVE_SERVER_DATABASE_URL:-postgresql://kdive-server-member:kdive-server-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
       KDIVE_HTTP_HOST: 0.0.0.0
       KDIVE_HTTP_PORT: "8000"
       # Bind the aux health/metrics listener to all interfaces INSIDE the container so
@@ -185,6 +203,8 @@ services:
       # never published (no host mapping below), so the container network namespace is
       # its access boundary — the unauthenticated /readyz/metrics stay non-public.
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9464
+      KDIVE_WORKER_DEATH_VERIFIER: docker
+      KDIVE_DOCKER_DEATH_API: http://worker-death-api:2375
     healthcheck:
       <<: *readyz_cadence
       # urlopen raises HTTPError on /readyz's 503 (not-ready), so the broad except maps
@@ -211,16 +231,29 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      role-bootstrap:
+        condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
       oidc:
         condition: service_started
+      worker-death-api:
+        condition: service_started
+    networks:
+      - default
+      - worker-death
 
   # The worker does real build/install I/O as a non-root user, so it needs writable,
   # correctly-owned volumes for the build workspace and install staging (ADR-0088
   # decision 3); server and reconciler need none. It writes vmcore/transcript
   # artifacts to the object store, so it also waits for the bucket to exist.
   worker:
+    # The reference deployment starts workers only through the lifecycle wrapper. The profile
+    # keeps a raw `docker compose up` from bypassing durable registration; the fallback value
+    # also makes an explicitly profile-enabled bypass fail the worker's nonce validation.
+    profiles: ["managed-worker"]
+    labels:
+      io.kdive.managed-worker: "true"
     image: ${KDIVE_IMAGE:-kdive:dev}
     command: ["worker"]
     # The process exits when Postgres is unreachable at start (ADR-0449), so the retry
@@ -231,7 +264,10 @@ services:
     restart: on-failure
     environment:
       <<: *backends
+      KDIVE_DATABASE_URL: ${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker-member:kdive-worker-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9465
+      KDIVE_WORKER_INCARNATION_KIND: docker
+      KDIVE_WORKER_INCARNATION_ID: docker:${KDIVE_WORKER_INCARNATION_NONCE:-unmanaged}
     healthcheck:
       <<: *readyz_cadence
       test:
@@ -253,6 +289,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      role-bootstrap:
+        condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
 
@@ -267,6 +305,7 @@ services:
     restart: on-failure
     environment:
       <<: *backends
+      KDIVE_DATABASE_URL: ${KDIVE_RECONCILER_DATABASE_URL:-postgresql://kdive-reconciler-member:kdive-reconciler-local@postgres:5432/kdive}  # pragma: allowlist secret — local dev only
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9466
     healthcheck:
       <<: *readyz_cadence
@@ -283,6 +322,8 @@ services:
           sys.exit(0 if ok else 1)
     depends_on:
       migrate:
+        condition: service_completed_successfully
+      role-bootstrap:
         condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
@@ -324,6 +365,21 @@ services:
       - ./deploy/grafana/kdive-overview.json:/var/lib/grafana/dashboards/kdive-overview.json:ro
     ports:
       - "${KDIVE_GRAFANA_PORT:-3000}:3000"
+
+  # Inspect-only authority used by the server to prove a specific worker container stopped.
+  # The proxy is reachable only on an internal network and rejects all write API methods.
+  worker-death-api:
+    image: ${KDIVE_IMAGE:-kdive:dev}
+    entrypoint: ["python", "-m", "kdive.processes.docker_death_api"]
+    user: root
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - worker-death
+
+networks:
+  worker-death:
+    internal: true
 
 volumes:
   kdive-build:

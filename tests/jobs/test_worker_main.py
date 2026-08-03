@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from typing import cast
 
 import pytest
+from pydantic import SecretStr
 
 from kdive.jobs.worker import WorkerConfig
 from kdive.observability.facade import Telemetry
@@ -15,6 +17,10 @@ from kdive.processes.runtime import (
     POOL_OPEN_TIMEOUT_SECONDS,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
+    WorkerIncarnation,
+)
 
 
 def _warm_open() -> list[str]:
@@ -68,8 +74,29 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
             events.append(f"close(timeout={timeout})")
 
     monkeypatch.setattr("kdive.processes.worker.create_pool", lambda **kw: _FakePool())
+
+    credential = SecretStr("authority-delivered-credential")
+
+    async def _authenticate(*args: object) -> WorkerIncarnation:
+        events.append("authenticate")
+        return WorkerIncarnation(
+            incarnation="docker:nonce",
+            authority_kind="docker",
+            authority_binding={"container_id": "a" * 64},
+            fence_protocol=CURRENT_WORKER_FENCE_PROTOCOL,
+        )
+
+    monkeypatch.setattr("kdive.processes.worker.worker_incarnation_id", lambda pid: "docker:nonce")
+    monkeypatch.setattr("kdive.processes.worker.worker_incarnation_credential", lambda: credential)
+    monkeypatch.setattr("kdive.processes.worker.authenticate_worker_incarnation", _authenticate)
     monkeypatch.setattr("kdive.processes.worker.install_stop", lambda: asyncio.Event())
-    monkeypatch.setattr("kdive.jobs.assembly.build_handler_registry", lambda **kw: object())
+    registry_credentials: list[SecretStr] = []
+
+    def _registry(**kwargs: object) -> object:
+        registry_credentials.append(cast(SecretStr, kwargs["incarnation_credential"]))
+        return object()
+
+    monkeypatch.setattr("kdive.jobs.assembly.build_handler_registry", _registry)
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: object())
     monkeypatch.setattr(
         "kdive.health.processes.server.build_postgres_ping", lambda pool: lambda: None
@@ -93,8 +120,10 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
 
     asyncio.run(__main__._run_worker(SecretRegistry(), _fake_telemetry()))
 
-    assert events == [*_warm_open(), "run", _close()]
+    assert events == [*_warm_open(), "acquire(timeout=None)", "authenticate", "run", _close()]
     config = constructed["config"]
+    assert constructed["incarnation_credential"] is credential
+    assert registry_credentials == [credential]
     assert isinstance(config, WorkerConfig)
     assert config.heartbeat is not None
     assert config.readiness is not None
@@ -102,3 +131,17 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     # Not merely present: `WorkerTelemetry.disabled()` is a non-None inert stand-in,
     # so wiring one would satisfy the check above (#1695).
     assert config.telemetry.enabled
+
+
+def test_worker_startup_refuses_old_fence_protocol() -> None:
+    from kdive.processes.worker import _validate_worker_incarnation
+
+    old = WorkerIncarnation(
+        incarnation="docker:old",
+        authority_kind="docker",
+        authority_binding={"container_id": "b" * 64},
+        fence_protocol=CURRENT_WORKER_FENCE_PROTOCOL - 1,
+    )
+
+    with pytest.raises(RuntimeError, match="fence protocol"):
+        _validate_worker_incarnation(old, configured_worker_id="docker:old")

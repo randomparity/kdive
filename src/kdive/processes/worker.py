@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import socket
 from typing import TYPE_CHECKING
 
 from psycopg_pool import AsyncConnectionPool
@@ -15,12 +14,35 @@ from kdive.processes.runtime import (
     readiness,
     run_process_runtime,
 )
+from kdive.processes.worker_incarnation import (
+    worker_incarnation_credential,
+    worker_incarnation_id,
+)
+from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
+    WorkerIncarnation,
+    authenticate_worker_incarnation,
+)
 
 if TYPE_CHECKING:
     from kdive.health.heartbeat import Heartbeat
     from kdive.health.probe import HealthProbe
     from kdive.observability.facade import Telemetry
     from kdive.security.secrets.secret_registry import SecretRegistry
+
+
+def _validate_worker_incarnation(
+    incarnation: WorkerIncarnation, *, configured_worker_id: str
+) -> str:
+    if incarnation.incarnation != configured_worker_id:
+        raise RuntimeError(
+            "authenticated worker incarnation does not match configured runtime identity"
+        )
+    if incarnation.fence_protocol != CURRENT_WORKER_FENCE_PROTOCOL:
+        raise RuntimeError(
+            "authenticated worker incarnation does not use the current fence protocol"
+        )
+    return incarnation.incarnation
 
 
 async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
@@ -32,7 +54,9 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
     from kdive.store.objectstore import object_store_from_env
 
     stop = install_stop()
-    worker_id = f"{socket.gethostname()}:{os.getpid()}"
+    configured_worker_id = worker_incarnation_id(os.getpid())
+    incarnation_credential = worker_incarnation_credential()
+    secret_registry.register(incarnation_credential.get_secret_value(), scope=None)
 
     def build_probe(pool: AsyncConnectionPool) -> HealthProbe:
         return build_worker_probe(
@@ -42,10 +66,19 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
     async def run_worker_body(
         pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe
     ) -> None:
+        async with pool.connection() as conn:
+            incarnation = await authenticate_worker_incarnation(conn, incarnation_credential)
+        worker_id = _validate_worker_incarnation(
+            incarnation, configured_worker_id=configured_worker_id
+        )
         worker = Worker(
             pool,
-            build_handler_registry(secret_registry=secret_registry),
+            build_handler_registry(
+                secret_registry=secret_registry,
+                incarnation_credential=incarnation_credential,
+            ),
             worker_id=worker_id,
+            incarnation_credential=incarnation_credential,
             secret_registry=secret_registry,
             config=WorkerConfig(
                 heartbeat=heartbeat,

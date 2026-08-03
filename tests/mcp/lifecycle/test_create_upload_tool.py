@@ -796,6 +796,32 @@ def test_create_upload_rejects_empty_artifacts(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_create_run_upload_rejects_closed_investigation(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_created_run(pool, build_profile=_EXTERNAL_PROFILE)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE investigations SET state = 'closed' WHERE id = "
+                    "(SELECT investigation_id FROM runs WHERE id = %s)",
+                    (UUID(run_id),),
+                )
+            out = await create_run_upload(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                artifacts=[{"name": "kernel", "sha256": "aaa", "size_bytes": 100}],
+                store=_FakeStore(),
+            )
+            async with pool.connection() as conn:
+                manifest = await upload_manifest.get_manifest(conn, "runs", UUID(run_id))
+        assert out.status == "error"
+        assert out.data["reason"] == "owner_not_accepting_upload"
+        assert manifest is None
+
+    asyncio.run(_run())
+
+
 def test_chunked_artifact_mints_one_url_per_chunk(migrated_url: str) -> None:
     _5gib = 5 * 1024 * 1024 * 1024
 

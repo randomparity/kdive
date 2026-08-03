@@ -1,6 +1,6 @@
 """CLI entrypoints for KDIVE processes and operator commands.
 
-The long-running processes are `python -m kdive {server|worker|reconciler}`:
+The long-running processes are `python -m kdive {server|worker|reconciler|lifecycle-witness}`:
 `server` runs the FastMCP streamable-HTTP app, `worker` runs the job-queue worker
 loop, and `reconciler` runs the drift-repair loop (ADR-0021). One-shot operator
 commands share the same parser: `migrate`, `install-fixtures`, `seed-project`, and
@@ -29,6 +29,7 @@ from kdive.domain.errors import CategorizedError
 from kdive.images.rootfs.command import add_build_fs_parser, run_build_fs
 from kdive.images.rootfs.stage_volume import add_stage_volume_parser, run_stage_volume
 from kdive.mcp.middleware.transport_trace import mcp_trace_enabled
+from kdive.processes.lifecycle_witness import run_lifecycle_witness as _run_lifecycle_witness
 from kdive.processes.reconciler import run_reconciler as _run_reconciler
 from kdive.processes.server import run_server as _run_server
 from kdive.processes.worker import run_worker as _run_worker
@@ -124,6 +125,15 @@ def _handle_reconciler(
 ) -> None:
     del args
     asyncio.run(_run_reconciler(secret_registry, _require_telemetry("reconciler", telemetry)))
+
+
+def _handle_lifecycle_witness(
+    args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
+) -> None:
+    del args
+    asyncio.run(
+        _run_lifecycle_witness(secret_registry, _require_telemetry("lifecycle-witness", telemetry))
+    )
 
 
 def _handle_migrate(
@@ -246,6 +256,12 @@ _COMMANDS: tuple[_Command, ...] = (
     _Command("worker", "run the job-queue worker loop", _handle_worker, runnable=True),
     _Command(
         "reconciler", "run the drift-repair reconciler loop", _handle_reconciler, runnable=True
+    ),
+    _Command(
+        "lifecycle-witness",
+        "run the Kubernetes worker lifecycle authority",
+        _handle_lifecycle_witness,
+        runnable=True,
     ),
     _Command("migrate", "apply database migrations", _handle_migrate, runnable=True),
     _Command(

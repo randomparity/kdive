@@ -17,7 +17,7 @@ two-phase vmcore upload.
 
 The `just` recipes below are source-tree conveniences. Installed-package deployments use
 `python -m kdive migrate` and `python -m kdive seed-project`, then run the app tier from the
-compose reference (`docker compose up -d migrate server worker reconciler`); see
+compose reference (`just compose-up`); see
 [`docs/operating/local-stack.md`](../local-stack.md) and
 [`deploy/compose/README.md`](../../../deploy/compose/README.md). For a **Kubernetes / Helm**
 deployment (the production-shaped path), see
@@ -212,7 +212,7 @@ reference ([`deploy/compose/README.md`](../../../deploy/compose/README.md)):
 ```bash
 python -m kdive migrate
 python -m kdive seed-project --project demo
-docker compose up -d migrate server worker reconciler
+just compose-up
 ```
 
 The default MCP URL is `http://127.0.0.1:8000/mcp`. Override the bind address with
@@ -304,7 +304,7 @@ set -a
 set +a
 python -m kdive migrate
 python -m kdive seed-project --project demo
-docker compose up -d migrate server worker reconciler
+just compose-up
 ```
 
 Expected defaults:

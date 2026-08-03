@@ -35,6 +35,16 @@ Do not run an old and new image together during this adoption. Suspending bucket
 live rollback to an image from before ADR-0524 are unsupported; recover forward with a
 version-aware image. A diagnostic run of an old image must remain quiesced.
 
+### Worker-fence authority upgrade
+
+For a release carrying the worker-fence protocol, stop old workers before migration. Migrate the
+runtime roles and protocol, rotate the distinct server, worker, reconciler, and lifecycle-witness
+credentials, start the witnesses, and then start current workers. Verify their registered
+incarnations and recovery-tool exposure before resuming queue processing. Rollback cannot restore
+old-worker claiming after this migration; recover forward with a current image. Raw lifecycle
+commands, manual finalizer removal, and database-owner or manual SQL bypasses retain pins rather
+than releasing them.
+
 ### Migration 0094: full-downtime artifact index build
 
 Migration 0094 builds a unique index over the artifact catalog inside KDIVE's atomic migration

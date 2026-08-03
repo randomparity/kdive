@@ -29,6 +29,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+from pydantic import SecretStr
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import JobState, RunState
@@ -85,12 +86,15 @@ class Worker:
         registry: HandlerRegistry,
         *,
         worker_id: str,
+        incarnation_credential: SecretStr,
         secret_registry: SecretRegistry,
         config: WorkerConfig = DEFAULT_WORKER_CONFIG,
     ) -> None:
         """Build a worker.
 
         Args:
+            incarnation_credential: Authority-minted credential for ``worker_id``. Every claim
+                authenticates it at the database boundary.
             config: Lease timing plus optional ``/livez`` heartbeat, readiness gate, and
                 per-job telemetry. ``None`` values in the config disable the optional
                 collaborators (always ready, no background liveness ticker, no-op telemetry).
@@ -116,6 +120,7 @@ class Worker:
         self._pool = pool
         self._registry = registry
         self._worker_id = worker_id
+        self._incarnation_credential = incarnation_credential
         self._lease = config.lease
         self._accepted_lanes = config.accepted_lanes
         self._heartbeat_interval = config.heartbeat_interval
@@ -144,7 +149,11 @@ class Worker:
             if await queue.is_queue_paused(conn):
                 return None
             job = await queue.dequeue(
-                conn, self._worker_id, lease=self._lease, accepted_lanes=self._accepted_lanes
+                conn,
+                self._worker_id,
+                incarnation_credential=self._incarnation_credential,
+                lease=self._lease,
+                accepted_lanes=self._accepted_lanes,
             )
             if self._telemetry.enabled:
                 self._telemetry.observe_queue_depth(
@@ -160,7 +169,11 @@ class Worker:
         if handler is None:
             async with self._pool.connection() as conn:
                 failed_job = await _fail_job_and_run(
-                    conn, job, ErrorCategory.NOT_IMPLEMENTED, terminal=True
+                    conn,
+                    job,
+                    ErrorCategory.NOT_IMPLEMENTED,
+                    incarnation_credential=self._incarnation_credential,
+                    terminal=True,
                 )
             self._telemetry.record_job_failure(failed_job, ErrorCategory.NOT_IMPLEMENTED)
             _log.warning("no handler for job %s kind %s; dead-lettered", job.id, job.kind)
@@ -226,7 +239,7 @@ class Worker:
 
     async def _dispatch(self, job: Job, handler: JobHandler) -> None:
         with self._telemetry.job_span(job.kind.value) as span:
-            heartbeat = asyncio.create_task(self._heartbeat_loop(job.id))
+            heartbeat = asyncio.create_task(self._heartbeat_loop(job.id, job.attempt))
             try:
                 await self._run_handler(job, handler, span)
             finally:
@@ -251,6 +264,7 @@ class Worker:
                     conn,
                     job,
                     category,
+                    incarnation_credential=self._incarnation_credential,
                     terminal=terminal,
                     failure_context=_failure_context(exc, self._secret_registry),
                 )
@@ -260,11 +274,17 @@ class Worker:
             _log.warning("job %s failed: %s", job.id, category, exc_info=True)
             return
         async with self._pool.connection() as conn:
-            completed = await queue.complete(conn, job.id, self._worker_id, result_ref)
+            completed = await queue.complete(
+                conn,
+                job.id,
+                result_ref,
+                attempt=job.attempt,
+                incarnation_credential=self._incarnation_credential,
+            )
         if completed is None:
             _log.warning("job %s completed but was reclaimed; result dropped", job.id)
 
-    async def _heartbeat_loop(self, job_id: UUID) -> None:
+    async def _heartbeat_loop(self, job_id: UUID, attempt: int) -> None:
         """Renew the lease until cancelled, the fence misses, or a heartbeat errors.
 
         A failed heartbeat (DB blip, lost connection) is logged and ends the loop
@@ -279,7 +299,13 @@ class Worker:
             async with self._pool.connection() as conn:
                 while True:
                     await asyncio.sleep(interval)
-                    if not await queue.heartbeat(conn, job_id, self._worker_id, lease=self._lease):
+                    if not await queue.heartbeat(
+                        conn,
+                        job_id,
+                        attempt=attempt,
+                        incarnation_credential=self._incarnation_credential,
+                        lease=self._lease,
+                    ):
                         return
         except Exception:  # noqa: BLE001 - a failing heartbeat must not crash the worker; stop beating and let the lease lapse
             _log.warning(
@@ -328,6 +354,7 @@ async def _fail_job_and_run(
     job: Job,
     category: ErrorCategory,
     *,
+    incarnation_credential: SecretStr,
     terminal: bool,
     failure_context: Mapping[str, str] | None = None,
 ) -> Job:
@@ -353,6 +380,7 @@ async def _fail_job_and_run(
         conn: A fresh finalize connection, not the handler's (ADR-0018 decision 7).
         job: The claimed job as this worker last saw it; its ``worker_id`` is the fence.
         category: The failure's category, recorded on both rows.
+        incarnation_credential: Authority for this worker incarnation.
         terminal: Dead-letter now rather than requeue (see :func:`_is_terminal`).
         failure_context: Redacted context for the job row; ignored on a requeue.
 
@@ -364,11 +392,21 @@ async def _fail_job_and_run(
     run_id = _compensation_run_id(job)
     if run_id is None:
         return await queue.fail(
-            conn, job, category, terminal=terminal, failure_context=failure_context
+            conn,
+            job,
+            category,
+            incarnation_credential=incarnation_credential,
+            terminal=terminal,
+            failure_context=failure_context,
         )
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
         failed_job = await queue.fail(
-            conn, job, category, terminal=terminal, failure_context=failure_context
+            conn,
+            job,
+            category,
+            incarnation_credential=incarnation_credential,
+            terminal=terminal,
+            failure_context=failure_context,
         )
         await _mark_run_failed(conn, failed_job, category, run_id)
         return failed_job

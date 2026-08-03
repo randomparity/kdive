@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kdive.fullname" . }}-server
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kdive.fullname" . }}-worker
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kdive.fullname" . }}-reconciler
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kdive.fullname" . }}-worker-termination-witness
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kdive.fullname" . }}-worker-death-reader
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+    resourceNames:
+      {{- range $ordinal := until (int (include "kdive.effectiveDeathCeiling" .)) }}
+      - {{ printf "%s-worker-%d" (include "kdive.fullname" $) $ordinal | quote }}
+      {{- end }}
+  - apiGroups: [""]
+    # Pod metadata finalizers are patched on the Pod resource; Kubernetes exposes no
+    # pods/finalizers subresource. Exact generated names keep this authority bounded.
+    resources: ["pods"]
+    verbs: ["patch"]
+    resourceNames:
+      {{- range $ordinal := until (int (include "kdive.effectiveDeathCeiling" .)) }}
+      - {{ printf "%s-worker-%d" (include "kdive.fullname" $) $ordinal | quote }}
+      {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kdive.fullname" . }}-worker-credential-tokenreview
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kdive.fullname" . }}-worker-death-reader
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kdive.fullname" . }}-worker-termination-witness
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kdive.fullname" . }}-worker-death-reader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kdive.fullname" . }}-worker-credential-tokenreview
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kdive.fullname" . }}-worker-termination-witness
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kdive.fullname" . }}-worker-credential-tokenreview

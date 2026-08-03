@@ -10,11 +10,17 @@ pre-building the image — is in [`deploy/compose/README.md`](../../deploy/compo
 
 ## Bring-up
 
-`docker compose up` resolves the graph, so one command starts the whole stack:
+The lifecycle wrapper resolves the graph and gates the worker, so one command starts the stack:
 
 ```bash
-docker compose up -d server worker reconciler
+just compose-up
 ```
+
+Use `just compose-recreate-worker` to replace the worker and `just compose-down` to tear the
+stack down. These are the only supported worker lifecycle commands: they preserve exact
+worker-incarnation evidence in Postgres. Raw Compose/Docker lifecycle commands and host workers
+bypass that evidence boundary. A database failure is fail-closed, retaining the never-started or
+terminal worker so the same recipe can be retried after Postgres recovers.
 
 Configuration is read from `KDIVE_*` variables; see
 [the config reference](../guide/reference/config.md) for every setting.
@@ -30,6 +36,17 @@ bucket-wide versioning and verifies `Enabled`, MFA Delete off, and no MinIO pref
 exclusions. A suspended, malformed, or excluded state makes the one-shot fail and blocks app
 start. A non-zero `migrate` exit also blocks app start. You do not order these services by hand —
 Compose does it from the graph.
+
+## Upgrading worker-fence authority
+
+For a deployment that already has workers, stop old workers before applying the worker-fence
+migrations. Then migrate the roles and fence protocol, rotate the distinct server, worker,
+reconciler, and lifecycle-witness credentials, start the lifecycle witnesses, and start only current
+workers. Verify that every current worker has registered its incarnation and that the server lists
+the recovery tools before resuming queue processing. Do not roll an old worker image back into this
+sequence: rollback cannot restore its ability to claim protocol-required jobs; recover forward with a
+current image. Raw Compose/Docker lifecycle commands and manual database changes bypass the witness
+and retain pins rather than releasing them.
 
 The Compose-managed bucket supplies the ADR-0524 store contract. When replacing it with an
 external store, follow the stop-old-first adoption order and IAM requirements in
@@ -56,7 +73,7 @@ does not start containers when the Docker daemon does. That is deliberate for a 
 MinIO uses root demo credentials and whose mock OIDC issuer mints accepted bearer tokens,
 both on published host ports: they should not come back on every reboot of a machine that
 once ran the stack. After a reboot, bring the stack up again explicitly with
-`docker compose up -d`.
+`just compose-up`.
 
 ## Pointing an agent at the endpoint
 
