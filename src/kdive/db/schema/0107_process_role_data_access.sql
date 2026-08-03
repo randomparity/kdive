@@ -123,7 +123,7 @@ SET search_path = ''
 AS $$
 DECLARE
     v_incarnation text;
-    v_lease_expires_at timestamptz;
+    v_lease_deadline timestamptz;
     v_server_time timestamptz;
 BEGIN
     IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
@@ -136,11 +136,20 @@ BEGIN
        OR p_attempt < 1 THEN
         RAISE EXCEPTION 'worker heartbeat facts are invalid' USING ERRCODE = '22023';
     END IF;
-    IF p_lease IS NULL
-       OR p_lease <= interval '0 seconds'
-       OR p_lease > interval '1 hour' THEN
+    v_server_time := clock_timestamp();
+    BEGIN
+        v_lease_deadline := v_server_time + p_lease;
+    EXCEPTION WHEN datetime_field_overflow THEN
         RAISE EXCEPTION
-            'worker heartbeat lease must be greater than zero and at most 1 hour; '
+            'worker heartbeat lease deadline must be after server time and at most 1 hour later; '
+            'retry with a valid lease'
+            USING ERRCODE = '22023';
+    END;
+    IF p_lease IS NULL
+       OR v_lease_deadline <= v_server_time
+       OR v_lease_deadline > v_server_time + interval '1 hour' THEN
+        RAISE EXCEPTION
+            'worker heartbeat lease deadline must be after server time and at most 1 hour later; '
             'retry with a valid lease'
             USING ERRCODE = '22023';
     END IF;
@@ -164,20 +173,19 @@ BEGIN
         RETURN false;
     END IF;
 
-    v_server_time := clock_timestamp();
     UPDATE public.jobs
-    SET heartbeat_at = v_server_time, lease_expires_at = v_server_time + p_lease
+    SET heartbeat_at = v_server_time, lease_expires_at = v_lease_deadline
     WHERE id = p_job_id
       AND worker_id = v_incarnation
       AND attempt = p_attempt
       AND state = 'running'
-    RETURNING lease_expires_at INTO v_lease_expires_at;
+    RETURNING lease_expires_at INTO v_lease_deadline;
     IF NOT FOUND THEN
         RETURN false;
     END IF;
 
     UPDATE public.investigation_build_uses
-    SET lease_expires_at = v_lease_expires_at
+    SET lease_expires_at = v_lease_deadline
     WHERE job_id = p_job_id
       AND holder_worker_id = v_incarnation
       AND attempt = p_attempt;

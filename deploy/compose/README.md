@@ -44,11 +44,12 @@ The migration owner and lifecycle witness DSNs are never present in the worker c
 256-bit incarnation credential is copied from a supervisor-owned file into the never-started container
 as UID 10001 with mode 0400 and is not placed in its environment or a shared mount.
 
-The worker's internal claim and heartbeat lease is a PostgreSQL interval per invocation: greater than
-zero and at most one hour, measured from the database's `clock_timestamp()` captured for that call.
-Invalid values raise SQLSTATE `22023` before job state or attempt data changes. Retry the same operation
-with a valid interval; the reference worker uses five minutes. Each heartbeat begins another bounded
-lease, so the ceiling is not a total job-runtime limit.
+The worker's internal claim and heartbeat lease is a PostgreSQL interval applied once to the
+database's `clock_timestamp()` captured for that invocation. Its computed deadline must be after that
+reference and no more than one hour later; this elapsed bound includes calendar and time-zone effects.
+An out-of-range deadline raises SQLSTATE `22023` before job state or attempt data changes. Retry the
+same operation with an interval whose computed deadline is valid; the reference worker uses five
+minutes. Each heartbeat begins another bounded lease, so the ceiling is not a total job-runtime limit.
 
 `docker compose up` resolves the graph rather than relying on the operator to order it:
 the app services pull in a healthy Postgres, the `minio-init` bucket-creation one-shot

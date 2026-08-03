@@ -47,6 +47,7 @@ SET search_path = ''
 AS $$
 DECLARE
     v_incarnation text;
+    v_lease_deadline timestamptz;
     v_server_time timestamptz;
 BEGIN
     IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
@@ -59,11 +60,20 @@ BEGIN
        OR p_accepted_lanes IS NULL THEN
         RAISE EXCEPTION 'worker claim facts are invalid' USING ERRCODE = '22023';
     END IF;
-    IF p_lease IS NULL
-       OR p_lease <= interval '0 seconds'
-       OR p_lease > interval '1 hour' THEN
+    v_server_time := clock_timestamp();
+    BEGIN
+        v_lease_deadline := v_server_time + p_lease;
+    EXCEPTION WHEN datetime_field_overflow THEN
         RAISE EXCEPTION
-            'worker claim lease must be greater than zero and at most 1 hour; '
+            'worker claim lease deadline must be after server time and at most 1 hour later; '
+            'retry with a valid lease'
+            USING ERRCODE = '22023';
+    END;
+    IF p_lease IS NULL
+       OR v_lease_deadline <= v_server_time
+       OR v_lease_deadline > v_server_time + interval '1 hour' THEN
+        RAISE EXCEPTION
+            'worker claim lease deadline must be after server time and at most 1 hour later; '
             'retry with a valid lease'
             USING ERRCODE = '22023';
     END IF;
@@ -88,13 +98,12 @@ BEGIN
         RETURN;
     END IF;
 
-    v_server_time := clock_timestamp();
     RETURN QUERY
     UPDATE public.jobs
     SET state = 'running',
         worker_id = v_incarnation,
         attempt = attempt + 1,
-        lease_expires_at = v_server_time + p_lease,
+        lease_expires_at = v_lease_deadline,
         heartbeat_at = v_server_time
     WHERE id = (
         SELECT id

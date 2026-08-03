@@ -93,13 +93,14 @@ on an older protocol. The upgrade runbook therefore performs: stop old workers; 
 rotate runtime credentials; start witnesses; start current workers; verify registration; resume queue
 processing. If ordering is wrong, jobs remain queued and startup/claim fails visibly.
 
-Claim and heartbeat lease durations are PostgreSQL intervals greater than zero and at most one hour.
-The unit and ceiling apply to each function invocation for one exact job attempt; a later successful
-heartbeat starts a new bounded lease and there is no cumulative per-job time limit. Each invocation
-captures `clock_timestamp()` as its reference clock rather than inheriting the caller transaction's
-timestamp. An invalid interval raises SQLSTATE `22023` before job state, attempt, heartbeat, or lease
-data changes. The caller recovers by retrying that claim or heartbeat with a valid interval; the
-production worker requests five minutes.
+Claim and heartbeat leases are PostgreSQL intervals applied once to a `clock_timestamp()` reference
+captured for the invocation. The computed deadline must be after that reference and at most one hour
+later, so calendar and time-zone fields are judged by their actual elapsed result rather than abstract
+interval ordering. The bound applies to each function invocation for one exact job attempt; a later
+successful heartbeat starts a new bounded lease and there is no cumulative per-job time limit. A
+deadline outside the bound raises SQLSTATE `22023` before job state, attempt, heartbeat, or lease data
+changes. The caller recovers by retrying that claim or heartbeat with an interval whose computed
+deadline is valid; the production worker requests five minutes.
 
 ### Provider cancellation
 

@@ -667,7 +667,17 @@ def test_worker_job_functions_fence_credential_holder_and_attempt(
         assert failed == ("failed", "build_failure")
 
 
-@pytest.mark.parametrize("lease", ["0 seconds", "-1 microsecond", "1 hour 1 microsecond"])
+@pytest.mark.parametrize(
+    "lease",
+    [
+        "0 seconds",
+        "-1 microsecond",
+        "1 hour 1 microsecond",
+        pytest.param("1000000 years", id="timestamp-overflow"),
+        pytest.param("-1 year 360 days 30 minutes", id="calendar-expired"),
+        pytest.param("1 year -360 days 30 minutes", id="calendar-over-limit"),
+    ],
+)
 def test_worker_claim_rejects_out_of_contract_lease_without_state_change(
     pg_conn: psycopg.Connection, role_dsn: RoleDsns, lease: str
 ) -> None:
@@ -691,7 +701,17 @@ def test_worker_claim_rejects_out_of_contract_lease_without_state_change(
     ).fetchone() == ("queued", 0, None, None, None)
 
 
-@pytest.mark.parametrize("lease", ["0 seconds", "-1 microsecond", "1 hour 1 microsecond"])
+@pytest.mark.parametrize(
+    "lease",
+    [
+        "0 seconds",
+        "-1 microsecond",
+        "1 hour 1 microsecond",
+        pytest.param("1000000 years", id="timestamp-overflow"),
+        pytest.param("-1 year 360 days 30 minutes", id="calendar-expired"),
+        pytest.param("1 year -360 days 30 minutes", id="calendar-over-limit"),
+    ],
+)
 def test_worker_heartbeat_rejects_out_of_contract_lease_without_state_change(
     pg_conn: psycopg.Connection, role_dsn: RoleDsns, lease: str
 ) -> None:

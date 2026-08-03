@@ -16,15 +16,24 @@ connection invoking the security-definer functions directly.
 ## Decision
 
 Every guarded job claim and heartbeat accepts one lease duration expressed as a PostgreSQL `interval`.
-The duration must be greater than zero and no greater than one hour. The function captures
-`clock_timestamp()` once at each invocation and uses that PostgreSQL value for both `heartbeat_at` and
-`lease_expires_at`; it does not use the caller transaction's possibly older timestamp.
+The function captures `clock_timestamp()` once at each invocation, applies the interval once to
+compute a candidate deadline, and validates that deadline against the same reference. The candidate
+must be strictly after the reference and no later than the reference plus one hour. The validated
+candidate is persisted as `lease_expires_at`, and the reference is persisted as `heartbeat_at`; the
+function does not use the caller transaction's possibly older timestamp.
+
+The computed deadline is the enforcement target, not PostgreSQL's abstract ordering of intervals.
+Intervals may contain month and day fields whose timestamp-addition result depends on the calendar
+and session time zone, including daylight-saving transitions, even when interval comparison
+normalizes them to a value within one hour. Applying the interval first evaluates those semantics at
+the invocation's actual database timestamp before enforcing the elapsed bound.
 
 The limit applies independently to each claim or heartbeat invocation for one exact job attempt. A
-successful later heartbeat may start another lease of at most one hour; this is not a cumulative
-per-job runtime limit. A missing, non-positive, or over-one-hour interval raises SQLSTATE `22023`
-before state, attempt, heartbeat, or lease data changes. The caller recovers by retrying the same claim
-or heartbeat with a valid interval. The production worker continues to request five minutes.
+successful later heartbeat may start another deadline at most one elapsed hour after its reference;
+this is not a cumulative per-job runtime limit. A missing interval or one whose computed deadline is
+not in the allowed range raises SQLSTATE `22023` before state, attempt, heartbeat, or lease data
+changes. The caller recovers by retrying the same claim or heartbeat with an interval whose computed
+deadline is valid. The production worker continues to request five minutes.
 
 The one-hour ceiling leaves twelve times the normal lease for specialized callers while bounding a
 single compromised or misconfigured request. Credential, active-incarnation, holder, exact-attempt,
@@ -37,9 +46,9 @@ A transaction opened long before a claim or heartbeat cannot backdate its lease.
 holder can continue extending work through bounded heartbeats, as required for long provider
 operations; termination evidence, not lease age, remains the artifact-fence recovery authority.
 
-Custom worker integrations that request zero, negative, or more than one hour now fail before mutation
-and must retry with a valid duration. Operators diagnosing SQLSTATE `22023` should correct that one
-invocation's lease interval; no job repair or attempt rollback is required.
+Custom worker integrations whose interval computes an expired or over-one-hour deadline now fail
+before mutation and must retry with a valid duration. Operators diagnosing SQLSTATE `22023` should
+correct that one invocation's lease interval; no job repair or attempt rollback is required.
 
 ## Considered & rejected
 
@@ -47,6 +56,9 @@ invocation's lease interval; no job repair or attempt rollback is required.
   directly, so application validation is not the enforcement boundary.
 - **Require only a positive interval.** This prevents immediate reclaim but leaves one request able to
   postpone recovery without limit.
+- **Compare the interval directly with zero and one hour.** PostgreSQL normalizes month and day fields
+  for interval ordering but applies them with calendar and time-zone semantics during timestamp
+  addition. A normalized in-range interval can therefore compute an expired or over-limit deadline.
 - **Use `now()`.** PostgreSQL binds it to transaction start, so a caller can unintentionally create an
   already-shortened or expired lease by invoking the function from an older transaction.
 - **Impose a cumulative job runtime limit.** Long builds and provider operations legitimately need
