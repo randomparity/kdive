@@ -14,7 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Reuse externally built kernel artifacts across Systems in one Investigation
 - Add column-agnostic render_envelope for generated verbs
 - Generate committed kdivectl verb descriptors from tool schemas
 - Unify --json on curated verbs onto the whole envelope
@@ -92,6 +91,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reuse investigation builds at run creation
 - Pin reusable builds during install
 - Reclaim investigation build generations
+- Fence build uses with worker incarnations
+- Gate compose worker lifecycle
+- Preserve terminal worker pod evidence
+- Route compose workers through lifecycle gate
+- Add investigation build catalog
+- Publish reusable external builds
+- Reuse investigation builds at run creation
+- Pin reusable builds during install
+- Reclaim investigation build generations
+- Preserve compose worker termination evidence
+- Preserve kubernetes worker termination evidence
+- Recover worker artifact fences safely
 
 ### Changed
 
@@ -358,10 +369,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make kernel reuse plan checkpoints executable
 - Publish reusable build contract
 - Require exact-version object reads
+- Refresh reusable build tool reference
+- Refresh operator recovery surfaces
+- Refresh RBAC resource snapshot
+- Expand reusable build threat model
+- Reflect conditional build recovery tools
+- Document worker death settings
+- Narrow reusable build GC bounds
+- Refresh durable recovery reference
+- Catalog compose worker nonce
+- Design investigation kernel build reuse
+- Define reusable build convergence
+- Retain reusable build expiry contract
+- Make expired build recovery terminating
+- Isolate reusable build generations
+- Scope kernel reuse to external builds
+- Make expired build recovery actionable
+- Fence reusable builds during install
+- Order reusable build lifecycle locks
+- Plan investigation kernel build reuse
+- Make kernel reuse plan checkpoints executable
+- Publish reusable build contract
+- Require exact-version object reads
 - Refresh reusable build run reference
 - Bound reusable build lifecycle scope
 - Enforce stop-old-first build schema upgrade
 - Record reduced branch review proof
+- Design recoverable worker artifact fences
+- Bind worker fences to exact credentials
+- Assign incarnation registration to witnesses
+- Make pod registration proofs explicit
+- Plan worker artifact fence implementation
+- Make worker fence plan executable
+- Define credential delivery loss recovery
+- Make pod credential delivery idempotent
+- Specify kubernetes credential broker
+- Make first fence build commit green
+- Explain worker fence baseline commit
+- Complete termination evidence alternatives
+- Complete worker fence limit contracts
+- Clarify kubernetes witness limit contract
+- Correct kubernetes witness continuation wording
+- Record worker-fence authority boundaries
 
 ### Fixed
 
@@ -618,6 +667,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Harden reusable run creation contract
 - Replay admitted installs after build expiry
 - Bound investigation build reclamation
+- Harden reusable build lifecycle
+- Close reusable build review gaps
+- Close reusable build lifecycle gaps
+- Persist reusable build use fences
+- Pin reusable artifact reads to versions
+- Preserve reusable build content identity
+- Persist reusable artifact version pins
+- Recover dead-worker build pins
+- Complete reusable build deadline contracts
+- Classify build pin recovery tools
+- Bound investigation build garbage collection
+- Pin reusable artifact reads to versions
+- Bind build validation to object versions
+- Bound build artifact GC passes
+- Verify worker death across deployments
+- Register worker death settings
+- Generate conditional recovery catalog
+- Consume durable worker termination evidence
+- Wait for compose registry dependencies
+- Supervise worker termination witnesses
+- Fence reusable build finalization
+- Harden reusable run creation contract
+- Replay admitted installs after build expiry
+- Bound investigation build reclamation
 - Pin reusable artifact reads to versions
 - Preserve reusable build content identity
 - Persist reusable artifact version pins
@@ -628,6 +701,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve reclaimed build expiry recovery
 - Require reusable build artifact versions
 - Preserve reusable build expiry after reclaim
+- Restore worker fence integration baseline
+- Harden worker fence authority
+- Close worker fence reclamation races
+- Scrub runtime role privilege residue
+- Retain build use through install cancellation
+- Address install cancellation review findings
+- Preserve install failure outcome precedence
+- Close compose lifecycle review gaps
+- Enforce worker job transition authority
+- Bound worker leases and cleanup probes
+- Validate worker lease deadlines
+- Start worker leases after lock waits
+- Restore protected worker fence paths
+- Paginate worker fence diagnostics
+- Validate kubernetes credential TokenReview audience
+- Retry exact worker termination evidence
+- Separate Helm database principals
+- Isolate Kubernetes lifecycle authority
+- Restrict deletion of pinned build jobs
+- Minimize lifecycle witness configuration
+- Bound TLS admission before handshake
+- Prevent database authority aliases
+- Supervise lifecycle authority tasks
 
 ### Build
 
@@ -635,6 +731,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump the python-dependencies group with 4 updates
 - Bump the docker-images group across 1 directory with 2 updates
 - Pin the ppc64le uv wheel to 0.11.31
+- Update cryptography to 50.0.0
+
+### Security
+
+- Restrict Docker death authority
+- Deny pod reads with no workers
+- Require terminal worker evidence
+- Audit build pin recovery refusals
+- Isolate pod finalizer authority
+- Bind build uses to worker credentials
+- Reject workers without fence protocol
+- Bound credential broker sessions
 
 ### Style
 
