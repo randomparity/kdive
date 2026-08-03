@@ -12,6 +12,7 @@ import pytest
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
+from pydantic import SecretStr
 
 import kdive.mcp.assembly.app as app_module
 import kdive.mcp.assembly.tool_registration as tool_module
@@ -27,6 +28,8 @@ from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
+
+_WORKER_CREDENTIAL = SecretStr("worker-test-incarnation-credential")
 
 
 def _verifier() -> JWTVerifier:
@@ -379,7 +382,9 @@ def test_worker_registry_default_propagates_object_store_assembly_error(
     monkeypatch.setattr(handler_module, "build_object_store_assembly", build_object_store_assembly)
 
     with pytest.raises(CategorizedError) as caught:
-        build_handler_registry(secret_registry=SecretRegistry())
+        build_handler_registry(
+            secret_registry=SecretRegistry(), incarnation_credential=_WORKER_CREDENTIAL
+        )
 
     assert caught.value is error
 
@@ -388,7 +393,9 @@ def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     # The provisioning plane (#16) registers provision/teardown, the install + boot plane (#19)
     # registers install/boot, and the retrieve plane (#24) registers capture_vmcore — each
     # building its provider lazily from env (no libvirt/S3 connection at registration).
-    registry = build_handler_registry(secret_registry=SecretRegistry())
+    registry = build_handler_registry(
+        secret_registry=SecretRegistry(), incarnation_credential=_WORKER_CREDENTIAL
+    )
     assert isinstance(registry, HandlerRegistry)
     assert registry.get(JobKind.PROVISION) is not None
     assert registry.get(JobKind.TEARDOWN) is not None
@@ -419,6 +426,7 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
         assembly: handler_module.WorkerHandlerAssembly,
     ) -> tuple[handler_module.HandlerRegistrar, ...]:
         captured["resolver"] = assembly.resolver
+        captured["incarnation_credential"] = assembly.incarnation_credential
         captured["secret_registry"] = assembly.secret_registry
         captured["object_stores"] = assembly.object_stores
 
@@ -428,11 +436,13 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
 
     build_handler_registry(
         secret_registry=caller_registry,
+        incarnation_credential=_WORKER_CREDENTIAL,
         provider_composition=cast(Any, _FakeComposition()),
     )
 
     assert captured["resolver"] is resolver
     assert captured["secret_registry"] is caller_registry
+    assert captured["incarnation_credential"] is _WORKER_CREDENTIAL
     object_stores = captured["object_stores"]
     assert isinstance(object_stores, ObjectStoreAssembly)
     # S3 is a required backend (ADR-0337): the assembly carries one non-optional store.

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from psycopg import AsyncConnection
+from pydantic import SecretStr
 
 from kdive.db.idempotency import claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -25,6 +26,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.lifecycle import Installer, InstallRequest
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
+from kdive.services.runs.build_use import acquire_build_use, release_build_use
 from kdive.services.runs.steps import (
     cmdline_for,
     existing_build_result,
@@ -56,6 +58,7 @@ async def install_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
+    incarnation_credential: SecretStr,
 ) -> str | None:
     """Stage the built kernel for direct-kernel boot, recording the `install` step.
 
@@ -65,7 +68,15 @@ async def install_handler(
     payload = _install_payload_context(job)
     plan = await _resolve_install_plan(conn, payload, resolver)
     job_ctx = job_context_from_job(job, plan.run.project)
-    claimed = await _run_install_step(conn, payload.run_id, plan.installer, plan.request)
+    claimed = await _run_install_step(
+        conn,
+        payload.run_id,
+        plan.installer,
+        plan.request,
+        job_id=job.id,
+        attempt=job.attempt,
+        incarnation_credential=incarnation_credential,
+    )
     if not claimed:
         return str(payload.run_id)
     await _complete_install_step(conn, job_ctx, plan)
@@ -252,22 +263,40 @@ async def _run_install_step(
     run_id: UUID,
     installer: Installer,
     request: InstallRequest,
+    *,
+    job_id: UUID,
+    attempt: int,
+    incarnation_credential: SecretStr,
 ) -> bool:
     claim = await claim_run_step(conn, run_id, "install")
     if not claim.claimed:
         return False
-    provider_task = asyncio.create_task(asyncio.to_thread(installer.install, request))
+    use_id = await acquire_build_use(
+        conn,
+        run_id,
+        job_id=job_id,
+        attempt=attempt,
+        incarnation_credential=incarnation_credential,
+    )
     try:
-        cancelled = await _wait_through_cancellation(provider_task)
-    except Exception:
-        cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
-        await _wait_through_cancellation(cleanup)
-        raise
-    if cancelled:
-        cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
-        await _wait_through_cancellation(cleanup)
-        raise asyncio.CancelledError
-    return True
+        provider_task = asyncio.create_task(asyncio.to_thread(installer.install, request))
+        try:
+            cancelled = await _wait_through_cancellation(provider_task)
+        except Exception:
+            cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
+            await _wait_through_cancellation(cleanup)
+            raise
+        if cancelled:
+            cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
+            await _wait_through_cancellation(cleanup)
+            raise asyncio.CancelledError
+        return True
+    finally:
+        await release_build_use(
+            conn,
+            use_id,
+            incarnation_credential=incarnation_credential,
+        )
 
 
 async def _complete_install_step(

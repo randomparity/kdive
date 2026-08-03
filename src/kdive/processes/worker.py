@@ -73,7 +73,10 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
         )
         worker = Worker(
             pool,
-            build_handler_registry(secret_registry=secret_registry),
+            build_handler_registry(
+                secret_registry=secret_registry,
+                incarnation_credential=incarnation_credential,
+            ),
             worker_id=worker_id,
             incarnation_credential=incarnation_credential,
             secret_registry=secret_registry,

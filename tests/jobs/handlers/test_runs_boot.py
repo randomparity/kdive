@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
+from pydantic import SecretStr
 
 from kdive.artifacts.storage import StoredArtifact
 from kdive.domain.capture import CaptureMethod
@@ -148,6 +149,7 @@ def test_expected_crash_matched_line_is_redacted_at_source() -> None:
 def _ports() -> runs.RunHandlerPorts:
     return runs.RunHandlerPorts(
         resolver=cast(ProviderResolver, object()),
+        incarnation_credential=SecretStr("worker-test-incarnation-credential"),
         secret_registry=cast(SecretRegistry, object()),
         artifact_store=cast(ObjectStore, "artifact-store"),
     )
@@ -202,7 +204,10 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
 
     # Each lambda threads the shared conn/job plus the ports the leaf handler needs.
     assert calls["install"][0] is conn and calls["install"][1] is job
-    assert calls["install"][2] == {"resolver": ports.resolver}
+    assert calls["install"][2] == {
+        "resolver": ports.resolver,
+        "incarnation_credential": ports.incarnation_credential,
+    }
     assert calls["boot"][0] is conn and calls["boot"][1] is job
     assert calls["boot"][2] == {
         "resolver": ports.resolver,

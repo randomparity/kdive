@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from typing import cast
 
 import pytest
 from pydantic import SecretStr
@@ -89,7 +90,13 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     monkeypatch.setattr("kdive.processes.worker.worker_incarnation_credential", lambda: credential)
     monkeypatch.setattr("kdive.processes.worker.authenticate_worker_incarnation", _authenticate)
     monkeypatch.setattr("kdive.processes.worker.install_stop", lambda: asyncio.Event())
-    monkeypatch.setattr("kdive.jobs.assembly.build_handler_registry", lambda **kw: object())
+    registry_credentials: list[SecretStr] = []
+
+    def _registry(**kwargs: object) -> object:
+        registry_credentials.append(cast(SecretStr, kwargs["incarnation_credential"]))
+        return object()
+
+    monkeypatch.setattr("kdive.jobs.assembly.build_handler_registry", _registry)
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: object())
     monkeypatch.setattr(
         "kdive.health.processes.server.build_postgres_ping", lambda pool: lambda: None
@@ -116,6 +123,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     assert events == [*_warm_open(), "acquire(timeout=None)", "authenticate", "run", _close()]
     config = constructed["config"]
     assert constructed["incarnation_credential"] is credential
+    assert registry_credentials == [credential]
     assert isinstance(config, WorkerConfig)
     assert config.heartbeat is not None
     assert config.readiness is not None

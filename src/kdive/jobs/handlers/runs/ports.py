@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pydantic import SecretStr
+
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
@@ -14,5 +16,6 @@ class RunHandlerPorts:
     """Dependencies shared by the install and boot job handlers."""
 
     resolver: ProviderResolver
+    incarnation_credential: SecretStr
     secret_registry: SecretRegistry
     artifact_store: ObjectStore
