@@ -246,16 +246,31 @@ def _validated_artifact_versions(
     return {name: versions[name] for name in refs}
 
 
-async def _wait_through_cancellation(task: asyncio.Task[object]) -> bool:
-    """Wait for a task to finish, retaining cancellation for its caller."""
+async def _drain_through_cancellation(task: asyncio.Task[object]) -> bool:
+    """Drain a task, retaining cancellation without consuming its result."""
     cancelled = False
     while not task.done():
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            cancelled = True
+            if not task.cancelled():
+                cancelled = True
+        except Exception:
+            # The caller reads task.result() after any ordered cleanup it requires.
+            pass
+    return cancelled
+
+
+async def _wait_through_cancellation(task: asyncio.Task[object]) -> bool:
+    """Wait for a task to finish, retaining cancellation for its caller."""
+    cancelled = await _drain_through_cancellation(task)
     task.result()
     return cancelled
+
+
+async def _abandon_claim_through_cancellation(conn: AsyncConnection, run_id: UUID) -> None:
+    cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
+    await _wait_through_cancellation(cleanup)
 
 
 async def _run_install_step(
@@ -271,32 +286,45 @@ async def _run_install_step(
     claim = await claim_run_step(conn, run_id, "install")
     if not claim.claimed:
         return False
-    use_id = await acquire_build_use(
-        conn,
-        run_id,
-        job_id=job_id,
-        attempt=attempt,
-        incarnation_credential=incarnation_credential,
-    )
+    try:
+        use_id = await acquire_build_use(
+            conn,
+            run_id,
+            job_id=job_id,
+            attempt=attempt,
+            incarnation_credential=incarnation_credential,
+        )
+    except Exception, asyncio.CancelledError:
+        await _abandon_claim_through_cancellation(conn, run_id)
+        raise
+    claim_abandoned = False
     try:
         provider_task = asyncio.create_task(asyncio.to_thread(installer.install, request))
         try:
             cancelled = await _wait_through_cancellation(provider_task)
         except Exception:
-            cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
-            await _wait_through_cancellation(cleanup)
+            await _abandon_claim_through_cancellation(conn, run_id)
+            claim_abandoned = True
             raise
         if cancelled:
-            cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
-            await _wait_through_cancellation(cleanup)
-            raise asyncio.CancelledError
-        return True
+            await _abandon_claim_through_cancellation(conn, run_id)
+            claim_abandoned = True
     finally:
-        await release_build_use(
-            conn,
-            use_id,
-            incarnation_credential=incarnation_credential,
+        release = asyncio.create_task(
+            release_build_use(
+                conn,
+                use_id,
+                incarnation_credential=incarnation_credential,
+            )
         )
+        release_cancelled = await _drain_through_cancellation(release)
+        if release_cancelled and not claim_abandoned:
+            await _abandon_claim_through_cancellation(conn, run_id)
+            claim_abandoned = True
+        release.result()
+    if cancelled or release_cancelled:
+        raise asyncio.CancelledError
+    return True
 
 
 async def _complete_install_step(
