@@ -311,9 +311,10 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
     assert rule[0]["resources"] == ["pods"]
     assert rule[0]["verbs"] == ["get"]
     assert rule[0]["resourceNames"] == [f"kdive-kdive-worker-{ordinal}" for ordinal in range(32)]
-    assert rule[1]["resources"] == ["pods"]
-    assert rule[1]["verbs"] == ["patch"]
-    assert rule[1]["resourceNames"] == rule[0]["resourceNames"]
+    assert rule[1] == {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}
+    assert rule[2]["resources"] == ["pods"]
+    assert rule[2]["verbs"] == ["patch"]
+    assert rule[2]["resourceNames"] == rule[0]["resourceNames"]
     assert binding["subjects"] == [
         {"kind": "ServiceAccount", "name": "kdive-kdive-worker-termination-witness"}
     ]
@@ -337,6 +338,64 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
     )
     assert reconciler["spec"]["template"]["spec"]["serviceAccountName"].endswith(
         "-worker-termination-witness"
+    )
+
+
+def test_worker_credential_broker_is_private_tls_and_init_only() -> None:
+    res = _template(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y",
+        "workerCredentialBroker.tls.secretName=broker-tls",
+        "workerCredentialBroker.envelopeKey.secretName=broker-envelope",
+    )
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+    service = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Service"
+        and str(doc["metadata"]["name"]).endswith("-worker-credential-broker")
+    )
+    policy = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "NetworkPolicy"
+        and str(doc["metadata"]["name"]).endswith("-worker-credential-broker")
+    )
+    worker = next(doc for doc in docs if doc.get("kind") == "StatefulSet")
+    reconciler = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and str(doc["metadata"]["name"]).endswith("-reconciler")
+    )
+
+    assert service["spec"]["type"] == "ClusterIP"
+    assert service["spec"].get("clusterIP") != "None"
+    assert policy["spec"]["podSelector"]["matchLabels"]["app"].endswith("-reconciler")
+    assert policy["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"]["app"].endswith(
+        "-worker"
+    )
+    assert worker["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+    init = worker["spec"]["template"]["spec"]["initContainers"][0]
+    worker_container = worker["spec"]["template"]["spec"]["containers"][0]
+    assert init["command"] == ["python", "-m", "kdive.processes.kubernetes_credential_init"]
+    assert any(
+        volume["emptyDir"].get("medium") == "Memory"
+        for volume in worker["spec"]["template"]["spec"]["volumes"]
+    )
+    assert all(
+        "credential-token" not in mount["name"] for mount in worker_container["volumeMounts"]
+    )
+    assert all("broker-envelope" not in mount["name"] for mount in worker_container["volumeMounts"])
+    reconciler_mounts = reconciler["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    assert any(mount["name"] == "broker-envelope" for mount in reconciler_mounts)
+    lifecycle_dsn = next(
+        item
+        for item in reconciler["spec"]["template"]["spec"]["containers"][0]["env"]
+        if item["name"] == "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL"
+    )
+    assert (
+        lifecycle_dsn["valueFrom"]["secretKeyRef"]["name"]
+        == "kdive-worker-credential-broker-database"
     )
 
 
@@ -751,7 +810,11 @@ def test_no_service_exposes_an_aux_port() -> None:
         if isinstance(doc, dict) and doc.get("kind") == "Service":
             ports = doc["spec"].get("ports") or []
             published[doc["metadata"]["name"]] = {p.get("port") for p in ports}
-    assert published == {"kdive-kdive-server": {8000}, "kdive-kdive-worker": set()}
+    assert published == {
+        "kdive-kdive-server": {8000},
+        "kdive-kdive-worker": set(),
+        "kdive-kdive-worker-credential-broker": {9443},
+    }
     for name, ports in published.items():
         assert not ports & set(_AUX_PORTS.values()), name
 
@@ -976,7 +1039,7 @@ def test_external_path_has_no_demo_backends() -> None:
     res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
     assert res.returncode == 0, res.stderr
     assert "mock-oauth2-server" not in res.stdout
-    assert "kind: NetworkPolicy" not in res.stdout
+    assert res.stdout.count("kind: NetworkPolicy") == 1
     assert res.stdout.count("kind: Deployment") == 2
     assert res.stdout.count("kind: StatefulSet") == 1
 

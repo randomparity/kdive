@@ -113,3 +113,61 @@ async def terminate_worker_incarnation(
         ).fetchone()
     assert row is not None
     return bool(row[0])
+
+
+async def register_kubernetes_worker_incarnation(
+    conn: AsyncConnection,
+    incarnation: str,
+    binding: dict[str, Any],
+    credential_hash: bytes,
+    credential_envelope: bytes,
+    fence_protocol: int,
+) -> bool:
+    """Persist an exact Kubernetes identity and its encrypted init-only envelope."""
+    require_top_level_transaction(conn, "register_kubernetes_worker_incarnation")
+    async with conn.transaction():
+        row = await (
+            await conn.execute(
+                "SELECT public.register_kubernetes_worker_incarnation(%s, %s, %s, %s, %s)",
+                (
+                    incarnation,
+                    Jsonb(binding),
+                    credential_hash,
+                    credential_envelope,
+                    fence_protocol,
+                ),
+            )
+        ).fetchone()
+    assert row is not None
+    return bool(row[0])
+
+
+async def read_kubernetes_credential_envelope(
+    conn: AsyncConnection, incarnation: str, binding: dict[str, Any]
+) -> bytes | None:
+    """Return a pending encrypted envelope only for the exact active Kubernetes binding."""
+    require_top_level_transaction(conn, "read_kubernetes_credential_envelope")
+    async with conn.transaction():
+        row = await (
+            await conn.execute(
+                "SELECT public.read_kubernetes_credential_envelope(%s, %s)",
+                (incarnation, Jsonb(binding)),
+            )
+        ).fetchone()
+    return None if row is None else cast(bytes | None, row[0])
+
+
+async def acknowledge_kubernetes_credential_envelope(
+    conn: AsyncConnection, incarnation: str, binding: dict[str, Any]
+) -> bool:
+    """Durably clear a pending exact envelope, accepting a repeated exact acknowledgment."""
+    require_top_level_transaction(conn, "acknowledge_kubernetes_credential_envelope")
+    async with conn.transaction():
+        row = await (
+            await conn.execute(
+                "SELECT public.acknowledge_kubernetes_credential_envelope(%s, %s)",
+                (incarnation, Jsonb(binding)),
+            )
+        ).fetchone()
+    assert row is not None
+    return bool(row[0])

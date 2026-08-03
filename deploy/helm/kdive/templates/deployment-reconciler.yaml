@@ -19,6 +19,7 @@ spec:
         {{- include "kdive.scrapeAnnotations" 9466 | nindent 8 }}
     spec:
       serviceAccountName: {{ include "kdive.fullname" . }}-worker-termination-witness
+      automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -31,6 +32,11 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["reconciler"]
           env:
+            - name: KDIVE_LIFECYCLE_WITNESS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.workerCredentialBroker.lifecycleWitnessDatabase.secretName | quote }}
+                  key: {{ .Values.workerCredentialBroker.lifecycleWitnessDatabase.key | quote }}
             - name: KDIVE_KUBERNETES_WITNESS_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -39,6 +45,18 @@ spec:
               value: {{ include "kdive.fullname" . }}-worker
             - name: KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING
               value: {{ include "kdive.effectiveDeathCeiling" . | quote }}
+            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST
+              value: "0.0.0.0"
+            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_PORT
+              value: {{ .Values.workerCredentialBroker.port | quote }}
+            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_CERT
+              value: /run/kdive/worker-credential-broker-tls/{{ .Values.workerCredentialBroker.tls.certificateKey }}
+            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_KEY
+              value: /run/kdive/worker-credential-broker-tls/{{ .Values.workerCredentialBroker.tls.privateKey }}
+            - name: KDIVE_KUBERNETES_CREDENTIAL_BROKER_CA
+              value: /run/kdive/worker-credential-broker-tls/{{ .Values.workerCredentialBroker.tls.caKey }}
+            - name: KDIVE_KUBERNETES_CREDENTIAL_ENVELOPE_KEY
+              value: /run/kdive/worker-credential-broker-envelope/{{ .Values.workerCredentialBroker.envelopeKey.key }}
             {{- include "kdive.auxEnv" 9466 | nindent 12 }}
             {{- include "kdive.secretsEnv" . | nindent 12 }}
             {{- include "kdive.systemsEnv" . | nindent 12 }}
@@ -52,15 +70,32 @@ spec:
           # is not killed by liveness.
           ports:
             - containerPort: 9466
+            - name: worker-credential-broker
+              containerPort: {{ .Values.workerCredentialBroker.port }}
           {{- include "kdive.auxProbes" 9466 | nindent 10 }}
-          {{- if or .Values.secrets.secretName .Values.systems.configMapName .Values.fixtures.configMapName }}
           volumeMounts:
+            - name: broker-tls
+              mountPath: /run/kdive/worker-credential-broker-tls
+              readOnly: true
+            - name: broker-envelope
+              mountPath: /run/kdive/worker-credential-broker-envelope
+              readOnly: true
+          {{- if or .Values.secrets.secretName .Values.systems.configMapName .Values.fixtures.configMapName }}
             {{- include "kdive.secretsVolumeMount" . | nindent 12 }}
             {{- include "kdive.systemsVolumeMount" . | nindent 12 }}
             {{- include "kdive.fixturesVolumeMount" . | nindent 12 }}
           {{- end }}
-      {{- if or .Values.secrets.secretName .Values.systems.configMapName .Values.fixtures.configMapName }}
       volumes:
+        - name: broker-tls
+          secret:
+            secretName: {{ .Values.workerCredentialBroker.tls.secretName | quote }}
+        - name: broker-envelope
+          secret:
+            secretName: {{ .Values.workerCredentialBroker.envelopeKey.secretName | quote }}
+            items:
+              - key: {{ .Values.workerCredentialBroker.envelopeKey.key | quote }}
+                path: {{ .Values.workerCredentialBroker.envelopeKey.key | quote }}
+      {{- if or .Values.secrets.secretName .Values.systems.configMapName .Values.fixtures.configMapName }}
         {{- include "kdive.secretsVolume" . | nindent 8 }}
         {{- include "kdive.systemsVolume" . | nindent 8 }}
         {{- include "kdive.fixturesVolume" . | nindent 8 }}

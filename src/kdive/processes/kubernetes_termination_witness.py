@@ -18,10 +18,11 @@ from typing import Any
 FINALIZER = "kdive.io/worker-termination-evidence"
 _log = logging.getLogger(__name__)
 _CONFLICT_RETRIES = 3
+_MAX_PASS_COUNT = 1_000
 
 type ReadPod = Callable[[str, str], Mapping[str, Any] | None]
 type PatchFinalizers = Callable[[str, str, list[dict[str, object]]], Awaitable[None]]
-type TerminateIncarnation = Callable[[str, str], Awaitable[None]]
+type TerminateIncarnation = Callable[[str, str], Awaitable[bool]]
 
 _TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _CA = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
@@ -131,11 +132,12 @@ class KubernetesTerminationWitness:
     read_pod: ReadPod
     patch_finalizers: PatchFinalizers
     terminate: TerminateIncarnation
+    pass_limit: int = _MAX_PASS_COUNT
 
     async def sweep_once(self) -> int:
         """Process at most one bounded configured page of exact worker names."""
         completed = 0
-        for ordinal in range(self.ordinal_ceiling):
+        for ordinal in range(min(self.ordinal_ceiling, self.pass_limit, _MAX_PASS_COUNT)):
             name = f"{self.worker_name}-{ordinal}"
             for attempt in range(_CONFLICT_RETRIES):
                 pod = self.read_pod(self.namespace, name)
@@ -143,8 +145,10 @@ class KubernetesTerminationWitness:
                     break
                 uid, resource_version, phase, index = claim
                 holder = f"kubernetes:{self.namespace}:{name}:{uid}"
-                await self.terminate(holder, f"kubernetes_pod_{phase}")
+                if not await self.terminate(holder, f"kubernetes_pod_{phase}"):
+                    break
                 operations: list[dict[str, object]] = [
+                    {"op": "test", "path": "/metadata/uid", "value": uid},
                     {
                         "op": "test",
                         "path": "/metadata/resourceVersion",

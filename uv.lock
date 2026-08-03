@@ -703,6 +703,7 @@ source = { editable = "." }
 dependencies = [
     { name = "boto3" },
     { name = "botocore" },
+    { name = "cryptography" },
     { name = "defusedxml" },
     { name = "fastmcp-slim", extra = ["client", "server"] },
     { name = "httpx" },
@@ -742,6 +743,7 @@ live = [
 requires-dist = [
     { name = "boto3", specifier = "==1.43.21" },
     { name = "botocore", specifier = "==1.43.54" },
+    { name = "cryptography", specifier = "==49.0.0" },
     { name = "defusedxml", specifier = "==0.7.1" },
     { name = "fastmcp-slim", extras = ["server", "client"], specifier = "==3.4.4" },
     { name = "httpx", specifier = "==0.28.1" },

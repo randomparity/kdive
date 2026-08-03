@@ -229,6 +229,12 @@ render no MinIO-specific init container.
 {{- define "kdive.minioVersioningBarrier" -}}
 {{- if .Values.bundledBackends }}
 initContainers:
+{{ include "kdive.minioVersioningBarrierItem" . | nindent 2 }}
+{{- end }}
+{{- end -}}
+
+{{- define "kdive.minioVersioningBarrierItem" -}}
+{{- if .Values.bundledBackends }}
   - name: verify-minio-versioning
     image: {{ .Values.demo.mc.image }}
     command:

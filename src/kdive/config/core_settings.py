@@ -839,6 +839,10 @@ def _kubernetes_worker(env: Mapping[str, str]) -> bool:
     return env.get("KDIVE_WORKER_INCARNATION_KIND", "local") == "kubernetes"
 
 
+def _kubernetes_witness(env: Mapping[str, str]) -> bool:
+    return bool(env.get("KDIVE_KUBERNETES_WITNESS_NAMESPACE"))
+
+
 POD_NAMESPACE = Setting(
     name="KDIVE_POD_NAMESPACE",
     parse=_nonempty,
@@ -886,6 +890,62 @@ KUBERNETES_WITNESS_ORDINAL_CEILING = Setting(
     group="worker-death",
     processes=_RECONCILER,
     help="Maximum exclusive worker ordinal polled by the Kubernetes termination witness.",
+)
+KUBERNETES_CREDENTIAL_BROKER_HOST = Setting(
+    name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_RECONCILER,
+    required_when=_kubernetes_witness,
+    help="Private reconciler bind host for the Kubernetes worker credential broker.",
+    suggest="the internal broker bind host, e.g. 0.0.0.0",
+)
+KUBERNETES_CREDENTIAL_BROKER_PORT = Setting(
+    name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_PORT",
+    parse=_positive_int,
+    group="worker-death",
+    processes=_RECONCILER,
+    required_when=_kubernetes_witness,
+    help="Private TLS port for the Kubernetes worker credential broker.",
+    suggest="a TCP port between 1 and 65535",
+)
+KUBERNETES_CREDENTIAL_BROKER_TLS_CERT = Setting(
+    name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_CERT",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_RECONCILER,
+    required_when=_kubernetes_witness,
+    help="Reconciler-only file reference for the broker TLS certificate.",
+    suggest="a readable TLS certificate file path",
+)
+KUBERNETES_CREDENTIAL_BROKER_TLS_KEY = Setting(
+    name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_KEY",
+    parse=_nonempty,
+    secret=True,
+    group="worker-death",
+    processes=_RECONCILER,
+    required_when=_kubernetes_witness,
+    help="Reconciler-only file reference for the broker TLS private key.",
+    suggest="a readable TLS private-key file path",
+)
+KUBERNETES_CREDENTIAL_BROKER_CA = Setting(
+    name="KDIVE_KUBERNETES_CREDENTIAL_BROKER_CA",
+    parse=_nonempty,
+    group="worker-death",
+    processes=_RECONCILER,
+    required_when=_kubernetes_witness,
+    help="Certificate-authority file reference trusted by the broker and init client.",
+    suggest="a readable TLS CA certificate file path",
+)
+KUBERNETES_CREDENTIAL_ENVELOPE_KEY = Setting(
+    name="KDIVE_KUBERNETES_CREDENTIAL_ENVELOPE_KEY",
+    parse=_nonempty,
+    secret=True,
+    group="worker-death",
+    processes=_RECONCILER,
+    required_when=_kubernetes_witness,
+    help="Reconciler-only Fernet key file for transient worker credential envelopes.",
+    suggest="a readable Fernet envelope-key file path",
 )
 
 SETTINGS = [
@@ -958,4 +1018,10 @@ SETTINGS = [
     KUBERNETES_WITNESS_NAMESPACE,
     KUBERNETES_WITNESS_WORKER_NAME,
     KUBERNETES_WITNESS_ORDINAL_CEILING,
+    KUBERNETES_CREDENTIAL_BROKER_HOST,
+    KUBERNETES_CREDENTIAL_BROKER_PORT,
+    KUBERNETES_CREDENTIAL_BROKER_TLS_CERT,
+    KUBERNETES_CREDENTIAL_BROKER_TLS_KEY,
+    KUBERNETES_CREDENTIAL_BROKER_CA,
+    KUBERNETES_CREDENTIAL_ENVELOPE_KEY,
 ]

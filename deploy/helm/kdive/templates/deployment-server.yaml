@@ -19,6 +19,7 @@ spec:
         {{- include "kdive.scrapeAnnotations" 9464 | nindent 8 }}
     spec:
       serviceAccountName: {{ include "kdive.fullname" . }}-server
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

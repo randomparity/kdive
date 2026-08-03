@@ -25,8 +25,9 @@ def test_terminal_exact_uid_commits_before_finalizer_patch() -> None:
     events: list[tuple[object, ...]] = []
     pod = _pod(uid="uid-1", phase="Failed")
 
-    async def terminate(holder: str, outcome: str) -> None:
+    async def terminate(holder: str, outcome: str) -> bool:
         events.append(("terminate", holder, outcome))
+        return True
 
     async def patch(namespace: str, name: str, operations: list[dict[str, object]]) -> None:
         events.append(("patch", namespace, name, operations))
@@ -48,6 +49,7 @@ def test_terminal_exact_uid_commits_before_finalizer_patch() -> None:
     )
     assert events[1][0:3] == ("patch", "kdive", "kdive-worker-0")
     assert events[1][3] == [
+        {"op": "test", "path": "/metadata/uid", "value": "uid-1"},
         {"op": "test", "path": "/metadata/resourceVersion", "value": "7"},
         {
             "op": "test",
@@ -56,6 +58,31 @@ def test_terminal_exact_uid_commits_before_finalizer_patch() -> None:
         },
         {"op": "remove", "path": "/metadata/finalizers/1"},
     ]
+
+
+def test_unregistered_terminal_pod_retains_finalizer_and_cannot_publish_evidence() -> None:
+    patched = False
+    terminated: list[str] = []
+
+    async def terminate(holder: str, outcome: str) -> bool:
+        terminated.append(holder)
+        return False
+
+    async def patch(namespace: str, name: str, operations: list[dict[str, object]]) -> None:
+        nonlocal patched
+        patched = True
+
+    witness = KubernetesTerminationWitness(
+        namespace="kdive",
+        worker_name="kdive-worker",
+        ordinal_ceiling=1,
+        read_pod=lambda namespace, name: _pod(uid="unregistered", phase="Failed"),
+        patch_finalizers=patch,
+        terminate=terminate,
+    )
+    assert asyncio.run(witness.sweep_once()) == 0
+    assert terminated == ["kubernetes:kdive:kdive-worker-0:unregistered"]
+    assert patched is False
 
 
 def test_live_absent_replaced_and_malformed_pods_fail_closed() -> None:
@@ -67,8 +94,9 @@ def test_live_absent_replaced_and_malformed_pods_fail_closed() -> None:
         "kdive-worker-2": {"metadata": {"uid": "bad"}, "status": {"phase": "Failed"}},
     }
 
-    async def terminate(holder: str, outcome: str) -> None:
+    async def terminate(holder: str, outcome: str) -> bool:
         terminated.append(holder)
+        return False
 
     async def patch(namespace: str, name: str, operations: list[dict[str, object]]) -> None:
         patched.append(name)
@@ -89,7 +117,7 @@ def test_live_absent_replaced_and_malformed_pods_fail_closed() -> None:
 def test_database_failure_preserves_finalizer() -> None:
     patched = False
 
-    async def terminate(holder: str, outcome: str) -> None:
+    async def terminate(holder: str, outcome: str) -> bool:
         raise RuntimeError("database unavailable")
 
     async def patch(namespace: str, name: str, operations: list[dict[str, object]]) -> None:
@@ -122,8 +150,8 @@ def test_patch_conflict_rereads_fresh_resource_version_before_removal() -> None:
         reads += 1
         return _pod(uid="uid", phase="Failed", resource_version=str(reads))
 
-    async def terminate(holder: str, outcome: str) -> None:
-        return None
+    async def terminate(holder: str, outcome: str) -> bool:
+        return True
 
     async def patch(namespace: str, name: str, operations: list[dict[str, object]]) -> None:
         patches.append(operations)
@@ -140,8 +168,8 @@ def test_patch_conflict_rereads_fresh_resource_version_before_removal() -> None:
     )
     assert asyncio.run(witness.sweep_once()) == 1
     assert reads == 2
-    assert patches[0][0]["value"] == "1"
-    assert patches[1][0]["value"] == "2"
+    assert patches[0][1]["value"] == "1"
+    assert patches[1][1]["value"] == "2"
 
 
 def test_witness_loop_survives_authority_failure_and_retries() -> None:
@@ -156,13 +184,16 @@ def test_witness_loop_survives_authority_failure_and_retries() -> None:
         stop.set()
         return None
 
+    async def terminate(holder: str, outcome: str) -> bool:
+        return False
+
     witness = KubernetesTerminationWitness(
         namespace="kdive",
         worker_name="kdive-worker",
         ordinal_ceiling=1,
         read_pod=read,
         patch_finalizers=lambda namespace, name, operations: asyncio.sleep(0),
-        terminate=lambda holder, outcome: asyncio.sleep(0),
+        terminate=terminate,
     )
     asyncio.run(run_witness(witness, stop, interval=0))
     assert reads == 2

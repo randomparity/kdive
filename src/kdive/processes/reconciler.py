@@ -6,17 +6,26 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import (
     BUILD_ARTIFACT_RETENTION_DAYS,
     INVESTIGATION_CLEANUP_GRACE_DAYS,
+    KUBERNETES_CREDENTIAL_BROKER_CA,
+    KUBERNETES_CREDENTIAL_BROKER_HOST,
+    KUBERNETES_CREDENTIAL_BROKER_PORT,
+    KUBERNETES_CREDENTIAL_BROKER_TLS_CERT,
+    KUBERNETES_CREDENTIAL_BROKER_TLS_KEY,
+    KUBERNETES_CREDENTIAL_ENVELOPE_KEY,
     KUBERNETES_WITNESS_NAMESPACE,
     KUBERNETES_WITNESS_ORDINAL_CEILING,
     KUBERNETES_WITNESS_WORKER_NAME,
+    LIFECYCLE_WITNESS_DATABASE_URL,
     REPORT_ARTIFACT_RETENTION_DAYS,
 )
 from kdive.db.pool import create_pool
@@ -107,6 +116,15 @@ async def run_reconciler_with_composition(
     upload_store: ObjectStore,
 ) -> None:
     from kdive.observability.console_telemetry import ConsoleTelemetry
+    from kdive.processes.kubernetes_credential_broker import (
+        KubernetesCredentialBroker,
+        PodIdentity,
+        envelope_codec,
+        run_pre_registration,
+        serve_broker,
+        tls_server_context,
+        token_review,
+    )
     from kdive.processes.kubernetes_termination_witness import (
         KubernetesTerminationWitness,
         patch_finalizers,
@@ -114,7 +132,13 @@ async def run_reconciler_with_composition(
         run_witness,
     )
     from kdive.reconciler.loop import Reconciler
-    from kdive.services.runs.worker_incarnations import terminate_worker_incarnation
+    from kdive.services.runs.worker_incarnations import (
+        CURRENT_WORKER_FENCE_PROTOCOL,
+        acknowledge_kubernetes_credential_envelope,
+        read_kubernetes_credential_envelope,
+        register_kubernetes_worker_incarnation,
+        terminate_worker_incarnation,
+    )
 
     console_hosting = await provider_composition.build_reconciler_console_hosting(
         console_telemetry=ConsoleTelemetry(
@@ -134,15 +158,96 @@ async def run_reconciler_with_composition(
     )
     hosting_task = start_console_hosting(console_hosting, stop)
     witness_task: asyncio.Task[None] | None = None
+    broker_task: asyncio.Task[None] | None = None
+    registration_task: asyncio.Task[None] | None = None
     witness_namespace = config.require(KUBERNETES_WITNESS_NAMESPACE)
     witness_name = config.require(KUBERNETES_WITNESS_WORKER_NAME)
     witness_ceiling = config.require(KUBERNETES_WITNESS_ORDINAL_CEILING)
     if witness_namespace and witness_name and witness_ceiling:
 
-        async def terminate(incarnation: str, outcome: str) -> None:
+        async def with_lifecycle_connection[T](
+            operation: Callable[[psycopg.AsyncConnection], Awaitable[T]],
+        ) -> T:
+            connection = await psycopg.AsyncConnection.connect(
+                config.require(LIFECYCLE_WITNESS_DATABASE_URL)
+            )
+            try:
+                return await operation(connection)
+            finally:
+                await connection.close()
+
+        async def terminate(incarnation: str, outcome: str) -> bool:
             terminal_outcome = "succeeded" if outcome.endswith("succeeded") else "failed"
-            async with pool.connection() as conn:
-                await terminate_worker_incarnation(conn, incarnation, terminal_outcome)
+            return await with_lifecycle_connection(
+                lambda connection: terminate_worker_incarnation(
+                    connection, incarnation, terminal_outcome
+                )
+            )
+
+        def incarnation(identity: PodIdentity) -> str:
+            return f"kubernetes:{identity.namespace}:{identity.name}:{identity.uid}"
+
+        def binding(identity: PodIdentity) -> dict[str, str]:
+            return {
+                "namespace": identity.namespace,
+                "name": identity.name,
+                "uid": identity.uid,
+            }
+
+        async def register(identity: PodIdentity, credential_hash: bytes, envelope: bytes) -> bool:
+            return await with_lifecycle_connection(
+                lambda connection: register_kubernetes_worker_incarnation(
+                    connection,
+                    incarnation(identity),
+                    binding(identity),
+                    credential_hash,
+                    envelope,
+                    CURRENT_WORKER_FENCE_PROTOCOL,
+                )
+            )
+
+        async def pending_envelope(identity: PodIdentity) -> bytes | None:
+            return await with_lifecycle_connection(
+                lambda connection: read_kubernetes_credential_envelope(
+                    connection, incarnation(identity), binding(identity)
+                )
+            )
+
+        async def acknowledge(identity: PodIdentity) -> bool:
+            return await with_lifecycle_connection(
+                lambda connection: acknowledge_kubernetes_credential_envelope(
+                    connection, incarnation(identity), binding(identity)
+                )
+            )
+
+        encrypt, decrypt = envelope_codec(Path(config.require(KUBERNETES_CREDENTIAL_ENVELOPE_KEY)))
+        broker = KubernetesCredentialBroker(
+            namespace=witness_namespace,
+            worker_name=witness_name,
+            ordinal_ceiling=witness_ceiling,
+            pass_limit=witness_ceiling,
+            read_pod=read_pod,
+            register=register,
+            pending_envelope=pending_envelope,
+            acknowledge=acknowledge,
+            token_review=token_review,
+            encrypt=encrypt,
+            decrypt=decrypt,
+        )
+        broker_task = asyncio.create_task(
+            serve_broker(
+                broker,
+                stop,
+                host=config.require(KUBERNETES_CREDENTIAL_BROKER_HOST),
+                port=config.require(KUBERNETES_CREDENTIAL_BROKER_PORT),
+                ssl_context=tls_server_context(
+                    certificate=config.require(KUBERNETES_CREDENTIAL_BROKER_TLS_CERT),
+                    private_key=config.require(KUBERNETES_CREDENTIAL_BROKER_TLS_KEY),
+                    ca=config.require(KUBERNETES_CREDENTIAL_BROKER_CA),
+                ),
+            )
+        )
+        registration_task = asyncio.create_task(run_pre_registration(broker, stop))
 
         witness = KubernetesTerminationWitness(
             namespace=witness_namespace,
@@ -158,7 +263,11 @@ async def run_reconciler_with_composition(
     try:
         await reconciler.run(stop)
     finally:
-        tasks = [task for task in (hosting_task, witness_task) if task is not None]
+        tasks = [
+            task
+            for task in (hosting_task, witness_task, broker_task, registration_task)
+            if task is not None
+        ]
         await cancel(*tasks)
         if console_hosting is not None:
             await console_hosting.close()

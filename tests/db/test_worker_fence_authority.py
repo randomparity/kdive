@@ -364,6 +364,7 @@ def residual_privilege_role_dsn(pg_conn: psycopg.Connection) -> Iterator[RoleDsn
             "0105_worker_fence_functions.sql",
             "0106_worker_fence_protocol_claim.sql",
             "0108_worker_fence_runtime_paths.sql",
+            "0109_kubernetes_credential_envelopes.sql",
         ):
             role_sql = (migrate.SCHEMA_DIR / filename).read_bytes()
             for canonical, isolated in roles.items():
@@ -1437,6 +1438,11 @@ def test_migration_upgrade_resets_guarded_function_matrix(
             "kdive_reconciler",
         },
         "claim_worker_job(text,bytea,interval,text[])": {"kdive_worker"},
+        "register_kubernetes_worker_incarnation(text,jsonb,bytea,bytea,integer)": {
+            "kdive_lifecycle_witness"
+        },
+        "read_kubernetes_credential_envelope(text,jsonb)": {"kdive_lifecycle_witness"},
+        "acknowledge_kubernetes_credential_envelope(text,jsonb)": {"kdive_lifecycle_witness"},
     }
     for signature, allowed_roles in allowed.items():
         for canonical, login in residual_privilege_role_dsn.logins.items():
@@ -1968,4 +1974,69 @@ def test_authority_binding_bound_is_serialized_bytes_at_table_and_function(
         witness.execute(
             "SELECT public.register_worker_incarnation(%s, 'docker', %s, %s, 1)",
             ("docker:large-function", Jsonb(oversized_binding), b"c" * 32),
+        )
+
+
+def test_kubernetes_envelope_is_exact_uid_bound_and_durably_cleared(
+    role_dsn: RoleDsns,
+) -> None:
+    """Only the lifecycle authority can read/ack a pending exact Pod envelope."""
+    holder = "kubernetes:kdive:kdive-worker-0:uid-1"
+    binding = {
+        "namespace": "kdive",
+        "name": "kdive-worker-0",
+        "uid": "uid-1",
+    }
+    envelope = b"controller-key-encrypted-envelope"
+    with psycopg.connect(role_dsn("kdive_lifecycle_witness"), autocommit=True) as witness:
+        assert witness.execute(
+            "SELECT public.register_kubernetes_worker_incarnation(%s, %s, %s, %s, 2)",
+            (holder, Jsonb(binding), b"e" * 32, envelope),
+        ).fetchone() == (True,)
+        assert witness.execute(
+            "SELECT public.register_kubernetes_worker_incarnation(%s, %s, %s, %s, 2)",
+            (holder, Jsonb(binding), b"f" * 32, b"replacement-envelope"),
+        ).fetchone() == (True,)
+        assert witness.execute(
+            "SELECT public.read_kubernetes_credential_envelope(%s, %s)",
+            (holder, Jsonb(binding)),
+        ).fetchone() == (envelope,)
+        assert witness.execute(
+            "SELECT public.acknowledge_kubernetes_credential_envelope(%s, %s)",
+            (holder, Jsonb(binding)),
+        ).fetchone() == (True,)
+        assert witness.execute(
+            "SELECT public.acknowledge_kubernetes_credential_envelope(%s, %s)",
+            (holder, Jsonb(binding)),
+        ).fetchone() == (True,)
+        assert witness.execute(
+            "SELECT public.read_kubernetes_credential_envelope(%s, %s)",
+            (holder, Jsonb(binding)),
+        ).fetchone() == (None,)
+
+    with (
+        psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker,
+        pytest.raises(psycopg.errors.InsufficientPrivilege),
+    ):
+        worker.execute(
+            "SELECT public.read_kubernetes_credential_envelope(%s, %s)",
+            (holder, Jsonb(binding)),
+        )
+
+
+def test_kubernetes_registration_requires_a_bounded_matching_uid_binding(
+    role_dsn: RoleDsns,
+) -> None:
+    with (
+        psycopg.connect(role_dsn("kdive_lifecycle_witness"), autocommit=True) as witness,
+        pytest.raises(psycopg.errors.InvalidParameterValue),
+    ):
+        witness.execute(
+            "SELECT public.register_kubernetes_worker_incarnation(%s, %s, %s, %s, 2)",
+            (
+                "kubernetes:kdive:kdive-worker-0:uid-1",
+                Jsonb({"namespace": "kdive", "name": "kdive-worker-0", "uid": "uid-2"}),
+                b"e" * 32,
+                b"controller-key-encrypted-envelope",
+            ),
         )

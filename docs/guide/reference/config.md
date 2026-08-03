@@ -201,6 +201,12 @@
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
 | `KDIVE_DOCKER_DEATH_API` | server | `http://worker-death-api:2375` | no | Private inspect-only Docker authority endpoint used by the Docker death verifier. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_CA` | reconciler | — | conditional | Certificate-authority file reference trusted by the broker and init client. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST` | reconciler | — | conditional | Private reconciler bind host for the Kubernetes worker credential broker. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_PORT` | reconciler | — | conditional | Private TLS port for the Kubernetes worker credential broker. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_CERT` | reconciler | — | conditional | Reconciler-only file reference for the broker TLS certificate. |
+| `KDIVE_KUBERNETES_CREDENTIAL_BROKER_TLS_KEY` | reconciler | — | conditional | secret (ref only) |
+| `KDIVE_KUBERNETES_CREDENTIAL_ENVELOPE_KEY` | reconciler | — | conditional | secret (ref only) |
 | `KDIVE_KUBERNETES_WITNESS_NAMESPACE` | reconciler | `` | no | Namespace watched by the bounded worker termination witness; blank disables it. |
 | `KDIVE_KUBERNETES_WITNESS_ORDINAL_CEILING` | reconciler | `0` | no | Maximum exclusive worker ordinal polled by the Kubernetes termination witness. |
 | `KDIVE_KUBERNETES_WITNESS_WORKER_NAME` | reconciler | `` | no | StatefulSet worker name prefix used with bounded ordinal Pod reads. |
