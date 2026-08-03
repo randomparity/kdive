@@ -354,11 +354,16 @@ def test_worker_role_direct_old_style_claim_is_denied(migrated_url: str) -> None
 
 async def _terminal_failed_job(conn: psycopg.AsyncConnection, dedup_key: str) -> Job:
     """Create a job dead-lettered to ``failed`` at ``attempt == max_attempts`` (ADR-0185)."""
+    credential = await _register_worker(conn, "w1")
     claimed = await _insert_running_job(
         conn, dedup_key, worker_id="w1", lease_seconds=300, attempt=3, max_attempts=3
     )
     failed = await queue.fail(
-        conn, claimed, ErrorCategory.TRANSPORT_FAILURE, failure_context={"failure_message": "blip"}
+        conn,
+        claimed,
+        ErrorCategory.TRANSPORT_FAILURE,
+        incarnation_credential=credential,
+        failure_context={"failure_message": "blip"},
     )
     assert failed.state is JobState.FAILED
     return failed
@@ -561,7 +566,13 @@ def test_enqueue_recycle_terminal_resets_succeeded_job_with_new_payload(migrated
             )
             claimed = await _dequeue(conn, "w1")
             assert claimed is not None
-            done = await queue.complete(conn, claimed.id, "w1", "result-ref")
+            done = await queue.complete(
+                conn,
+                claimed.id,
+                "result-ref",
+                attempt=claimed.attempt,
+                incarnation_credential=_credential("w1"),
+            )
             assert done is not None and done.state is JobState.SUCCEEDED
 
             recycled = await queue.enqueue(
@@ -626,7 +637,13 @@ def test_enqueue_default_leaves_succeeded_job_untouched(migrated_url: str) -> No
             await queue.enqueue(conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-ok")
             claimed = await _dequeue(conn, "w1")
             assert claimed is not None
-            done = await queue.complete(conn, claimed.id, "w1", "result-ref")
+            done = await queue.complete(
+                conn,
+                claimed.id,
+                "result-ref",
+                attempt=claimed.attempt,
+                incarnation_credential=_credential("w1"),
+            )
             assert done is not None and done.state is JobState.SUCCEEDED
 
             again = await queue.enqueue(
@@ -801,7 +818,16 @@ def test_heartbeat_renews_for_owner(migrated_url: str) -> None:
                     claimed.lease_expires_at,
                 ),
             )
-            assert await queue.heartbeat(conn, claimed.id, "w1", lease=timedelta(minutes=5)) is True
+            assert (
+                await queue.heartbeat(
+                    conn,
+                    claimed.id,
+                    attempt=claimed.attempt,
+                    incarnation_credential=_credential("w1"),
+                    lease=timedelta(minutes=5),
+                )
+                is True
+            )
             cur = await conn.execute(
                 "SELECT lease_expires_at FROM jobs WHERE id = %s", (claimed.id,)
             )
@@ -825,7 +851,16 @@ def test_heartbeat_false_for_non_owner(migrated_url: str) -> None:
             await queue.enqueue(conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-hb2")
             claimed = await _dequeue(conn, "w1")
             assert claimed is not None
-            assert await queue.heartbeat(conn, claimed.id, "intruder") is False
+            intruder_credential = await _register_worker(conn, "intruder")
+            assert (
+                await queue.heartbeat(
+                    conn,
+                    claimed.id,
+                    attempt=claimed.attempt,
+                    incarnation_credential=intruder_credential,
+                )
+                is False
+            )
 
     asyncio.run(_run())
 
@@ -836,7 +871,13 @@ def test_complete_for_owner_and_none_for_non_owner(migrated_url: str) -> None:
             await queue.enqueue(conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-c1")
             claimed = await _dequeue(conn, "w1")
             assert claimed is not None
-            done = await queue.complete(conn, claimed.id, "w1", "s3://result")
+            done = await queue.complete(
+                conn,
+                claimed.id,
+                "s3://result",
+                attempt=claimed.attempt,
+                incarnation_credential=_credential("w1"),
+            )
             assert done is not None
             assert done.state is JobState.SUCCEEDED
             assert done.result_ref == "s3://result"
@@ -844,7 +885,17 @@ def test_complete_for_owner_and_none_for_non_owner(migrated_url: str) -> None:
             await queue.enqueue(conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-c2")
             other = await _dequeue(conn, "w1")
             assert other is not None
-            assert await queue.complete(conn, other.id, "intruder", "s3://x") is None
+            intruder_credential = await _register_worker(conn, "intruder")
+            assert (
+                await queue.complete(
+                    conn,
+                    other.id,
+                    "s3://x",
+                    attempt=other.attempt,
+                    incarnation_credential=intruder_credential,
+                )
+                is None
+            )
 
     asyncio.run(_run())
 
@@ -857,7 +908,12 @@ def test_fail_requeues_below_max(migrated_url: str) -> None:
             )
             claimed = await _dequeue(conn, "w1")  # attempt -> 1
             assert claimed is not None
-            out = await queue.fail(conn, claimed, ErrorCategory.INFRASTRUCTURE_FAILURE)
+            out = await queue.fail(
+                conn,
+                claimed,
+                ErrorCategory.INFRASTRUCTURE_FAILURE,
+                incarnation_credential=_credential("w1"),
+            )
             assert out.state is JobState.QUEUED
             assert out.worker_id is None
             assert out.lease_expires_at is None
@@ -871,7 +927,13 @@ def test_fail_dead_letters_at_max(migrated_url: str) -> None:
             claimed = await _insert_running_job(
                 conn, "dk-f2", worker_id="w1", lease_seconds=300, attempt=3, max_attempts=3
             )
-            out = await queue.fail(conn, claimed, ErrorCategory.BUILD_FAILURE)
+            credential = await _register_worker(conn, "w1")
+            out = await queue.fail(
+                conn,
+                claimed,
+                ErrorCategory.BUILD_FAILURE,
+                incarnation_credential=credential,
+            )
             assert out.state is JobState.FAILED
             assert out.error_category is ErrorCategory.BUILD_FAILURE
 
@@ -886,7 +948,13 @@ def test_fail_terminal_dead_letters_below_max(migrated_url: str) -> None:
             )
             claimed = await _dequeue(conn, "w1")  # attempt -> 1, below max
             assert claimed is not None
-            out = await queue.fail(conn, claimed, ErrorCategory.NOT_IMPLEMENTED, terminal=True)
+            out = await queue.fail(
+                conn,
+                claimed,
+                ErrorCategory.NOT_IMPLEMENTED,
+                incarnation_credential=_credential("w1"),
+                terminal=True,
+            )
             assert out.state is JobState.FAILED
             assert out.error_category is ErrorCategory.NOT_IMPLEMENTED
 
@@ -902,7 +970,12 @@ def test_fail_fence_miss_returns_input(migrated_url: str) -> None:
             # Simulate a reclaim by another worker: change worker_id out from under it.
             await _register_worker(conn, "w2")
             await conn.execute("UPDATE jobs SET worker_id = 'w2' WHERE id = %s", (claimed.id,))
-            out = await queue.fail(conn, claimed, ErrorCategory.INFRASTRUCTURE_FAILURE)
+            out = await queue.fail(
+                conn,
+                claimed,
+                ErrorCategory.INFRASTRUCTURE_FAILURE,
+                incarnation_credential=_credential("w1"),
+            )
             assert out is claimed  # fence missed: unchanged input returned
 
     asyncio.run(_run())

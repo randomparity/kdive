@@ -6,6 +6,7 @@ import asyncio
 import os
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Iterator
@@ -142,6 +143,86 @@ def _assert_runtime_data_access(admin_dsn: str) -> None:
         witness.execute("SELECT count(*) FROM resources")
 
 
+def _cleanup_isolated_stack(
+    env: dict[str, str], *, project: str, image: str, credential_path: Path
+) -> None:
+    """Attempt every cleanup arm and prove the unique fixture resources are absent."""
+    errors: list[Exception] = []
+
+    try:
+        _compose(env, "down", "--volumes", "--remove-orphans", timeout=120)
+    except Exception as exc:  # noqa: BLE001 - cleanup must continue through every independent arm
+        errors.append(exc)
+    try:
+        credential_path.unlink(missing_ok=True)
+    except Exception as exc:  # noqa: BLE001 - cleanup must continue through every independent arm
+        errors.append(exc)
+    try:
+        _run(("docker", "image", "rm", image), env, timeout=60, allow_failure=True)
+    except Exception as exc:  # noqa: BLE001 - cleanup must continue into the absence probes
+        errors.append(exc)
+
+    probes = {
+        "containers": (
+            "docker",
+            "ps",
+            "--all",
+            "--quiet",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
+        ),
+        "networks": (
+            "docker",
+            "network",
+            "ls",
+            "--quiet",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
+        ),
+        "volumes": (
+            "docker",
+            "volume",
+            "ls",
+            "--quiet",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
+        ),
+        "image": ("docker", "image", "inspect", image),
+    }
+    for kind, argv in probes.items():
+        try:
+            remaining = _run(argv, env, timeout=60, allow_failure=True).strip()
+            if remaining:
+                errors.append(RuntimeError(f"isolated Compose {kind} remain: {remaining}"))
+        except Exception as exc:  # noqa: BLE001 - every postcondition is checked independently
+            errors.append(exc)
+    if credential_path.exists():
+        errors.append(RuntimeError(f"isolated Compose credential remains: {credential_path}"))
+
+    if not errors:
+        return
+    active = sys.exception()
+    if active is not None:
+        details = "; ".join(f"{type(error).__name__}: {error}" for error in errors)
+        active.add_note(f"isolated Compose cleanup failures: {details}")
+        return
+    raise ExceptionGroup("isolated Compose cleanup failed", errors)
+
+
+def _apply_migrations_when_stable(admin_dsn: str) -> None:
+    """Cross the official Postgres image's temporary init-server restart."""
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            with psycopg.connect(admin_dsn, autocommit=True) as conn:
+                apply_migrations(conn)
+            return
+        except psycopg.OperationalError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+
+
 @contextmanager
 def _isolated_stack(tmp_path: Path) -> Iterator[tuple[dict[str, str], str, str]]:
     token = uuid.uuid4().hex[:12]
@@ -159,14 +240,130 @@ def _isolated_stack(tmp_path: Path) -> Iterator[tuple[dict[str, str], str, str]]
     try:
         _run(("docker", "build", "--tag", image, "."), env, timeout=600)
         _compose(env, "up", "-d", "--wait", "--wait-timeout", "60", "postgres")
-        with psycopg.connect(admin_dsn, autocommit=True) as conn:
-            apply_migrations(conn)
+        _apply_migrations_when_stable(admin_dsn)
         _compose(env, "--profile", "bootstrap", "run", "--rm", "--no-deps", "role-bootstrap")
         yield env, admin_dsn, str(credential_path)
     finally:
-        _compose(env, "down", "--volumes", "--remove-orphans", timeout=120)
-        credential_path.unlink(missing_ok=True)
-        _run(("docker", "image", "rm", image), env, timeout=60, allow_failure=True)
+        _cleanup_isolated_stack(env, project=project, image=image, credential_path=credential_path)
+
+
+def test_isolated_cleanup_preserves_body_failure_and_attempts_every_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = {"COMPOSE_PROJECT_NAME": "kdive-lifecycle-proof-cleanup"}
+    credential_path = tmp_path / "credential"
+    credential_path.write_text("secret", encoding="utf-8")
+    calls: list[tuple[str, ...]] = []
+
+    def compose_failure(_env: dict[str, str], *args: str, timeout: int = 120) -> str:
+        calls.append(("compose", *args, str(timeout)))
+        raise RuntimeError("compose cleanup failed")
+
+    def run_probe(
+        argv: tuple[str, ...],
+        _env: dict[str, str],
+        *,
+        timeout: int = 120,
+        allow_failure: bool = False,
+    ) -> str:
+        calls.append((*argv, str(timeout), str(allow_failure)))
+        return ""
+
+    monkeypatch.setattr(
+        "tests.compose.test_compose_worker_lifecycle_live._compose", compose_failure
+    )
+    monkeypatch.setattr("tests.compose.test_compose_worker_lifecycle_live._run", run_probe)
+    original = ValueError("body failed")
+    with pytest.raises(ValueError, match="body failed") as caught:
+        try:
+            raise original
+        finally:
+            _cleanup_isolated_stack(
+                env,
+                project=env["COMPOSE_PROJECT_NAME"],
+                image="kdive-lifecycle-proof:cleanup",
+                credential_path=credential_path,
+            )
+
+    assert caught.value is original
+    assert any("compose cleanup failed" in note for note in caught.value.__notes__)
+    assert not credential_path.exists()
+    assert any(
+        call[:4] == ("docker", "image", "rm", "kdive-lifecycle-proof:cleanup") for call in calls
+    )
+    assert any(call[:3] == ("docker", "network", "ls") for call in calls)
+    assert any(call[:3] == ("docker", "volume", "ls") for call in calls)
+
+
+def test_isolated_cleanup_requires_exact_absence_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = {"COMPOSE_PROJECT_NAME": "kdive-lifecycle-proof-postcondition"}
+    credential_path = tmp_path / "credential"
+    calls: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr(
+        "tests.compose.test_compose_worker_lifecycle_live._compose",
+        lambda _env, *args, timeout=120: calls.append(("compose", *args)) or "",
+    )
+
+    def run_with_leaked_volume(
+        argv: tuple[str, ...],
+        _env: dict[str, str],
+        *,
+        timeout: int = 120,
+        allow_failure: bool = False,
+    ) -> str:
+        calls.append(argv)
+        if argv[:3] == ("docker", "volume", "ls"):
+            return "kdive-lifecycle-proof-postcondition_proof-postgres\n"
+        return ""
+
+    monkeypatch.setattr(
+        "tests.compose.test_compose_worker_lifecycle_live._run", run_with_leaked_volume
+    )
+    with pytest.raises(ExceptionGroup, match="isolated Compose cleanup failed"):
+        _cleanup_isolated_stack(
+            env,
+            project=env["COMPOSE_PROJECT_NAME"],
+            image="kdive-lifecycle-proof:postcondition",
+            credential_path=credential_path,
+        )
+
+
+def test_migration_application_retries_postgres_init_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    applied: list[object] = []
+    stable_connection = object()
+
+    class ConnectionContext:
+        def __enter__(self) -> object:
+            return stable_connection
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def connect(_dsn: str, *, autocommit: bool) -> ConnectionContext:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise psycopg.OperationalError("temporary initialization server restarted")
+        assert autocommit is True
+        return ConnectionContext()
+
+    monkeypatch.setattr(psycopg, "connect", connect)
+    monkeypatch.setattr(
+        "tests.compose.test_compose_worker_lifecycle_live.apply_migrations",
+        lambda conn: applied.append(conn),
+    )
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    _apply_migrations_when_stable("postgresql://example")
+
+    assert attempts == 2
+    assert applied == [stable_connection]
 
 
 def _gate(project: str, witness_dsn: str, credential_path: Path) -> WorkerLifecycleGate:

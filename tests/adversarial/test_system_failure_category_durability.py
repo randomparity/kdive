@@ -50,7 +50,7 @@ from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
 from tests.adversarial.conftest import seed_allocation, seed_resource
 from tests.mcp.systems_support import ctx as _ctx
 from tests.mcp.systems_support import provider_resolver
-from tests.support.worker_fence import dequeue_as_current_worker
+from tests.support.worker_fence import dequeue_as_current_worker, incarnation_credential
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _WORKER = "worker-1"
@@ -274,7 +274,13 @@ def test_reclaimed_job_that_re_enters_a_failed_system_keeps_the_real_category(
                 )
             assert result == system_id, "the terminal-state re-entry returns success (ADR-0128)"
             async with pool.connection() as conn:
-                completed = await queue.complete(conn, second.id, _WORKER, result)
+                completed = await queue.complete(
+                    conn,
+                    second.id,
+                    result,
+                    attempt=second.attempt,
+                    incarnation_credential=incarnation_credential(_WORKER),
+                )
             assert completed is not None
 
             row = await _job_row(pool, first.id)

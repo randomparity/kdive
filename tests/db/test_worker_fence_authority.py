@@ -27,7 +27,200 @@ _PROTECTED_TABLES = {
     "schema_migrations",
     "worker_incarnations",
 }
-_RUNTIME_DATA_ROLES = {"kdive_server", "kdive_worker", "kdive_reconciler"}
+_ORDINARY_TABLES = {
+    "allocations",
+    "artifacts",
+    "audit_log",
+    "budgets",
+    "build_artifact_gc_cursors",
+    "component_uploads",
+    "cost_class_coefficients",
+    "debug_sessions",
+    "egress_probe_guests",
+    "idempotency_keys",
+    "image_catalog",
+    "investigation_build_gc_cursor",
+    "investigation_build_tombstones",
+    "investigation_builds",
+    "investigations",
+    "inventory_overrides",
+    "jobs",
+    "ledger",
+    "object_write_leases",
+    "ops_control",
+    "platform_audit_log",
+    "provider_components",
+    "quotas",
+    "resources",
+    "rootfs_fetch_leases",
+    "run_steps",
+    "runs",
+    "snapshots",
+    "system_bootstrap_keys",
+    "system_object_sweep_cursors",
+    "system_shapes",
+    "systems",
+    "tool_invocation",
+    "upload_manifests",
+}
+_SERVER_MUTATIONS = {
+    "INSERT": _ORDINARY_TABLES
+    - {
+        "build_artifact_gc_cursors",
+        "investigation_build_gc_cursor",
+        "investigation_build_tombstones",
+        "system_object_sweep_cursors",
+    },
+    "UPDATE": _ORDINARY_TABLES
+    - {
+        "audit_log",
+        "build_artifact_gc_cursors",
+        "investigation_build_gc_cursor",
+        "investigation_build_tombstones",
+        "ledger",
+        "platform_audit_log",
+        "system_object_sweep_cursors",
+        "tool_invocation",
+    },
+    "DELETE": {
+        "artifacts",
+        "component_uploads",
+        "debug_sessions",
+        "egress_probe_guests",
+        "idempotency_keys",
+        "image_catalog",
+        "inventory_overrides",
+        "provider_components",
+        "resources",
+        "rootfs_fetch_leases",
+        "run_steps",
+        "snapshots",
+        "system_bootstrap_keys",
+        "system_shapes",
+        "tool_invocation",
+        "upload_manifests",
+    },
+}
+_WORKER_SELECT = {
+    "allocations",
+    "artifacts",
+    "budgets",
+    "component_uploads",
+    "cost_class_coefficients",
+    "debug_sessions",
+    "egress_probe_guests",
+    "image_catalog",
+    "investigation_build_tombstones",
+    "investigation_builds",
+    "investigations",
+    "jobs",
+    "ledger",
+    "object_write_leases",
+    "ops_control",
+    "provider_components",
+    "quotas",
+    "resources",
+    "rootfs_fetch_leases",
+    "run_steps",
+    "runs",
+    "snapshots",
+    "system_bootstrap_keys",
+    "system_shapes",
+    "systems",
+    "upload_manifests",
+}
+_WORKER_MUTATIONS = {
+    "INSERT": {
+        "artifacts",
+        "component_uploads",
+        "egress_probe_guests",
+        "ledger",
+        "object_write_leases",
+        "rootfs_fetch_leases",
+        "run_steps",
+        "snapshots",
+        "upload_manifests",
+    },
+    "UPDATE": {
+        "allocations",
+        "artifacts",
+        "budgets",
+        "component_uploads",
+        "debug_sessions",
+        "egress_probe_guests",
+        "image_catalog",
+        "investigation_builds",
+        "investigations",
+        "run_steps",
+        "runs",
+        "snapshots",
+        "systems",
+        "upload_manifests",
+    },
+    "DELETE": {
+        "artifacts",
+        "object_write_leases",
+        "rootfs_fetch_leases",
+        "run_steps",
+        "snapshots",
+        "system_bootstrap_keys",
+        "upload_manifests",
+    },
+}
+_RECONCILER_SELECT = _ORDINARY_TABLES - {"audit_log", "platform_audit_log", "tool_invocation"}
+_RECONCILER_MUTATIONS = {
+    "INSERT": {
+        "artifacts",
+        "cost_class_coefficients",
+        "image_catalog",
+        "investigation_build_tombstones",
+        "inventory_overrides",
+        "jobs",
+        "ledger",
+        "resources",
+    },
+    "UPDATE": {
+        "allocations",
+        "budgets",
+        "build_artifact_gc_cursors",
+        "cost_class_coefficients",
+        "debug_sessions",
+        "egress_probe_guests",
+        "image_catalog",
+        "investigation_build_gc_cursor",
+        "investigation_builds",
+        "investigations",
+        "jobs",
+        "resources",
+        "runs",
+        "snapshots",
+        "system_object_sweep_cursors",
+        "systems",
+        "upload_manifests",
+    },
+    "DELETE": {
+        "artifacts",
+        "idempotency_keys",
+        "image_catalog",
+        "investigation_builds",
+        "inventory_overrides",
+        "jobs",
+        "object_write_leases",
+        "resources",
+        "rootfs_fetch_leases",
+        "run_steps",
+        "snapshots",
+        "system_bootstrap_keys",
+        "upload_manifests",
+    },
+}
+_EXPECTED_ROLE_TABLE_PRIVILEGES = {
+    "kdive_server": {"SELECT": _ORDINARY_TABLES, **_SERVER_MUTATIONS},
+    "kdive_worker": {"SELECT": _WORKER_SELECT, **_WORKER_MUTATIONS},
+    "kdive_reconciler": {"SELECT": _RECONCILER_SELECT, **_RECONCILER_MUTATIONS},
+    "kdive_lifecycle_witness": {},
+    "unprivileged": {},
+}
 
 
 @dataclass(frozen=True)
@@ -361,32 +554,124 @@ def test_runtime_roles_receive_data_access_without_crossing_fence_authority(
             "WHERE sequence_schema = 'public'"
         ).fetchall()
     }
-    assert ordinary_tables
+    assert ordinary_tables == _ORDINARY_TABLES
 
     for role, login in role_dsn.logins.items():
-        for table in ordinary_tables:
-            privileges = pg_conn.execute(
-                "SELECT has_table_privilege(%s, %s, privilege) "
-                "FROM unnest(%s::text[]) AS privilege ORDER BY privilege",
-                (login, f"public.{table}", ["DELETE", "INSERT", "SELECT", "UPDATE"]),
-            ).fetchall()
-            expected = role in _RUNTIME_DATA_ROLES
-            assert privileges == [(expected,)] * 4, (role, table)
-        for table in _PROTECTED_TABLES:
-            privileges = pg_conn.execute(
-                "SELECT has_table_privilege(%s, %s, privilege) "
-                "FROM unnest(%s::text[]) AS privilege ORDER BY privilege",
-                (login, f"public.{table}", ["DELETE", "INSERT", "SELECT", "UPDATE"]),
-            ).fetchall()
-            assert privileges == [(False,)] * 4, (role, table)
+        expected_by_operation = _EXPECTED_ROLE_TABLE_PRIVILEGES[role]
+        for table in ordinary_tables | _PROTECTED_TABLES:
+            for privilege in (
+                "DELETE",
+                "INSERT",
+                "REFERENCES",
+                "SELECT",
+                "TRIGGER",
+                "TRUNCATE",
+                "UPDATE",
+            ):
+                effective = pg_conn.execute(
+                    "SELECT has_table_privilege(%s, %s, %s)",
+                    (login, f"public.{table}", privilege),
+                ).fetchone()
+                assert effective == (table in expected_by_operation.get(privilege, set()),), (
+                    role,
+                    table,
+                    privilege,
+                )
         for sequence in sequences:
             privileges = pg_conn.execute(
                 "SELECT has_sequence_privilege(%s, %s, privilege) "
                 "FROM unnest(%s::text[]) AS privilege ORDER BY privilege",
                 (login, f"public.{sequence}", ["SELECT", "UPDATE", "USAGE"]),
             ).fetchall()
-            expected = role in _RUNTIME_DATA_ROLES
-            assert privileges == [(expected,)] * 3, (role, sequence)
+            assert privileges == [(False,)] * 3, (role, sequence)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, dedup_key) "
+        "VALUES ('install', '{}'::jsonb, 'queued', 3, '{}'::jsonb, 'worker-bypass')",
+        "UPDATE jobs SET state = 'running', worker_id = 'observed-current-worker'",
+        "UPDATE jobs SET state = 'failed' WHERE state = 'running'",
+        "DELETE FROM jobs",
+    ],
+)
+def test_worker_role_cannot_mutate_jobs_directly(
+    role_dsn: RoleDsns, operation: LiteralString
+) -> None:
+    """A worker login cannot bypass credential-gated job transitions with table DML."""
+    with (
+        psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker,
+        pytest.raises(psycopg.errors.InsufficientPrivilege),
+    ):
+        worker.execute(SQL(operation))
+
+
+def test_worker_job_functions_fence_credential_holder_and_attempt(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """Guarded job writes derive the holder and match the exact charged attempt."""
+    holder_a, holder_b = "docker:job-owner-a", "docker:job-owner-b"
+    credential_a, credential_b = b"a" * 32, b"b" * 32
+    _register(role_dsn, holder_a, credential_a)
+    _register(role_dsn, holder_b, credential_b)
+
+    _investigation, _generation, heartbeat_job = _seed_claim(pg_conn, holder=holder_a, attempt=1)
+    _investigation, _generation, complete_job = _seed_claim(pg_conn, holder=holder_a, attempt=2)
+    _investigation, _generation, requeue_job = _seed_claim(pg_conn, holder=holder_a, attempt=1)
+    _investigation, _generation, fail_job = _seed_claim(pg_conn, holder=holder_a, attempt=3)
+
+    with psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker:
+        assert worker.execute(
+            "SELECT public.heartbeat_worker_job(%s, %s, 1, interval '5 minutes')",
+            (heartbeat_job, credential_a),
+        ).fetchone() == (True,)
+        assert worker.execute(
+            "SELECT public.heartbeat_worker_job(%s, %s, 2, interval '5 minutes')",
+            (heartbeat_job, credential_a),
+        ).fetchone() == (False,)
+        assert (
+            worker.execute(
+                "SELECT public.complete_worker_job(%s, %s, 2, 'result-a')",
+                (complete_job, credential_b),
+            ).fetchone()
+            is None
+        )
+        completed = worker.execute(
+            "SELECT state, result_ref FROM public.complete_worker_job(%s, %s, 2, 'result-a')",
+            (complete_job, credential_a),
+        ).fetchone()
+        assert completed == ("succeeded", "result-a")
+        requeued = worker.execute(
+            "SELECT state, worker_id FROM public.fail_worker_job("
+            "%s, %s, 1, 'infrastructure_failure', '{}'::jsonb, false)",
+            (requeue_job, credential_a),
+        ).fetchone()
+        assert requeued == ("queued", None)
+        failed = worker.execute(
+            "SELECT state, error_category FROM public.fail_worker_job("
+            "%s, %s, 3, 'build_failure', '{\"failure_message\":\"bounded\"}'::jsonb, false)",
+            (fail_job, credential_a),
+        ).fetchone()
+        assert failed == ("failed", "build_failure")
+
+
+def test_worker_job_function_execute_authority_is_exact(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """Only the worker process role can invoke credential-bound job writes."""
+    signatures = {
+        "heartbeat_worker_job(uuid,bytea,integer,interval)",
+        "complete_worker_job(uuid,bytea,integer,text)",
+        "fail_worker_job(uuid,bytea,integer,text,jsonb,boolean)",
+    }
+    for signature in signatures:
+        for role, login in role_dsn.logins.items():
+            privilege = pg_conn.execute(
+                "SELECT has_function_privilege(%s, %s, 'EXECUTE')",
+                (login, signature),
+            ).fetchone()
+            assert privilege == (role == "kdive_worker",), (role, signature)
 
 
 def test_migration_upgrade_resets_guarded_function_matrix(

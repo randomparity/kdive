@@ -22,7 +22,7 @@ from kdive.diagnostics.checks import (
 from kdive.diagnostics.result_codec import serialize_results
 from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
 from kdive.jobs import queue as job_queue
-from tests.support.worker_fence import dequeue_as_current_worker
+from tests.support.worker_fence import dequeue_as_current_worker, incarnation_credential
 
 _WORKER_ID = "stand-in-worker"
 
@@ -39,7 +39,13 @@ async def _complete_when_claimable(url: str) -> None:
         for _ in range(200):
             claimed = await dequeue_as_current_worker(conn, _WORKER_ID)
             if claimed is not None:
-                await job_queue.complete(conn, claimed.id, _WORKER_ID, serialized)
+                await job_queue.complete(
+                    conn,
+                    claimed.id,
+                    serialized,
+                    attempt=claimed.attempt,
+                    incarnation_credential=incarnation_credential(_WORKER_ID),
+                )
                 return
             await asyncio.sleep(0.02)
 

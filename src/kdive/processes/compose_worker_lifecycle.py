@@ -39,6 +39,7 @@ type PrepareCredential = Callable[[], None]
 type CreateEnvironment = Callable[[], dict[str, str]]
 type CredentialRetained = Callable[[], bool]
 type CleanupCredential = Callable[[], None]
+type CleanupManagedVolumes = Callable[[], None]
 
 _COMPOSE = ("docker", "compose")
 _PROFILE = ("--profile", "managed-worker")
@@ -93,6 +94,7 @@ class ComposeWorkerLifecycle:
         create_environment: CreateEnvironment = dict,
         credential_retained: CredentialRetained = lambda: False,
         cleanup_credential: CleanupCredential = lambda: None,
+        cleanup_managed_volumes: CleanupManagedVolumes = lambda: None,
     ) -> None:
         self._command = command
         self._gate = gate
@@ -101,6 +103,7 @@ class ComposeWorkerLifecycle:
         self._create_environment = create_environment
         self._credential_retained = credential_retained
         self._cleanup_credential = cleanup_credential
+        self._cleanup_managed_volumes = cleanup_managed_volumes
 
     def _worker_id(self) -> str | None:
         value = self._command((*_COMPOSE, *_PROFILE, "ps", "--all", "-q", "worker"), None).strip()
@@ -158,6 +161,8 @@ class ComposeWorkerLifecycle:
             self._require_safe_absence()
         args = (*_COMPOSE, "down", *(("--volumes",) if volumes else ()), "--remove-orphans")
         self._command(args, None)
+        if volumes:
+            self._cleanup_managed_volumes()
 
 
 def _bounded_command(
@@ -351,6 +356,26 @@ def _credential_path(project: str) -> Path:
     return Path(f"/tmp/kdive-compose-worker-{project}.credential")
 
 
+def _remove_managed_worker_volumes(project: str) -> None:
+    """Remove the two exact profile-only volumes omitted after worker removal."""
+    if not _PROJECT.fullmatch(project):
+        raise RuntimeError("Compose project name is invalid for managed-volume cleanup")
+    _bounded_command(
+        (
+            "docker",
+            "volume",
+            "rm",
+            "--force",
+            f"{project}_kdive-build",
+            f"{project}_kdive-install",
+        ),
+        None,
+        timeout=30,
+        max_stdout_bytes=65_536,
+        max_stderr_bytes=65_536,
+    )
+
+
 def _prepare_credential_file(path: Path) -> None:
     descriptor = _open_credential_file(path, os.O_CREAT | os.O_WRONLY)
     try:
@@ -477,6 +502,7 @@ def _lifecycle(project: str) -> ComposeWorkerLifecycle:
         },
         credential_retained=lambda: _credential_retained(credential_path),
         cleanup_credential=lambda: _cleanup_credential(credential_path),
+        cleanup_managed_volumes=lambda: _remove_managed_worker_volumes(project),
     )
 
 

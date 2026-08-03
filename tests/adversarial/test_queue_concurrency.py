@@ -26,7 +26,7 @@ from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, InstallPayload
 from tests.adversarial.conftest import count_rows, open_conn, open_conns
-from tests.support.worker_fence import dequeue_as_current_worker
+from tests.support.worker_fence import dequeue_as_current_worker, incarnation_credential
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 
@@ -111,9 +111,31 @@ def test_reclaimed_worker_cannot_finalize(migrated_url: str) -> None:
             # A lost the lease: every A-fenced write must miss. complete/heartbeat
             # signal the miss directly; fail() signals it by returning the *unchanged*
             # input job (worker_id still 'A') rather than a post-write row.
-            assert await queue.heartbeat(conn, job.id, "A") is False
-            assert await queue.complete(conn, job.id, "A", "ref-from-A") is None
-            failed_by_a = await queue.fail(conn, claimed_a, ErrorCategory.BUILD_FAILURE)
+            assert (
+                await queue.heartbeat(
+                    conn,
+                    job.id,
+                    attempt=claimed_a.attempt,
+                    incarnation_credential=incarnation_credential("A"),
+                )
+                is False
+            )
+            assert (
+                await queue.complete(
+                    conn,
+                    job.id,
+                    "ref-from-A",
+                    attempt=claimed_a.attempt,
+                    incarnation_credential=incarnation_credential("A"),
+                )
+                is None
+            )
+            failed_by_a = await queue.fail(
+                conn,
+                claimed_a,
+                ErrorCategory.BUILD_FAILURE,
+                incarnation_credential=incarnation_credential("A"),
+            )
             assert failed_by_a is claimed_a, "fail() returns the input unchanged on a fence miss"
 
             # The row itself is untouched by A: still B's running job.
@@ -125,7 +147,13 @@ def test_reclaimed_worker_cannot_finalize(migrated_url: str) -> None:
             assert row == ("running", "B", None), f"A mutated B's job: {row}"
 
             # B still owns it and can finalize.
-            done = await queue.complete(conn, job.id, "B", "ref-from-B")
+            done = await queue.complete(
+                conn,
+                job.id,
+                "ref-from-B",
+                attempt=claimed_b.attempt,
+                incarnation_credential=incarnation_credential("B"),
+            )
             assert done is not None and done.state is JobState.SUCCEEDED
             assert done.result_ref == "ref-from-B"
 

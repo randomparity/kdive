@@ -54,6 +54,7 @@ def _lifecycle(
     initially_created: bool = False,
     needs_replacement: bool = False,
     retained_credential: bool = False,
+    clean_managed_volumes: bool = False,
 ) -> tuple[ComposeWorkerLifecycle, list[tuple[str, object]]]:
     events: list[tuple[str, object]] = []
     container_id = "a" * 64
@@ -66,6 +67,11 @@ def _lifecycle(
             created = True
         return container_id if created and argv[-4:] == ("ps", "--all", "-q", "worker") else ""
 
+    cleanup_arguments = (
+        {"cleanup_managed_volumes": lambda: events.append(("cleanup-volumes", None))}
+        if clean_managed_volumes
+        else {}
+    )
     return (
         ComposeWorkerLifecycle(
             command=command,
@@ -77,6 +83,7 @@ def _lifecycle(
             nonce=lambda: _NONCE,
             credential_retained=lambda: retained_credential,
             cleanup_credential=lambda: events.append(("cleanup-credential", None)),
+            **cleanup_arguments,
         ),
         events,
     )
@@ -160,6 +167,52 @@ def test_down_terminates_worker_before_database_and_gate_services() -> None:
         "command",
         (("docker", "compose", "down", "--volumes", "--remove-orphans"), None),
     )
+
+
+def test_down_volumes_removes_profile_only_managed_volumes_after_compose_down() -> None:
+    lifecycle, events = _lifecycle(initially_created=True, clean_managed_volumes=True)
+
+    asyncio.run(lifecycle.down(volumes=True))
+
+    down_index = events.index(
+        (
+            "command",
+            (("docker", "compose", "down", "--volumes", "--remove-orphans"), None),
+        )
+    )
+    assert events[down_index + 1] == ("cleanup-volumes", None)
+
+
+def test_managed_volume_cleanup_targets_only_exact_project_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def command(
+        argv: tuple[str, ...],
+        _env: dict[str, str] | None,
+        *,
+        timeout: float,
+        max_stdout_bytes: int,
+        max_stderr_bytes: int,
+    ) -> str:
+        calls.append(argv)
+        return ""
+
+    monkeypatch.setattr(compose_worker_lifecycle, "_bounded_command", command)
+
+    compose_worker_lifecycle._remove_managed_worker_volumes("exact-project")
+
+    assert calls == [
+        (
+            "docker",
+            "volume",
+            "rm",
+            "--force",
+            "exact-project_kdive-build",
+            "exact-project_kdive-install",
+        )
+    ]
 
 
 def test_absent_worker_with_retained_credential_refuses_destructive_bypass() -> None:

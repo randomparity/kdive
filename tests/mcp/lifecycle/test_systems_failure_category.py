@@ -56,7 +56,11 @@ from tests.mcp.systems_support import (
 from tests.mcp.systems_support import (
     provisioning_profile as _provisioning_profile,
 )
-from tests.support.worker_fence import dequeue_as_current_worker, register_worker
+from tests.support.worker_fence import (
+    dequeue_as_current_worker,
+    incarnation_credential,
+    register_worker,
+)
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -425,6 +429,7 @@ async def _dead_letter(
             conn,
             claimed,
             category,
+            incarnation_credential=incarnation_credential("w1"),
             terminal=True,
             failure_context={"failure_message": message},
         )
@@ -573,7 +578,16 @@ def test_latest_failed_job_for_system_does_not_skip_over_a_newer_success(
                 )
                 claimed = await dequeue_as_current_worker(conn, "w1")
                 assert claimed is not None
-                assert await queue.complete(conn, claimed.id, "w1", None) is not None
+                assert (
+                    await queue.complete(
+                        conn,
+                        claimed.id,
+                        None,
+                        attempt=claimed.attempt,
+                        incarnation_credential=incarnation_credential("w1"),
+                    )
+                    is not None
+                )
                 found = await queue.latest_failed_job_for_system(conn, system_id)
         assert found is None
 

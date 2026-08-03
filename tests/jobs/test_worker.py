@@ -602,12 +602,19 @@ def test_heartbeat_renews_live_lease(migrated_url: str, monkeypatch: pytest.Monk
             async def observed_heartbeat(
                 conn: psycopg.AsyncConnection,
                 job_id: UUID,
-                worker_id: str,
                 *,
+                attempt: int,
+                incarnation_credential: SecretStr,
                 lease: timedelta = queue.DEFAULT_LEASE,
             ) -> bool:
                 nonlocal heartbeat_count
-                ok = await original_heartbeat(conn, job_id, worker_id, lease=lease)
+                ok = await original_heartbeat(
+                    conn,
+                    job_id,
+                    attempt=attempt,
+                    incarnation_credential=incarnation_credential,
+                    lease=lease,
+                )
                 heartbeat_count += 1
                 if heartbeat_count == 1:
                     first_heartbeat.set()
