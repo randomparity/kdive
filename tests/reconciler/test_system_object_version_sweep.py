@@ -15,7 +15,7 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import ObjectVersion, VersionBatch, VersionPage
-from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.locks import LockScope, _lock_key, advisory_xact_lock
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.console_hosting import CollectorRegistry, ConsoleHostingLoop
@@ -458,24 +458,21 @@ def test_delete_runs_after_system_transaction_and_lock_release(migrated_url: str
             system_id = await seed_system(seed, system_state=SystemState.TORN_DOWN)
         key = _local_key(system_id)
         store = _Store({key: [_version(key)]})
-        backend_pid = 0
+        lock_key = _lock_key(LockScope.SYSTEM, system_id)
 
-        def inspect_connection() -> None:
-            with psycopg.connect(migrated_url, autocommit=True) as observer:
+        def contend_for_system_lock() -> None:
+            with psycopg.connect(migrated_url) as observer:
                 row = observer.execute(
-                    "SELECT state, xact_start, "
-                    "(SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
-                    "AND pid = %s AND granted) FROM pg_stat_activity WHERE pid = %s",
-                    (backend_pid, backend_pid),
+                    "SELECT pg_try_advisory_xact_lock(%s)",
+                    (lock_key,),
                 ).fetchone()
-            assert row == ("idle", None, 0)
+            assert row == (True,)
 
-        store.before_delete = inspect_connection
+        store.before_delete = contend_for_system_lock
         async with (
             AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
             pool.connection() as conn,
         ):
-            backend_pid = conn.info.backend_pid
             assert await sweep.sweep_local_system_object_versions(conn, store) == 1
 
     asyncio.run(go())
