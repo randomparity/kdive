@@ -6,10 +6,12 @@ import asyncio
 import hashlib
 import io
 import json
+import ssl
 import urllib.request
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -21,7 +23,9 @@ from kdive.processes.kubernetes_credential_broker import (
     BrokerRequest,
     KubernetesCredentialBroker,
     PodIdentity,
+    encode_request,
     read_frame,
+    serve_broker,
     tls_server_context,
     write_frame,
 )
@@ -249,3 +253,197 @@ def test_broker_refuses_to_start_without_operator_supplied_tls_material(tmp_path
             private_key=str(tmp_path / "missing-key.pem"),
             ca=str(tmp_path / "missing-ca.pem"),
         )
+
+
+class _TestWriter:
+    def __init__(self) -> None:
+        self.data = bytearray()
+        self.closed = asyncio.Event()
+
+    def write(self, data: bytes) -> None:
+        self.data.extend(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed.set()
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+async def _captured_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    broker: KubernetesCredentialBroker,
+) -> tuple[
+    Callable[[asyncio.StreamReader, asyncio.StreamWriter], Coroutine[Any, Any, None]],
+    dict[str, Any],
+]:
+    callback: (
+        Callable[[asyncio.StreamReader, asyncio.StreamWriter], Coroutine[Any, Any, None]] | None
+    ) = None
+    server_kwargs: dict[str, Any] = {}
+
+    class _Server:
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    async def start_server(
+        handler: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Coroutine[Any, Any, None]],
+        host: str,
+        port: int,
+        **kwargs: Any,
+    ) -> _Server:
+        nonlocal callback
+        callback = handler
+        server_kwargs.update(kwargs)
+        return _Server()
+
+    monkeypatch.setattr(credential_broker.asyncio, "start_server", start_server)
+    monkeypatch.setattr(credential_broker, "CONNECTION_TIMEOUT_SECONDS", 0.02, raising=False)
+    monkeypatch.setattr(credential_broker, "MAX_CONCURRENT_SESSIONS", 1, raising=False)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        serve_broker(
+            broker,
+            stop,
+            host="127.0.0.1",
+            port=9443,
+            ssl_context=cast(ssl.SSLContext, object()),
+        )
+    )
+    await asyncio.sleep(0)
+    stop.set()
+    await task
+    assert callback is not None
+    return callback, server_kwargs
+
+
+def _valid_reader() -> asyncio.StreamReader:
+    request = encode_request(
+        BrokerRequest("deliver", "bound-token", "kdive", "kdive-worker-0", "uid-1")
+    )
+    reader = asyncio.StreamReader()
+    reader.feed_data(len(request).to_bytes(4, "big") + request)
+    return reader
+
+
+def _invalid_reader() -> asyncio.StreamReader:
+    reader = asyncio.StreamReader()
+    reader.feed_data((1).to_bytes(4, "big") + b"{")
+    return reader
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [b"", b"\x00\x00", b"\x00\x00\x00\x08{"],
+    ids=["no-prefix", "partial-prefix", "partial-payload"],
+)
+def test_partial_frames_are_closed_by_the_full_exchange_timeout(
+    monkeypatch: pytest.MonkeyPatch, partial: bytes
+) -> None:
+    async def run() -> None:
+        handler, _ = await _captured_handler(monkeypatch, _broker(_Store(), {}))
+        reader = asyncio.StreamReader()
+        reader.feed_data(partial)
+        writer = _TestWriter()
+        task = asyncio.create_task(handler(reader, cast(asyncio.StreamWriter, writer)))
+        await asyncio.sleep(0.05)
+        try:
+            assert task.done()
+            assert writer.closed.is_set()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_timed_out_application_operation_releases_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BlockingBroker:
+        calls = 0
+
+        async def handle(self, request: BrokerRequest) -> credential_broker.BrokerReply:
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+            return credential_broker.BrokerReply(refused=True)
+
+    async def run() -> None:
+        broker = cast(KubernetesCredentialBroker, _BlockingBroker())
+        handler, _ = await _captured_handler(monkeypatch, broker)
+        timed_out_writer = _TestWriter()
+        timed_out = asyncio.create_task(
+            handler(_valid_reader(), cast(asyncio.StreamWriter, timed_out_writer))
+        )
+        await asyncio.sleep(0.05)
+        assert timed_out.done()
+        assert timed_out_writer.closed.is_set()
+        valid_writer = _TestWriter()
+        await handler(_valid_reader(), cast(asyncio.StreamWriter, valid_writer))
+        assert valid_writer.data
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("first_reader", [_valid_reader, _invalid_reader], ids=["success", "error"])
+def test_success_and_error_release_capacity_for_the_next_request(
+    monkeypatch: pytest.MonkeyPatch,
+    first_reader: Callable[[], asyncio.StreamReader],
+) -> None:
+    async def run() -> None:
+        store = _Store()
+        broker = _broker(store, {"kdive-worker-0": _pod()})
+        assert await broker.pre_register_once() == 1
+        handler, _ = await _captured_handler(monkeypatch, broker)
+
+        first_writer = _TestWriter()
+        await handler(first_reader(), cast(asyncio.StreamWriter, first_writer))
+        assert first_writer.closed.is_set()
+
+        valid_writer = _TestWriter()
+        await handler(_valid_reader(), cast(asyncio.StreamWriter, valid_writer))
+        assert valid_writer.data
+
+    asyncio.run(run())
+
+
+def test_over_capacity_connection_closes_promptly_and_valid_request_follows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        store = _Store()
+        broker = _broker(store, {"kdive-worker-0": _pod()})
+        assert await broker.pre_register_once() == 1
+        handler, server_kwargs = await _captured_handler(monkeypatch, broker)
+        blocking_reader = asyncio.StreamReader()
+        blocking_writer = _TestWriter()
+        blocking = asyncio.create_task(
+            handler(blocking_reader, cast(asyncio.StreamWriter, blocking_writer))
+        )
+        await asyncio.sleep(0)
+
+        overloaded_writer = _TestWriter()
+        overloaded = asyncio.create_task(
+            handler(asyncio.StreamReader(), cast(asyncio.StreamWriter, overloaded_writer))
+        )
+        await asyncio.sleep(0.01)
+        assert overloaded.done()
+        assert overloaded_writer.closed.is_set()
+
+        blocking.cancel()
+        await asyncio.gather(blocking, return_exceptions=True)
+        valid_writer = _TestWriter()
+        await handler(_valid_reader(), cast(asyncio.StreamWriter, valid_writer))
+        assert valid_writer.data
+        assert server_kwargs["ssl_handshake_timeout"] > 0
+        assert server_kwargs["ssl_shutdown_timeout"] > 0
+
+    asyncio.run(run())

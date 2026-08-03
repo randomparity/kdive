@@ -22,6 +22,10 @@ BROKER_AUDIENCE = "kdive-worker-credential-broker"
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024
 MAX_PASS_COUNT = 1_000
+CONNECTION_TIMEOUT_SECONDS = 15
+MAX_CONCURRENT_SESSIONS = 64
+TLS_HANDSHAKE_TIMEOUT_SECONDS = 5
+TLS_SHUTDOWN_TIMEOUT_SECONDS = 5
 _log = logging.getLogger(__name__)
 _SERVICE_ACCOUNT_TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _SERVICE_ACCOUNT_CA = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
@@ -341,21 +345,40 @@ async def serve_broker(
     ssl_context: ssl.SSLContext,
 ) -> None:
     """Serve only bounded internal TLS credential requests until reconciler shutdown."""
+    sessions = asyncio.BoundedSemaphore(MAX_CONCURRENT_SESSIONS)
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if sessions.locked():
+            writer.close()
+            return
+        await sessions.acquire()
         try:
-            request = decode_request(
-                await read_frame(reader, maximum=MAX_REQUEST_BYTES, kind="request")
-            )
-            reply = await broker.handle(request)
-            await write_frame(writer, encode_reply(reply), maximum=MAX_RESPONSE_BYTES)
-        except Exception:  # noqa: BLE001 -- malformed/internal peers receive no details
-            _log.warning("worker credential broker rejected a request")
+            try:
+                async with asyncio.timeout(CONNECTION_TIMEOUT_SECONDS):
+                    try:
+                        request = decode_request(
+                            await read_frame(reader, maximum=MAX_REQUEST_BYTES, kind="request")
+                        )
+                        reply = await broker.handle(request)
+                        await write_frame(writer, encode_reply(reply), maximum=MAX_RESPONSE_BYTES)
+                    except Exception:  # noqa: BLE001 -- malformed/internal peers receive no details
+                        _log.warning("worker credential broker rejected a request")
+                    writer.close()
+                    await writer.wait_closed()
+            except TimeoutError:
+                _log.warning("worker credential broker request timed out")
         finally:
             writer.close()
-            await writer.wait_closed()
+            sessions.release()
 
-    server = await asyncio.start_server(handle, host, port, ssl=ssl_context)
+    server = await asyncio.start_server(
+        handle,
+        host,
+        port,
+        ssl=ssl_context,
+        ssl_handshake_timeout=TLS_HANDSHAKE_TIMEOUT_SECONDS,
+        ssl_shutdown_timeout=TLS_SHUTDOWN_TIMEOUT_SECONDS,
+    )
     try:
         await stop.wait()
     finally:
