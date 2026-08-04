@@ -495,6 +495,12 @@ config-guard:
 env-docs-check:
     uv run python scripts/check_env_documented.py
 
+# Fail when the pinned mcp library no longer advertises the protocol range src/kdive/mcp
+# declares (ADR-0537). Offline by design — the upstream half runs on a weekly cron
+# (mcp-spec-drift.yml), so no PR depends on github.com being reachable.
+mcp-spec-check:
+    uv run python scripts/check_mcp_spec_version.py
+
 # Immutability guard: no modify/delete/rename of an existing src/kdive/db/schema/*.sql
 # (only new migrations may be added). Applied migrations are byte-immutable (ADR-0015);
 # a cosmetic edit breaks upgrades of any DB migrated by an earlier build (#1218). Diffs
@@ -537,4 +543,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test
+ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check mcp-spec-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test

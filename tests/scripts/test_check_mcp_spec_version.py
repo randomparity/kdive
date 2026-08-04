@@ -16,6 +16,7 @@ from urllib.error import URLError
 import mcp.shared.version
 import mcp.types
 import pytest
+import yaml
 
 from kdive.mcp import MCP_PROTOCOL_VERSION, MCP_SUPPORTED_PROTOCOL_VERSIONS
 from scripts import check_mcp_spec_version
@@ -23,6 +24,10 @@ from scripts.check_mcp_spec_version import main, newer_revisions
 
 # The upstream `schema/` listing as published today, `draft` included.
 _LISTING = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28", "draft")
+
+_ROOT = Path(__file__).resolve().parents[2]
+_CI_WORKFLOW = _ROOT / ".github" / "workflows" / "ci.yml"
+_DRIFT_WORKFLOW = _ROOT / ".github" / "workflows" / "mcp-spec-drift.yml"
 
 
 def test_declared_constants_match_the_pinned_library() -> None:
@@ -115,6 +120,30 @@ def test_offline_mode_makes_no_network_call(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(socket, "create_connection", _no_sockets)
 
     assert main([]) == 0
+
+
+# --- wiring: the gate only bites if CI actually invokes it -----------------------------
+
+
+def _ci_run_steps() -> list[str]:
+    doc = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
+    return [
+        step["run"]
+        for job in doc["jobs"].values()
+        for step in job.get("steps", [])
+        if "run" in step
+    ]
+
+
+def test_ci_workflow_runs_the_mcp_spec_check_recipe() -> None:
+    """Criterion 1 rests on a hand-listed ci.yml step, not on the `ci` recipe.
+
+    No workflow here invokes `just ci` — ci.yml runs each recipe as its own step. This repo
+    has lost that wiring twice: ADR-0518 records schema-guard sitting in the `ci` aggregate
+    and the prek hook while CI never invoked it, so it passed every PR (#1723), and ADR-0410
+    hit the same thing. A comment is not a guard, and the failure mode is green.
+    """
+    assert any("just mcp-spec-check" in run for run in _ci_run_steps())
 
 
 # --- upstream mode: the weekly cron, which gates nothing -------------------------------
