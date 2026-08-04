@@ -37,7 +37,8 @@ class _RecordingFetch:
 def test_resolve_fetches_present_ref_to_dest(tmp_path: Path) -> None:
     fetch = _RecordingFetch(data=b"ELFDATA")
     resolver = debuginfo.DebuginfoResolver(
-        read_debuginfo_ref=lambda run_id: "runs/r1/vmlinux", fetch_object=fetch
+        read_debuginfo_ref=lambda run_id: ArtifactReadRef("runs/r1/vmlinux", None),
+        fetch_object=fetch,
     )
     dest = tmp_path / "vmlinux"
     result = resolver.resolve("r1", dest)
@@ -83,7 +84,8 @@ def test_resolve_propagates_fetch_error(tmp_path: Path) -> None:
     )
     fetch = _RecordingFetch(error=boom)
     resolver = debuginfo.DebuginfoResolver(
-        read_debuginfo_ref=lambda run_id: "runs/r1/vmlinux", fetch_object=fetch
+        read_debuginfo_ref=lambda run_id: ArtifactReadRef("runs/r1/vmlinux", None),
+        fetch_object=fetch,
     )
     dest = tmp_path / "vmlinux"
     with pytest.raises(CategorizedError) as exc:
@@ -97,7 +99,7 @@ def test_resolve_writes_to_dest_not_run_id_derived_path(tmp_path: Path) -> None:
     # per-attach staging dir is the seam's responsibility). A hostile run_id never reaches the path.
     fetch = _RecordingFetch(data=b"SYMBOLS")
     resolver = debuginfo.DebuginfoResolver(
-        read_debuginfo_ref=lambda run_id: "key", fetch_object=fetch
+        read_debuginfo_ref=lambda run_id: ArtifactReadRef("key", None), fetch_object=fetch
     )
     dest = tmp_path / "custom-name"
     resolver.resolve("../../etc/passwd", dest)
@@ -112,7 +114,7 @@ def _fake_attachment() -> GdbMiAttachment:
 def test_stage_and_attach_stages_into_private_dir_and_attaches(tmp_path: Path) -> None:
     fetch = _RecordingFetch(data=b"ELF")
     resolver = debuginfo.DebuginfoResolver(
-        read_debuginfo_ref=lambda run_id: "key", fetch_object=fetch
+        read_debuginfo_ref=lambda run_id: ArtifactReadRef("key", None), fetch_object=fetch
     )
     seen: dict[str, Path] = {}
     sentinel = _fake_attachment()
@@ -157,7 +159,8 @@ def test_stage_and_attach_removes_staging_dir_on_attach_failure(
 ) -> None:
     monkeypatch.setattr(debuginfo.tempfile, "tempdir", str(tmp_path))
     resolver = debuginfo.DebuginfoResolver(
-        read_debuginfo_ref=lambda run_id: "key", fetch_object=_RecordingFetch(data=b"ELF")
+        read_debuginfo_ref=lambda run_id: ArtifactReadRef("key", None),
+        fetch_object=_RecordingFetch(data=b"ELF"),
     )
     boom = CategorizedError("gdb attach failed", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
 
@@ -237,7 +240,7 @@ def test_module_resolve_returns_path_and_identity() -> None:
     tar = _make_modules_tar({"lib/modules/6.0/kernel/fs/foo.ko": b"ELF-foo"})
     fetch = _RecordingFetch(data=tar)
     resolver = debuginfo.ModuleDebuginfoResolver(
-        read_kernel_ref=lambda run_id: "runs/r1/kernel.tar",
+        read_kernel_ref=lambda run_id: ArtifactReadRef("runs/r1/kernel.tar", None),
         fetch_object=fetch,
         read_identity=lambda path: ("SRC123", "BID456"),
     )
@@ -265,7 +268,7 @@ def test_module_resolve_reusable_kernel_fetches_exact_version() -> None:
 def test_module_resolve_absent_ko_raises_no_module_debuginfo() -> None:
     tar = _make_modules_tar({"lib/modules/6.0/kernel/fs/other.ko": b"x"})
     resolver = debuginfo.ModuleDebuginfoResolver(
-        read_kernel_ref=lambda run_id: "runs/r1/kernel.tar",
+        read_kernel_ref=lambda run_id: ArtifactReadRef("runs/r1/kernel.tar", None),
         fetch_object=_RecordingFetch(data=tar),
         read_identity=lambda path: (None, None),
     )
@@ -280,7 +283,7 @@ def test_module_resolve_absent_ko_raises_no_module_debuginfo() -> None:
 def test_module_resolve_matches_dash_underscore_variant() -> None:
     tar = _make_modules_tar({"lib/modules/6.0/kernel/foo-bar.ko": b"FB"})
     resolver = debuginfo.ModuleDebuginfoResolver(
-        read_kernel_ref=lambda run_id: "k",
+        read_kernel_ref=lambda run_id: ArtifactReadRef("k", None),
         fetch_object=_RecordingFetch(data=tar),
         read_identity=lambda path: (None, None),
     )
@@ -292,7 +295,7 @@ def test_module_resolve_caches_fetch_per_run() -> None:
     tar = _make_modules_tar({"lib/modules/6.0/foo.ko": b"f"})
     fetch = _RecordingFetch(data=tar)
     resolver = debuginfo.ModuleDebuginfoResolver(
-        read_kernel_ref=lambda run_id: "k",
+        read_kernel_ref=lambda run_id: ArtifactReadRef("k", None),
         fetch_object=fetch,
         read_identity=lambda path: (None, None),
     )

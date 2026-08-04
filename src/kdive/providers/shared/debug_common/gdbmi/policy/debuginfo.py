@@ -40,12 +40,12 @@ from kdive.providers.shared.debug_common.crash_postmortem import (
     default_fetch_versioned_object,
 )
 
-type _ReadDebuginfoRef = Callable[[str], str | ArtifactReadRef | None]
+type _ReadDebuginfoRef = Callable[[str], ArtifactReadRef | None]
 type _FetchObject = Callable[[str], bytes]
 type _FetchVersionedObject = Callable[[str, str], bytes]
 type _Attach = Callable[[Path], GdbMiAttachment]
 type _GdbMiEngineFactory = Callable[[], _GdbMiAttachEngine]
-type _ReadKernelRef = Callable[[str], str | ArtifactReadRef | None]
+type _ReadKernelRef = Callable[[str], ArtifactReadRef | None]
 type _ReadModuleIdentity = Callable[[Path], tuple[str | None, str | None]]
 type ModuleDebuginfoResolverSeam = Callable[[str, str], "ModuleDebuginfo"]
 
@@ -99,9 +99,7 @@ class DebuginfoResolver:
         dest.write_bytes(self._fetch(ref))
         return dest
 
-    def _fetch(self, ref: str | ArtifactReadRef) -> bytes:
-        if isinstance(ref, str):
-            return self._fetch_object(ref)
+    def _fetch(self, ref: ArtifactReadRef) -> bytes:
         if ref.version_id is None:
             return self._fetch_object(ref.key)
         if self._fetch_versioned_object is None:
@@ -171,9 +169,7 @@ class ModuleDebuginfoResolver:
         if ref is None:
             raise self._missing(run_id, module)
         root = Path(tempfile.mkdtemp(prefix="kdive-modules-"))
-        if isinstance(ref, str):
-            data = self._fetch_object(ref)
-        elif ref.version_id is None:
+        if ref.version_id is None:
             data = self._fetch_object(ref.key)
         elif self._fetch_versioned_object is not None:
             data = self._fetch_versioned_object(ref.key, ref.version_id)
