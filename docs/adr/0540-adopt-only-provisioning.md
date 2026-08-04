@@ -53,11 +53,11 @@ that generalize, `default_crashkernel` is genuinely arch-keyed and BYO wants it;
 fields a BYO host reads from the arch table is one.
 
 **Two runtime defaults are actively wrong for an adopted host.**
-`platform_root_cmdline` defaults to `"root=/dev/vda"` (`src/kdive/providers/core/runtime.py:143`),
+`platform_root_cmdline` defaults to `"root=/dev/vda"` (`src/kdive/providers/core/runtime.py:152`),
 which is a claim about a platform-owned disk layout that an adopted host's own bootloader
-owns instead. And `binding` defaults to `None`, meaning `for_resource()` returns the runtime
-unchanged (`runtime.py:190`); a provider serving many hosts would then resolve every operation
-against one arbitrary host. Remote-libvirt overrides both
+owns instead. And `binding` defaults to `None` (`runtime.py:162`), so `for_resource()` returns
+the runtime unchanged (`:174-183`); a provider serving many hosts would then resolve every
+operation against one arbitrary host. Remote-libvirt overrides both
 (`src/kdive/providers/remote_libvirt/composition.py:390`, `:391`,
 [ADR-0183](0183-provider-aware-platform-root-cmdline.md),
 [ADR-0187](0187-remote-libvirt-per-op-resource-selection.md)) for the same two reasons.
@@ -128,9 +128,27 @@ is mandatory rather than optional. Both are stated here because both are facts a
 and both fail quietly if omitted: a wrong `root=` produces a kernel that boots to an
 unreachable root, and a missing rebind hook silently drives the wrong machine.
 
-**One System per host.** `concurrent_allocation_cap` defaults to 1. A force-crash takes the
-whole machine, so a second concurrent System on the same host would be crashed by the first
-one's Run without either knowing.
+**One System per host, and one declaration per machine.** `concurrent_allocation_cap` defaults
+to 1: a force-crash takes the whole machine, so a second concurrent System on the same host
+would be crashed by the first one's Run without either knowing.
+
+The cap alone does not deliver that invariant, and the gap is worth stating because the
+mechanism looks sufficient. A Resource is identified by `(kind, name)`
+(`src/kdive/db/schema/0030_systems_inventory.sql:33`), so two `[[byo_host]]` entries with
+different `name` values but the same SSH target, the same OOB `endpoint`, or the same
+`(managed_system, lpar_name)` pair are two schedulable Resources — each correctly capped at
+one — driving one physical machine. The realized failure is cross-tenant and is exactly what
+the cap exists to prevent: tenant A's `force_crash` takes down tenant B's System, B's Run
+reports a kernel fault it did not cause, and teardown then restores a baseline underneath B
+mid-Run. The HMC case is the easiest to hit by accident, because a partition is addressed by
+two identifiers and an operator may reasonably name one LPAR twice to place it in two pools.
+
+So a host's **physical coordinates are unique across `[[byo_host]]` entries**: the SSH target,
+the OOB endpoint, and `(managed_system, lpar_name)` where present.
+`reconcile-systems --check` rejects a duplicate with an `entry.field: msg` error. This is a
+comparison over the parsed document and touches nothing, so ADR-0121's no-I/O contract is
+preserved — the check belongs at deploy time precisely because a live probe could not tell two
+declarations of one machine apart from two machines that happen to answer alike.
 
 ## Consequences
 
@@ -202,6 +220,11 @@ a healthy one.
 - **Lift only `default_crashkernel` and `SUPPORTED_ARCHES` into a platform-neutral module.**
   Smaller than a full split and worse: it produces the two-table coupling without the benefit
   of having separated the libvirt-only fields from the portable ones.
+- **Detect aliased declarations live, at adopt, instead of at `reconcile-systems --check`.** A
+  probe would have to prove two reachable endpoints are the same machine, which it cannot do
+  reliably — a shared machine-id or boot-id is evidence, not proof, and two genuinely distinct
+  hosts restored from one image share both. The declaration is where the operator's intent is
+  legible, and comparing declared coordinates is exact.
 - **Let a BYO host carry a `concurrent_allocation_cap` above 1 for partitioning cases.**
   No partitioning case survives a force-crash, which is the operation the provider exists for.
   A host that could safely host two independent debug Systems is a hypervisor, and KDIVE has

@@ -43,18 +43,18 @@ ACL *is* the auth. A KGDB session reaches the target through the service process
 control is the OOB credential and the network path to that endpoint. Different mechanism,
 different failure mode, and worth stating rather than inheriting by analogy.
 
-Two closed literals govern how a transport is expressed
-(`src/kdive/providers/ports/lifecycle.py:27-28`), and the file's own comment says to keep them
-separate:
+Two closed literals govern how a transport is expressed, and the file's own comment says to keep
+them separate:
 
-- `DebugTransportKind = Literal["gdbstub", "drgn-live"]` — the agent-facing value accepted by
+- `DebugTransportKind = Literal["gdbstub", "drgn-live"]`
+  (`src/kdive/providers/ports/lifecycle.py:27`) — the agent-facing value accepted by
   `debug.start_session`.
-- `TransportHandleKind = Literal["gdbstub", "ssh", "drgn-live"]` — the realization, serialized
-  as `<kind>://host:port` (`:41-50`), always a loopback endpoint.
+- `TransportHandleKind = Literal["gdbstub", "ssh", "drgn-live"]` (`:21`) — the realization,
+  serialized as `<kind>://host:port` (`:41-50`), always a loopback endpoint.
 
 Widening the agent-facing literal touches the debug-session registrar under `mcp/tools/`,
 which is inside the portability gate's core prefixes
-(`scripts/m2_portability_gate.py:45-54`). There is precedent: ADR-0085's drgn-live
+(`scripts/m2_portability_gate.py:44-53`). There is precedent: ADR-0085's drgn-live
 generalization allowlisted `src/kdive/mcp/tools/debug/sessions.py` and `introspect.py` as
 deliberate, reviewed core touches.
 
@@ -88,9 +88,11 @@ the lease is held:
 **`supports_crash_watch` is advertised `True`.** The capability is real: crash watch works on
 every BYO host whenever no debug session holds the lease, which is the common case. Advertising
 `False` because a conflict is possible would be a static lie about a dynamic condition, and
-`ProviderSupport` flags (`src/kdive/providers/core/runtime.py:78-90`) are read at admission to
+`ProviderSupport` flags (`src/kdive/providers/core/runtime.py:66-89`) are read at admission to
 tell an agent what a provider *can* do. The dynamic condition is reported where it occurs, as a
-refusal that names its holder and its remedy.
+refusal that names its holder, its expiry, and its remedy — and, per
+[ADR-0539](0539-out-of-band-control-port.md), a remedy that stays performable when the holding
+worker has died, because the reconciler reclaims a stranded lease.
 
 **`kgdboc` is composed into the target cmdline at install time**, through the existing cmdline
 composition path ([ADR-0061](0061-boot-cmdline-composition.md)), naming the same console device

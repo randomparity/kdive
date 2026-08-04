@@ -18,18 +18,26 @@ this document follows from them:
    machine in an unknown kernel state, which placement will happily hand to the next tenant.
    Every provider before this one could only leave an orphan.
 
-**Roadmap position.** `docs/design/top-level-design.md` scopes M4 as bare metal (PXE / SoL /
-IPMI / Redfish) and M5 as PowerVM/HMC. The adopt-only decision removes PXE from M4 entirely,
-and the single-provider decision ([ADR-0538](../adr/0538-byo-host-provider-package.md)) merges
-the two control planes behind one seam — so the M5 PowerVM control plane lands **inside** this
-milestone rather than after it. This document is the integration contract for both.
+**Roadmap position.** `docs/design/top-level-design.md:581` scopes M4 as bare metal (PXE / SoL /
+IPMI / Redfish) and `:583` scopes M5 as "LPAR activation + HMC; second architecture". The
+adopt-only decision removes two declared pieces, one from each: **PXE** from M4, and **LPAR
+activation** from M5 (see Non-goals — KDIVE never creates, deletes, or resizes an LPAR). What
+the single-provider decision ([ADR-0538](../adr/0538-byo-host-provider-package.md)) merges into
+this milestone is therefore M5's **HMC control plane and second architecture**, not its LPAR
+lifecycle half. That half is not rescheduled — it is out of scope for the adopt-only approach
+and would need its own decision to return.
 
-**Relationship to epic #1760.** #1760 selects MAAS as an external provisioning control plane.
-This milestone selects none. Both epics are open and the control-plane decision between them is
-deliberately outstanding; roughly ten of #1760's sub-issues describe host-facing planes that
-overlap entries 11–16 and 19–20 here. Those are **not** adopted into this milestone, and an
-overlapping pair is not worked in parallel. Whichever direction wins, the losing epic's
-overlapping entries close as duplicates at that point — not before.
+**Relationship to epic #1760.** #1760 selected MAAS as an external provisioning control plane;
+this milestone selects none. It was **closed as `NOT_PLANNED` on 2026-08-04**, with all 27 of
+its sub-issues closed, so adopt-only is the surviving direction and **no cross-epic hold
+applies** to any entry here. Roughly ten of #1760's sub-issues described host-facing planes
+that overlap entries 11–16 and 19–20; they are closed, not adopted, and this milestone owns
+that surface outright. The MAAS approach stands as a recorded alternative in #1760's history —
+returning to it would be a new decision, not the resumption of an outstanding one. The
+motivating findings survive the closure and are why adopt-only was chosen: `packer-maas`
+publishes no ppc64el image template (#1793), Beaker was a closer fit than MAAS (#1792), and
+neither control plane can issue an NMI, which a provider whose central operation is
+`force_crash` cannot accept (#1808).
 
 - **Decisions:** [ADR-0538](../adr/0538-byo-host-provider-package.md) (one `byo_host` package
   for both architectures + `ResourceKind.BYO_HOST` + bind-only registration),
@@ -56,8 +64,10 @@ overlapping entries close as duplicates at that point — not before.
 
 ## Resolved open questions
 
-Epic #1814 opened seven. Four were architecture and are settled here; three are not
-architecture and stay with the entries that own them.
+Epic #1814 opened seven. **Five are settled here** (1, 2, 3, 4, 7) and **two stay open** (5, 6)
+with the entries that own them. Questions 1–4 are the architecture questions this issue was cut
+to resolve; question 7 arrived in the epic already proposed with a stated answer, and is
+confirmed rather than decided here — so the scope claim of "open questions 1–4" still holds.
 
 | # | Question | Resolution | Record |
 |---|---|---|---|
@@ -183,13 +193,17 @@ Three runtime fields are set explicitly because their defaults are wrong here:
 
 | field | default | BYO value | why |
 |---|---|---|---|
-| `platform_root_cmdline` | `"root=/dev/vda"` (`providers/core/runtime.py:143`) | `None` | The adopted host's own bootloader owns its root device; a wrong `root=` boots to an unreachable root (ADR-0183). |
-| `binding` | `None` → `for_resource()` is identity (`runtime.py:190`) | `ResourceBindingCapabilities(...)` | BYO serves many hosts; without a rebind hook every op silently drives one arbitrary machine (ADR-0187). |
+| `platform_root_cmdline` | `"root=/dev/vda"` (`providers/core/runtime.py:152`) | `None` | The adopted host's own bootloader owns its root device; a wrong `root=` boots to an unreachable root (ADR-0183). |
+| `binding` | `None` (`runtime.py:162`) → `for_resource()` returns identity (`:174-183`) | `ResourceBindingCapabilities(...)` | BYO serves many hosts; without a rebind hook every op silently drives one arbitrary machine (ADR-0187). |
 | `support.supports_crash_watch` | `False` | `True` | The capability is real whenever no debug session holds the console lease. The dynamic conflict is a refusal, not a static flag (ADR-0542). |
 
-The declared architecture reaches `Resource.capabilities`, so `resolve_accel()`
-(`src/kdive/services/systems/validation.py:50`) stops fail-opening and admission rejects an
-arch-mismatched profile at `systems.create` rather than at install.
+The declared architecture reaches `Resource.capabilities` under the `guest_arches` key, so
+`resolve_accel()` (`src/kdive/services/systems/validation.py:50`) and `resource_supports_arch()`
+(`src/kdive/services/allocation/admission/affinity.py:45`) stop fail-opening and admission
+rejects an arch-mismatched profile at `systems.create` rather than at install. The exact record
+BYO writes, and why it needs no core change, is fixed by
+[ADR-0538](../adr/0538-byo-host-provider-package.md) — the shape is libvirt's, so BYO's entry
+carries explicit sentinels rather than a fabricated accelerator.
 
 ## The out-of-band plane (the load-bearing mechanism)
 
@@ -265,7 +279,7 @@ the teardown case.
 
 The epic's R9 listed seven touch-points. **Four of them are outside the gate's reach**, and
 recording that here is what keeps entry 17 (#1820) from adding allowlist entries for files the
-gate never inspects. `CORE_PREFIXES` (`scripts/m2_portability_gate.py:45-54`) is exactly
+gate never inspects. `CORE_PREFIXES` (`scripts/m2_portability_gate.py:44-53`) is exactly
 `domain/`, `db/`, `jobs/`, `reconciler/`, `services/`, `store/`, `security/`, and `mcp/`.
 
 **Not gated** — no allowlist entry is owed, because these paths are not core prefixes:
@@ -285,8 +299,8 @@ gate never inspects. `CORE_PREFIXES` (`scripts/m2_portability_gate.py:45-54`) is
 | `src/kdive/mcp/tools/debug/sessions.py` | the `kgdb` transport arm on the debug-session registrar | yes (entered for ADR-0085; BYO reuses it) |
 | `src/kdive/reconciler/loop.py` | the BYO mid-teardown drift arm | yes (entered for ADR-0086; BYO reuses it) |
 
-Two further facts about the gate, both verified against the tree rather than inherited from
-M2's design doc:
+Three further facts about the gate, each verified against the tree rather than inherited from
+M2's design doc. Two of them say the enforcement M2's document describes is not there:
 
 - **The gate does not run in CI.** `just m2-gate` appears in no workflow and is not a member of
   the `ci` recipe (`justfile:546`); it is reachable only by hand, alongside `just m2-report`.
@@ -294,12 +308,18 @@ M2's design doc:
   deciding whether to wire it or to state plainly that the measurement is milestone-end only —
   a gate nobody runs measures nothing, and claiming otherwise in this document would be the
   same defect one layer up.
-- **What *is* gated is the drift-guard test.** `tests/scripts/test_m2_portability_gate.py`
-  imports the real runtime builders and fails when `CAPTURE_COVERAGE`
-  (`scripts/m2_portability_gate.py:39`) diverges from what composition advertises. It runs under
-  `just test`, so registering `byo-host` reddens the suite until the table gains
-  `"byo-host": frozenset({"kdump", "fadump"})`. That is why entry 17 follows entry 2 directly
-  rather than trailing the milestone.
+- **Nothing detects a missing `CAPTURE_COVERAGE` row.** The drift guard
+  (`tests/scripts/test_m2_portability_gate.py:33-52`) imports the real builders and asserts two
+  **hardcoded** keys — `CAPTURE_COVERAGE["remote-libvirt"]` and `["local-libvirt"]` — against
+  `build_remote_runtime` and `build_local_runtime`. Nothing enumerates the resolver's registered
+  kinds, in either direction. So entry 2 can register `byo-host` with no coverage row and
+  `just test` stays green; the omission surfaces only as `just m2-report` quietly leaving out
+  the provider this milestone exists to add. **Entry 17 owns closing that**: an assertion that
+  iterates the resolver's registered kinds and requires a `CAPTURE_COVERAGE` entry for each,
+  which is what makes epic exit criterion 8 checkable and what turns the entry-17-after-entry-2
+  ordering from a convention into an enforced one. Until it lands, the ordering is a convention
+  with no automated signal, and `"byo-host": frozenset({"kdump", "fadump"})` is a row a human
+  has to remember.
 - **`BASELINE_TAG = "pre-M2"`** (`:24`) would measure BYO's diff against a tag two milestones
   old, folding every intervening core change into this milestone's total. Entry 17 owns a
   `pre-M4` baseline alongside it.
@@ -312,7 +332,7 @@ and 20 are the operator-run proofs on real hardware.
 | # | Issue | Depends on | Area |
 |---|---|---|---|
 | 1 | **The ADR set + this document.** Five ADRs and the milestone contract; open questions 1–4 resolved. | — | design |
-| 2 | **#1817 — `ResourceKind.BYO_HOST`, migration, inventory schema, package skeleton.** `ByoHostInstance` + `InventoryDoc` field + reconcile arm, `systems.toml.example`, and `providers/byo_host/` with a buildable runtime whose ports are fail-closed stubs. Inseparable: the CHECK widen and the registered runtime must land together. | 1 | providers + db |
+| 2 | **#1817 — `ResourceKind.BYO_HOST`, migration, inventory schema, package skeleton.** `ByoHostInstance` + `InventoryDoc` field + the host-coordinate uniqueness check (ADR-0540) + reconcile arm, `systems.toml.example`, and `providers/byo_host/` with a buildable runtime whose ports are fail-closed stubs. Inseparable: the CHECK widen and the registered runtime must land together. Also renames `test_check_admits_all_three_kinds` (`tests/db/test_resource_kind_parity.py:25`), whose exact-equality assertion at `:30` names three kinds. | 1 | providers + db |
 | 3 | **#1819 — provisioning profile section and policy.** `ByoHostProfile`, `ProviderSection.byo_host_section`, `ByoHostProfilePolicy`, and the `adopted-host` boot method with the generalized pairing map. | 2 | provisioning |
 | 4 | **#1818 — the OOB control port seam and the Redfish driver.** The typed protocol under `providers/byo_host/oob/`, the console lease, and Redfish. | 1 | providers + security |
 | 5 | **#1821 — the IPMI driver.** Additive behind the entry-4 seam. | 4 | providers |
@@ -326,8 +346,8 @@ and 20 are the operator-run proofs on real hardware.
 | 13 | **#1829 — crash capture and retrieve.** kdump on both arches, fadump on POWER; owns replacing the QEMU-version-floor fadump probe (open question 5). | 10, 12 | capture |
 | 14 | **#1828 — the KGDB transport.** The third `DebugTransportKind`, the debug-session registrar arm, the allowlist entry, and the console-to-loopback bridge. | 11 | debug |
 | 15 | **#1831 — in-target drgn and vmcore postmortem.** | 13 | debug |
-| 16 | **#1830 — teardown: baseline restore, OOB power-cycle, cordon, reconciler drift arm.** | 12 | lifecycle |
-| 17 | **#1820 — extend the portability gate.** The `pre-M4` baseline tag, the `byo-host` `CAPTURE_COVERAGE` row, the two new allowlist entries, and the CI-wiring decision above. | 2 | tooling |
+| 16 | **#1830 — teardown: baseline restore, OOB power-cycle, cordon, reconciler drift arm.** Also owns the **stranded-console-lease reclaim** (ADR-0539), which shares the dead-worker shape and the same `reconciler/loop.py` allowlist entry as the mid-teardown arm. | 12 | lifecycle |
+| 17 | **#1820 — extend the portability gate.** The `pre-M4` baseline tag, the `byo-host` `CAPTURE_COVERAGE` row, the **registered-kinds completeness assertion** that makes a missing row detectable at all, the two new allowlist entries, and the CI-wiring decision above. | 2 | tooling |
 | 18 | **#1832 — operator runbook and agent-facing documentation.** | 13, 16 | docs |
 | 19 | **#1833 — live proof: the full spine on an x86 host with a BMC.** | 14, 15, 16 | proof |
 | 20 | **#1834 — live proof: the full spine on a PowerVM LPAR via HMC**, including fadump. | 6, 14, 15, 16 | proof |
@@ -352,8 +372,10 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
   Entry 6 (HMC) is sequenced immediately after 4 rather than last, because its
   managed-system-plus-partition addressing is what stresses the port shape — a revision it
   forces is cheap there and expensive after four planes are written.
-- **The drift-guard test breaks the moment entry 2 lands.** `byo-host` registered without a
-  `CAPTURE_COVERAGE` row reddens `just test`, so entry 17 follows entry 2 directly.
+- **Entry 17 follows entry 2 by convention, not by a failing test.** Nothing today detects a
+  registered kind with no `CAPTURE_COVERAGE` row (see the gate section above), so the ordering
+  is a discipline until entry 17 lands the completeness assertion that makes it enforceable.
+  Treat the row as owed the moment entry 2 merges.
 - **Expected rebase zones:** `providers/assembly/composition.py` (entry 2 registers; 3–16 wire
   ports), `src/kdive/domain/catalog/resources.py` (one enum value, entry 2),
   `tests/db/test_migrate.py` (entry 2's migration), and the generated `docs/guide/reference/*`

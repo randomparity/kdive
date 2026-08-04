@@ -84,6 +84,26 @@ consequences of that choice for KGDB specifically are
 [ADR-0542](0542-kgdb-over-leased-serial-channel.md); the lease itself is here because it is a
 property of the channel, not of the debugger.
 
+**A lease is persisted, expiring, and reclaimable — its holder can die.** Lease state lives in
+Postgres keyed on the System, not in worker-local memory, because the process that holds it is
+exactly the process that can vanish. Every lease carries an expiry with the five-part contract
+(unit, reference clock, scope, consequence, recovery), and a refusal names the holder, the
+expiry, and the release action. A lease whose holding worker is no longer live is reclaimed by
+the reconciler ([ADR-0021](0021-reconciler-loop-drift-repair.md)) rather than waiting for a
+human.
+
+This is not a new mechanism; it is the one the repository already built for the same failure.
+[ADR-0086](0086-dead-worker-gdbstub-reconciler-reset.md) added a reconciler reset because a
+worker that died mid-debug wedged remote-libvirt's single-client gdbstub until teardown, and
+`src/kdive/reconciler/loop.py` sits in the portability allowlist for precisely that reason. A
+console lease is the same shape with a worse blast radius: a stranded holder takes log
+collection, SysRq, **and** crash watch down for the host, and every refusal names a remedy —
+"release the holding session" — that nobody can perform, while being indistinguishable from
+ordinary healthy contention. Without reclaim, the lease's central argument over a splitter
+(that a refusal names its cause and its remedy) is false in the one case that needs it. The
+work is named in the milestone decomposition alongside the mid-teardown drift arm, since the
+two share the dead-worker detection and the same allowlist entry.
+
 **Credentials resolve through the SecretRegistry and register for redaction before use.** The
 declaration carries refs only, never material ([ADR-0012](0012-secret-backend.md),
 [ADR-0087](0087-config-registry.md)). The worker resolves each ref at the op boundary,
@@ -156,6 +176,14 @@ a refusal names its cause and its remedy, and interleaved bytes name neither.
   by every vendor shipping today, unencrypted in its most-deployed configurations, and its SoL
   implementations vary more than Redfish's. Redfish is the driver the x86 live proof depends
   on; IPMI is the compatibility path.
+- **Keep lease state in worker-local memory.** Simplest, and it makes the failure
+  unrecoverable: a dead worker's lease is unreadable by anyone, so nothing can even report who
+  holds the channel, let alone reclaim it. The state has to outlive the holder to be reclaimable
+  at all.
+- **Rely on expiry alone, with no reconciler reclaim.** A lease that expires does eventually
+  free the channel, and until it does every consumer is refused with a remedy nobody can
+  perform. ADR-0086 reached the same conclusion for the gdbstub and added the reconciler arm;
+  reusing that shape costs one drift check and removes the wait entirely.
 - **Let the console be shared, with each consumer reading the stream it wants.** One serial
   channel cannot serve two readers without a splitter, and a splitter that mis-frames one byte
   corrupts a debugger session. The lease states the constraint instead of hiding it. What a
