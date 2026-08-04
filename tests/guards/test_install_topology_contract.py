@@ -590,6 +590,153 @@ printf '%s\n%s\n' "$TARGET_CHART" "$TARGET_VALUES_SNAPSHOT"
     assert publish().returncode != 0
 
 
+def test_canonical_staged_helm_upgrade_retry_is_fresh_and_does_not_recapture(
+    tmp_path: Path,
+) -> None:
+    _, stages = _staged_upgrade_stages()
+    initial_block = _block_containing(
+        stages[_STAGED_UPGRADE_MARKERS[0]], 'name: "${CURRENT_MIGRATION_SECRET}"'
+    )
+    functions = initial_block[initial_block.index("sha256_file() {") :]
+    functions = functions[: functions.index("verify_target_pins() {")]
+    source_chart = tmp_path / "source chart"
+    source_chart.mkdir()
+    (source_chart / "Chart.yaml").write_text("name: retry-test\n")
+    source_values = tmp_path / "operator values.yaml"
+    chart_dir = tmp_path / "private chart snapshots"
+    values_dir = tmp_path / "private values snapshots"
+    recovery_state = tmp_path / "recovery state"
+    counter = tmp_path / "capture calls"
+    shell_pids = tmp_path / "shell pids"
+    harness = (
+        functions
+        + r"""
+set -euo pipefail
+mode=$1
+counter=$2
+CHART=$3
+TARGET_VALUES=$4
+RECOVERY_CHART_DIR=$5
+RECOVERY_VALUES_DIR=$6
+RECOVERY_STATE_FILE=$7
+shell_pids=$8
+printf '%s\n' "$BASHPID" >>"$shell_pids"
+count_call() { printf '%s\n' "$1" >>"$counter"; }
+if test ! -e "$TARGET_VALUES"; then
+  count_call helm_get_values
+  target_values_tmp="${TARGET_VALUES}.tmp"
+  printf 'image: retry-test\n' >"$target_values_tmp"
+  chmod 0600 "$target_values_tmp"
+  mv -- "$target_values_tmp" "$TARGET_VALUES"
+fi
+values_digest=$(sha256_file "$TARGET_VALUES")
+chart_digest=$(sha256_chart "$CHART")
+TARGET_VALUES_SNAPSHOT=$(publish_values_snapshot "$TARGET_VALUES" "$values_digest")
+TARGET_CHART=$(publish_chart_snapshot "$CHART" "$chart_digest")
+printf '%s\n%s\n' "$TARGET_CHART" "$TARGET_VALUES_SNAPSHOT"
+if test "$mode" = fail_after_snapshots; then
+  exit 97
+fi
+count_call server_replica_read
+count_call worker_replica_read
+count_call reconciler_replica_read
+count_call queue_state_capture
+state_tmp="${RECOVERY_STATE_FILE}.tmp"
+printf 'TARGET_CHART=%q\nTARGET_VALUES_SNAPSHOT=%q\n' \
+  "$TARGET_CHART" "$TARGET_VALUES_SNAPSHOT" >"$state_tmp"
+chmod 0600 "$state_tmp"
+mv -- "$state_tmp" "$RECOVERY_STATE_FILE"
+"""
+    )
+
+    def attempt(mode: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                harness,
+                "_",
+                mode,
+                str(counter),
+                str(source_chart),
+                str(source_values),
+                str(chart_dir),
+                str(values_dir),
+                str(recovery_state),
+                str(shell_pids),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    failed = attempt("fail_after_snapshots")
+    assert failed.returncode == 97
+    assert not recovery_state.exists()
+    failed_paths = [Path(path) for path in failed.stdout.splitlines()]
+    failed_inodes = [path.stat().st_ino for path in failed_paths]
+    assert list(chart_dir.glob("*.tmp.*")) == []
+    assert list(values_dir.glob("*.tmp.*")) == []
+
+    retried = attempt("retry")
+    assert retried.returncode == 0, retried.stderr
+    retry_paths = [Path(path) for path in retried.stdout.splitlines()]
+    assert retry_paths == failed_paths
+    assert [path.stat().st_ino for path in retry_paths] == failed_inodes
+    assert recovery_state.is_file()
+    observed_shells = shell_pids.read_text().splitlines()
+    assert len(observed_shells) == 2
+    assert len(set(observed_shells)) == 2
+    assert counter.read_text().splitlines() == [
+        "helm_get_values",
+        "server_replica_read",
+        "worker_replica_read",
+        "reconciler_replica_read",
+        "queue_state_capture",
+    ]
+
+    failure_functions = (
+        functions
+        + r"""
+set -euo pipefail
+source_input=$1
+RECOVERY_CHART_DIR=$2
+RECOVERY_VALUES_DIR=$3
+kind=$4
+digest=$(
+  if test "$kind" = chart; then sha256_chart "$source_input"; else sha256_file "$source_input"; fi
+)
+cp() { command cp "$@"; return 19; }
+if test "$kind" = chart; then
+  publish_chart_snapshot "$source_input" "$digest"
+else
+  publish_values_snapshot "$source_input" "$digest"
+fi
+"""
+    )
+
+    for kind, source_input in (("chart", source_chart), ("values", source_values)):
+        failure_root = tmp_path / f"{kind} ordinary failure"
+        failure_root.mkdir()
+        failed_publish = subprocess.run(
+            [
+                "bash",
+                "-c",
+                failure_functions,
+                "_",
+                str(source_input),
+                str(failure_root / "charts"),
+                str(failure_root / "values"),
+                kind,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert failed_publish.returncode == 19
+        assert list(failure_root.rglob("*.tmp.*")) == []
+
+
 def test_canonical_staged_helm_upgrade_pin_guard_rejects_input_drift(tmp_path: Path) -> None:
     _, stages = _staged_upgrade_stages()
     initial_block = _block_containing(
