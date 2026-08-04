@@ -119,8 +119,22 @@ restricted to `mode = 'preempting'` makes that one acquisition an insert that ei
 conflicts, while reading rows carry no uniqueness at all and simply coexist. A plain
 `UNIQUE (resource)` would allow one hold of any kind, and `UNIQUE (resource, mode)` would allow
 one reading hold — both would refuse the second reading acquirer, which is the crash-watch plus
-SysRq case this design exists to permit. This repository has built three lease tables already,
-but each held a single owner; this is the first with a shared mode. The table is claimed in the milestone's single migration, ahead of the entry
+SysRq case this design exists to permit.
+
+**The index arbitrates one of the matrix's four refusals; an advisory lock arbitrates the rest.**
+A partial index cannot see reading rows, so a preempting insert succeeds however many exist, and
+a reading insert succeeds whether or not a preempting row does — both cross-mode refusals would
+otherwise be an unserialized select-then-insert that two workers can interleave, which is the
+same defect this record rejects a jsonb key for. So **acquisition in either mode takes an
+advisory transaction lock scoped to the Resource before the existence check and the insert**.
+That is not a new pattern: `hold_write_lease` (`src/kdive/artifacts/write_lease.py:83-88`) takes
+`advisory_xact_lock` on the subject and only then inserts, for a lease whose primary key is
+`(owner_kind, owner_id, job_id)` (`src/kdive/db/schema/0084_object_write_leases.sql:40`) — an
+existing **shared-holder** lease arbitrated by the lock rather than by uniqueness.
+`rootfs_fetch_leases` is weaker still, carrying no per-subject uniqueness at all
+(`0087_rootfs_fetch_leases.sql:32-42`), because its gate asks whether *any* live lease is held.
+Only `build_host_leases` is one row per subject. The table is chosen for durable, reclaimable,
+per-holder state — not because a unique constraint is what a lease needs. The table is claimed in the milestone's single migration, ahead of the entry
 that first writes it. Every lease carries an expiry with the five-part contract
 (unit, reference clock, scope, consequence, recovery), and a refusal names the holder, the
 expiry, and the release action. A lease whose holding worker is no longer live is reclaimed by
@@ -225,7 +239,10 @@ a refusal names its cause and its remedy, and interleaved bytes name neither.
   reason is. It would need no table and no schema budget. A jsonb key carries no unique
   constraint, so acquiring becomes a read-modify-write that two workers can interleave and both
   believe they hold — on the one resource whose whole purpose is to have a single holder. The
-  cordon reason tolerates that shape because it has one writer and no contention.
+  cordon reason tolerates that shape for a different reason — ADR-0541's migration budget, not an
+  absence of contention. It has three write paths (teardown's step 0, the operator-origin stamp on
+  `_apply_cordon`, and the clear on uncordon) and it *is* contended across the restore window,
+  which is why ADR-0541 builds a re-read guard for it rather than assuming a single writer.
 - **Rely on expiry alone, with no reconciler reclaim.** A lease that expires does eventually
   free the channel, and until it does every consumer is refused with a remedy nobody can
   perform. ADR-0086 reached the same conclusion for the gdbstub and added the reconciler arm;

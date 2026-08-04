@@ -129,7 +129,10 @@ reconciler arm below would otherwise have to produce.
 
 **Clearing requires that this teardown set the cordon, and re-checks at the moment it clears.**
 Step 4 clears only when the reason is *still* this teardown's own — re-read immediately before
-the write, not carried from step 0 — **and** step 0 recorded that it flipped the boolean. Both
+the write, not carried from step 0 — **and** step 0 recorded that it flipped the boolean. The
+re-read and the clearing write go in one transaction, which `teardown_handler` already owns; two
+separate statements leave a gap an operator cordon can land in, reproducing in miniature the
+outcome the guard exists to prevent. Both
 halves are needed because the guard has two directions and step 0 alone covers one. Step 0's
 read-before-write catches an operator cordon taken *before* teardown ran. The re-read at step 4
 catches one taken *during* it, which is the longer exposure: the window spans a bootloader

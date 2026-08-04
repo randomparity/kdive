@@ -176,7 +176,10 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
      unique on `resource_id` **where `mode = 'preempting'`** — so the one exclusive hold is an
      insert that either wins or conflicts, while reading holds are unconstrained concurrent rows.
      A whole-table `UNIQUE (resource)` or `UNIQUE (resource, mode)` would cap reading holds at
-     one and refuse the second, breaking the force-crash-under-watch workflow entry 12 owns; and
+     one and refuse the second, breaking the force-crash-under-watch workflow entry 12 owns. The
+     index arbitrates preempting-vs-preempting only; the cross-mode refusals need an advisory
+     transaction lock on the Resource around check-then-insert, following `hold_write_lease`
+     (`src/kdive/artifacts/write_lease.py:83-88`); and
   4. `systems.byo_adopt_facts jsonb` — where adopt records what it established (ADR-0540), and
      what ADR-0541's teardown compares the returned host against.
 - **Items 3 and 4 land ahead of their writers**, and that is the deliberate trade. The gap
@@ -187,9 +190,10 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
   front" rule exists to avoid. Unused schema for two waves is cheaper than two serialization
   points in the merge order.
 - The lease needs a table rather than a jsonb key because it is contended. Every persisted
-  lease in this repository got one for the same reason — `build_host_leases` (0027),
-  `object_write_leases` (0084), `rootfs_fetch_leases` (0087) — and a `capabilities` key has no
-  unique constraint, so two acquirers would race on a read-modify-write. It is keyed on the
+  lease in this repository got one — `build_host_leases` (0027), `object_write_leases` (0084),
+  `rootfs_fetch_leases` (0087) — for durable, reclaimable, per-holder state. Not for uniqueness:
+  `object_write_leases` is itself shared-holder (PK `(owner_kind, owner_id, job_id)`) and
+  serializes on an advisory lock instead. It is keyed on the
   **Resource**, not the System: the serial channel belongs to the physical host, and log
   a hold can outlive any one System (ADR-0539), so a System-keyed or `debug_sessions`-keyed
   lease could not represent every holder. It carries the hold's **mode**, since only the
@@ -352,7 +356,7 @@ gate never inspects. `CORE_PREFIXES` (`scripts/m2_portability_gate.py:44-53`) is
 | `src/kdive/jobs/handlers/control/diagnostic_sysrq.py` and `.../control/watch_for_crash.py` | **holding a console-lease scope** and propagating its `transport_conflict` (ADR-0542) — two changes, not one. Each handler brackets its whole multi-read console interaction in a lease scope, because a per-read lease would let KGDB take the channel between SysRq's mark read (`diagnostic_sysrq.py:111`) and its injection. Each also surfaces the conflict instead of core's current handling: `diagnostic_sysrq.py:164-169` raises `configuration_error` / `console_not_pumped` naming no holder, and `watch_for_crash.py:191-193` discards `pumped` deliberately. These two are `read_window`'s only consumers in the tree. | 12, 14 | **no — new entry** |
 | `src/kdive/reconciler/loop.py` | the BYO mid-teardown drift arm and the stranded-console-lease reclaim | 16 | yes (entered for ADR-0086; BYO reuses it) |
 
-**Nine new entries across six issues, not three** — and two of them look like reuse until you
+**Nine new entries across five issues, not three** — and two of them look like reuse until you
 check. `ALLOWED_FILES` is matched by exact path (`violations()`,
 `scripts/m2_portability_gate.py:229-231`); there is no prefix or directory matching. The
 entries ADR-0085 and ADR-0541's surface would have reused —
@@ -369,8 +373,8 @@ stops it recurring: fail the gate on an `ALLOWED_FILES` member that does not exi
 That is pre-existing rot rather than BYO's — it affects local-libvirt and remote-libvirt's own
 measurement too — so it is tracked separately as #1835.
 
-**Surfacing the cordon reason costs no entry**, and it is worth saying why the obvious ninth
-row is absent. `describe_resource` already has a provider-owned adornment seam:
+**Surfacing the cordon reason costs no entry**, and it is worth saying why no row for it
+appears above. `describe_resource` already has a provider-owned adornment seam:
 `ResourceDetailCapabilities.projector` on the `for_resource`-bound runtime, merged into the
 envelope at `src/kdive/mcp/tools/catalog/resources.py:217`, which remote-libvirt already uses
 (`providers/remote_libvirt/composition.py:266`, wired at `:360-362`). That code lives under
