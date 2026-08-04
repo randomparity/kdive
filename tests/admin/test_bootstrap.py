@@ -80,6 +80,7 @@ def test_register_discovered_resources_skips_local_when_disabled(
     from psycopg_pool import AsyncConnectionPool
 
     from kdive.admin.projects import register_discovered_resources
+    from kdive.store.objectstore import ObjectStore
 
     monkeypatch.setenv("KDIVE_LOCAL_LIBVIRT_ENABLED", "false")
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
@@ -87,6 +88,10 @@ def test_register_discovered_resources_skips_local_when_disabled(
     monkeypatch.setattr(
         "kdive.providers.local_libvirt.composition._discovery_target",
         _fail_local_discovery_target,
+    )
+    monkeypatch.setattr(
+        "kdive.store.assembly.object_store_from_env",
+        lambda: cast(ObjectStore, object()),
     )
 
     asyncio.run(register_discovered_resources(cast(AsyncConnectionPool, object())))
