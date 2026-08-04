@@ -1,6 +1,7 @@
 """Operator documentation must describe each deployment's actual process topology."""
 
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -228,6 +229,16 @@ def _staged_upgrade_stages() -> tuple[str, dict[str, str]]:
     return staged, stages
 
 
+def _bash_blocks(section: str) -> list[str]:
+    return re.findall(r"```bash\n(.*?)```", section, flags=re.DOTALL)
+
+
+def _block_containing(section: str, needle: str) -> str:
+    matches = [block for block in _bash_blocks(section) if needle in block]
+    assert len(matches) == 1, needle
+    return matches[0]
+
+
 def test_canonical_staged_helm_upgrade_stages_one_to_four_are_restart_safe() -> None:
     staged, stages = _staged_upgrade_stages()
 
@@ -238,27 +249,52 @@ def test_canonical_staged_helm_upgrade_stages_one_to_four_are_restart_safe() -> 
         "umask 077",
         'test ! -e "$TARGET_VALUES"',
         'chmod 0600 "$TARGET_VALUES_TMP"',
-        'helm template "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES"',
+        'helm template "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES"',
         "--show-only templates/job-migrate.yaml",
         "TARGET_IMAGE",
+        "TARGET_IMAGE_PULL_POLICY",
         "MIGRATION_SECRET",
         "MIGRATION_KEY",
+        "TARGET_VALUES_SHA256",
+        "TARGET_CHART_SHA256",
         "RECOVERY_STATE",
         "validate_nonnegative_count",
         "validate_short_name",
         'DB_CLIENT_JOB="${FULL}-fence-db-check"',
         'INCARNATION_JOB="${FULL}-fence-worker-check"',
         "%q",
-        'bash -n "$RECOVERY_STATE_TMP"',
+        'bash -n "$output"',
         'mv -- "$RECOVERY_STATE_TMP" "$RECOVERY_STATE_FILE"',
         "kubectl create configmap",
         "verify_recovery_configmap",
         "${FULL}-fence-upgrade",
     ):
         assert phrase in stage_1, phrase
-    assert "kubectl apply" not in stage_1
+    assert "kubectl apply" in stage_1
     assert "CURRENT_IMAGE" not in staged
     assert "NAMESPACE=<namespace>" not in staged
+
+    capture_block = _block_containing(stage_1, 'helm get values "$RELEASE"')
+    assert capture_block.index("umask 077") < capture_block.index("helm get values")
+    assert capture_block.index('chmod 0600 "$TARGET_VALUES_TMP"') < capture_block.index(
+        'mv -- "$TARGET_VALUES_TMP" "$TARGET_VALUES"'
+    )
+
+    initial_block = _block_containing(stage_1, 'name: "${CURRENT_MIGRATION_SECRET}"')
+    validation_loop = re.search(
+        r'for name in ([^;]+); do\n  validate_short_name "\$name"', initial_block
+    )
+    assert validation_loop is not None
+    for generated_name in (
+        '"$RECOVERY_STATE"',
+        '"$QUEUE_STATE_JOB"',
+        '"$DB_CLIENT_JOB"',
+        '"$INCARNATION_JOB"',
+    ):
+        assert generated_name in validation_loop.group(1)
+    assert initial_block.index(
+        'mv -- "$RECOVERY_STATE_TMP" "$RECOVERY_STATE_FILE"'
+    ) < initial_block.index("render_recovery_configmap | kubectl create -f -")
 
     stage_2 = stages[_STAGED_UPGRADE_MARKERS[1]]
     for phrase in (
@@ -275,15 +311,45 @@ def test_canonical_staged_helm_upgrade_stages_one_to_four_are_restart_safe() -> 
     assert stage_2.index("set-queue-paused --paused") < stage_2.index(
         "scale statefulset/${FULL}-worker"
     )
+    stage_2_block = _bash_blocks(stage_2)[0]
+    witness_rollouts = [
+        match.start()
+        for match in re.finditer(r"rollout status deployment/\$\{FULL\}-witness", stage_2_block)
+    ]
+    witness_ready = [
+        match.start()
+        for match in re.finditer(
+            re.escape(
+                'kubectl wait --for=condition=Ready pod -n "$NAMESPACE" \\\n'
+                '  -l "app=${FULL}-witness"'
+            ),
+            stage_2_block,
+        )
+    ]
+    assert len(witness_rollouts) == len(witness_ready) == 2
+    pause = stage_2_block.index("set-queue-paused --paused")
+    scale = stage_2_block.index("scale statefulset/${FULL}-worker")
+    drained = stage_2_block.index('wait_for_pods_deleted "app=${FULL}-worker"')
+    assert witness_rollouts[0] < witness_ready[0] < pause < scale < drained
+    assert drained < witness_rollouts[1] < witness_ready[1]
+    for limit_contract in (
+        "five-minute Kubernetes API wall-clock limit",
+        "each rollout and Ready-Pod wait",
+        "target namespace",
+        "exits Stage 2",
+        "rerun Stage 2",
+    ):
+        assert limit_contract in stage_2
 
     stage_3 = stages[_STAGED_UPGRADE_MARKERS[2]]
     for phrase in (
         'source "$RECOVERY_STATE_FILE"',
         "activeDeadlineSeconds: 60",
         "secretKeyRef:",
-        "name: ${MIGRATION_SECRET}",
-        "key: ${MIGRATION_KEY}",
+        'name: "${MIGRATION_SECRET}"',
+        'key: "${MIGRATION_KEY}"',
         'image: "${TARGET_IMAGE}"',
+        'imagePullPolicy: "${TARGET_IMAGE_PULL_POLICY}"',
         "pid <> pg_backend_pid()",
         "backend_type = 'client backend'",
         'RETRY_DIAGNOSTIC="${RETRY_DIAGNOSTIC:-}"',
@@ -300,6 +366,412 @@ def test_canonical_staged_helm_upgrade_stages_one_to_four_are_restart_safe() -> 
     assert 'source "$RECOVERY_STATE_FILE"' in stage_4
     assert "lifecycleWitness.enabled=false" in stage_4
     assert "--no-hooks" not in "\n".join(re.findall(r"```bash\n(.*?)```", stage_4, flags=re.DOTALL))
+
+
+def test_canonical_staged_helm_upgrade_pins_target_render_and_repin() -> None:
+    staged, stages = _staged_upgrade_stages()
+    stage_1 = stages[_STAGED_UPGRADE_MARKERS[0]]
+    initial_block = _block_containing(stage_1, 'name: "${CURRENT_MIGRATION_SECRET}"')
+
+    for phrase in (
+        "sha256_chart()",
+        'TARGET_VALUES_SHA256=$(sha256_file "$TARGET_VALUES")',
+        'TARGET_CHART_SHA256=$(sha256_chart "$CHART")',
+        "TARGET_IMAGE_PULL_POLICY",
+        'validate_pull_policy "$TARGET_IMAGE_PULL_POLICY"',
+        "Always | IfNotPresent | Never",
+        'TARGET_CHART=$(publish_chart_snapshot "$CHART" "$TARGET_CHART_SHA256")',
+        "write_recovery_state",
+        '--from-literal=target_values_sha256="$TARGET_VALUES_SHA256"',
+        '--from-literal=target_chart_sha256="$TARGET_CHART_SHA256"',
+        '--from-literal=target_image_pull_policy="$TARGET_IMAGE_PULL_POLICY"',
+    ):
+        assert phrase in initial_block, phrase
+
+    for stage_index, use in (
+        (1, "set-queue-paused --paused"),
+        (2, "kind: Job"),
+        (3, "helm upgrade"),
+        (4, "kubectl get secret"),
+        (5, "helm upgrade"),
+        (6, "helm upgrade"),
+        (7, "kind: Job"),
+    ):
+        block = _block_containing(stages[_STAGED_UPGRADE_MARKERS[stage_index]], use)
+        assert block.index("verify_recovery_state") < block.index(use)
+
+    final_block = _block_containing(stages[_STAGED_UPGRADE_MARKERS[7]], "ops build-uses-list")
+    assert final_block.index("verify_recovery_state") < final_block.index("helm upgrade")
+    assert final_block.rindex("verify_target_pins", 0, final_block.index("helm upgrade")) < (
+        final_block.index("helm upgrade")
+    )
+
+    repin_block = _block_containing(stage_1, "TARGET_VALUES_NEXT:?set")
+    for phrase in (
+        'TARGET_VALUES_TMP="${TARGET_VALUES}.tmp"',
+        "TARGET_VALUES_NEXT",
+        "helm template",
+        "TARGET_IMAGE_PULL_POLICY",
+        "validate_secret_name",
+        "validate_secret_key",
+        "validate_pull_policy",
+        "write_recovery_state",
+        'mv -- "$RECOVERY_STATE_TMP" "$RECOVERY_STATE_FILE"',
+        "kubectl apply -f -",
+        "verify_recovery_configmap",
+    ):
+        assert phrase in repin_block, phrase
+    assert "SERVER_REPLICAS=$(kubectl get" not in repin_block
+    assert "PRIOR_QUEUE_PAUSED=$(kubectl" not in repin_block
+    assert "rerun Stage 3 before Stage 4" in stage_1
+    assert "edit the target file, and return to the hooked Stage 4" not in staged
+    assert "A target-values change requires another all-zero hooked Stage 4" not in staged
+
+
+def test_canonical_staged_helm_upgrade_snapshots_chart_without_toc_tou() -> None:
+    staged, stages = _staged_upgrade_stages()
+    initial_block = _block_containing(
+        stages[_STAGED_UPGRADE_MARKERS[0]], 'name: "${CURRENT_MIGRATION_SECRET}"'
+    )
+
+    for phrase in (
+        "find -P",
+        "-print0",
+        "sort -z",
+        "read -r -d ''",
+        "sha256sum --",
+        'test -f "$chart" && test ! -L "$chart"',
+        'test -d "$chart" && test ! -L "$chart"',
+        'chmod 0700 "$RECOVERY_CHART_DIR"',
+        'chmod 0600 "$temporary"',
+        'mv -- "$temporary" "$target"',
+        'actual=$(sha256_chart "$temporary")',
+        'actual_source_chart=$(sha256_chart "$CHART")',
+        'actual_target_chart=$(sha256_chart "$TARGET_CHART")',
+    ):
+        assert phrase in initial_block, phrase
+
+    render = initial_block.index('helm template "$RELEASE" "$TARGET_CHART"')
+    snapshot = initial_block.index(
+        'TARGET_CHART=$(publish_chart_snapshot "$CHART" "$TARGET_CHART_SHA256")'
+    )
+    live_capture = initial_block.index("SERVER_REPLICAS=$(kubectl get deployment/${FULL}-server")
+    assert snapshot < render < live_capture
+    assert render < initial_block.index('write_recovery_state "$RECOVERY_STATE_TMP"')
+    helm_invocations = re.findall(r"helm (?:template|upgrade)[^\n]*", staged)
+    assert helm_invocations
+    assert all('"$TARGET_CHART"' in invocation for invocation in helm_invocations)
+    assert all('"$CHART"' not in invocation for invocation in helm_invocations)
+
+
+def test_canonical_staged_helm_upgrade_chart_hash_handles_both_chart_forms(
+    tmp_path: Path,
+) -> None:
+    _, stages = _staged_upgrade_stages()
+    initial_block = _block_containing(
+        stages[_STAGED_UPGRADE_MARKERS[0]], 'name: "${CURRENT_MIGRATION_SECRET}"'
+    )
+    functions = initial_block[initial_block.index("sha256_file() {") :]
+    functions = functions[: functions.index("publish_chart_snapshot() {")]
+    chart = tmp_path / "chart with spaces"
+    chart.mkdir()
+    (chart / "Chart.yaml").write_text("name: test\n")
+    templates = chart / "templates"
+    templates.mkdir()
+    (templates / "name with spaces.yaml").write_text("kind: ConfigMap\n")
+    package = tmp_path / "chart package.tgz"
+    package.write_bytes(b"packaged-chart")
+
+    def digest(path: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", "-c", functions + '\nsha256_chart "$1"\n', "_", str(path)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    first = digest(chart)
+    second = digest(chart)
+    packaged = digest(package)
+    assert first.returncode == second.returncode == packaged.returncode == 0
+    assert first.stdout == second.stdout
+    assert re.fullmatch(r"[0-9a-f]{64}\n", first.stdout)
+    assert re.fullmatch(r"[0-9a-f]{64}\n", packaged.stdout)
+    (templates / "name with spaces.yaml").write_text("kind: Secret\n")
+    assert digest(chart).stdout != first.stdout
+
+
+def test_canonical_staged_helm_upgrade_pin_guard_rejects_input_drift(tmp_path: Path) -> None:
+    _, stages = _staged_upgrade_stages()
+    initial_block = _block_containing(
+        stages[_STAGED_UPGRADE_MARKERS[0]], 'name: "${CURRENT_MIGRATION_SECRET}"'
+    )
+    functions = initial_block[initial_block.index("validate_secret_name() {") :]
+    functions = functions[: functions.index("render_recovery_configmap() {")]
+    source_chart = tmp_path / "source chart"
+    target_chart = tmp_path / "snapshot chart"
+    for chart in (source_chart, target_chart):
+        chart.mkdir()
+        (chart / "Chart.yaml").write_text("name: test\n")
+    values = tmp_path / "target values.yaml"
+    values.write_text("image: target\n")
+    script = (
+        functions
+        + r"""
+CHART=$1
+TARGET_CHART=$2
+TARGET_VALUES=$3
+mode=$4
+TARGET_VALUES_SHA256=$(sha256_file "$TARGET_VALUES")
+TARGET_CHART_SHA256=$(sha256_chart "$CHART")
+TARGET_IMAGE=example.invalid/kdive:test
+TARGET_IMAGE_PULL_POLICY=IfNotPresent
+MIGRATION_SECRET=true
+MIGRATION_KEY=null
+case "$mode" in
+  clean) ;;
+  values) printf 'changed\n' >>"$TARGET_VALUES" ;;
+  source) printf 'changed\n' >>"$CHART/Chart.yaml" ;;
+  snapshot) printf 'changed\n' >>"$TARGET_CHART/Chart.yaml" ;;
+  tuple) TARGET_IMAGE_PULL_POLICY=sometimes ;;
+esac
+verify_target_pins
+"""
+    )
+
+    def verify(mode: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                script,
+                "_",
+                str(source_chart),
+                str(target_chart),
+                str(values),
+                mode,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    assert verify("clean").returncode == 0
+    for mode in ("values", "source", "snapshot", "tuple"):
+        source_chart.joinpath("Chart.yaml").write_text("name: test\n")
+        target_chart.joinpath("Chart.yaml").write_text("name: test\n")
+        values.write_text("image: target\n")
+        assert verify(mode).returncode != 0, mode
+
+
+def test_canonical_staged_helm_upgrade_persists_exact_target_contract() -> None:
+    _, stages = _staged_upgrade_stages()
+    initial_block = _block_containing(
+        stages[_STAGED_UPGRADE_MARKERS[0]], 'name: "${CURRENT_MIGRATION_SECRET}"'
+    )
+    persisted = (
+        "TARGET_CHART",
+        "TARGET_VALUES_SHA256",
+        "TARGET_CHART_SHA256",
+        "TARGET_IMAGE",
+        "MIGRATION_SECRET",
+        "MIGRATION_KEY",
+        "TARGET_IMAGE_PULL_POLICY",
+        "STAGE3_VALUES_SHA256",
+        "STAGE3_CHART_SHA256",
+    )
+    for name in persisted:
+        assert f"printf '{name}=%q\\n'" in initial_block
+
+    literals = re.findall(r"--from-literal=([a-z0-9_]+)=", initial_block)
+    assert literals == [
+        "server_replicas",
+        "worker_replicas",
+        "reconciler_replicas",
+        "prior_queue_paused",
+        "target_values_sha256",
+        "target_chart_sha256",
+        "target_image",
+        "migration_secret",
+        "migration_key",
+        "target_image_pull_policy",
+        "stage3_values_sha256",
+        "stage3_chart_sha256",
+    ]
+    assert 'test "$key_count" = 12' in initial_block
+    assert "KDIVE_DATABASE_URL=%q" not in initial_block
+    assert "secret_value" not in initial_block.lower()
+
+
+def test_canonical_staged_helm_upgrade_guards_every_fresh_stage_block() -> None:
+    _, stages = _staged_upgrade_stages()
+
+    for marker in _STAGED_UPGRADE_MARKERS[1:]:
+        for block in _bash_blocks(stages[marker]):
+            source = 'source "$RECOVERY_STATE_FILE"'
+            assert source in block, marker
+            source_position = block.index(source)
+            assert block.rindex('bash -n "$RECOVERY_STATE_FILE"', 0, source_position) < (
+                source_position
+            )
+            assert block.index("verify_recovery_state", source_position) > source_position
+
+
+def test_canonical_staged_helm_upgrade_stage_three_proof_gates_helm() -> None:
+    _, stages = _staged_upgrade_stages()
+    stage_3_block = _block_containing(stages[_STAGED_UPGRADE_MARKERS[2]], "kind: Job")
+    job_proof = stage_3_block.index("kubectl logs job/${DB_CLIENT_JOB}")
+    marker_values = stage_3_block.index('STAGE3_VALUES_SHA256="$TARGET_VALUES_SHA256"')
+    marker_chart = stage_3_block.index('STAGE3_CHART_SHA256="$TARGET_CHART_SHA256"')
+    assert job_proof < marker_values < marker_chart
+
+    stage_4_block = _block_containing(stages[_STAGED_UPGRADE_MARKERS[3]], "helm upgrade")
+    helm = stage_4_block.index("helm upgrade")
+    assert stage_4_block.index('test "$STAGE3_VALUES_SHA256" = "$TARGET_VALUES_SHA256"') < helm
+    assert stage_4_block.index('test "$STAGE3_CHART_SHA256" = "$TARGET_CHART_SHA256"') < helm
+
+    marker_guard = stage_4_block[
+        stage_4_block.index('test "$STAGE3_VALUES_SHA256"') : stage_4_block.index(
+            "verify_target_pins"
+        )
+    ]
+    marker_script = (
+        "TARGET_VALUES_SHA256=values\n"
+        "TARGET_CHART_SHA256=chart\n"
+        "STAGE3_VALUES_SHA256=$1\n"
+        "STAGE3_CHART_SHA256=$2\n" + marker_guard
+    )
+    for values_marker, chart_marker, expected in (
+        ("values", "chart", 0),
+        ("old-values", "chart", 2),
+        ("values", "old-chart", 2),
+    ):
+        checked = subprocess.run(
+            ["bash", "-c", marker_script, "_", values_marker, chart_marker],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert checked.returncode == expected
+
+
+def test_canonical_staged_helm_upgrade_configmap_guard_rejects_digest_drift() -> None:
+    _, stages = _staged_upgrade_stages()
+    initial_block = _block_containing(
+        stages[_STAGED_UPGRADE_MARKERS[0]], 'name: "${CURRENT_MIGRATION_SECRET}"'
+    )
+    verifier = initial_block[initial_block.index("verify_captured_configmap() {") :]
+    verifier = verifier[: verifier.index("verify_recovery_state() {")]
+    script = (
+        verifier
+        + r"""
+verify_captured_configmap() { :; }
+TARGET_VALUES_SHA256=values
+TARGET_CHART_SHA256=chart
+TARGET_IMAGE=image
+MIGRATION_SECRET=secret
+MIGRATION_KEY=key
+TARGET_IMAGE_PULL_POLICY=IfNotPresent
+STAGE3_VALUES_SHA256=stage-values
+STAGE3_CHART_SHA256=stage-chart
+CM_TARGET_VALUES_SHA256=$1
+kubectl() {
+  case "$*" in
+    *'{{len .data}}'*) printf 12 ;;
+    *target_values_sha256*) printf %s "$CM_TARGET_VALUES_SHA256" ;;
+    *target_chart_sha256*) printf %s "$TARGET_CHART_SHA256" ;;
+    *target_image_pull_policy*) printf %s "$TARGET_IMAGE_PULL_POLICY" ;;
+    *target_image*) printf %s "$TARGET_IMAGE" ;;
+    *migration_secret*) printf %s "$MIGRATION_SECRET" ;;
+    *migration_key*) printf %s "$MIGRATION_KEY" ;;
+    *stage3_values_sha256*) printf %s "$STAGE3_VALUES_SHA256" ;;
+    *stage3_chart_sha256*) printf %s "$STAGE3_CHART_SHA256" ;;
+  esac
+}
+verify_recovery_configmap
+"""
+    )
+    for mirror_digest, expected in (("values", 0), ("old-values", 2)):
+        checked = subprocess.run(
+            ["bash", "-c", script, "_", mirror_digest],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert checked.returncode == expected
+
+
+def test_canonical_staged_helm_upgrade_repin_preserves_live_capture() -> None:
+    _, stages = _staged_upgrade_stages()
+    stage_1 = stages[_STAGED_UPGRADE_MARKERS[0]]
+    repin = _block_containing(stage_1, "TARGET_VALUES_NEXT:?set")
+
+    assert "STAGE3_VALUES_SHA256=" in repin
+    assert "STAGE3_CHART_SHA256=" in repin
+    assert "render_recovery_configmap | kubectl apply -f -" in repin
+    assert repin.count("kubectl apply -f -") == 1
+    assert repin.index('chmod 0600 "$TARGET_VALUES_TMP"') < repin.index(
+        'mv -- "$TARGET_VALUES_TMP" "$TARGET_VALUES"'
+    )
+    assert "SELECT queue_paused" not in repin
+    assert "SERVER_REPLICAS=$(kubectl get" not in repin
+    assert "WORKER_REPLICAS=$(kubectl get" not in repin
+    assert "RECONCILER_REPLICAS=$(kubectl get" not in repin
+    assert "printf 'PRIOR_QUEUE_PAUSED=%q\\n'" not in repin
+
+
+def test_canonical_staged_helm_upgrade_validates_and_quotes_secret_refs() -> None:
+    _, stages = _staged_upgrade_stages()
+    stage_1 = stages[_STAGED_UPGRADE_MARKERS[0]]
+    initial_block = _block_containing(stage_1, 'name: "${CURRENT_MIGRATION_SECRET}"')
+
+    for phrase in (
+        'validate_secret_name "$MIGRATION_SECRET"',
+        'validate_secret_key "$MIGRATION_KEY"',
+        'validate_secret_name "$CURRENT_MIGRATION_SECRET"',
+        'validate_secret_key "$CURRENT_MIGRATION_KEY"',
+    ):
+        assert phrase in initial_block
+
+    function_source = initial_block[initial_block.index("validate_secret_name() {") :]
+    function_source = function_source[: function_source.index("validate_pull_policy() {")]
+    for ambiguous in ("null", "true"):
+        call = (
+            f"validate_secret_name {shlex.quote(ambiguous)}\n"
+            f"validate_secret_key {shlex.quote(ambiguous)}\n"
+        )
+        parsed = subprocess.run(
+            ["bash", "-c", function_source + call],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert parsed.returncode == 0, parsed.stderr
+    for invalid_name in ("a.-b", "a-.b", "a..b"):
+        parsed = subprocess.run(
+            [
+                "bash",
+                "-c",
+                function_source + f"validate_secret_name {shlex.quote(invalid_name)}\n",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert parsed.returncode != 0, invalid_name
+
+    diagnostic_blocks = (
+        initial_block,
+        _block_containing(stages[_STAGED_UPGRADE_MARKERS[2]], "kind: Job"),
+        _block_containing(stages[_STAGED_UPGRADE_MARKERS[7]], "kind: Job"),
+    )
+    assert 'name: "${CURRENT_MIGRATION_SECRET}"' in diagnostic_blocks[0]
+    assert 'key: "${CURRENT_MIGRATION_KEY}"' in diagnostic_blocks[0]
+    for block in diagnostic_blocks[1:]:
+        assert 'name: "${MIGRATION_SECRET}"' in block
+        assert 'key: "${MIGRATION_KEY}"' in block
+    for block in diagnostic_blocks:
+        assert 'imagePullPolicy: "${TARGET_IMAGE_PULL_POLICY}"' in block
 
 
 def test_canonical_staged_helm_upgrade_stages_five_to_seven_restore_safely() -> None:
@@ -370,9 +842,17 @@ def test_canonical_staged_helm_upgrade_stage_eight_proves_and_cleans_up() -> Non
         "wait_for_server_deleted",
         'COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"',
         'mv -- "$RECOVERY_STATE_FILE" "$COMPLETED_STATE"',
+        'mv -- "$RECOVERY_CHART_DIR" "$COMPLETED_CHART_DIR"',
         'kubectl delete configmap "$RECOVERY_STATE"',
     ):
         assert phrase in stage_8, phrase
+    final_block = _block_containing(stage_8, "ops build-uses-list --limit 1")
+    completion_assignment = 'COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"'
+    assert completion_assignment in final_block
+    assert final_block.index(completion_assignment) < final_block.index(
+        'test ! -e "$COMPLETED_STATE"'
+    )
+
     proof_end = stage_8.index("ops build-uses-list --limit 1")
     assert stage_8.index("set-queue-paused --paused") < stage_8.index(
         'kubectl create -n "$NAMESPACE" -f - <<EOF'
@@ -382,12 +862,38 @@ def test_canonical_staged_helm_upgrade_stage_eight_proves_and_cleans_up() -> Non
     assert stage_8.index('mv -- "$RECOVERY_STATE_FILE" "$COMPLETED_STATE"') < stage_8.rindex(
         'kubectl delete configmap "$RECOVERY_STATE"'
     )
-    cleanup = stage_8.split('if test -e "$COMPLETED_STATE"', maxsplit=1)[1].split("fi", maxsplit=1)[
-        0
-    ]
+    cleanup = stage_8.split('if test -e "$COMPLETED_STATE"', maxsplit=1)[1].split(
+        "  exit 0\nfi", maxsplit=1
+    )[0]
     assert 'source "$COMPLETED_STATE"' in cleanup
     assert cleanup.count("--ignore-not-found --wait=true --timeout=2m") >= 2
     assert "-l " not in cleanup
+
+
+def test_canonical_staged_helm_upgrade_restores_the_captured_queue_state() -> None:
+    _, stages = _staged_upgrade_stages()
+    stage_1 = stages[_STAGED_UPGRADE_MARKERS[0]]
+    initial_block = _block_containing(stage_1, 'name: "${CURRENT_MIGRATION_SECRET}"')
+    final_block = _block_containing(stages[_STAGED_UPGRADE_MARKERS[7]], "ops build-uses-list")
+
+    for phrase in (
+        "SELECT queue_paused FROM ops_control WHERE singleton = true",
+        'case "$PRIOR_QUEUE_PAUSED" in',
+        "true | false",
+        "printf 'PRIOR_QUEUE_PAUSED=%q\\n'",
+        '--from-literal=prior_queue_paused="$PRIOR_QUEUE_PAUSED"',
+        'cm_queue=$(kubectl get configmap "$RECOVERY_STATE"',
+        'test "$cm_queue" = "$PRIOR_QUEUE_PAUSED"',
+    ):
+        assert phrase in initial_block, phrase
+
+    equality = 'test "$CM_PRIOR_QUEUE_PAUSED" = "$PRIOR_QUEUE_PAUSED"'
+    queue_case = 'case "$PRIOR_QUEUE_PAUSED" in'
+    assert equality in final_block
+    assert final_block.index(equality) < final_block.index(queue_case)
+    restore = final_block[final_block.index(queue_case) : final_block.index("esac")]
+    assert re.search(r"true\)\n\s+timeout 60s .* --paused\n\s+;;", restore)
+    assert re.search(r"false\)\n\s+timeout 60s .* --no-paused\n\s+;;", restore)
 
 
 def test_canonical_staged_helm_upgrade_bash_blocks_parse() -> None:

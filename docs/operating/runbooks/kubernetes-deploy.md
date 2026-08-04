@@ -182,6 +182,7 @@ RELEASE=${RELEASE:-kdive}
 CHART=${CHART:-deploy/helm/kdive}
 TARGET_VALUES=${TARGET_VALUES:-kdive-target-values.yaml}
 RECOVERY_STATE_FILE=${RECOVERY_STATE_FILE:-${RELEASE}-fence-upgrade.state}
+RECOVERY_CHART_DIR="${RECOVERY_STATE_FILE}.charts"
 TARGET_VALUES_TMP="${TARGET_VALUES}.tmp"
 RECOVERY_STATE_TMP="${RECOVERY_STATE_FILE}.tmp"
 COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"
@@ -213,7 +214,7 @@ test ! -e "$TARGET_VALUES" || {
   exit 2
 }
 for path in "$TARGET_VALUES_TMP" "$RECOVERY_STATE_FILE" "$RECOVERY_STATE_TMP" \
-  "$COMPLETED_STATE"; do
+  "$RECOVERY_CHART_DIR" "$COMPLETED_STATE"; do
   test ! -e "$path" || {
     echo "recovery artifact already exists: $path; inspect it before retrying" >&2
     exit 2
@@ -230,7 +231,8 @@ test "$(stat -c '%a' "$TARGET_VALUES")" = 600 || {
 ```
 
 Edit this one target file now to select the target image and configuration, then run
-`chmod 0600 "$TARGET_VALUES"`. Do not edit it after Stage 4. The next block renders that edited
+`chmod 0600 "$TARGET_VALUES"`. Once the next block pins it, use the repin path below for any
+change. The next block renders that edited
 file before any workload scale, extracts only the target migration Job's image and
 `KDIVE_DATABASE_URL` Secret reference, captures the live counts and queue state, and publishes the
 local record atomically before creating the cluster record. It never reads, stores, or prints a
@@ -245,6 +247,7 @@ RELEASE=${RELEASE:-kdive}
 CHART=${CHART:-deploy/helm/kdive}
 TARGET_VALUES=${TARGET_VALUES:-kdive-target-values.yaml}
 RECOVERY_STATE_FILE=${RECOVERY_STATE_FILE:-${RELEASE}-fence-upgrade.state}
+RECOVERY_CHART_DIR="${RECOVERY_STATE_FILE}.charts"
 TARGET_VALUES_TMP="${TARGET_VALUES}.tmp"
 RECOVERY_STATE_TMP="${RECOVERY_STATE_FILE}.tmp"
 COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"
@@ -278,6 +281,314 @@ validate_short_name() {
   }
 }
 
+validate_secret_name() {
+  local name=$1 label
+  local -a labels
+  test "${#name}" -le 253 || {
+    echo "migration Secret name exceeds 253 characters: $name" >&2
+    exit 2
+  }
+  case "$name" in
+    "" | *[!a-z0-9.-]* | [!a-z0-9]* | *[!a-z0-9])
+      echo "invalid migration Secret DNS-subdomain name: $name" >&2
+      exit 2
+      ;;
+  esac
+  IFS=. read -r -a labels <<<"$name"
+  for label in "${labels[@]}"; do
+    case "$label" in
+      "" | *[!a-z0-9-]* | [!a-z0-9]* | *[!a-z0-9])
+        echo "invalid migration Secret DNS label in: $name" >&2
+        exit 2
+        ;;
+    esac
+    test "${#label}" -le 63 || {
+      echo "migration Secret DNS label exceeds 63 characters: $name" >&2
+      exit 2
+    }
+  done
+}
+
+validate_secret_key() {
+  local key=$1
+  test "${#key}" -le 253 || {
+    echo "migration Secret key exceeds 253 characters: $key" >&2
+    exit 2
+  }
+  case "$key" in
+    "" | *[!A-Za-z0-9._-]*)
+      echo "invalid migration Secret data key: $key" >&2
+      exit 2
+      ;;
+  esac
+}
+
+validate_pull_policy() {
+  case "$1" in
+    Always | IfNotPresent | Never) ;;
+    *)
+      echo "invalid target migration imagePullPolicy: $1" >&2
+      exit 2
+      ;;
+  esac
+}
+
+validate_sha256() {
+  test "${#1}" -eq 64 || {
+    echo "invalid SHA-256 length for $2" >&2
+    exit 2
+  }
+  case "$1" in
+    *[!0-9a-f]*)
+      echo "invalid SHA-256 characters for $2" >&2
+      exit 2
+      ;;
+  esac
+}
+
+sha256_file() {
+  local output
+  test -f "$1" && test ! -L "$1" || {
+    echo "expected a regular non-symlink file: $1" >&2
+    exit 2
+  }
+  output=$(sha256sum -- "$1")
+  printf '%s\n' "${output%% *}"
+}
+
+sha256_chart() (
+  set -euo pipefail
+  umask 077
+  local chart=$1 listing= sorted= manifest= path output status temporary
+  cleanup_chart_hash() {
+    status=$?
+    trap - EXIT
+    for temporary in "$listing" "$sorted" "$manifest"; do
+      test -z "$temporary" || rm -f -- "$temporary"
+    done
+    exit "$status"
+  }
+  trap cleanup_chart_hash EXIT
+  listing=$(mktemp "${TMPDIR:-/tmp}/kdive-chart-list.XXXXXX")
+  sorted=$(mktemp "${TMPDIR:-/tmp}/kdive-chart-sort.XXXXXX")
+  manifest=$(mktemp "${TMPDIR:-/tmp}/kdive-chart-manifest.XXXXXX")
+  chmod 0600 "$listing" "$sorted" "$manifest"
+
+  if test -f "$chart" && test ! -L "$chart"; then
+    sha256_file "$chart"
+    exit 0
+  fi
+  test -d "$chart" && test ! -L "$chart" || {
+    echo "chart must be a local directory or regular packaged-chart file: $chart" >&2
+    exit 2
+  }
+  if (cd -- "$chart" && find -P . \( ! -type d ! -type f \) -print -quit) |
+    IFS= read -r _; then
+    echo "chart contains a non-regular entry: $chart" >&2
+    exit 2
+  fi
+  (cd -- "$chart" && find -P . -type f -print0 >"$listing")
+  LC_ALL=C sort -z "$listing" >"$sorted"
+  : >"$manifest"
+  while IFS= read -r -d '' path; do
+    (
+      cd -- "$chart"
+      output=$(sha256sum -- "$path")
+      printf 'F\0%s\0%s\0' "$path" "${output%% *}"
+    ) >>"$manifest"
+  done <"$sorted"
+  sha256_file "$manifest"
+)
+
+publish_chart_snapshot() {
+  local chart=$1 digest=$2 suffix target temporary actual
+  test ! -L "$RECOVERY_CHART_DIR" || {
+    echo "recovery chart directory must not be a symlink: $RECOVERY_CHART_DIR" >&2
+    exit 2
+  }
+  if test ! -e "$RECOVERY_CHART_DIR"; then
+    mkdir -- "$RECOVERY_CHART_DIR"
+  fi
+  test -d "$RECOVERY_CHART_DIR" || {
+    echo "recovery chart path is not a directory: $RECOVERY_CHART_DIR" >&2
+    exit 2
+  }
+  chmod 0700 "$RECOVERY_CHART_DIR"
+  if test -d "$chart" && test ! -L "$chart"; then
+    suffix=dir
+  elif test -f "$chart" && test ! -L "$chart"; then
+    suffix=tgz
+  else
+    echo "chart must be a local directory or regular packaged-chart file: $chart" >&2
+    exit 2
+  fi
+  target="${RECOVERY_CHART_DIR}/${digest}.${suffix}"
+  temporary="${target}.tmp"
+  test ! -e "$temporary" || {
+    echo "leftover chart snapshot temporary exists: $temporary" >&2
+    exit 2
+  }
+  if test -e "$target"; then
+    actual=$(sha256_chart "$target")
+    test "$actual" = "$digest" || {
+      echo "existing chart snapshot hash mismatch: $target" >&2
+      exit 2
+    }
+    printf '%s\n' "$target"
+    return
+  fi
+  if test "$suffix" = dir; then
+    cp -a -- "$chart" "$temporary"
+    chmod -R u=rwX,go= "$temporary"
+  else
+    cp -- "$chart" "$temporary"
+    chmod 0600 "$temporary"
+  fi
+  actual=$(sha256_chart "$temporary")
+  test "$actual" = "$digest" || {
+    echo "chart changed while snapshotting; inspect and remove $temporary, then retry" >&2
+    exit 2
+  }
+  mv -- "$temporary" "$target"
+  printf '%s\n' "$target"
+}
+
+verify_target_pins() {
+  local actual_values actual_source_chart actual_target_chart
+  validate_sha256 "$TARGET_VALUES_SHA256" "target values"
+  validate_sha256 "$TARGET_CHART_SHA256" "target chart"
+  validate_pull_policy "$TARGET_IMAGE_PULL_POLICY"
+  validate_secret_name "$MIGRATION_SECRET"
+  validate_secret_key "$MIGRATION_KEY"
+  actual_values=$(sha256_file "$TARGET_VALUES")
+  actual_source_chart=$(sha256_chart "$CHART")
+  actual_target_chart=$(sha256_chart "$TARGET_CHART")
+  test "$actual_values" = "$TARGET_VALUES_SHA256" || {
+    echo "target values changed; use the Stage 1 repin path and rerun Stage 3" >&2
+    exit 2
+  }
+  test "$actual_source_chart" = "$TARGET_CHART_SHA256" || {
+    echo "source chart changed; use the Stage 1 repin path and rerun Stage 3" >&2
+    exit 2
+  }
+  test "$actual_target_chart" = "$TARGET_CHART_SHA256" || {
+    echo "private target chart snapshot changed; stop and inspect recovery artifacts" >&2
+    exit 2
+  }
+}
+
+render_recovery_configmap() {
+  kubectl create configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    --from-literal=server_replicas="$SERVER_REPLICAS" \
+    --from-literal=worker_replicas="$WORKER_REPLICAS" \
+    --from-literal=reconciler_replicas="$RECONCILER_REPLICAS" \
+    --from-literal=prior_queue_paused="$PRIOR_QUEUE_PAUSED" \
+    --from-literal=target_values_sha256="$TARGET_VALUES_SHA256" \
+    --from-literal=target_chart_sha256="$TARGET_CHART_SHA256" \
+    --from-literal=target_image="$TARGET_IMAGE" \
+    --from-literal=migration_secret="$MIGRATION_SECRET" \
+    --from-literal=migration_key="$MIGRATION_KEY" \
+    --from-literal=target_image_pull_policy="$TARGET_IMAGE_PULL_POLICY" \
+    --from-literal=stage3_values_sha256="$STAGE3_VALUES_SHA256" \
+    --from-literal=stage3_chart_sha256="$STAGE3_CHART_SHA256" \
+    --dry-run=client -o yaml
+}
+
+verify_captured_configmap() {
+  local cm_server cm_worker cm_reconciler cm_queue
+  cm_server=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.server_replicas}')
+  cm_worker=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.worker_replicas}')
+  cm_reconciler=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.reconciler_replicas}')
+  cm_queue=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.prior_queue_paused}')
+  test "$cm_server" = "$SERVER_REPLICAS" &&
+    test "$cm_worker" = "$WORKER_REPLICAS" &&
+    test "$cm_reconciler" = "$RECONCILER_REPLICAS" &&
+    test "$cm_queue" = "$PRIOR_QUEUE_PAUSED" || {
+      echo "captured local state differs from the recovery ConfigMap" >&2
+      exit 2
+    }
+}
+
+verify_recovery_configmap() {
+  local key_count cm_values_sha cm_chart_sha cm_image cm_secret cm_key cm_pull
+  local cm_stage3_values cm_stage3_chart
+  verify_captured_configmap
+  key_count=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o go-template='{{len .data}}')
+  cm_values_sha=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.target_values_sha256}')
+  cm_chart_sha=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.target_chart_sha256}')
+  cm_image=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.target_image}')
+  cm_secret=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.migration_secret}')
+  cm_key=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.migration_key}')
+  cm_pull=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.target_image_pull_policy}')
+  cm_stage3_values=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.stage3_values_sha256}')
+  cm_stage3_chart=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.stage3_chart_sha256}')
+  test "$key_count" = 12 &&
+    test "$cm_values_sha" = "$TARGET_VALUES_SHA256" &&
+    test "$cm_chart_sha" = "$TARGET_CHART_SHA256" &&
+    test "$cm_image" = "$TARGET_IMAGE" &&
+    test "$cm_secret" = "$MIGRATION_SECRET" &&
+    test "$cm_key" = "$MIGRATION_KEY" &&
+    test "$cm_pull" = "$TARGET_IMAGE_PULL_POLICY" &&
+    test "$cm_stage3_values" = "$STAGE3_VALUES_SHA256" &&
+    test "$cm_stage3_chart" = "$STAGE3_CHART_SHA256" || {
+      echo "target local state differs from the recovery ConfigMap" >&2
+      exit 2
+    }
+}
+
+verify_recovery_state() {
+  verify_target_pins
+  verify_recovery_configmap
+}
+
+write_recovery_state() {
+  local output=$1
+  {
+    printf 'RELEASE=%q\n' "$RELEASE"
+    printf 'NAMESPACE=%q\n' "$NAMESPACE"
+    printf 'FULL=%q\n' "$FULL"
+    printf 'CHART=%q\n' "$CHART"
+    printf 'TARGET_VALUES=%q\n' "$TARGET_VALUES"
+    printf 'RECOVERY_STATE=%q\n' "$RECOVERY_STATE"
+    printf 'RECOVERY_CHART_DIR=%q\n' "$RECOVERY_CHART_DIR"
+    printf 'TARGET_CHART=%q\n' "$TARGET_CHART"
+    printf 'SERVER_REPLICAS=%q\n' "$SERVER_REPLICAS"
+    printf 'WORKER_REPLICAS=%q\n' "$WORKER_REPLICAS"
+    printf 'RECONCILER_REPLICAS=%q\n' "$RECONCILER_REPLICAS"
+    printf 'QUEUE_STATE_JOB=%q\n' "$QUEUE_STATE_JOB"
+    printf 'DB_CLIENT_JOB=%q\n' "$DB_CLIENT_JOB"
+    printf 'INCARNATION_JOB=%q\n' "$INCARNATION_JOB"
+    printf 'TARGET_VALUES_SHA256=%q\n' "$TARGET_VALUES_SHA256"
+    printf 'TARGET_CHART_SHA256=%q\n' "$TARGET_CHART_SHA256"
+    printf 'TARGET_IMAGE=%q\n' "$TARGET_IMAGE"
+    printf 'MIGRATION_SECRET=%q\n' "$MIGRATION_SECRET"
+    printf 'MIGRATION_KEY=%q\n' "$MIGRATION_KEY"
+    printf 'TARGET_IMAGE_PULL_POLICY=%q\n' "$TARGET_IMAGE_PULL_POLICY"
+    printf 'STAGE3_VALUES_SHA256=%q\n' "$STAGE3_VALUES_SHA256"
+    printf 'STAGE3_CHART_SHA256=%q\n' "$STAGE3_CHART_SHA256"
+    printf 'PRIOR_QUEUE_PAUSED=%q\n' "$PRIOR_QUEUE_PAUSED"
+    declare -f validate_secret_name validate_secret_key validate_pull_policy validate_sha256
+    declare -f sha256_file sha256_chart publish_chart_snapshot verify_target_pins
+    declare -f render_recovery_configmap verify_captured_configmap
+    declare -f verify_recovery_configmap verify_recovery_state write_recovery_state
+  } >"$output"
+  bash -n "$output"
+  chmod 0600 "$output"
+}
+
 for name in "$RECOVERY_STATE" "$QUEUE_STATE_JOB" "$DB_CLIENT_JOB" "$INCARNATION_JOB"; do
   validate_short_name "$name"
 done
@@ -288,27 +599,40 @@ test -f "$TARGET_VALUES" || {
 chmod 0600 "$TARGET_VALUES"
 test "$(stat -c '%a' "$TARGET_VALUES")" = 600
 for path in "$TARGET_VALUES_TMP" "$RECOVERY_STATE_FILE" "$RECOVERY_STATE_TMP" \
-  "$COMPLETED_STATE"; do
+  "$RECOVERY_CHART_DIR" "$COMPLETED_STATE"; do
   test ! -e "$path" || {
     echo "recovery artifact already exists: $path; use the Stage 1 retry block" >&2
     exit 2
   }
 done
 
-read -r TARGET_IMAGE MIGRATION_SECRET MIGRATION_KEY < <(
-  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" \
+TARGET_VALUES_SHA256=$(sha256_file "$TARGET_VALUES")
+TARGET_CHART_SHA256=$(sha256_chart "$CHART")
+validate_sha256 "$TARGET_VALUES_SHA256" "target values"
+validate_sha256 "$TARGET_CHART_SHA256" "target chart"
+TARGET_CHART=$(publish_chart_snapshot "$CHART" "$TARGET_CHART_SHA256")
+test "$(sha256_chart "$TARGET_CHART")" = "$TARGET_CHART_SHA256"
+read -r TARGET_IMAGE TARGET_IMAGE_PULL_POLICY MIGRATION_SECRET MIGRATION_KEY < <(
+  helm template "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" \
     --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
     --set lifecycleWitness.enabled=false --show-only templates/job-migrate.yaml |
     kubectl create --dry-run=client -f - -o jsonpath='{.spec.template.spec.containers['\
 '?(@.name=="migrate")].image}{"\t"}{.spec.template.spec.containers['\
+'?(@.name=="migrate")].imagePullPolicy}{"\t"}{.spec.template.spec.containers['\
 '?(@.name=="migrate")].env[?(@.name=="KDIVE_DATABASE_URL")].valueFrom.secretKeyRef.name}'\
 '{"\t"}{.spec.template.spec.containers[?(@.name=="migrate")].env['\
 '?(@.name=="KDIVE_DATABASE_URL")].valueFrom.secretKeyRef.key}{"\n"}'
 )
 test -n "$TARGET_IMAGE" && test -n "$MIGRATION_SECRET" && test -n "$MIGRATION_KEY" || {
-  echo "target migration Job lacks an image or KDIVE_DATABASE_URL Secret reference" >&2
+  echo "target migration Job lacks its image or KDIVE_DATABASE_URL Secret reference" >&2
   exit 2
 }
+validate_pull_policy "$TARGET_IMAGE_PULL_POLICY"
+validate_secret_name "$MIGRATION_SECRET"
+validate_secret_key "$MIGRATION_KEY"
+STAGE3_VALUES_SHA256=
+STAGE3_CHART_SHA256=
+verify_target_pins
 
 SERVER_REPLICAS=$(kubectl get deployment/${FULL}-server -n "$NAMESPACE" \
   -o jsonpath='{.spec.replicas}')
@@ -330,6 +654,8 @@ test -n "$CURRENT_MIGRATION_SECRET" && test -n "$CURRENT_MIGRATION_KEY" || {
   echo "current migration Job lacks its KDIVE_DATABASE_URL Secret reference" >&2
   exit 2
 }
+validate_secret_name "$CURRENT_MIGRATION_SECRET"
+validate_secret_key "$CURRENT_MIGRATION_KEY"
 
 if kubectl get job "$QUEUE_STATE_JOB" -n "$NAMESPACE" -o name; then
   test "$RETRY_DIAGNOSTIC" = 1 || {
@@ -339,6 +665,7 @@ if kubectl get job "$QUEUE_STATE_JOB" -n "$NAMESPACE" -o name; then
   kubectl delete job "$QUEUE_STATE_JOB" -n "$NAMESPACE" \
     --ignore-not-found --wait=true --timeout=2m
 fi
+verify_target_pins
 kubectl create -n "$NAMESPACE" -f - <<EOF
 apiVersion: batch/v1
 kind: Job
@@ -357,12 +684,13 @@ spec:
       containers:
         - name: queue-state
           image: "${TARGET_IMAGE}"
+          imagePullPolicy: "${TARGET_IMAGE_PULL_POLICY}"
           env:
             - name: KDIVE_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: ${CURRENT_MIGRATION_SECRET}
-                  key: ${CURRENT_MIGRATION_KEY}
+                  name: "${CURRENT_MIGRATION_SECRET}"
+                  key: "${CURRENT_MIGRATION_KEY}"
           command: ["python", "-c"]
           args:
             - |
@@ -392,55 +720,10 @@ esac
 kubectl delete job "$QUEUE_STATE_JOB" -n "$NAMESPACE" \
   --ignore-not-found --wait=true --timeout=2m
 
-{
-  printf 'RELEASE=%q\n' "$RELEASE"
-  printf 'NAMESPACE=%q\n' "$NAMESPACE"
-  printf 'FULL=%q\n' "$FULL"
-  printf 'CHART=%q\n' "$CHART"
-  printf 'TARGET_VALUES=%q\n' "$TARGET_VALUES"
-  printf 'RECOVERY_STATE=%q\n' "$RECOVERY_STATE"
-  printf 'SERVER_REPLICAS=%q\n' "$SERVER_REPLICAS"
-  printf 'WORKER_REPLICAS=%q\n' "$WORKER_REPLICAS"
-  printf 'RECONCILER_REPLICAS=%q\n' "$RECONCILER_REPLICAS"
-  printf 'QUEUE_STATE_JOB=%q\n' "$QUEUE_STATE_JOB"
-  printf 'DB_CLIENT_JOB=%q\n' "$DB_CLIENT_JOB"
-  printf 'INCARNATION_JOB=%q\n' "$INCARNATION_JOB"
-  printf 'TARGET_IMAGE=%q\n' "$TARGET_IMAGE"
-  printf 'MIGRATION_SECRET=%q\n' "$MIGRATION_SECRET"
-  printf 'MIGRATION_KEY=%q\n' "$MIGRATION_KEY"
-  printf 'PRIOR_QUEUE_PAUSED=%q\n' "$PRIOR_QUEUE_PAUSED"
-} >"$RECOVERY_STATE_TMP"
-bash -n "$RECOVERY_STATE_TMP"
-chmod 0600 "$RECOVERY_STATE_TMP"
+verify_target_pins
+write_recovery_state "$RECOVERY_STATE_TMP"
 mv -- "$RECOVERY_STATE_TMP" "$RECOVERY_STATE_FILE"
-
-kubectl create configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
-  --from-literal=server_replicas="$SERVER_REPLICAS" \
-  --from-literal=worker_replicas="$WORKER_REPLICAS" \
-  --from-literal=reconciler_replicas="$RECONCILER_REPLICAS" \
-  --from-literal=prior_queue_paused="$PRIOR_QUEUE_PAUSED"
-
-verify_recovery_configmap() {
-  local key_count cm_server cm_worker cm_reconciler cm_queue
-  key_count=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
-    -o go-template='{{len .data}}')
-  cm_server=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
-    -o jsonpath='{.data.server_replicas}')
-  cm_worker=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
-    -o jsonpath='{.data.worker_replicas}')
-  cm_reconciler=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
-    -o jsonpath='{.data.reconciler_replicas}')
-  cm_queue=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
-    -o jsonpath='{.data.prior_queue_paused}')
-  test "$key_count" = 4 &&
-    test "$cm_server" = "$SERVER_REPLICAS" &&
-    test "$cm_worker" = "$WORKER_REPLICAS" &&
-    test "$cm_reconciler" = "$RECONCILER_REPLICAS" &&
-    test "$cm_queue" = "$PRIOR_QUEUE_PAUSED" || {
-      echo "recovery ConfigMap does not exactly match the local recovery state" >&2
-      exit 2
-    }
-}
+render_recovery_configmap | kubectl create -f -
 verify_recovery_configmap
 ```
 
@@ -450,8 +733,8 @@ failure leaves that exact Job for inspection; it does not expose the credential.
 
 If local publication succeeds but ConfigMap creation or verification fails, do not recapture live
 counts or queue state. Run this retry block. It refuses a leftover temporary file, sources the
-restricted local record, creates the ConfigMap only when absent, and verifies the exact four-key
-record:
+restricted local record, verifies the pinned files, creates the ConfigMap only when absent, and
+verifies the exact 12-key record:
 
 ```bash
 set -euo pipefail
@@ -468,39 +751,93 @@ test ! -e "$RECOVERY_STATE_TMP" || {
 }
 bash -n "$RECOVERY_STATE_FILE"
 source "$RECOVERY_STATE_FILE"
-chmod 0600 "$TARGET_VALUES"
+verify_target_pins
 
 if ! kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" -o name; then
-  kubectl create configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
-    --from-literal=server_replicas="$SERVER_REPLICAS" \
-    --from-literal=worker_replicas="$WORKER_REPLICAS" \
-    --from-literal=reconciler_replicas="$RECONCILER_REPLICAS" \
-    --from-literal=prior_queue_paused="$PRIOR_QUEUE_PAUSED"
+  render_recovery_configmap | kubectl create -f -
 fi
-
-verify_recovery_configmap() {
-  local key_count cm_server cm_worker cm_reconciler cm_queue
-  key_count=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
-    -o go-template='{{len .data}}')
-  cm_server=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
-    -o jsonpath='{.data.server_replicas}')
-  cm_worker=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
-    -o jsonpath='{.data.worker_replicas}')
-  cm_reconciler=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
-    -o jsonpath='{.data.reconciler_replicas}')
-  cm_queue=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
-    -o jsonpath='{.data.prior_queue_paused}')
-  test "$key_count" = 4 &&
-    test "$cm_server" = "$SERVER_REPLICAS" &&
-    test "$cm_worker" = "$WORKER_REPLICAS" &&
-    test "$cm_reconciler" = "$RECONCILER_REPLICAS" &&
-    test "$cm_queue" = "$PRIOR_QUEUE_PAUSED" || {
-      echo "recovery ConfigMap does not exactly match the local recovery state" >&2
-      exit 2
-    }
-}
 verify_recovery_configmap
 ```
+
+If a target value, chart, image, pull policy, or migration Secret reference must change after live
+state was captured, keep all four workloads at zero and use this repin path. Set
+`TARGET_VALUES_NEXT` to a separately edited regular file. The path preserves the captured replica
+counts and queue value, atomically publishes a new restricted values file and chart snapshot,
+rerenders the migration tuple, clears the Stage 3 proof markers, and updates the one 12-key
+ConfigMap. It does not reread live replica specs or the queue:
+
+```bash
+set -euo pipefail
+umask 077
+: "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+: "${TARGET_VALUES_NEXT:?set a separately edited target-values file}"
+RECOVERY_STATE_TMP="${RECOVERY_STATE_FILE}.tmp"
+bash -n "$RECOVERY_STATE_FILE"
+source "$RECOVERY_STATE_FILE"
+TARGET_VALUES_TMP="${TARGET_VALUES}.tmp"
+verify_captured_configmap
+
+assert_no_workload_pods() {
+  local selector pods
+  for selector in "app=${FULL}-server" "app=${FULL}-worker" "app=${FULL}-reconciler" \
+    "app=${FULL}-witness"; do
+    pods=$(kubectl get pods -n "$NAMESPACE" -l "$selector" \
+      -o jsonpath='{.items[*].metadata.name}')
+    test -z "$pods" || {
+      echo "repin requires all workloads at zero; found $selector Pods: $pods" >&2
+      exit 2
+    }
+  done
+}
+assert_no_workload_pods
+test -f "$TARGET_VALUES_NEXT" && test ! -L "$TARGET_VALUES_NEXT" || {
+  echo "TARGET_VALUES_NEXT must be a regular non-symlink file" >&2
+  exit 2
+}
+test "$TARGET_VALUES_NEXT" != "$TARGET_VALUES" || {
+  echo "TARGET_VALUES_NEXT must be separate from the pinned target values" >&2
+  exit 2
+}
+for path in "$RECOVERY_STATE_TMP" "$TARGET_VALUES_TMP"; do
+  test ! -e "$path" || {
+    echo "temporary recovery artifact exists: $path; inspect it before retrying" >&2
+    exit 2
+  }
+done
+
+NEXT_VALUES_SHA256=$(sha256_file "$TARGET_VALUES_NEXT")
+cp -- "$TARGET_VALUES_NEXT" "$TARGET_VALUES_TMP"
+chmod 0600 "$TARGET_VALUES_TMP"
+test "$(sha256_file "$TARGET_VALUES_TMP")" = "$NEXT_VALUES_SHA256"
+mv -- "$TARGET_VALUES_TMP" "$TARGET_VALUES"
+TARGET_VALUES_SHA256=$(sha256_file "$TARGET_VALUES")
+TARGET_CHART_SHA256=$(sha256_chart "$CHART")
+TARGET_CHART=$(publish_chart_snapshot "$CHART" "$TARGET_CHART_SHA256")
+read -r TARGET_IMAGE TARGET_IMAGE_PULL_POLICY MIGRATION_SECRET MIGRATION_KEY < <(
+  helm template "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" \
+    --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
+    --set lifecycleWitness.enabled=false --show-only templates/job-migrate.yaml |
+    kubectl create --dry-run=client -f - -o jsonpath='{.spec.template.spec.containers['\
+'?(@.name=="migrate")].image}{"\t"}{.spec.template.spec.containers['\
+'?(@.name=="migrate")].imagePullPolicy}{"\t"}{.spec.template.spec.containers['\
+'?(@.name=="migrate")].env[?(@.name=="KDIVE_DATABASE_URL")].valueFrom.secretKeyRef.name}'\
+'{"\t"}{.spec.template.spec.containers[?(@.name=="migrate")].env['\
+'?(@.name=="KDIVE_DATABASE_URL")].valueFrom.secretKeyRef.key}{"\n"}'
+)
+validate_pull_policy "$TARGET_IMAGE_PULL_POLICY"
+validate_secret_name "$MIGRATION_SECRET"
+validate_secret_key "$MIGRATION_KEY"
+STAGE3_VALUES_SHA256=
+STAGE3_CHART_SHA256=
+verify_target_pins
+write_recovery_state "$RECOVERY_STATE_TMP"
+mv -- "$RECOVERY_STATE_TMP" "$RECOVERY_STATE_FILE"
+render_recovery_configmap | kubectl apply -f -
+verify_recovery_configmap
+```
+
+After any successful repin, rerun Stage 3 before Stage 4. A restart may reuse a matching chart
+snapshot; a leftover `.tmp` is never overwritten.
 
 #### Stage 2 — Drain workers through the current witness
 
@@ -511,7 +848,9 @@ claiming through the authenticated, audited CLI before draining workers:
 ```bash
 set -euo pipefail
 : "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+bash -n "$RECOVERY_STATE_FILE"
 source "$RECOVERY_STATE_FILE"
+verify_recovery_state
 : "${KDIVE_SERVER_URL:?set the current MCP URL ending in /mcp}"
 : "${KDIVE_TOKEN:?set a platform-operator bearer token}"
 
@@ -528,6 +867,9 @@ test "$CM_SERVER_REPLICAS" = "$SERVER_REPLICAS" &&
     exit 2
   }
 
+kubectl rollout status deployment/${FULL}-witness -n "$NAMESPACE" --timeout=5m
+kubectl wait --for=condition=Ready pod -n "$NAMESPACE" \
+  -l "app=${FULL}-witness" --timeout=5m
 if test "$SERVER_REPLICAS" -eq 0; then
   kubectl scale deployment/${FULL}-server -n "$NAMESPACE" --replicas=1
 fi
@@ -548,13 +890,16 @@ wait_for_pods_deleted() {
     -o jsonpath='{.items[*].metadata.name}')"
 }
 wait_for_pods_deleted "app=${FULL}-worker"
+kubectl rollout status deployment/${FULL}-witness -n "$NAMESPACE" --timeout=5m
+kubectl wait --for=condition=Ready pod -n "$NAMESPACE" \
+  -l "app=${FULL}-witness" --timeout=5m
 ```
 
-The old-server rollout and readiness waits each have a five-minute Kubernetes API wall-clock limit;
-the audited pause call has a 60-second operator-host wall-clock limit; the worker deletion wait has
-a five-minute API limit. A failure leaves the recovery records intact. Restore old-server
-availability if needed and rerun Stage 2: scaling to one, setting the queue to paused, and scaling
-workers to zero are all idempotent. Do not remove finalizers or hide an error.
+The five-minute Kubernetes API wall-clock limit applies to each rollout and Ready-Pod wait in the
+target namespace. The audited pause call has a 60-second operator-host wall-clock limit, and the
+worker deletion wait has a five-minute API limit. A violation exits Stage 2 with the recovery
+records intact; correct availability and rerun Stage 2. Scaling to one, setting the queue to paused,
+and scaling workers to zero are idempotent. Do not remove finalizers or hide an error.
 
 #### Stage 3 — Stop all workloads and prove migration safety
 
@@ -563,7 +908,9 @@ Stop the remaining workloads and prove that all four KDIVE workloads have no run
 ```bash
 set -euo pipefail
 : "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+bash -n "$RECOVERY_STATE_FILE"
 source "$RECOVERY_STATE_FILE"
+verify_recovery_state
 
 wait_for_pods_deleted() {
   local selector=$1
@@ -594,6 +941,7 @@ if kubectl get job "$DB_CLIENT_JOB" -n "$NAMESPACE" -o name; then
   kubectl delete job "$DB_CLIENT_JOB" -n "$NAMESPACE" \
     --ignore-not-found --wait=true --timeout=2m
 fi
+verify_target_pins
 kubectl create -n "$NAMESPACE" -f - <<EOF
 apiVersion: batch/v1
 kind: Job
@@ -612,12 +960,13 @@ spec:
       containers:
         - name: db-check
           image: "${TARGET_IMAGE}"
+          imagePullPolicy: "${TARGET_IMAGE_PULL_POLICY}"
           env:
             - name: KDIVE_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: ${MIGRATION_SECRET}
-                  key: ${MIGRATION_KEY}
+                  name: "${MIGRATION_SECRET}"
+                  key: "${MIGRATION_KEY}"
           command: ["python", "-c"]
           args:
             - |
@@ -644,6 +993,18 @@ if ! kubectl wait --for=condition=complete job/${DB_CLIENT_JOB} -n "$NAMESPACE" 
   exit 1
 fi
 kubectl logs job/${DB_CLIENT_JOB} -n "$NAMESPACE" --tail=20
+verify_target_pins
+STAGE3_VALUES_SHA256="$TARGET_VALUES_SHA256"
+STAGE3_CHART_SHA256="$TARGET_CHART_SHA256"
+RECOVERY_STATE_TMP="${RECOVERY_STATE_FILE}.tmp"
+test ! -e "$RECOVERY_STATE_TMP" || {
+  echo "temporary recovery state exists: $RECOVERY_STATE_TMP; inspect it before retrying" >&2
+  exit 2
+}
+write_recovery_state "$RECOVERY_STATE_TMP"
+mv -- "$RECOVERY_STATE_TMP" "$RECOVERY_STATE_FILE"
+render_recovery_configmap | kubectl apply -f -
+verify_recovery_configmap
 ```
 
 The Job deadline is 60 seconds of Kubernetes controller wall time; the per-stage API wait allows
@@ -665,17 +1026,31 @@ four database role credentials and referenced Secrets only after this all-zero m
 ```bash
 set -euo pipefail
 : "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+bash -n "$RECOVERY_STATE_FILE"
 source "$RECOVERY_STATE_FILE"
+verify_recovery_state
+test "$STAGE3_VALUES_SHA256" = "$TARGET_VALUES_SHA256" &&
+  test "$STAGE3_CHART_SHA256" = "$TARGET_CHART_SHA256" || {
+    echo "Stage 3 proof does not match the pinned target; rerun Stage 3 before Stage 4" >&2
+    exit 2
+  }
 
-helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" \
+verify_target_pins
+if helm upgrade "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" \
   --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
-  --set lifecycleWitness.enabled=false
+  --set lifecycleWitness.enabled=false; then
+  verify_target_pins
+else
+  status=$?
+  verify_target_pins
+  exit "$status"
+fi
 ```
 
-If this hooked stage fails, keep all workloads at zero, correct the target migration or
-configuration, and retry this same hooked all-zero stage. After it succeeds, do not change target
-values, credential references, or configuration: `--no-hooks` also skips the external
-ConfigMap hook.
+If this hooked stage fails without any input change, keep all workloads at zero and retry it. If a
+target input must change, use the Stage 1 repin path, rerun Stage 3, and then rerun Stage 4. After
+it succeeds, do not change target values, credential references, or configuration: `--no-hooks`
+also skips the external ConfigMap hook.
 
 #### Stage 5 — Correct target credential content
 
@@ -691,7 +1066,9 @@ the target Secret reference now resolves without printing its value before conti
 ```bash
 set -euo pipefail
 : "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+bash -n "$RECOVERY_STATE_FILE"
 source "$RECOVERY_STATE_FILE"
+verify_recovery_state
 
 kubectl get secret "$MIGRATION_SECRET" -n "$NAMESPACE" \
   -o go-template='{{range $key, $_ := .data}}{{println $key}}{{end}}' |
@@ -706,11 +1083,20 @@ wait for its rollout and readiness:
 ```bash
 set -euo pipefail
 : "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+bash -n "$RECOVERY_STATE_FILE"
 source "$RECOVERY_STATE_FILE"
+verify_recovery_state
 
-helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
+verify_target_pins
+if helm upgrade "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
   --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
-  --set lifecycleWitness.enabled=true
+  --set lifecycleWitness.enabled=true; then
+  verify_target_pins
+else
+  status=$?
+  verify_target_pins
+  exit "$status"
+fi
 kubectl rollout status deployment/${FULL}-witness -n "$NAMESPACE" --timeout=5m
 kubectl wait --for=condition=Ready pod -n "$NAMESPACE" -l "app=${FULL}-witness" --timeout=5m
 ```
@@ -723,7 +1109,9 @@ ready:
 ```bash
 set -euo pipefail
 : "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+bash -n "$RECOVERY_STATE_FILE"
 source "$RECOVERY_STATE_FILE"
+verify_recovery_state
 
 WITNESS_POD=$(kubectl get pod -n "$NAMESPACE" -l "app=${FULL}-witness" \
   -o jsonpath='{.items[*].metadata.name}')
@@ -740,7 +1128,7 @@ kubectl wait --for=condition=Ready pod -n "$NAMESPACE" \
 ```
 
 If target values, a credential reference, or configuration must change, set all four workloads to
-zero again, edit the target file, and return to the hooked Stage 4. Do not apply changed target
+zero, use the Stage 1 repin path, rerun Stage 3, and then rerun Stage 4. Do not apply changed target
 values through a hook-free retry.
 
 #### Stage 7 — Restore captured core counts
@@ -752,7 +1140,9 @@ target server for the authenticated Stage 8 proofs:
 ```bash
 set -euo pipefail
 : "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+bash -n "$RECOVERY_STATE_FILE"
 source "$RECOVERY_STATE_FILE"
+verify_recovery_state
 
 validate_nonnegative_count() {
   case "$1" in
@@ -789,9 +1179,16 @@ if test "$SERVER_REPLICAS" -eq 0; then
   VERIFY_SERVER_REPLICAS=1
 fi
 
-helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
+verify_target_pins
+if helm upgrade "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
   --set server.replicas=${VERIFY_SERVER_REPLICAS} --set worker.replicas=${WORKER_REPLICAS} \
-  --set reconciler.replicas=${RECONCILER_REPLICAS} --set lifecycleWitness.enabled=true
+  --set reconciler.replicas=${RECONCILER_REPLICAS} --set lifecycleWitness.enabled=true; then
+  verify_target_pins
+else
+  status=$?
+  verify_target_pins
+  exit "$status"
+fi
 kubectl rollout status deployment/${FULL}-server -n "$NAMESPACE" --timeout=5m
 kubectl rollout status statefulset/${FULL}-worker -n "$NAMESPACE" --timeout=5m
 kubectl rollout status deployment/${FULL}-reconciler -n "$NAMESPACE" --timeout=5m
@@ -800,7 +1197,7 @@ kubectl rollout status deployment/${FULL}-reconciler -n "$NAMESPACE" --timeout=5
 Each rollout has its own five-minute Kubernetes API wall-clock limit; the three checks can consume
 at most 15 minutes in this stage. A failure leaves the ready witness running. Reapply the hook-free
 all-core-zero state, correct a transient runtime fault without changing target values, and retry
-Stage 7. A target-values change requires another all-zero hooked Stage 4.
+Stage 7. A target-values change requires the Stage 1 repin path, Stage 3, and Stage 4.
 
 #### Stage 8 — Prove restored worker and recovery authority
 
@@ -813,8 +1210,17 @@ workers requires both sets to be empty:
 set -euo pipefail
 : "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
 COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"
+COMPLETED_CHART_DIR="${COMPLETED_STATE}.charts"
 if test -e "$COMPLETED_STATE"; then
+  bash -n "$COMPLETED_STATE"
   source "$COMPLETED_STATE"
+  if test -d "$RECOVERY_CHART_DIR"; then
+    test ! -e "$COMPLETED_CHART_DIR" || {
+      echo "both active and completed chart archives exist; inspect them before cleanup" >&2
+      exit 2
+    }
+    mv -- "$RECOVERY_CHART_DIR" "$COMPLETED_CHART_DIR"
+  fi
   kubectl delete job "$QUEUE_STATE_JOB" -n "$NAMESPACE" \
     --ignore-not-found --wait=true --timeout=2m
   kubectl delete job "$DB_CLIENT_JOB" -n "$NAMESPACE" \
@@ -825,7 +1231,9 @@ if test -e "$COMPLETED_STATE"; then
     --ignore-not-found --wait=true --timeout=2m
   exit 0
 fi
+bash -n "$RECOVERY_STATE_FILE"
 source "$RECOVERY_STATE_FILE"
+verify_recovery_state
 : "${KDIVE_SERVER_URL:?set the deployed MCP URL ending in /mcp}"
 : "${KDIVE_TOKEN:?set a platform-operator bearer token with project viewer grants}"
 
@@ -869,6 +1277,7 @@ if kubectl get job "$INCARNATION_JOB" -n "$NAMESPACE" -o name; then
   kubectl delete job "$INCARNATION_JOB" -n "$NAMESPACE" \
     --ignore-not-found --wait=true --timeout=2m
 fi
+verify_target_pins
 kubectl create -n "$NAMESPACE" -f - <<EOF
 apiVersion: batch/v1
 kind: Job
@@ -887,12 +1296,13 @@ spec:
       containers:
         - name: incarnation-check
           image: "${TARGET_IMAGE}"
+          imagePullPolicy: "${TARGET_IMAGE_PULL_POLICY}"
           env:
             - name: KDIVE_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: ${MIGRATION_SECRET}
-                  key: ${MIGRATION_KEY}
+                  name: "${MIGRATION_SECRET}"
+                  key: "${MIGRATION_KEY}"
             - name: EXPECTED_WORKERS_B64
               value: "${EXPECTED_WORKERS_B64}"
             - name: EXPECTED_WORKER_COUNT
@@ -957,6 +1367,7 @@ if ! kubectl wait --for=condition=complete job/${INCARNATION_JOB} -n "$NAMESPACE
   exit 1
 fi
 kubectl logs job/${INCARNATION_JOB} -n "$NAMESPACE" --tail=20
+verify_target_pins
 ```
 
 The target-server rollout and readiness waits each have a five-minute API limit, and the repeated
@@ -973,7 +1384,11 @@ both recovery tools are exposed and make one bounded read call:
 ```bash
 set -euo pipefail
 : "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"
+COMPLETED_CHART_DIR="${COMPLETED_STATE}.charts"
+bash -n "$RECOVERY_STATE_FILE"
 source "$RECOVERY_STATE_FILE"
+verify_recovery_state
 : "${KDIVE_SERVER_URL:?set the deployed MCP URL ending in /mcp}"
 : "${KDIVE_TOKEN:?set a platform-operator bearer token with project viewer grants}"
 
@@ -1001,6 +1416,12 @@ asyncio.run(main())
 PY
 timeout 60s uv run kdivectl --json ops build-uses-list --limit 1
 
+CM_PRIOR_QUEUE_PAUSED=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+  -o jsonpath='{.data.prior_queue_paused}')
+test "$CM_PRIOR_QUEUE_PAUSED" = "$PRIOR_QUEUE_PAUSED" || {
+  echo "local prior queue state differs from the recovery ConfigMap" >&2
+  exit 2
+}
 case "$PRIOR_QUEUE_PAUSED" in
   true)
     timeout 60s uv run kdivectl --json ops set-queue-paused --paused
@@ -1015,9 +1436,16 @@ case "$PRIOR_QUEUE_PAUSED" in
 esac
 
 if test "$SERVER_REPLICAS" -eq 0; then
-  helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
+  verify_target_pins
+  if helm upgrade "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
     --set server.replicas=0 --set worker.replicas=${WORKER_REPLICAS} \
-    --set reconciler.replicas=${RECONCILER_REPLICAS} --set lifecycleWitness.enabled=true
+    --set reconciler.replicas=${RECONCILER_REPLICAS} --set lifecycleWitness.enabled=true; then
+    verify_target_pins
+  else
+    status=$?
+    verify_target_pins
+    exit "$status"
+  fi
   wait_for_server_deleted() {
     local pods
     pods=$(kubectl get pods -n "$NAMESPACE" -l "app=${FULL}-server" \
@@ -1039,6 +1467,13 @@ test ! -e "$COMPLETED_STATE" || {
 }
 bash -n "$RECOVERY_STATE_FILE"
 mv -- "$RECOVERY_STATE_FILE" "$COMPLETED_STATE"
+if test -d "$RECOVERY_CHART_DIR"; then
+  test ! -e "$COMPLETED_CHART_DIR" || {
+    echo "completion chart archive already exists: $COMPLETED_CHART_DIR" >&2
+    exit 2
+  }
+  mv -- "$RECOVERY_CHART_DIR" "$COMPLETED_CHART_DIR"
+fi
 kubectl delete job "$QUEUE_STATE_JOB" -n "$NAMESPACE" \
   --ignore-not-found --wait=true --timeout=2m
 kubectl delete job "$DB_CLIENT_JOB" -n "$NAMESPACE" \
@@ -1061,8 +1496,8 @@ delete names one exact object, ignores an already-absent object, waits for delet
 two-minute Kubernetes API wall-clock limit. If cleanup is interrupted, rerun the Stage 8 block: the
 completion branch performs only those bounded exact deletions and does not require the deleted
 ConfigMap or repeat any proof. Changing target configuration instead requires returning all
-workloads to zero and resuming at hooked Stage 4. Forward recovery is the only supported path after
-migration succeeds.
+workloads to zero, using the Stage 1 repin path, rerunning Stage 3, and then rerunning Stage 4.
+Forward recovery is the only supported path after migration succeeds.
 
 **Validate `systems.toml` against the running image (no DB/S3 needed):**
 
