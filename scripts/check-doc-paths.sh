@@ -2,8 +2,8 @@
 # Fail when a concrete docs/<path> reference in justfile / scripts / *.yml / *.py / operational
 # *.md points at a target that does not exist. Illustrative ellipses (docs/... and the
 # unicode docs/…) and angle-bracket placeholders (docs/<seg>) are excluded. Catches
-# non-markdown rot (e.g. justfile m2-report output, AGENTS.md code spans, a docstring that
-# cites a moved spec). NOT scanned:
+# non-markdown rot (e.g. a justfile recipe's output path, AGENTS.md code spans, a docstring
+# that cites a moved spec). NOT scanned:
 #   - docs/design/** — design specs narrate path moves (e.g. specs/ -> design/), so their
 #     docs/... mentions are intentional and must not be policed here;
 #   - docs/archive/** — frozen dated design records reference paths as they were when written and
@@ -18,8 +18,8 @@
 #     their example strings (e.g. docs/<overlay>.md) are illustrative, not real references.
 #   - src/kdive/mcp/resources/_content/** — generated mirrors of canonical docs (ADR-0151);
 #     any docs/ token they carry is policed at the docs/ source, not in the snapshot copy.
-#   - the guard/gate machinery tests (test_check_doc_paths.py, test_m2_portability_gate.py) —
-#     they construct synthetic, intentionally-missing docs/ paths to exercise the checks.
+#   - the guard machinery test (test_check_doc_paths.py) — it constructs synthetic,
+#     intentionally-missing docs/ paths to exercise this check.
 # The docs/ token is anchored on a left word boundary so substrings like mkdocs/ or
 # subdocs/ are not mistaken for a docs/ reference.
 # Generator constants built from slash-joined string literals are also out of scope
@@ -30,7 +30,7 @@ set -euo pipefail
 readonly ROOT="${1:-.}"
 cd "${ROOT}"
 
-readonly EXCLUDE='^docs/(design|archive)/|^CHANGELOG\.md$|^\.(claude|agents|codex)/|^src/kdive/mcp/resources/_content/|^tests/scripts/test_check_doc_paths\.py$|^tests/scripts/test_m2_portability_gate\.py$'
+readonly EXCLUDE='^docs/(design|archive)/|^CHANGELOG\.md$|^\.(claude|agents|codex)/|^src/kdive/mcp/resources/_content/|^tests/scripts/test_check_doc_paths\.py$'
 
 mapfile -t files < <(
   { git ls-files 'justfile' 'scripts/*' '*.yml' '*.yaml' '*.md' '*.py' 2>/dev/null || true; } |
@@ -45,7 +45,6 @@ if ((${#files[@]} == 0)); then
       -not -path './.claude/*' -not -path './.agents/*' -not -path './.codex/*' \
       -not -path './src/kdive/mcp/resources/_content/*' \
       -not -path './tests/scripts/test_check_doc_paths.py' \
-      -not -path './tests/scripts/test_m2_portability_gate.py' \
       -printf '%P\n'
   )
 fi

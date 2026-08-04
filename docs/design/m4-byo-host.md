@@ -327,115 +327,52 @@ whose worker died mid-flight; it means a restore that did not
 complete over indeterminate state, needing an operator rather than a retry, which is exactly
 the teardown case.
 
-## Portability gate: what is actually enforced, and the allowlist
+## Portability: what the retired gate leaves behind
 
-The epic's R9 listed seven touch-points. **Four of them are outside the gate's reach**, and
-recording that here is what keeps entry 17 (#1820) from adding allowlist entries for files the
-gate never inspects. `CORE_PREFIXES` (`scripts/m2_portability_gate.py`) is exactly
-`domain/`, `db/`, `jobs/`, `reconciler/`, `services/`, `store/`, `security/`, and `mcp/`.
+The epic's R9 listed seven touch-points and this section used to enumerate which of them owed
+an allowlist entry in the M2 portability gate. **That gate is retired**
+([ADR-0543](../adr/0543-retire-m2-portability-gate.md), #1840), so no allowlist entry is owed
+by any of them and entry 17 (#1820) no longer owns a `pre-M4` baseline tag or the R9 entries.
 
-**Not gated** — no allowlist entry is owed, because these paths are not core prefixes:
-`src/kdive/profiles/provisioning.py` (the `adopted-host` value, the pairing map, and
-`ProviderSection.byo_host_section`), `src/kdive/inventory/model.py` and
-`src/kdive/inventory/reconcile/` (the declaration model and reconcile arm),
-`src/kdive/profiles/provider_sections.py` (the `PROVIDER_SECTIONS` row),
-`src/kdive/providers/` in its entirety (the package, the OOB port, and the
-`DebugTransportKind` literal at `providers/ports/lifecycle.py:27-28`).
+The gate measured cumulative touched lines over `pre-M2..HEAD` and failed on any core file
+outside a named allowlist. It first reported violations three days after its own baseline was
+cut, and none of the first 57 was provider logic: a time-range measurement cannot separate a
+Milestone's provider work from the platform work merging to `main` beside it. The hypothesis
+it tested — that adding a provider needs no core changes — held for remote-libvirt and is
+recorded in `AGENTS.md` and ADR-0543. Whether BYO's core touches stay that small is now a
+review question, judged by reading the change, not a measured one.
 
-**Gated** — the allowlist entries this milestone owes:
+**One guard survives, and one gap stays open.** The per-provider capture-coverage drift guard
+(`tests/scripts/test_provider_capture_coverage.py`) imports the real `build_*_runtime`
+builders and fails when a provider's advertised capture methods disagree with its pinned row.
+It still asserts two **hardcoded** keys — `remote-libvirt` and `local-libvirt`. Nothing
+enumerates the resolver's registered kinds, so entry 2 can register `byo-host` with no
+coverage row and `just test` stays green. **Entry 17 owns closing that**: an assertion that
+iterates the registered kinds and requires a row for each, which is what makes epic exit
+criterion 8 checkable and turns the entry-17-after-entry-2 ordering from a convention into an
+enforced one. Until it lands, `"byo-host": frozenset({"kdump", "fadump"})` is a row a human
+has to remember.
 
-| path | why | owning entry | already allowlisted? |
-|---|---|---|---|
-| `src/kdive/domain/catalog/resources.py` | `ResourceKind.BYO_HOST` | 2 | yes (ADR-0076 touch-point) |
-| `src/kdive/db/schema/0112_resources_kind_byo_host.sql` | the one migration | 2 | **no — new entry** |
-| `src/kdive/domain/platform/arch_traits.py` | the docstring amendment marking field scope (ADR-0540) | 8 | **no — new entry** |
-| `src/kdive/jobs/handlers/systems.py` | cordon-on-teardown-failure with a reason (ADR-0541) — the provider port cannot do it: `Provisioner.teardown(domain_name)` (`src/kdive/providers/ports/lifecycle.py:130-138`) takes a domain name, gets no connection, and documents only `INFRASTRUCTURE_FAILURE` / `TRANSPORT_FAILURE`. The caller is `teardown_handler` (`src/kdive/jobs/handlers/systems.py:751`, provider call at `:783`). | 16 | **no — new entry** |
-| `src/kdive/mcp/tools/debug/sessions/lifecycle.py` and `.../sessions/registrar.py` | the `kgdb` transport arm: `lifecycle.py` carries the per-transport branching (`_GDBSTUB` / `_DRGN_LIVE` at `:80-81`, the `DEBUG_TRANSPORT_KINDS` check at `:305`, the arms at `:409` and `:427`); `registrar.py` carries the agent-facing `Field` text | 14 | yes, since #1835 re-pointed ADR-0085's entry here (see below) |
-| `src/kdive/mcp/tools/ops/resources/host_ops.py` | the cordon-write path (ADR-0541): `_apply_cordon` (`:141`) writes the boolean unconditionally and records nothing, so it needs the operator-origin reason step 0's read-before-write and step 4's re-read both depend on, plus the clear-on-uncordon arm. `resources.set_scheduling` is at `:47`. | 16 | yes, since #1835 re-pointed ADR-0089's entry here (see below) |
-| `src/kdive/mcp/tools/lifecycle/systems/profile_examples.py` | a `byo-host` arm in `_example_profile` (`:159-165`), which otherwise falls through to `_local_profile` and serves a local-libvirt profile under the BYO label | 2 | **no — new entry** |
-| `src/kdive/jobs/handlers/control/diagnostic_sysrq.py` and `.../control/watch_for_crash.py` | **holding a console-lease scope** and propagating its `transport_conflict` (ADR-0542) — two changes, not one. Each handler brackets its whole multi-read console interaction in a lease scope, because a per-read lease would let KGDB take the channel between SysRq's mark read (`diagnostic_sysrq.py:111`) and its injection. Each also surfaces the conflict instead of core's current handling: `diagnostic_sysrq.py:164-169` raises `configuration_error` / `console_not_pumped` naming no holder, and `watch_for_crash.py:191-193` discards `pumped` deliberately. These two are `read_window`'s only consumers in the tree. | 12, 14 | **no — new entry** |
-| `src/kdive/reconciler/loop.py` | the BYO mid-teardown drift arm and the stranded-console-lease reclaim | 16 | yes (entered for ADR-0086; BYO reuses it) |
-
-**Six new entries across five issues** — down from nine, because #1835 has since landed and
-three of the entries above stopped being new. `ALLOWED_FILES` is matched by exact path
-(`violations()`, `scripts/m2_portability_gate.py`); there is no prefix or directory matching.
-When this section was written, the entries ADR-0085 and ADR-0541's surface would have reused —
-`src/kdive/mcp/tools/debug/sessions.py`, `.../debug/introspect.py`, and
-`.../ops/resources.py` — named files that no longer existed. Each had become a package, so the
-allowlist strings matched nothing while every file inside those packages sat under
-`src/kdive/mcp/`, a core prefix.
-
-That was not confined to the three BYO would have leaned on: 14 of the 54 `ALLOWED_FILES`
-entries pointed at absent paths — roughly a quarter of the allowlist protecting nothing,
-silently, which is the same failure class as the drift guard above. #1835 discharged the
-re-pointing half of entry 17: the allowlist is now 69 entries with none absent,
-`sessions/lifecycle.py`, `sessions/registrar.py` and `resources/host_ops.py` among them, and
-the gate fails on a member that does not exist on disk or falls outside `CORE_PREFIXES`. It was
-pre-existing rot rather than BYO's — it affected local-libvirt and remote-libvirt's own
-measurement too. Two things entry 17 still owns are below: wiring the gate into CI, and the
-missing-`CAPTURE_COVERAGE`-row assertion. A third, the same dead-entry shape reached by a
-carve-out rather than a move, is #1838.
-
-One residue entry 17 will meet the moment it wires the gate up: #1835 dropped
-`src/kdive/reconciler/console_hosting.py` because its content left the core surface for
-`providers/infra/console_hosting.py`, and under `--no-renames` the retired path keeps its 778
-cumulative touched lines. They report as a violation that no allowlist edit can clear —
-re-adding the entry fails the absent-path check, pointing it at the successor fails the prefix
-check — so the `pre-M4` baseline below is what actually retires them, not an allowlist row.
-
-**Surfacing the cordon reason costs no entry**, and it is worth saying why no row for it
-appears above. `describe_resource` already has a provider-owned adornment seam:
+**Surfacing the cordon reason needs no new surface**, and it is worth saying why.
+`describe_resource` already has a provider-owned adornment seam:
 `ResourceDetailCapabilities.projector` on the `for_resource`-bound runtime, merged into the
 envelope at `src/kdive/mcp/tools/catalog/resources.py:217`, which remote-libvirt already uses
-(`providers/remote_libvirt/composition.py:266`, wired at `:360-362`). That code lives under
-`src/kdive/providers/`, outside the gate. It reaches `resources.describe` only, and the surface division is worth stating precisely
-because it is not the obvious one: **neither `resources.list` nor `resources.describe` emits the
-`cordoned` flag today** — the only tool that does is `resources.availability`
+(`providers/remote_libvirt/composition.py:266`, wired at `:360-362`). It reaches
+`resources.describe` only, and the surface division is worth stating precisely because it is
+not the obvious one: **neither `resources.list` nor `resources.describe` emits the `cordoned`
+flag today** — the only tool that does is `resources.availability`
 (`src/kdive/mcp/tools/catalog/availability.py:280`). So the operator path is
 `resources.availability` for *that a host is cordoned* and `resources.describe` for *why*, and
 entry 16 owes documentation of that pairing rather than a new flag. Routing the reason through
 the shared `resource_capability_data` projection (`_resource_envelopes.py:25-56`) instead would
-have cost a core touch-point, since that projection emits a fixed key set and would drop a
-namespaced key silently.
+emit a fixed key set and drop a namespaced key silently.
 
-The three `jobs/` rows are the ones a reader is most likely to miss on their own merits:
-`src/kdive/jobs/` is a core prefix whose allowlisted members are only `worker.py`,
-`worker_telemetry.py`, `queue.py`, `payloads.py`, and `handlers/image_build.py`. Nothing in the
-tree cordons on teardown failure today. There are six existing cordon write sites —
-`inventory/reconcile/prune.py:52` and `:85` (not a core prefix),
-`reconciler/cleanup/runtime_resources.py:148` (gated, unallowlisted; the allowlisted reconciler
-modules are `loop.py`, `loop_telemetry.py`, `cleanup/images.py` and
-`cleanup/provider_reaping.py`),
-`mcp/tools/ops/resources/deregister.py:283` and `:347` (also gated and unallowlisted), and
-`host_ops.py:145` — and **every one writes the boolean with no reason**, which is why ADR-0541's
-step 0 has to read the flag before setting it rather than trusting a reason key to tell an
-operator's cordon from its own.
-
-Three further facts about the gate, each verified against the tree rather than inherited from
-M2's design doc. Two of them say the enforcement M2's document describes is not there:
-
-- **The gate does not run in CI.** `just m2-gate` appears in no workflow and is not a member of
-  the `ci` recipe (`justfile:546`); it is reachable only by hand, alongside `just m2-report`.
-  M2's design doc describes a per-PR gate, and that wiring is not present. Entry 17 owns
-  deciding whether to wire it or to state plainly that the measurement is milestone-end only —
-  a gate nobody runs measures nothing, and claiming otherwise in this document would be the
-  same defect one layer up.
-- **Nothing detects a missing `CAPTURE_COVERAGE` row.** The drift guard
-  (`test_capture_coverage_matches_the_real_advertised_provider_sets`, in
-  `tests/scripts/test_m2_portability_gate.py`) imports the real builders and asserts two
-  **hardcoded** keys — `CAPTURE_COVERAGE["remote-libvirt"]` and `["local-libvirt"]` — against
-  `build_remote_runtime` and `build_local_runtime`. Nothing enumerates the resolver's registered
-  kinds, in either direction. So entry 2 can register `byo-host` with no coverage row and
-  `just test` stays green; the omission surfaces only as `just m2-report` quietly leaving out
-  the provider this milestone exists to add. **Entry 17 owns closing that**: an assertion that
-  iterates the resolver's registered kinds and requires a `CAPTURE_COVERAGE` entry for each,
-  which is what makes epic exit criterion 8 checkable and what turns the entry-17-after-entry-2
-  ordering from a convention into an enforced one. Until it lands, the ordering is a convention
-  with no automated signal, and `"byo-host": frozenset({"kdump", "fadump"})` is a row a human
-  has to remember.
-- **`BASELINE_TAG = "pre-M2"`** would measure BYO's diff against a tag two milestones
-  old, folding every intervening core change into this milestone's total. Entry 17 owns a
-  `pre-M4` baseline alongside it.
+**Every existing cordon write site records no reason**, which is why ADR-0541's step 0 has to
+read the flag before setting it rather than trusting a reason key to tell an operator's cordon
+from its own. The six sites are `inventory/reconcile/prune.py:52` and `:85`,
+`reconciler/cleanup/runtime_resources.py:148`,
+`mcp/tools/ops/resources/deregister.py:283` and `:347`, and
+`mcp/tools/ops/resources/host_ops.py:145`.
 
 ## Decomposition into single-PR issues
 
@@ -458,10 +395,10 @@ teardown cordon reason is written by entry 16 and cleared through `resources.set
 | 11 | **#1826 — the console plane over the leased OOB channel.** Collect, rotate, snapshot; reuses `providers/console_parts/`. | 4, 8 | console |
 | 12 | **#1827 — control: SysRq force-crash and OOB power.** Sets `supports_diagnostic_sysrq` and `supports_crash_watch`, and **brackets both control handlers in a reading-lease scope** (ADR-0539/0542). Entry 14 then adds the conflict propagation to the same two files, so entry 12 lands first rather than beside it. | 11 | control |
 | 13 | **#1829 — crash capture and retrieve.** kdump on both arches, fadump on POWER; owns replacing the QEMU-version-floor fadump probe (open question 5). | 10, 12 | capture |
-| 14 | **#1828 — the KGDB transport.** The third `DebugTransportKind`, the debug-session registrar arm, the console-to-loopback bridge, and the **`transport_conflict` propagation** in the two control handlers entry 12 bracketed. Entry 17 owns every `ALLOWED_FILES` edit, including the entries this work needs. | 11, 12 | debug |
+| 14 | **#1828 — the KGDB transport.** The third `DebugTransportKind`, the debug-session registrar arm, the console-to-loopback bridge, and the **`transport_conflict` propagation** in the two control handlers entry 12 bracketed. No allowlist edit is owed — ADR-0543 retired the gate. | 11, 12 | debug |
 | 15 | **#1831 — in-target drgn and vmcore postmortem.** | 13 | debug |
 | 16 | **#1830 — teardown: baseline restore, OOB power-cycle, cordon-and-clear, reconciler drift arm.** The drift arm keys on a Resource cordoned with a restore-in-progress reason and no live worker, **not** on a System state: `torn_down` is terminal (`domain/capacity/state.py:249`) and there is no teardown-in-progress member (ADR-0541). Shares the dead-worker shape and the `reconciler/loop.py` entry with the lease reclaim entry 4 lands. | 12 | lifecycle |
-| 17 | **#1820 — extend the portability gate.** The `pre-M4` baseline tag, the `byo-host` `CAPTURE_COVERAGE` row, the **registered-kinds completeness assertion** that makes a missing row detectable at all, the nine new allowlist entries, **re-pointing the 14 stale `ALLOWED_FILES` paths** plus a guard failing the gate on a member absent from disk, and the CI-wiring decision above. | 2 | tooling |
+| 17 | **#1820 — the `byo-host` capture-coverage row.** The row itself plus the **registered-kinds completeness assertion** that makes a missing row detectable at all. ADR-0543 retired the portability gate, so the baseline tag, the allowlist entries and the CI-wiring decision this entry used to carry are all gone; re-scope the issue accordingly. | 2 | tooling |
 | 18 | **#1832 — operator runbook and agent-facing documentation.** | 13, 16 | docs |
 | 19 | **#1833 — live proof: the full spine on an x86 host with a BMC.** | 14, 15, 16 | proof |
 | 20 | **#1834 — live proof: the full spine on a PowerVM LPAR via HMC**, including fadump. | 6, 14, 15, 16 | proof |
