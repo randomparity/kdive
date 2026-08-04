@@ -103,6 +103,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve compose worker termination evidence
 - Preserve kubernetes worker termination evidence
 - Recover worker artifact fences safely
+- Add the MCP protocol-version drift guard
+- Gate PRs on MCP protocol drift and state the revision in agent-index
+- Add the weekly MCP spec drift workflow
 
 ### Changed
 
@@ -411,6 +414,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clarify kubernetes witness limit contract
 - Correct kubernetes witness continuation wording
 - Record worker-fence authority boundaries
+- Record MCP protocol-version drift design (#1809)
+- Bind the drift gate to the supported range and to ci.yml
+- Make the upstream drift arm fail closed and dedup on any state
+- Pin the dedup comparison and the doc-resource re-mirror
+- Add the MCP drift-check implementation plan (#1809)
+- Align the design record with the shipped two-job workflow
 
 ### Fixed
 
@@ -724,6 +733,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound TLS admission before handshake
 - Prevent database authority aliases
 - Supervise lifecycle authority tasks
+- Stop the drift cron failing weekly and filing empty reports
+- Dedup the drift issue on the revision, and correct the rationale
+- Stop the first drift run duplicating the open issue #1485
 
 ### Build
 
