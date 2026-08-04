@@ -180,6 +180,12 @@ before any BYO code exists, to separate one field from five.
 offers four concurrent Systems, not four times some multiplier. That is what the hardware
 actually offers, and admission's existing per-resource cap expresses it with no new mechanism.
 
+Adopt's established facts need a home the System row does not have today: `systems` carries the
+submitted `provisioning_profile` and typed columns, and no free-form bag. The milestone's single
+migration adds one (`systems.byo_adopt_facts jsonb`), claimed with the rest of the schema rather
+than in a second migration — the reasoning is in the milestone design document, and it is the
+same strictly-ascending-numbers argument that keeps this epic to one schema-touching entry.
+
 Recording adopt's established facts on the System row means a later operation can tell what
 was true at adopt without re-probing — which is what lets teardown compare the host it is
 returning against the host it received, and lets the reconciler tell a mid-teardown host from

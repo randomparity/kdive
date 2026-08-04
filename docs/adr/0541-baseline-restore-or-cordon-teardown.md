@@ -124,6 +124,18 @@ holding host facts. The tension is real and the alternative was worse — an aud
 reason is one an operator will not read before clearing the cordon. The clearing obligation is
 explicit: uncordoning removes the key, so a stale reason cannot linger on a schedulable host.
 
+**The cordon is not the provider's write, and cannot be.** `Teardown.teardown(domain_name)`
+(`src/kdive/providers/ports/lifecycle.py:130-138`) takes a domain name, receives no database
+connection, and documents only `INFRASTRUCTURE_FAILURE` / `TRANSPORT_FAILURE`. Cordoning a
+Resource, persisting the reason, and raising `RESTORE_INCOMPLETE` therefore happen in the
+caller, `teardown_handler` (`src/kdive/jobs/handlers/systems.py:751`; the provider call is at
+`:783`) — which is inside the portability gate's core prefixes and is not among that package's
+allowlisted files. This decision consequently costs the milestone a declared core touch-point
+rather than being pure provider work, and it is recorded in the milestone design doc's gate
+table for that reason. Widening the port to take a connection would spread the same coupling to
+every provider that has no use for it; keeping the write in the one handler that already owns
+the transaction is the smaller change, at the price of a named, reviewed allowlist entry.
+
 Reusing `RESTORE_INCOMPLETE` means one category now covers two subjects — a snapshot revert and
 a host restore. Both are "a restore did not finish, the state is indeterminate, a retry is not
 the answer", which is what the category names. Its ADR-0513 prose describes the snapshot case

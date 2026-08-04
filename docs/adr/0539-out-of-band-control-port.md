@@ -85,8 +85,14 @@ consequences of that choice for KGDB specifically are
 property of the channel, not of the debugger.
 
 **A lease is persisted, expiring, and reclaimable — its holder can die.** Lease state lives in
-Postgres keyed on the System, not in worker-local memory, because the process that holds it is
-exactly the process that can vanish. Every lease carries an expiry with the five-part contract
+Postgres, not in worker-local memory, because the process that holds it is exactly the process
+that can vanish. It is a dedicated table keyed on the **Resource** — the serial channel belongs
+to the physical host, and log collection is an ordinary holder, so neither a System key nor
+`debug_sessions` (keyed on a run) can represent every holder. A unique constraint on the
+resource makes acquisition an insert that either wins or conflicts, rather than a
+read-modify-write two acquirers can race; this repository has built three lease tables for that
+reason already. The table is claimed in the milestone's single migration, ahead of the entry
+that first writes it. Every lease carries an expiry with the five-part contract
 (unit, reference clock, scope, consequence, recovery), and a refusal names the holder, the
 expiry, and the release action. A lease whose holding worker is no longer live is reclaimed by
 the reconciler ([ADR-0021](0021-reconciler-loop-drift-repair.md)) rather than waiting for a
@@ -180,6 +186,11 @@ a refusal names its cause and its remedy, and interleaved bytes name neither.
   unrecoverable: a dead worker's lease is unreadable by anyone, so nothing can even report who
   holds the channel, let alone reclaim it. The state has to outlive the holder to be reclaimable
   at all.
+- **Store the lease as a namespaced `resources.capabilities` key**, as the teardown cordon
+  reason is. It would need no table and no schema budget. A jsonb key carries no unique
+  constraint, so acquiring becomes a read-modify-write that two workers can interleave and both
+  believe they hold — on the one resource whose whole purpose is to have a single holder. The
+  cordon reason tolerates that shape because it has one writer and no contention.
 - **Rely on expiry alone, with no reconciler reclaim.** A lease that expires does eventually
   free the channel, and until it does every consumer is refused with a remedy nobody can
   perform. ADR-0086 reached the same conclusion for the gdbstub and added the reconciler arm;

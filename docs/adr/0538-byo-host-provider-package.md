@@ -103,7 +103,9 @@ alongside a registered, buildable `ProviderRuntime` — fail-closed stub ports a
 satisfy the parity test, and #1817 is cut that way deliberately.
 
 **The declared architecture reaches `Resource.capabilities`, in libvirt's shape, with explicit
-sentinels.** Discovery publishes one `guest_arches` entry for the declared architecture:
+sentinels.** `reconcile_resources` writes one `guest_arches` entry from the declaration, beside
+the `vcpus` / `memory_mb` / `concurrent_allocation_cap` keys it already derives there
+(`src/kdive/inventory/reconcile/resources.py:268`):
 `{<arch>: {"accel": "none", "emulator": "none"}}`. Both values are sentinels naming the absence
 of a hypervisor, not descriptions of one, and nothing in BYO reads either. The shape is
 libvirt's because the readers are shared: `ResourceCapabilities.guest_arches()`
@@ -132,6 +134,26 @@ window — which is the correct window for firmware POST on real metal rather th
 the runtime composes only when an operator supplies `[[byo_host]]` configuration — the same
 opt-in shape remote-libvirt uses. A deployment that declares no BYO host has no bookable BYO
 resource.
+
+`creates=False` is not a reduced write, it is no write: the registrar returns before resolving
+a target (`src/kdive/providers/assembly/composition.py:69-70`), and remote-libvirt's target
+factory raises on the theory it is unreachable
+(`src/kdive/providers/remote_libvirt/composition.py:241-246`). That is why the `guest_arches`
+entry above is reconcile's write and not discovery's, and why it lands with the inventory
+schema rather than with adopt — an entry written at adopt would arrive after `systems.create`
+has already run the check it exists to close.
+
+**A malformed declaration degrades to no provider, and says so at the op boundary.** The
+composition opt-in gate treats a present-but-unparseable `systems.toml` as *not configured*
+rather than raising, so one bad operator edit cannot take down the MCP server or the unrelated
+providers — ADR-0112's fault-isolation contract, stated for remote-libvirt at
+`src/kdive/providers/remote_libvirt/config.py:131-143`. BYO inherits that behavior and the
+obligation that comes with it: the precise parse error must resurface fail-closed when an op
+resolves the host's configuration, and the `doctor` contribution carries an explicit arm for a
+present-but-unparseable declaration. Without both, an operator who mis-edits a `[[byo_host]]`
+block on a live deployment sees only "no such resource" at allocation, naming neither the file
+nor the defect — and the deploy-time `reconcile-systems --check` arm only helps someone who
+runs it.
 
 **This rides the existing dispatch seam.** `byo_host` satisfies the same typed
 `ProviderRuntime` ports ([ADR-0063](0063-typed-provider-runtime.md)) and registers behind the

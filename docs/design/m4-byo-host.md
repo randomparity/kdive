@@ -75,7 +75,7 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
 | 2 | What `boot_method` does an adopted host declare? | A third value, `adopted-host`, and the pairing validator generalizes from a biconditional to an explicit provider-to-boot-method map. | ADR-0540 |
 | 3 | Console multiplexing between KGDB and log capture | KGDB takes the console lease exclusively. Collection suspends and the read seam reports not-pumped; `supports_crash_watch` stays `True` and the tools refuse with `transport_conflict` naming the holder. | ADR-0539, ADR-0542 |
 | 4 | Does `arch_traits()` split? | No. Four of its six fields are libvirt domain-render facts; of the two that generalize, `console_device` is a per-host firmware setting on metal. One arch-keyed field does not justify a second table. The module docstring is amended to mark field scope. | ADR-0540 |
-| 5 | fadump detection on real firmware | Open. Owned by entry 13 (#1829), which replaces the QEMU version floor at `src/kdive/providers/shared/fadump_detect.py:17`. Not architecture — a probe choice made against real hardware. |  |
+| 5 | fadump detection on real firmware | Open. Owned by entry 13 (#1829), which replaces the QEMU version floor at `src/kdive/providers/shared/fadump_detect.py:18`. Not architecture — a probe choice made against real hardware. |  |
 | 6 | Cost-class coefficient value | Open. An operator pricing input to entry 2 (#1817). The migration must seed *a* row; which number is not a design decision. |  |
 | 7 | Concurrency ceiling | Settled as `concurrent_allocation_cap = 1`: a force-crash takes the whole machine, so no partitioning case survives the provider's central operation. | ADR-0540 |
 
@@ -86,8 +86,8 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
   control, retrieve, debug, and teardown modules over the same typed `ProviderRuntime` ports.
   The x86/POWER split is visible in exactly two places: behind the OOB driver port, and in one
   arch-keyed bootloader module. A new `ResourceKind.BYO_HOST = "byo-host"` and one migration
-  (CHECK widen **plus** cost-class seed) register the fourth kind behind the per-kind
-  `ProviderResolver`.
+  (CHECK widen, cost-class seed, the console-lease table, and the adopt-facts column) register
+  the fourth kind behind the per-kind `ProviderResolver`.
 - **An out-of-band control plane as a first-class provider capability.** A typed driver port
   under `providers/byo_host/oob/` with three implementations — Redfish (x86, primary), IPMI
   (x86, legacy labs), HMC (PowerVM LPAR). A driver is constructed from one host's declaration
@@ -151,22 +151,47 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
 ## Postgres schema (M4 delta)
 
 - **One migration**, `0112_resources_kind_byo_host.sql` (next free after
-  `src/kdive/db/schema/0111_restrict_pinned_job_deletion.sql`; ADR-0517 makes migration numbers
-  strictly ascending across merges, so it lands early and alone). It widens
-  `resources_kind_check` to admit `'byo-host'` **and** seeds a cost-class coefficient row in
-  the same file. Forward-only.
-- The seed is not optional. Admission resolves the coefficient fail-closed, so a cost class
-  with no row denies every allocation with a message about cost classes rather than about the
-  host. `src/kdive/db/schema/0032_remote_cost_class_coefficient.sql` is the record of that
-  defect shipping once already.
-- **No new columns or tables.** A BYO host's SSH target, OOB endpoint and driver kind,
-  credential refs, declared architecture, `baseline_kernel`, console device, and
-  `concurrent_allocation_cap` are keys in the existing `resources.capabilities` jsonb, as
-  remote-libvirt's connection config is. The teardown cordon reason is a further namespaced key
-  there; reconcile merges rather than replaces
-  (`src/kdive/inventory/reconcile/resources.py:292`, `:493`), so it survives a pass.
+  `src/kdive/db/schema/0111_restrict_pinned_job_deletion.sql`), owned by entry 2. Forward-only.
+  It carries **four** things:
+  1. the `resources_kind_check` widen admitting `'byo-host'`;
+  2. a seeded cost-class coefficient row;
+  3. `byo_console_leases` — a Resource-keyed table for the ADR-0539 console lease (holder,
+     expiry, acquired-at), with a unique constraint on the resource so acquisition is an insert
+     that either wins or conflicts; and
+  4. `systems.byo_adopt_facts jsonb` — where adopt records what it established (ADR-0540), and
+     what ADR-0541's teardown compares the returned host against.
+- **Items 3 and 4 land several waves before anything writes them**, and that is the deliberate
+  trade. ADR-0517 makes migration numbers strictly ascending across merges, so a second
+  schema-touching entry — entry 4 for the lease, entry 8 for the facts — would make every
+  rebase between them a renumber, which is precisely the cost the "one migration, claimed up
+  front" rule exists to avoid. Unused schema for two waves is cheaper than two serialization
+  points in the merge order.
+- The lease needs a table rather than a jsonb key because it is contended. Every persisted
+  lease in this repository got one for the same reason — `build_host_leases` (0027),
+  `object_write_leases` (0084), `rootfs_fetch_leases` (0087) — and a `capabilities` key has no
+  unique constraint, so two acquirers would race on a read-modify-write. It is keyed on the
+  **Resource**, not the System: the serial channel belongs to the physical host, and log
+  collection is an ordinary holder (ADR-0539), so a System-keyed or `debug_sessions`-keyed
+  lease could not represent every holder.
+- The cost-class seed is not optional. Admission resolves the coefficient fail-closed, so a
+  cost class with no row denies every allocation with a message about cost classes rather than
+  about the host. `src/kdive/db/schema/0032_remote_cost_class_coefficient.sql` is the record of
+  that defect shipping once already.
+- **The `resources.capabilities` jsonb carries the host facts**, as remote-libvirt's connection
+  config does. Written by the reconcile arm from the declaration
+  (`src/kdive/inventory/reconcile/resources.py:268`): SSH target, OOB endpoint and driver kind,
+  credential refs, `baseline_kernel`, console device, `concurrent_allocation_cap`, the
+  `guest_arches` sentinel entry (ADR-0538), and **`pseries_fadump`** on a ppc64le host. The last
+  is not optional and is easy to miss: fadump admission is per-Resource and fail-closed
+  (`src/kdive/services/systems/admission.py:277`, `services/systems/validation.py:75`), so a
+  host that does not publish the key is denied fadump at `systems.create` — and entry 20's
+  POWER proof includes fadump. `CAPTURE_COVERAGE` is provider-level and cannot carry the
+  per-arch split by itself. Entry 2 owns the declaration field; entry 13 owns where the value
+  comes from (open question 5).
+- The teardown cordon reason is a further namespaced key there; reconcile merges rather than
+  replaces (`:292`, `:493`), so a key written by another writer survives a pass.
 - The migration merges **only** alongside a registered, buildable runtime.
-  `tests/db/test_resource_kind_parity.py:25` asserts the CHECK set by exact equality and `:33`
+  `tests/db/test_resource_kind_parity.py:30` asserts the CHECK set by exact equality and `:44`
   asserts every admitted kind resolves to a buildable runtime, so a CHECK widen without a
   registered runtime fails CI. Fail-closed stub ports satisfy it, which is why entry 2 is cut
   that way.
@@ -291,13 +316,24 @@ gate never inspects. `CORE_PREFIXES` (`scripts/m2_portability_gate.py:44-53`) is
 
 **Gated** — the allowlist entries this milestone owes:
 
-| path | why | already allowlisted? |
-|---|---|---|
-| `src/kdive/domain/catalog/resources.py` | `ResourceKind.BYO_HOST` | yes (ADR-0076 touch-point) |
-| `src/kdive/db/schema/0112_resources_kind_byo_host.sql` | the one migration | **no — new entry** |
-| `src/kdive/domain/platform/arch_traits.py` | the docstring amendment marking field scope (ADR-0540) | **no — new entry** |
-| `src/kdive/mcp/tools/debug/sessions.py` | the `kgdb` transport arm on the debug-session registrar | yes (entered for ADR-0085; BYO reuses it) |
-| `src/kdive/reconciler/loop.py` | the BYO mid-teardown drift arm | yes (entered for ADR-0086; BYO reuses it) |
+| path | why | owning entry | already allowlisted? |
+|---|---|---|---|
+| `src/kdive/domain/catalog/resources.py` | `ResourceKind.BYO_HOST` | 2 | yes (ADR-0076 touch-point) |
+| `src/kdive/db/schema/0112_resources_kind_byo_host.sql` | the one migration | 2 | **no — new entry** |
+| `src/kdive/domain/platform/arch_traits.py` | the docstring amendment marking field scope (ADR-0540) | 8 | **no — new entry** |
+| `src/kdive/jobs/handlers/systems.py` | cordon-on-teardown-failure with a reason (ADR-0541) — the provider port cannot do it: `Teardown.teardown(domain_name)` (`providers/ports/lifecycle.py:130-138`) takes a domain name, gets no connection, and documents only `INFRASTRUCTURE_FAILURE` / `TRANSPORT_FAILURE`. The caller is `teardown_handler` (`:751`, provider call at `:783`). | 16 | **no — new entry** |
+| `src/kdive/mcp/tools/debug/sessions.py` | the `kgdb` transport arm on the debug-session registrar | 14 | yes (entered for ADR-0085; BYO reuses it) |
+| `src/kdive/reconciler/loop.py` | the BYO mid-teardown drift arm and the stranded-console-lease reclaim | 16 | yes (entered for ADR-0086; BYO reuses it) |
+| `src/kdive/mcp/tools/ops/resources.py` | surfacing the cordon reason and clearing it on uncordon (ADR-0541) | 16 | yes (`m2_portability_gate.py:95`) |
+
+`jobs/handlers/systems.py` is the entry a reader is most likely to miss, and it is the one that
+matters: `src/kdive/jobs/` is a core prefix whose allowlisted members are only `worker.py`,
+`worker_telemetry.py`, `queue.py`, `payloads.py`, and `handlers/image_build.py`. Nothing in the
+tree cordons on teardown failure today — the two existing cordon writers are
+`inventory/reconcile/prune.py:52` (not a core prefix) and
+`reconciler/cleanup/runtime_resources.py:148` (gated, and not allowlisted; only
+`reconciler/loop.py` is). ADR-0541's restore-or-cordon rule therefore requires a **third** new
+allowlist entry, not two.
 
 Three further facts about the gate, each verified against the tree rather than inherited from
 M2's design doc. Two of them say the enforcement M2's document describes is not there:
@@ -332,14 +368,14 @@ and 20 are the operator-run proofs on real hardware.
 | # | Issue | Depends on | Area |
 |---|---|---|---|
 | 1 | **The ADR set + this document.** Five ADRs and the milestone contract; open questions 1–4 resolved. | — | design |
-| 2 | **#1817 — `ResourceKind.BYO_HOST`, migration, inventory schema, package skeleton.** `ByoHostInstance` + `InventoryDoc` field + the host-coordinate uniqueness check (ADR-0540) + reconcile arm, `systems.toml.example`, and `providers/byo_host/` with a buildable runtime whose ports are fail-closed stubs. Inseparable: the CHECK widen and the registered runtime must land together. Also renames `test_check_admits_all_three_kinds` (`tests/db/test_resource_kind_parity.py:25`), whose exact-equality assertion at `:30` names three kinds. | 1 | providers + db |
+| 2 | **#1817 — `ResourceKind.BYO_HOST`, migration, inventory schema, package skeleton.** `ByoHostInstance` + `InventoryDoc` field + the host-coordinate uniqueness check (ADR-0540) + the reconcile arm, which is the sole writer of BYO's `capabilities` keys **including `guest_arches` and `pseries_fadump`**; `systems.toml.example`; and `providers/byo_host/` with a buildable runtime whose ports are fail-closed stubs. Inseparable: the CHECK widen and the registered runtime must land together. Test work is larger than a rename: `build_provider_resolver` gains an `enable_byo_host` parameter and both resolver-constructing parity tests (`tests/db/test_resource_kind_parity.py:40`, `:55`) pass it, or `assert allowed <= buildable` (`:44`) fails the moment the CHECK admits the kind; `test_check_admits_all_three_kinds` (`:25`, asserting at `:30`) is renamed and widened, and `test_every_registered_kind_is_check_allowed` (`:49`) is the third test in the set. | 1 | providers + db |
 | 3 | **#1819 — provisioning profile section and policy.** `ByoHostProfile`, `ProviderSection.byo_host_section`, `ByoHostProfilePolicy`, and the `adopted-host` boot method with the generalized pairing map. | 2 | provisioning |
 | 4 | **#1818 — the OOB control port seam and the Redfish driver.** The typed protocol under `providers/byo_host/oob/`, the console lease, and Redfish. | 1 | providers + security |
 | 5 | **#1821 — the IPMI driver.** Additive behind the entry-4 seam. | 4 | providers |
 | 6 | **#1822 — the HMC driver for PowerVM LPARs.** Power, partition identity, vterm. Sequenced early: it is the driver most likely to force a port revision. | 4 | providers |
 | 7 | **#1816 — survey the OOB surface beyond power and console.** Read-only spike; produces findings and follow-on issues, not code. | — | providers |
-| 8 | **#1823 — adopt: the Provisioner, the precondition module, and runtime binding.** Also sets `platform_root_cmdline=None` and `binding`, and advertises the declared arch. | 3, 4 | provisioning |
-| 9 | **#1824 — the `doctor` diagnostics contribution.** Second caller of the entry-8 precondition module. | 8 | diagnostics |
+| 8 | **#1823 — adopt: the Provisioner, the precondition module, and runtime binding.** Also sets `platform_root_cmdline=None` and `binding`. The declared arch is **not** advertised here — reconcile owns that write (entry 2), because an entry written at adopt arrives after the `systems.create` check it exists to close. | 3, 4 | provisioning |
+| 9 | **#1824 — the `doctor` diagnostics contribution.** Second caller of the entry-8 precondition module, plus an arm reporting a present-but-unparseable `[[byo_host]]` declaration (ADR-0538) — the case the runtime degrades on silently. | 8 | diagnostics |
 | 10 | **#1825 — install and boot/readiness.** In-target presigned-GET pull, arch-keyed bootloader write, `kgdboc` on the cmdline, boot-id readiness. | 8 | build-install |
 | 11 | **#1826 — the console plane over the leased OOB channel.** Collect, rotate, snapshot; reuses `providers/console_parts/`. | 4, 8 | console |
 | 12 | **#1827 — control: SysRq force-crash and OOB power.** Sets `supports_diagnostic_sysrq` and `supports_crash_watch`. | 11 | control |
@@ -347,7 +383,7 @@ and 20 are the operator-run proofs on real hardware.
 | 14 | **#1828 — the KGDB transport.** The third `DebugTransportKind`, the debug-session registrar arm, the allowlist entry, and the console-to-loopback bridge. | 11 | debug |
 | 15 | **#1831 — in-target drgn and vmcore postmortem.** | 13 | debug |
 | 16 | **#1830 — teardown: baseline restore, OOB power-cycle, cordon, reconciler drift arm.** Also owns the **stranded-console-lease reclaim** (ADR-0539), which shares the dead-worker shape and the same `reconciler/loop.py` allowlist entry as the mid-teardown arm. | 12 | lifecycle |
-| 17 | **#1820 — extend the portability gate.** The `pre-M4` baseline tag, the `byo-host` `CAPTURE_COVERAGE` row, the **registered-kinds completeness assertion** that makes a missing row detectable at all, the two new allowlist entries, and the CI-wiring decision above. | 2 | tooling |
+| 17 | **#1820 — extend the portability gate.** The `pre-M4` baseline tag, the `byo-host` `CAPTURE_COVERAGE` row, the **registered-kinds completeness assertion** that makes a missing row detectable at all, the three new allowlist entries, and the CI-wiring decision above. | 2 | tooling |
 | 18 | **#1832 — operator runbook and agent-facing documentation.** | 13, 16 | docs |
 | 19 | **#1833 — live proof: the full spine on an x86 host with a BMC.** | 14, 15, 16 | proof |
 | 20 | **#1834 — live proof: the full spine on a PowerVM LPAR via HMC**, including fadump. | 6, 14, 15, 16 | proof |
@@ -364,7 +400,9 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
 - **One migration, claimed up front.** Entry 2 owns `0112_resources_kind_byo_host.sql` — the
   only DDL this milestone — and lands early and alone, because ADR-0517 makes migration numbers
   strictly ascending across merges and a second schema-touching entry would force a
-  renumber-on-rebase.
+  renumber-on-rebase. That is why it also carries the console-lease table and the adopt-facts
+  column, which entries 4 and 8 are the first to write: schema unused for two waves is the
+  price of keeping the epic to one serialization point.
 - **One precondition module, three callers.** Entry 8 writes it, entry 9 (`doctor`) calls it,
   entry 16 (teardown) calls it. Writing the checks twice is how they come to disagree, which is
   why 9 follows 8 rather than preceding it.
@@ -391,8 +429,9 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
 
 1. **The provider seam is unchanged** (ADR-0063) — `byo_host` satisfies the same
    `ProviderRuntime` ports and registers into a resolver that already exists. The portability
-   hypothesis is measured a third time rather than abandoned, and the two genuinely new core
-   touches (the migration, the `arch_traits` docstring) are declared up front rather than
+   hypothesis is measured a third time rather than abandoned, and the three genuinely new core
+   touches (the migration, the `arch_traits` docstring, and `jobs/handlers/systems.py` for
+   cordon-on-teardown-failure) are declared up front rather than
    discovered.
 2. **Secrets never leak** (ADR-0012, ADR-0073) — OOB credentials resolve at the worker
    boundary, register for redaction before first use, and release only after
