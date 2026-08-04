@@ -78,8 +78,8 @@ management — is #1816 and stays outside this port until a specific use justifi
 holds it for a bounded scope, and releases it. While a lease is held, a second acquirer is
 refused with `TRANSPORT_CONFLICT` naming the current holder and the action that releases it.
 Log collection is itself a lease holder rather than a privileged background reader, so
-"the collector is pumping" and "KGDB is attached" are the same kind of fact and the console
-read seam ([ADR-0429](0429-remote-console-read-seam.md)) can report which one is true. The
+"the collector is pumping" and "KGDB is attached" are the same kind of fact, which the live
+console read seam ([ADR-0429](0429-remote-console-read-seam.md)) already has a field for. The
 consequences of that choice for KGDB specifically are
 [ADR-0542](0542-kgdb-over-leased-serial-channel.md); the lease itself is here because it is a
 property of the channel, not of the debugger.
@@ -146,9 +146,16 @@ while a revision is still cheap.
 Making log collection an ordinary lease holder rather than a background reader is a change of
 posture from remote-libvirt, where a reconciler-resident collector streams the console
 continuously. On an adopted host the collector can be preempted, so a console artifact may
-have a gap. That gap is reported rather than papered over — ADR-0429 built the read seam
-precisely so an empty read is never mistaken for "the kernel printed nothing", and a
-lease-shaped gap is the same class of fact.
+have a gap, and the gap is legible on one seam only. A **live** read reports it:
+`ConsoleWindowRead.pumped` (`src/kdive/providers/ports/console.py:64-82`) is what
+[ADR-0429](0429-remote-console-read-seam.md) added so an empty read is never mistaken for "the
+kernel printed nothing", and a suspended collector sets it `False`. The persisted per-Run
+**artifact** cannot: `ConsoleSnapshotter.snapshot` is best-effort by contract and
+`ConsoleSnapshot` carries only an id, a key, and bytes — the port docstring states outright that
+this is "a distinction the boot snapshotter cannot make". So a lease-shaped hole inside an
+assembled artifact reads the same as a quiet kernel, and this decision accepts that rather than
+claiming otherwise. Marking the boundary in the assembled parts would be an additive change to
+the console plane, not a property inherited from ADR-0429.
 
 Refusing to materialize credentials to disk keeps BYO out of ADR-0077's cleanup-on-every-exit
 obligation, which is the part of that design most able to leave a private key behind after a

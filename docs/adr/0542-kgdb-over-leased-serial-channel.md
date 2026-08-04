@@ -78,10 +78,11 @@ makes this possible, and this is the case they were split for.
 **KGDB takes the console lease exclusively, for the session's lifetime.** No splitter. While
 the lease is held:
 
-- Console collection is suspended, and the console read seam reports that the console is not
-  being pumped rather than returning empty bytes
-  ([ADR-0429](0429-remote-console-read-seam.md)) — the property that keeps an empty read from
-  reading as "the kernel printed nothing".
+- Console collection is suspended. A **live** read reports this — `ConsoleWindowRead.pumped`
+  goes `False` ([ADR-0429](0429-remote-console-read-seam.md)), the property that keeps an empty
+  read from being taken for "the kernel printed nothing". The persisted per-Run artifact carries
+  no such marker (ADR-0539), so a session's hole in it is indistinguishable from a silent
+  kernel.
 - `control.watch_for_crash` and `control.diagnostic_sysrq` refuse with `TRANSPORT_CONFLICT`,
   naming the holding debug session and the action that releases it. SysRq needs to *write* to
   the same channel, so the conflict is symmetric rather than a reader-writer special case.
@@ -118,9 +119,11 @@ the alternative — a fourth handle kind — would have widened the decode path,
 round-trip tests, and every consumer that switches on realization.
 
 Suspending console collection for a debug session means a per-Run console artifact can have a
-gap. That is honest and it is reported: the read seam distinguishes "not pumped" from "empty",
-so the gap is legible as a lease rather than as silence. It is also the smaller loss than it
-sounds — while gdb has the machine stopped, the kernel is not printing.
+gap. The live read seam distinguishes "not pumped" from "empty", so the gap is legible as a
+lease rather than as silence **to a live reader** — `pumped` is a
+bare bool, so even there a caller learns "not pumped", not "held by session X", and the artifact
+carries no marker at all. It is a smaller loss than it sounds: while gdb has the machine
+stopped, the kernel is not printing.
 
 A conflict between crash watch and an attached debugger is a refusal an agent will meet during
 ordinary work. It names the holding session, so the remedy is one call away. The alternative

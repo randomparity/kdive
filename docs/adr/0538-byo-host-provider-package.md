@@ -118,9 +118,10 @@ Publishing it closes the fail-open in both readers — `resolve_accel()`
 `resource_supports_arch()` (`src/kdive/services/allocation/admission/affinity.py:45`) — so
 admission rejects an arch-mismatched profile at `systems.create` rather than at install. **No
 core change is needed for this**, which is the point of choosing sentinels over a schema
-relaxation: `resolve_accel_emulator` explicitly does not validate the accel value domain
-(`resource_capabilities.py:68-92`), so any two strings satisfy the readers, and the
-arch-mismatch rejection is what the entry exists to produce.
+relaxation: `resolve_accel_emulator` returns `entry["accel"], entry["emulator"]` unvalidated
+(`resource_capabilities.py:106`) — `guest_arches()`'s own docstring says the accel value domain
+is not validated (`:216-217`) — so any two strings satisfy the readers, and the arch-mismatch
+rejection is what the entry exists to produce.
 
 `resolve_accel` will record `accel="none"` on the System. That is inert here and mildly
 useful: the ADR-0340 renderer that maps a non-`kvm` accel to a TCG domain is a local-libvirt

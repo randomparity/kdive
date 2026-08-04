@@ -46,9 +46,13 @@ The available mechanisms are all already in the tree.
 
 ## Decision
 
-**Teardown restores and verifies, and a host it cannot verify does not return to the
-schedulable pool.** In order:
+**The host is cordoned for the whole restore, and the cordon clears only on verified success.**
+In order:
 
+0. **Cordon the Resource**, with a reason marking a restore in progress. Placement excludes a
+   cordoned Resource on both paths
+   (`src/kdive/services/allocation/admission/placement.py:86` and the `AND NOT cordoned`
+   predicate at `:104`), so from here until step 4 no tenant can be granted this machine.
 1. Re-point the host's bootloader default at the declared `baseline_kernel`, arch-keyed
    (`grubby` on x86, grub2-PReP or petitboot on a PowerVM LPAR).
 2. Power-cycle through the out-of-band driver
@@ -57,30 +61,48 @@ schedulable pool.** In order:
 3. Re-run the adopt preconditions — the same module `provision` and `doctor` call
    (ADR-0540) — against the rebooted host, including that the running kernel is now the
    declared baseline.
+4. **Clear the cordon.** This is the success signal, and it is the only thing that returns the
+   host to the schedulable pool.
 
-Step 3 is the load-bearing one. A power-cycle that returns is not evidence that the host is
-back in the state adopt requires; only the adopt predicate is evidence of that, and running
-the same predicate is what makes "returned" mean the same thing as "adoptable". This is the
-precondition module's third caller, and the reason it is one module.
+Step 3 is the load-bearing verification. A power-cycle that returns is not evidence that the
+host is back in the state adopt requires; only the adopt predicate is evidence of that, and
+running the same predicate is what makes "returned" mean the same thing as "adoptable". This is
+the precondition module's third caller, and the reason it is one module.
 
-**The cordon is the mechanism, not a withheld release.** This decision does not reorder or gate
-anything in the existing teardown path, and an implementer should not go looking for a step to
-gate. `teardown_handler` writes `SystemState.TORN_DOWN` and commits it under the System
-advisory lock **before** it calls the provider
-(`src/kdive/jobs/handlers/systems.py:760-778`, provider call at `:783`), so by the time a BYO
-restore can fail the System is already terminal; and the handler never touches the Resource at
-all — freeing is `src/kdive/services/allocation/release.py` on the allocation path, which
-**needs no change for this**. What keeps an unverified host out of rotation is the cordon
-itself: both placement paths exclude a cordoned Resource
-(`src/kdive/services/allocation/admission/placement.py:86` and the `AND NOT cordoned` predicate
-at `:104`), whether or not the allocation has released.
+**Step 0 is what makes the invariant continuous rather than eventual**, and it is there because
+the allocation is already gone by the time the restore starts. `_release_locked`
+(`src/kdive/services/allocation/release.py:229`) drives `active → releasing → released` in one
+transaction, consulting nothing about the System or its teardown, and `_count_occupying`
+(`src/kdive/services/allocation/admission/core.py:586`) counts only GRANTED/ACTIVE/RELEASING —
+so ADR-0540's `concurrent_allocation_cap = 1` slot frees the moment `allocations.release`
+commits. `teardown_handler` then commits `SystemState.TORN_DOWN` under the System advisory lock
+(`src/kdive/jobs/handlers/systems.py:760-778`) **before** calling the provider at `:783`. Both
+the allocation and the System are therefore terminal, and the Resource pristine to placement,
+for the several minutes the bootloader write, the firmware power-cycle, and the full
+precondition re-check take. Without step 0 the next tenant can be granted the machine inside
+that window — early, they are denied at adopt against the previous tenant's still-running debug
+kernel, which is precisely the misattribution the first rejected alternative below says this
+design avoids; late, they adopt successfully and then meet the previous tenant's power-cycle.
 
-**Any failure cordons the host with a reason.** If the bootloader write fails, if the
-power-cycle does not return, if the host comes back on the wrong kernel, or if any adopt
-precondition fails, the Resource is cordoned and the reason is recorded. The failure surfaces
-as `RESTORE_INCOMPLETE` — an existing category whose meaning is exactly this: a restore that
-did not complete, leaving indeterminate state, needing an operator rather than a retry. No new
-`ErrorCategory` is invented.
+**Nothing else in the release path changes.** `services/allocation/release.py` needs no edit,
+and an implementer should not add one: the cordon is the whole mechanism, and holding an
+allocation in `releasing` until a job completes would make every provider wait on something
+only this one needs.
+
+**A restore that fails keeps the cordon and replaces the reason.** If the bootloader write
+fails, if the power-cycle does not return, if the host comes back on the wrong kernel, or if
+any adopt precondition fails, step 4 does not run and the in-progress reason is replaced with
+the specific defect. The failure surfaces as `RESTORE_INCOMPLETE` — an existing category whose
+meaning is exactly this: a restore that did not complete, leaving indeterminate state, needing
+an operator rather than a retry. No new `ErrorCategory` is invented. A worker that dies
+mid-restore therefore leaves an **already-cordoned** host, which is the fail-closed outcome the
+reconciler arm below would otherwise have to produce.
+
+**Clearing is keyed on the reason, never unconditional.** Step 4 clears the cordon only when the
+recorded reason is this teardown's own. An operator who cordoned the host for maintenance while
+a Run was live must not have that cordon silently lifted by an unrelated release completing —
+the two are indistinguishable on the `cordoned` boolean alone, which is what makes the reason
+key load-bearing rather than decorative.
 
 **The reason is persisted on the Resource, under a namespaced `capabilities` key.** A cordon
 whose cause requires cross-referencing an audit log is a cordon an operator will clear without
@@ -119,8 +141,9 @@ crashed host never silently becomes the next allocation's starting point. Every 
 Run that crashed the machine either ends in a host verified back on its baseline, or in a host
 no scheduler will pick.
 
-A lab will accumulate cordoned hosts. That is the design working — each one is a machine that
-genuinely needs a human, and the alternative is the same machines silently in rotation. The
+A lab will accumulate cordoned hosts — the ones whose reason records a failure rather than a
+restore in progress. That is the design working: each one is a machine that genuinely needs a
+human, and the alternative is the same machines silently in rotation. The
 cost is an operator workflow: read the reason on `resources.describe`, fix the host, uncordon.
 `doctor` (#1824) is the tool that tells them whether the fix took, and it runs the same
 predicate teardown ran.
@@ -157,10 +180,16 @@ the answer", which is what the category names. Its ADR-0513 prose describes the 
 concretely and is amended rather than rewritten when this lands.
 
 Teardown becomes the slowest operation on the provider: a bootloader write, a firmware
-power-cycle, and a full precondition re-check. That is time a tenant is not using the host and
-the next one cannot have it. It is also the only point at which the host's state is checked
-against what the operator declared, so shortening it means shipping a host whose state nobody
-verified.
+power-cycle, and a full precondition re-check. That is time a tenant is not using the host, and
+the step-0 cordon is what makes it also time the next tenant cannot have it — the allocation's
+capacity slot freed minutes earlier. It is also the only point at which the host's state is
+checked against what the operator declared, so shortening it means shipping a host whose state
+nobody verified.
+
+The visible cost is that a BYO host reads `cordoned` during every ordinary release, not only
+after a failure. An operator watching `resources.list` sees hosts move in and out of the state,
+and the reason key is what distinguishes a routine restore from a defect — which is another
+reason it is persisted on the row rather than only in an audit log.
 
 ## Considered & rejected
 

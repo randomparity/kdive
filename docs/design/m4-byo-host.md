@@ -73,7 +73,7 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
 |---|---|---|---|
 | 1 | How is `baseline_kernel` identified? | Operator-declared, verified present at `doctor` **and** at adopt. A captured value records whatever was booted — after a failed teardown, a KDIVE debug kernel — so the host would restore to it indefinitely with no signal. | ADR-0540 |
 | 2 | What `boot_method` does an adopted host declare? | A third value, `adopted-host`, and the pairing validator generalizes from a biconditional to an explicit provider-to-boot-method map. | ADR-0540 |
-| 3 | Console multiplexing between KGDB and log capture | KGDB takes the console lease exclusively. Collection suspends and the read seam reports not-pumped; `supports_crash_watch` stays `True` and the tools refuse with `transport_conflict` naming the holder. | ADR-0539, ADR-0542 |
+| 3 | Console multiplexing between KGDB and log capture | KGDB takes the console lease exclusively. Collection suspends and a live read reports `pumped=False` (the persisted artifact carries no gap marker); `supports_crash_watch` stays `True` and the tools refuse with `transport_conflict` naming the holder. | ADR-0539, ADR-0542 |
 | 4 | Does `arch_traits()` split? | No. Four of its six fields are libvirt domain-render facts; of the two that generalize, `console_device` is a per-host firmware setting on metal. One arch-keyed field does not justify a second table. The module docstring is amended to mark field scope. | ADR-0540 |
 | 5 | fadump detection on real firmware | Open. Owned by entry 13 (#1829), which replaces the QEMU version floor at `src/kdive/providers/shared/fadump_detect.py:18`. Not architecture — a probe choice made against real hardware. |  |
 | 6 | Cost-class coefficient value | Open. An operator pricing input to entry 2 (#1817). The migration must seed *a* row; which number is not a design decision. |  |
@@ -100,8 +100,10 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
   injection, crash watch, KGDB. The channel is leased with a named holder, and a second
   acquirer is refused with `transport_conflict` naming the holder and the release action. Log
   collection is itself an ordinary lease holder rather than a privileged background reader, so
-  a gap in a console artifact is legible as a lease rather than as silence
-  ([ADR-0429](../adr/0429-remote-console-read-seam.md)).
+  a **live** console read reports the suspension through `ConsoleWindowRead.pumped`
+  ([ADR-0429](../adr/0429-remote-console-read-seam.md)). The persisted per-Run artifact carries
+  no such marker, so a lease-shaped hole in it reads as a silent kernel — an accepted
+  consequence, recorded in ADR-0539 rather than papered over.
 - **Adopt-only provisioning.** `provision` validates preconditions against the live machine,
   records what it established on the System row, and returns a stable handle. No OS install, no
   re-image, no boot-order change, no firmware write. `boot_method: adopted-host` is the profile
@@ -119,11 +121,15 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
   console to a worker-local loopback port and returns an ordinary `gdbstub://host:port` handle,
   so `TransportHandleKind` is unchanged and the engine, the handle codec, and every consumer of
   realization are untouched. `kgdboc` is composed into the target cmdline at install time.
-- **Restore-verify-or-cordon teardown.** Re-point the bootloader at the declared
-  `baseline_kernel`, power-cycle out-of-band, re-run the adopt preconditions against the
-  rebooted host, and only then free the Resource. Any failure cordons with a reason persisted
-  on the Resource, surfaced as `restore_incomplete`. The reconciler gains a BYO drift arm that
-  drives a mid-teardown host to cordoned, never to available, and never retries the restore.
+- **Cordon-restore-verify-uncordon teardown.** Cordon the Resource, re-point the bootloader at
+  the declared `baseline_kernel`, power-cycle out-of-band, re-run the adopt preconditions
+  against the rebooted host, and clear the cordon only on success. The cordon comes **first**
+  because the allocation's capacity slot frees synchronously at `allocations.release`
+  (`services/allocation/release.py:229`, `admission/core.py:586`), minutes before the teardown
+  job runs — so without it the next tenant can be granted the machine mid-restore. Any failure
+  leaves the cordon in place with a reason persisted on the Resource, surfaced as
+  `restore_incomplete`; the clear is keyed on that reason so it cannot lift an operator's
+  maintenance cordon. The reconciler gains a BYO drift arm that never retries the restore.
 
 ## Non-goals (scoped out)
 
@@ -254,8 +260,8 @@ and 16 are written against:
 
 Two contract points are load-bearing and tested: **(a)** no OOB credential reaches a persisted
 transcript, a response snippet, or an argv unmasked; **(b)** every console consumer goes
-through the lease, so a suspended collector reports not-pumped rather than empty and two
-consumers never interleave on one line.
+through the lease, so a suspended collector reports `pumped=False` to a live reader rather than
+empty bytes, and two consumers never interleave on one line.
 
 ## MCP tool surface (M4 delta)
 
@@ -350,8 +356,8 @@ measurement too — so it is tracked separately as #1835.
 `worker_telemetry.py`, `queue.py`, `payloads.py`, and `handlers/image_build.py`. Nothing in the
 tree cordons on teardown failure today — the two existing cordon writers are
 `inventory/reconcile/prune.py:52` (not a core prefix) and
-`reconciler/cleanup/runtime_resources.py:148` (gated, and not allowlisted; only
-`reconciler/loop.py` is).
+`reconciler/cleanup/runtime_resources.py:148` (gated, and not allowlisted — the reconciler
+modules that are allowlisted and still exist are `loop.py` and `loop_telemetry.py`).
 
 Three further facts about the gate, each verified against the tree rather than inherited from
 M2's design doc. Two of them say the enforcement M2's document describes is not there:
@@ -386,7 +392,7 @@ and 20 are the operator-run proofs on real hardware.
 | # | Issue | Depends on | Area |
 |---|---|---|---|
 | 1 | **The ADR set + this document.** Five ADRs and the milestone contract; open questions 1–4 resolved. | — | design |
-| 2 | **#1817 — `ResourceKind.BYO_HOST`, migration, inventory schema, package skeleton.** `ByoHostInstance` + `InventoryDoc` field + the host-coordinate uniqueness check (ADR-0540) + the reconcile arm, which is the sole writer of BYO's `capabilities` keys **including `guest_arches` and `pseries_fadump`**; `systems.toml.example`; and `providers/byo_host/` with a buildable runtime whose ports are fail-closed stubs. Inseparable: the CHECK widen and the registered runtime must land together. A second inseparability, alongside the CHECK/runtime one: entry 2 makes `byo-host` composable, and `src/kdive/mcp/tools/lifecycle/systems/profile_examples.py:120` indexes `PROVIDER_SECTIONS[kind]` for every composed kind **unguarded** (its sibling `src/kdive/profiles/provider_sections.py:58` guards the same lookup). So entry 2 adds the `PROVIDER_SECTIONS` row too — a placeholder until entry 3 supplies the real model — or an operator who opts in between the two merges gets a `KeyError` from the profile-examples tool rather than a fail-closed stub refusal. Test work is larger than a rename: `build_provider_resolver` gains an `enable_byo_host` parameter and both resolver-constructing parity tests (`tests/db/test_resource_kind_parity.py:40`, `:55`) pass it, or `assert allowed <= buildable` (`:44`) fails the moment the CHECK admits the kind; `test_check_admits_all_three_kinds` (`:25`, asserting at `:30`) is renamed and widened, and `test_every_registered_kind_is_check_allowed` (`:49`) is the third test in the set. | 1 | providers + db |
+| 2 | **#1817 — `ResourceKind.BYO_HOST`, migration, inventory schema, package skeleton.** `ByoHostInstance` + `InventoryDoc` field + the host-coordinate uniqueness check (ADR-0540) + the reconcile arm, which is the sole writer of BYO's `capabilities` keys **including `guest_arches` and `pseries_fadump`**; `systems.toml.example`; and `providers/byo_host/` with a buildable runtime whose ports are fail-closed stubs. Inseparable: the CHECK widen and the registered runtime must land together. A second inseparability, alongside the CHECK/runtime one: entry 2 makes `byo-host` composable, and `src/kdive/mcp/tools/lifecycle/systems/profile_examples.py:120` indexes `PROVIDER_SECTIONS[kind]` for every composed kind **unguarded** (its sibling `src/kdive/profiles/provider_sections.py:58` guards the same lookup). So entry 2 adds the `PROVIDER_SECTIONS` row too — a placeholder until entry 3 supplies the real model — or an operator who opts in between the two merges gets a `KeyError` from the profile-examples tool rather than a fail-closed stub refusal. Test work is larger than a rename: `build_provider_resolver` gains an `enable_byo_host` parameter and the two resolver-constructing parity tests that enable the opt-ins (`tests/db/test_resource_kind_parity.py:40`, `:55`) pass it; a third, `test_default_production_registry_registers_only_local_libvirt` (`:70`), deliberately builds with the opt-ins off and is what pins BYO's default to unregistered, or `assert allowed <= buildable` (`:44`) fails the moment the CHECK admits the kind; `test_check_admits_all_three_kinds` (`:25`, asserting at `:30`) is renamed and widened, and `test_every_registered_kind_is_check_allowed` (`:49`) is the third test in the set. | 1 | providers + db |
 | 3 | **#1819 — provisioning profile section and policy.** `ByoHostProfile`, `ProviderSection.byo_host_section`, `ByoHostProfilePolicy`, and the `adopted-host` boot method with the generalized pairing map. | 2 | provisioning |
 | 4 | **#1818 — the OOB control port seam and the Redfish driver.** The typed protocol under `providers/byo_host/oob/`, the console lease, and Redfish. Depends on entry 2 as well as entry 1: the lease writes `byo_console_leases`, which entry 2's migration creates, and it lives in the `providers/byo_host/` package entry 2 skeletons. | 1, 2 | providers + security |
 | 5 | **#1821 — the IPMI driver.** Additive behind the entry-4 seam. | 4 | providers |
@@ -461,12 +467,15 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
    in-band access is gone, so a fallback would make an OOB failure invisible until the moment
    it mattered. `doctor` reports OOB reachability before allocation instead.
 4. **One console, one holder** (ADR-0539, ADR-0542) — every consumer goes through the lease. A
-   suspended collector reports not-pumped rather than empty, and a refused acquirer is told who
-   holds the channel and how to get it.
+   suspended collector reports `pumped=False` to a live reader rather than empty bytes, and a
+   refused acquirer is told who holds the channel and how to get it. The per-Run artifact carries
+   no gap marker; ADR-0539 records that as accepted rather than solved.
 5. **A crashed host never silently becomes the next allocation's starting point** (ADR-0541) —
-   every path out of a Run that crashed the machine ends either in a host verified back on its
-   declared baseline, or in a host no scheduler will pick. The reconciler fails closed to
-   cordoned and never retries a restore over unknown state.
+   and the guarantee is continuous, not just true at the endpoints. The host is cordoned from
+   the start of the restore until it has been verified back on its declared baseline, so there
+   is no window in which a machine mid-restore is schedulable, even though its allocation and
+   System both went terminal before the restore began. A worker that dies mid-restore leaves an
+   already-cordoned host; the reconciler never retries a restore over unknown state.
 6. **`byo_host` is opt-in** — the runtime and its discovery registrar compose only when an
    operator declares a `[[byo_host]]` entry, so a deployment without one has no bookable BYO
    resource. Registration is bind-only; `reconcile_resources` is the sole creator.
