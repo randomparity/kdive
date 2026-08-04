@@ -3,12 +3,15 @@
 fadump on POWER pseries needs a host QEMU >= 10.2 (the ``ibm,configure-kernel-dump`` RTAS). This
 contribution adds one worker-vantage check that finds ``qemu-system-ppc64`` on PATH and compares
 its version against the floor — reusing :func:`detect_pseries_fadump` — so it needs no DB handle
-and no libvirt call. It attributes to ``local-libvirt`` (the provider that runs ppc64le guests)
-but depends on no local-libvirt internals, so it lives in the neutral diagnostics package.
+and no libvirt call. The synchronous version detector runs in a worker thread so the shared
+per-check timeout can interrupt the async probe. It attributes to ``local-libvirt`` (the provider
+that runs ppc64le guests) but depends on no local-libvirt internals, so it lives in the neutral
+diagnostics package.
 """
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from collections.abc import Callable
 
@@ -40,7 +43,8 @@ def default_pseries_fadump_probe(
     real qemu. A host with no ``qemu-system-ppc64`` cannot run ppc64le guests, so fadump is
     ``not_applicable`` and no subprocess is spawned; otherwise the emulator's version is compared
     against the floor via the same :func:`detect_pseries_fadump` discovery uses, so doctor and
-    discovery cannot diverge.
+    discovery cannot diverge. The detector is offloaded so the async probe yields while its
+    synchronous version subprocess runs and :func:`run_check` can enforce its deadline.
     """
 
     async def _probe() -> PseriesFadumpOutcome:
@@ -49,9 +53,9 @@ def default_pseries_fadump_probe(
             return PseriesFadumpOutcome.NOT_APPLICABLE
         arches = {"ppc64le": {"accel": "tcg", "emulator": emulator}}
         supported = (
-            detect_pseries_fadump(arches)
+            await asyncio.to_thread(detect_pseries_fadump, arches)
             if run_version is None
-            else detect_pseries_fadump(arches, run_version=run_version)
+            else await asyncio.to_thread(detect_pseries_fadump, arches, run_version=run_version)
         )
         return PseriesFadumpOutcome.SUPPORTED if supported else PseriesFadumpOutcome.UNSUPPORTED
 
