@@ -21,7 +21,8 @@ from kdive.artifacts.storage import StoredArtifact
 from kdive.db.repositories import ARTIFACTS
 from kdive.providers.ports.console import ConsoleSnapshot
 from kdive.providers.remote_libvirt.console.wiring import RemoteConsolePartStore
-from kdive.store.objectstore import object_store_from_env
+from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
+from kdive.store.objectstore import ObjectStore
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
@@ -39,6 +40,9 @@ _REFRESH_ETAG_SQL = "UPDATE artifacts SET etag = %s WHERE id = %s"
 class RemoteLibvirtConsoleSnapshotter:
     """Assemble the System's S3 console parts into an immutable per-Run console artifact."""
 
+    def __init__(self, store: ObjectStore = UNCONFIGURED_OBJECT_STORE) -> None:
+        self._store = store
+
     async def mark_boot_window(self, system_id: UUID) -> int:
         """Return the next part index for ``system_id`` — this boot's window starts here.
 
@@ -47,8 +51,7 @@ class RemoteLibvirtConsoleSnapshotter:
         """
 
         def _next_index() -> int:
-            store = object_store_from_env()
-            parts = RemoteConsolePartStore(store, "")
+            parts = RemoteConsolePartStore(self._store, "")
             existing = parts.list_part_indices(system_id)
             return (max(existing) + 1) if existing else 0
 
@@ -63,10 +66,9 @@ class RemoteLibvirtConsoleSnapshotter:
         worker thread; the row is upserted on ``conn`` so it commits with the boot step. Store and
         database failures propagate to the boot handler's best-effort boundary.
         """
-        store = object_store_from_env()
         # The conninfo is unused on this path: this snapshotter writes the per-Run `artifacts` row
         # on the boot handler's `conn` (below), never via the part store's own teardown row path.
-        parts = RemoteConsolePartStore(store, "")
+        parts = RemoteConsolePartStore(self._store, "")
         data = await asyncio.to_thread(parts.assemble, system_id, start_index)
         if not data:
             return None

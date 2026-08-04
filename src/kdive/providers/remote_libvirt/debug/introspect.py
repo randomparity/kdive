@@ -43,6 +43,8 @@ from kdive.providers.shared.debug_common.introspect import (
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
+from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
+from kdive.store.objectstore import ObjectStore
 
 _REPORT_BYTE_CAP = 1 << 20
 
@@ -91,7 +93,9 @@ class RemoteLibvirtVmcoreIntrospect:
         self._run_helper = run_helper
 
     @classmethod
-    def from_env(cls, *, secret_registry: SecretRegistry) -> RemoteLibvirtVmcoreIntrospect:
+    def from_env(
+        cls, *, secret_registry: SecretRegistry, store: ObjectStore = UNCONFIGURED_OBJECT_STORE
+    ) -> RemoteLibvirtVmcoreIntrospect:
         """Build from env with the real drgn seams (lazy: drgn imports on first use).
 
         drgn stays an operator-provided live-host prerequisite — the seams import it
@@ -99,8 +103,10 @@ class RemoteLibvirtVmcoreIntrospect:
         raises the documented ``MISSING_DEPENDENCY`` there instead of an import error.
         """
         return cls(
-            fetch_object=_real_fetch_object,
-            fetch_versioned_object=_real_fetch_versioned_object,
+            fetch_object=lambda ref: store.get_artifact(ref, None).data,
+            fetch_versioned_object=lambda ref, version_id: (
+                store.get_artifact(ref, None, version_id=version_id).data
+            ),
             read_vmcore_build_id=read_vmcoreinfo_build_id,
             secret_registry=secret_registry,
             open_program=open_vmcore_program,

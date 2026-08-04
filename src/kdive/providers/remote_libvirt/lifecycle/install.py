@@ -179,10 +179,15 @@ class RemoteLibvirtInstall:
         cls,
         *,
         secret_registry: SecretRegistry,
+        store: _StorePort,
         config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
     ) -> RemoteLibvirtInstall:
         """Build from the shared worker env; opens no connection and mints no URL here."""
-        return cls(secret_registry=secret_registry, config_factory=config_factory)
+        return cls(
+            secret_registry=secret_registry,
+            store_factory=lambda: store,
+            config_factory=config_factory,
+        )
 
     def install(self, request: InstallRequest) -> None:
         """Pull the built bundle in-guest, install it, and write the boot entry.

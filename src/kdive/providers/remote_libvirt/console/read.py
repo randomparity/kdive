@@ -28,7 +28,8 @@ from kdive.providers.ports.console import ConsoleWindowRead
 from kdive.providers.remote_libvirt.console.wiring import RemoteConsolePartStore
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import object_store_from_env
+from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
+from kdive.store.objectstore import ObjectStore
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
@@ -105,11 +106,13 @@ class RemoteLibvirtConsoleReader:
         return redactor.redact_text(data.decode("utf-8", "replace")).encode("utf-8")
 
 
-def build_remote_console_reader(*, secret_registry: SecretRegistry) -> RemoteLibvirtConsoleReader:
+def build_remote_console_reader(
+    *, secret_registry: SecretRegistry, store: ObjectStore = UNCONFIGURED_OBJECT_STORE
+) -> RemoteLibvirtConsoleReader:
     """Build the production remote console reader from the environment object store.
 
     ``conninfo`` is unused on the read path (``list_part_indices``/``assemble`` touch only the
     object store, never the database), so the part store is constructed with an empty one.
     """
-    parts = RemoteConsolePartStore(object_store_from_env(), "")
+    parts = RemoteConsolePartStore(store, "")
     return RemoteLibvirtConsoleReader(parts=parts, secret_registry=secret_registry)

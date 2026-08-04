@@ -11,7 +11,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -41,6 +41,8 @@ from kdive.providers.local_libvirt import composition as local_composition
 from kdive.providers.remote_libvirt import composition as remote_composition
 from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
+from kdive.store.objectstore import ObjectStore
 
 if TYPE_CHECKING:
     from kdive.providers.infra.console_hosting import ConsoleHosting
@@ -48,6 +50,15 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 type _ConsoleHostingFactory = Callable[[], Awaitable["ConsoleHosting | None"]]
+
+
+class _UnconfiguredObjectStore:
+    """Fail only if test-only composition tries to use an omitted production dependency."""
+
+    def __getattr__(self, name: str) -> object:
+        raise RuntimeError(
+            "provider composition needs the process object store; pass object_store explicitly"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,20 +104,29 @@ def _with_discovery_registration(
     return replace(runtime, discovery_registrar=_discovery_registrar(registration))
 
 
-def build_local_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
-    runtime = local_composition.build_runtime(secret_registry=secret_registry)
+def build_local_runtime(
+    *, secret_registry: SecretRegistry, store: ObjectStore = UNCONFIGURED_OBJECT_STORE
+) -> ProviderRuntime:
+    runtime = local_composition.build_runtime(secret_registry=secret_registry, store=store)
     return _with_discovery_registration(runtime, local_composition.discovery_registration())
 
 
 def build_fault_inject_runtime(
-    *, inventory: FaultInjectInventory | None = None, engine: FaultEngine | None = None
+    *,
+    inventory: FaultInjectInventory | None = None,
+    engine: FaultEngine | None = None,
+    store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
 ) -> ProviderRuntime:
-    runtime = fault_inject_composition.build_runtime(inventory=inventory, engine=engine)
+    runtime = fault_inject_composition.build_runtime(
+        inventory=inventory, engine=engine, store=store
+    )
     return _with_discovery_registration(runtime, fault_inject_composition.discovery_registration())
 
 
-def build_remote_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
-    runtime = remote_composition.build_runtime(secret_registry=secret_registry)
+def build_remote_runtime(
+    *, secret_registry: SecretRegistry, store: ObjectStore = UNCONFIGURED_OBJECT_STORE
+) -> ProviderRuntime:
+    runtime = remote_composition.build_runtime(secret_registry=secret_registry, store=store)
     return _with_discovery_registration(
         runtime, remote_composition.discovery_registration(secret_registry=secret_registry)
     )
@@ -222,9 +242,11 @@ class ProviderComposition:
         *,
         fault_inject_inventory: FaultInjectInventory | None = None,
         secret_registry: SecretRegistry | None = None,
+        object_store: ObjectStore | None = None,
     ) -> None:
         self._fault_inject_inventory = fault_inject_inventory or FaultInjectInventory()
         self._secret_registry = secret_registry or SecretRegistry()
+        self._object_store = object_store or cast(ObjectStore, _UnconfiguredObjectStore())
 
     @property
     def secret_registry(self) -> SecretRegistry:
@@ -243,7 +265,7 @@ class ProviderComposition:
                 kind=ResourceKind.LOCAL_LIBVIRT,
                 enabled=lambda: _local_libvirt_enabled(enable_local_libvirt),
                 runtime_factory=lambda: local_composition.build_runtime(
-                    secret_registry=self._secret_registry
+                    secret_registry=self._secret_registry, store=self._object_store
                 ),
                 discovery_registration_factory=local_composition.discovery_registration,
             ),
@@ -251,7 +273,7 @@ class ProviderComposition:
                 kind=ResourceKind.FAULT_INJECT,
                 enabled=lambda: _fault_inject_enabled(enable_fault_inject),
                 runtime_factory=lambda: fault_inject_composition.build_runtime(
-                    inventory=self._fault_inject_inventory
+                    inventory=self._fault_inject_inventory, store=self._object_store
                 ),
                 discovery_registration_factory=fault_inject_composition.discovery_registration,
             ),
@@ -259,7 +281,7 @@ class ProviderComposition:
                 kind=ResourceKind.REMOTE_LIBVIRT,
                 enabled=lambda: _remote_libvirt_enabled(enable_remote_libvirt),
                 runtime_factory=lambda: remote_composition.build_runtime(
-                    secret_registry=self._secret_registry
+                    secret_registry=self._secret_registry, store=self._object_store
                 ),
                 discovery_registration_factory=lambda: remote_composition.discovery_registration(
                     secret_registry=self._secret_registry
@@ -338,6 +360,7 @@ class ProviderComposition:
         return (
             lambda: remote_composition.build_console_hosting(
                 secret_registry=self._secret_registry,
+                store=self._object_store,
                 running_systems_factory=DbRunningRemoteSystems,
                 console_telemetry=console_telemetry,
             ),

@@ -4,10 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import cast
 
 from kdive.store.objectstore import ObjectStore, object_store_from_env
 
 ObjectStoreFactory = Callable[[], ObjectStore]
+
+
+class _UnconfiguredObjectStore:
+    def __getattr__(self, name: str) -> object:
+        raise RuntimeError("the process object store was not supplied to provider composition")
+
+
+UNCONFIGURED_OBJECT_STORE = cast(ObjectStore, _UnconfiguredObjectStore())
 
 
 @dataclass(frozen=True, slots=True)

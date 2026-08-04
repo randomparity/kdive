@@ -41,13 +41,16 @@ def build_handler_registry(
     provider_composition: ProviderComposition | None = None,
 ) -> HandlerRegistry:
     """Build the worker's `HandlerRegistry` from provider-aware handler registrars."""
-    composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
+    stores = build_object_store_assembly()
+    composition = provider_composition or ProviderComposition(
+        secret_registry=secret_registry, object_store=stores.store
+    )
     registry = HandlerRegistry()
     assembly = WorkerHandlerAssembly(
         resolver=composition.build_provider_resolver(),
         incarnation_credential=incarnation_credential,
         secret_registry=composition.secret_registry,
-        object_stores=build_object_store_assembly(),
+        object_stores=stores,
     )
     for register in build_handler_registrars(assembly):
         register(registry)

@@ -54,6 +54,7 @@ from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAd
 from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.objectstore import ObjectStore
 
 _REMOTE_INVENTORY = """
 schema_version = 2
@@ -734,10 +735,12 @@ def test_console_hosting_delegates_to_remote_when_enabled(
     async def _build_console_hosting(
         *,
         secret_registry: SecretRegistry,
+        store: object,
         running_systems_factory: object,
         console_telemetry: object | None = None,
     ) -> object:
         seen["secret_registry"] = secret_registry
+        seen["store"] = store
         seen["running_systems_factory"] = running_systems_factory
         seen["console_telemetry"] = console_telemetry
         return expected_hosting
@@ -893,13 +896,13 @@ def test_build_runtime_helpers_thread_registry_and_real_discovery_registration(
     real_local = composition.local_composition.build_runtime
     real_remote = composition.remote_composition.build_runtime
 
-    def _local(*, secret_registry: SecretRegistry) -> ProviderRuntime:
+    def _local(*, secret_registry: SecretRegistry, store: ObjectStore) -> ProviderRuntime:
         seen["local"] = secret_registry
-        return real_local(secret_registry=secret_registry)
+        return real_local(secret_registry=secret_registry, store=store)
 
-    def _remote(*, secret_registry: SecretRegistry) -> ProviderRuntime:
+    def _remote(*, secret_registry: SecretRegistry, store: ObjectStore) -> ProviderRuntime:
         seen["remote"] = secret_registry
-        return real_remote(secret_registry=secret_registry)
+        return real_remote(secret_registry=secret_registry, store=store)
 
     real_remote_disc = composition.remote_composition.discovery_registration
 
@@ -936,13 +939,13 @@ def test_resolver_threads_shared_registry_into_provider_runtimes(
     real_remote = composition.remote_composition.build_runtime
     real_remote_disc = composition.remote_composition.discovery_registration
 
-    def _local(*, secret_registry: SecretRegistry) -> ProviderRuntime:
+    def _local(*, secret_registry: SecretRegistry, store: ObjectStore) -> ProviderRuntime:
         seen["local"] = secret_registry
-        return real_local(secret_registry=secret_registry)
+        return real_local(secret_registry=secret_registry, store=store)
 
-    def _remote(*, secret_registry: SecretRegistry) -> ProviderRuntime:
+    def _remote(*, secret_registry: SecretRegistry, store: ObjectStore) -> ProviderRuntime:
         seen["remote"] = secret_registry
-        return real_remote(secret_registry=secret_registry)
+        return real_remote(secret_registry=secret_registry, store=store)
 
     def _remote_disc(*, secret_registry: SecretRegistry) -> object:
         seen["remote_disc"] = secret_registry

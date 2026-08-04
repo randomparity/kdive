@@ -79,7 +79,9 @@ async def run_reconciler_body(
     from kdive.store.objectstore import object_store_from_env
 
     upload_store = object_store_from_env()
-    provider_composition = ProviderComposition(secret_registry=secret_registry)
+    provider_composition = ProviderComposition(
+        secret_registry=secret_registry, object_store=upload_store
+    )
     provider_resolver = provider_composition.build_provider_resolver()
     discovery_task = asyncio.create_task(register_provider_resources(pool, provider_resolver))
     try:
