@@ -35,22 +35,16 @@ from kdive.services.runs.complete_build import (
 )
 from kdive.services.runs.steps import BuildStepResult
 from tests.clock import STORE_MTIME
+from tests.mcp import complete_build_support
 from tests.mcp.complete_build_support import (
     FakeValidator,
+    build_output,
+    complete_build,
+    ctx,
+    run_by_id,
     seed_external_run,
     seed_external_run_with_manifest,
     seed_system,
-)
-from tests.mcp.complete_build_support import (
-    build_output as _output,
-)
-from tests.mcp.complete_build_support import (
-    complete_build as _complete,
-)
-from tests.mcp.complete_build_support import ctx as _ctx
-from tests.mcp.complete_build_support import pool as _pool
-from tests.mcp.complete_build_support import (
-    run_by_id as _run_by_id,
 )
 from tests.mcp.systems_support import provider_resolver
 
@@ -233,10 +227,10 @@ async def _complete_config_error(
     run_id: Any,
     finalizer: CompleteBuildFinalizer,
 ) -> CompleteBuildConfigurationError:
-    run = await _run_by_id(pool, run_id)
+    run = await run_by_id(pool, run_id)
     async with pool.connection() as conn:
         try:
-            await finalizer.complete(conn, _ctx(), run, build_id=None, cmdline="console=ttyS0")
+            await finalizer.complete(conn, ctx(), run, build_id=None, cmdline="console=ttyS0")
         except CompleteBuildConfigurationError as exc:
             return exc
     raise AssertionError("complete_build did not raise CompleteBuildConfigurationError")
@@ -247,10 +241,10 @@ async def _complete_expired_window_error(
     run_id: Any,
     finalizer: CompleteBuildFinalizer,
 ) -> CompleteBuildExpiredWindowError:
-    run = await _run_by_id(pool, run_id)
+    run = await run_by_id(pool, run_id)
     async with pool.connection() as conn:
         try:
-            await finalizer.complete(conn, _ctx(), run, build_id=None, cmdline="console=ttyS0")
+            await finalizer.complete(conn, ctx(), run, build_id=None, cmdline="console=ttyS0")
         except CompleteBuildExpiredWindowError as exc:
             return exc
     raise AssertionError("complete_build did not raise CompleteBuildExpiredWindowError")
@@ -258,12 +252,12 @@ async def _complete_expired_window_error(
 
 def test_complete_build_finalizer_rejects_missing_manifest(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run(pool)
             error = await _complete_config_error(
                 pool,
                 run_id,
-                CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(run_id))),
+                CompleteBuildFinalizer(validate_complete_build=FakeValidator(build_output(run_id))),
             )
 
         assert error.data == {"reason": "no_upload_manifest"}
@@ -273,13 +267,13 @@ def test_complete_build_finalizer_rejects_missing_manifest(migrated_url: str) ->
 
 def test_complete_build_finalizer_rejects_expired_chunk_manifest(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(
                 pool, entries=[_CHUNKED_KERNEL], ttl=timedelta(seconds=-1)
             )
             store = _ChunkedStore()
             finalizer = CompleteBuildFinalizer(
-                validate_complete_build=FakeValidator(_output(run_id)),
+                validate_complete_build=FakeValidator(build_output(run_id)),
                 object_store_factory=lambda: store,
             )
             error = await _complete_expired_window_error(pool, run_id, finalizer)
@@ -294,13 +288,13 @@ def test_complete_build_finalizer_rejects_expired_single_put_manifest(migrated_u
     """A non-chunked finalize past the deadline is rejected, not silently committed (#1534)."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, ttl=timedelta(seconds=-1))
-            validator = FakeValidator(_output(run_id))
+            validator = FakeValidator(build_output(run_id))
             error = await _complete_expired_window_error(
                 pool, run_id, CompleteBuildFinalizer(validate_complete_build=validator)
             )
-            run = await _run_by_id(pool, run_id)
+            run = await run_by_id(pool, run_id)
             manifest_kept = await _manifest_present(pool, run_id)
             artifact_rows = await _fetchall(
                 pool, "SELECT id FROM artifacts WHERE owner_id = %s", (run_id,)
@@ -325,7 +319,7 @@ def test_complete_build_finalizer_declines_when_reaper_wins_mid_validation(
     """
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool)
 
             def reap_then_validate(*args: Any, **kwargs: Any) -> ValidatedUpload:
@@ -334,14 +328,14 @@ def test_complete_build_finalizer_declines_when_reaper_wins_mid_validation(
                         "DELETE FROM upload_manifests WHERE owner_kind = 'runs' AND owner_id = %s",
                         (run_id,),
                     )
-                return FakeValidator(_output(run_id))(*args, **kwargs)
+                return FakeValidator(build_output(run_id))(*args, **kwargs)
 
             error = await _complete_config_error(
                 pool,
                 run_id,
                 CompleteBuildFinalizer(validate_complete_build=reap_then_validate),
             )
-            run = await _run_by_id(pool, run_id)
+            run = await run_by_id(pool, run_id)
             artifact_rows = await _fetchall(
                 pool, "SELECT id FROM artifacts WHERE owner_id = %s", (run_id,)
             )
@@ -365,7 +359,7 @@ def test_complete_build_finalizer_declines_when_the_window_is_reminted_mid_valid
     """
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool)
 
             def reap_and_remint_then_validate(*args: Any, **kwargs: Any) -> ValidatedUpload:
@@ -383,14 +377,14 @@ def test_complete_build_finalizer_declines_when_the_window_is_reminted_mid_valid
                             Jsonb([{"name": "kernel", "sha256": "c", "size_bytes": 1}]),
                         ),
                     )
-                return FakeValidator(_output(run_id))(*args, **kwargs)
+                return FakeValidator(build_output(run_id))(*args, **kwargs)
 
             error = await _complete_config_error(
                 pool,
                 run_id,
                 CompleteBuildFinalizer(validate_complete_build=reap_and_remint_then_validate),
             )
-            run = await _run_by_id(pool, run_id)
+            run = await run_by_id(pool, run_id)
             artifact_rows = await _fetchall(
                 pool, "SELECT id FROM artifacts WHERE owner_id = %s", (run_id,)
             )
@@ -414,7 +408,7 @@ def test_complete_build_finalizer_declines_chunked_reassembly_of_a_reaped_window
     """
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             store = _ChunkedStore()
 
@@ -430,11 +424,11 @@ def test_complete_build_finalizer_declines_chunked_reassembly_of_a_reaped_window
                 pool,
                 run_id,
                 CompleteBuildFinalizer(
-                    validate_complete_build=FakeValidator(_output(run_id)),
+                    validate_complete_build=FakeValidator(build_output(run_id)),
                     object_store_factory=reap_then_build_store,
                 ),
             )
-            run = await _run_by_id(pool, run_id)
+            run = await run_by_id(pool, run_id)
 
         assert error.data == {"reason": "no_upload_manifest"}
         assert store.events == []  # no multipart copy against reaped chunk objects
@@ -447,10 +441,10 @@ def test_complete_build_finalizer_recovers_on_remint_without_reupload(migrated_u
     """The advertised recovery: reject, re-mint, finalize — same keys, nothing re-uploaded."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, ttl=timedelta(seconds=-1))
             finalizer = CompleteBuildFinalizer(
-                validate_complete_build=FakeValidator(_output(run_id))
+                validate_complete_build=FakeValidator(build_output(run_id))
             )
             await _complete_expired_window_error(pool, run_id, finalizer)
 
@@ -465,14 +459,14 @@ def test_complete_build_finalizer_recovers_on_remint_without_reupload(migrated_u
                         ttl=timedelta(hours=1),
                     ),
                 )
-            result = await _complete(pool, run_id, finalizer)
+            result = await complete_build(pool, run_id, finalizer)
             keys = await _fetchall(
                 pool,
                 "SELECT object_key FROM artifacts WHERE owner_kind = 'investigations' "
                 "AND owner_id = (SELECT investigation_id FROM runs WHERE id = %s)",
                 (run_id,),
             )
-            run = await _run_by_id(pool, run_id)
+            run = await run_by_id(pool, run_id)
 
         assert run.state is RunState.SUCCEEDED
         # The re-mint addressed the very key the lapsed window used: no re-upload was needed.
@@ -486,14 +480,14 @@ def test_complete_build_finalizer_accepts_single_put_inside_window(migrated_url:
     """The deadline is a wall, not a floor: a still-open window finalizes (#1534)."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, ttl=timedelta(seconds=30))
-            result = await _complete(
+            result = await complete_build(
                 pool,
                 run_id,
-                CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(run_id))),
+                CompleteBuildFinalizer(validate_complete_build=FakeValidator(build_output(run_id))),
             )
-            run = await _run_by_id(pool, run_id)
+            run = await run_by_id(pool, run_id)
 
         assert result.kernel_ref == f"local/runs/{run_id}/kernel"
         assert run.state is RunState.SUCCEEDED
@@ -505,7 +499,7 @@ def test_complete_build_finalizer_returns_recorded_success_after_reassembly_fail
     migrated_url: str,
 ) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             recorded = BuildStepResult(
                 kernel_ref="recorded/kernel",
@@ -518,7 +512,7 @@ def test_complete_build_finalizer_returns_recorded_success_after_reassembly_fail
                 del args, kwargs
                 raise AssertionError("recorded success must bypass validation")
 
-            result = await _complete(
+            result = await complete_build(
                 pool,
                 run_id,
                 CompleteBuildFinalizer(
@@ -545,10 +539,10 @@ async def _complete_swallowing_failure(
     savepoint before reassembly ran. The other helpers here re-raise out of the block, which rolls
     that extension back; reproducing #1553 requires the production shape, not theirs.
     """
-    run = await _run_by_id(pool, run_id)
+    run = await run_by_id(pool, run_id)
     async with pool.connection() as conn:
         try:
-            await finalizer.complete(conn, _ctx(), run, build_id=None, cmdline="console=ttyS0")
+            await finalizer.complete(conn, ctx(), run, build_id=None, cmdline="console=ttyS0")
         except CategorizedError:
             return
     raise AssertionError("the chunked finalize was expected to fail in reassembly")
@@ -584,10 +578,10 @@ def test_repeated_failing_finalizes_cannot_extend_the_window_past_the_cap(
     monkeypatch.setenv("KDIVE_UPLOAD_WINDOW_MAX_TTL_MULTIPLE", "2")
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             finalizer = CompleteBuildFinalizer(
-                validate_complete_build=FakeValidator(_output(run_id)),
+                validate_complete_build=FakeValidator(build_output(run_id)),
                 object_store_factory=lambda: _ChunkedStore(bad_head=True),
             )
             minted = await _window_deadline(pool, run_id)
@@ -608,7 +602,7 @@ def test_repeated_failing_finalizes_cannot_extend_the_window_past_the_cap(
                 await _complete_swallowing_failure(pool, run_id, finalizer)
             after_second = await _window_deadline(pool, run_id)
 
-            run = await _run_by_id(pool, run_id)
+            run = await run_by_id(pool, run_id)
 
         assert after_first > minted  # a failing finalize still commits its first extension
         assert after_second == after_first  # and the cap stops every later one
@@ -636,7 +630,7 @@ def test_a_ttl_lowered_after_the_mint_reports_a_capped_refresh(
     monkeypatch.setenv("KDIVE_UPLOAD_WINDOW_MAX_TTL_MULTIPLE", "3")
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             minted = await _window_deadline(pool, run_id)
 
@@ -646,7 +640,7 @@ def test_a_ttl_lowered_after_the_mint_reports_a_capped_refresh(
                     pool,
                     run_id,
                     CompleteBuildFinalizer(
-                        validate_complete_build=FakeValidator(_output(run_id)),
+                        validate_complete_build=FakeValidator(build_output(run_id)),
                         object_store_factory=lambda: _ChunkedStore(bad_head=True),
                     ),
                 )
@@ -674,14 +668,14 @@ def test_the_cap_multiple_is_read_from_configuration(
     monkeypatch.setenv("KDIVE_UPLOAD_WINDOW_MAX_TTL_MULTIPLE", "1")
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             minted = await _window_deadline(pool, run_id)
             await _complete_swallowing_failure(
                 pool,
                 run_id,
                 CompleteBuildFinalizer(
-                    validate_complete_build=FakeValidator(_output(run_id)),
+                    validate_complete_build=FakeValidator(build_output(run_id)),
                     object_store_factory=lambda: _ChunkedStore(bad_head=True),
                 ),
             )
@@ -710,15 +704,15 @@ def test_complete_build_finalizer_keeps_manifest_when_chunk_cleanup_fails(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             store = _ChunkedStore(delete_raises=".part0001")
             with caplog.at_level(logging.WARNING, logger=complete_build_service.__name__):
-                result = await _complete(
+                result = await complete_build(
                     pool,
                     run_id,
                     CompleteBuildFinalizer(
-                        validate_complete_build=FakeValidator(_output(run_id)),
+                        validate_complete_build=FakeValidator(build_output(run_id)),
                         object_store_factory=lambda: store,
                     ),
                 )
@@ -745,17 +739,17 @@ def test_complete_build_finalizer_logs_manifest_cleanup_failure(
         )
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             monkeypatch.setattr(
                 complete_build_service.upload_manifest, "delete_manifest", fail_delete_manifest
             )
             with caplog.at_level(logging.WARNING, logger=complete_build_service.__name__):
-                result = await _complete(
+                result = await complete_build(
                     pool,
                     run_id,
                     CompleteBuildFinalizer(
-                        validate_complete_build=FakeValidator(_output(run_id)),
+                        validate_complete_build=FakeValidator(build_output(run_id)),
                         object_store_factory=_ChunkedStore,
                     ),
                 )
@@ -773,7 +767,7 @@ def _prefix(run_id: Any) -> str:
 
 def test_complete_build_rejects_after_investigation_closes(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool)
             async with pool.connection() as conn:
                 await conn.execute(
@@ -782,10 +776,12 @@ def test_complete_build_rejects_after_investigation_closes(migrated_url: str) ->
                     (run_id,),
                 )
             with pytest.raises(CompleteBuildConfigurationError) as caught:
-                await _complete(
+                await complete_build(
                     pool,
                     run_id,
-                    CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(run_id))),
+                    CompleteBuildFinalizer(
+                        validate_complete_build=FakeValidator(build_output(run_id))
+                    ),
                 )
             assert caught.value.data == {"reason": "investigation_not_accepting_upload"}
             async with pool.connection() as conn:
@@ -818,18 +814,18 @@ def test_complete_build_success_persists_run_step_artifacts_and_audit(migrated_u
     provenance: dict[str, str | bool | list[str]] = {"source_url": "https://x", "verified": True}
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=entries)
             kernel = f"{_prefix(run_id)}kernel"
             debuginfo = f"{_prefix(run_id)}vmlinux"
             output = BuildOutput(kernel, debuginfo, "build-id")
-            run = await _run_by_id(pool, run_id)
+            run = await run_by_id(pool, run_id)
             async with pool.connection() as conn:
                 result = await CompleteBuildFinalizer(
                     validate_complete_build=FakeValidator(output)
                 ).complete(
                     conn,
-                    _ctx(),
+                    ctx(),
                     run,
                     build_id=None,
                     cmdline="console=ttyS0",
@@ -908,10 +904,10 @@ def test_complete_build_publishes_winner_under_investigation_then_run_lock(
             yield
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=entries)
             prefix = _prefix(run_id)
-            result = await _complete(
+            result = await complete_build(
                 pool,
                 run_id,
                 CompleteBuildFinalizer(
@@ -980,29 +976,29 @@ def test_real_completion_finalizer_and_install_do_not_cycle(
         async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
             return await finalizer.complete(
                 conn,
-                _ctx(),
+                ctx(),
                 stale_created_run,
                 build_id=None,
                 cmdline="console=ttyS0",
             )
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool)
-            stale_created_run = await _run_by_id(pool, run_id)
+            stale_created_run = await run_by_id(pool, run_id)
             finalizer = CompleteBuildFinalizer(
-                validate_complete_build=FakeValidator(_output(run_id))
+                validate_complete_build=FakeValidator(build_output(run_id))
             )
             with monkeypatch.context() as patched:
                 patched.setattr(upload_manifest, "delete_manifest", keep_manifest)
-                await _complete(pool, run_id, finalizer)
+                await complete_build(pool, run_id, finalizer)
                 patched.setattr(complete_build_service, "advisory_xact_lock", paused_lock)
                 replay = asyncio.create_task(replay_completion(finalizer, stale_created_run))
                 await acquired.wait()
                 install = asyncio.create_task(
                     install_run(
                         pool,
-                        _ctx(),
+                        ctx(),
                         str(run_id),
                         resolver=provider_resolver(),
                     )
@@ -1032,14 +1028,14 @@ def test_chunked_completion_acquires_investigation_before_retained_run_lock(
             yield
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             store = _ChunkedStore()
-            await _complete(
+            await complete_build(
                 pool,
                 run_id,
                 CompleteBuildFinalizer(
-                    validate_complete_build=FakeValidator(_output(run_id)),
+                    validate_complete_build=FakeValidator(build_output(run_id)),
                     object_store_factory=lambda: store,
                 ),
             )
@@ -1059,7 +1055,7 @@ def test_loser_bytes_are_retained_when_single_put_commit_fails(
         raise psycopg.OperationalError("commit failed")
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             winner_id = await seed_external_run_with_manifest(pool)
             loser_id = await seed_external_run_with_manifest(pool)
             async with pool.connection() as conn:
@@ -1068,23 +1064,25 @@ def test_loser_bytes_are_retained_when_single_put_commit_fails(
                     "(SELECT investigation_id FROM runs WHERE id = %s) WHERE id = %s",
                     (winner_id, loser_id),
                 )
-            await _complete(
+            await complete_build(
                 pool,
                 winner_id,
-                CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(winner_id))),
+                CompleteBuildFinalizer(
+                    validate_complete_build=FakeValidator(build_output(winner_id))
+                ),
             )
             store = _VersionDeleteStore()
             finalizer = CompleteBuildFinalizer(
-                validate_complete_build=FakeValidator(_output(loser_id)),
+                validate_complete_build=FakeValidator(build_output(loser_id)),
                 object_store_factory=lambda: store,
             )
-            run = await _run_by_id(pool, loser_id)
+            run = await run_by_id(pool, loser_id)
             async with pool.connection() as conn:
                 with monkeypatch.context() as patched:
                     patched.setattr(psycopg.AsyncConnection, "commit", _reject_commit)
                     with pytest.raises(psycopg.OperationalError, match="commit failed"):
                         await finalizer.complete(
-                            conn, _ctx(), run, build_id=None, cmdline="console=ttyS0"
+                            conn, ctx(), run, build_id=None, cmdline="console=ttyS0"
                         )
             state = await _fetchone(pool, "SELECT state FROM runs WHERE id = %s", (loser_id,))
             steps = await _fetchall(
@@ -1102,13 +1100,13 @@ def test_loser_bytes_are_retained_when_single_put_commit_fails(
 
 def test_reused_step_matches_real_publisher_step(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             source_id = await seed_external_run_with_manifest(
                 pool,
                 entries=[ManifestEntry("kernel", "ck", 1), ManifestEntry("vmlinux", "cv", 1)],
             )
             prefix = _prefix(source_id)
-            published = await _complete(
+            published = await complete_build(
                 pool,
                 source_id,
                 CompleteBuildFinalizer(
@@ -1118,11 +1116,11 @@ def test_reused_step_matches_real_publisher_step(migrated_url: str) -> None:
                 ),
             )
             assert published.build_ref is not None
-            source = await _run_by_id(pool, source_id)
+            source = await run_by_id(pool, source_id)
             target_system = await seed_system(pool)
             reused = await create_run(
                 pool,
-                _ctx(),
+                ctx(),
                 RunCreateRequest(
                     investigation_id=str(source.investigation_id),
                     system_id=str(target_system),
@@ -1148,15 +1146,17 @@ def test_completion_stamps_generation_from_postgres_wall_clock(
     """Long validation cannot shorten the catalog generation's advertised retention."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool)
             async with pool.connection() as conn:
                 before_row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
             assert before_row is not None
-            result = await _complete(
+            result = await complete_build(
                 pool,
                 run_id,
-                CompleteBuildFinalizer(validate_complete_build=_DelayedValidator(_output(run_id))),
+                CompleteBuildFinalizer(
+                    validate_complete_build=_DelayedValidator(build_output(run_id))
+                ),
             )
             async with pool.connection() as conn:
                 row = await (
@@ -1182,7 +1182,7 @@ def test_concurrent_identical_completions_reuse_winner_and_delete_loser_versions
     """A converged Run stores winner refs and removes only its own validated version."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             first_id = await seed_external_run_with_manifest(pool)
             second_id = await seed_external_run_with_manifest(pool)
             async with pool.connection() as conn:
@@ -1193,15 +1193,15 @@ def test_concurrent_identical_completions_reuse_winner_and_delete_loser_versions
                 )
             store = _VersionDeleteStore()
             first = CompleteBuildFinalizer(
-                validate_complete_build=FakeValidator(_output(first_id)),
+                validate_complete_build=FakeValidator(build_output(first_id)),
                 object_store_factory=lambda: store,
             )
             second = CompleteBuildFinalizer(
-                validate_complete_build=FakeValidator(_output(second_id)),
+                validate_complete_build=FakeValidator(build_output(second_id)),
                 object_store_factory=lambda: store,
             )
             results = await asyncio.gather(
-                _complete(pool, first_id, first), _complete(pool, second_id, second)
+                complete_build(pool, first_id, first), complete_build(pool, second_id, second)
             )
             artifacts = await _fetchall(
                 pool,
@@ -1225,7 +1225,7 @@ def test_loser_delete_failure_leaves_the_version_for_orphan_repair(
     """Delete errors do not roll back a completed loser or target the winning object."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             winner_id = await seed_external_run_with_manifest(pool)
             loser_id = await seed_external_run_with_manifest(pool)
             async with pool.connection() as conn:
@@ -1234,18 +1234,20 @@ def test_loser_delete_failure_leaves_the_version_for_orphan_repair(
                     "(SELECT investigation_id FROM runs WHERE id = %s) WHERE id = %s",
                     (winner_id, loser_id),
                 )
-            await _complete(
+            await complete_build(
                 pool,
                 winner_id,
-                CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(winner_id))),
+                CompleteBuildFinalizer(
+                    validate_complete_build=FakeValidator(build_output(winner_id))
+                ),
             )
             store = _VersionDeleteStore(fail=True)
             with caplog.at_level(logging.WARNING, logger=complete_build_service.__name__):
-                result = await _complete(
+                result = await complete_build(
                     pool,
                     loser_id,
                     CompleteBuildFinalizer(
-                        validate_complete_build=FakeValidator(_output(loser_id)),
+                        validate_complete_build=FakeValidator(build_output(loser_id)),
                         object_store_factory=lambda: store,
                     ),
                 )
@@ -1263,12 +1265,14 @@ def test_complete_build_propagates_target_arch_to_validator(migrated_url: str) -
     """The persisted build-profile arch is passed to the upload validator (ADR-0343)."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(
                 pool, build_profile={"schema_version": 1, "arch": "aarch64"}
             )
-            validator = FakeValidator(_output(run_id))
-            await _complete(pool, run_id, CompleteBuildFinalizer(validate_complete_build=validator))
+            validator = FakeValidator(build_output(run_id))
+            await complete_build(
+                pool, run_id, CompleteBuildFinalizer(validate_complete_build=validator)
+            )
             assert validator.last_arch == "aarch64"
 
     asyncio.run(_run())
@@ -1278,12 +1282,14 @@ def test_complete_build_defaults_missing_arch_to_x86_64(migrated_url: str) -> No
     """A build profile without an arch validates as x86_64 (the documented default)."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(
                 pool, build_profile={"schema_version": 1}
             )
-            validator = FakeValidator(_output(run_id))
-            await _complete(pool, run_id, CompleteBuildFinalizer(validate_complete_build=validator))
+            validator = FakeValidator(build_output(run_id))
+            await complete_build(
+                pool, run_id, CompleteBuildFinalizer(validate_complete_build=validator)
+            )
             assert validator.last_arch == "x86_64"
 
     asyncio.run(_run())
@@ -1295,14 +1301,14 @@ def test_complete_build_chunked_cleanup_deletes_selected_chunk_versions_and_mani
     """A peer replacement cannot turn post-commit cleanup into a delete of new chunks."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             store = _ChunkedStore()
-            await _complete(
+            await complete_build(
                 pool,
                 run_id,
                 CompleteBuildFinalizer(
-                    validate_complete_build=FakeValidator(_output(run_id)),
+                    validate_complete_build=FakeValidator(build_output(run_id)),
                     object_store_factory=lambda: store,
                 ),
             )
@@ -1329,14 +1335,14 @@ def test_complete_build_chunk_cleanup_does_not_target_peer_chunk_versions(
     """The post-commit delete targets the pre-fence HEAD, not a peer replacement."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             store = _PeerPutChunkedStore()
-            await _complete(
+            await complete_build(
                 pool,
                 run_id,
                 CompleteBuildFinalizer(
-                    validate_complete_build=FakeValidator(_output(run_id)),
+                    validate_complete_build=FakeValidator(build_output(run_id)),
                     object_store_factory=lambda: store,
                 ),
             )
@@ -1357,20 +1363,20 @@ def test_complete_build_does_not_delete_chunks_when_the_commit_fails(
         raise psycopg.OperationalError("commit failed")
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with complete_build_support.pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             store = _ChunkedStore()
             finalizer = CompleteBuildFinalizer(
-                validate_complete_build=FakeValidator(_output(run_id)),
+                validate_complete_build=FakeValidator(build_output(run_id)),
                 object_store_factory=lambda: store,
             )
-            run = await _run_by_id(pool, run_id)
+            run = await run_by_id(pool, run_id)
             async with pool.connection() as conn:
                 with monkeypatch.context() as patched:
                     patched.setattr(psycopg.AsyncConnection, "commit", _reject_commit)
                     with pytest.raises(psycopg.OperationalError, match="commit failed"):
                         await finalizer.complete(
-                            conn, _ctx(), run, build_id=None, cmdline="console=ttyS0"
+                            conn, ctx(), run, build_id=None, cmdline="console=ttyS0"
                         )
 
         assert store.deleted_versions == []

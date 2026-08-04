@@ -44,56 +44,30 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.mcp import systems_support
 from tests.mcp.systems_support import (
-    SYSTEM_ADMIN_HANDLERS as _SYSTEM_ADMIN_HANDLERS,
-)
-from tests.mcp.systems_support import (
-    SYSTEM_PROVISION_HANDLERS as _SYSTEM_PROVISION_HANDLERS,
-)
-from tests.mcp.systems_support import (
-    TEST_COMPONENT_SOURCES as _TEST_COMPONENT_SOURCES,
-)
-from tests.mcp.systems_support import (
-    TEST_DT as _DT,
-)
-from tests.mcp.systems_support import (
-    TEST_PROFILE_POLICY as _TEST_PROFILE_POLICY,
-)
-from tests.mcp.systems_support import (
-    FakeProvisioning as _FakeProvisioning,
-)
-from tests.mcp.systems_support import (
-    ctx as _ctx,
-)
-from tests.mcp.systems_support import (
-    enqueue_provision as _enqueue_provision,
-)
-from tests.mcp.systems_support import (
-    granted_allocation as _granted_allocation,
-)
-from tests.mcp.systems_support import (
-    pool as _pool,
-)
-from tests.mcp.systems_support import (
-    provider_resolver as _provider_resolver,
-)
-from tests.mcp.systems_support import (
-    provisioning_profile as _profile,
-)
-from tests.mcp.systems_support import (
-    seed_system as _seed_system,
-)
-from tests.mcp.systems_support import (
-    upload_profile as _upload_profile,
+    SYSTEM_ADMIN_HANDLERS,
+    SYSTEM_PROVISION_HANDLERS,
+    TEST_COMPONENT_SOURCES,
+    TEST_DT,
+    TEST_PROFILE_POLICY,
+    FakeProvisioning,
+    ctx,
+    enqueue_provision,
+    granted_allocation,
+    provider_resolver,
+    provisioning_profile,
+    seed_system,
+    upload_profile,
 )
 from tests.support.object_store import INERT_OBJECT_STORE
 
 
 def test_get_system_surfaces_resolved_cpu(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(
                 pool,
                 alloc_id,
                 SystemState.READY,
@@ -104,7 +78,7 @@ def test_get_system_surfaces_resolved_cpu(migrated_url: str) -> None:
                     "baseline_level": "x86-64-v3",
                 },
             )
-            resp = await get_system(pool, _ctx(), sys_id, resolver=_provider_resolver())
+            resp = await get_system(pool, ctx(), sys_id, resolver=provider_resolver())
         assert resp.data["resolved_cpu"] == {
             "model": "Skylake-Client-IBRS",
             "vendor": "Intel",
@@ -117,10 +91,10 @@ def test_get_system_surfaces_resolved_cpu(migrated_url: str) -> None:
 
 def test_get_system_omits_resolved_cpu_when_absent(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            resp = await get_system(pool, _ctx(), sys_id, resolver=_provider_resolver())
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            resp = await get_system(pool, ctx(), sys_id, resolver=provider_resolver())
         assert "resolved_cpu" not in resp.data
 
     asyncio.run(_run())
@@ -128,10 +102,10 @@ def test_get_system_omits_resolved_cpu_when_absent(migrated_url: str) -> None:
 
 def test_get_own_system_returns_state(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            resp = await get_system(pool, _ctx(), sys_id, resolver=_provider_resolver())
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            resp = await get_system(pool, ctx(), sys_id, resolver=provider_resolver())
         assert resp.object_id == sys_id
         assert resp.status == "ready"
 
@@ -140,21 +114,21 @@ def test_get_own_system_returns_state(migrated_url: str) -> None:
 
 def test_get_system_requires_viewer_role(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
             with pytest.raises(AuthorizationError):
-                await get_system(pool, _ctx(role=None), sys_id, resolver=_provider_resolver())
+                await get_system(pool, ctx(role=None), sys_id, resolver=provider_resolver())
 
     asyncio.run(_run())
 
 
 def test_get_failed_system_renders_failure(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
-            resp = await get_system(pool, _ctx(), sys_id, resolver=_provider_resolver())
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.FAILED)
+            resp = await get_system(pool, ctx(), sys_id, resolver=provider_resolver())
         assert resp.status == "error"
         assert resp.error_category == "infrastructure_failure"
         assert resp.data["current_status"] == "failed"
@@ -164,11 +138,11 @@ def test_get_failed_system_renders_failure(migrated_url: str) -> None:
 
 def test_get_cross_project_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
             resp = await get_system(
-                pool, _ctx(projects=("other",)), sys_id, resolver=_provider_resolver()
+                pool, ctx(projects=("other",)), sys_id, resolver=provider_resolver()
             )
         assert resp.status == "error"
         assert resp.error_category == "not_found"
@@ -184,9 +158,9 @@ def test_get_platform_only_token_is_not_found_not_authorization_denied(migrated_
     # require_role; the held platform role (even platform_admin) is never consulted.
     #
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
             platform_only = RequestContext(
                 principal="ops-cli",
                 agent_session="s",
@@ -194,7 +168,7 @@ def test_get_platform_only_token_is_not_found_not_authorization_denied(migrated_
                 roles={},
                 platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
             )
-            resp = await get_system(pool, platform_only, sys_id, resolver=_provider_resolver())
+            resp = await get_system(pool, platform_only, sys_id, resolver=provider_resolver())
         # The held platform role buys no project data, and a non-member gets the same
         # not_found envelope as an absent ID.
         assert resp.status == "error"
@@ -206,8 +180,8 @@ def test_get_platform_only_token_is_not_found_not_authorization_denied(migrated_
 
 def test_get_malformed_uuid_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await get_system(pool, _ctx(), "not-a-uuid", resolver=_provider_resolver())
+        async with systems_support.pool(migrated_url) as pool:
+            resp = await get_system(pool, ctx(), "not-a-uuid", resolver=provider_resolver())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         # ADR-0174: actionable reason + non-null detail for the malformed-id parse failure.
@@ -240,7 +214,7 @@ async def _provision(
     idempotency_key: str | None = None,
     label: str | None = None,
 ):
-    return await _SYSTEM_PROVISION_HANDLERS.provision_system(
+    return await SYSTEM_PROVISION_HANDLERS.provision_system(
         pool,
         ctx,
         allocation_id=alloc_id,
@@ -257,17 +231,17 @@ def _noop_rootfs_validator(_: RootfsSource) -> None:
 def _provision_handlers(
     rootfs_validator: Callable[[RootfsSource], None] = _noop_rootfs_validator,
 ) -> SystemProvisionHandlers:
-    return SystemProvisionHandlers(_TEST_PROFILE_POLICY, _TEST_COMPONENT_SOURCES, rootfs_validator)
+    return SystemProvisionHandlers(TEST_PROFILE_POLICY, TEST_COMPONENT_SOURCES, rootfs_validator)
 
 
 def _admin_handlers(
     rootfs_validator: Callable[[RootfsSource], None] = _noop_rootfs_validator,
 ) -> SystemAdminHandlers:
-    return SystemAdminHandlers(_TEST_PROFILE_POLICY, _TEST_COMPONENT_SOURCES, rootfs_validator)
+    return SystemAdminHandlers(TEST_PROFILE_POLICY, TEST_COMPONENT_SOURCES, rootfs_validator)
 
 
 def _artifact_rootfs_profile() -> dict[str, Any]:
-    profile = _profile()
+    profile = provisioning_profile()
     profile["provider"]["local-libvirt"]["rootfs"] = {
         "kind": "artifact",
         "artifact_id": str(uuid4()),
@@ -276,7 +250,7 @@ def _artifact_rootfs_profile() -> dict[str, Any]:
 
 
 def _local_rootfs_profile(path: Path) -> dict[str, Any]:
-    profile = _profile()
+    profile = provisioning_profile()
     profile["provider"]["local-libvirt"]["rootfs"] = {"kind": "local", "path": str(path)}
     return profile
 
@@ -314,9 +288,9 @@ def _failing_rootfs_validator(calls: list[ComponentRef]) -> Callable[[RootfsSour
 
 def test_provision_mints_system_active_allocation_and_job(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            resp = await _provision(pool, ctx(), alloc_id, provisioning_profile())
             assert resp.status == "queued"
             assert resp.data["system_id"]
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -339,12 +313,14 @@ def test_provision_mints_system_active_allocation_and_job(migrated_url: str) -> 
 
 def test_provision_with_label_persists_and_systems_get_echoes(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _provision(pool, _ctx(), alloc_id, _profile(), label="  edge-case A  ")
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            resp = await _provision(
+                pool, ctx(), alloc_id, provisioning_profile(), label="  edge-case A  "
+            )
             assert resp.status == "queued"
             system_id = str(resp.data["system_id"])
-            get_resp = await get_system(pool, _ctx(), system_id, resolver=_provider_resolver())
+            get_resp = await get_system(pool, ctx(), system_id, resolver=provider_resolver())
         assert get_resp.data["label"] == "edge-case A"  # stored stripped, echoed verbatim
 
     asyncio.run(_run())
@@ -352,11 +328,11 @@ def test_provision_with_label_persists_and_systems_get_echoes(migrated_url: str)
 
 def test_provision_without_label_echoes_null(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            resp = await _provision(pool, ctx(), alloc_id, provisioning_profile())
             get_resp = await get_system(
-                pool, _ctx(), str(resp.data["system_id"]), resolver=_provider_resolver()
+                pool, ctx(), str(resp.data["system_id"]), resolver=provider_resolver()
             )
         assert get_resp.data["label"] is None
 
@@ -365,9 +341,11 @@ def test_provision_without_label_echoes_null(migrated_url: str) -> None:
 
 def test_provision_invalid_label_rejected_no_system_or_audit(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _provision(pool, _ctx(), alloc_id, _profile(), label="bad\tlabel")
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            resp = await _provision(
+                pool, ctx(), alloc_id, provisioning_profile(), label="bad\tlabel"
+            )
             assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
             assert resp.data["reason"] == "invalid_label"
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -385,10 +363,10 @@ def test_provision_invalid_label_rejected_no_system_or_audit(migrated_url: str) 
 
 def test_provision_retry_is_idempotent(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            first = await _provision(pool, _ctx(), alloc_id, _profile())
-            second = await _provision(pool, _ctx(), alloc_id, _profile())
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            first = await _provision(pool, ctx(), alloc_id, provisioning_profile())
+            second = await _provision(pool, ctx(), alloc_id, provisioning_profile())
             assert first.object_id == second.object_id  # same job
             assert first.data["system_id"] == second.data["system_id"]
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -408,10 +386,14 @@ def test_provision_keyed_retry_replays_one_system(migrated_url: str) -> None:
     """A keyed retry replays the identical envelope, mints one System, records one key."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            first = await _provision(pool, _ctx(), alloc_id, _profile(), idempotency_key="k1")
-            second = await _provision(pool, _ctx(), alloc_id, _profile(), idempotency_key="k1")
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            first = await _provision(
+                pool, ctx(), alloc_id, provisioning_profile(), idempotency_key="k1"
+            )
+            second = await _provision(
+                pool, ctx(), alloc_id, provisioning_profile(), idempotency_key="k1"
+            )
             assert first.model_dump() == second.model_dump()
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM systems")
@@ -428,10 +410,10 @@ def test_provision_keyed_retry_replays_one_system(migrated_url: str) -> None:
 
 def test_provision_terminal_existing_system_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            await _seed_system(pool, alloc_id, SystemState.TORN_DOWN)
-            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            await seed_system(pool, alloc_id, SystemState.TORN_DOWN)
+            resp = await _provision(pool, ctx(), alloc_id, provisioning_profile())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "torn_down"
@@ -474,16 +456,16 @@ async def _fail_provision_job(
 
 def test_provision_retry_failed_system_surfaces_reason_and_actions(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.FAILED)
             job_id = await _fail_provision_job(
                 pool,
                 alloc_id,
                 sys_id,
                 {"failure_message": "base image volume is not staged"},
             )
-            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+            resp = await _provision(pool, ctx(), alloc_id, provisioning_profile())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.object_id == sys_id  # no re-mint: same failed System
@@ -501,12 +483,12 @@ def test_provision_retry_failed_system_surfaces_reason_and_actions(migrated_url:
 
 def test_provision_retry_failed_system_is_idempotent(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.FAILED)
             await _fail_provision_job(pool, alloc_id, sys_id, {"failure_message": "boom"})
-            first = await _provision(pool, _ctx(), alloc_id, _profile())
-            second = await _provision(pool, _ctx(), alloc_id, _profile())
+            first = await _provision(pool, ctx(), alloc_id, provisioning_profile())
+            second = await _provision(pool, ctx(), alloc_id, provisioning_profile())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "SELECT count(*) AS n FROM systems WHERE allocation_id = %s", (alloc_id,)
@@ -522,10 +504,10 @@ def test_provision_retry_failed_system_is_idempotent(migrated_url: str) -> None:
 
 def test_provision_retry_failed_system_without_job_returns_sentence(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
-            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.FAILED)
+            resp = await _provision(pool, ctx(), alloc_id, provisioning_profile())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.object_id == sys_id
@@ -560,11 +542,11 @@ def test_provision_retry_failed_system_ignores_succeeded_provision_job(migrated_
     # A System can reach FAILED via reprovisioning->failed, leaving the original provision job
     # SUCCEEDED. The retry must not advertise that succeeded job as the failing one.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.FAILED)
             await _succeed_provision_job(pool, alloc_id, sys_id)
-            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+            resp = await _provision(pool, ctx(), alloc_id, provisioning_profile())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.object_id == sys_id
@@ -577,16 +559,16 @@ def test_provision_retry_failed_system_ignores_succeeded_provision_job(migrated_
 
 def test_provision_retry_failed_system_copies_failure_detail_keys(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.FAILED)
             await _fail_provision_job(
                 pool,
                 alloc_id,
                 sys_id,
                 {"failure_message": "boom", "failure_detail_host": "host-7"},
             )
-            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+            resp = await _provision(pool, ctx(), alloc_id, provisioning_profile())
         assert resp.data["failure_detail_host"] == "host-7"
 
     asyncio.run(_run())
@@ -594,11 +576,11 @@ def test_provision_retry_failed_system_copies_failure_detail_keys(migrated_url: 
 
 def test_provision_non_granted_allocation_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             async with pool.connection() as conn:
                 await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASING)
-            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+            resp = await _provision(pool, ctx(), alloc_id, provisioning_profile())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "releasing"
@@ -617,8 +599,8 @@ async def _second_granted_allocation(pool: AsyncConnectionPool) -> str:
             conn,
             Allocation(
                 id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
+                created_at=TEST_DT,
+                updated_at=TEST_DT,
                 principal="user-1",
                 project="proj",
                 resource_id=res_row["id"],
@@ -633,11 +615,11 @@ def test_provision_at_system_quota_is_quota_exceeded_no_writes(migrated_url: str
     # distinct granted allocation, same project) is denied quota_exceeded and writes
     # neither a System nor a job, leaving the allocation granted.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            first_alloc = await _granted_allocation(pool, systems_quota=1)
-            await _provision(pool, _ctx(), first_alloc, _profile())
+        async with systems_support.pool(migrated_url) as pool:
+            first_alloc = await granted_allocation(pool, systems_quota=1)
+            await _provision(pool, ctx(), first_alloc, provisioning_profile())
             second_alloc = await _second_granted_allocation(pool)
-            resp = await _provision(pool, _ctx(), second_alloc, _profile())
+            resp = await _provision(pool, ctx(), second_alloc, provisioning_profile())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM systems")
                 sys_n = await cur.fetchone()
@@ -657,11 +639,11 @@ def test_provision_at_system_quota_is_quota_exceeded_no_writes(migrated_url: str
 def test_provision_no_quota_row_is_quota_exceeded(migrated_url: str) -> None:
     # Fail-closed: a project with no quota row cannot provision (ADR-0007 §4).
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             async with pool.connection() as conn:
                 await conn.execute("DELETE FROM quotas WHERE project = %s", ("proj",))
-            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+            resp = await _provision(pool, ctx(), alloc_id, provisioning_profile())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM systems")
                 sys_n = await cur.fetchone()
@@ -676,11 +658,11 @@ def test_provision_quota_counts_only_non_terminal_systems(migrated_url: str) -> 
     # A torn_down System does not occupy a quota slot; with quota=1 and one terminal
     # System already present, a fresh provision still succeeds.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            spent_alloc = await _granted_allocation(pool, systems_quota=1)
-            await _seed_system(pool, spent_alloc, SystemState.TORN_DOWN)
+        async with systems_support.pool(migrated_url) as pool:
+            spent_alloc = await granted_allocation(pool, systems_quota=1)
+            await seed_system(pool, spent_alloc, SystemState.TORN_DOWN)
             fresh_alloc = await _second_granted_allocation(pool)
-            resp = await _provision(pool, _ctx(), fresh_alloc, _profile())
+            resp = await _provision(pool, ctx(), fresh_alloc, provisioning_profile())
         assert resp.status == "queued"
 
     asyncio.run(_run())
@@ -688,11 +670,11 @@ def test_provision_quota_counts_only_non_terminal_systems(migrated_url: str) -> 
 
 def test_provision_unknown_domain_param_is_config_error_no_job(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            bad = _profile()
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            bad = provisioning_profile()
             bad["provider"]["local-libvirt"]["domain_xml_params"]["bogus"] = "x"
-            resp = await _provision(pool, _ctx(), alloc_id, bad)
+            resp = await _provision(pool, ctx(), alloc_id, bad)
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM systems")
                 sys_n = await cur.fetchone()
@@ -707,9 +689,9 @@ def test_provision_rejects_unsupported_artifact_rootfs_before_system_and_job(
     migrated_url: str,
 ) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _provision(pool, _ctx(), alloc_id, _artifact_rootfs_profile())
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            resp = await _provision(pool, ctx(), alloc_id, _artifact_rootfs_profile())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM systems")
                 sys_n = await cur.fetchone()
@@ -735,11 +717,11 @@ def test_provision_rejects_local_rootfs_outside_allowed_root_before_system_and_j
     allowed_root.mkdir()
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             resp = await _provision_handlers(_rootfs_validator(allowed_root)).provision_system(
                 pool,
-                _ctx(),
+                ctx(),
                 allocation_id=alloc_id,
                 profile=_local_rootfs_profile(outside),
             )
@@ -763,10 +745,10 @@ def test_provision_without_operator_raises(migrated_url: str) -> None:
     from kdive.security.authz.rbac import AuthorizationError
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             with pytest.raises(AuthorizationError):
-                await _provision(pool, _ctx(Role.VIEWER), alloc_id, _profile())
+                await _provision(pool, ctx(Role.VIEWER), alloc_id, provisioning_profile())
 
     asyncio.run(_run())
 
@@ -779,12 +761,12 @@ def test_provision_viewer_denied_before_provider_rootfs_validation(
     outside.write_bytes(b"rootfs")
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             with pytest.raises(AuthorizationError):
                 await _provision_handlers(_failing_rootfs_validator(calls)).provision_system(
                     pool,
-                    _ctx(Role.VIEWER),
+                    ctx(Role.VIEWER),
                     allocation_id=alloc_id,
                     profile=_local_rootfs_profile(outside),
                 )
@@ -797,9 +779,11 @@ def test_provision_foreign_allocation_is_not_found(migrated_url: str) -> None:
     """An Allocation outside the caller's projects is not found, never a cross-project mint."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _provision(pool, _ctx(projects=("other",)), alloc_id, _profile())
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            resp = await _provision(
+                pool, ctx(projects=("other",)), alloc_id, provisioning_profile()
+            )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM systems")
                 sys_n = await cur.fetchone()
@@ -812,8 +796,8 @@ def test_provision_foreign_allocation_is_not_found(migrated_url: str) -> None:
 
 def test_provision_malformed_uuid_is_invalid_uuid(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await _provision(pool, _ctx(), "not-a-uuid", _profile())
+        async with systems_support.pool(migrated_url) as pool:
+            resp = await _provision(pool, ctx(), "not-a-uuid", provisioning_profile())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "invalid_uuid"
@@ -828,14 +812,14 @@ def test_provision_malformed_uuid_is_invalid_uuid(migrated_url: str) -> None:
 
 def test_provision_handler_drives_system_ready(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
-            job = await _enqueue_provision(pool, sys_id, alloc_id)
-            prov = _FakeProvisioning()
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            job = await enqueue_provision(pool, sys_id, alloc_id)
+            prov = FakeProvisioning()
             async with pool.connection() as conn:
                 result = await systems_handlers.provision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn, job, resolver=provider_resolver(provisioner=prov)
                 )
             assert result == sys_id
             assert prov.provisioned == [UUID(sys_id)]
@@ -856,16 +840,16 @@ def test_provision_handler_stamps_active_started_at_on_ready(migrated_url: str) 
     """
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             # The genuine path flips the allocation granted->active at provision time.
             async with pool.connection() as conn:
                 await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.ACTIVE)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
-            job = await _enqueue_provision(pool, sys_id, alloc_id)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            job = await enqueue_provision(pool, sys_id, alloc_id)
             async with pool.connection() as conn:
                 await systems_handlers.provision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=_FakeProvisioning())
+                    conn, job, resolver=provider_resolver(provisioner=FakeProvisioning())
                 )
                 alloc = await ALLOCATIONS.get(conn, UUID(alloc_id))
             assert alloc is not None
@@ -882,8 +866,8 @@ def test_provision_handler_does_not_restamp_active_started_at(migrated_url: str)
     """
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             anchor = datetime(2026, 1, 1, 12, tzinfo=UTC)
             async with pool.connection() as conn:
                 await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.ACTIVE)
@@ -891,11 +875,11 @@ def test_provision_handler_does_not_restamp_active_started_at(migrated_url: str)
                     "UPDATE allocations SET active_started_at = %s WHERE id = %s",
                     (anchor, UUID(alloc_id)),
                 )
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
-            job = await _enqueue_provision(pool, sys_id, alloc_id)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            job = await enqueue_provision(pool, sys_id, alloc_id)
             async with pool.connection() as conn:
                 await systems_handlers.provision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=_FakeProvisioning())
+                    conn, job, resolver=provider_resolver(provisioner=FakeProvisioning())
                 )
                 alloc = await ALLOCATIONS.get(conn, UUID(alloc_id))
             assert alloc is not None
@@ -906,14 +890,14 @@ def test_provision_handler_does_not_restamp_active_started_at(migrated_url: str)
 
 def test_provision_handler_retry_on_ready_is_noop(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            job = await _enqueue_provision(pool, sys_id, alloc_id)
-            prov = _FakeProvisioning()
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            job = await enqueue_provision(pool, sys_id, alloc_id)
+            prov = FakeProvisioning()
             async with pool.connection() as conn:
                 await systems_handlers.provision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn, job, resolver=provider_resolver(provisioner=prov)
                 )
             assert prov.provisioned == []  # already up; provider not called again
 
@@ -922,15 +906,15 @@ def test_provision_handler_retry_on_ready_is_noop(migrated_url: str) -> None:
 
 def test_provision_handler_provider_failure_sets_system_failed(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
-            job = await _enqueue_provision(pool, sys_id, alloc_id)
-            prov = _FakeProvisioning(provision_error=True)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            job = await enqueue_provision(pool, sys_id, alloc_id)
+            prov = FakeProvisioning(provision_error=True)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError):
                     await systems_handlers.provision_handler(
-                        conn, job, resolver=_provider_resolver(provisioner=prov)
+                        conn, job, resolver=provider_resolver(provisioner=prov)
                     )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state, domain_name FROM systems WHERE id = %s", (sys_id,))
@@ -947,7 +931,7 @@ def test_provision_handler_failure_when_already_terminal_preserves_category(
     # The provider fails AND a concurrent teardown already drove the System torn_down. The
     # failed-branch transition is illegal (torn_down->failed), but the handler tolerates that
     # and re-raises the original PROVISIONING_FAILURE (not the masking IllegalTransition).
-    class _FailAfterTerminal(_FakeProvisioning):
+    class _FailAfterTerminal(FakeProvisioning):
         def __init__(self, url: str) -> None:
             super().__init__(provision_error=True)
             self._url = url
@@ -967,15 +951,15 @@ def test_provision_handler_failure_when_already_terminal_preserves_category(
             return super().provision(system_id, profile, overlay_customizers=overlay_customizers)
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
-            job = await _enqueue_provision(pool, sys_id, alloc_id)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            job = await enqueue_provision(pool, sys_id, alloc_id)
             prov = _FailAfterTerminal(migrated_url)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
                     await systems_handlers.provision_handler(
-                        conn, job, resolver=_provider_resolver(provisioner=prov)
+                        conn, job, resolver=provider_resolver(provisioner=prov)
                     )
             assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -991,14 +975,14 @@ def test_provision_handler_terminal_system_reaps_without_provisioning(migrated_u
     # idempotently reaps the deterministic domain — the durable retry point for a compensation
     # that failed on an earlier run (NULL domain_name -> deterministic name).
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.TORN_DOWN)
-            job = await _enqueue_provision(pool, sys_id, alloc_id)
-            prov = _FakeProvisioning()
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.TORN_DOWN)
+            job = await enqueue_provision(pool, sys_id, alloc_id)
+            prov = FakeProvisioning()
             async with pool.connection() as conn:
                 result = await systems_handlers.provision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn, job, resolver=provider_resolver(provisioner=prov)
                 )
         assert result == sys_id
         assert prov.provisioned == []  # not re-provisioned
@@ -1011,7 +995,7 @@ def test_provision_handler_failed_compensation_retries_reap_on_requeue(migrated_
     # provision creates the domain, a concurrent teardown drives torn_down, and the finalize
     # compensation teardown fails transiently (handler raises -> job requeues). The requeue must
     # re-attempt the reap from the terminal-entry path rather than leaking the created domain.
-    class _RacingThenTeardownFails(_FakeProvisioning):
+    class _RacingThenTeardownFails(FakeProvisioning):
         def __init__(self, url: str) -> None:
             super().__init__()
             self._url = url
@@ -1038,20 +1022,20 @@ def test_provision_handler_failed_compensation_retries_reap_on_requeue(migrated_
             super().teardown(domain_name)
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
-            job = await _enqueue_provision(pool, sys_id, alloc_id)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            job = await enqueue_provision(pool, sys_id, alloc_id)
             prov = _RacingThenTeardownFails(migrated_url)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError):  # finalize compensation teardown failed
                     await systems_handlers.provision_handler(
-                        conn, job, resolver=_provider_resolver(provisioner=prov)
+                        conn, job, resolver=provider_resolver(provisioner=prov)
                     )
             assert prov.torn_down == []  # nothing reaped yet — the domain is still leaked
             async with pool.connection() as conn:  # requeue
                 result = await systems_handlers.provision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn, job, resolver=provider_resolver(provisioner=prov)
                 )
             assert result == sys_id
             assert prov.provisioned == [UUID(sys_id)]  # provider NOT re-invoked on the requeue
@@ -1062,14 +1046,14 @@ def test_provision_handler_failed_compensation_retries_reap_on_requeue(migrated_
 
 def test_provision_handler_missing_row_is_infra_failure(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            job = await _enqueue_provision(pool, str(uuid4()), alloc_id)
-            prov = _FakeProvisioning()
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            job = await enqueue_provision(pool, str(uuid4()), alloc_id)
+            prov = FakeProvisioning()
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
                     await systems_handlers.provision_handler(
-                        conn, job, resolver=_provider_resolver(provisioner=prov)
+                        conn, job, resolver=provider_resolver(provisioner=prov)
                     )
         assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
@@ -1079,7 +1063,7 @@ def test_provision_handler_missing_row_is_infra_failure(migrated_url: str) -> No
 def test_provision_handler_superseded_midflight_tears_down_created_domain(
     migrated_url: str,
 ) -> None:
-    class _RacingProvisioning(_FakeProvisioning):
+    class _RacingProvisioning(FakeProvisioning):
         """Drives the System torn_down before returning — a deterministic mid-flight race."""
 
         def __init__(self, url: str) -> None:
@@ -1101,14 +1085,14 @@ def test_provision_handler_superseded_midflight_tears_down_created_domain(
             return name
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
-            job = await _enqueue_provision(pool, sys_id, alloc_id)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            job = await enqueue_provision(pool, sys_id, alloc_id)
             prov = _RacingProvisioning(migrated_url)
             async with pool.connection() as conn:
                 result = await systems_handlers.provision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn, job, resolver=provider_resolver(provisioner=prov)
                 )
             assert result == sys_id
             assert prov.torn_down == [f"kdive-{sys_id}"]  # the created domain was cleaned up
@@ -1123,7 +1107,7 @@ def test_provision_handler_superseded_midflight_tears_down_created_domain(
 def test_provision_handler_concurrent_same_job_ready_does_not_tear_down(migrated_url: str) -> None:
     # A lease lapse double-run: another worker already finalized this provision to `ready`.
     # The finalize must NOT tear down the (live) domain — `ready` is not a teardown.
-    class _RacingToReady(_FakeProvisioning):
+    class _RacingToReady(FakeProvisioning):
         def __init__(self, url: str) -> None:
             super().__init__()
             self._url = url
@@ -1146,14 +1130,14 @@ def test_provision_handler_concurrent_same_job_ready_does_not_tear_down(migrated
             return name
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
-            job = await _enqueue_provision(pool, sys_id, alloc_id)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            job = await enqueue_provision(pool, sys_id, alloc_id)
             prov = _RacingToReady(migrated_url)
             async with pool.connection() as conn:
                 result = await systems_handlers.provision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn, job, resolver=provider_resolver(provisioner=prov)
                 )
             assert result == sys_id
             assert prov.torn_down == []  # the live domain was left alone
@@ -1173,8 +1157,8 @@ async def _seed_system_with_profile(
             conn,
             System(
                 id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
+                created_at=TEST_DT,
+                updated_at=TEST_DT,
                 principal="user-1",
                 project="proj",
                 allocation_id=UUID(alloc_id),
@@ -1193,7 +1177,7 @@ async def _teardown(pool: AsyncConnectionPool, ctx: RequestContext, system_id: s
 
 
 def _teardown_profile() -> dict[str, Any]:
-    p = _profile()
+    p = provisioning_profile()
     p["provider"]["local-libvirt"]["destructive_ops"] = ["teardown"]
     return p
 
@@ -1205,7 +1189,7 @@ async def _seed_teardown_system(
     *,
     profile: dict[str, Any] | None = None,
 ) -> str:
-    sys_id = await _seed_system(pool, alloc_id, state)
+    sys_id = await seed_system(pool, alloc_id, state)
     async with pool.connection() as conn:
         await conn.execute(
             "UPDATE systems SET provisioning_profile = %s WHERE id = %s",
@@ -1217,10 +1201,10 @@ async def _seed_teardown_system(
 def test_teardown_admin_enqueues_job(migrated_url: str) -> None:
     # ADR-0129: admin on the owning project may tear down; teardown runs no destructive gate.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
-            resp = await _teardown(pool, _ctx(Role.ADMIN), sys_id)
+            resp = await _teardown(pool, ctx(Role.ADMIN), sys_id)
             assert resp.data["system_id"] == sys_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
@@ -1234,10 +1218,10 @@ def test_teardown_admin_enqueues_job(migrated_url: str) -> None:
 
 def test_teardown_tool_already_torn_down_no_job(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_teardown_system(pool, alloc_id, SystemState.TORN_DOWN)
-            resp = await _teardown(pool, _ctx(Role.ADMIN), sys_id)
+            resp = await _teardown(pool, ctx(Role.ADMIN), sys_id)
             assert resp.status == "torn_down"
             # The idempotent replay steers to release the freed Allocation, not just re-read
             # the System (#1385): allocations.release precedes systems.get.
@@ -1255,10 +1239,10 @@ def test_teardown_below_admin_denied_with_missing_checks(migrated_url: str, role
     # teardown is admin-only (ADR-0129): both viewer AND operator are refused, and the
     # denial envelope names the failed check while the audit row keeps the same shape.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
-            resp = await _teardown(pool, _ctx(role), sys_id)
+            resp = await _teardown(pool, ctx(role), sys_id)
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'teardown'")
                 row = await cur.fetchone()
@@ -1282,12 +1266,12 @@ def test_teardown_admin_succeeds_without_profile_opt_in(migrated_url: str) -> No
     # ADR-0129: teardown no longer reads the profile, so a profile that does not opt
     # teardown in does not block an admin tearing down their own System.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_teardown_system(
-                pool, alloc_id, SystemState.READY, profile=_profile()
+                pool, alloc_id, SystemState.READY, profile=provisioning_profile()
             )
-            resp = await _teardown(pool, _ctx(Role.ADMIN), sys_id)
+            resp = await _teardown(pool, ctx(Role.ADMIN), sys_id)
         assert resp.data["system_id"] == sys_id
         assert resp.status != "error"
 
@@ -1296,20 +1280,20 @@ def test_teardown_admin_succeeds_without_profile_opt_in(migrated_url: str) -> No
 
 def test_teardown_handler_destroys_and_sets_torn_down(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
             async with pool.connection() as conn:
                 await conn.execute(
                     "UPDATE systems SET domain_name = %s WHERE id = %s", (f"kdive-{sys_id}", sys_id)
                 )
             job = await _enqueue_teardown(pool, sys_id)
-            prov = _FakeProvisioning()
+            prov = FakeProvisioning()
             async with pool.connection() as conn:
                 await systems_handlers.teardown_handler(
                     conn,
                     job,
-                    resolver=_provider_resolver(provisioner=prov),
+                    resolver=provider_resolver(provisioner=prov),
                     artifact_store=INERT_OBJECT_STORE,
                 )
             assert prov.torn_down == [f"kdive-{sys_id}"]
@@ -1323,16 +1307,16 @@ def test_teardown_handler_destroys_and_sets_torn_down(migrated_url: str) -> None
 
 def test_teardown_handler_provisioning_system_one_transition(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
             job = await _enqueue_teardown(pool, sys_id)
-            prov = _FakeProvisioning()
+            prov = FakeProvisioning()
             async with pool.connection() as conn:
                 await systems_handlers.teardown_handler(
                     conn,
                     job,
-                    resolver=_provider_resolver(provisioner=prov),
+                    resolver=provider_resolver(provisioner=prov),
                     artifact_store=INERT_OBJECT_STORE,
                 )
             assert prov.torn_down == [f"kdive-{sys_id}"]  # NULL domain_name -> deterministic name
@@ -1351,16 +1335,16 @@ def test_teardown_handler_already_torn_down_reattempts_destroy_no_transition(
     # idempotent destroy — so a teardown that failed after committing ->torn_down self-heals
     # on retry rather than leaking the domain.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.TORN_DOWN)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.TORN_DOWN)
             job = await _enqueue_teardown(pool, sys_id)
-            prov = _FakeProvisioning()
+            prov = FakeProvisioning()
             async with pool.connection() as conn:
                 await systems_handlers.teardown_handler(
                     conn,
                     job,
-                    resolver=_provider_resolver(provisioner=prov),
+                    resolver=provider_resolver(provisioner=prov),
                     artifact_store=INERT_OBJECT_STORE,
                 )
             assert prov.torn_down == [f"kdive-{sys_id}"]  # idempotent destroy re-attempted
@@ -1381,12 +1365,12 @@ def test_teardown_handler_already_torn_down_reattempts_destroy_no_transition(
 
 def _active_allocation_profile() -> dict[str, Any]:
     """A profile for reprovision; no destructive_ops opt-in needed (ADR-0326)."""
-    return _profile()
+    return provisioning_profile()
 
 
 async def _scoped_active_allocation(pool: AsyncConnectionPool) -> str:
     """A granted->active allocation; reprovision is granted by the contributor role alone."""
-    alloc_id = await _granted_allocation(pool)
+    alloc_id = await granted_allocation(pool)
     async with pool.connection() as conn:
         await conn.execute(
             "UPDATE allocations SET state = 'active' WHERE id = %s",
@@ -1396,7 +1380,7 @@ async def _scoped_active_allocation(pool: AsyncConnectionPool) -> str:
 
 
 async def _seed_ready_system(pool: AsyncConnectionPool, alloc_id: str) -> str:
-    sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+    sys_id = await seed_system(pool, alloc_id, SystemState.READY)
     async with pool.connection() as conn:
         await conn.execute(
             "UPDATE systems SET provisioning_profile = %s, domain_name = %s WHERE id = %s",
@@ -1411,8 +1395,8 @@ async def _seed_run(pool: AsyncConnectionPool, sys_id: str, state: RunState) -> 
             conn,
             Investigation(
                 id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
+                created_at=TEST_DT,
+                updated_at=TEST_DT,
                 principal="user-1",
                 project="proj",
                 title="t",
@@ -1423,8 +1407,8 @@ async def _seed_run(pool: AsyncConnectionPool, sys_id: str, state: RunState) -> 
             conn,
             Run(
                 id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
+                created_at=TEST_DT,
+                updated_at=TEST_DT,
                 principal="user-1",
                 project="proj",
                 investigation_id=inv.id,
@@ -1445,7 +1429,7 @@ async def _reprovision(
     *,
     idempotency_key: str | None = None,
 ):
-    return await _SYSTEM_ADMIN_HANDLERS.reprovision_system(
+    return await SYSTEM_ADMIN_HANDLERS.reprovision_system(
         pool,
         ctx,
         system_id=system_id,
@@ -1458,12 +1442,12 @@ def test_reprovision_transitions_ready_to_reprovisioning_and_enqueues_job(
     migrated_url: str,
 ) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             new_profile = _active_allocation_profile()
             new_profile["vcpu"] = 8
-            resp = await _reprovision(pool, _ctx(), sys_id, new_profile)
+            resp = await _reprovision(pool, ctx(), sys_id, new_profile)
             assert resp.status == "queued"
             assert resp.data["system_id"] == sys_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -1493,7 +1477,7 @@ def test_reprovision_rejected_when_bound_investigation_closed(migrated_url: str)
     # System bound to a terminal investigation is rejected, not moved ready->reprovisioning. This
     # closes the force-close-then-reprovision race from the reprovision side.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             async with pool.connection() as conn:
@@ -1501,8 +1485,8 @@ def test_reprovision_rejected_when_bound_investigation_closed(migrated_url: str)
                     conn,
                     Investigation(
                         id=uuid4(),
-                        created_at=_DT,
-                        updated_at=_DT,
+                        created_at=TEST_DT,
+                        updated_at=TEST_DT,
                         principal="user-1",
                         project="proj",
                         title="t",
@@ -1514,7 +1498,7 @@ def test_reprovision_rejected_when_bound_investigation_closed(migrated_url: str)
                 )
             new_profile = _active_allocation_profile()
             new_profile["vcpu"] = 8
-            resp = await _reprovision(pool, _ctx(), sys_id, new_profile)
+            resp = await _reprovision(pool, ctx(), sys_id, new_profile)
             assert resp.status == "error"
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
@@ -1529,12 +1513,12 @@ def test_reprovision_with_unselectable_cpu_pin_is_config_error(migrated_url: str
     # rejected pre-mutation (ADR-0369), leaving the System READY — never a reprovisioning->failed
     # that destroys a working System with a late libvirt-define error.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             new_profile = _active_allocation_profile()
             new_profile["provider"]["local-libvirt"]["cpu"] = {"model": "qemu64"}
-            resp = await _reprovision(pool, _ctx(), sys_id, new_profile)
+            resp = await _reprovision(pool, ctx(), sys_id, new_profile)
             assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
@@ -1552,7 +1536,7 @@ def test_reprovision_clears_local_resolved_cpu(migrated_url: str) -> None:
     # live-verified value is unknown until Phase C re-reads it) — systems.get must not report a
     # stale CPU as live-verified during the rebuild (ADR-0369).
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             async with pool.connection() as conn:
@@ -1560,7 +1544,7 @@ def test_reprovision_clears_local_resolved_cpu(migrated_url: str) -> None:
                     "UPDATE systems SET resolved_cpu = %s WHERE id = %s",
                     (Jsonb({"model": "SapphireRapids", "arch": "x86_64"}), UUID(sys_id)),
                 )
-            resp = await _reprovision(pool, _ctx(), sys_id, _active_allocation_profile())
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
             assert resp.status == "queued"
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT resolved_cpu FROM systems WHERE id = %s", (sys_id,))
@@ -1572,12 +1556,12 @@ def test_reprovision_clears_local_resolved_cpu(migrated_url: str) -> None:
 
 def test_reprovision_same_profile_dedups(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             p = _active_allocation_profile()
-            first = await _reprovision(pool, _ctx(), sys_id, p)
-            second = await _reprovision(pool, _ctx(), sys_id, p)
+            first = await _reprovision(pool, ctx(), sys_id, p)
+            second = await _reprovision(pool, ctx(), sys_id, p)
             assert first.object_id == second.object_id  # same job (dedup on digest)
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
@@ -1589,16 +1573,16 @@ def test_reprovision_same_profile_dedups(migrated_url: str) -> None:
 
 def test_reprovision_different_profile_is_new_job(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
-            first = await _reprovision(pool, _ctx(), sys_id, _active_allocation_profile())
+            first = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
             # Drive back to ready so a second reprovision is admissible.
             async with pool.connection() as conn:
                 await conn.execute("UPDATE systems SET state = 'ready' WHERE id = %s", (sys_id,))
             other = _active_allocation_profile()
             other["memory_mb"] = 8192
-            second = await _reprovision(pool, _ctx(), sys_id, other)
+            second = await _reprovision(pool, ctx(), sys_id, other)
             assert first.object_id != second.object_id  # distinct job (distinct digest)
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
@@ -1610,11 +1594,11 @@ def test_reprovision_different_profile_is_new_job(migrated_url: str) -> None:
 
 def test_reprovision_invalid_idempotency_key_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             resp = await _reprovision(
-                pool, _ctx(), sys_id, _active_allocation_profile(), idempotency_key=""
+                pool, ctx(), sys_id, _active_allocation_profile(), idempotency_key=""
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
@@ -1635,12 +1619,12 @@ def test_reprovision_keyed_retry_replays_stored_envelope(migrated_url: str) -> N
     """A keyed retry replays the first envelope (admin.py:91-97) rather than re-checking state."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             p = _active_allocation_profile()
-            first = await _reprovision(pool, _ctx(), sys_id, p, idempotency_key="k1")
-            second = await _reprovision(pool, _ctx(), sys_id, p, idempotency_key="k1")
+            first = await _reprovision(pool, ctx(), sys_id, p, idempotency_key="k1")
+            second = await _reprovision(pool, ctx(), sys_id, p, idempotency_key="k1")
             assert first.model_dump() == second.model_dump()  # replay, not a fresh evaluation
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
@@ -1657,11 +1641,11 @@ def test_reprovision_keyed_retry_replays_stored_envelope(migrated_url: str) -> N
 
 def test_reprovision_under_live_run_is_stale_handle(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             await _seed_run(pool, sys_id, RunState.RUNNING)
-            resp = await _reprovision(pool, _ctx(), sys_id, _active_allocation_profile())
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
                 sys_row = await cur.fetchone()
@@ -1677,11 +1661,11 @@ def test_reprovision_under_live_run_is_stale_handle(migrated_url: str) -> None:
 
 def test_reprovision_with_terminal_run_is_admissible(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             await _seed_run(pool, sys_id, RunState.SUCCEEDED)  # terminal -> does not block
-            resp = await _reprovision(pool, _ctx(), sys_id, _active_allocation_profile())
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
         assert resp.status == "queued"
 
     asyncio.run(_run())
@@ -1689,10 +1673,10 @@ def test_reprovision_with_terminal_run_is_admissible(migrated_url: str) -> None:
 
 def test_reprovision_non_ready_system_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
-            resp = await _reprovision(pool, _ctx(), sys_id, _active_allocation_profile())
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "provisioning"
@@ -1704,11 +1688,11 @@ def test_reprovision_contributor_may_invoke_without_opt_in(migrated_url: str) ->
     # ADR-0326: reprovision is contributor leaseholder control; a contributor may reprovision its
     # own READY System with no destructive_ops opt-in.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             resp = await _reprovision(
-                pool, _ctx(Role.CONTRIBUTOR), sys_id, _active_allocation_profile()
+                pool, ctx(Role.CONTRIBUTOR), sys_id, _active_allocation_profile()
             )
         assert resp.status == "queued"
 
@@ -1717,11 +1701,11 @@ def test_reprovision_contributor_may_invoke_without_opt_in(migrated_url: str) ->
 
 def test_reprovision_viewer_denied(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             with pytest.raises(AuthorizationError):
-                await _reprovision(pool, _ctx(Role.VIEWER), sys_id, _active_allocation_profile())
+                await _reprovision(pool, ctx(Role.VIEWER), sys_id, _active_allocation_profile())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
                 sys_row = await cur.fetchone()
@@ -1738,14 +1722,14 @@ def test_reprovision_viewer_denied_before_provider_rootfs_validation(
     outside.write_bytes(b"rootfs")
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             profile = _local_rootfs_profile(outside)
             with pytest.raises(AuthorizationError):
                 await _admin_handlers(_failing_rootfs_validator(calls)).reprovision_system(
                     pool,
-                    _ctx(Role.VIEWER),
+                    ctx(Role.VIEWER),
                     system_id=sys_id,
                     profile=profile,
                 )
@@ -1763,11 +1747,11 @@ def test_reprovision_viewer_denied_before_provider_rootfs_validation(
 
 def test_reprovision_cross_project_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             resp = await _reprovision(
-                pool, _ctx(projects=("other",)), sys_id, _active_allocation_profile()
+                pool, ctx(projects=("other",)), sys_id, _active_allocation_profile()
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -1777,8 +1761,8 @@ def test_reprovision_cross_project_is_config_error(migrated_url: str) -> None:
 
 def test_reprovision_malformed_uuid_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await _reprovision(pool, _ctx(), "not-a-uuid", _active_allocation_profile())
+        async with systems_support.pool(migrated_url) as pool:
+            resp = await _reprovision(pool, ctx(), "not-a-uuid", _active_allocation_profile())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
 
@@ -1787,12 +1771,12 @@ def test_reprovision_malformed_uuid_is_config_error(migrated_url: str) -> None:
 
 def test_reprovision_bad_profile_is_config_error_no_job(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             bad = _active_allocation_profile()
             bad["provider"]["local-libvirt"]["domain_xml_params"]["bogus"] = "x"
-            resp = await _reprovision(pool, _ctx(), sys_id, bad)
+            resp = await _reprovision(pool, ctx(), sys_id, bad)
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM jobs")
                 job_n = await cur.fetchone()
@@ -1807,10 +1791,10 @@ def test_reprovision_rejects_unsupported_artifact_rootfs_before_mutating_ready_s
     migrated_url: str,
 ) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
-            resp = await _reprovision(pool, _ctx(), sys_id, _artifact_rootfs_profile())
+            resp = await _reprovision(pool, ctx(), sys_id, _artifact_rootfs_profile())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "SELECT state, provisioning_profile FROM systems WHERE id = %s", (sys_id,)
@@ -1838,13 +1822,13 @@ def test_reprovision_rejects_local_rootfs_outside_allowed_root_before_mutating_r
     allowed_root.mkdir()
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             profile = _local_rootfs_profile(outside)
             resp = await _admin_handlers(_rootfs_validator(allowed_root)).reprovision_system(
                 pool,
-                _ctx(),
+                ctx(),
                 system_id=sys_id,
                 profile=profile,
             )
@@ -1880,7 +1864,7 @@ async def _enqueue_reprovision(pool: AsyncConnectionPool, system_id: str) -> Job
 
 def test_reprovision_handler_drives_reprovisioning_to_ready(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             async with pool.connection() as conn:
@@ -1888,10 +1872,10 @@ def test_reprovision_handler_drives_reprovisioning_to_ready(migrated_url: str) -
                     "UPDATE systems SET state = 'reprovisioning' WHERE id = %s", (sys_id,)
                 )
             job = await _enqueue_reprovision(pool, sys_id)
-            prov = _FakeProvisioning()
+            prov = FakeProvisioning()
             async with pool.connection() as conn:
                 result = await systems_handlers.reprovision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn, job, resolver=provider_resolver(provisioner=prov)
                 )
             assert result == sys_id
             assert prov.reprovisioned == [UUID(sys_id)]
@@ -1908,7 +1892,7 @@ def test_reprovision_handler_drives_reprovisioning_to_ready(migrated_url: str) -
 
 def test_reprovision_handler_provider_failure_sets_failed(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             async with pool.connection() as conn:
@@ -1916,11 +1900,11 @@ def test_reprovision_handler_provider_failure_sets_failed(migrated_url: str) -> 
                     "UPDATE systems SET state = 'reprovisioning' WHERE id = %s", (sys_id,)
                 )
             job = await _enqueue_reprovision(pool, sys_id)
-            prov = _FakeProvisioning(reprovision_error=True)
+            prov = FakeProvisioning(reprovision_error=True)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError):
                     await systems_handlers.reprovision_handler(
-                        conn, job, resolver=_provider_resolver(provisioner=prov)
+                        conn, job, resolver=provider_resolver(provisioner=prov)
                     )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
@@ -1934,7 +1918,7 @@ def test_reprovision_handler_recording_failure_preserves_provider_error(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             async with pool.connection() as conn:
@@ -1942,7 +1926,7 @@ def test_reprovision_handler_recording_failure_preserves_provider_error(
                     "UPDATE systems SET state = 'reprovisioning' WHERE id = %s", (sys_id,)
                 )
             job = await _enqueue_reprovision(pool, sys_id)
-            prov = _FakeProvisioning(reprovision_error=True)
+            prov = FakeProvisioning(reprovision_error=True)
 
             async def _fail_audit(*args: object, **kwargs: object) -> None:
                 del args, kwargs
@@ -1952,7 +1936,7 @@ def test_reprovision_handler_recording_failure_preserves_provider_error(
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
                     await systems_handlers.reprovision_handler(
-                        conn, job, resolver=_provider_resolver(provisioner=prov)
+                        conn, job, resolver=provider_resolver(provisioner=prov)
                     )
 
         assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
@@ -1962,14 +1946,14 @@ def test_reprovision_handler_recording_failure_preserves_provider_error(
 
 def test_reprovision_handler_retry_on_ready_is_noop(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)  # already ready (finalized)
             job = await _enqueue_reprovision(pool, sys_id)
-            prov = _FakeProvisioning()
+            prov = FakeProvisioning()
             async with pool.connection() as conn:
                 await systems_handlers.reprovision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn, job, resolver=provider_resolver(provisioner=prov)
                 )
             assert prov.reprovisioned == []  # not re-applied to a finalized System
 
@@ -1979,7 +1963,7 @@ def test_reprovision_handler_retry_on_ready_is_noop(migrated_url: str) -> None:
 def test_reprovision_handler_superseded_midflight_tears_down_domain(
     migrated_url: str,
 ) -> None:
-    class _RacingProvisioning(_FakeProvisioning):
+    class _RacingProvisioning(FakeProvisioning):
         """Drives the System torn_down before returning — a deterministic mid-flight race."""
 
         def __init__(self, url: str) -> None:
@@ -2001,7 +1985,7 @@ def test_reprovision_handler_superseded_midflight_tears_down_domain(
             return name
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             alloc_id = await _scoped_active_allocation(pool)
             sys_id = await _seed_ready_system(pool, alloc_id)
             async with pool.connection() as conn:
@@ -2012,7 +1996,7 @@ def test_reprovision_handler_superseded_midflight_tears_down_domain(
             prov = _RacingProvisioning(migrated_url)
             async with pool.connection() as conn:
                 result = await systems_handlers.reprovision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=prov)
+                    conn, job, resolver=provider_resolver(provisioner=prov)
                 )
             assert result == sys_id
             assert prov.torn_down == [f"kdive-{sys_id}"]
@@ -2031,7 +2015,7 @@ def test_register_handlers_binds_provision_teardown_and_reprovision() -> None:
     registry = HandlerRegistry()
     systems_handlers.register_handlers(
         registry,
-        resolver=_provider_resolver(provisioner=_FakeProvisioning()),
+        resolver=provider_resolver(provisioner=FakeProvisioning()),
         secret_registry=SecretRegistry(),
         artifact_store=INERT_OBJECT_STORE,
     )
@@ -2044,13 +2028,13 @@ def test_reprovision_rejects_unbound_upload_rootfs(migrated_url: str) -> None:
     # A ready System with no investigation binding cannot reprovision to an upload rootfs: the
     # binding invariant fails fast with a configuration_error (ADR-0441 §2).
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            profile = _upload_profile()
-            resp = await _SYSTEM_ADMIN_HANDLERS.reprovision_system(
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            profile = upload_profile()
+            resp = await SYSTEM_ADMIN_HANDLERS.reprovision_system(
                 pool,
-                _ctx(),
+                ctx(),
                 system_id=sys_id,
                 profile=profile,
             )
@@ -2065,10 +2049,10 @@ def test_provision_create_lane_rejects_unbound_upload(migrated_url: str) -> None
     # §2): the base resolves by content checksum within an investigation, so a missing binding is
     # a configuration_error, never a late provision failure — and no System is inserted.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _SYSTEM_PROVISION_HANDLERS.provision_system(
-                pool, _ctx(), allocation_id=alloc_id, profile=_upload_profile()
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            resp = await SYSTEM_PROVISION_HANDLERS.provision_system(
+                pool, ctx(), allocation_id=alloc_id, profile=upload_profile()
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM systems")
@@ -2089,10 +2073,10 @@ def test_provision_create_lane_reports_existing_system_state(
     migrated_url: str, state: SystemState
 ) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, state)
-            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, state)
+            resp = await _provision(pool, ctx(), alloc_id, provisioning_profile())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "SELECT count(*) AS n FROM jobs WHERE dedup_key = %s",
@@ -2115,16 +2099,16 @@ def test_teardown_handler_drives_pre_ready_system_to_torn_down(migrated_url: str
     # A System abandoned before its provision job ran (no domain) is terminable via
     # provisioning -> torn_down (#111).
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
             job = await _enqueue_teardown(pool, sys_id)
-            prov = _FakeProvisioning()
+            prov = FakeProvisioning()
             async with pool.connection() as conn:
                 await systems_handlers.teardown_handler(
                     conn,
                     job,
-                    resolver=_provider_resolver(provisioner=prov),
+                    resolver=provider_resolver(provisioner=prov),
                     artifact_store=INERT_OBJECT_STORE,
                 )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -2142,9 +2126,9 @@ def test_reconciler_gc_tears_down_pre_ready_orphan(migrated_url: str) -> None:
     from kdive.reconciler.loop import _repair_orphaned_systems
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
             async with pool.connection() as conn:
                 await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASING)
                 await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASED)
@@ -2165,7 +2149,7 @@ def test_reconciler_gc_tears_down_pre_ready_orphan(migrated_url: str) -> None:
 
 def _sized_profile(**sizes: int) -> dict[str, Any]:
     """A profile with all sizing fields stripped, then re-added per ``sizes`` (for restate)."""
-    profile = _profile()
+    profile = provisioning_profile()
     for field in ("vcpu", "memory_mb", "disk_gb"):
         del profile[field]
     profile.update(sizes)
@@ -2181,8 +2165,8 @@ async def _stored_profile(pool: AsyncConnectionPool, system_id: str) -> dict[str
 
 def test_shape_sized_provision_constructs_profile_from_snapshot(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(
                 pool,
                 requested_vcpus=2,
                 requested_memory_gb=4,
@@ -2190,7 +2174,7 @@ def test_shape_sized_provision_constructs_profile_from_snapshot(migrated_url: st
                 shape="medium",
             )
             # The profile omits sizing entirely; it is constructed from the snapshot.
-            resp = await _provision(pool, _ctx(), alloc_id, _sized_profile())
+            resp = await _provision(pool, ctx(), alloc_id, _sized_profile())
             assert resp.status == "queued"
             stored = await _stored_profile(pool, resp.data["system_id"])
         assert stored["vcpu"] == 2
@@ -2202,12 +2186,12 @@ def test_shape_sized_provision_constructs_profile_from_snapshot(migrated_url: st
 
 def test_shape_sized_provision_accepts_matching_restatement(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(
                 pool, requested_vcpus=2, requested_memory_gb=4, requested_disk_gb=20, shape="medium"
             )
             resp = await _provision(
-                pool, _ctx(), alloc_id, _sized_profile(vcpu=2, memory_mb=4096, disk_gb=20)
+                pool, ctx(), alloc_id, _sized_profile(vcpu=2, memory_mb=4096, disk_gb=20)
             )
         assert resp.status == "queued"
 
@@ -2216,13 +2200,13 @@ def test_shape_sized_provision_accepts_matching_restatement(migrated_url: str) -
 
 def test_shape_sized_provision_rejects_conflicting_restatement(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(
                 pool, requested_vcpus=2, requested_memory_gb=4, requested_disk_gb=20, shape="medium"
             )
             # Restating a DIFFERENT vcpu than the resolved size is a conflict.
             resp = await _provision(
-                pool, _ctx(), alloc_id, _sized_profile(vcpu=8, memory_mb=4096, disk_gb=20)
+                pool, ctx(), alloc_id, _sized_profile(vcpu=8, memory_mb=4096, disk_gb=20)
             )
             assert resp.status == "error"
             assert resp.error_category == "configuration_error"
@@ -2236,10 +2220,10 @@ def test_shape_sized_provision_rejects_conflicting_restatement(migrated_url: str
 
 def test_no_snapshot_lane_requires_profile_sizing(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with systems_support.pool(migrated_url) as pool:
             # No requested_* snapshot (legacy / full-custom): a profile missing sizing is an error.
-            alloc_id = await _granted_allocation(pool)
-            resp = await _provision(pool, _ctx(), alloc_id, _sized_profile())
+            alloc_id = await granted_allocation(pool)
+            resp = await _provision(pool, ctx(), alloc_id, _sized_profile())
             assert resp.status == "error"
             assert resp.error_category == "configuration_error"
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -2252,9 +2236,11 @@ def test_no_snapshot_lane_requires_profile_sizing(migrated_url: str) -> None:
 
 def test_no_snapshot_lane_provisions_with_profile_sizing(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _provision(pool, _ctx(), alloc_id, _profile())  # carries concrete sizing
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            resp = await _provision(
+                pool, ctx(), alloc_id, provisioning_profile()
+            )  # carries concrete sizing
             assert resp.status == "queued"
             stored = await _stored_profile(pool, resp.data["system_id"])
         assert stored["vcpu"] == 4  # the profile's own sizing is authoritative
@@ -2264,13 +2250,13 @@ def test_no_snapshot_lane_provisions_with_profile_sizing(migrated_url: str) -> N
 
 def test_system_records_shape_label(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(
                 pool, requested_vcpus=2, requested_memory_gb=4, requested_disk_gb=20, shape="medium"
             )
             # The handler does not yet copy the label; assert the System's own shape column
             # is wired through provisioning (the System sizing remains the profile JSON).
-            resp = await _provision(pool, _ctx(), alloc_id, _sized_profile())
+            resp = await _provision(pool, ctx(), alloc_id, _sized_profile())
             async with pool.connection() as conn:
                 system = await SYSTEMS.get(conn, UUID(resp.data["system_id"]))
         assert system is not None
@@ -2281,11 +2267,11 @@ def test_system_records_shape_label(migrated_url: str) -> None:
 
 def test_catalog_change_after_provision_does_not_resize_system(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(
                 pool, requested_vcpus=2, requested_memory_gb=4, requested_disk_gb=20, shape="medium"
             )
-            resp = await _provision(pool, _ctx(), alloc_id, _sized_profile())
+            resp = await _provision(pool, ctx(), alloc_id, _sized_profile())
             sys_id = resp.data["system_id"]
             # Redefine `medium` in the catalog AFTER the System is provisioned.
             async with pool.connection() as conn:
