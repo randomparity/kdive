@@ -43,8 +43,10 @@ For a release carrying the worker-fence protocol, stop old workers before migrat
 runtime roles and protocol. Then follow the deployment-specific authority sequence:
 
 - **Kubernetes:** follow the [Kubernetes deploy runbook](runbooks/kubernetes-deploy.md), rotate the
-  separate server, worker, reconciler, and lifecycle-witness credentials, start the dedicated
-  lifecycle-witness workload, then start current workers.
+  separate server, worker, reconciler, and lifecycle-witness credentials, and scale workers to zero
+  while the lifecycle-witness remains healthy. Wait until worker Pods and their finalizers are gone,
+  then stop the lifecycle-witness before migration. After migration, start and verify the
+  lifecycle-witness before starting workers.
 - **Compose:** rotate the separate server, worker, reconciler, and lifecycle-witness credentials
   used by the lifecycle recipes. Use `just compose-up` or `just compose-recreate-worker` to run the
   operator-side lifecycle wrapper and gate current workers; Compose has no persistent
@@ -61,31 +63,36 @@ Migration 0094 builds a unique index over the artifact catalog inside KDIVE's at
 transaction. The index build takes a write-blocking table lock, so a deployment that includes 0094
 is a full-downtime maintenance operation, not a rolling upgrade:
 
-1. Stop every old KDIVE long-running workload. On Kubernetes, stop server, worker, reconciler, and
-   lifecycle-witness workloads; on Compose or systemd, stop only the three portable core processes.
-   Disable restart controllers so an old process cannot reconnect during the migration.
+1. Stop every old KDIVE long-running workload. On Kubernetes, stop or quiesce server and reconciler
+   as appropriate, then scale workers to zero while the lifecycle-witness remains healthy.
+   Wait until worker Pods and their finalizers are gone, then stop the lifecycle-witness.
+   On Compose or systemd, stop only the three portable core processes. Disable restart controllers
+   so an old process cannot reconnect during the migration.
 2. On the target database, verify `pg_stat_activity` has no sessions from the KDIVE runtime role.
    Do not start migration while any old application session remains.
 3. Run `python -m kdive migrate` once with the new image. If duplicate ownership triples make the
    unique-index build fail, inspect and repair those durable claims before retrying; the migration
    never chooses a winner or deletes data.
-4. On Kubernetes, start the new server, worker, reconciler, and lifecycle-witness workloads; on
-   Compose or systemd, start only the new server, worker, and reconciler processes. Verify
-   readiness.
+4. On Kubernetes, start server and reconciler as appropriate, then start and verify the
+   lifecycle-witness before starting workers. On Compose or systemd, start only the new server,
+   worker, and reconciler processes. Verify readiness.
 
-For Kubernetes, scale all four long-running Kubernetes workloads to zero and wait for their Pods to
-terminate before the hooked upgrade that runs migration 0094. For systemd or Compose, stop only the
-three portable core processes before the migrate one-shot. A normal rolling `helm upgrade` while old
-Pods still write is not supported for the release containing 0094.
+For Kubernetes, complete the ordered shutdown above before the hooked upgrade that runs migration
+0094. For systemd or Compose, stop only the three portable core processes before the migrate
+one-shot. A normal rolling `helm upgrade` while old Pods still write is not supported for the
+release containing 0094.
 
 ### Migration 0095: stop-old-first Run schema expansion
 
 The release containing migration 0095 adds `runs.build_ref`. Older KDIVE processes use strict Run
-models with `SELECT *`, so they cannot read the expanded row shape. On Kubernetes, stop server,
-worker, reconciler, and lifecycle-witness workloads before migration; on Compose or systemd, stop
-only the three portable core processes. Start only the new deployment afterward. Migration 0095
-checks `pg_stat_activity` and refuses to run while another client remains connected to the KDIVE
-database. This release is not rolling-upgrade compatible; recover forward if migration has applied.
+models with `SELECT *`, so they cannot read the expanded row shape. On Kubernetes, stop or quiesce
+server and reconciler as appropriate, then scale workers to zero while the lifecycle-witness remains
+healthy. Wait until worker Pods and their finalizers are gone, then stop the lifecycle-witness
+before migration. After migration, start server and reconciler as appropriate, then start and verify
+lifecycle-witness before starting workers. On Compose or systemd, stop only the three portable core
+processes and start only the new deployment afterward. Migration 0095 checks `pg_stat_activity` and
+refuses to run while another client remains connected to the KDIVE database. This release is not
+rolling-upgrade compatible; recover forward if migration has applied.
 
 ## Install paths
 

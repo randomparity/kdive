@@ -100,8 +100,10 @@ server:
 reconciler:
   replicas: 1
 
-# Reconciler-only TLS server, envelope key, and lifecycle-witness DSN for the pre-worker init
-# handoff. The operator creates all three Secrets; only the init container receives the public CA.
+# Lifecycle-witness-only TLS server and envelope key for the pre-worker init handoff.
+# The operator creates these two broker Secrets; only the init container receives the public CA.
+# The lifecycle-witness DSN is declared separately at databaseCredentials.lifecycleWitness.
+# The reconciler receives none of this authority.
 workerCredentialBroker:
   port: 9443
   tokenAudience: kdive-worker-credential-broker

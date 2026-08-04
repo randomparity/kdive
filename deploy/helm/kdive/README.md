@@ -52,12 +52,13 @@ use the normal rolling path.
 
 ## Upgrade
 
-**The release containing migration 0095 is stop-old-first.** Scale the server, worker, reconciler,
-and lifecycle-witness workloads to zero and wait for every old Pod to terminate before the migrate
-hook runs. Migration 0095 refuses to run while another database client is connected because
-pre-0095 strict Run projections cannot tolerate the new `runs.build_ref` column. Run the hooked
-upgrade only after the old Pods are gone, then restore the desired replicas with the new image. Do
-not use a rolling upgrade or roll back to a pre-0095 image after migration.
+**The release containing migration 0095 is stop-old-first.** Stop or quiesce server and reconciler
+as appropriate, then scale workers to zero while the lifecycle-witness remains healthy. Wait until
+worker Pods and their finalizers are gone, then stop the lifecycle-witness before the migrate hook
+runs. Migration 0095 refuses to run while another database client is connected because pre-0095
+strict Run projections cannot tolerate the new `runs.build_ref` column. After migration, start and
+verify the lifecycle-witness before starting workers, then restore the other desired replicas with
+the new image. Do not use a rolling upgrade or roll back to a pre-0095 image after migration.
 
 **Do not upgrade with bare `helm upgrade --reuse-values`.** `--reuse-values` carries the
 previous release's merged values and *ignores the fresh `values.yaml` defaults*, so any
@@ -234,8 +235,9 @@ for any caller and must never front a real RBAC boundary.
 
 ## Health probes & scrape (ADR-0090 §5)
 
-Every Deployment wires `livenessProbe` → `/livez` and `readinessProbe` → `/readyz` on
-the process's aux port (`server` 9464, `worker` 9465, `reconciler` 9466), and carries
+Every long-running workload wires `livenessProbe` → `/livez` and `readinessProbe` → `/readyz` on
+the process's aux port (`server` 9464, `worker` 9465, `reconciler` 9466, and
+`lifecycle-witness` 9467), and carries
 `prometheus.io/scrape` pod annotations pointing a pull-based collector at `/metrics` on
 that port. Liveness tracks the loop being alive, readiness tracks the process's own
 backend set — a failing `/readyz` (a backend down) withdraws/gates the pod but does
@@ -255,7 +257,7 @@ Ingress/LoadBalancer to expose it outside the cluster.
 ### Bundled Prometheus (opt-in — ADR-0189)
 
 Nothing scrapes the `/metrics` above by default. Set `bundledObservability=true` to deploy an
-in-cluster Prometheus that discovers all three components via the `prometheus.io/scrape`
+in-cluster Prometheus that discovers all four components via the `prometheus.io/scrape`
 annotations and collects them:
 
 ```sh
@@ -270,7 +272,7 @@ on `pods`, scoped to the release namespace), the scrape-config `ConfigMap`, the 
 
 ```sh
 kubectl port-forward svc/<release>-kdive-prometheus 9090:9090
-# open http://localhost:9090/targets — all three components (server/worker/reconciler) should be UP
+# open http://localhost:9090/targets — server/worker/reconciler/witness all UP
 # then query e.g. kdive_job_queue_depth to confirm kdive_* series are present
 ```
 
@@ -304,6 +306,8 @@ aux `/metrics` is never re-exposed off the cluster (keep it that way; do not Nod
       - targetPort: 9465   # worker
         path: /metrics
       - targetPort: 9466   # reconciler
+        path: /metrics
+      - targetPort: 9467   # lifecycle witness
         path: /metrics
   ```
 

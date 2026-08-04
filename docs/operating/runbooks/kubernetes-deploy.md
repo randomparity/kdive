@@ -1,7 +1,8 @@
 # Runbook: Kubernetes / Helm deployment
 
-Operator guide for deploying the kdive control plane — `server`, `worker`, `reconciler`, plus a
-migrate one-shot — on Kubernetes with the [Helm chart](../../../deploy/helm/kdive/README.md)
+Operator guide for deploying the kdive control plane — `server`, `worker`, `reconciler`, and the
+dedicated `lifecycle-witness`, plus a migrate one-shot — on Kubernetes with the
+[Helm chart](../../../deploy/helm/kdive/README.md)
 (ADR-0088). This is the **production-shaped** path; the
 [live-stack runbook](live-stack.md) covers the source-tree (`just`) and `docker compose`
 deployments. For driving the spine against a remote `qemu+tls://` libvirt host once the stack is
@@ -252,13 +253,14 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 ### Collect metrics (opt-in — ADR-0189)
 
 The per-process `/metrics` (ADR-0090 §5) are emitted but not collected by default. Install with
-`--set bundledObservability=true` to deploy an in-cluster Prometheus that scrapes all three
-components via the `prometheus.io/scrape` annotations. This is the live check the render tests
-cannot do — confirm every component is an `UP` target and the `kdive_*` series are present:
+`--set bundledObservability=true` to deploy an in-cluster Prometheus that scrapes all four
+components via the `prometheus.io/scrape` annotations, including the lifecycle-witness on port 9467.
+This is the live check the render tests cannot do — confirm every component is an `UP` target and
+the `kdive_*` series are present:
 
 ```bash
 kubectl port-forward svc/<release>-kdive-prometheus 9090:9090
-# http://localhost:9090/targets — server/worker/reconciler all UP
+# http://localhost:9090/targets — server/worker/reconciler/lifecycle-witness all UP
 # http://localhost:9090/graph — query kdive_job_queue_depth (worker) / kdive_mcp_requests (server)
 ```
 
