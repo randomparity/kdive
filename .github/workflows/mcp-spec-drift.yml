@@ -73,10 +73,18 @@ jobs:
           echo "exit_code=$?" >> "${GITHUB_OUTPUT}"
 
       - name: Open a tracking issue on newly detected drift
+        id: file
         # Runs on exit 1 only. Exit 2 (could not determine) and any other code file nothing —
         # the job simply fails, because reporting drift that was never measured is the defect
         # this design exists to avoid.
-        if: steps.check.outputs.exit_code == '1'
+        #
+        # `newest != ''` is the second half of that guard and is not redundant: exit_code is
+        # whatever the process returned, and check_upstream() is the only writer of the
+        # newest/declared outputs. Any exit 1 that is not the drift path — an interpreter
+        # error, a `uv run` failure — would otherwise file an issue titled
+        # "MCP spec drift: upstream  not yet adopted", and the exact-title dedup would then
+        # make that malformed title permanent.
+        if: steps.check.outputs.exit_code == '1' && steps.check.outputs.newest != ''
         env:
           GITHUB_TOKEN: ${{ github.token }}
           # Script-emitted and constrained to ^\d{4}-\d{2}-\d{2}$, but passed through env
@@ -85,6 +93,10 @@ jobs:
           DECLARED: ${{ steps.check.outputs.declared }}
         run: |
           set -euo pipefail
+          if [[ -z "${NEWEST}" || -z "${DECLARED}" ]]; then
+            echo "::error::exit 1 with no revision payload — refusing to file"
+            exit 1
+          fi
           title="MCP spec drift: upstream ${NEWEST} not yet adopted"
 
           # The search is a candidate filter; the dedup is exact-title equality. GitHub issue
@@ -99,8 +111,10 @@ jobs:
 
           if [[ -n "${existing}" ]]; then
             echo "already tracked as #${existing}; nothing to file"
+            echo "filed=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
+          echo "filed=true" >> "${GITHUB_OUTPUT}"
 
           body_file="$(mktemp)"
           {
@@ -127,10 +141,18 @@ jobs:
             --label "status:needs-triage" \
             --body-file "${body_file}"
 
-      - name: Fail the run when drift was reported or could not be determined
+      - name: Fail the run when drift was newly filed or could not be determined
         # The badge means: newly-detected drift, or a check that could not run. It does not
-        # mean "drift is still outstanding" — that is what the tracking issue is for.
-        if: steps.check.outputs.exit_code != '0'
+        # mean "drift is still outstanding" — that is what the tracking issue is for. Drift is
+        # the expected state for months at a time, so failing on every exit 1 would hold the
+        # badge red permanently and make a genuinely broken check indistinguishable from the
+        # expected one (ADR-0537).
+        #
+        # `filed != 'false'` is what carries that: the filing step sets it to 'false' only on
+        # the already-tracked path, so an outstanding, already-reported revision passes while
+        # every other non-zero outcome — a fresh filing, exit 2, an empty payload, a skipped
+        # filing step — leaves it unset or 'true' and fails.
+        if: steps.check.outputs.exit_code != '0' && steps.file.outputs.filed != 'false'
         env:
           EXIT_CODE: ${{ steps.check.outputs.exit_code }}
         run: |

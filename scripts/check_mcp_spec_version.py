@@ -45,7 +45,12 @@ _FETCH_TIMEOUT_S = 30
 
 # A released revision directory: exactly YYYY-MM-DD. Excludes `draft` and any future
 # `YYYY-MM-DD-<suffix>` pre-release, neither of which KDIVE could adopt.
-_RECOGNIZED = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+#
+# `\Z`, not `$`: `$` also matches before a single trailing newline, so `"2026-07-28\n"` would
+# satisfy it. The value flows into $GITHUB_OUTPUT and from there into the workflow's issue
+# title and its `--jq` program, where an embedded newline breaks the JSON literal. The
+# workflow's no-injection argument rests on this pattern being exact, so it is.
+_RECOGNIZED = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 
 EXIT_OK = 0
 EXIT_DRIFT = 1
@@ -65,7 +70,7 @@ def newer_revisions(entries: Iterable[str], declared: str) -> list[str]:
     Returns:
         The recognized entries above ``declared``, ascending.
     """
-    recognized = sorted(entry for entry in entries if _RECOGNIZED.match(entry))
+    recognized = sorted(entry for entry in entries if _RECOGNIZED.fullmatch(entry))
     return [entry for entry in recognized if entry > declared]
 
 
@@ -170,7 +175,7 @@ def check_upstream() -> int:
         :data:`EXIT_UNDETERMINED` when the listing is not one this reader recognizes.
     """
     entries = fetch_schema_entries()
-    recognized = [entry for entry in entries if _RECOGNIZED.match(entry)]
+    recognized = [entry for entry in entries if _RECOGNIZED.fullmatch(entry)]
 
     # The sanity floor. Without it, an upstream restructuring that still returns HTTP 200
     # leaves every entry unmatched, the comparison finds nothing newer, and this job passes

@@ -60,6 +60,16 @@ def test_newer_revisions_is_empty_on_an_equal_revision() -> None:
     assert newer_revisions(("2026-07-28",), "2026-07-28") == []
 
 
+def test_newer_revisions_rejects_a_trailing_newline() -> None:
+    """`$` would accept this; `\\Z` does not.
+
+    The value reaches $GITHUB_OUTPUT and from there the workflow's issue title and its `--jq`
+    program, where an embedded newline breaks the JSON literal. The workflow's no-injection
+    argument rests on the pattern being exact.
+    """
+    assert newer_revisions(("2026-07-28\n",), "2025-11-25") == []
+
+
 def test_newer_revisions_returns_multiple_revisions_oldest_first() -> None:
     """Two revisions published between crons are both reported, in publication order."""
     listing = (*_LISTING, "2026-11-01")
@@ -187,13 +197,41 @@ def test_mcp_spec_drift_workflow_dedups_across_closed_issues() -> None:
     assert "--state all" in filing["run"]
 
 
-def test_mcp_spec_drift_workflow_labels_exist_in_the_repo() -> None:
-    """The three labels are real; a wrong one fails `gh issue create` with a red badge that
-    is indistinguishable from the newly-detected-drift red the design reserves."""
+def test_mcp_spec_drift_workflow_uses_the_expected_labels() -> None:
+    """Catches a typo in the workflow. It cannot detect a label renamed in the repo — that
+    would fail `gh issue create` at run time, and no offline test can see it."""
     filing = next(step for step in _drift_steps() if "gh issue create" in step.get("run", ""))
 
     for label in ("area:mcp-api", "type:chore", "status:needs-triage"):
         assert label in filing["run"]
+
+
+def test_mcp_spec_drift_workflow_does_not_file_without_a_revision() -> None:
+    """exit_code is whatever the process returned, and only check_upstream() writes `newest`.
+
+    Any exit 1 from a non-drift cause — an interpreter error, a `uv run` failure — would
+    otherwise file an issue titled "MCP spec drift: upstream  not yet adopted", and the
+    exact-title dedup would then make that malformed title permanent.
+    """
+    filing = next(step for step in _drift_steps() if "gh issue create" in step.get("run", ""))
+
+    assert "steps.check.outputs.newest != ''" in filing["if"]
+
+
+def test_mcp_spec_drift_workflow_passes_while_drift_is_already_tracked() -> None:
+    """The spec's `1 | open -> pass` and `1 | closed -> pass` rows.
+
+    Drift is the expected state for months, so failing on every exit 1 would hold the badge
+    red permanently and make a genuinely broken check indistinguishable from the expected one
+    (ADR-0537). A bare `exit_code != '0'` condition is exactly that defect.
+    """
+    failing = next(step for step in _drift_steps() if "--upstream exited" in step.get("run", ""))
+    condition = failing["if"]
+
+    assert "steps.file.outputs.filed != 'false'" in condition, (
+        "the failing step must not fire when the revision is already tracked"
+    )
+    assert condition.strip() != "steps.check.outputs.exit_code != '0'"
 
 
 def test_ci_workflow_runs_the_mcp_spec_check_recipe() -> None:

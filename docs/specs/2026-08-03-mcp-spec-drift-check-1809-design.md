@@ -206,8 +206,20 @@ The dedup search runs over **all** issue states, and the title is built from the
 | 1 | none | open one titled `MCP spec drift: upstream <newest> not yet adopted`, labels `area:mcp-api`, `type:chore`, `status:needs-triage` | fail |
 | 1 | open | nothing — the open issue is the report | pass |
 | 1 | closed | nothing — the close is a human acknowledgement | pass |
+| 1, empty `newest` | — | file nothing | fail |
 | 2 | — | file nothing | fail |
 | anything else | — | file nothing | fail |
+
+The `empty newest` row is not redundant with exit 2. `exit_code` is whatever the process
+returned, and `check_upstream()` is the only writer of the `$GITHUB_OUTPUT` values, so an exit 1
+from any *other* cause — an interpreter error, a failed `uv run` — carries no revision. Filing
+on it would produce an issue titled `MCP spec drift: upstream  not yet adopted`, and the
+exact-title dedup would then make that malformed title permanent. The workflow requires a
+non-empty `newest` in the filing step's `if:` and re-checks it in the shell.
+
+Two of these rows pass while a non-zero exit stands, so the failing step cannot be conditioned
+on `exit_code != '0'`. The filing step reports whether it filed, and the failing step fires
+unless that says `false`.
 
 The idempotent arm is what keeps the badge meaningful. Upstream `2026-07-28` already exceeds
 the declared `2025-11-25` and will keep doing so until the `mcp` 2.0.0 bump is scheduled, so
