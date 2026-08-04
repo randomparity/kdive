@@ -100,6 +100,10 @@ server:
 reconciler:
   replicas: 1
 
+# The lifecycle witness is a singleton authority. Set zero only for a staged maintenance window.
+lifecycleWitness:
+  replicas: 1
+
 # Lifecycle-witness-only TLS server and envelope key for the pre-worker init handoff.
 # The operator creates these two broker Secrets; only the init container receives the public CA.
 # The lifecycle-witness DSN is declared separately at databaseCredentials.lifecycleWitness.

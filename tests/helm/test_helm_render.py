@@ -146,6 +146,10 @@ def _template(*set_args: str) -> subprocess.CompletedProcess[str]:
     args = ["helm", "template", "kdive", CHART]
     for s in set_args:
         args += ["--set", s]
+    return _template_args(*args)
+
+
+def _template_args(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, capture_output=True, text=True, check=False)
 
 
@@ -811,6 +815,52 @@ def _workloads(*set_args: str) -> dict[str, dict[str, Any]]:
     StatefulSet (ADR-0514). Extra ``--set`` args layer onto the external-backend base.
     """
     return _rendered_app_workloads("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+
+
+def _witness_workload(*set_args: str) -> dict[str, Any]:
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+    assert res.returncode == 0, res.stderr
+    for doc in yaml.safe_load_all(res.stdout):
+        if not (isinstance(doc, dict) and doc.get("kind") == "Deployment"):
+            continue
+        if str(doc.get("metadata", {}).get("name", "")).endswith("-witness"):
+            return doc
+    raise AssertionError("chart rendered no lifecycle-witness Deployment")
+
+
+def test_lifecycle_witness_replicas_default_to_one_and_accept_zero() -> None:
+    assert _witness_workload()["spec"]["replicas"] == 1
+    assert _witness_workload("lifecycleWitness.replicas=0")["spec"]["replicas"] == 0
+
+
+def test_staged_fence_render_scales_all_kdive_workloads_to_zero() -> None:
+    staged_values = (
+        "server.replicas=0",
+        "worker.replicas=0",
+        "reconciler.replicas=0",
+        "lifecycleWitness.replicas=0",
+    )
+    workloads = _workloads(*staged_values)
+
+    assert {workload["spec"]["replicas"] for workload in workloads.values()} == {0}
+    assert _witness_workload(*staged_values)["spec"]["replicas"] == 0
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--set", "lifecycleWitness.replicas=-1"),
+        ("--set", "lifecycleWitness.replicas=2"),
+        ("--set", "lifecycleWitness.replicas=true"),
+        ("--set", "lifecycleWitness.replicas=0.5"),
+        ("--set-string", "lifecycleWitness.replicas=0"),
+    ],
+)
+def test_lifecycle_witness_replicas_reject_invalid_type_or_range(args: tuple[str, str]) -> None:
+    res = _template_args("helm", "template", "kdive", CHART, *args)
+
+    assert res.returncode != 0
+    assert "lifecycleWitness.replicas must be an integer 0 or 1" in res.stderr
 
 
 def _rendered_app_workloads(*set_args: str) -> dict[str, dict[str, Any]]:

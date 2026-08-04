@@ -1,6 +1,6 @@
 apiVersion: v2
 name: kdive
-description: kdive control plane (server/worker/reconciler)
+description: kdive control plane (server/worker/reconciler/lifecycle-witness)
 type: application
 # Two version fields, distinct tracks (ADR-0365):
 #   version    — the chart PACKAGE version (templates/values/packaging), its own SemVer
@@ -9,7 +9,7 @@ type: application
 #   appVersion — the deployed APPLICATION version. MUST mirror pyproject [project].version
 #                (ADR-0041 source of truth); `just set-version` rewrites it and
 #                `just chart-version-check` fails CI on any appVersion != pyproject drift.
-version: 0.5.0
+version: 0.5.1
 appVersion: "0.4.1"
 # The worker StatefulSet sets persistentVolumeClaimRetentionPolicy (ADR-0514). That field is
 # gated behind the StatefulSetAutoDeletePVC feature gate, which is off by default before 1.27:
