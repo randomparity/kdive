@@ -356,8 +356,8 @@ gate never inspects. `CORE_PREFIXES` (`scripts/m2_portability_gate.py`) is exact
 | `src/kdive/jobs/handlers/control/diagnostic_sysrq.py` and `.../control/watch_for_crash.py` | **holding a console-lease scope** and propagating its `transport_conflict` (ADR-0542) — two changes, not one. Each handler brackets its whole multi-read console interaction in a lease scope, because a per-read lease would let KGDB take the channel between SysRq's mark read (`diagnostic_sysrq.py:111`) and its injection. Each also surfaces the conflict instead of core's current handling: `diagnostic_sysrq.py:164-169` raises `configuration_error` / `console_not_pumped` naming no holder, and `watch_for_crash.py:191-193` discards `pumped` deliberately. These two are `read_window`'s only consumers in the tree. | 12, 14 | **no — new entry** |
 | `src/kdive/reconciler/loop.py` | the BYO mid-teardown drift arm and the stranded-console-lease reclaim | 16 | yes (entered for ADR-0086; BYO reuses it) |
 
-**Seven new entries across five issues** — down from nine, because #1835 has since landed and
-two of the rows above stopped being new. `ALLOWED_FILES` is matched by exact path
+**Six new entries across five issues** — down from nine, because #1835 has since landed and
+three of the entries above stopped being new. `ALLOWED_FILES` is matched by exact path
 (`violations()`, `scripts/m2_portability_gate.py`); there is no prefix or directory matching.
 When this section was written, the entries ADR-0085 and ADR-0541's surface would have reused —
 `src/kdive/mcp/tools/debug/sessions.py`, `.../debug/introspect.py`, and
@@ -368,9 +368,9 @@ allowlist strings matched nothing while every file inside those packages sat und
 That was not confined to the three BYO would have leaned on: 14 of the 54 `ALLOWED_FILES`
 entries pointed at absent paths — roughly a quarter of the allowlist protecting nothing,
 silently, which is the same failure class as the drift guard above. #1835 discharged the
-re-pointing half of entry 17: the allowlist is now 69 entries with none absent, `sessions/
-lifecycle.py`, `sessions/registrar.py` and `resources/host_ops.py` among them, and the gate
-fails on a member that does not exist on disk or falls outside `CORE_PREFIXES`. It was
+re-pointing half of entry 17: the allowlist is now 69 entries with none absent,
+`sessions/lifecycle.py`, `sessions/registrar.py` and `resources/host_ops.py` among them, and
+the gate fails on a member that does not exist on disk or falls outside `CORE_PREFIXES`. It was
 pre-existing rot rather than BYO's — it affected local-libvirt and remote-libvirt's own
 measurement too. Two things entry 17 still owns are below: wiring the gate into CI, and the
 missing-`CAPTURE_COVERAGE`-row assertion. A third, the same dead-entry shape reached by a
@@ -426,7 +426,7 @@ M2's design doc. Two of them say the enforcement M2's document describes is not 
   ordering from a convention into an enforced one. Until it lands, the ordering is a convention
   with no automated signal, and `"byo-host": frozenset({"kdump", "fadump"})` is a row a human
   has to remember.
-- **`BASELINE_TAG = "pre-M2"`** (`:24`) would measure BYO's diff against a tag two milestones
+- **`BASELINE_TAG = "pre-M2"`** would measure BYO's diff against a tag two milestones
   old, folding every intervening core change into this milestone's total. Entry 17 owns a
   `pre-M4` baseline alongside it.
 
