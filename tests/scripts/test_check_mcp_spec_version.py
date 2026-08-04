@@ -167,6 +167,21 @@ def test_mcp_spec_drift_workflow_has_both_triggers() -> None:
     assert "pull_request" not in triggers  # it must never gate a PR
 
 
+def test_mcp_spec_drift_report_job_is_skipped_when_there_is_no_drift() -> None:
+    """The exit-code table's first row: exit 0 -> report skipped -> the run passes.
+
+    After the two-job split this `if:` is that row's only implementation, and it is the one
+    element of the restructure nothing else catches — actionlint accepts the job with the
+    line deleted, at which case the report job runs on every clean week and the failing step
+    fires on an unset `filed`, holding the badge red indefinitely.
+    """
+    report = _drift_workflow()["jobs"]["report"]
+
+    assert "outputs.exit_code != '0'" in report.get("if", ""), (
+        "the report job must be gated on a non-zero exit, or it runs on every clean week"
+    )
+
+
 def test_mcp_spec_drift_keeps_the_issue_grant_off_the_dependency_tree() -> None:
     """Least privilege: the job that runs project code holds no write scope.
 

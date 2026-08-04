@@ -210,11 +210,11 @@ Do **not** bind `docs/adr/0268-tool-gateway-dispatcher.md:27` or `docs/design/20
 
 - [ ] **Step 1: Write the failing test**
 
-`test_mcp_spec_drift_workflow_shape` — `yaml.safe_load` over the workflow; assert both `schedule` and `workflow_dispatch` triggers, `permissions` of `contents: read` + `issues: write`, `GITHUB_TOKEN` in the `env:` of both the `--upstream` step and the issue-filing step, `--state all` on the dedup search, and that the three label strings are labels the repo actually has. Static, so it runs pre-merge — which matters because the live run cannot.
+A set of shape tests over the workflow (`yaml.safe_load`), one per property the live run would otherwise be first to exercise: both triggers with `pull_request` absent; the `report` job's `if:` gating the exit-0 row; `check-drift` holding `contents: read` only while `issues: write` lives on `report`, which runs no `uv run`; `GITHUB_TOKEN` on the check step and `GH_TOKEN` on the report job; `--state all`, the `contains` select and the absence of a `--label` conjunct; the empty-payload and pass-while-drifting rows; and the three label strings on `gh issue create`. Static, so they run pre-merge — which matters because the live run cannot.
 
 - [ ] **Step 2: Write the workflow**
 
-Weekly cron (Mondays 12:00 UTC) plus `workflow_dispatch`, `concurrency` group with `cancel-in-progress: false`, SHA-pinned `actions/checkout` with `persist-credentials: false`, a header comment stating why the job exists. Steps: checkout, install `libvirt-dev`, `uv sync --locked`, run `--upstream` capturing stdout and the exit code, then branch:
+Weekly cron (Mondays 12:00 UTC) plus `workflow_dispatch`, `concurrency` group with `cancel-in-progress: false`, SHA-pinned `actions/checkout` with `persist-credentials: false`, a header comment stating why the job exists. Top-level `permissions: contents: read`. Two jobs: `check-drift` (`contents: read`) checks out, installs `libvirt-dev`, runs `uv sync --locked` and `--upstream`, and emits `exit_code`/`newest`/`declared`/`newer`; `report` (`issues: write`, `needs: check-drift`, `if: needs.check-drift.outputs.exit_code != '0'`) runs only `gh` and branches:
 
 | exit | matching issue | action | job |
 | --- | --- | --- | --- |

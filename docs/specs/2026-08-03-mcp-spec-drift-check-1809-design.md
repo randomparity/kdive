@@ -192,15 +192,32 @@ the next bump onward, and clearing it would mean editing a historical citation;
 
 Weekly cron plus `workflow_dispatch`, following `test-ordering.yml`'s conventions
 (SHA-pinned actions, `persist-credentials: false`, a `concurrency` group, a comment stating
-why the job exists). `permissions: contents: read, issues: write`.
+why the job exists). Top-level `permissions: contents: read`.
 
-Steps: check out, install `libvirt-dev`, `uv sync --locked`, run `--upstream` capturing
-stdout and the exit code, then branch on it. Both the `--upstream` step and the issue-filing
-step carry `env: GITHUB_TOKEN: ${{ github.token }}` — Actions does not export it into step
-environments on its own, so without it the script's `Authorization` header is inert (the
-rate-limit mitigation never applies) and `gh` has no credential at all. This is the
-repository's first issue-filing workflow, so there is no prior art to inherit the wiring from;
-`test-ordering.yml`, the template for everything else here, is `contents: read` with no token.
+**Two jobs, and the split is the security boundary.**
+
+| job | permissions | runs | emits / consumes |
+| --- | --- | --- | --- |
+| `check-drift` | `contents: read` | checkout, `libvirt-dev`, `uv sync --locked`, `--upstream` capturing stdout and the exit code | outputs `exit_code`, `newest`, `declared`, `newer` |
+| `report` | `contents: read`, `issues: write` | nothing but `gh` — no checkout, no dependency install, no project code | `needs: check-drift`, gated `if: needs.check-drift.outputs.exit_code != '0'` |
+
+`check-drift` runs `uv run python`, which imports the whole synced dependency tree. A
+job-level `issues: write` there would put an issue-creating token in the same process as every
+third-party package — and buy nothing, since the token in that job is only a rate-limit bump
+against a public third-party repository, which any scope satisfies. So the grant lives on
+`report`, which executes only `gh`.
+
+Tokens are wired explicitly in both jobs, because Actions does not export one into step
+environments on its own: `check-drift`'s check step carries `env: GITHUB_TOKEN: ${{ github.token }}`,
+and `report` carries `GH_TOKEN` plus `GH_REPO` at job level (it has no checkout, so `gh` needs
+`GH_REPO` to resolve the repository). Without them the script's `Authorization` header is inert
+and `gh` has no credential at all. This is the repository's first issue-filing workflow, so
+there is no prior art to inherit the wiring from; `test-ordering.yml`, the template for
+everything else here, is `contents: read` with no token.
+
+The `report` job's `if:` is the exit-code table's first row (`0 → nothing → pass`) and its only
+implementation: with it deleted the job runs every clean week and the failing step fires on an
+unset `filed`. `actionlint` accepts that deletion, so a shape test pins it.
 
 The dedup search runs over **all** issue states, and the title is built from the script's
 `$GITHUB_OUTPUT` values:
@@ -270,8 +287,8 @@ predicate — *a human has seen this revision*. A maintainer retitling the issue
 say to fold it under an `mcp` 2.0.0 epic, would break a full-title key in both halves at once
 and file a duplicate for a revision someone had demonstrably already seen. A retitle is
 stronger evidence of attention than a close, and the design already honours a close via
-`--state all`. The label narrows the candidate set so an unrelated issue that merely mentions
-the date cannot match.
+`--state all`. What bounds a false match is the `contains` select on the revision plus the
+AND semantics measured above — not a label filter, which the section below rules out.
 
 For the same reason the title carries the revision alone and not the version pair: with the
 `2026-07-28` issue open against declared `2025-11-25`, a partial bump to an intermediate
@@ -327,12 +344,20 @@ upstream revision still changes `<newest>` and correctly opens a new issue.
   `schema-guard` sitting in the `ci` aggregate and the prek hook while CI never invoked it, so
   it passed every PR (#1723), and ADR-0410 hit the same thing. A comment is not a guard, and
   the failure mode is green.
-- **`test_mcp_spec_drift_workflow_shape`** — the same `yaml.safe_load` idiom over
-  `mcp-spec-drift.yml`: both the `schedule` and `workflow_dispatch` triggers present,
-  `permissions` of `contents: read` plus `issues: write`, `GITHUB_TOKEN` in the `env:` of both
-  the `--upstream` step and the issue-filing step, `--state all` on the dedup search, and the
-  three label strings matching labels the repository actually has. This is static, so it runs
-  on the branch — which matters because the live run cannot, per the note below.
+- **Six drift-workflow shape tests**, the same `yaml.safe_load` idiom over
+  `mcp-spec-drift.yml`, one per property the live run would otherwise be the first to
+  exercise. They are static, so they run on the branch — which matters because the live run
+  cannot, per the note below.
+
+  | test | pins |
+  | --- | --- |
+  | `..._has_both_triggers` | `schedule` and `workflow_dispatch` present, `pull_request` absent |
+  | `..._report_job_is_skipped_when_there_is_no_drift` | the exit-code table's `0 → pass` row, whose only implementation is the `report` job's `if:` — `actionlint` accepts that line's deletion |
+  | `..._keeps_the_issue_grant_off_the_dependency_tree` | `check-drift` is `contents: read`, `issues: write` lives only on `report`, and `report` runs no `uv run` |
+  | `..._wires_a_token_into_both_jobs` | `GITHUB_TOKEN` on the check step, `GH_TOKEN` on the report job |
+  | `..._dedups_across_closed_issues` + `..._dedups_on_the_revision_not_the_title` + `..._dedup_search_carries_no_label_conjunct` | `--state all`, the `contains` select, and the absence of a `--label` conjunct on the search |
+  | `..._does_not_file_without_a_revision` and `..._passes_while_drift_is_already_tracked` | the empty-payload row and the two pass-while-drifting rows |
+  | `..._uses_the_expected_labels` | the three label strings on `gh issue create` (a typo guard; it cannot see a label renamed in the repo) |
 
 No test performs network I/O: `newer_revisions` is pure, and the `--upstream` tests inject
 the fetch.
