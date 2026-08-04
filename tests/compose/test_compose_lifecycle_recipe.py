@@ -9,6 +9,7 @@ def _recipe(justfile: str, name: str) -> str:
 
 def test_lifecycle_recipes_require_role_specific_database_authorities() -> None:
     justfile = (Path(__file__).resolve().parents[2] / "justfile").read_text()
+    lifecycle_module = "python -m kdive.processes.lifecycle.compose_worker_lifecycle"
     witness_default = (
         "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="
         '"${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:'
@@ -21,6 +22,8 @@ def test_lifecycle_recipes_require_role_specific_database_authorities() -> None:
 
     assert justfile.count(witness_default) == 4
     assert justfile.count(worker_default) == 2
+    assert justfile.count(lifecycle_module) == 3
+    assert lifecycle_module.replace(".lifecycle", "") not in justfile
 
 
 def test_compose_stop_preserves_volumes_while_compose_down_removes_them() -> None:

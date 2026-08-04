@@ -370,7 +370,7 @@ services:
   # The proxy is reachable only on an internal network and rejects all write API methods.
   worker-death-api:
     image: ${KDIVE_IMAGE:-kdive:dev}
-    entrypoint: ["python", "-m", "kdive.processes.docker_death_api"]
+    entrypoint: ["python", "-m", "kdive.processes.lifecycle.docker_death_api"]
     user: root
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro

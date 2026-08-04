@@ -503,7 +503,11 @@ def test_worker_credential_broker_is_private_tls_and_init_only() -> None:
     assert worker["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
     init = worker["spec"]["template"]["spec"]["initContainers"][0]
     worker_container = worker["spec"]["template"]["spec"]["containers"][0]
-    assert init["command"] == ["python", "-m", "kdive.processes.kubernetes_credential_init"]
+    assert init["command"] == [
+        "python",
+        "-m",
+        "kdive.processes.lifecycle.kubernetes_credential_init",
+    ]
     assert any(
         volume["emptyDir"].get("medium") == "Memory"
         for volume in worker["spec"]["template"]["spec"]["volumes"]
