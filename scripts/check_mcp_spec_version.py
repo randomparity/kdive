@@ -46,10 +46,13 @@ _FETCH_TIMEOUT_S = 30
 # A released revision directory: exactly YYYY-MM-DD. Excludes `draft` and any future
 # `YYYY-MM-DD-<suffix>` pre-release, neither of which KDIVE could adopt.
 #
-# `\Z`, not `$`: `$` also matches before a single trailing newline, so `"2026-07-28\n"` would
-# satisfy it. The value flows into $GITHUB_OUTPUT and from there into the workflow's issue
-# title and its `--jq` program, where an embedded newline breaks the JSON literal. The
-# workflow's no-injection argument rests on this pattern being exact, so it is.
+# Exactness matters beyond filtering: the matched value flows into $GITHUB_OUTPUT and from
+# there into the drift workflow's issue title and its `--jq` program, where an embedded
+# newline would break the JSON literal. Two independent guards hold that, and either alone
+# suffices — callers use `fullmatch` (which requires the match to span the whole string), and
+# the pattern anchors with `\Z` rather than `$` (`$` also matches before a trailing newline).
+# They are belt-and-braces for each other; relaxing both at once is what would admit
+# "2026-07-28\n".
 _RECOGNIZED = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 
 EXIT_OK = 0
@@ -154,17 +157,21 @@ def fetch_schema_entries() -> list[str]:
     return [entry["name"] for entry in payload if entry["type"] == "dir"]
 
 
-def _emit_github_output(newest: str, declared: str) -> None:
-    """Hand the workflow the two values it builds the issue title from.
+def _emit_github_output(newest: str, declared: str, newer: list[str]) -> None:
+    """Hand the workflow the values it builds the issue title and body from.
 
     The workflow must not scrape them out of the human report: the title is the dedup key, so
     a later rewording of that prose would silently change it.
+
+    ``newer`` carries *every* unadopted revision, not just the newest. When two are published
+    between crons, one issue is filed — keyed on the newest — and without this the older one
+    would never be named anywhere.
     """
     path = os.environ.get("GITHUB_OUTPUT")
     if not path:
         return
     with open(path, "a", encoding="utf-8") as handle:
-        handle.write(f"newest={newest}\ndeclared={declared}\n")
+        handle.write(f"newest={newest}\ndeclared={declared}\nnewer={','.join(newer)}\n")
 
 
 def check_upstream() -> int:
@@ -203,7 +210,7 @@ def check_upstream() -> int:
         f"Adopting one requires a pinned mcp release that supports it; when that lands, "
         f"{_REMEDIATION}."
     )
-    _emit_github_output(newest, MCP_PROTOCOL_VERSION)
+    _emit_github_output(newest, MCP_PROTOCOL_VERSION, newer)
     return EXIT_DRIFT
 
 

@@ -92,7 +92,7 @@ MCP_SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "20
 - Test: `tests/scripts/test_check_mcp_spec_version.py`
 
 **Interfaces:**
-- Produces: `newer_revisions(entries: Iterable[str], declared: str) -> list[str]`, and `RECOGNIZED = re.compile(r"^\d{4}-\d{2}-\d{2}$")`.
+- Produces: `newer_revisions(entries: Iterable[str], declared: str) -> list[str]`, and `_RECOGNIZED = re.compile(r"\d{4}-\d{2}-\d{2}\Z")` applied with `fullmatch` (either guard alone rejects a trailing newline; both are kept as belt-and-braces).
 
 - [ ] **Step 1: Write the four failing tests**
 
@@ -143,7 +143,7 @@ Filter to `RECOGNIZED`, keep entries `> declared` as strings (ISO-8601 sorts lex
 - Test: `tests/scripts/test_check_mcp_spec_version.py`
 
 **Interfaces:**
-- Produces: `fetch_schema_entries() -> list[str]` (injectable), `check_upstream(fetch=...) -> int`.
+- Produces: `fetch_schema_entries() -> list[str]` and `check_upstream() -> int`. The fetch is injected by monkeypatching the module attribute, not by a parameter — the tests patch `check_mcp_spec_version.fetch_schema_entries`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -225,7 +225,9 @@ Weekly cron (Mondays 12:00 UTC) plus `workflow_dispatch`, `concurrency` group wi
 | 2 | — | file nothing | fail |
 | anything else | — | file nothing | fail |
 
-Title built **only** from the `$GITHUB_OUTPUT` values. Dedup is `gh issue list --state all --search "<quoted title>" --json number,title` followed by **string equality** on `title` — bare search relevance matches tokens, not literals, so a newly published revision would match the existing issue and go unreported forever. Quote the search string: the title contains a colon, GitHub search's qualifier separator.
+Title and body built **only** from the `$GITHUB_OUTPUT` values. Dedup is `gh issue list --state all --search "<newest> in:title" --json number,title` followed by a `contains` select on the revision — keyed on the revision rather than the whole title, so it survives a triage retitle and matches a human-filed issue. **No `--label` conjunct:** `gh` ANDs it into the query, which would hide issue #1485 and duplicate it on the first run. See the design doc's dedup section for the measured GitHub search behaviour behind both choices.
+
+Split the workflow into two jobs: `check-drift` (`contents: read`, runs `uv run python`) and `report` (`issues: write`, runs only `gh`). The elevated grant must not be in scope for the process that loads the dependency tree.
 
 - [ ] **Step 3: Flip the ADR to Accepted**
 

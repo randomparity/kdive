@@ -104,16 +104,21 @@ failure class — ADR-0518: "A guard that reports success over nothing is worse 
 because it also retires the attention that would have caught the problem."
 
 On drift the script writes one human-readable report to stdout naming the declared version,
-every newer revision, and the remediation. It writes it once: the workflow tees that single
-run rather than re-fetching to build an issue body.
+every newer revision, and the remediation. That goes to the job log and nowhere else — the
+workflow does not parse it.
 
-It also emits the two values the workflow needs machine-readably — `newest=<v>` and
-`declared=<v>` appended to `$GITHUB_OUTPUT` when that variable is set — and **the workflow
-builds the issue title only from those.** This is the one interface where exactness is
-load-bearing: the title is the dedup key, so a later rewording of the human report must not be
-able to change it. Scraping the prose with `grep`/`sed` would let an empty capture produce
-`MCP spec drift: upstream  is newer than pinned `, which matches no existing issue and refiles
-every week.
+Everything the workflow needs arrives machine-readably instead, appended to `$GITHUB_OUTPUT`
+when that variable is set: `newest=<v>`, `declared=<v>`, and `newer=<comma-joined>`. **The
+workflow builds the issue title and body only from those, and never from the prose.** This is
+the one interface where exactness is load-bearing: the title carries the dedup key, so a later
+rewording of the human report must not be able to change it. Scraping with `grep`/`sed` would
+let an empty capture produce `MCP spec drift: upstream  not yet adopted`, which matches no
+existing issue and refiles every week.
+
+`newer` carries the whole list, not just the ceiling, because only one issue is filed per run
+and it is keyed on the newest. With `2026-07-28` and a later `2026-11-01` both published
+between crons, the run detects both, files one issue for `2026-11-01`, and without this output
+`2026-07-28` would be named nowhere. The body lists every unadopted revision.
 
 ### The `ci` wiring — two places, not one
 
@@ -237,8 +242,19 @@ outcome this arm exists to prevent, in a worse form than the commenting design i
 predicate is *a human has seen this*, not *an issue is open*.
 
 **The dedup key is the upstream revision, not the title.** The workflow runs
-`gh issue list --state all --label area:mcp-api --search "<newest> in:title" --json number,title`
-and selects hits whose title contains the revision.
+`gh issue list --state all --search "<newest> in:title" --json number,title` and selects hits
+whose title contains the revision.
+
+**No `--label` conjunct.** `gh` ANDs a label filter into the query, which hides any issue
+tracking the revision under a different label set — including a human-filed one. Measured
+today: issue #1485, *"Investigate MCP 2026-07-28 Spec Update Requirements"*, is open and
+carries `type:feature, priority:P2, effort:L, status:needs-triage, risk:daytime-only` but not
+`area:mcp-api`. The label-filtered query returns nothing for it; the unfiltered one returns it.
+With the conjunct, this workflow's very first run would have opened a duplicate of an existing
+open tracking issue — the exact outcome the idempotent arm exists to prevent. The labels still
+go on `gh issue create`; they must not go on the search. An unrelated issue whose title happens
+to contain a specific ISO date is the far cheaper false positive: one skipped filing, visible
+in the log.
 
 Measured behaviour, against this repository with gh 2.96.0: GitHub issue search **ANDs** its
 terms. Searching a real issue's exact title returns that one issue; replacing any single token

@@ -61,13 +61,15 @@ def test_newer_revisions_is_empty_on_an_equal_revision() -> None:
 
 
 def test_newer_revisions_rejects_a_trailing_newline() -> None:
-    """`$` would accept this; `\\Z` does not.
+    """The value reaches $GITHUB_OUTPUT and from there the drift workflow's issue title and
+    its `--jq` program, where an embedded newline would break the JSON literal.
 
-    The value reaches $GITHUB_OUTPUT and from there the workflow's issue title and its `--jq`
-    program, where an embedded newline breaks the JSON literal. The workflow's no-injection
-    argument rests on the pattern being exact.
+    Two independent guards hold this and either alone suffices, so the behavioural assertion
+    reddens only if both are relaxed at once. The second assertion pins the anchor on its own,
+    because `fullmatch` would otherwise mask a `\\Z` -> `$` mutation entirely.
     """
     assert newer_revisions(("2026-07-28\n",), "2025-11-25") == []
+    assert check_mcp_spec_version._RECOGNIZED.search("2026-07-28\n") is None
 
 
 def test_newer_revisions_returns_multiple_revisions_oldest_first() -> None:
@@ -165,25 +167,34 @@ def test_mcp_spec_drift_workflow_has_both_triggers() -> None:
     assert "pull_request" not in triggers  # it must never gate a PR
 
 
-def test_mcp_spec_drift_workflow_can_file_an_issue_and_no_more() -> None:
-    """Least privilege: it reads the repo and writes issues, nothing else."""
-    permissions = _drift_workflow()["jobs"]["check-drift"]["permissions"]
+def test_mcp_spec_drift_keeps_the_issue_grant_off_the_dependency_tree() -> None:
+    """Least privilege: the job that runs project code holds no write scope.
 
-    assert permissions == {"contents": "read", "issues": "write"}
+    `check-drift` runs `uv run python`, which imports the whole synced dependency tree; a
+    job-level `issues: write` there would put an issue-creating token in the same process as
+    every third-party package. `report` holds the grant and runs nothing but `gh`.
+    """
+    jobs = _drift_workflow()["jobs"]
+
+    assert jobs["check-drift"]["permissions"] == {"contents": "read"}
+    assert jobs["report"]["permissions"] == {"contents": "read", "issues": "write"}
+    assert "issues" not in _drift_workflow().get("permissions", {})
+
+    report_runs = " ".join(step.get("run", "") for step in jobs["report"]["steps"])
+    assert "uv run" not in report_runs, "the elevated job must not execute project code"
 
 
-def test_mcp_spec_drift_workflow_wires_the_token_into_both_steps() -> None:
-    """Actions does not export GITHUB_TOKEN into step environments on its own.
+def test_mcp_spec_drift_workflow_wires_a_token_into_both_jobs() -> None:
+    """Actions does not export the token into step environments on its own.
 
     Without it the script's Authorization header is inert — so the documented rate-limit
     mitigation silently never applies — and `gh` has no credential at all.
     """
-    steps = _drift_steps()
-    fetching = next(step for step in steps if step.get("id") == "check")
-    filing = next(step for step in steps if "gh issue create" in step.get("run", ""))
+    jobs = _drift_workflow()["jobs"]
+    fetching = next(step for step in jobs["check-drift"]["steps"] if step.get("id") == "check")
 
-    for step in (fetching, filing):
-        assert "GITHUB_TOKEN" in step.get("env", {}), f"{step.get('name')} carries no token"
+    assert "GITHUB_TOKEN" in fetching.get("env", {})
+    assert "GH_TOKEN" in jobs["report"].get("env", {})
 
 
 def test_mcp_spec_drift_workflow_dedups_across_closed_issues() -> None:
@@ -209,7 +220,20 @@ def test_mcp_spec_drift_workflow_dedups_on_the_revision_not_the_title() -> None:
 
     assert "select(.title | contains(" in run, "dedup must filter hits, not take the first"
     assert "${NEWEST} in:title" in run
-    assert '--label "area:mcp-api"' in run  # narrows candidates to this workflow's issues
+
+
+def test_mcp_spec_drift_dedup_search_carries_no_label_conjunct() -> None:
+    """`gh` ANDs `--label` into the query, which hides human-filed issues.
+
+    Issue #1485 ("Investigate MCP 2026-07-28 Spec Update Requirements") is open and tracks
+    exactly the revision this workflow reports, but carries no `area:mcp-api` label. A
+    label-filtered search returns nothing for it, so the first run would have duplicated it.
+    The labels still go on `gh issue create`; they must not go on the search.
+    """
+    filing = next(step for step in _drift_steps() if "gh issue create" in step.get("run", ""))
+    search = filing["run"].split("gh issue list", 1)[1].split("--jq", 1)[0]
+
+    assert "--label" not in search
 
 
 def test_mcp_spec_drift_workflow_uses_the_expected_labels() -> None:
@@ -230,7 +254,7 @@ def test_mcp_spec_drift_workflow_does_not_file_without_a_revision() -> None:
     """
     filing = next(step for step in _drift_steps() if "gh issue create" in step.get("run", ""))
 
-    assert "steps.check.outputs.newest != ''" in filing["if"]
+    assert "outputs.newest != ''" in filing["if"]
 
 
 def test_mcp_spec_drift_workflow_passes_while_drift_is_already_tracked() -> None:

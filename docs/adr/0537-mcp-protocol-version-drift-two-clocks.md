@@ -94,10 +94,25 @@ at all.
 The `ci` gate gains one offline check. It cannot fail from a GitHub outage, a rate limit,
 or an air-gapped runner, because the only network-dependent mode runs on the cron.
 
-The cron will report drift on its first run and file an issue: upstream `2026-07-28` is
-newer than the declared `2025-11-25`. That is the correct report, not a defect in the check.
-Closing it requires leaving `mcp==1.28.1` — PyPI's current `mcp` is `2.0.0`, a major bump
-with its own compatibility review — so the issue will stay open until that work is scheduled.
+The cron will report drift on its first run: upstream `2026-07-28` is newer than the declared
+`2025-11-25`. It will not file anything, because issue #1485 ("Investigate MCP 2026-07-28 Spec
+Update Requirements") is already open and names that revision — the dedup finds it and the run
+passes quietly. That is the arm working as designed, and it is why the dedup search carries no
+`--label` conjunct: #1485 does not carry this workflow's labels, and a label-filtered query
+would have missed it and duplicated it on day one.
+
+Resolving the underlying drift requires leaving `mcp==1.28.1` — PyPI's current `mcp` is
+`2.0.0`, a major bump with its own compatibility review — so #1485 stays open until that work
+is scheduled.
+
+The workflow is split into two jobs, and the split is the security boundary rather than a
+structural preference. `check-drift` runs `uv run python` and so imports the whole synced
+dependency tree; it holds `contents: read` only. `report` holds the sole `issues: write` grant
+and runs nothing but `gh` — no checkout, no dependency install, no project code. A job-level
+grant on the first job would have put an issue-creating token in the same process as every
+third-party package, for no benefit: the token there is only a rate-limit bump against a public
+third-party repository, which any scope satisfies. This is the repository's first
+elevated-permission workflow, so it is the wiring the next one will copy.
 
 Because that state persists for months rather than days, the cron is idempotent: it files on
 the *transition* into drift and succeeds quietly whenever a matching issue already exists, in
