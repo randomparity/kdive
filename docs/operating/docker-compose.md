@@ -55,7 +55,8 @@ start gate outside this reference workflow. Verify that every current worker has
 incarnation and that the server lists the recovery tools before resuming queue processing.
 Do not roll an old worker image back into this sequence. Rollback cannot restore its ability
 to claim protocol-required jobs; recover forward with a current image. Do not invoke
-`python -m kdive.processes.compose_worker_lifecycle` directly or use raw Docker/Compose commands;
+`python -m kdive.processes.lifecycle.compose_worker_lifecycle` directly or use raw Docker/Compose
+commands;
 they bypass the public lifecycle path and retain pins rather than releasing them.
 
 The Compose-managed bucket supplies the ADR-0524 store contract. When replacing it with an

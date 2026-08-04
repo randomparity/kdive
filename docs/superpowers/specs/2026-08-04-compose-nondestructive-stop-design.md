@@ -117,8 +117,9 @@ arbitrary downstream Compose topology.
 
 ## Alternatives rejected
 
-- **Document `python -m kdive.processes.compose_worker_lifecycle down`.** This exposes an internal
-  module invocation while the repository declares `just` recipes as the public workflow.
+- **Document `python -m kdive.processes.lifecycle.compose_worker_lifecycle down`.** This exposes
+  an internal module invocation while the repository declares `just` recipes as the public
+  workflow.
 - **Reuse `just compose-down`.** It deletes the Postgres volume and cannot support an existing-data
   migration.
 - **Use `compose-recreate-worker`.** It starts the replacement immediately and violates

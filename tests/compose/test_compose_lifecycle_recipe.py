@@ -22,7 +22,7 @@ def test_lifecycle_recipes_require_role_specific_database_authorities() -> None:
 
     assert justfile.count(witness_default) == 4
     assert justfile.count(worker_default) == 2
-    assert justfile.count(lifecycle_module) == 3
+    assert justfile.count(lifecycle_module) == 4
     assert lifecycle_module.replace(".lifecycle", "") not in justfile
 
 
@@ -36,7 +36,7 @@ def test_compose_stop_preserves_volumes_while_compose_down_removes_them() -> Non
 
     assert witness_default in stop_recipe
     assert witness_default in down_recipe
-    assert "python -m kdive.processes.compose_worker_lifecycle down" in stop_recipe
+    assert "python -m kdive.processes.lifecycle.compose_worker_lifecycle down" in stop_recipe
     assert "--volumes" not in stop_recipe
     assert "--volumes" in down_recipe
 

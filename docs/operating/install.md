@@ -53,7 +53,8 @@ For a release carrying the worker-fence protocol, follow the deployment-specific
   externally provisioned Compose-derived deployment must supply an equivalent stop-old, migrate,
   provision credentials and memberships, and start gate outside this reference workflow.
   Do not invoke
-  `python -m kdive.processes.compose_worker_lifecycle` directly or use raw Docker/Compose commands;
+  `python -m kdive.processes.lifecycle.compose_worker_lifecycle` directly or use raw
+  Docker/Compose commands;
   they bypass the public lifecycle path. Compose has no persistent lifecycle-witness service.
 
 Verify registered current incarnations and recovery-tool exposure before resuming queue processing.
