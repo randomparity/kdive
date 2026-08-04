@@ -18,7 +18,8 @@ from _pytest.mark import ParameterSet
 
 from kdive.cli.__main__ import build_parser, main
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
-from kdive.cli.commands.registry import _ARG_TYPES, GENERATED_ARG_PREFIX
+from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX
+from kdive.cli.commands.registry import _ARG_TYPES
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 from tests.cli.verb_argv import required_argv_for_generated
 

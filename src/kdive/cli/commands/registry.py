@@ -17,11 +17,11 @@ import kdive.cli.commands.images as images
 import kdive.cli.commands.mutations as mutations
 import kdive.cli.commands.reads as reads
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedLocalFlag, GeneratedVerb
 from kdive.cli.reserved_flags import derive_cli_flag
 
 __all__ = [
-    "GENERATED_ARG_PREFIX",
     "HANDLER_OVERRIDES",
     "add_subparsers",
     "doctor",
@@ -98,11 +98,6 @@ _ARG_TYPES: dict[str, Callable[[str], object]] = {
     "int": int,
     "float": _finite_float,
 }
-
-#: Generated-verb flag values land on the namespace under this prefix (``genarg_<param>``),
-#: so a tool parameter named ``command``/``subcommand``/``json`` can never clobber argparse's
-#: routing keys. The generic dispatch handler (#1450) strips the prefix to rebuild the payload.
-GENERATED_ARG_PREFIX = "genarg_"
 
 
 def _json_parent() -> argparse.ArgumentParser:
@@ -240,10 +235,7 @@ def _generated_verb_parser(
         _add_generated_json_flag(parser, param)
     for flag in verb.local_flags:
         _add_generated_local_flag(parser, flag)
-    requires_yes = (
-        verb.destructive if verb.confirm_destructive is None else verb.confirm_destructive
-    )
-    if requires_yes:
+    if verb.confirm_destructive:
         parser.add_argument(
             "--yes",
             dest="yes",

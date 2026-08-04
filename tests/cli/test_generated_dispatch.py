@@ -18,7 +18,7 @@ import pytest
 
 from kdive.cli import dispatch
 from kdive.cli.__main__ import build_parser
-from kdive.cli.commands.registry import GENERATED_ARG_PREFIX
+from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX, assemble_generated_payload
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 
 
@@ -117,6 +117,7 @@ def _verb(
         tool=tool,
         read_only=read_only,
         destructive=destructive,
+        confirm_destructive=destructive,
         unwrap_request=unwrap_request,
         flags=flags,
         json_params=json_params,
@@ -147,23 +148,36 @@ def _run(verb: GeneratedVerb, args: argparse.Namespace) -> int:
 def test_payload_strips_the_genarg_prefix() -> None:
     verb = _verb("systems.provision", flags=(_scalar("name"),))
     args = _ns(**{_dest("name"): "web-01"})
-    assert dispatch._assemble_generated_payload(verb, args) == {"name": "web-01"}
+    assert assemble_generated_payload(verb, args) == {"name": "web-01"}
 
 
 def test_payload_omits_absent_scalar_flags() -> None:
     verb = _verb("systems.provision", flags=(_scalar("name"), _scalar("arch")))
     args = _ns(**{_dest("name"): "web-01", _dest("arch"): None})
-    assert dispatch._assemble_generated_payload(verb, args) == {"name": "web-01"}
+    assert assemble_generated_payload(verb, args) == {"name": "web-01"}
+
+
+def test_payload_excludes_routing_rendering_confirmation_and_local_fields() -> None:
+    verb = _verb("systems.provision", flags=(_scalar("name"),))
+    args = _ns(
+        command="systems",
+        subcommand="provision",
+        json=True,
+        yes=True,
+        force=True,
+        expired=True,
+        **{_dest("name"): "web-01"},
+    )
+
+    assert assemble_generated_payload(verb, args) == {"name": "web-01"}
 
 
 def test_payload_store_true_included_only_when_set() -> None:
     on = GeneratedFlag(name="--wait", dest="wait", required=False, help="", action="store_true")
     verb = _verb("runs.boot", flags=(on,))
-    assert dispatch._assemble_generated_payload(verb, _ns(**{_dest("wait"): True})) == {
-        "wait": True
-    }
+    assert assemble_generated_payload(verb, _ns(**{_dest("wait"): True})) == {"wait": True}
     # An unset boolean is omitted so the server default holds (argparse cannot express "unset").
-    assert dispatch._assemble_generated_payload(verb, _ns(**{_dest("wait"): False})) == {}
+    assert assemble_generated_payload(verb, _ns(**{_dest("wait"): False})) == {}
 
 
 def test_payload_bool_optional_sends_both_states() -> None:
@@ -173,21 +187,17 @@ def test_payload_bool_optional_sends_both_states() -> None:
         name="--paused", dest="paused", required=True, help="", action="bool_optional"
     )
     verb = _verb("ops.set_queue_paused", flags=(paused,))
-    assert dispatch._assemble_generated_payload(verb, _ns(**{_dest("paused"): True})) == {
-        "paused": True
-    }
-    assert dispatch._assemble_generated_payload(verb, _ns(**{_dest("paused"): False})) == {
-        "paused": False
-    }
+    assert assemble_generated_payload(verb, _ns(**{_dest("paused"): True})) == {"paused": True}
+    assert assemble_generated_payload(verb, _ns(**{_dest("paused"): False})) == {"paused": False}
 
 
 def test_payload_append_flag_included_when_present() -> None:
     pkgs = GeneratedFlag(name="--pkg", dest="pkg", required=False, help="", action="append")
     verb = _verb("resources.set_status", flags=(pkgs,))
-    assert dispatch._assemble_generated_payload(verb, _ns(**{_dest("pkg"): ["a", "b"]})) == {
+    assert assemble_generated_payload(verb, _ns(**{_dest("pkg"): ["a", "b"]})) == {
         "pkg": ["a", "b"]
     }
-    assert dispatch._assemble_generated_payload(verb, _ns(**{_dest("pkg"): None})) == {}
+    assert assemble_generated_payload(verb, _ns(**{_dest("pkg"): None})) == {}
 
 
 def test_payload_folds_in_json_param() -> None:
@@ -198,7 +208,7 @@ def test_payload_folds_in_json_param() -> None:
             f"{GENERATED_ARG_PREFIX}profile_json": '{"arch": "x86_64"}',
         }
     )
-    assert dispatch._assemble_generated_payload(verb, args) == {
+    assert assemble_generated_payload(verb, args) == {
         "allocation_id": "al-1",
         "profile": {"arch": "x86_64"},
     }
@@ -214,7 +224,7 @@ def test_payload_json_param_array_folds_in() -> None:
             f"{GENERATED_ARG_PREFIX}artifacts_json": '[{"name": "vmlinuz"}]',
         }
     )
-    assert dispatch._assemble_generated_payload(verb, args) == {
+    assert assemble_generated_payload(verb, args) == {
         "run_id": "run-1",
         "artifacts": [{"name": "vmlinuz"}],
     }
@@ -223,19 +233,19 @@ def test_payload_json_param_array_folds_in() -> None:
 def test_payload_absent_json_param_omitted() -> None:
     verb = _verb("systems.provision", flags=(_scalar("allocation_id"),), json_params=("profile",))
     args = _ns(**{_dest("allocation_id"): "al-1", f"{GENERATED_ARG_PREFIX}profile_json": None})
-    assert dispatch._assemble_generated_payload(verb, args) == {"allocation_id": "al-1"}
+    assert assemble_generated_payload(verb, args) == {"allocation_id": "al-1"}
 
 
 def test_payload_unwrap_request_wraps_body() -> None:
     verb = _verb("investigations.list", unwrap_request=True, flags=(_scalar("state"),))
     args = _ns(**{_dest("state"): "open"})
-    assert dispatch._assemble_generated_payload(verb, args) == {"request": {"state": "open"}}
+    assert assemble_generated_payload(verb, args) == {"request": {"state": "open"}}
 
 
 def test_payload_unwrap_request_empty_body_sends_no_key() -> None:
     verb = _verb("jobs.list", unwrap_request=True, flags=(_scalar("kind"),))
     args = _ns(**{_dest("kind"): None})
-    assert dispatch._assemble_generated_payload(verb, args) == {}
+    assert assemble_generated_payload(verb, args) == {}
 
 
 # --- tier resolution + ceremony --------------------------------------------------------------

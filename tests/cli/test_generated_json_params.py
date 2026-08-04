@@ -14,7 +14,7 @@ import pytest
 
 from kdive.cli.__main__ import build_parser
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
-from kdive.cli.commands.registry import GENERATED_ARG_PREFIX
+from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 
 # Every descriptor that carries at least one non-scalar parameter exposes its JSON-flag surface,

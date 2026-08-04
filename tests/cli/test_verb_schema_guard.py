@@ -17,7 +17,7 @@ Two complementary guards close that (ADR-0469):
   ``additionalProperties: false``, that single assertion covers unknown keys, dropped
   properties, and the ``{"request": ...}`` wrapper convention in both directions.
 * **Generic dispatch — structural.** Its payload assembly is mechanical
-  (``dispatch._assemble_generated_payload``), so the descriptor itself is checked against the
+  (``generated_args.assemble_generated_payload``), so the descriptor itself is checked against the
   schema: required properties reachable, no dest the schema lacks, enums carrying ``choices``,
   and no argument-less verb for a tool that demands arguments.
 
@@ -49,7 +49,8 @@ import kdive.cli.commands.mutations as mutations
 import kdive.cli.commands.reads as reads
 from kdive.cli.__main__ import build_parser
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
-from kdive.cli.commands.registry import GENERATED_ARG_PREFIX, HANDLER_OVERRIDES
+from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX
+from kdive.cli.commands.registry import HANDLER_OVERRIDES
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 from kdive.mcp.tools._common import DEFAULT_WAIT_S, MAX_WAIT_S
 from scripts import gen_cli_verbs as gen

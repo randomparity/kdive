@@ -70,8 +70,8 @@ class GeneratedVerb:
     for them; the ``--<param>-json`` escape that surfaces them is a separate entry (#1449).
 
     ``confirm_destructive`` controls whether this path exposes the generic ``--yes`` ceremony.
-    ``None`` retains the legacy default of following :attr:`destructive`; generated descriptors
-    set it explicitly so a bespoke historical handler can retain its narrower CLI surface.
+    Every descriptor supplies this explicit boolean, so parser behavior never falls back to an
+    inferred value.
     """
 
     group: str
@@ -85,4 +85,4 @@ class GeneratedVerb:
     json_params: tuple[str, ...] = field(default_factory=tuple)
     positionals: tuple[str, ...] = ()
     local_flags: tuple[GeneratedLocalFlag, ...] = ()
-    confirm_destructive: bool | None = None
+    confirm_destructive: bool = field(kw_only=True)
