@@ -12,7 +12,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from tests.db_waits import wait_until_any_backend_waiting, wait_until_backend_waiting
 
 
-def test_any_backend_wait_ignores_waiter_in_other_database(
+def test_any_backend_wait_ignores_waiter_blocked_by_other_backend(
     postgres_url: str, migrated_url: str
 ) -> None:
     async def _run() -> None:
@@ -43,7 +43,7 @@ def test_any_backend_wait_ignores_waiter_in_other_database(
                     )
                     with pytest.raises(
                         AssertionError,
-                        match="no backend began waiting on the expected database lock",
+                        match="no backend began waiting on the expected lock held by the observer",
                     ):
                         await wait_until_any_backend_waiting(
                             observer, locktype="advisory", timeout_s=0.1
@@ -56,16 +56,15 @@ def test_any_backend_wait_ignores_waiter_in_other_database(
     asyncio.run(_run())
 
 
-def test_any_backend_wait_detects_waiter_in_observer_database(migrated_url: str) -> None:
+def test_any_backend_wait_detects_waiter_blocked_by_observer(migrated_url: str) -> None:
     async def _run() -> None:
         key = uuid4()
         async with (
-            await psycopg.AsyncConnection.connect(migrated_url) as observer,
             await psycopg.AsyncConnection.connect(migrated_url) as holder,
             await psycopg.AsyncConnection.connect(migrated_url) as waiter_conn,
         ):
 
-            async def wait_in_observer_database() -> None:
+            async def wait_on_observer() -> None:
                 async with (
                     waiter_conn.transaction(),
                     advisory_xact_lock(waiter_conn, LockScope.INVESTIGATION, key),
@@ -78,8 +77,8 @@ def test_any_backend_wait_detects_waiter_in_observer_database(migrated_url: str)
                     holder.transaction(),
                     advisory_xact_lock(holder, LockScope.INVESTIGATION, key),
                 ):
-                    waiter = asyncio.create_task(wait_in_observer_database())
-                    await wait_until_any_backend_waiting(observer, locktype="advisory")
+                    waiter = asyncio.create_task(wait_on_observer())
+                    await wait_until_any_backend_waiting(holder, locktype="advisory")
                     assert not waiter.done()
             finally:
                 if waiter is not None:
