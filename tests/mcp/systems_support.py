@@ -69,6 +69,22 @@ class _ResolvingLiveIntrospector:
         del transport_handle, script, timeout_sec, key_path
 
 
+class _NoopSnapshotter:
+    """Snapshot-capable test port whose lifecycle methods intentionally do nothing."""
+
+    def create(self, domain_name: str, name: str, *, include_memory: bool) -> None:
+        del domain_name, name, include_memory
+
+    def revert(self, domain_name: str, name: str, *, start_paused: bool) -> None:
+        del domain_name, name, start_paused
+
+    def delete(self, domain_name: str, name: str) -> None:
+        del domain_name, name
+
+    def delete_all(self, domain_name: str) -> None:
+        del domain_name
+
+
 TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="test-provider",
     accepted_component_sources={
@@ -218,7 +234,7 @@ def provider_resolver(
             if bootstrap_key_customizer is None
             else BootstrapKeyCapabilities(customizer=bootstrap_key_customizer)
         ),
-        snapshot=cast(Any, snapshotter if snapshotter is not None else unused_port)
+        snapshot=cast(Any, snapshotter if snapshotter is not None else _NoopSnapshotter())
         if supports_snapshots
         else None,
         traffic_capturer=cast(

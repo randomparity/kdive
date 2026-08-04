@@ -126,8 +126,11 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     expected_hosting = _FakeConsoleHosting()
 
     class _FakeProviderComposition:
-        def __init__(self, *, secret_registry: SecretRegistry | None = None) -> None:
+        def __init__(
+            self, *, secret_registry: SecretRegistry | None = None, object_store: object
+        ) -> None:
             assert secret_registry is expected_registry
+            constructed["object_store"] = object_store
 
         def build_provider_resolver(self) -> _FakeResolver:
             return _FakeResolver()
