@@ -249,13 +249,13 @@ def _no_discovery_target() -> DiscoveryRegistrationTarget:
     )
 
 
-def _debug_capabilities(secret_registry: SecretRegistry) -> DebugCapabilities:
+def _debug_capabilities(secret_registry: SecretRegistry, store: ObjectStore) -> DebugCapabilities:
     return DebugCapabilities(
         attach_seam=remote_attach_seam,
         engine=GdbMiEngine(
             redactor_factory=lambda: Redactor(registry=secret_registry),
             host_policy=allow_acl_remote,
-            module_debuginfo_resolver=real_module_debuginfo_resolver(),
+            module_debuginfo_resolver=real_module_debuginfo_resolver(store),
         ),
     )
 
@@ -375,7 +375,7 @@ def build_runtime(
             # (ADR-0367/0433, #1435). The deferred ADR-0427 opt-in; matches the reader factory.
             supports_crash_watch=True,
         ),
-        debug=_debug_capabilities(secret_registry),
+        debug=_debug_capabilities(secret_registry, store),
         rootfs=RootfsCapabilities(build_plane=RemoteLibvirtRootfsBuildPlane.from_env()),
         resource_details=ResourceDetailCapabilities(
             staged_volume_probe=_staged_volume_probe(config_factory),

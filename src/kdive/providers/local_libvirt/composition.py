@@ -189,7 +189,7 @@ def build_runtime(
             attach_seam=default_attach_seam,
             engine=GdbMiEngine(
                 redactor_factory=lambda: Redactor(registry=secret_registry),
-                module_debuginfo_resolver=real_module_debuginfo_resolver(),
+                module_debuginfo_resolver=real_module_debuginfo_resolver(store),
             ),
         ),
         rootfs=RootfsCapabilities(

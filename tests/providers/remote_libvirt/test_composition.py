@@ -41,6 +41,7 @@ from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAd
 from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.objectstore import ObjectStore
 
 
 def test_remote_runtime_owns_no_platform_root_cmdline() -> None:
@@ -49,6 +50,24 @@ def test_remote_runtime_owns_no_platform_root_cmdline() -> None:
     # the remote runtime carries platform_root_cmdline=None, unlike local's "root=/dev/vda" (#587).
     runtime = composition.build_runtime(secret_registry=SecretRegistry())
     assert runtime.platform_root_cmdline is None
+
+
+def test_build_runtime_threads_store_to_module_debuginfo_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = cast(ObjectStore, object())
+    seen: list[ObjectStore] = []
+
+    def fake_resolver(store_arg: ObjectStore) -> object:
+        seen.append(store_arg)
+        return object()
+
+    monkeypatch.setattr(composition, "real_module_debuginfo_resolver", fake_resolver)
+
+    composition.build_runtime(secret_registry=SecretRegistry(), store=store)
+
+    assert len(seen) == 1
+    assert seen[0] is store
 
 
 def test_remote_runtime_advertises_and_wires_snapshots() -> None:

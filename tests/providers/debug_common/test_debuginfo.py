@@ -14,9 +14,12 @@ from typing import cast
 import pytest
 
 from kdive.artifacts.read_model import ArtifactReadRef
+from kdive.artifacts.storage import FetchedArtifact
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common.gdbmi.policy import debuginfo
+from kdive.store.objectstore import ObjectStore
 
 
 class _RecordingFetch:
@@ -32,6 +35,20 @@ class _RecordingFetch:
         if self._error is not None:
             raise self._error
         return self._data
+
+
+class _RecordingStore:
+    """A fake object store that records the exact artifact-read contract."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self.calls: list[tuple[str, str | None, str | None]] = []
+
+    def get_artifact(
+        self, key: str, etag: str | None, *, version_id: str | None = None
+    ) -> FetchedArtifact:
+        self.calls.append((key, etag, version_id))
+        return FetchedArtifact(self._data, Sensitivity.SENSITIVE, "test")
 
 
 def test_resolve_fetches_present_ref_to_dest(tmp_path: Path) -> None:
@@ -313,6 +330,27 @@ def test_module_resolve_no_kernel_ref_raises_no_module_debuginfo() -> None:
     with pytest.raises(CategorizedError) as exc:
         resolver.resolve("r1", "foo")
     assert exc.value.details["reason"] == "no_module_debuginfo"
+
+
+def test_real_module_resolver_fetches_unversioned_and_versioned_artifacts_from_its_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tar = _make_modules_tar({"lib/modules/6.0/foo.ko": b"ELF"})
+    store = _RecordingStore(tar)
+    refs = {
+        "unversioned": ArtifactReadRef("runs/r1/kernel.tar", None),
+        "versioned": ArtifactReadRef("builds/kernel.tar", "version-9"),
+    }
+    monkeypatch.setattr(debuginfo, "real_read_kernel_ref", lambda run_id: refs[run_id])
+
+    resolver = debuginfo.real_module_debuginfo_resolver(cast(ObjectStore, store))
+
+    assert resolver("unversioned", "foo").path.read_bytes() == b"ELF"
+    assert resolver("versioned", "foo").path.read_bytes() == b"ELF"
+    assert store.calls == [
+        ("runs/r1/kernel.tar", None, None),
+        ("builds/kernel.tar", None, "version-9"),
+    ]
 
 
 # --- parse_module_identity (pure ELF parse) -------------------------------------------------

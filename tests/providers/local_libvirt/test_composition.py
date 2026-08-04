@@ -116,6 +116,24 @@ def test_build_runtime_threads_store_to_the_provisioner(
     assert seen == [store]
 
 
+def test_build_runtime_threads_store_to_module_debuginfo_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = cast(ObjectStore, object())
+    seen: list[ObjectStore] = []
+
+    def fake_resolver(store_arg: ObjectStore) -> object:
+        seen.append(store_arg)
+        return object()
+
+    monkeypatch.setattr(composition, "real_module_debuginfo_resolver", fake_resolver)
+
+    composition.build_runtime(secret_registry=SecretRegistry(), store=store)
+
+    assert len(seen) == 1
+    assert seen[0] is store
+
+
 def test_local_runtime_sets_rebind_for_resource() -> None:
     # ADR-0313/0187: local now carries a per-Resource rebind hook so the resolver binds the
     # operator's guest_egress opt-in to the allocated Resource by name (previously identity/no-op).

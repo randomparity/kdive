@@ -35,10 +35,7 @@ from kdive.artifacts.read_model import (
 from kdive.config.core_settings import DATABASE_URL
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import AttachSeam, GdbMiAttachment
-from kdive.providers.shared.debug_common.crash_postmortem import (
-    default_fetch_object,
-    default_fetch_versioned_object,
-)
+from kdive.store.objectstore import ObjectStore
 
 type _ReadDebuginfoRef = Callable[[str], ArtifactReadRef | None]
 type _FetchObject = Callable[[str], bytes]
@@ -206,16 +203,25 @@ def real_read_kernel_ref(run_id: str) -> ArtifactReadRef | None:  # pragma: no c
         return kernel_ref_for_run_sync(conn, UUID(run_id))
 
 
-def real_module_debuginfo_resolver() -> ModuleDebuginfoResolverSeam:  # pragma: no cover - live_vm
+def real_module_debuginfo_resolver(
+    store: ObjectStore,
+) -> ModuleDebuginfoResolverSeam:  # pragma: no cover - live_vm
     """The production module-debuginfo resolver seam wired to the live DB/object-store/ELF seams.
 
     Returns the bound ``resolve`` so the engine seam stays a plain ``(run_id, module)`` callable;
     the closed-over resolver instance keeps its per-run staging cache alive across calls.
     """
+
+    def _fetch_object(ref: str) -> bytes:
+        return store.get_artifact(ref, None).data
+
+    def _fetch_versioned_object(ref: str, version_id: str) -> bytes:
+        return store.get_artifact(ref, None, version_id=version_id).data
+
     return ModuleDebuginfoResolver(
         read_kernel_ref=real_read_kernel_ref,
-        fetch_object=default_fetch_object,
-        fetch_versioned_object=default_fetch_versioned_object,
+        fetch_object=_fetch_object,
+        fetch_versioned_object=_fetch_versioned_object,
         read_identity=read_module_identity,
     ).resolve
 
@@ -295,6 +301,11 @@ def stage_and_attach(
     vmlinux path with its own host-policy'd engine (loopback for local, ACL-remote for remote).
     """
     if resolver is None:
+        from kdive.providers.shared.debug_common.crash_postmortem import (
+            default_fetch_object,
+            default_fetch_versioned_object,
+        )
+
         resolver = DebuginfoResolver(
             read_debuginfo_ref=real_read_debuginfo_ref,
             fetch_object=default_fetch_object,
