@@ -9,9 +9,12 @@ walk's blind spot: a core change introduced only in a merge commit (a conflict
 resolution or evil merge), which ``--no-merges`` numstat never sees. The allowlist is
 the ADR-0076 set: the ``ResourceKind`` enum value, the one M2 migration, and the
 additive ``presign_get`` primitive. Extending it is a deliberate, reviewed decision —
-edit this file in the same PR. Allowlist paths are matched exactly, so the gate first
-checks that every entry still names a file and refuses to measure against a list that
-has silently stopped allowlisting anything (#1835).
+edit this file in the same PR. Allowlist paths are matched exactly, so the gate also
+reports any entry naming no file and fails on it: such an entry allowlists nothing while
+the modules that replaced it count as violations (#1835). That check catches the
+move-or-delete shape only. An entry naming a file is not thereby live — content carved
+out of a module that stays in place leaves the entry pointing at a shell, which nothing
+here detects; see the note above ``ALLOWED_FILES`` for what review has to do instead.
 
 Exit codes: 0 gate passes; 1 a stale allowlist entry or violations found; 2 the
 baseline tag is unavailable.
@@ -60,11 +63,16 @@ CORE_PREFIXES = (
 )
 
 # Entries are matched exactly against numstat paths, so every member must name a file that
-# exists (``stale_entries`` enforces it). When a refactor moves an allowlisted module, re-point
-# its entry at the modules that took over its content — the ones the moving commit produced from
-# it — and leave that entry's justification comment attached to them. Siblings that arrived in
-# the new package by another route were never part of the reviewed decision and stay out. When
-# the content leaves ``CORE_PREFIXES`` altogether, drop the entry and say where it went.
+# exists (``stale_entries`` enforces it) and still holds the content its comment justifies.
+# When a refactor moves an allowlisted module, follow the move chain to its end — a later
+# carve-out out of a successor inherits the justification as long as it stays inside that
+# successor's own package — and re-point the entry at whichever modules hold the content now,
+# leaving the justification comment attached to them. Drop an entry once its file holds none
+# of that content: a bare package marker allowlists nothing, which is the failure #1835 was
+# filed about. Two things do not inherit: a module that arrived in the new package by another
+# route was never part of the reviewed decision, and content that migrates to a different
+# subsystem is a separate decision needing its own reviewed entry. When the content leaves
+# ``CORE_PREFIXES`` altogether, drop the entry and say where it went.
 ALLOWED_FILES = frozenset(
     {
         # ResourceKind.REMOTE_LIBVIRT (ADR-0076 named touch-point).
@@ -76,12 +84,14 @@ ALLOWED_FILES = frozenset(
         # drgn-live transport generalization (#215, ADR-0085): the deliberate, reviewed core
         # touch routing remote in-guest drgn off the ssh-credential + ssh-string assumption.
         # Was debug/sessions.py (split to sessions_lifecycle.py, then both grouped into the
-        # sessions package) and debug/introspect.py (split into the introspection package,
-        # then reduced to a facade and removed).
-        "src/kdive/mcp/tools/debug/sessions/__init__.py",
+        # sessions package, whose init later gave up its registration to sessions/registrar.py)
+        # and debug/introspect.py (split into the introspection package, then reduced to a
+        # facade and removed; the package's live handler later gave up its debuginfo probe to
+        # introspection/gate.py). Both package inits are bare markers now and hold nothing.
         "src/kdive/mcp/tools/debug/sessions/lifecycle.py",
-        "src/kdive/mcp/tools/debug/introspection/__init__.py",
+        "src/kdive/mcp/tools/debug/sessions/registrar.py",
         "src/kdive/mcp/tools/debug/introspection/common.py",
+        "src/kdive/mcp/tools/debug/introspection/gate.py",
         "src/kdive/mcp/tools/debug/introspection/live.py",
         "src/kdive/mcp/tools/debug/introspection/offline.py",
         "src/kdive/mcp/tools/debug/introspection/registrar.py",
@@ -94,12 +104,14 @@ ALLOWED_FILES = frozenset(
         # kdive.config. This is shared-infra (platform) work, not provider work; kdive/config/
         # itself is outside CORE_PREFIXES, so only these in-place reader migrations register here.
         # domain/lease.py moved into the domain/lifecycle package; debug/ops.py became the
-        # debug/operations package init.
+        # debug/operations package init, which then gave up its whole body to operations/
+        # runtime.py and operations/registrar.py and is a bare marker now.
         "src/kdive/db/pool.py",
         "src/kdive/domain/lifecycle/lease.py",
         "src/kdive/mcp/auth.py",
         "src/kdive/mcp/tools/catalog/artifacts/uploads.py",
-        "src/kdive/mcp/tools/debug/operations/__init__.py",
+        "src/kdive/mcp/tools/debug/operations/runtime.py",
+        "src/kdive/mcp/tools/debug/operations/registrar.py",
         "src/kdive/security/secrets/secrets.py",
         # Operator-CLI audit attribution (#248, ADR-0089): the milestone's only non-cli core
         # change. A provider-agnostic addition — record the caller class (operator-cli | agent
@@ -108,7 +120,9 @@ ALLOWED_FILES = frozenset(
         # success site; none of it is provider-specific.
         # ops/_auth.py became the shared mcp/platform_auth.py; breakglass.py moved to the
         # ops/security package; reconcile.py to the ops/reconcile package; resources.py became
-        # the ops/resources package init.
+        # the ops/resources package init, which then gave up its body to resources/host_ops.py
+        # and is a bare marker now (the register/deregister/renew modules beside it are the
+        # net-new runtime tools of a later decision, not content carved out of this one).
         "src/kdive/db/schema/0021_platform_audit_actor.sql",
         "src/kdive/security/authz/actor.py",
         "src/kdive/security/authz/context.py",
@@ -118,7 +132,7 @@ ALLOWED_FILES = frozenset(
         "src/kdive/mcp/tools/ops/security/breakglass.py",
         "src/kdive/mcp/tools/ops/queue.py",
         "src/kdive/mcp/tools/ops/reconcile/reconcile.py",
-        "src/kdive/mcp/tools/ops/resources/__init__.py",
+        "src/kdive/mcp/tools/ops/resources/host_ops.py",
         "src/kdive/mcp/tools/ops/tuning.py",
         "src/kdive/mcp/tools/accounting/reports.py",
         "src/kdive/mcp/tools/catalog/shapes.py",
@@ -144,10 +158,9 @@ ALLOWED_FILES = frozenset(
         # metrics) at the dispatch boundary and registering it in build_app. The labels
         # are restricted to the tool name + outcome (no provider/tenant data); none of it
         # is provider-specific. mcp/middleware.py was later split into the middleware
-        # package; these are the seven modules that split produced. Middlewares added to the
-        # package afterwards (bare_bearer_hint, compact, doc_exposure, transport_trace) are
-        # their own decisions and are not covered here.
-        "src/kdive/mcp/middleware/__init__.py",
+        # package; these are the modules that split produced, less its bare-marker init.
+        # Middlewares added to the package afterwards (bare_bearer_hint, compact,
+        # doc_exposure, transport_trace) are their own decisions and are not covered here.
         "src/kdive/mcp/middleware/binding_errors.py",
         "src/kdive/mcp/middleware/denial_audit.py",
         "src/kdive/mcp/middleware/exposure.py",
@@ -219,12 +232,12 @@ ALLOWED_FILES = frozenset(
         # three new destructive tools to the reviewed set. None of it is provider-specific —
         # authz is the same gate-then-act-then-audit ops surface as its siblings above, and the
         # kdivectl CLI verbs live outside CORE_PREFIXES (src/kdive/cli/...). ops/images.py was
-        # later split into the ops/images package; these are the six modules that split produced
-        # (its registrar was factored out of the package init afterwards and is not covered here).
-        "src/kdive/mcp/tools/ops/images/__init__.py",
+        # later split into the ops/images package, whose init then gave up its registration to
+        # images/registrar.py and is a bare marker now.
         "src/kdive/mcp/tools/ops/images/_common.py",
         "src/kdive/mcp/tools/ops/images/build_publish.py",
         "src/kdive/mcp/tools/ops/images/delete.py",
+        "src/kdive/mcp/tools/ops/images/registrar.py",
         "src/kdive/mcp/tools/ops/images/retention.py",
         "src/kdive/mcp/tools/ops/images/upload.py",
         "src/kdive/mcp/tools/catalog/images.py",
@@ -282,10 +295,15 @@ def stale_entries(root: Path) -> list[str]:
 
     An entry is matched against numstat paths exactly — there is no prefix or directory
     matching — so an entry whose module moved or became a package stops allowlisting
-    anything, while the modules that replaced it register as violations (#1835). Nothing
-    else distinguishes such an entry from a live one, so the gate refuses to measure
-    against a list that has quietly stopped meaning what it says. A directory is as stale
-    as an absent path: numstat names files.
+    anything, while the modules that replaced it register as violations (#1835). A
+    directory is as stale as an absent path: numstat names files.
+
+    This is a floor, not a liveness check. An entry naming no file is definitely dead; an
+    entry naming a file may still be dead, because content carved out of a module that
+    stays in place leaves the entry pointing at a shell that allowlists nothing. That
+    shape has no cheap mechanical test — ``_measure`` runs with ``--no-renames``, so a
+    retired path keeps its historical touch counts forever and a zero-touch check would
+    not fire either — so only review catches it.
     """
     return sorted(path for path in ALLOWED_FILES if not (root / path).is_file())
 
@@ -319,11 +337,18 @@ def render_capture_coverage() -> list[str]:
     return lines
 
 
-def render_report(touched: dict[str, int]) -> str:
-    """Render the measurement as a markdown report (pure function over the touched map).
+def render_report(touched: dict[str, int], stale: list[str]) -> str:
+    """Render the measurement as a markdown report (pure function over its inputs).
 
     Used by ``--report`` to write the committed milestone-end record (``just m2-report``). The
-    verdict mirrors the gate: a non-allowlisted core touch is a violation and fails.
+    verdict mirrors the gate: a non-allowlisted core touch is a violation and fails, and so
+    does a stale allowlist entry.
+
+    A stale entry renders as its own section rather than short-circuiting the render: the
+    recipe redirects stdout into the committed record, so the shell truncates that file
+    before this runs and printing nothing would leave it empty. A report that says which
+    entries are stale, and that every classification below them is therefore unreliable, is
+    a record; a zero-length file is not.
     """
     allowed = {path: count for path, count in touched.items() if path in ALLOWED_FILES}
     bad = violations(touched)
@@ -335,6 +360,19 @@ def render_report(touched: dict[str, int]) -> str:
         "hand-edit.",
         "",
         *render_capture_coverage(),
+    ]
+    if stale:
+        lines += [
+            "## Stale allowlist entries",
+            "",
+            "These entries name no file in the tree, so they allowlist nothing while the modules",
+            "that replaced them fall under Violations below. Every classification in this report",
+            "is unreliable until they are re-pointed (#1835).",
+            "",
+            *(f"- `{path}`" for path in stale),
+            "",
+        ]
+    lines += [
         "## Allowlisted touch-points",
         "",
         "| cumulative lines | file |",
@@ -352,6 +390,8 @@ def render_report(touched: dict[str, int]) -> str:
             "",
             "**Verdict: gate FAILED** — provider-specific changes reached the core surface.",
         ]
+    elif stale:
+        lines.append("**Verdict: gate FAILED** — the allowlist has entries naming no file.")
     else:
         lines.append(
             "**Verdict: gate passed** — no core surface touched outside the ADR-0076 allowlist."
@@ -432,32 +472,29 @@ def _measure() -> dict[str, int] | None:
 
 
 def main() -> int:
-    stale = stale_entries(REPO_ROOT)
-    if stale:
-        print(
-            "error: these ALLOWED_FILES entries name no file in the tree, so they "
-            "allowlist nothing while the modules that replaced them count as violations:",
-            file=sys.stderr,
-        )
-        for path in stale:
-            print(f"  stale  {path}", file=sys.stderr)
-        print(
-            "\nRe-point each entry at the module that now holds its allowlisted content, "
-            "keeping its justification comment attached, or drop the entry when that "
-            "content left the core surface.",
-            file=sys.stderr,
-        )
-        return 1
     touched = _measure()
     if touched is None:
         return 2
+    stale = stale_entries(REPO_ROOT)
     if "--report" in sys.argv[1:]:
-        print(render_report(touched))
-        return 1 if violations(touched) else 0
+        print(render_report(touched, stale))
+        return 1 if violations(touched) or stale else 0
     allowed = {path: count for path, count in touched.items() if path in ALLOWED_FILES}
     print(f"M2 portability measurement since {BASELINE_TAG} (cumulative touched lines):")
     for path, count in sorted(allowed.items()):
         print(f"  allowlisted  {count:>6}  {path}")
+    if stale:
+        print(
+            "\ngate FAILED - these ALLOWED_FILES entries name no file in the tree, so they "
+            "allowlist nothing while the modules that replaced them count as violations:"
+        )
+        for path in stale:
+            print(f"  STALE ENTRY          {path}")
+        print(
+            "\nRe-point each entry at the module that now holds its allowlisted content, "
+            "keeping its justification comment attached, or drop the entry when that "
+            "content left the core surface."
+        )
     bad = violations(touched)
     if bad:
         print("\ngate FAILED - provider-specific changes reached the core surface:")
@@ -468,6 +505,7 @@ def main() -> int:
             "docs/design/m2-remote-libvirt.md), or - for a deliberate provider-agnostic "
             "core change - extend ALLOWED_FILES in this script in the same PR."
         )
+    if bad or stale:
         return 1
     print("gate passed: no core surface touched outside the ADR-0076 allowlist.")
     return 0
