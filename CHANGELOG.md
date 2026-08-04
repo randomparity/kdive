@@ -469,6 +469,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make staged Helm recovery restart-safe
 - Close staged Helm recovery gaps
 - Snapshot staged Helm values
+- Record the BYO host provider design in ADRs 0538-0542 and a milestone doc
+- Correct BYO host design claims found by adversarial review
+- Close three unimplementable BYO commitments found in review
+- Fix BYO gate-table rows that allowlist paths deleted from the tree
+- Point the stale-allowlist note at its tracking issue
+- Cordon a BYO host for the whole restore, not only on failure
+- Name the core cost of the console-lease refusal, and fix the cordon guard
+- Key the BYO drift arm on the cordon, not a System state that cannot exist
+- Split the console lease into preempting and reading modes
+- Give the console lease a compatibility matrix, not two loose modes
+- Make the console-lease uniqueness partial so reading holds can share
+- Serialize console-lease acquisition on an advisory lock
 
 ### Fixed
 
