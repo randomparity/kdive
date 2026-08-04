@@ -10,9 +10,14 @@ job-duration metrics and per-job timeouts, not by liveness.
 
 from __future__ import annotations
 
+import asyncio
 import time
-from collections.abc import Callable
-from typing import SupportsFloat
+from collections.abc import Awaitable, Callable
+from typing import Protocol, SupportsFloat
+
+
+class _Ticker(Protocol):
+    def tick(self) -> None: ...
 
 
 class Heartbeat:
@@ -40,3 +45,18 @@ class Heartbeat:
     def is_live(self) -> bool:
         """Return whether the last tick is within :attr:`stale_after` seconds."""
         return (self._read_now() - self._last_tick) < self._stale_after
+
+
+async def tick_until_stop(
+    heartbeat: _Ticker,
+    stop: asyncio.Event,
+    interval: float,
+    sleep_until_stop: Callable[[asyncio.Event, float], Awaitable[None]],
+) -> None:
+    """Tick immediately and then after each stop-aware interval until stopped or cancelled."""
+    heartbeat.tick()
+    while not stop.is_set():
+        await sleep_until_stop(stop, interval)
+        if stop.is_set():
+            break
+        heartbeat.tick()

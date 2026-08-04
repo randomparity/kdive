@@ -19,7 +19,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode
 
-from kdive.health.heartbeat import Heartbeat
+from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop as reconciler_loop
 from kdive.reconciler.loop import Reconciler, ReconcileReport
@@ -307,10 +307,11 @@ def test_background_ticker_does_not_tick_after_stop() -> None:
         heartbeat = _CountingHeartbeat()
         stop = asyncio.Event()
         task = asyncio.create_task(
-            reconciler_loop._tick_until_stop(
-                cast(Heartbeat, heartbeat),
+            tick_until_stop(
+                heartbeat,
                 stop,
                 60.0,
+                reconciler_loop._sleep_until_stop,
             )
         )
         await asyncio.sleep(0)
@@ -511,7 +512,7 @@ def test_run_cancels_heartbeat_ticker_on_exit(monkeypatch: pytest.MonkeyPatch) -
         ticker_running.set()
         await asyncio.Event().wait()  # blocks forever until cancelled
 
-    monkeypatch.setattr(reconciler_loop, "_tick_until_stop", _never_ending_ticker)
+    monkeypatch.setattr(reconciler_loop, "tick_until_stop", _never_ending_ticker)
 
     async def _run() -> None:
         reconciler = Reconciler(

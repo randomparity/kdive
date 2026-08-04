@@ -21,7 +21,7 @@ from kdive.db.repositories import JOBS
 from kdive.domain.capacity.state import JobState, RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.health.heartbeat import Heartbeat
+from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
 from kdive.jobs import worker as worker_module
 from kdive.jobs.models import HandlerRegistry
@@ -1013,7 +1013,7 @@ def test_background_ticker_keeps_livez_live_across_a_long_blocking_job() -> None
                 _stop.set()
             await asyncio.sleep(0)
 
-        await worker_module._tick_until_stop(
+        await tick_until_stop(
             hb,
             stop,
             0.4,
@@ -1032,7 +1032,7 @@ def test_run_schedules_ticker_concurrent_with_the_claim_loop(
 ) -> None:
     """run() drives the heartbeat ticker concurrent with a long job, keeping /livez live.
 
-    Unlike the isolated _tick_until_stop tests, this drives the real worker.run(stop): a
+    Unlike the isolated ticker tests, this drives the real worker.run(stop): a
     run_once that blocks past the stale bound must NOT flip /livez stale (ADR-0090 §5). A
     regression where run() fails to schedule the ticker, or awaits it before the claim loop,
     would deadlock (the fake clock never advances) — so this test fences run()'s concurrency
@@ -1091,7 +1091,12 @@ def test_background_ticker_does_not_tick_after_stop() -> None:
         heartbeat = _CountingHeartbeat()
         stop = asyncio.Event()
         task = asyncio.create_task(
-            worker_module._tick_until_stop(cast(Heartbeat, heartbeat), stop, 60.0)
+            tick_until_stop(
+                cast(Heartbeat, heartbeat),
+                stop,
+                60.0,
+                worker_module._sleep_until_stop,
+            )
         )
         await asyncio.sleep(0)
         assert heartbeat.ticks == 1

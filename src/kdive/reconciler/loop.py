@@ -21,7 +21,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import Any, Protocol, cast
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -33,6 +33,7 @@ from kdive.config.core_settings import (
     UPLOAD_ORPHAN_GRACE,
     UPLOAD_TTL_SECONDS,
 )
+from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.infra.reaping import (
@@ -91,9 +92,6 @@ from kdive.services.images.retention import (
 from kdive.services.images.retention import (
     repair_expired_private_images as _repair_expired_private_images,
 )
-
-if TYPE_CHECKING:
-    from kdive.health.heartbeat import Heartbeat
 
 _log = logging.getLogger(__name__)
 
@@ -738,7 +736,7 @@ class Reconciler:
         if self._config.heartbeat is None:
             return None
         return asyncio.create_task(
-            _tick_until_stop(
+            tick_until_stop(
                 self._config.heartbeat,
                 stop,
                 self._heartbeat_tick,
@@ -762,23 +760,3 @@ class Reconciler:
             next_due = time.monotonic() + interval
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=interval)
-
-
-async def _tick_until_stop(
-    heartbeat: Heartbeat,
-    stop: asyncio.Event,
-    interval: float,
-    sleep_until_stop: Callable[[asyncio.Event, float], Awaitable[None]] = _sleep_until_stop,
-) -> None:
-    """Bump ``heartbeat`` every ``interval`` seconds until ``stop`` is set or cancelled.
-
-    Runs concurrently with the pass loop so a long-running pass never starves the
-    ``/livez`` signal (ADR-0090 §5); a wedged event loop stops this ticker too, so a truly
-    stuck reconciler still reads not-live.
-    """
-    heartbeat.tick()
-    while not stop.is_set():
-        await sleep_until_stop(stop, interval)
-        if stop.is_set():
-            break
-        heartbeat.tick()
