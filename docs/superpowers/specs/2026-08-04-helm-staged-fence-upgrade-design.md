@@ -37,17 +37,20 @@ Add:
 
 ```yaml
 lifecycleWitness:
-  replicas: 1
+  enabled: true
 ```
 
-The value accepts only integer `0` or `1`:
+The value accepts only a boolean:
 
-- `0` intentionally holds the witness stopped during a staged maintenance window;
-- `1` runs the singleton authority in ordinary operation;
+- `false` intentionally holds the witness stopped during a staged maintenance window;
+- `true` runs the singleton authority in ordinary operation;
 - every other value fails template rendering with an actionable message.
 
-The witness Deployment renders this value. Default output remains unchanged at one replica, so
-ordinary installs and existing values files retain current behavior.
+The witness Deployment renders zero or one replica from this value. Default output remains
+unchanged at one replica, so ordinary installs and existing values files retain current behavior.
+A boolean expresses the only two valid singleton states without Helm's numeric coercion paths: a
+JSON fraction can underflow to numeric zero before a template sees it, so a numeric `0|1` value
+cannot provide the promised strict input boundary.
 
 ## Supported staged upgrade
 
@@ -61,7 +64,7 @@ The canonical procedure lives in `docs/operating/runbooks/kubernetes-deploy.md`:
 3. Scale server and reconciler to zero, then scale the witness to zero. Verify all four KDIVE
    workloads have no running Pods and no KDIVE runtime database sessions remain.
 4. Run the target Helm upgrade with `server.replicas=0`, `worker.replicas=0`,
-   `reconciler.replicas=0`, and `lifecycleWitness.replicas=0`. The release's migration hook runs
+   `reconciler.replicas=0`, and `lifecycleWitness.enabled=false`. The release's migration hook runs
    while no old or new application workload is active.
 5. Complete the backend-specific credential stage while all four workloads remain at zero:
    - **External backends:** rotate each database role credential and update its referenced Secret
@@ -69,19 +72,19 @@ The canonical procedure lives in `docs/operating/runbooks/kubernetes-deploy.md`:
    - **Bundled demo backends:** include the new `demoCredentials` values in the stage-4 all-zero
      upgrade. Its post-upgrade hook applies migration and resets the database role passwords before
      the stage succeeds; do not update only the generated Secrets afterward.
-6. Run a hook-free Helm upgrade with only `lifecycleWitness.replicas=1`; keep server, worker, and
+6. Run a hook-free Helm upgrade with only `lifecycleWitness.enabled=true`; keep server, worker, and
    reconciler at zero. Wait for witness rollout plus readiness. It runs the target image and reads
    the rotated credential because the Pod is newly created. `--no-hooks` is required: rerunning a
    stop-old migration while this database client is active would violate the maintenance boundary.
-7. Run a final hook-free Helm upgrade with `lifecycleWitness.replicas=1` and explicit
+7. Run a final hook-free Helm upgrade with `lifecycleWitness.enabled=true` and explicit
    `server.replicas`, `worker.replicas`, and `reconciler.replicas` values from step 1. The
    already-ready witness remains available before workers are restored.
 8. Verify worker incarnations and recovery-tool exposure before resuming queue processing.
 
 The values file used for every Helm stage must be the freshly captured/edited release values, not
 `--reuse-values`. Every stage also passes the three explicit captured replica counts or explicit
-zeros, so a new chart default cannot silently change scale. The chart's existing prohibition on
-bare `--reuse-values` remains in force.
+zeros and an explicit witness enabled state, so a new chart default cannot silently change scale.
+The chart's existing prohibition on bare `--reuse-values` remains in force.
 
 The install page, chart README, and build-use recovery runbook summarize the safety boundary and
 link to this canonical procedure rather than publishing divergent command sequences.
@@ -106,10 +109,9 @@ Forward recovery is the only supported path after the fence migration succeeds.
 
 Helm render tests must prove:
 
-- default witness replicas equal one;
-- `--set lifecycleWitness.replicas=0` renders zero while workers can independently render zero;
-- values below zero or above one and boolean, decimal, and string inputs fail with the same
-  bounded-value message;
+- the default `lifecycleWitness.enabled=true` renders one witness replica;
+- `--set lifecycleWitness.enabled=false` renders zero while workers can independently render zero;
+- numeric, decimal, string, and null inputs fail with the same boolean-value message;
 - the staged-zero render leaves all four KDIVE workloads at zero.
 
 Documentation guards must scope to the canonical staged-upgrade section and require all eight
@@ -129,7 +131,8 @@ documents link to the canonical runbook.
 
 ### Controls
 
-- The witness replica value is bounded to zero or one, preserving ADR-0536's singleton authority.
+- The witness enabled value is strictly boolean and maps only to zero or one replica, preserving
+  ADR-0536's singleton authority.
 - Old workers drain while the old witness credential remains valid; credential rotation occurs only
   after all old worker finalizers clear and migration completes.
 - All application replicas render zero during the migration stage, preventing old/new database
@@ -150,8 +153,9 @@ unsupported and retain pins rather than creating recovery evidence.
   startup and is the defect being fixed.
 - **Use only manual `kubectl scale`.** The next Helm reconciliation restores the hardcoded witness
   replica and makes release state disagree with the maintenance stage.
-- **Add a second upgrade-mode boolean.** Four existing replica values express the desired stopped
-  state directly; another mode would duplicate them.
+- **Expose a witness replica count.** A singleton has only running and stopped states. A numeric
+  value exposes invalid counts and Helm can normalize a malformed JSON fraction to zero before
+  template validation; a strict boolean represents the actual contract.
 - **Allow multiple witness replicas.** The authority is designed and operated as a singleton; more
   replicas add broker and finalizer races without a decided leader-election contract.
 
