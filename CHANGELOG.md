@@ -106,6 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add the MCP protocol-version drift guard
 - Gate PRs on MCP protocol drift and state the revision in agent-index
 - Add the weekly MCP spec drift workflow
+- Add non-destructive stack stop
+- Support staged witness shutdown
 
 ### Changed
 
@@ -146,6 +148,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Renumber the fetch-lease fence migration 0088 -> 0090
 - Keep reservations through writers
 - Simplify reservation helper
+- Centralize configuration errors
+- Share process heartbeat ticker
+- Move remote staging wiring to provider
+- Inject shared object store
+- Generate parser shape descriptors
+- Split cleanup concerns
+- Require structured artifact refs
+- Unify artifact retirement loops
+- Simplify handler registration
+- Rehome lifecycle helpers
+- Extract shared support helpers
+- Remove private support aliases
+- Inject rootfs object store
+- Inject module debuginfo store
+- Inject object store factory
+- Use object store assembly
+- Move stage volume composition
+- Split tool registration helpers
+- Centralize generated argument access
+- Remove legacy handler argument adapter
+- Group deployment lifecycle modules
+- Point manifests at lifecycle modules
 
 ### Documentation
 
@@ -420,6 +444,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin the dedup comparison and the doc-resource re-mirror
 - Add the MCP drift-check implementation plan (#1809)
 - Align the design record with the shipped two-job workflow
+- Design provider capability parity validation
+- Clarify snapshot failure boundary
+- Add lifecycle witness topology
+- Condense reclaim contracts
+- Define object store injection
+- Define stage volume CLI boundary
+- Define control registrar extraction
+- Define generated CLI argument boundary
+- Define internal docstring cleanup
+- Consolidate offline drgn contracts
+- Trim artifact and job internals
+- Define effective config fail-open boundary
+- Define non-destructive Compose stop
+- Define staged Helm fence upgrade
+- Correct Compose bootstrap semantics
+- Make witness activation type-safe
+- Correct deployment process topology
+- Complete witness topology guidance
+- Preserve witness upgrade ordering
+- Finalize witness upgrade sequence
+- Add staged Helm fence upgrade
+- Clarify local bootstrap upgrade scope
+- Make staged Helm recovery restart-safe
+- Close staged Helm recovery gaps
+- Snapshot staged Helm values
 
 ### Fixed
 
@@ -736,6 +785,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stop the drift cron failing weekly and filing empty reports
 - Dedup the drift issue on the revision, and correct the rationale
 - Stop the first drift run duplicating the open issue #1485
+- Enforce capability port parity
+- Validate canceled recycling mode
+- Honor advisory helper contracts
+- Retry event loop thread startup
+- Offload blocking lifecycle work
+- Make fadump probe timeout effective
+- Preserve handler import timing
+- Trigger live stepping workload
+- Await cancelled live continue
+- Type async loop callbacks
+- Enforce fail-open advisory reads
+- Make witness activation type-safe
+- Preserve cancellation through cleanup
+- Update lifecycle module references
 
 ### Build
 
