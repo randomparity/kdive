@@ -238,6 +238,69 @@ def test_continue_to_vfs_read_closes_ssh_trigger_on_tool_error(
     asyncio.run(exercise())
 
 
+def test_continue_to_vfs_read_waits_for_underlying_call_after_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise() -> None:
+        banner_received: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+        disconnected = asyncio.Event()
+        call_started = asyncio.Event()
+        allow_work_to_finish = asyncio.Event()
+        work_finished = asyncio.Event()
+
+        async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                banner_received.set_result(await reader.readline())
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                disconnected.set()
+
+        async def underlying_work() -> ToolResponse:
+            await allow_work_to_finish.wait()
+            work_finished.set()
+            return ToolResponse.success("session-x", "stopped")
+
+        server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+        ssh_port = int(server.sockets[0].getsockname()[1])
+        work_task = asyncio.create_task(underlying_work())
+
+        async def call_with_cancellation_insensitive_work(
+            _client: Client[Any], _tool: str, _arguments: dict[str, object]
+        ) -> ToolResponse:
+            await asyncio.wait_for(banner_received, timeout=1.0)
+            call_started.set()
+            return await asyncio.shield(work_task)
+
+        monkeypatch.setattr(
+            sys.modules[__name__], "_call_tool", call_with_cancellation_insensitive_work
+        )
+        continue_task = asyncio.create_task(
+            _continue_to_vfs_read(cast(Any, object()), "session-x", ssh_port)
+        )
+        try:
+            await asyncio.wait_for(call_started.wait(), timeout=1.0)
+            continue_task.cancel()
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(disconnected.wait(), timeout=0.05)
+            assert not continue_task.done(), "cleanup returned while underlying work was running"
+            allow_work_to_finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await continue_task
+            assert work_finished.is_set()
+            await asyncio.wait_for(disconnected.wait(), timeout=1.0)
+        finally:
+            allow_work_to_finish.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await continue_task
+            await work_task
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(exercise())
+
+
 async def _drive_gdbmi_smoke(
     surface: _LiveDebugSurface,
     vmlinux: Path,
@@ -350,45 +413,39 @@ async def _continue_to_vfs_read(
     client: Client[Any], session_id: str, ssh_port: int
 ) -> ToolResponse:
     """Resume with a queued SSH client read so ``vfs_read`` is not ambient-I/O dependent."""
-    release_trigger = asyncio.Event()
-    trigger_task = asyncio.create_task(_hold_ssh_read_trigger(ssh_port, release_trigger))
-    continue_task = asyncio.create_task(
-        _call_tool(
-            client,
-            "debug.continue",
-            {"session_id": session_id, "timeout_sec": 30.0},
+    async with _queued_ssh_read_trigger(ssh_port):
+        continue_task = asyncio.create_task(
+            _call_tool(
+                client,
+                "debug.continue",
+                {"session_id": session_id, "timeout_sec": 30.0},
+            )
         )
-    )
-    try:
-        done, _pending = await asyncio.wait(
-            {continue_task, trigger_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        if trigger_task in done:
-            await trigger_task
-            raise RuntimeError("SSH read trigger ended before debug.continue stopped")
-        return await continue_task
-    finally:
-        release_trigger.set()
-        if not continue_task.done():
-            continue_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await continue_task
-        if not trigger_task.done():
+        cancelled = False
+        while True:
             try:
-                await asyncio.wait_for(asyncio.shield(trigger_task), timeout=1.0)
-            except TimeoutError:
-                trigger_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await trigger_task
+                response = await asyncio.shield(continue_task)
+                break
+            except asyncio.CancelledError:
+                if continue_task.cancelled():
+                    return await continue_task
+                cancelled = True
+                if continue_task.done():
+                    response = continue_task.result()
+                    break
+        if cancelled:
+            raise asyncio.CancelledError()
+        return response
 
 
-async def _hold_ssh_read_trigger(ssh_port: int, release: asyncio.Event) -> None:
-    """Send a client banner that makes guest sshd call read(2), then hold the socket open."""
+@contextlib.asynccontextmanager
+async def _queued_ssh_read_trigger(ssh_port: int) -> AsyncIterator[None]:
+    """Queue a client banner that makes guest sshd call read(2), holding the socket open."""
     _reader, writer = await asyncio.open_connection("127.0.0.1", ssh_port)
     try:
         writer.write(b"SSH-2.0-kdive-live-test\r\n")
         await writer.drain()
-        await release.wait()
+        yield
     finally:
         writer.close()
         await writer.wait_closed()
