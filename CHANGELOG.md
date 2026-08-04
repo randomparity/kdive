@@ -486,6 +486,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct the gate section this change falsified
 - Fix the entry count, a wrapped path, a stale citation
 - Say that dropping an entry is one-way, narrow two claims
+- Retire the M2 portability diff gate (ADR-0543)
+- Correct four accuracy defects found in review
+- Drop an unsupported ADR cite, scope the dangling-reference census
 
 ### Fixed
 
@@ -819,6 +822,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-point stale allowlist entries, guard on absent paths
 - Re-point past the package markers, keep the report whole
 - Report an out-of-prefix entry, cover the report exit code
+- Keep ADR-0543 inside docs-paths, and state the guard's real contract
+- Record that the gate was a CI check, and was switched off
+- Drop the gate reference from the settings manifest docstring
 
 ### Build
 
