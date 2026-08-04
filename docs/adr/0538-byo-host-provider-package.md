@@ -1,0 +1,250 @@
+# 0538 — One `byo_host` provider package for both architectures, and `ResourceKind.BYO_HOST`
+
+## Status
+
+Proposed
+
+## Context
+
+Every provider KDIVE has is a hypervisor client. `local_libvirt` defines a domain on the
+worker's own libvirtd, `remote_libvirt` defines one over `qemu+tls://`, `fault_inject`
+synthesizes one. All three answer `Provisioner.provision`
+(`src/kdive/providers/ports/lifecycle.py:88`) by *creating* a machine.
+
+Epic #1814 adds a provider that adopts a machine the operator already runs: an x86 host with
+a BMC, or a ppc64le PowerVM LPAR reached through an HMC. The question this record settles is
+the package shape — one provider or two — and the resource kind that admits it.
+
+KDIVE has two precedents pointing opposite ways.
+
+**A package per platform.** [ADR-0076](0076-remote-libvirt-provider-package.md) gave
+`remote_libvirt` its own package rather than a `libvirt_common` layer shared with
+`local_libvirt`, accepting bounded duplication of libvirt API calls to keep the two
+independent. AGENTS.md carries that forward: future provider families "should follow that
+path unless a new ADR justifies broader registry-based dispatch."
+
+**One provider, arch-keyed.** The ppc64le work (epic #1139) added a second architecture to
+`local_libvirt` without a second package. `arch_traits()`
+(`src/kdive/domain/platform/arch_traits.py:85`) is one table with a row per arch, ADR-0343
+keys kernel artifacts by arch, and `select_gdb_binary()`
+(`src/kdive/providers/shared/debug_common/gdbmi/policy/arch.py:59`) picks the debugger by
+arch. Adding POWER was rows and branches, not a package.
+
+The two precedents split on *what varies*. ADR-0076's two providers vary in their transport
+throughout: every libvirt call differs between a local connection and a `qemu+tls://` one, so
+the shared surface was thin and the duplication bounded. The ppc64le work varied in a handful
+of platform facts against one otherwise-identical driver.
+
+An adopted x86 host and an adopted PowerVM LPAR sit on the ppc64le side of that split. They
+differ in exactly two planes:
+
+- **The service processor.** Redfish or IPMI against a per-host BMC on x86; an HMC that
+  addresses a partition within a managed system on POWER. Power actions and the serial
+  console both go through it.
+- **The bootloader.** `grubby` against a GRUB2/EFI installation on x86; grub2-PReP or
+  petitboot on a PowerVM LPAR.
+
+Everything else agrees. Both are reached in-band over SSH. Both take a kernel by pulling it
+in-target from a presigned GET and installing it into the running OS
+([ADR-0078](0078-object-store-in-target-install-seam.md),
+[ADR-0082](0082-remote-install-in-guest-kernel.md)). Both confirm readiness by a boot-id
+change. Both crash by magic SysRq and capture by kdump. Both run in-target drgn
+([ADR-0085](0085-drgn-live-transport-generalization.md)) and worker-side vmcore
+postmortem. Both restore a baseline kernel at release.
+
+The resource kind is not a free choice either. `ResourceKind`
+(`src/kdive/domain/catalog/resources.py:17`) is a closed enum backed by a `CHECK (kind IN
+(...))` constraint, and `tests/db/test_resource_kind_parity.py:30` asserts the CHECK set by
+*exact equality* — against a literal three-element set, inside a test named
+`test_check_admits_all_three_kinds` — while `:44` asserts every admitted kind resolves to a
+buildable runtime. A kind is therefore a coupled unit: enum value, migration, and registered
+runtime land together or CI fails.
+
+Two hazards attach to a new kind, both already recorded as bugs that shipped once:
+
+- Admission resolves a cost-class coefficient fail-closed, so a cost class with no seeded row
+  denies every allocation. `src/kdive/db/schema/0032_remote_cost_class_coefficient.sql:1-9` is
+  the remote-libvirt instance of that defect being fixed after the fact.
+- `resolve_accel()` (`src/kdive/services/systems/validation.py:50`) fail-*opens* when a
+  resource advertises no guest arches, and so does the placement predicate
+  `resource_supports_arch()` (`src/kdive/services/allocation/admission/affinity.py:45`). A BYO
+  host that does not publish its architecture would admit a ppc64le profile onto x86 metal and
+  fail at install, long past the point where the agent could pick a different host. The key
+  both read is `guest_arches`, whose entry shape came from libvirt capability XML and whose
+  only producer today is local-libvirt — a shape a machine with no hypervisor cannot fill
+  descriptively.
+
+## Decision
+
+We will add **one** provider package, `src/kdive/providers/byo_host/`, serving both
+architectures behind **one** `ResourceKind.BYO_HOST = "byo-host"`, and will isolate the two
+varying planes behind seams inside that package rather than behind a package boundary.
+
+**One package, arch-keyed.** The service-processor difference lives behind the typed
+out-of-band driver port ([ADR-0539](0539-out-of-band-control-port.md)), which is the seam
+whose three implementations — Redfish, IPMI, HMC — are the only place the x86/POWER split is
+visible for power and console. The bootloader difference lives behind one arch-keyed
+bootloader module inside the install plane. Adopt, boot-readiness, control, capture, retrieve,
+debug, and teardown are written once. Splitting on architecture would duplicate that entire
+spine to vary two planes, which is the shape ADR-0076 rejected a shared layer to *avoid* — the
+duplication there was bounded and here it would be the whole provider.
+
+**One resource kind.** `ResourceKind.BYO_HOST = "byo-host"` describes how KDIVE relates to the
+machine — it adopts rather than creates — which is the fact admission, teardown, and the
+reconciler branch on. Architecture is a property of the host, carried in
+`Resource.capabilities` where the scheduler already reads it, not a second kind. A kind per
+architecture would double the CHECK set, the parity test's expectations, the composition
+entries, and the cost-class seeds, to encode a fact that already has a home.
+
+**The kind lands as a coupled unit.** One migration widens `resources_kind_check` to admit
+`'byo-host'` **and** seeds a cost-class coefficient row in the same file, so the fail-closed
+admission path has a value from the moment the kind is admissible. The migration merges only
+alongside a registered, buildable `ProviderRuntime` — fail-closed stub ports are enough to
+satisfy the parity test, and #1817 is cut that way deliberately.
+
+**The declared architecture reaches `Resource.capabilities`, in libvirt's shape, with explicit
+sentinels.** `reconcile_resources` writes one `guest_arches` entry from the declaration, beside
+the `vcpus` / `memory_mb` / `concurrent_allocation_cap` keys it already derives there
+(`src/kdive/inventory/reconcile/resources.py:268`):
+`{<arch>: {"accel": "none", "emulator": "none"}}`. Both values are sentinels naming the absence
+of a hypervisor, not descriptions of one, and nothing in BYO reads either. The shape is
+libvirt's because the readers are shared: `ResourceCapabilities.guest_arches()`
+(`src/kdive/domain/catalog/resource_capabilities.py:210`) keeps only entries carrying string
+`accel` **and** `emulator` and silently drops the rest, so an arch-only entry would be discarded
+and the fail-open would stand.
+
+Publishing it closes the fail-open in both readers — `resolve_accel()`
+(`src/kdive/services/systems/validation.py:50`) and the placement predicate
+`resource_supports_arch()` (`src/kdive/services/allocation/admission/affinity.py:45`) — so
+admission rejects an arch-mismatched profile at `systems.create` rather than at install. **No
+core change is needed for this**, which is the point of choosing sentinels over a schema
+relaxation: `resolve_accel_emulator` returns `entry["accel"], entry["emulator"]` unvalidated
+(`resource_capabilities.py:106`) — `guest_arches()`'s own docstring says the accel value domain
+is not validated (`:216-217`) — so any two strings satisfy the readers, and the arch-mismatch
+rejection is what the entry exists to produce.
+
+`resolve_accel` will record `accel="none"` on the System. That is inert here and mildly
+useful: the ADR-0340 renderer that maps a non-`kvm` accel to a TCG domain is a local-libvirt
+path BYO never enters, `Booter.boot`'s contract has non-local providers accept and ignore the
+value, and ADR-0341's deadline scaling gives an unrecognized accelerator the generous boot
+window — which is the correct window for firmware POST on real metal rather than a VM boot.
+
+**Registration is bind-only and opt-in.** The provider registers with `creates=False`
+(`src/kdive/providers/core/discovery_registration.py:39`), leaving `reconcile_resources`
+(`src/kdive/inventory/reconcile/resources.py:150`) the sole creator of BYO Resource rows, and
+the runtime composes only when an operator supplies `[[byo_host]]` configuration — the same
+opt-in shape remote-libvirt uses. A deployment that declares no BYO host has no bookable BYO
+resource.
+
+`creates=False` is not a reduced write, it is no write: the registrar returns before resolving
+a target (`src/kdive/providers/assembly/composition.py:69-70`), and remote-libvirt's target
+factory raises on the theory it is unreachable
+(`src/kdive/providers/remote_libvirt/composition.py:241-246`). That is why the `guest_arches`
+entry above is reconcile's write and not discovery's, and why it lands with the inventory
+schema rather than with adopt — an entry written at adopt would arrive after `systems.create`
+has already run the check it exists to close.
+
+**A malformed declaration degrades to no provider, and says so at the op boundary.** The
+composition opt-in gate treats a present-but-unparseable `systems.toml` as *not configured*
+rather than raising, so one bad operator edit cannot take down the MCP server or the unrelated
+providers — ADR-0112's fault-isolation contract, stated for remote-libvirt at
+`src/kdive/providers/remote_libvirt/config.py:131-143`. BYO inherits that behavior and the
+obligation that comes with it, because on a live deployment the Resource rows survive from the
+last good reconcile and what the operator meets is neither uniform nor self-explanatory. A
+**kind-targeted** allocation is refused by `assert_kind_composed`
+(`src/kdive/mcp/tools/lifecycle/allocations/request.py:86`) with `configuration_error` naming
+the kind and the composed set — but neither the file nor the parse defect. A **pool- or
+id-targeted** request skips that check entirely, is granted against the still-present row, and
+fails only later at `systems.create` or at provider resolution — after the tenant has taken the
+capacity slot. So the precise parse error must resurface fail-closed when an op resolves the
+host's configuration, and the `doctor` contribution carries an explicit arm for a
+present-but-unparseable declaration. The deploy-time `reconcile-systems --check` arm only helps
+someone who runs it.
+
+**This rides the existing dispatch seam.** `byo_host` satisfies the same typed
+`ProviderRuntime` ports ([ADR-0063](0063-typed-provider-runtime.md)) and registers behind the
+same `ProviderResolver` ([ADR-0071](0071-per-kind-provider-runtime-registry.md)). No new
+dispatch architecture is proposed, which is the condition AGENTS.md sets before a provider
+family may depart from the remote-libvirt path.
+
+## Consequences
+
+The x86 and POWER halves of the epic can be built and proven independently even though they
+share a package: #1818 and #1821 add x86 drivers, #1822 adds the HMC driver, and #1833/#1834
+prove each arch on real hardware. The shared spine means a defect fixed for one arch is fixed
+for both, and it also means a change to the spine risks both — which is why the two live
+proofs are separate exit criteria rather than one.
+
+The HMC is the driver most likely to stress the port shape, because it addresses a partition
+within a managed system rather than a host with a service processor of its own. #1822 is
+sequenced early for that reason: if the port must change, it changes before four planes are
+written against it.
+
+Advertising one architecture per BYO resource makes a host single-arch by construction. That
+is a true statement about metal, and it is what closes the `resolve_accel()` fail-open. It
+also means a host whose declared arch is wrong is rejected at `systems.create` with a
+readable mismatch rather than at install — the failure moves earlier, where a different host
+is still selectable.
+
+Seeding the cost-class coefficient in the widening migration couples a pricing value to a
+schema change. The value is an operator decision (#1814 open question 6) and a later
+correction is an ordinary forward-only migration. Carrying it here is the cheaper error: a
+missing row denies every BYO allocation with a message about cost classes rather than about
+the host, which is what made the remote-libvirt instance take a second PR to find.
+
+One kind means one row in the portability gate's `CAPTURE_COVERAGE` table
+(`scripts/m2_portability_gate.py:39`) rather than two, and one entry in the composition map. No
+test detects that row's absence today: the drift guard
+(`tests/scripts/test_m2_portability_gate.py:33-52`) asserts two hardcoded keys against two
+named builders and enumerates nothing, so `byo-host` can register with no row and the suite
+stays green while `just m2-report` quietly omits the provider. #1820 owns the completeness
+assertion that closes it, and until that lands the "#1820 follows #1817" ordering is a
+convention rather than an enforced one.
+
+Nothing here commits KDIVE to PowerNV or OpenPOWER bare metal. The ppc64le half is PowerVM
+LPARs reached through an HMC. A future PowerNV host has a BMC and would be an x86-shaped BYO
+host with a ppc64le arch — reachable through this design, but unproven by it.
+
+## Considered & rejected
+
+- **Two packages, `byo_x86` and `byo_powervm`, following ADR-0076.** The precedent transfers
+  by name and not by substance. ADR-0076 split two providers whose every libvirt call differed;
+  these two share SSH in-band access, the in-target install seam, boot-id readiness, SysRq,
+  kdump, drgn, vmcore postmortem, and baseline-restore teardown. The duplication would be the
+  spine rather than a bounded API surface, and every spine fix would need applying twice with
+  nothing to catch a missed one.
+- **A `ResourceKind` per architecture (`byo-x86`, `byo-powervm`).** Architecture is already a
+  scheduling fact carried in `Resource.capabilities`, and `resolve_accel()` reads it there. A
+  second kind would encode it a second time, doubling the CHECK set, the parity-test
+  expectations, the composition entries, and the cost-class seeds — and creating the
+  possibility of the two representations disagreeing.
+- **Extend `remote_libvirt` with an adopt mode.** It is the closest existing provider by
+  mechanism (presigned in-target install, boot-id readiness), but its whole control plane is
+  libvirt over `qemu+tls://`. An adopted host has no libvirtd to talk to, so the extension
+  would be a second provider wearing the first one's package name, and ADR-0076's independence
+  decision would have to be reopened to justify it.
+- **Reuse `ResourceKind.REMOTE_LIBVIRT`.** Admission, teardown, and the reconciler branch on
+  kind, and their behavior genuinely differs: a remote-libvirt System is destroyed at release
+  while a BYO host is restored and returned. Sharing the kind would put that difference behind
+  a capability flag read at every branch, which is a kind by another name.
+- **Introduce registry-based provider dispatch for this family.** AGENTS.md leaves the door
+  open for an ADR that justifies it. Nothing in this epic needs it: BYO registers one runtime
+  into a resolver seam that already exists, exactly as remote-libvirt did, and the falsifiable
+  hypothesis ADR-0076 set is worth measuring a third time rather than abandoning.
+- **Relax `guest_arches()` to admit an arch-only entry, instead of publishing sentinels.**
+  Honest typing — a bare-metal host would say "ppc64le" and nothing more. It is a change to
+  `src/kdive/domain/catalog/resource_capabilities.py`, inside the portability gate's core
+  prefixes, so it would add a gated touch-point and put a second entry shape in front of two
+  admission readers and the local-libvirt provisioner that share the resolver. The sentinel
+  costs two string constants and no core change.
+- **Publish a plausible-looking `accel` (e.g. `"kvm"`) rather than a sentinel.** It would read
+  naturally in `resources.describe` and would be false: a bare-metal host has no accelerator,
+  and a persisted `accel="kvm"` invites a future reader to treat it as one. `"none"` is
+  unrecognized by every consumer that switches on the value, which is the behavior wanted.
+- **Skip `guest_arches` and close the fail-open somewhere else.** Every alternative site —
+  `validation.py`, `affinity.py` — is gated core, and each would leave the other reader
+  fail-opening. Publishing the key satisfies both readers at once, where they already look.
+- **Defer the cost-class seed to a follow-up migration.** It is what happened for
+  remote-libvirt, and `0032_remote_cost_class_coefficient.sql` is the record of the repair. The
+  failure is silent in the direction that matters: every allocation is denied for a reason that
+  names cost classes, not the new provider.
