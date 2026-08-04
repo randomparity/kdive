@@ -57,6 +57,12 @@ class _Store:
         return FetchedArtifact(self._data, Sensitivity.SENSITIVE, "build")
 
 
+class _DegenerateDecisionFault:
+    @property
+    def is_degenerate(self) -> bool:
+        raise RuntimeError("degenerate decision failed")
+
+
 def _conn(row: dict[str, Any] | None) -> AsyncConnection[Any]:
     return cast(AsyncConnection[Any], _FakeConn(row))
 
@@ -201,6 +207,30 @@ def test_parse_runtime_error_fails_open_with_traceback(caplog: pytest.LogCapture
 
     with (
         patch("kdive.kernel_config.fetch.parse_kernel_config", _boom),
+        caplog.at_level(logging.WARNING, logger="kdive.kernel_config.fetch"),
+    ):
+        got = asyncio.run(
+            load_effective_config(
+                _conn({"object_key": "k"}), run_id, store_factory=lambda: _Store(_GOOD)
+            )
+        )
+
+    assert got is None
+    assert len(caplog.records) == 1
+    assert str(run_id) in caplog.records[0].getMessage()
+    assert caplog.records[0].exc_info is not None
+
+
+def test_degenerate_decision_runtime_error_fails_open_with_traceback(
+    caplog: pytest.LogCaptureFixture,
+):
+    run_id = uuid4()
+
+    with (
+        patch(
+            "kdive.kernel_config.fetch.parse_kernel_config",
+            return_value=_DegenerateDecisionFault(),
+        ),
         caplog.at_level(logging.WARNING, logger="kdive.kernel_config.fetch"),
     ):
         got = asyncio.run(
