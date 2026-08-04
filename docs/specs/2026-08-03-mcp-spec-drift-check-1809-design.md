@@ -53,7 +53,15 @@ codes so the caller can tell drift from breakage:
 | mode | network | asserts | exit 0 | exit 1 | exit 2 |
 | --- | --- | --- | --- | --- | --- |
 | default | no | `LATEST_PROTOCOL_VERSION` and `tuple(SUPPORTED_PROTOCOL_VERSIONS)` equal the declared constants | equal | differ | anything else |
-| `--upstream` | yes | no upstream revision exceeds `MCP_PROTOCOL_VERSION` | none newer | newer exists | anything else |
+| `--upstream` | yes | the listing is recognizable, and no revision in it exceeds `MCP_PROTOCOL_VERSION` | none newer | newer exists | anything else |
+
+Both values are read as **module attributes at call time** —
+`mcp.types.LATEST_PROTOCOL_VERSION` and `mcp.shared.version.SUPPORTED_PROTOCOL_VERSIONS`,
+never `from ... import`. This is load-bearing for the tests rather than for the gate:
+`shared/version.py` does `from mcp.types import LATEST_PROTOCOL_VERSION` and materializes
+`SUPPORTED_PROTOCOL_VERSIONS` with that value already substituted, at import. A script holding
+its own `from`-bound name would not see either monkeypatch, and the two offline-failure tests
+below would fail while the gate silently kept asserting against the real pin.
 
 **Exit 1 means "drift determined", and nothing else.** `main()` wraps its body in a
 top-level guard that maps any exception other than `SystemExit`/`KeyboardInterrupt` to exit 2
@@ -84,9 +92,28 @@ It keeps entries matching `^\d{4}-\d{2}-\d{2}$` — dropping `draft`, and any fu
 compares as strings. ISO-8601 dates sort lexicographically, so no date parsing is involved and
 no timezone can enter.
 
+**The filter needs a floor, not just a ceiling.** Before comparing, `--upstream` requires
+`MCP_PROTOCOL_VERSION` itself to appear among the recognized entries; if it does not, the
+listing is not the document this check knows how to read, and the script prints that and exits
+2. Without the floor, any upstream restructuring that still returns HTTP 200 — a `v` prefix, a
+nested `schema/versions/<date>/` layout, a move to a sibling directory — leaves every entry
+failing the filter, `newer_revisions` returning `[]`, and the job passing green permanently.
+The exit-2 guard does not cover that on its own, because an empty filtered list is not an
+exception; it is an ordinary successful-looking result. This repository has already named that
+failure class — ADR-0518: "A guard that reports success over nothing is worse than no guard,
+because it also retires the attention that would have caught the problem."
+
 On drift the script writes one human-readable report to stdout naming the declared version,
 every newer revision, and the remediation. It writes it once: the workflow tees that single
 run rather than re-fetching to build an issue body.
+
+It also emits the two values the workflow needs machine-readably — `newest=<v>` and
+`declared=<v>` appended to `$GITHUB_OUTPUT` when that variable is set — and **the workflow
+builds the issue title only from those.** This is the one interface where exactness is
+load-bearing: the title is the dedup key, so a later rewording of the human report must not be
+able to change it. Scraping the prose with `grep`/`sed` would let an empty capture produce
+`MCP spec drift: upstream  is newer than pinned `, which matches no existing issue and refiles
+every week.
 
 ### The `ci` wiring — two places, not one
 
@@ -153,15 +180,24 @@ Weekly cron plus `workflow_dispatch`, following `test-ordering.yml`'s convention
 why the job exists). `permissions: contents: read, issues: write`.
 
 Steps: check out, install `libvirt-dev`, `uv sync --locked`, run `--upstream` capturing
-stdout and the exit code, then branch on it —
+stdout and the exit code, then branch on it. Both the `--upstream` step and the issue-filing
+step carry `env: GITHUB_TOKEN: ${{ github.token }}` — Actions does not export it into step
+environments on its own, so without it the script's `Authorization` header is inert (the
+rate-limit mitigation never applies) and `gh` has no credential at all. This is the
+repository's first issue-filing workflow, so there is no prior art to inherit the wiring from;
+`test-ordering.yml`, the template for everything else here, is `contents: read` with no token.
 
-| exit | action | job result |
-| --- | --- | --- |
-| 0 | nothing | pass |
-| 1, no matching open issue | open one titled `MCP spec drift: upstream <newest> is newer than pinned <declared>`, labels `area:mcp-api`, `type:chore`, `status:needs-triage` | fail |
-| 1, matching open issue exists | nothing — the open issue is the report | pass |
-| 2 | file nothing | fail |
-| anything else | file nothing | fail |
+The dedup search runs over **all** issue states, and the title is built from the script's
+`$GITHUB_OUTPUT` values:
+
+| exit | matching issue | action | job result |
+| --- | --- | --- | --- |
+| 0 | — | nothing | pass |
+| 1 | none | open one titled `MCP spec drift: upstream <newest> is newer than pinned <declared>`, labels `area:mcp-api`, `type:chore`, `status:needs-triage` | fail |
+| 1 | open | nothing — the open issue is the report | pass |
+| 1 | closed | nothing — the close is a human acknowledgement | pass |
+| 2 | — | file nothing | fail |
+| anything else | — | file nothing | fail |
 
 The idempotent arm is what keeps the badge meaningful. Upstream `2026-07-28` already exceeds
 the declared `2025-11-25` and will keep doing so until the `mcp` 2.0.0 bump is scheduled, so
@@ -171,9 +207,16 @@ actually-broken check (changed API shape, expired token scope, failed `uv sync`)
 exactly the same. With the idempotent arm, red means newly-detected drift or a check that
 could not run.
 
-The title embeds the version pair, so a second published revision does not match the open
-issue's title and correctly opens a new one. `cancel-in-progress: false` keeps a slow run from
-being killed mid-file.
+The closed row matters as much as the open one, and searching open-only would omit it. Closing
+the tracking issue is the ordinary disposition once the work is folded into an `mcp` 2.0.0
+epic or recorded as a deferral under `docs/debt/` — and an open-only search would then find no
+match, refile a duplicate, and fail the job every week thereafter. That is the ~52-per-year
+outcome this arm exists to prevent, in a worse form than the commenting design it rejects. The
+predicate is *a human has seen this*, not *an issue is open*.
+
+The title embeds the version pair, so a second published revision does not match either a
+closed or an open issue's title and correctly opens a new one. `cancel-in-progress: false`
+keeps a slow run from being killed mid-file.
 
 ## Tests
 
@@ -210,6 +253,17 @@ being killed mid-file.
   whose shape breaks the reader (a `KeyError`); assert exit 2. Separate from the `URLError`
   case because it is the top-level guard under test, not the handled-network path, and
   without the guard this returns Python's default exit 1 and files a false drift issue.
+- **`test_upstream_mode_exits_2_when_the_listing_has_no_recognized_revisions`** — the fetch
+  returns a plausibly-restructured listing (`v2026-07-28`, `versions`, `draft`); assert exit 2,
+  **not 0**. This is the sanity-floor test, and it is the one that separates "no drift" from
+  "could not read the listing" — the state that would otherwise stay green forever.
+- **`test_ci_workflow_runs_the_mcp_spec_check_recipe`** — load `.github/workflows/ci.yml` with
+  PyYAML and assert `just mcp-spec-check` appears among the job's `run` steps, in the idiom of
+  the existing `tests/scripts/test_live_workflow_shape.py`. Criterion 1 rests on that
+  hand-listed step, and this repository has lost exactly that wiring twice: ADR-0518 records
+  `schema-guard` sitting in the `ci` aggregate and the prek hook while CI never invoked it, so
+  it passed every PR (#1723), and ADR-0410 hit the same thing. A comment is not a guard, and
+  the failure mode is green.
 
 No test performs network I/O: `newer_revisions` is pure, and the `--upstream` tests inject
 the fetch.
@@ -226,3 +280,9 @@ merge and reported:
   whose sentence does not match fails it, which is the assertion. Note this gate cannot run on
   macOS: `gen_doc_constants` imports provider composition, which resolves the Linux-only
   `fallocate` symbol at import time, so it is verified in a Linux container.
+
+One piece of ratification housekeeping belongs to the implementing PR rather than to this
+document: ADR-0537 opens as **Proposed** and must flip to **Accepted** in the same PR that
+lands the script. `scripts/check_adr_status.py` enforces exactly that — its second invariant
+fails any `Proposed` ADR cited from `src/` or `tests/`, "including guard-type ADRs whose
+enforcement ships purely as tests" — and the script and its tests will both cite this record.

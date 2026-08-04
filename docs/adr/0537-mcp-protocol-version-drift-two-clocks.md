@@ -68,7 +68,9 @@ hazard that file records in eleven separate comments and that ADR-0410 hit befor
 **Upstream clock, network, gates nothing.** The same script's `--upstream` mode lists the
 upstream `schema/` directory, keeps entries matching `^\d{4}-\d{2}-\d{2}$` — which drops
 `draft` — and reports when the newest exceeds `MCP_PROTOCOL_VERSION`. ISO-8601 dates sort
-lexicographically, so the comparison needs no date parsing.
+lexicographically, so the comparison needs no date parsing. It fails closed on an
+unrecognizable listing: the declared version must itself appear among the matched entries, or
+the check reports that it could not read the directory rather than that nothing is newer.
 `.github/workflows/mcp-spec-drift.yml` runs it on a weekly cron plus `workflow_dispatch` and
 opens a tracking issue on the transition into drift.
 
@@ -97,12 +99,18 @@ Closing it requires leaving `mcp==1.28.1` — PyPI's current `mcp` is `2.0.0`, a
 with its own compatibility review — so the issue will stay open until that work is scheduled.
 
 Because that state persists for months rather than days, the cron is idempotent: it files on
-the *transition* into drift and succeeds quietly while a matching issue is already open. A
-weekly job that instead commented every run would add roughly fifty identical comments a year
-and hold the badge red permanently, which would make an actually-broken check —
-a changed API shape, an expired token scope, a failed `uv sync` — indistinguishable from the
-expected state. Red therefore means newly-detected drift or a check that could not run, and
-the open issue, not the badge, is the standing report.
+the *transition* into drift and succeeds quietly whenever a matching issue already exists, in
+any state. A weekly job that instead commented every run would add roughly fifty identical
+comments a year and hold the badge red permanently, which would make an actually-broken
+check — a changed API shape, an expired token scope, a failed `uv sync` — indistinguishable
+from the expected state. Red therefore means newly-detected drift or a check that could not
+run, and the tracking issue, not the badge, is the standing report.
+
+"In any state" is the load-bearing half. Dedup on an *open* issue alone would re-arm the filer
+the moment a maintainer closed it — which is the ordinary disposition once the item is folded
+into an `mcp` 2.0.0 epic or recorded under `docs/debt/` — producing a duplicate issue and a
+red job every week thereafter. The predicate is that a human has seen this revision, not that
+an issue is currently open.
 
 Drift *within* an already-published revision is not detected. Only a vendored byte-for-byte
 copy would catch an in-place edit to `2025-11-25/schema.json`, and this decision declines to
