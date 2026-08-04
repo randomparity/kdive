@@ -103,6 +103,42 @@ def test_compose_worker_fence_guidance_uses_the_public_stop_workflow(
     ), path
 
 
+@pytest.mark.parametrize(
+    ("path", "start", "end"),
+    [
+        (_COMPOSE_DOC, "## Upgrading worker-fence authority", "The Compose-managed bucket"),
+        (_COMPOSE_REFERENCE, "## Upgrading worker-fence authority", "`docker compose up` resolves"),
+        (_INSTALL, "- **Compose:**", "Verify registered"),
+        (_BUILD_USE_RECOVERY, "- **Compose:**", "Verify registered"),
+    ],
+)
+def test_compose_worker_fence_guidance_scopes_local_bootstrap(
+    path: Path, start: str, end: str
+) -> None:
+    section = _section(path, start, end)
+
+    assert "local-bootstrap-only" in section, path
+    assert "kdive_local_role_bootstrap=1" in section, path
+    assert "resets fixed local development passwords" in section, path
+    assert "restores the intended runtime-role memberships" in section, path
+    disabled_setting = section.index("kdive_local_role_bootstrap=0")
+    assert "disables local mutation" in section[disabled_setting:], path
+    assert (
+        "equivalent stop-old, migrate, provision credentials and memberships, and start gate"
+        in section
+    ), path
+    assert "outside this reference workflow" in section, path
+    assert "rotates" not in section, path
+
+
+def test_compose_reference_describes_fixed_local_bootstrap_credentials() -> None:
+    text = _normalized(_COMPOSE_REFERENCE)
+
+    assert "resets their fixed local development passwords" in text
+    assert "restores each intended runtime-role membership" in text
+    assert "rotates their local-only secrets" not in text
+
+
 def test_helm_confines_witness_credentials_to_its_dedicated_workload() -> None:
     text = _normalized(_HELM_REFERENCE)
 

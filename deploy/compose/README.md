@@ -30,13 +30,13 @@ leaves the never-started or terminal worker retained; restore Postgres and retry
 On a clean local database, Postgres creates the separate `kdive-migration` owner first. Migrations
 create the four NOLOGIN capabilities, then the `role-bootstrap` one-shot creates distinct
 `kdive-server-member`, `kdive-worker-member`, `kdive-reconciler-member`, and
-`kdive-witness-member` logins, rotates their local-only secrets, removes every wrong capability
-membership, and grants each exact capability before a runtime process starts. The migration owner is
-absent from every runtime container. Production Compose-derived and Helm deployments retain the
-external-provisioning contract: operators provide secret-backed login members and do not run this
-explicitly local bootstrap. Set `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` and supply the migration, server,
-worker, reconciler, and lifecycle-witness DSNs to use that external path; the bootstrap one-shot then
-performs no database mutation.
+`kdive-witness-member` logins, resets their fixed local development passwords, removes every wrong
+capability membership, and restores each intended runtime-role membership before a runtime process
+starts. The migration owner is absent from every runtime container. Production Compose-derived and
+Helm deployments retain the external-provisioning contract: operators provide secret-backed login
+members and do not run this explicitly local bootstrap. Set `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` and
+supply the migration, server, worker, reconciler, and lifecycle-witness DSNs to use that external
+path; the bootstrap one-shot then performs no database mutation.
 
 The server, worker, and reconciler capabilities have ordinary application-table access. The
 lifecycle witness has none. Protected worker-incarnation and investigation-build-use mutation remains
@@ -59,10 +59,16 @@ heartbeat begins another bounded lease, so the ceiling is not a total job-runtim
 
 ## Upgrading worker-fence authority
 
-For an existing deployment, use `just compose-stop` to record old-worker termination and preserve
-named volumes. Select the new image and configuration, then use `just compose-up`. The Compose graph
-runs the migrate one-shot and, for local defaults, role bootstrap before the operator-side lifecycle
-wrapper registers the current worker. Verify registered current incarnations and the server's
+This three-command path is local-bootstrap-only: with `KDIVE_LOCAL_ROLE_BOOTSTRAP=1`, use
+`just compose-stop`, select the new image and configuration, then `just compose-up`. It records
+old-worker termination and preserves named volumes; the Compose graph runs the migrate one-shot and
+local role bootstrap before the operator-side lifecycle wrapper registers the current worker. That
+bootstrap resets fixed local development passwords and restores the intended runtime-role
+memberships.
+
+`KDIVE_LOCAL_ROLE_BOOTSTRAP=0` disables local mutation. An externally provisioned Compose-derived
+deployment must supply an equivalent stop-old, migrate, provision credentials and memberships, and
+start gate outside this reference workflow. Verify registered current incarnations and the server's
 recovery-tool exposure before resuming queue processing. An image rollback cannot restore old
 claiming after the protocol migration, so recover forward with a current worker image. Do not invoke
 `python -m kdive.processes.compose_worker_lifecycle` directly or use raw Docker/Compose commands;
