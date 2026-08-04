@@ -54,10 +54,6 @@ def build_handler_registry(
 
 def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAssembly) -> None:
     """Register every active worker handler using the process assembly ports."""
-    from kdive.jobs.handlers import diagnostics
-    from kdive.jobs.handlers.artifacts import rootfs_reclaim
-    from kdive.jobs.handlers.control import capture_traffic, diagnostic_sysrq, watch_for_crash
-
     systems.register_handlers(
         registry,
         resolver=assembly.resolver,
@@ -79,17 +75,26 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
         artifact_store=assembly.object_stores.store,
     )
     control.register_handlers(registry, resolver=assembly.resolver)
+
+    from kdive.jobs.handlers.control import diagnostic_sysrq
+
     diagnostic_sysrq.register_handlers(
         registry,
         resolver=assembly.resolver,
         secret_registry=assembly.secret_registry,
         artifact_store=assembly.object_stores.store,
     )
+
+    from kdive.jobs.handlers.control import capture_traffic
+
     capture_traffic.register_handlers(
         registry,
         resolver=assembly.resolver,
         artifact_store=assembly.object_stores.store,
     )
+
+    from kdive.jobs.handlers.control import watch_for_crash
+
     watch_for_crash.register_handlers(
         registry,
         resolver=assembly.resolver,
@@ -106,5 +111,11 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
         resolver=assembly.resolver,
         store=assembly.object_stores.store,
     )
+
+    from kdive.jobs.handlers.artifacts import rootfs_reclaim
+
     rootfs_reclaim.register_handlers(registry, artifact_store=assembly.object_stores.store)
+
+    from kdive.jobs.handlers import diagnostics
+
     diagnostics.register_handlers(registry)
