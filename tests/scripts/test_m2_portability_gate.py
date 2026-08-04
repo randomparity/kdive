@@ -129,18 +129,17 @@ def test_allowlist_is_exactly_the_named_touch_points() -> None:
     # the three deadline-guarded drift sweeps), and the ADR-0095 M2.5 reconciler-owned remote
     # console collector (#303: the hosting loop, which has since left the core surface for
     # providers/infra/, + the session-scoped pg_advisory_lock leadership helper in locks.py);
-    # extending it is a deliberate, reviewed decision. Entries re-pointed at their successor
-    # modules by #1835 are marked below.
+    # extending it is a deliberate, reviewed decision. #1835 re-pointed the entries whose
+    # modules had moved; which entry replaced which retired path is recorded once, beside
+    # each justification in the script's ALLOWED_FILES, rather than mirrored here.
     assert (
         frozenset(
             {
                 "src/kdive/domain/catalog/resources.py",
                 "src/kdive/db/schema/0020_resources_kind_remote_libvirt.sql",
                 "src/kdive/store/objectstore.py",
-                # was mcp/tools/debug/sessions.py (#1835)
                 "src/kdive/mcp/tools/debug/sessions/lifecycle.py",
                 "src/kdive/mcp/tools/debug/sessions/registrar.py",
-                # was mcp/tools/debug/introspect.py (#1835)
                 "src/kdive/mcp/tools/debug/introspection/common.py",
                 "src/kdive/mcp/tools/debug/introspection/gate.py",
                 "src/kdive/mcp/tools/debug/introspection/live.py",
@@ -148,10 +147,9 @@ def test_allowlist_is_exactly_the_named_touch_points() -> None:
                 "src/kdive/mcp/tools/debug/introspection/registrar.py",
                 "src/kdive/reconciler/loop.py",
                 "src/kdive/db/pool.py",
-                "src/kdive/domain/lifecycle/lease.py",  # was domain/lease.py (#1835)
+                "src/kdive/domain/lifecycle/lease.py",
                 "src/kdive/mcp/auth.py",
                 "src/kdive/mcp/tools/catalog/artifacts/uploads.py",
-                # was mcp/tools/debug/ops.py (#1835)
                 "src/kdive/mcp/tools/debug/operations/runtime.py",
                 "src/kdive/mcp/tools/debug/operations/registrar.py",
                 "src/kdive/security/secrets/secrets.py",
@@ -159,32 +157,26 @@ def test_allowlist_is_exactly_the_named_touch_points() -> None:
                 "src/kdive/security/authz/actor.py",
                 "src/kdive/security/authz/context.py",
                 "src/kdive/security/audit.py",
-                "src/kdive/mcp/platform_auth.py",  # was mcp/tools/ops/_auth.py (#1835)
+                "src/kdive/mcp/platform_auth.py",
                 "src/kdive/mcp/tools/ops/_reads.py",
-                # was mcp/tools/ops/breakglass.py (#1835)
                 "src/kdive/mcp/tools/ops/security/breakglass.py",
                 "src/kdive/mcp/tools/ops/queue.py",
-                # was mcp/tools/ops/reconcile.py (#1835)
                 "src/kdive/mcp/tools/ops/reconcile/reconcile.py",
-                # was mcp/tools/ops/resources.py (#1835)
                 "src/kdive/mcp/tools/ops/resources/host_ops.py",
                 "src/kdive/mcp/tools/ops/tuning.py",
                 "src/kdive/mcp/tools/accounting/reports.py",
                 "src/kdive/mcp/tools/catalog/shapes.py",
-                # was mcp/tools/ops/secrets.py (#1835)
                 "src/kdive/mcp/tools/ops/security/secrets.py",
                 "src/kdive/mcp/tools/catalog/fixtures.py",
                 "src/kdive/security/secrets/secret_registry.py",
                 "src/kdive/mcp/tools/ops/diagnostics.py",
                 "src/kdive/mcp/assembly/app.py",
-                # was mcp/middleware.py (#1835)
                 "src/kdive/mcp/middleware/binding_errors.py",
                 "src/kdive/mcp/middleware/denial_audit.py",
                 "src/kdive/mcp/middleware/exposure.py",
                 "src/kdive/mcp/middleware/shared.py",
                 "src/kdive/mcp/middleware/telemetry.py",
                 "src/kdive/mcp/middleware/usage.py",
-                # was reconciler/provider_reaping.py (#1835)
                 "src/kdive/reconciler/cleanup/provider_reaping.py",
                 "src/kdive/db/schema/0022_egress_probe_guests.sql",
                 "src/kdive/jobs/worker.py",
@@ -199,9 +191,7 @@ def test_allowlist_is_exactly_the_named_touch_points() -> None:
                 "src/kdive/jobs/payloads.py",
                 "src/kdive/db/schema/0024_image_build_job_kind.sql",
                 "src/kdive/services/images/upload.py",
-                # was reconciler/images.py (#1835)
                 "src/kdive/reconciler/cleanup/images.py",
-                # was mcp/tools/ops/images.py (#1835)
                 "src/kdive/mcp/tools/ops/images/_common.py",
                 "src/kdive/mcp/tools/ops/images/build_publish.py",
                 "src/kdive/mcp/tools/ops/images/delete.py",
@@ -210,8 +200,6 @@ def test_allowlist_is_exactly_the_named_touch_points() -> None:
                 "src/kdive/mcp/tools/ops/images/upload.py",
                 "src/kdive/mcp/tools/catalog/images.py",
                 "src/kdive/mcp/tools/_docmeta.py",
-                # reconciler/console_hosting.py dropped: its content left CORE_PREFIXES for
-                # providers/infra/console_hosting.py (#1835)
                 "src/kdive/db/locks.py",
                 "src/kdive/db/schema/0025_build_config_catalog.sql",
                 "src/kdive/db/schema/0034_build_config_catalog_source.sql",
