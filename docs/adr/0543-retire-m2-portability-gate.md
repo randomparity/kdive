@@ -48,21 +48,23 @@ instrument with a different cost.
 
 Nothing depends on the gate. `m2-gate` is in no workflow and is not one of the `ci`
 recipe's members; it is reachable only by hand. Its one committed output,
-`docs/archive/reports/m2-portability.md`, was last regenerated 2026-06-12 and still reads
+`docs/<archive>/reports/m2-portability.md`, was last regenerated 2026-06-12 and still reads
 "Verdict: gate passed — no core surface touched outside the ADR-0076 allowlist" over a
 measurement that has contradicted it for eight weeks. It also describes a four-method
 capture vocabulary, which ADR-0349 made five when it added `fadump`.
 
-One piece of that machinery is worth more than the gate. The drift guard in
-`tests/scripts/test_m2_portability_gate.py` imports the real `build_local_runtime` /
-`build_remote_runtime` builders and fails when a provider advertises a capture-method set
-the pinned table does not match. That guard is about provider capability truthfulness, not
+One piece of that machinery is worth more than the gate. The drift guard that lived in the
+gate's test module imports the real `build_local_runtime` / `build_remote_runtime` builders
+and fails when either provider advertises a capture-method set the pinned table does not
+match. That guard is about provider capability truthfulness, not
 about diff scope, and it is what epic #1814's exit criterion 8 and #1820 actually depend on.
 
 ## Decision
 
 **Retire the gate.** Remove `scripts/m2_portability_gate.py`, the `m2-gate` and `m2-report`
-recipes, and the committed `docs/archive/reports/m2-portability.md`.
+recipes, and the committed `docs/<archive>/reports/m2-portability.md`. (The path is written
+with the repository's angle-bracket placeholder idiom because the file no longer exists and
+`just docs-paths` scans `docs/adr/`.)
 
 The M2 verdict is recorded here and in `AGENTS.md` rather than in a generated file. A
 committed report asserting a verdict that its own instrument contradicts is worse than no
@@ -70,8 +72,12 @@ report: it invites a reader to trust a measurement nobody has run since June.
 
 **Keep the capture-coverage drift guard.** It survives as a test with its pinned
 `CAPTURE_COVERAGE` table rehomed into the test module, whose only other consumer was the
-deleted report renderer. The guard's contract is unchanged: registering a provider whose
-advertised capture methods are absent from the table fails `just test`.
+deleted report renderer. Its contract is unchanged, and narrower than its name suggests:
+changing an existing provider's advertised set reddens `just test`, because the guard
+asserts two hardcoded keys against `build_local_runtime` and `build_remote_runtime`. It
+enumerates nothing, so a newly registered kind with no row stays green and undetected.
+Closing that is the registered-kinds completeness assertion #1820 owns; this decision
+neither creates nor worsens that gap.
 
 **Do not build a replacement.** Provider-specific logic reaching core is a design smell that
 review catches by reading the change, not a quantity a line-count instrument measures. The
@@ -96,6 +102,17 @@ one scoped by label or pull request and accept the cost, under its own ADR.
 - **A later provider could leak into core without an automated signal.** This is the real
   cost, accepted deliberately: the gate has not provided that signal since 2026-06-12 in any
   case, so nothing operative is lost — only the appearance of one.
+- **Three recent records keep citing the deleted script**, and this decision is what makes
+  those citations historical: [ADR-0538](0538-byo-host-provider-package.md) §BYO portability,
+  [ADR-0540](0540-adopt-only-provisioning.md) and
+  [ADR-0542](0542-kgdb-over-leased-serial-channel.md) each reason from `CORE_PREFIXES` or
+  `CAPTURE_COVERAGE` living in `scripts/m2_portability_gate.py`, and ADR-0538 assigns entry-17
+  work on that basis. They are not amended: three amendments would add more text than the
+  risk removes, and a reader arriving from any of them lands here.
+- **`docs/design/m2-remote-libvirt.md` gets a pointer, not a rewrite.** M2's design doc
+  describes the gate as a per-PR CI check in six places. It is the record of a completed
+  Milestone, so this change adds one note naming ADR-0543 rather than restating the document
+  around an instrument that no longer exists.
 
 ## Considered & rejected
 

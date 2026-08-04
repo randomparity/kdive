@@ -165,7 +165,7 @@ Three operational notes:
 
 ## 6. Four-method capture capstone (M2.5)
 
-At the M2.5 exit the remote provider advertises **all four** capture methods —
+At the M2.5 exit the remote provider advertises four capture methods —
 `{console, host_dump, gdbstub, kdump}` — pinned by the drift guard in
 `tests/scripts/test_provider_capture_coverage.py`. The capstone exercise
 (`test_remote_four_method_capture_over_the_wire`) proves all four against the live remote spine.
@@ -202,13 +202,12 @@ Operator notes:
 is reframed from "deprecate local" to the narrower **production default vs. opt-in
 dev/CI/reference provider** distinction. Local stays the in-tree default; remote is the opt-in
 production provider (gated on a declared `[[remote_libvirt]]` instance). The two providers' advertised capture
-sets differ: remote advertises `console`/`host_dump`/`gdbstub`/`kdump`, while ADR-0208 narrowed
-local to the core-producing methods it can actually fetch a vmcore for, `{kdump, fadump,
-host_dump}`. That difference — pinned by the
+sets are such that **neither contains the other**: remote adds `console` and `gdbstub`, while
+ADR-0208 narrowed local to the core-producing methods it can actually fetch a vmcore for and
+gave it `fadump`, which remote does not advertise. That two-way asymmetry — pinned by the
 `tests/scripts/test_provider_capture_coverage.py` drift guard against the real `build_*_runtime`
-sets — is the structural reason the two providers stay complementary rather than one superseding
-the
-other. `#198` stays **open**; its final disposition (keep-default vs. reclassify-as-opt-in) is
+sets — is the structural reason the two providers stay complementary rather than one
+superseding the other. `#198` stays **open**; its final disposition (keep-default vs. reclassify-as-opt-in) is
 decided post-parity, informed by this capstone.
 
 ## Non-goals

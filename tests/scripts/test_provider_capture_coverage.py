@@ -5,18 +5,18 @@ committed M2 portability report. ADR-0543 retired that gate and its report; this
 outlived them because its subject is different — whether a provider's advertised capture
 methods match what the repository claims — rather than diff scope.
 
-Registering a provider whose advertised set is absent from, or disagrees with, the table
-fails here. That is the check epic #1814's exit criterion 8 and #1820 rely on.
+The contract is narrower than the module name suggests, and worth stating plainly: changing
+an existing provider's advertised set reddens this test, because it asserts two hardcoded keys
+against ``build_local_runtime`` and ``build_remote_runtime``. Nothing enumerates the resolver's
+registered kinds, so a newly registered provider with no row here stays green and undetected.
+Closing that is the registered-kinds completeness assertion #1820 owns.
 """
 
 from __future__ import annotations
 
+from kdive.domain.capture import CaptureMethod
 from kdive.providers.assembly.composition import build_local_runtime, build_remote_runtime
 from kdive.security.secrets.secret_registry import SecretRegistry
-
-# The CaptureMethod vocabulary: console/host_dump/gdbstub/kdump/fadump (fadump added by
-# ADR-0349).
-CAPTURE_VOCABULARY = ("console", "host_dump", "gdbstub", "kdump", "fadump")
 
 # Remote advertises console/host_dump/gdbstub/kdump (M2.5 exit, ADR-0084; no fadump — that is
 # a local pseries opt-in). Local advertises {kdump, fadump, host_dump}: ADR-0208 narrows its
@@ -46,9 +46,10 @@ def test_capture_coverage_matches_the_real_advertised_provider_sets() -> None:
     assert "host_dump" in CAPTURE_COVERAGE["local-libvirt"]
 
 
-def test_every_advertised_method_is_in_the_known_vocabulary() -> None:
-    # A provider advertising a method outside the vocabulary means CaptureMethod grew and this
-    # module was not revisited — the same drift the table guards, one level up.
+def test_every_pinned_method_is_a_real_capture_method() -> None:
+    # Against the enum, not a sibling literal: a pinned row naming a string CaptureMethod does
+    # not define is a typo the equality assertion above would report as provider drift.
+    vocabulary = {m.value for m in CaptureMethod}
     for provider, methods in CAPTURE_COVERAGE.items():
-        unknown = methods - set(CAPTURE_VOCABULARY)
-        assert not unknown, f"{provider} advertises methods outside the vocabulary: {unknown}"
+        unknown = methods - vocabulary
+        assert not unknown, f"{provider} pins methods CaptureMethod does not define: {unknown}"

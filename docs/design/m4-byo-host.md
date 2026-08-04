@@ -448,8 +448,8 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
 
 1. **The provider seam is unchanged** (ADR-0063) — `byo_host` satisfies the same
    `ProviderRuntime` ports and registers into a resolver that already exists. The portability
-   hypothesis is measured a third time rather than abandoned, and all nine genuinely new core
-   touches — the migration, the `arch_traits` docstring, `jobs/handlers/systems.py`, the two
+   hypothesis is now reviewed rather than measured (ADR-0543 retired the diff gate), and all
+   nine genuinely new core touches — the migration, the `arch_traits` docstring, `jobs/handlers/systems.py`, the two
    debug-session modules, `ops/resources/host_ops.py`, `profile_examples.py`, and the two control
    handlers that must hold a reading-lease scope — are declared up front rather than
    discovered.
