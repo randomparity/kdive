@@ -54,8 +54,15 @@ For the reference local stack, the worker-fence upgrade path is:
 
 The existing `compose-up` graph applies migrations before local role bootstrap, starts the
 non-worker services, and only then lets the lifecycle wrapper register and start the current
-worker. This supplies stop old → migrate → rotate local runtime credentials → start current worker
-without a raw Docker lifecycle command.
+worker. The bootstrap resets the fixed local development passwords and restores the intended
+runtime-role memberships. This supplies stop old → migrate → reset local development roles →
+start current worker without a raw Docker lifecycle command.
+
+This three-command path is local-bootstrap-only and requires `KDIVE_LOCAL_ROLE_BOOTSTRAP=1` (the
+default). Setting it to `0` disables that local database mutation; an externally provisioned
+Compose-derived deployment must supply its own equivalent ordered provisioning gate outside this
+reference workflow. This design does not prescribe that downstream workflow's commands, Secret
+format, or credential mechanism.
 
 `just compose-down` remains the destructive development teardown and continues to pass
 `--volumes`. The two recipes must have distinct names and comments so preserving data is never
@@ -70,9 +77,11 @@ Extend `tests/compose/test_compose_lifecycle_recipe.py` to assert:
 - both recipes provide the lifecycle-witness database authority;
 - both `docs/operating/docker-compose.md` and `deploy/compose/README.md` list `compose-stop` among
   the supported recipes, distinguish its volume-preserving stop from destructive `compose-down`,
-  and show `compose-stop` → select image/configuration → `compose-up` for a fence-protocol upgrade;
-- the install and recovery guidance uses the same sequence and does not direct operators to raw
-  worker lifecycle commands.
+  show `compose-stop` → select image/configuration → `compose-up` for a local-bootstrap
+  fence-protocol upgrade, and distinguish fixed-password reset from credential rotation;
+- the install and recovery guidance uses the same local-only sequence, states that external
+  provisioning is outside the reference workflow, and does not direct operators to raw worker
+  lifecycle commands.
 
 The existing `ComposeWorkerLifecycle.down` unit and live tests remain the behavioral proof that the
 wrapper records evidence before Compose teardown and preserves volumes when its `volumes` argument
