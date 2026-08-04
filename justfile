@@ -363,15 +363,6 @@ served-doc-links:
 adr-status-check:
     python3 scripts/check_adr_status.py
 
-# M2 portability gate: cumulative core-touch measurement vs the pre-M2 tag (ADR-0076).
-# Stdlib-only (plain python3, no uv sync); needs the pre-M2 tag fetched.
-m2-gate:
-    python3 scripts/m2_portability_gate.py
-
-# Regenerate the committed milestone-end M2 portability report (ADR-0076).
-m2-report:
-    python3 scripts/m2_portability_gate.py --report > docs/archive/reports/m2-portability.md
-
 # Audit runtime dependencies for known vulnerabilities.
 audit:
     #!/usr/bin/env bash

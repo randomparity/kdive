@@ -96,6 +96,27 @@ refactor away.
   remote runtime and has no bookable remote resource — the same posture ADR-0071 set for
   fault-inject.
 
+### Amendment (2026-08-04): the diff gate is retired; the hypothesis verdict stands (#1840)
+
+This is an amendment rather than a new claim because it qualifies one consequence recorded
+above — "The falsifiability hypothesis becomes a checked gate, not a claim" — without
+disturbing the package-boundary decision this record exists for, which stands unchanged.
+
+The superseded claim is that the gate is an operative check. It was one for three days: a CI
+job and a `just ci` member from 2026-06-09 (`c07d731a3`) until 2026-06-12 (`b06f3fc15`,
+"Remove M2 gate from PR checks"), 31 minutes before the merge that took it to 57 violations,
+after which it never returned to green and was reachable only by hand.
+[ADR-0543](0543-retire-m2-portability-gate.md) retires the gate, the `m2-gate` and
+`m2-report` recipes, and the committed report, on the finding that a time-range measurement
+cannot separate this Milestone's provider work from the platform work merging to `main`
+beside it: none of those first 57 violations was remote-libvirt logic.
+
+What the gate was built to test is unaffected. The hypothesis held — `AGENTS.md` records
+that adding remote-libvirt was mostly a provider implementation plus `ProviderRuntime`
+wiring — and the capture-coverage drift guard survives as a test. So this consequence should
+now be read as: the hypothesis was checked for M2, found to hold, and recorded; it is not
+continuously enforced.
+
 ## Alternatives considered
 
 - **Extract a shared `libvirt_common` layer** consumed by both providers. DRY, and refactoring

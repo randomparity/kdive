@@ -1,5 +1,13 @@
 # M2 — Remote libvirt (Integration Contract)
 
+> **Retired (2026-08-04).** This document describes the per-PR CI portability diff gate as an
+> operative check. It was one for its first three days — a CI job and a `just ci` member from
+> 2026-06-09 to 2026-06-12 — and hand-run-only after that. It is retired by
+> [ADR-0543](../adr/0543-retire-m2-portability-gate.md): a time-range measurement could not
+> separate M2's provider work from the platform work merging beside it. The hypothesis it
+> tested held — see that ADR and `AGENTS.md` for the verdict. Read the gate references below
+> as the plan of record for M2, not as machinery that exists.
+
 ## Purpose
 
 M2 adds the **first real second provider**: an independent `remote_libvirt` package that

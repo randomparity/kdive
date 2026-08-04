@@ -165,9 +165,9 @@ Three operational notes:
 
 ## 6. Four-method capture capstone (M2.5)
 
-At the M2.5 exit the remote provider advertises **all four** capture methods —
-`{console, host_dump, gdbstub, kdump}` — so a `just m2-report` records remote at **4/4** (see
-`docs/archive/reports/m2-portability.md`, *Capture-method coverage*). The capstone exercise
+At the M2.5 exit the remote provider advertises four capture methods —
+`{console, host_dump, gdbstub, kdump}` — pinned by the drift guard in
+`tests/scripts/test_provider_capture_coverage.py`. The capstone exercise
 (`test_remote_four_method_capture_over_the_wire`) proves all four against the live remote spine.
 It runs under the same `live_stack` gate as the spine above: configure the prerequisites in steps
 1–4, then `just test-live-stack` collects it.
@@ -202,11 +202,12 @@ Operator notes:
 is reframed from "deprecate local" to the narrower **production default vs. opt-in
 dev/CI/reference provider** distinction. Local stays the in-tree default; remote is the opt-in
 production provider (gated on a declared `[[remote_libvirt]]` instance). The two providers' advertised capture
-sets remain **disjoint on `kdump`**: remote advertises `kdump`, local does not (local stays
-`{console, host_dump, gdbstub}`). That disjointness — pinned by the
-`tests/scripts/test_m2_portability_gate.py` drift guard against the real `build_*_runtime` sets —
-is the structural reason the two providers stay complementary rather than one superseding the
-other. `#198` stays **open**; its final disposition (keep-default vs. reclassify-as-opt-in) is
+sets are such that **neither contains the other**: remote adds `console` and `gdbstub`, while
+ADR-0208 narrowed local to the core-producing methods it can actually fetch a vmcore for, and
+ADR-0349 added `fadump`, which remote does not advertise. That two-way asymmetry — pinned by the
+`tests/scripts/test_provider_capture_coverage.py` drift guard against the real `build_*_runtime`
+sets — is the structural reason the two providers stay complementary rather than one
+superseding the other. `#198` stays **open**; its final disposition (keep-default vs. reclassify-as-opt-in) is
 decided post-parity, informed by this capstone.
 
 ## Non-goals
@@ -214,6 +215,6 @@ decided post-parity, informed by this capstone.
 In-guest drgn-**live** MCP routing is a deferred follow-up (#215). The remote spine's introspect
 phase uses the **worker-side** vmcore postmortem (`introspect.from_vmcore`), which fetches the
 core from the object store and runs the report on the worker — no live in-guest reachability
-needed. The portability gate (`just m2-gate`) and its committed report
-(`docs/archive/reports/m2-portability.md`) confirm the remote provider added no provider-specific logic
-to core or `mcp/tools/*` beyond the ADR-0076 allowlist.
+needed. That the remote provider added no provider-specific logic to core or `mcp/tools/*` was
+the ADR-0076 portability hypothesis; it held, and ADR-0543 records the verdict and retires the
+diff gate that measured it.
