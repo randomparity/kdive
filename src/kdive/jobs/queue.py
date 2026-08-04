@@ -109,11 +109,14 @@ async def enqueue(
 
     Raises:
         ValueError: ``max_attempts < 1`` (a job that ``dequeue`` could never claim).
+        ValueError: ``recycle_canceled`` without ``recycle_terminal``.
         ValueError: ``kind`` is a retired historical kind without an active handler.
         ValueError: ``dispatch_lane`` is blank.
     """
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
+    if recycle_canceled and not recycle_terminal:
+        raise ValueError("recycle_canceled requires recycle_terminal")
     if kind in RETIRED_JOB_KINDS:
         raise ValueError(f"job kind {kind.value!r} is retired and cannot be enqueued")
     if not dispatch_lane:
