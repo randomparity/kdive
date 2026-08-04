@@ -5,9 +5,9 @@ The remote console is streamed out-of-band by a reconciler-resident
 parts. The boot worker cannot reach that in-process collector, so this snapshotter assembles the
 System's already-uploaded parts itself and writes an immutable ``console-<run>`` artifact, with its
 `artifacts` row committed on the boot handler's connection so it lands atomically with the boot
-step. It is best-effort: it reads the parts as of boot completion and may trail the collector's
-pump latency (a later boot of the same System still gets its own per-Run key, so no evidence is
-overwritten — that is the property this seam exists to guarantee).
+step. It reads the parts as of boot completion and may trail the collector's pump latency (a later
+boot of the same System still gets its own per-Run key, so no evidence is overwritten — that is the
+property this seam exists to guarantee). The boot handler owns the best-effort failure boundary.
 """
 
 from __future__ import annotations
@@ -60,7 +60,8 @@ class RemoteLibvirtConsoleSnapshotter:
         """Persist a ``console-<run>`` artifact from this boot's parts (index ``>= start_index``).
 
         Returns ``None`` when the boot window has no parts yet. The blocking S3 work runs in a
-        worker thread; the row is upserted on ``conn`` so it commits with the boot step.
+        worker thread; the row is upserted on ``conn`` so it commits with the boot step. Store and
+        database failures propagate to the boot handler's best-effort boundary.
         """
         store = object_store_from_env()
         # The conninfo is unused on this path: this snapshotter writes the per-Run `artifacts` row
