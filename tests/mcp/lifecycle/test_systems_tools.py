@@ -44,7 +44,6 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.serialization import JsonValue
 from tests.mcp.systems_support import (
     SYSTEM_ADMIN_HANDLERS as _SYSTEM_ADMIN_HANDLERS,
 )
@@ -82,34 +81,12 @@ from tests.mcp.systems_support import (
     provisioning_profile as _profile,
 )
 from tests.mcp.systems_support import (
+    seed_system as _seed_system,
+)
+from tests.mcp.systems_support import (
     upload_profile as _upload_profile,
 )
 from tests.support.object_store import INERT_OBJECT_STORE
-
-
-async def _seed_system(
-    pool: AsyncConnectionPool,
-    alloc_id: str,
-    state: SystemState,
-    *,
-    resolved_cpu: dict[str, JsonValue] | None = None,
-) -> str:
-    async with pool.connection() as conn:
-        system = await SYSTEMS.insert(
-            conn,
-            System(
-                id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
-                principal="user-1",
-                project="proj",
-                allocation_id=UUID(alloc_id),
-                state=state,
-                provisioning_profile=_profile(),
-                resolved_cpu=resolved_cpu,
-            ),
-        )
-    return str(system.id)
 
 
 def test_get_system_surfaces_resolved_cpu(migrated_url: str) -> None:

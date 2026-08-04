@@ -21,13 +21,12 @@ from kdive.artifacts.storage import HeadResult, MultipartCompletion, chunk_key
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.config.core_settings import BUILD_ARTIFACT_RETENTION_DAYS, UPLOAD_WINDOW_MAX_TTL_MULTIPLE
-from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.tools.lifecycle.runs.steps import install_run
 from kdive.security.audit import args_digest
-from kdive.services.runs import complete_build
+from kdive.services.runs import complete_build as complete_build_service
 from kdive.services.runs.admission import RunCreateRequest, create_run
 from kdive.services.runs.complete_build import (
     CompleteBuildConfigurationError,
@@ -42,8 +41,17 @@ from tests.mcp.complete_build_support import (
     seed_external_run_with_manifest,
     seed_system,
 )
+from tests.mcp.complete_build_support import (
+    build_output as _output,
+)
+from tests.mcp.complete_build_support import (
+    complete_build as _complete,
+)
 from tests.mcp.complete_build_support import ctx as _ctx
 from tests.mcp.complete_build_support import pool as _pool
+from tests.mcp.complete_build_support import (
+    run_by_id as _run_by_id,
+)
 from tests.mcp.systems_support import provider_resolver
 
 _CHUNKED_KERNEL = ManifestEntry(
@@ -55,9 +63,9 @@ def test_chunked_content_identity_ignores_advisory_whole_hash_but_pins_ordered_c
     same_chunks_other_whole = _CHUNKED_KERNEL._replace(sha256="different-advisory-whole")
     reversed_chunks = _CHUNKED_KERNEL._replace(chunks=tuple(reversed(_CHUNKED_KERNEL.chunks or ())))
 
-    identity = complete_build._manifest_content_identity(_CHUNKED_KERNEL)
-    assert identity == complete_build._manifest_content_identity(same_chunks_other_whole)
-    assert identity != complete_build._manifest_content_identity(reversed_chunks)
+    identity = complete_build_service._manifest_content_identity(_CHUNKED_KERNEL)
+    assert identity == complete_build_service._manifest_content_identity(same_chunks_other_whole)
+    assert identity != complete_build_service._manifest_content_identity(reversed_chunks)
 
 
 class _ChunkedStore:
@@ -192,13 +200,6 @@ class _DelayedValidator(FakeValidator):
         return super().__call__(manifest, keys, declared_build_id, arch=arch)
 
 
-async def _run_by_id(pool: AsyncConnectionPool, run_id: Any):
-    async with pool.connection() as conn:
-        run = await RUNS.get(conn, run_id)
-    assert run is not None
-    return run
-
-
 async def _manifest_present(pool: AsyncConnectionPool, run_id: Any) -> bool:
     async with pool.connection() as conn:
         return await upload_manifest.get_manifest(conn, "runs", run_id) is not None
@@ -227,16 +228,6 @@ async def _record_build_step(
         )
 
 
-async def _complete(
-    pool: AsyncConnectionPool,
-    run_id: Any,
-    finalizer: CompleteBuildFinalizer,
-) -> BuildStepResult:
-    run = await _run_by_id(pool, run_id)
-    async with pool.connection() as conn:
-        return await finalizer.complete(conn, _ctx(), run, build_id=None, cmdline="console=ttyS0")
-
-
 async def _complete_config_error(
     pool: AsyncConnectionPool,
     run_id: Any,
@@ -263,10 +254,6 @@ async def _complete_expired_window_error(
         except CompleteBuildExpiredWindowError as exc:
             return exc
     raise AssertionError("complete_build did not raise CompleteBuildExpiredWindowError")
-
-
-def _output(run_id: Any) -> BuildOutput:
-    return BuildOutput(f"local/runs/{run_id}/kernel", "", "build-id")
 
 
 def test_complete_build_finalizer_rejects_missing_manifest(migrated_url: str) -> None:
@@ -617,7 +604,7 @@ def test_repeated_failing_finalizes_cannot_extend_the_window_past_the_cap(
                     (run_id,),
                 )
 
-            with caplog.at_level(logging.WARNING, logger=complete_build.__name__):
+            with caplog.at_level(logging.WARNING, logger=complete_build_service.__name__):
                 await _complete_swallowing_failure(pool, run_id, finalizer)
             after_second = await _window_deadline(pool, run_id)
 
@@ -654,7 +641,7 @@ def test_a_ttl_lowered_after_the_mint_reports_a_capped_refresh(
             minted = await _window_deadline(pool, run_id)
 
             monkeypatch.setenv("KDIVE_UPLOAD_TTL_SECONDS", "60")
-            with caplog.at_level(logging.WARNING, logger=complete_build.__name__):
+            with caplog.at_level(logging.WARNING, logger=complete_build_service.__name__):
                 await _complete_swallowing_failure(
                     pool,
                     run_id,
@@ -726,7 +713,7 @@ def test_complete_build_finalizer_keeps_manifest_when_chunk_cleanup_fails(
         async with _pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             store = _ChunkedStore(delete_raises=".part0001")
-            with caplog.at_level(logging.WARNING, logger=complete_build.__name__):
+            with caplog.at_level(logging.WARNING, logger=complete_build_service.__name__):
                 result = await _complete(
                     pool,
                     run_id,
@@ -761,9 +748,9 @@ def test_complete_build_finalizer_logs_manifest_cleanup_failure(
         async with _pool(migrated_url) as pool:
             run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
             monkeypatch.setattr(
-                complete_build.upload_manifest, "delete_manifest", fail_delete_manifest
+                complete_build_service.upload_manifest, "delete_manifest", fail_delete_manifest
             )
-            with caplog.at_level(logging.WARNING, logger=complete_build.__name__):
+            with caplog.at_level(logging.WARNING, logger=complete_build_service.__name__):
                 result = await _complete(
                     pool,
                     run_id,
@@ -912,7 +899,7 @@ def test_complete_build_publishes_winner_under_investigation_then_run_lock(
         ManifestEntry("initrd", "ci", 1),
     ]
     trace: list[str] = []
-    original_lock = complete_build.advisory_xact_lock
+    original_lock = complete_build_service.advisory_xact_lock
 
     @asynccontextmanager
     async def traced_lock(conn, scope, key):
@@ -965,7 +952,7 @@ def test_complete_build_publishes_winner_under_investigation_then_run_lock(
         ]
 
     with monkeypatch.context() as patched:
-        patched.setattr(complete_build, "advisory_xact_lock", traced_lock)
+        patched.setattr(complete_build_service, "advisory_xact_lock", traced_lock)
         asyncio.run(_run())
     assert trace == ["investigation", "run"]
 
@@ -976,7 +963,7 @@ def test_real_completion_finalizer_and_install_do_not_cycle(
     """A stale completion replay and install serialize through the production dual-lock paths."""
     acquired = asyncio.Event()
     release = asyncio.Event()
-    original_lock = complete_build.advisory_xact_lock
+    original_lock = complete_build_service.advisory_xact_lock
 
     @asynccontextmanager
     async def paused_lock(conn, scope, key):
@@ -1009,7 +996,7 @@ def test_real_completion_finalizer_and_install_do_not_cycle(
             with monkeypatch.context() as patched:
                 patched.setattr(upload_manifest, "delete_manifest", keep_manifest)
                 await _complete(pool, run_id, finalizer)
-                patched.setattr(complete_build, "advisory_xact_lock", paused_lock)
+                patched.setattr(complete_build_service, "advisory_xact_lock", paused_lock)
                 replay = asyncio.create_task(replay_completion(finalizer, stale_created_run))
                 await acquired.wait()
                 install = asyncio.create_task(
@@ -1036,7 +1023,7 @@ def test_chunked_completion_acquires_investigation_before_retained_run_lock(
 ) -> None:
     """The retained chunk-reassembly lock observes the global Investigation → Run order."""
     trace: list[str] = []
-    original_lock = complete_build.advisory_xact_lock
+    original_lock = complete_build_service.advisory_xact_lock
 
     @asynccontextmanager
     async def traced_lock(conn, scope, key):
@@ -1058,7 +1045,7 @@ def test_chunked_completion_acquires_investigation_before_retained_run_lock(
             )
 
     with monkeypatch.context() as patched:
-        patched.setattr(complete_build, "advisory_xact_lock", traced_lock)
+        patched.setattr(complete_build_service, "advisory_xact_lock", traced_lock)
         asyncio.run(_run())
     assert trace[:2] == ["investigation", "run"]
 
@@ -1253,7 +1240,7 @@ def test_loser_delete_failure_leaves_the_version_for_orphan_repair(
                 CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(winner_id))),
             )
             store = _VersionDeleteStore(fail=True)
-            with caplog.at_level(logging.WARNING, logger=complete_build.__name__):
+            with caplog.at_level(logging.WARNING, logger=complete_build_service.__name__):
                 result = await _complete(
                     pool,
                     loser_id,

@@ -6,9 +6,7 @@ emitted instruments carry only allowlisted labels (``job_kind``/``outcome``).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
 
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
@@ -17,26 +15,9 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.worker_telemetry import WorkerTelemetry
+from tests.jobs.worker_telemetry_support import make_job
 from tests.support.otel import tracer_provider
-
-_NOW = datetime(2026, 1, 1, tzinfo=UTC)
-
-
-def _job(state: JobState, category: ErrorCategory | None = None) -> Job:
-    return Job(
-        id=uuid4(),
-        created_at=_NOW,
-        updated_at=_NOW,
-        kind=JobKind.BUILD,
-        payload={},
-        state=state,
-        max_attempts=3,
-        error_category=category,
-        authorizing={"principal": "alice", "agent_session": None, "project": "proj"},
-        dedup_key=str(uuid4()),
-    )
 
 
 def _telemetry() -> tuple[WorkerTelemetry, InMemoryMetricReader, InMemorySpanExporter]:
@@ -82,7 +63,7 @@ def test_instrument_contract_names_units_and_descriptions() -> None:
         set_provider_kind("local-libvirt")
         span.set_outcome("error")  # also drives provider.op.errors
     telemetry.record_job_failure(
-        _job(JobState.FAILED, ErrorCategory.BUILD_FAILURE), ErrorCategory.BUILD_FAILURE
+        make_job(JobState.FAILED, ErrorCategory.BUILD_FAILURE), ErrorCategory.BUILD_FAILURE
     )
     telemetry.record_time_to_claim("build", 1.0)
     telemetry.record_job_retry("build")
@@ -201,7 +182,7 @@ def _error_points(reader: InMemoryMetricReader) -> dict[tuple[tuple[str, str], .
 
 def test_record_job_failure_increments_errors_by_category() -> None:
     telemetry, reader, _ = _telemetry()
-    job = _job(JobState.FAILED, ErrorCategory.BUILD_FAILURE)
+    job = make_job(JobState.FAILED, ErrorCategory.BUILD_FAILURE)
     telemetry.record_job_failure(job, ErrorCategory.BUILD_FAILURE)
     points = _error_points(reader)
     assert points[(("error_category", "build_failure"),)] == 1
@@ -209,14 +190,14 @@ def test_record_job_failure_increments_errors_by_category() -> None:
 
 def test_record_job_failure_skips_a_requeued_job() -> None:
     telemetry, reader, _ = _telemetry()
-    telemetry.record_job_failure(_job(JobState.QUEUED), ErrorCategory.TRANSPORT_FAILURE)
+    telemetry.record_job_failure(make_job(JobState.QUEUED), ErrorCategory.TRANSPORT_FAILURE)
     # A non-terminal (requeued) job is a retry, not a failure origin → not counted.
     assert _error_points(reader) == {}
 
 
 def test_record_job_failure_disabled_is_noop() -> None:
     WorkerTelemetry.disabled().record_job_failure(
-        _job(JobState.FAILED, ErrorCategory.BUILD_FAILURE), ErrorCategory.BUILD_FAILURE
+        make_job(JobState.FAILED, ErrorCategory.BUILD_FAILURE), ErrorCategory.BUILD_FAILURE
     )
 
 

@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import threading
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, LiteralString, cast
 from uuid import UUID, uuid4
@@ -19,21 +18,19 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
-from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, JOBS, RESOURCES, RUNS, SYSTEMS
+from kdive.db.repositories import JOBS, RUNS
 from kdive.domain.capacity.state import (
     AllocationState,
     InvestigationState,
     JobState,
-    ResourceStatus,
     RunState,
     SystemState,
 )
-from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
+from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.lifecycle.run_steps import BootOutcome
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.domain.pcie import PCIeClaim
 from kdive.jobs.handlers.console import console_evidence
 from kdive.jobs.handlers.runs import common as run_handler_common
 from kdive.jobs.handlers.runs import registrar as runs_handlers
@@ -66,12 +63,43 @@ from kdive.services.runs.admission import RunCreateResult
 from kdive.services.runs.liveness import Liveness
 from kdive.services.runs.steps import StepProgress, ready_boot_outcome, step_progress
 from tests.db_waits import wait_until_any_backend_waiting
+from tests.mcp.lifecycle.runs_support import (
+    LOCAL_PROFILE_POLICY as _LOCAL_POLICY,
+)
+from tests.mcp.lifecycle.runs_support import (
+    TEST_DT as _DT,
+)
+from tests.mcp.lifecycle.runs_support import (
+    build_profile as _profile,
+)
+from tests.mcp.lifecycle.runs_support import (
+    create as _create,
+)
+from tests.mcp.lifecycle.runs_support import (
+    ctx as _ctx,
+)
+from tests.mcp.lifecycle.runs_support import (
+    install as _install,
+)
+from tests.mcp.lifecycle.runs_support import (
+    pool as _pool,
+)
+from tests.mcp.lifecycle.runs_support import (
+    profile_dump as _profile_dump,
+)
+from tests.mcp.lifecycle.runs_support import (
+    seed_investigation as _seed_investigation,
+)
+from tests.mcp.lifecycle.runs_support import (
+    seed_investigation_build as _seed_investigation_build,
+)
+from tests.mcp.lifecycle.runs_support import (
+    seed_system as _seed_system,
+)
 from tests.mcp.systems_support import provider_resolver
 from tests.support.object_store import INERT_OBJECT_STORE
 from tests.support.worker_fence import dequeue_as_current_worker, incarnation_credential
 
-_DT = datetime(2026, 1, 1, tzinfo=UTC)
-_PROFILE: dict[str, Any] = {"schema_version": 1}
 _INSTALL_CREDENTIAL = incarnation_credential("runs-install-handler")
 
 
@@ -87,17 +115,6 @@ def _staged_warm_tree(
     absolute directory lets admission pass through to the injected builder.
     """
     monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path_factory.mktemp("warm-tree")))
-
-
-def _profile() -> dict[str, Any]:
-    return copy.deepcopy(_PROFILE)
-
-
-def _ctx(
-    role: Role | None = Role.OPERATOR, *, projects: tuple[str, ...] = ("proj",)
-) -> RequestContext:
-    roles = {"proj": role} if role is not None else {}
-    return RequestContext(principal="user-1", agent_session="s", projects=projects, roles=roles)
 
 
 def _run_model(
@@ -137,16 +154,6 @@ def _job_model(state: JobState = JobState.QUEUED) -> Job:
     )
 
 
-@asynccontextmanager
-async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
-    pool = AsyncConnectionPool(url, min_size=1, max_size=4, open=False)
-    await pool.open()
-    try:
-        yield pool
-    finally:
-        await pool.close()
-
-
 async def get_run(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
@@ -162,91 +169,6 @@ async def get_run(
         secret_registry=SecretRegistry(),
         include_console_artifacts=include_console_artifacts,
     )
-
-
-async def _seed_system(
-    pool: AsyncConnectionPool,
-    *,
-    system_state: SystemState = SystemState.READY,
-    alloc_state: AllocationState = AllocationState.ACTIVE,
-    project: str = "proj",
-    provisioning_profile: dict[str, Any] | None = None,
-    requested_vcpus: int | None = None,
-    requested_memory_gb: int | None = None,
-    requested_disk_gb: int | None = None,
-    pcie_claim: list[PCIeClaim] | None = None,
-    lease_expiry: datetime | None = None,
-) -> str:
-    """Insert a Resource + Allocation + System directly and return the system id."""
-    async with pool.connection() as conn:
-        res = await RESOURCES.insert(
-            conn,
-            Resource(
-                id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
-                kind=ResourceKind.LOCAL_LIBVIRT,
-                pool="local-libvirt",
-                cost_class="local",
-                status=ResourceStatus.AVAILABLE,
-                host_uri="qemu:///system",
-            ),
-        )
-        alloc = await ALLOCATIONS.insert(
-            conn,
-            Allocation(
-                id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
-                principal="user-1",
-                project=project,
-                resource_id=res.id,
-                state=alloc_state,
-                requested_vcpus=requested_vcpus,
-                requested_memory_gb=requested_memory_gb,
-                requested_disk_gb=requested_disk_gb,
-                pcie_claim=pcie_claim or [],
-                lease_expiry=lease_expiry,
-            ),
-        )
-        system = await SYSTEMS.insert(
-            conn,
-            System(
-                id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
-                principal="user-1",
-                project=project,
-                allocation_id=alloc.id,
-                state=system_state,
-                provisioning_profile=provisioning_profile
-                if provisioning_profile is not None
-                else _profile_dump(),
-            ),
-        )
-    return str(system.id)
-
-
-async def _seed_investigation(
-    pool: AsyncConnectionPool,
-    *,
-    state: InvestigationState = InvestigationState.OPEN,
-    project: str = "proj",
-) -> str:
-    async with pool.connection() as conn:
-        inv = await INVESTIGATIONS.insert(
-            conn,
-            Investigation(
-                id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
-                principal="user-1",
-                project=project,
-                title="seeded",
-                state=state,
-            ),
-        )
-    return str(inv.id)
 
 
 async def _seed_run(
@@ -2277,60 +2199,6 @@ def test_create_external_run_chains_to_upload_loop(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-async def _create(
-    pool: AsyncConnectionPool,
-    ctx: RequestContext,
-    inv_id: str,
-    sys_id: str,
-    *,
-    profile=None,
-    reuse_requirement: RunReuseRequirementInput | None = None,
-    idempotency_key: str | None = None,
-    label: str | None = None,
-    build_ref: str | None = None,
-):
-    return await create_run(
-        pool,
-        ctx,
-        RunCreateRequest(
-            investigation_id=inv_id,
-            system_id=sys_id,
-            build_profile=profile or _profile(),
-            reuse_requirement=reuse_requirement,
-            label=label,
-            build_ref=build_ref,
-        ),
-        resolver=provider_resolver(),
-        idempotency_key=idempotency_key,
-    )
-
-
-async def _seed_investigation_build(pool: AsyncConnectionPool, investigation_id: str) -> str:
-    digest = "b" * 64
-    generation = uuid4()
-    build_ref = f"{digest}.{generation}"
-    expires_at = datetime.now(UTC) + timedelta(days=7)
-    async with pool.connection() as conn:
-        await conn.execute(
-            "INSERT INTO investigation_builds "
-            "(investigation_id, generation, build_ref, content_digest, canonical_document, "
-            "build_result, artifacts, target_kind, build_profile, state, expires_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'local-libvirt', %s, 'active', %s)",
-            (
-                investigation_id,
-                generation,
-                build_ref,
-                digest,
-                Jsonb({"version": 1}),
-                Jsonb({"kernel_ref": "build/kernel", "build_id": "id"}),
-                Jsonb({}),
-                Jsonb({"schema_version": 1, "arch": "x86_64"}),
-                expires_at,
-            ),
-        )
-    return build_ref
-
-
 def test_reusable_create_idempotency_and_read_models(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -3552,14 +3420,12 @@ async def _build_job_for(conn: AsyncConnection, run_id: str) -> Job:
 # --- runs.install / runs.boot (install + boot plane, #19) ----------------------------
 
 from kdive.domain.capture import CaptureMethod  # noqa: E402
-from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy  # noqa: E402
 from kdive.providers.ports.lifecycle import (  # noqa: E402
     Booter,
     Installer,
     InstallRequest,
 )
 
-_LOCAL_POLICY = LocalLibvirtProfilePolicy()
 _SUCCEEDED_BUILD: dict[str, Any] = {
     **_VALID_BUILD,
     "cmdline": "console=ttyS0 crashkernel=256M",
@@ -3718,12 +3584,6 @@ async def _seed_build_ledger(
             "VALUES (%s, 'build', 'succeeded', %s) ON CONFLICT (run_id, step) DO NOTHING",
             (run_id, Jsonb(result)),
         )
-
-
-async def _install(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> Any:
-    return await install_run(
-        pool, ctx, run_id, resolver=provider_resolver(profile_policy=_LOCAL_POLICY)
-    )
 
 
 async def _boot(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> Any:
@@ -5692,26 +5552,6 @@ def _system_with_profile(profile: dict[str, Any]) -> System:
         state=SystemState.READY,
         provisioning_profile=profile,
     )
-
-
-def _profile_dump(**local_libvirt: Any) -> dict[str, Any]:
-    """A real ProvisioningProfile.model_dump(by_alias=True) — pins the 'local-libvirt' alias."""
-    from kdive.profiles.provisioning import ProvisioningProfile
-
-    section: dict[str, Any] = {"rootfs": {"kind": "local", "path": "/img"}}
-    section.update(local_libvirt)
-    return ProvisioningProfile.model_validate(
-        {
-            "schema_version": 1,
-            "arch": "x86_64",
-            "vcpu": 2,
-            "memory_mb": 2048,
-            "disk_gb": 10,
-            "boot_method": "direct-kernel",
-            "kernel_source_ref": "git+https://git.kernel.org#v6.9",
-            "provider": {"local-libvirt": section},
-        }
-    ).model_dump(by_alias=True)
 
 
 def _fadump_profile_dump() -> dict[str, Any]:

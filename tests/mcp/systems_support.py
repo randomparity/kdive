@@ -15,13 +15,13 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.references import ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
-from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
+from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, SYSTEMS
 from kdive.domain.accounting.records import Budget, Quota
-from kdive.domain.capacity.state import AllocationState
+from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle.records import Allocation
+from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import SystemPayload
@@ -49,6 +49,7 @@ from kdive.providers.ports.lifecycle import (
     IntrospectionMode,
 )
 from kdive.security.authz.rbac import Role
+from kdive.serialization import JsonValue
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 TEST_DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -329,6 +330,32 @@ async def granted_allocation(
             ),
         )
     return str(alloc.id)
+
+
+async def seed_system(
+    conn_pool: AsyncConnectionPool,
+    allocation_id: str,
+    state: SystemState,
+    *,
+    resolved_cpu: dict[str, JsonValue] | None = None,
+) -> str:
+    """Insert a System for an existing Allocation and return its id."""
+    async with conn_pool.connection() as conn:
+        system = await SYSTEMS.insert(
+            conn,
+            System(
+                id=uuid4(),
+                created_at=TEST_DT,
+                updated_at=TEST_DT,
+                principal="user-1",
+                project="proj",
+                allocation_id=UUID(allocation_id),
+                state=state,
+                provisioning_profile=provisioning_profile(),
+                resolved_cpu=resolved_cpu,
+            ),
+        )
+    return str(system.id)
 
 
 class FakeProvisioning:

@@ -31,7 +31,7 @@ from kdive.services.allocation.admission.metrics import (
     AdmissionMetrics,
     _AdmissionReason,
 )
-from tests.jobs.test_worker_telemetry import _job
+from tests.jobs.worker_telemetry_support import make_job
 from tests.support.otel import tracer_provider
 
 from kdive.domain.capacity.state import (  # isort: skip
@@ -85,7 +85,7 @@ def _emit_everything(reader: InMemoryMetricReader) -> None:
 
     worker = WorkerTelemetry(tracer=tracer, meter=meter)
     worker.record_job_failure(
-        _job(JobState.FAILED, ErrorCategory.BUILD_FAILURE), ErrorCategory.BUILD_FAILURE
+        make_job(JobState.FAILED, ErrorCategory.BUILD_FAILURE), ErrorCategory.BUILD_FAILURE
     )
 
     # F + I: provider-op RED (job_span with provider tag) + time-to-claim + retries.

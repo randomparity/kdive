@@ -8,38 +8,11 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
-from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.providers.remote_libvirt.console.wiring import (
     RemoteConsolePartStore,
     _RemoteConsoleStream,
 )
-
-
-class FakeObjectStore:
-    """An in-memory object store satisfying the part store's _StorePort slice."""
-
-    def __init__(self) -> None:
-        self.objects: dict[str, bytes] = {}
-
-    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
-        key = request.key()
-        self.objects[key] = request.data
-        return StoredArtifact(
-            key,
-            f"etag-{len(self.objects)}",
-            request.sensitivity,
-            "console",
-            version_id="test-version",
-        )
-
-    def get_artifact(self, key: str, etag):  # noqa: ANN001, ANN201
-        from kdive.artifacts.storage import FetchedArtifact
-
-        return FetchedArtifact(self.objects[key], Sensitivity.REDACTED, "console")
-
-    def list_prefix(self, prefix: str) -> list[str]:
-        return [k for k in self.objects if k.startswith(prefix)]
+from tests.providers.remote_libvirt.fakes import FakeObjectStore
 
 
 def test_parts_roundtrip_and_index_listing(migrated_url: str) -> None:

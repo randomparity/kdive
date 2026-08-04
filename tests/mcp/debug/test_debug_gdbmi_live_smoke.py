@@ -52,15 +52,17 @@ from tests.live_vm import (
     require_live_vm_throwaway,
     require_live_vm_vmlinux,
 )
-from tests.mcp.debug.test_debug_live_attach import _render_panicking_domain
-from tests.mcp.debug.test_debug_tools import (
-    _PROFILE,
-    _PROFILE_POLICY,
-    _ctx,
-    _granted_allocation,
-    _pool,
-    _seed_run,
-    _seed_system,
+from tests.mcp.debug.live_support import render_panicking_domain
+from tests.mcp.debug.session_support import (
+    PROFILE,
+    PROFILE_POLICY,
+    granted_allocation,
+    request_context,
+    seed_run,
+    seed_system,
+)
+from tests.mcp.debug.session_support import (
+    pool as open_pool,
 )
 from tests.mcp.systems_support import provider_resolver
 
@@ -101,7 +103,7 @@ class _LiveDebugSurface:
             transcript_dir=self.transcript_dir,
         )
         runtime_resolver = _FixedDebugRuntimeResolver(runtime)
-        async with _pool(self.migrated_url) as pool:
+        async with open_pool(self.migrated_url) as pool:
             session_id = await _start_live_session(pool, runtime_resolver, boot_result=boot_result)
             try:
                 async with _debug_client(pool, runtime_resolver, self.monkeypatch) as client:
@@ -156,7 +158,7 @@ def test_live_vm_gdbmi_promoted_ops_smoke(  # pragma: no cover - live_vm
         ["qemu-img", "create", "-f", "qcow2", str(disk), "1G"], check=True, capture_output=True
     )
 
-    final_xml = _render_panicking_domain(bzimage=str(contract.bzimage), disk=disk, console=console)
+    final_xml = render_panicking_domain(bzimage=str(contract.bzimage), disk=disk, console=console)
     module_fixture = _optional_module_fixture()
     with boot_gdbstub_domain(
         final_xml,
@@ -487,11 +489,11 @@ async def _start_live_session(
     *,
     boot_result: dict[str, object] | None,
 ) -> str:
-    alloc_id = await _granted_allocation(pool)
-    sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-    run_id = await _seed_run(pool, sys_id, boot_result=boot_result)
+    alloc_id = await granted_allocation(pool)
+    sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+    run_id = await seed_run(pool, sys_id, boot_result=boot_result)
     handlers = _session_handlers(runtime_resolver)
-    resp = await handlers.start_session(pool, _ctx(), run_id=run_id, transport="gdbstub")
+    resp = await handlers.start_session(pool, request_context(), run_id=run_id, transport="gdbstub")
     assert resp.status == "live", resp
     return resp.object_id
 
@@ -502,7 +504,7 @@ async def _end_live_session(
     session_id: str,
 ) -> None:
     handlers = _session_handlers(runtime_resolver)
-    resp = await handlers.end_session(pool, _ctx(), session_id)
+    resp = await handlers.end_session(pool, request_context(), session_id)
     assert resp.status in {"detached", "already_detached"}, resp
 
 
@@ -512,7 +514,7 @@ def _session_handlers(
     return debug_tools.DebugSessionHandlers.from_resolver(
         provider_resolver(
             connector=LocalLibvirtConnect.from_env(),
-            profile_policy=_PROFILE_POLICY,
+            profile_policy=PROFILE_POLICY,
             supported_debug_transports=frozenset({"gdbstub"}),
         ),
         runtime_resolver=cast(Any, runtime_resolver),
@@ -534,7 +536,7 @@ async def _debug_client(
         ops_watchpoints,
         ops_modules,
     ):
-        monkeypatch.setattr(module, "current_context", _ctx)
+        monkeypatch.setattr(module, "current_context", request_context)
     app: FastMCP = FastMCP(name="live-gdbmi-smoke")
     debug_ops_registrar.register(app, pool, cast(Any, runtime_resolver))
     async with Client(app) as client:
@@ -640,7 +642,7 @@ def _rootfs_overlay(rootfs: Path) -> Iterator[Path]:
 
 
 def _render_stepping_domain(*, disk: Path, bzimage: Path, gdb_port: int, ssh_port: int) -> str:
-    data = copy.deepcopy(_PROFILE)
+    data = copy.deepcopy(PROFILE)
     section = data["provider"]["local-libvirt"]
     section["rootfs"] = {"kind": "local", "path": str(disk)}
     section["debug"] = {"gdbstub": True}
@@ -658,6 +660,6 @@ def _render_stepping_domain(*, disk: Path, bzimage: Path, gdb_port: int, ssh_por
     name = root.find("name")
     cmdline = root.find("./os/cmdline")
     assert name is not None and cmdline is not None and cmdline.text is not None
-    name.text = "kdive-x"  # matches the System row seeded by _seed_system
+    name.text = "kdive-x"  # matches the System row seeded by seed_system
     cmdline.text = f"{cmdline.text} nokaslr"
     return ET.tostring(root, encoding="unicode")

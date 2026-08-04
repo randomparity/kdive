@@ -18,7 +18,7 @@ import pytest
 from kdive.providers.remote_libvirt.console.snapshot import RemoteLibvirtConsoleSnapshotter
 from kdive.providers.remote_libvirt.console.wiring import RemoteConsolePartStore
 from kdive.store.objectstore import ObjectStore
-from tests.providers.remote_libvirt.console.test_console_wiring import FakeObjectStore
+from tests.providers.remote_libvirt.fakes import FakeObjectStore
 
 
 def _seed_parts(store: FakeObjectStore, system_id: UUID, parts: list[bytes], conninfo: str) -> None:

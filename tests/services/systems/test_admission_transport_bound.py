@@ -20,6 +20,7 @@ from uuid import UUID
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.tools.lifecycle.systems.provision import _admission_response
 from kdive.profiles.provisioning import RootfsSource
@@ -47,6 +48,7 @@ from tests.mcp.systems_support import (
 from tests.mcp.systems_support import (
     provisioning_profile as _profile,
 )
+from tests.mcp.systems_support import seed_system
 
 
 def _admission(
@@ -207,15 +209,12 @@ def test_first_mutation_disables_the_deadline(migrated_url: str) -> None:
 
 def test_no_mutation_branch_never_disables_the_deadline(migrated_url: str) -> None:
     """Acceptance #4 corollary: a terminal-existing-System failure disables zero times."""
-    from kdive.domain.capacity.state import SystemState
-    from tests.mcp.lifecycle.test_systems_tools import _seed_system
-
     reschedules: list[float | None] = []
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            await _seed_system(pool, alloc_id, SystemState.TORN_DOWN)
+            await seed_system(pool, alloc_id, SystemState.TORN_DOWN)
             admission = _admission(
                 lambda _rootfs: None,
                 premutation_timeout_s=30.0,
