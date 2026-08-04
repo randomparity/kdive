@@ -11,8 +11,11 @@ import pytest
 from kdive.db.locks import LockScope
 from kdive.domain.capacity.state import InvestigationState
 from kdive.mcp.tools.lifecycle.runs import steps as run_steps_module
-from kdive.reconciler.cleanup import gc as gc_module
-from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts, gc_investigation_artifacts
+from kdive.reconciler.cleanup import artifact_retention as artifact_retention_module
+from kdive.reconciler.cleanup.artifact_retention import (
+    gc_expired_build_artifacts,
+    gc_investigation_artifacts,
+)
 from kdive.services.runs import admission as run_admission_module
 from kdive.services.runs import complete_build as complete_build_module
 from kdive.services.runs.complete_build import CompleteBuildFinalizer
@@ -98,7 +101,7 @@ def test_reclaim_lock_wins_and_real_create_rejects_reference(
 ) -> None:
     acquired = asyncio.Event()
     release = asyncio.Event()
-    original_lock = gc_module.advisory_xact_lock
+    original_lock = artifact_retention_module.advisory_xact_lock
 
     @asynccontextmanager
     async def paused_lock(conn, scope, key):
@@ -147,7 +150,7 @@ def test_reclaim_lock_wins_and_real_create_rejects_reference(
             assert response.suggested_next_actions == ["runs.create"]
 
     with monkeypatch.context() as patched:
-        patched.setattr(gc_module, "advisory_xact_lock", paused_lock)
+        patched.setattr(artifact_retention_module, "advisory_xact_lock", paused_lock)
         asyncio.run(_run())
 
 
@@ -176,7 +179,7 @@ def test_reclaim_wins_and_real_install_rejects_reclaiming_reference(
 ) -> None:
     acquired = asyncio.Event()
     release = asyncio.Event()
-    original_lock = gc_module.advisory_xact_lock
+    original_lock = artifact_retention_module.advisory_xact_lock
 
     @asynccontextmanager
     async def paused_lock(conn, scope, key):
@@ -206,7 +209,7 @@ def test_reclaim_wins_and_real_install_rejects_reclaiming_reference(
             assert response.data["reason"] == "build_ref_not_found"
 
     with monkeypatch.context() as patched:
-        patched.setattr(gc_module, "advisory_xact_lock", paused_lock)
+        patched.setattr(artifact_retention_module, "advisory_xact_lock", paused_lock)
         asyncio.run(_run())
 
 
@@ -349,7 +352,7 @@ def test_reclaim_wins_and_real_complete_build_publishes_fresh_generation(
 ) -> None:
     acquired = asyncio.Event()
     release = asyncio.Event()
-    original_lock = gc_module.advisory_xact_lock
+    original_lock = artifact_retention_module.advisory_xact_lock
 
     @asynccontextmanager
     async def paused_lock(conn, scope, key):
@@ -386,5 +389,5 @@ def test_reclaim_wins_and_real_complete_build_publishes_fresh_generation(
             assert fresh.build_ref is not None and fresh.build_ref != old.build_ref
 
     with monkeypatch.context() as patched:
-        patched.setattr(gc_module, "advisory_xact_lock", paused_lock)
+        patched.setattr(artifact_retention_module, "advisory_xact_lock", paused_lock)
         asyncio.run(_run())

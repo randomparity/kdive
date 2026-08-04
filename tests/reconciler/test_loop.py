@@ -16,12 +16,12 @@ from kdive.domain.capacity.state import AllocationState, DebugSessionState, RunS
 from kdive.health.heartbeat import Heartbeat
 from kdive.providers.infra.reaping import DumpVolume, InfraReaper, NullReaper
 from kdive.reconciler import loop
-from kdive.reconciler.cleanup.gc import (
-    ArtifactObjectDeleter,
+from kdive.reconciler.cleanup.artifact_retention import ArtifactObjectDeleter
+from kdive.reconciler.cleanup.provider_reaping import (
     reap_console_collectors,
     reap_orphaned_dump_volumes,
+    repair_leaked_domains,
 )
-from kdive.reconciler.cleanup.provider_reaping import repair_leaked_domains
 from kdive.reconciler.loop import (
     Reconciler,
     ReconcileReport,

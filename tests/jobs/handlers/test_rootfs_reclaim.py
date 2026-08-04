@@ -42,8 +42,10 @@ from kdive.jobs.handlers.artifacts.rootfs_reclaim import (
 )
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_name
 from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
-from kdive.reconciler.cleanup import gc
-from kdive.reconciler.cleanup.gc import sweep_expired_investigation_rootfs_reclaim
+from kdive.reconciler.cleanup import investigation_rootfs
+from kdive.reconciler.cleanup.investigation_rootfs import (
+    sweep_expired_investigation_rootfs_reclaim,
+)
 from tests.reconciler.conftest import connect
 
 _FROZEN = datetime(2026, 7, 24, 0, 0, tzinfo=UTC)
@@ -1157,7 +1159,9 @@ def test_the_deferred_checksum_is_re_selected_by_the_ttl_lane_on_the_next_pass(
                     (str(inv),),
                 )
                 with pytest.MonkeyPatch.context() as patch:
-                    patch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+                    patch.setattr(
+                        investigation_rootfs, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0)
+                    )
                     reissued = await sweep_expired_investigation_rootfs_reclaim(
                         conn, timedelta(days=30)
                     )
@@ -1170,7 +1174,7 @@ def test_the_deferred_checksum_is_re_selected_by_the_ttl_lane_on_the_next_pass(
             ) == ("1")
             assert not staged.exists()
             with pytest.MonkeyPatch.context() as patch:
-                patch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+                patch.setattr(investigation_rootfs, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
                 assert (
                     await sweep_expired_investigation_rootfs_reclaim(conn, timedelta(days=30)) == 0
                 )

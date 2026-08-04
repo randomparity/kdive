@@ -28,7 +28,7 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, Investigation, System
-from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
+from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifacts
 from kdive.security.audit import args_digest
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role

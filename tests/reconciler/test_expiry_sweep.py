@@ -26,7 +26,7 @@ from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop
-from kdive.reconciler.cleanup.gc import gc_idempotency_keys
+from kdive.reconciler.cleanup.idempotency import gc_idempotency_keys
 from kdive.reconciler.repairs import allocations as allocation_repairs
 from kdive.services.accounting import ledger as accounting
 from tests.db_waits import wait_until_any_backend_waiting

@@ -834,7 +834,8 @@ async def _finish_drained_investigation(
 
     **The close-driven lane is no longer the only one that re-runs.** A TTL job runs against an
     ``open``/``active`` investigation whose marker is already NULL, so retaining is a no-op there,
-    and that lane's worklist (``reconciler.cleanup.gc._TTL_ROOTFS_OBJECTS_SQL``) is a pure
+    and that lane's worklist
+    (``reconciler.cleanup.investigation_rootfs._TTL_ROOTFS_OBJECTS_SQL``) is a pure
     ``artifacts`` query over rows this job just deleted. ADR-0494 adds
     ``sweep_unowned_investigation_rootfs_staging``, whose worklist is the ``systems`` rows that
     reference an uploaded base rather than the ``artifacts`` rows that own one, so a never-closed
@@ -843,11 +844,11 @@ async def _finish_drained_investigation(
     **The rows-still-present half is answered in the row-driven path, not here** (ADR-0495, #1565).
     A live-held partial for a checksum still under reclaim now defers that checksum inside
     :func:`_reclaim_one_checksum`, which keeps its ``artifacts`` row — and that row is exactly what
-    ``reconciler.cleanup.gc._TTL_ROOTFS_OBJECTS_SQL`` selects on, so the retry is the existing lane
-    re-selecting the same investigation on its next pass. Nothing was added here: the deferral this
-    tail decides on is still only about the *staging directory*, and the close marker is
-    deliberately not overloaded onto an open investigation, because it is durable state whose
-    meaning is "this investigation was closed and its rootfs is being reclaimed".
+    ``reconciler.cleanup.investigation_rootfs._TTL_ROOTFS_OBJECTS_SQL`` selects on, so the retry is
+    the existing lane re-selecting the same investigation on its next pass. Nothing was added here:
+    the deferral this tail decides on is still only about the *staging directory*, and the close
+    marker is deliberately not overloaded onto an open investigation, because it is durable state
+    whose meaning is "this investigation was closed and its rootfs is being reclaimed".
 
     What remains unreachable by every lane is an ``abandoned`` investigation (ADR-0494's
     Consequences). No writer transitions one to that state today, so it is named rather than

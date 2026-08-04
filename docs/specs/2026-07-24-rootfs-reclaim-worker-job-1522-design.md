@@ -52,7 +52,7 @@ class ReclaimInvestigationRootfsPayload(_PayloadBase):
 The kind is internal/platform: absent from `CONTRIBUTOR_CANCELABLE_JOB_KINDS` (so `jobs.cancel`
 requires operator, fails closed) and absent from `OPT_IN_DESTRUCTIVE_JOB_KINDS`.
 
-### Reconciler side — `reconciler/cleanup/gc.py`
+### Reconciler side — `reconciler/cleanup/investigation_rootfs.py`
 
 `gc_investigation_uploaded_rootfs` → `sweep_investigation_rootfs_reclaim(conn, grace)`:
 selects investigations whose `rootfs_cleanup_pending_at` is older than `grace` — no row-existence

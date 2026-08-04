@@ -26,8 +26,8 @@ from kdive.artifacts.content_address import rootfs_object_token
 from kdive.domain.capacity.state import ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES
 from kdive.domain.operations.jobs import JobKind
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile
-from kdive.reconciler.cleanup import gc
-from kdive.reconciler.cleanup.gc import (
+from kdive.reconciler.cleanup import investigation_rootfs
+from kdive.reconciler.cleanup.investigation_rootfs import (
     sweep_expired_investigation_rootfs_reclaim,
     sweep_investigation_rootfs_reclaim,
     sweep_unowned_investigation_rootfs_staging,
@@ -294,7 +294,7 @@ def test_a_settled_job_past_the_backoff_is_reissued_with_a_fresh_created_at(
     # The sweep drops the settled row and inserts a fresh one, so the reclaim is re-dated to the
     # pass that decided it is due and carries that pass's due set. (`recycle_terminal` re-dates
     # `created_at` too since ADR-0447; what keeps the delete-and-insert here is the backoff.)
-    monkeypatch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+    monkeypatch.setattr(investigation_rootfs, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
 
     async def _run() -> None:
         seed = await connect(migrated_url)
@@ -331,7 +331,7 @@ def test_a_canceled_job_does_not_wedge_the_slot(
 ) -> None:
     # The slot is reconciler-owned: an operator cancel stops the current attempt but must not
     # silently disable reclaim for the investigation forever (ADR-0442 §6 — cancel is advisory).
-    monkeypatch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+    monkeypatch.setattr(investigation_rootfs, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
 
     async def _run() -> None:
         seed = await connect(migrated_url)
@@ -432,7 +432,7 @@ def test_a_dead_worker_recovers_via_the_abandoned_jobs_repair(
                 (job_id,),
             )
 
-            monkeypatch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+            monkeypatch.setattr(investigation_rootfs, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
             # Without the abandoned-jobs repair the slot stays wedged: `running` is in flight.
             assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 0
 
@@ -646,7 +646,7 @@ def test_staging_drain_lane_retries_a_long_staged_investigation_whose_system_is_
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("system_state", sorted(gc._MID_MATERIALIZE_STATE_VALUES))
+@pytest.mark.parametrize("system_state", sorted(investigation_rootfs._MID_MATERIALIZE_STATE_VALUES))
 def test_staging_drain_lane_leaves_an_investigation_with_a_mid_materialize_system_alone(
     migrated_url: str, system_state: str
 ) -> None:
@@ -734,7 +734,7 @@ def test_the_lanes_mid_materialize_states_are_the_curated_pre_overlay_set() -> N
     # SystemState added without being classified reddens there -- and this lane inherits that guard
     # instead of silently keeping a two-element list someone wrote by hand.
     curated = tuple(sorted(state.value for state in ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES))
-    assert curated == gc._MID_MATERIALIZE_STATE_VALUES
+    assert curated == investigation_rootfs._MID_MATERIALIZE_STATE_VALUES
     assert set(curated) == {"provisioning", "reprovisioning", "restoring"}
 
 
@@ -795,7 +795,10 @@ def test_the_lanes_json_path_matches_what_a_real_profile_actually_serializes_to(
         assert key in node, f"the lane's JSON path breaks at {key!r}: {serialized}"
         node = node[key]
     assert node == "upload"
-    assert f"'{{{','.join(_STAGING_LANE_JSON_PATH)}}}'" in gc._UNOWNED_STAGING_INV_SQL
+    assert (
+        f"'{{{','.join(_STAGING_LANE_JSON_PATH)}}}'"
+        in investigation_rootfs._UNOWNED_STAGING_INV_SQL
+    )
 
 
 def test_a_content_address_token_never_contains_a_dot() -> None:
