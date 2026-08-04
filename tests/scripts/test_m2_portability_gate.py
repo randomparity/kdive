@@ -14,6 +14,7 @@ from scripts.m2_portability_gate import (
     CAPTURE_COVERAGE,
     parse_numstat,
     render_report,
+    stale_entries,
     violations,
 )
 
@@ -111,44 +112,65 @@ def test_allowlist_is_exactly_the_named_touch_points() -> None:
     # IMAGE_BUILD job touch (#285: the publish service, the handler + payload, the jobs.kind
     # widen), and the ADR-0092/0093 M2.4 reconciler image sweeps (#287: reconciler/images.py,
     # the three deadline-guarded drift sweeps), and the ADR-0095 M2.5 reconciler-owned remote
-    # console collector (#303: the console_hosting.py hosting loop + the session-scoped
-    # pg_advisory_lock leadership helper in locks.py); extending it is a deliberate, reviewed
-    # decision.
+    # console collector (#303: the hosting loop, which has since left the core surface for
+    # providers/infra/, + the session-scoped pg_advisory_lock leadership helper in locks.py);
+    # extending it is a deliberate, reviewed decision. Entries re-pointed at their successor
+    # modules by #1835 are marked below.
     assert (
         frozenset(
             {
                 "src/kdive/domain/catalog/resources.py",
                 "src/kdive/db/schema/0020_resources_kind_remote_libvirt.sql",
                 "src/kdive/store/objectstore.py",
-                "src/kdive/mcp/tools/debug/sessions.py",
-                "src/kdive/mcp/tools/debug/introspect.py",
+                # was mcp/tools/debug/sessions.py (#1835)
+                "src/kdive/mcp/tools/debug/sessions/__init__.py",
+                "src/kdive/mcp/tools/debug/sessions/lifecycle.py",
+                # was mcp/tools/debug/introspect.py (#1835)
+                "src/kdive/mcp/tools/debug/introspection/__init__.py",
+                "src/kdive/mcp/tools/debug/introspection/common.py",
+                "src/kdive/mcp/tools/debug/introspection/live.py",
+                "src/kdive/mcp/tools/debug/introspection/offline.py",
+                "src/kdive/mcp/tools/debug/introspection/registrar.py",
                 "src/kdive/reconciler/loop.py",
                 "src/kdive/db/pool.py",
-                "src/kdive/domain/lease.py",
+                "src/kdive/domain/lifecycle/lease.py",  # was domain/lease.py (#1835)
                 "src/kdive/mcp/auth.py",
                 "src/kdive/mcp/tools/catalog/artifacts/uploads.py",
-                "src/kdive/mcp/tools/debug/ops.py",
+                # was mcp/tools/debug/ops.py (#1835)
+                "src/kdive/mcp/tools/debug/operations/__init__.py",
                 "src/kdive/security/secrets/secrets.py",
                 "src/kdive/db/schema/0021_platform_audit_actor.sql",
                 "src/kdive/security/authz/actor.py",
                 "src/kdive/security/authz/context.py",
                 "src/kdive/security/audit.py",
-                "src/kdive/mcp/tools/ops/_auth.py",
+                "src/kdive/mcp/platform_auth.py",  # was mcp/tools/ops/_auth.py (#1835)
                 "src/kdive/mcp/tools/ops/_reads.py",
-                "src/kdive/mcp/tools/ops/breakglass.py",
+                # was mcp/tools/ops/breakglass.py (#1835)
+                "src/kdive/mcp/tools/ops/security/breakglass.py",
                 "src/kdive/mcp/tools/ops/queue.py",
-                "src/kdive/mcp/tools/ops/reconcile.py",
-                "src/kdive/mcp/tools/ops/resources.py",
+                # was mcp/tools/ops/reconcile.py (#1835)
+                "src/kdive/mcp/tools/ops/reconcile/reconcile.py",
+                # was mcp/tools/ops/resources.py (#1835)
+                "src/kdive/mcp/tools/ops/resources/__init__.py",
                 "src/kdive/mcp/tools/ops/tuning.py",
                 "src/kdive/mcp/tools/accounting/reports.py",
                 "src/kdive/mcp/tools/catalog/shapes.py",
-                "src/kdive/mcp/tools/ops/secrets.py",
+                # was mcp/tools/ops/secrets.py (#1835)
+                "src/kdive/mcp/tools/ops/security/secrets.py",
                 "src/kdive/mcp/tools/catalog/fixtures.py",
                 "src/kdive/security/secrets/secret_registry.py",
                 "src/kdive/mcp/tools/ops/diagnostics.py",
                 "src/kdive/mcp/assembly/app.py",
-                "src/kdive/mcp/middleware.py",
-                "src/kdive/reconciler/provider_reaping.py",
+                # was mcp/middleware.py (#1835)
+                "src/kdive/mcp/middleware/__init__.py",
+                "src/kdive/mcp/middleware/binding_errors.py",
+                "src/kdive/mcp/middleware/denial_audit.py",
+                "src/kdive/mcp/middleware/exposure.py",
+                "src/kdive/mcp/middleware/shared.py",
+                "src/kdive/mcp/middleware/telemetry.py",
+                "src/kdive/mcp/middleware/usage.py",
+                # was reconciler/provider_reaping.py (#1835)
+                "src/kdive/reconciler/cleanup/provider_reaping.py",
                 "src/kdive/db/schema/0022_egress_probe_guests.sql",
                 "src/kdive/jobs/worker.py",
                 "src/kdive/jobs/worker_telemetry.py",
@@ -162,11 +184,19 @@ def test_allowlist_is_exactly_the_named_touch_points() -> None:
                 "src/kdive/jobs/payloads.py",
                 "src/kdive/db/schema/0024_image_build_job_kind.sql",
                 "src/kdive/services/images/upload.py",
-                "src/kdive/reconciler/images.py",
-                "src/kdive/mcp/tools/ops/images.py",
+                # was reconciler/images.py (#1835)
+                "src/kdive/reconciler/cleanup/images.py",
+                # was mcp/tools/ops/images.py (#1835)
+                "src/kdive/mcp/tools/ops/images/__init__.py",
+                "src/kdive/mcp/tools/ops/images/_common.py",
+                "src/kdive/mcp/tools/ops/images/build_publish.py",
+                "src/kdive/mcp/tools/ops/images/delete.py",
+                "src/kdive/mcp/tools/ops/images/retention.py",
+                "src/kdive/mcp/tools/ops/images/upload.py",
                 "src/kdive/mcp/tools/catalog/images.py",
                 "src/kdive/mcp/tools/_docmeta.py",
-                "src/kdive/reconciler/console_hosting.py",
+                # reconciler/console_hosting.py dropped: its content left CORE_PREFIXES for
+                # providers/infra/console_hosting.py (#1835)
                 "src/kdive/db/locks.py",
                 "src/kdive/db/schema/0025_build_config_catalog.sql",
                 "src/kdive/db/schema/0034_build_config_catalog_source.sql",
@@ -175,6 +205,57 @@ def test_allowlist_is_exactly_the_named_touch_points() -> None:
         )
         == ALLOWED_FILES
     )
+
+
+def test_stale_entries_names_the_allowlist_paths_absent_from_the_tree(tmp_path: Path) -> None:
+    live = "src/kdive/store/objectstore.py"
+    (tmp_path / live).parent.mkdir(parents=True)
+    (tmp_path / live).touch()
+
+    stale = stale_entries(tmp_path)
+
+    assert live not in stale
+    assert "src/kdive/domain/catalog/resources.py" in stale
+    assert stale == sorted(stale)
+
+
+def test_stale_entries_rejects_a_directory_standing_in_for_a_file(tmp_path: Path) -> None:
+    # An entry is matched against numstat paths, which are always files. A directory of
+    # the same name allowlists nothing, so it is as stale as an absent path.
+    entry = "src/kdive/store/objectstore.py"
+    (tmp_path / entry).mkdir(parents=True)
+
+    assert entry in stale_entries(tmp_path)
+
+
+def test_no_allowlist_entry_names_a_path_absent_from_this_tree() -> None:
+    # The #1835 recurrence guard, asserted where CI gates it: an entry whose file moved
+    # or became a package silently stops allowlisting anything (the match is exact — there
+    # is no prefix or directory matching), while the modules that replaced it register as
+    # violations. A stale entry is otherwise indistinguishable from a live one.
+    assert stale_entries(gate.REPO_ROOT) == []
+
+
+def test_gate_fails_on_a_stale_allowlist_entry_before_measuring(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(gate, "ALLOWED_FILES", frozenset({"src/kdive/domain/gone.py"}))
+    measured = False
+
+    def _measure() -> dict[str, int]:
+        nonlocal measured
+        measured = True
+        return {}
+
+    monkeypatch.setattr(gate, "_measure", _measure)
+
+    assert gate.main() == 1
+
+    err = capsys.readouterr().err
+    assert "src/kdive/domain/gone.py" in err
+    # Measuring against a stale allowlist yields a wrong verdict, and ``--report`` would
+    # commit it, so the gate stops before the walk rather than reporting alongside it.
+    assert measured is False
 
 
 def _git(repo: Path, *args: str) -> None:
