@@ -12,8 +12,8 @@ from typing import cast
 
 import pytest
 
-from kdive.processes import compose_worker_lifecycle
-from kdive.processes.compose_worker_lifecycle import ComposeWorkerLifecycle
+from kdive.processes.lifecycle import compose_worker_lifecycle
+from kdive.processes.lifecycle.compose_worker_lifecycle import ComposeWorkerLifecycle
 
 type _CommandEvent = tuple[tuple[str, ...], dict[str, str] | None]
 _NONCE = "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret

@@ -8,15 +8,15 @@ from typing import TYPE_CHECKING
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.pool import create_pool
+from kdive.processes.lifecycle.worker_incarnation import (
+    worker_incarnation_credential,
+    worker_incarnation_id,
+)
 from kdive.processes.runtime import (
     HEARTBEAT_STALE_SECONDS,
     install_stop,
     readiness,
     run_process_runtime,
-)
-from kdive.processes.worker_incarnation import (
-    worker_incarnation_credential,
-    worker_incarnation_id,
 )
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,

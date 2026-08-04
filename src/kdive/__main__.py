@@ -33,7 +33,9 @@ from kdive.images.rootfs.command import (
     run_stage_volume,
 )
 from kdive.mcp.middleware.transport_trace import mcp_trace_enabled
-from kdive.processes.lifecycle_witness import run_lifecycle_witness as _run_lifecycle_witness
+from kdive.processes.lifecycle.lifecycle_witness import (
+    run_lifecycle_witness as _run_lifecycle_witness,
+)
 from kdive.processes.reconciler import run_reconciler as _run_reconciler
 from kdive.processes.server import run_server as _run_server
 from kdive.processes.worker import run_worker as _run_worker

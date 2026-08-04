@@ -52,7 +52,7 @@ from kdive.mcp.tools.ops.security import breakglass as ops_breakglass_tools
 from kdive.mcp.tools.ops.security import secrets as ops_secrets_tools
 from kdive.mcp.tools.reports import generate as reports_generate
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
-from kdive.processes.worker_incarnation import WorkerDeathVerifier
+from kdive.processes.lifecycle.worker_incarnation import WorkerDeathVerifier
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import DumpVolumeReaper, InfraReaper

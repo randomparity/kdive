@@ -86,7 +86,7 @@ async def run_lifecycle_witness(secret_registry: SecretRegistry, telemetry: Tele
 
 async def run_lifecycle_witness_body(pool: AsyncConnectionPool, stop: asyncio.Event) -> None:
     """Run the broker, pre-registration, and termination loops on one authority pool."""
-    from kdive.processes.kubernetes_credential_broker import (
+    from kdive.processes.lifecycle.kubernetes_credential_broker import (
         KubernetesCredentialBroker,
         PodIdentity,
         envelope_codec,
@@ -95,7 +95,7 @@ async def run_lifecycle_witness_body(pool: AsyncConnectionPool, stop: asyncio.Ev
         tls_server_context,
         token_review,
     )
-    from kdive.processes.kubernetes_termination_witness import (
+    from kdive.processes.lifecycle.kubernetes_termination_witness import (
         KubernetesTerminationWitness,
         patch_finalizers,
         read_pod,

@@ -22,8 +22,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-import kdive.processes.kubernetes_credential_broker as credential_broker
-from kdive.processes.kubernetes_credential_broker import (
+import kdive.processes.lifecycle.kubernetes_credential_broker as credential_broker
+from kdive.processes.lifecycle.kubernetes_credential_broker import (
     BROKER_AUDIENCE,
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
@@ -37,7 +37,7 @@ from kdive.processes.kubernetes_credential_broker import (
     tls_server_context,
     write_frame,
 )
-from kdive.processes.kubernetes_termination_witness import FINALIZER
+from kdive.processes.lifecycle.kubernetes_termination_witness import FINALIZER
 
 
 def _pod(

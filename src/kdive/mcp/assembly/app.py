@@ -24,7 +24,7 @@ from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.schema.tool_index import build_instructions
 from kdive.mcp.verbosity import compact_responses_enabled
-from kdive.processes.worker_incarnation import (
+from kdive.processes.lifecycle.worker_incarnation import (
     DockerWorkerDeathVerifier,
     KubernetesWorkerDeathVerifier,
     WorkerDeathVerifier,

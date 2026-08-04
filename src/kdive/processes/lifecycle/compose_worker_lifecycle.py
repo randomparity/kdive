@@ -27,7 +27,7 @@ from kdive.config.core_settings import (
     LIFECYCLE_WITNESS_DATABASE_URL,
     WORKER_DATABASE_URL,
 )
-from kdive.processes.docker_death_api import WorkerLifecycleGate
+from kdive.processes.lifecycle.docker_death_api import WorkerLifecycleGate
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     register_worker_incarnation,

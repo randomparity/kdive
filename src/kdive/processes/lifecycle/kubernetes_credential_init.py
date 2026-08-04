@@ -20,7 +20,7 @@ from kdive.config.core_settings import (
     POD_NAMESPACE,
     POD_UID,
 )
-from kdive.processes.kubernetes_credential_broker import (
+from kdive.processes.lifecycle.kubernetes_credential_broker import (
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
     BrokerReply,
