@@ -298,12 +298,25 @@ def stale_entries(root: Path) -> list[str]:
     anything, while the modules that replaced it register as violations (#1835). A
     directory is as stale as an absent path: numstat names files.
 
-    This is a floor, not a liveness check. An entry naming no file is definitely dead; an
-    entry naming a file may still be dead, because content carved out of a module that
-    stays in place leaves the entry pointing at a shell that allowlists nothing. That
-    shape has no cheap mechanical test — ``_measure`` runs with ``--no-renames``, so a
-    retired path keeps its historical touch counts forever and a zero-touch check would
-    not fire either — so only review catches it.
+    This is a floor, not a liveness check, in three ways. An entry naming no file is
+    definitely dead; an entry naming a file may still be dead.
+
+    Content carved out of a module that stays in place leaves the entry pointing at a
+    shell that allowlists nothing. That shape has no cheap mechanical test — ``_measure``
+    runs with ``--no-renames``, so a retired path keeps its historical touch counts
+    forever and a zero-touch check would not fire either — so only review catches it.
+
+    An entry naming an untracked or ignored file also allowlists nothing, because every
+    path it is matched against comes from ``git`` numstat, which never emits one. Only
+    running this guard against a clean checkout catches that, which is what the unit test
+    in CI does; a local run passes on a successor module you forgot to stage.
+
+    ``root`` is the checkout this script lives in, while ``_measure`` shells ``git`` in the
+    process working directory. They are the same tree for ``just m2-gate``, which runs from
+    the justfile's directory, and the split is deliberate: the allowlist describes this
+    repository, whereas the measurement is of whatever history it is pointed at, which is
+    how the gate's own tests drive it over throwaway repositories. Invoking the script by
+    absolute path from another checkout measures one tree and checks staleness in another.
     """
     return sorted(path for path in ALLOWED_FILES if not (root / path).is_file())
 

@@ -248,6 +248,11 @@ def test_no_allowlist_entry_names_a_path_absent_from_this_tree() -> None:
     # or became a package silently stops allowlisting anything (the match is exact — there
     # is no prefix or directory matching), while the modules that replaced it register as
     # violations. A stale entry is otherwise indistinguishable from a live one.
+    #
+    # This run is also the only one that catches an entry naming an untracked or ignored
+    # file, which allowlists nothing because git numstat never emits such a path: CI checks
+    # out clean, so an unstaged successor module is genuinely absent here even though a
+    # local `just m2-gate` would stat it and pass.
     assert stale_entries(gate.REPO_ROOT) == []
 
 
