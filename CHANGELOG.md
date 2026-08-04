@@ -170,6 +170,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove legacy handler argument adapter
 - Group deployment lifecycle modules
 - Point manifests at lifecycle modules
+- Stop mirroring the re-point mapping in the test
 
 ### Documentation
 
@@ -481,6 +482,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give the console lease a compatibility matrix, not two loose modes
 - Make the console-lease uniqueness partial so reading holds can share
 - Serialize console-lease acquisition on an advisory lock
+- Record the two limits of the staleness guard
+- Correct the gate section this change falsified
+- Fix the entry count, a wrapped path, a stale citation
+- Say that dropping an entry is one-way, narrow two claims
 
 ### Fixed
 
@@ -811,6 +816,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make witness activation type-safe
 - Preserve cancellation through cleanup
 - Update lifecycle module references
+- Re-point stale allowlist entries, guard on absent paths
+- Re-point past the package markers, keep the report whole
+- Report an out-of-prefix entry, cover the report exit code
 
 ### Build
 
