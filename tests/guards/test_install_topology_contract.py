@@ -1,5 +1,6 @@
 """Operator documentation must describe each deployment's actual process topology."""
 
+import os
 import re
 import shlex
 import subprocess
@@ -594,107 +595,204 @@ def test_canonical_staged_helm_upgrade_retry_is_fresh_and_does_not_recapture(
     tmp_path: Path,
 ) -> None:
     _, stages = _staged_upgrade_stages()
-    initial_block = _block_containing(
-        stages[_STAGED_UPGRADE_MARKERS[0]], 'name: "${CURRENT_MIGRATION_SECRET}"'
+    stage_1 = stages[_STAGED_UPGRADE_MARKERS[0]]
+    initialization_block = _block_containing(stage_1, 'helm get values "$RELEASE"')
+    capture_block = _block_containing(stage_1, 'name: "${CURRENT_MIGRATION_SECRET}"')
+    assert stage_1.index(initialization_block) < stage_1.index(capture_block)
+    snapshot_end = capture_block.index(
+        'TARGET_CHART=$(publish_chart_snapshot "$CHART" "$TARGET_CHART_SHA256")'
     )
-    functions = initial_block[initial_block.index("sha256_file() {") :]
-    functions = functions[: functions.index("verify_target_pins() {")]
+    first_live_capture = capture_block.index(
+        "SERVER_REPLICAS=$(kubectl get deployment/${FULL}-server"
+    )
+    state_publication = capture_block.index('mv -- "$RECOVERY_STATE_TMP" "$RECOVERY_STATE_FILE"')
+    assert snapshot_end < first_live_capture < state_publication
+
     source_chart = tmp_path / "source chart"
     source_chart.mkdir()
     (source_chart / "Chart.yaml").write_text("name: retry-test\n")
     source_values = tmp_path / "operator values.yaml"
-    chart_dir = tmp_path / "private chart snapshots"
-    values_dir = tmp_path / "private values snapshots"
     recovery_state = tmp_path / "recovery state"
-    counter = tmp_path / "capture calls"
-    shell_pids = tmp_path / "shell pids"
-    harness = (
-        functions
-        + r"""
+    chart_dir = Path(f"{recovery_state}.charts")
+    values_dir = Path(f"{recovery_state}.values")
+    fake_bin = tmp_path / "fake bin"
+    fake_bin.mkdir()
+    command_log = tmp_path / "command log"
+    desired_configmap = tmp_path / "desired configmap.json"
+    published_configmap = tmp_path / "published configmap.json"
+    fail_server_once = tmp_path / "fail server once"
+    shell_pids = tmp_path / "capture shell pids"
+
+    fake_helm = fake_bin / "helm"
+    fake_helm.write_text(
+        """#!/usr/bin/env bash
 set -euo pipefail
-mode=$1
-counter=$2
-CHART=$3
-TARGET_VALUES=$4
-RECOVERY_CHART_DIR=$5
-RECOVERY_VALUES_DIR=$6
-RECOVERY_STATE_FILE=$7
-shell_pids=$8
-printf '%s\n' "$BASHPID" >>"$shell_pids"
-count_call() { printf '%s\n' "$1" >>"$counter"; }
-if test ! -e "$TARGET_VALUES"; then
-  count_call helm_get_values
-  target_values_tmp="${TARGET_VALUES}.tmp"
-  printf 'image: retry-test\n' >"$target_values_tmp"
-  chmod 0600 "$target_values_tmp"
-  mv -- "$target_values_tmp" "$TARGET_VALUES"
+printf 'helm %s\\n' "$*" >>"$FAKE_COMMAND_LOG"
+if test "$1 $2" = "get values"; then
+  printf 'image:\\n  repository: example.invalid/kdive\\n  tag: retry-test\\n'
+elif test "$1" = template; then
+  printf 'fake rendered migration job\\n'
+else
+  exit 64
 fi
-values_digest=$(sha256_file "$TARGET_VALUES")
-chart_digest=$(sha256_chart "$CHART")
-TARGET_VALUES_SNAPSHOT=$(publish_values_snapshot "$TARGET_VALUES" "$values_digest")
-TARGET_CHART=$(publish_chart_snapshot "$CHART" "$chart_digest")
-printf '%s\n%s\n' "$TARGET_CHART" "$TARGET_VALUES_SNAPSHOT"
-if test "$mode" = fail_after_snapshots; then
-  exit 97
-fi
-count_call server_replica_read
-count_call worker_replica_read
-count_call reconciler_replica_read
-count_call queue_state_capture
-state_tmp="${RECOVERY_STATE_FILE}.tmp"
-printf 'TARGET_CHART=%q\nTARGET_VALUES_SNAPSHOT=%q\n' \
-  "$TARGET_CHART" "$TARGET_VALUES_SNAPSHOT" >"$state_tmp"
-chmod 0600 "$state_tmp"
-mv -- "$state_tmp" "$RECOVERY_STATE_FILE"
 """
     )
+    fake_helm.chmod(0o755)
 
-    def attempt(mode: str) -> subprocess.CompletedProcess[str]:
+    fake_kubectl = fake_bin / "kubectl"
+    fake_kubectl.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+args = sys.argv[1:]
+log_path = Path(os.environ["FAKE_COMMAND_LOG"])
+
+
+def log(event: str) -> None:
+    with log_path.open("a") as stream:
+        stream.write(event + "\\n")
+
+
+def option_value(option: str) -> str:
+    return args[args.index(option) + 1]
+
+
+if args[0] == "create" and "--dry-run=client" in args and args[1] != "configmap":
+    sys.stdin.read()
+    log("target_render_tuple")
+    print("example.invalid/kdive:retry-test\\tIfNotPresent\\ttarget-db\\tdsn")
+elif args[:2] == ["create", "configmap"]:
+    data = {}
+    for argument in args:
+        if argument.startswith("--from-literal="):
+            key, value = argument.removeprefix("--from-literal=").split("=", 1)
+            data[key] = value
+    Path(os.environ["FAKE_CM_DESIRED"]).write_text(json.dumps(data))
+    print("FAKE_CONFIGMAP")
+elif args[0] == "create" and "-f" in args:
+    content = sys.stdin.read()
+    if content.strip() == "FAKE_CONFIGMAP":
+        desired = Path(os.environ["FAKE_CM_DESIRED"]).read_text()
+        Path(os.environ["FAKE_CM_PUBLISHED"]).write_text(desired)
+        log("configmap_publish")
+    else:
+        log("queue_job_create")
+elif args[0] == "get" and args[1].startswith("deployment/"):
+    resource = args[1]
+    if resource.endswith("-server"):
+        fail_once = Path(os.environ["FAKE_FAIL_SERVER_ONCE"])
+        log("server_replica_read_attempt")
+        if fail_once.exists():
+            fail_once.rename(fail_once.with_suffix(".used"))
+            raise SystemExit(42)
+        log("server_replica_read_success")
+        print("2", end="")
+    elif resource.endswith("-reconciler"):
+        log("reconciler_replica_read_success")
+        print("1", end="")
+elif args[0] == "get" and args[1].startswith("statefulset/"):
+    log("worker_replica_read_success")
+    print("3", end="")
+elif args[0] == "get" and args[1].endswith("-migrate"):
+    output = option_value("-o")
+    print("current-db" if "secretKeyRef.name" in output else "dsn", end="")
+elif args[:2] == ["get", "job"]:
+    raise SystemExit(1)
+elif args[:2] == ["get", "configmap"]:
+    data = json.loads(Path(os.environ["FAKE_CM_PUBLISHED"]).read_text())
+    output = option_value("-o")
+    if output.startswith("go-template="):
+        print(len(data), end="")
+    else:
+        match = re.search(r"\\.data\\.([a-z0-9_]+)", output)
+        if match is None:
+            raise SystemExit(65)
+        print(data[match.group(1)], end="")
+elif args[0] == "wait":
+    log("queue_job_complete")
+elif args[0] == "logs":
+    if "--tail=1" in args:
+        log("queue_state_capture_success")
+        print("false")
+    else:
+        print("queue diagnostic complete")
+elif args[0] == "delete":
+    log("queue_job_delete")
+else:
+    log("unhandled kubectl " + " ".join(args))
+    raise SystemExit(66)
+"""
+    )
+    fake_kubectl.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "NAMESPACE": "retry-namespace",
+        "RELEASE": "retry-release",
+        "CHART": str(source_chart),
+        "TARGET_VALUES": str(source_values),
+        "RECOVERY_STATE_FILE": str(recovery_state),
+        "FAKE_COMMAND_LOG": str(command_log),
+        "FAKE_CM_DESIRED": str(desired_configmap),
+        "FAKE_CM_PUBLISHED": str(published_configmap),
+        "FAKE_FAIL_SERVER_ONCE": str(fail_server_once),
+    }
+
+    initialized = subprocess.run(
+        ["bash", "-c", initialization_block],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    fail_server_once.write_text("fail the first live capture\n")
+
+    def capture() -> subprocess.CompletedProcess[str]:
+        wrapped = f"printf '%s\\n' \"$BASHPID\" >>{shlex.quote(str(shell_pids))}\n{capture_block}"
         return subprocess.run(
-            [
-                "bash",
-                "-c",
-                harness,
-                "_",
-                mode,
-                str(counter),
-                str(source_chart),
-                str(source_values),
-                str(chart_dir),
-                str(values_dir),
-                str(recovery_state),
-                str(shell_pids),
-            ],
+            ["bash", "-c", wrapped],
+            env=env,
             text=True,
             capture_output=True,
             check=False,
         )
 
-    failed = attempt("fail_after_snapshots")
-    assert failed.returncode == 97
+    failed = capture()
+    assert failed.returncode == 42
     assert not recovery_state.exists()
-    failed_paths = [Path(path) for path in failed.stdout.splitlines()]
+    assert not published_configmap.exists()
+    failed_paths = [next(chart_dir.glob("*.dir")), next(values_dir.glob("*.yaml"))]
     failed_inodes = [path.stat().st_ino for path in failed_paths]
     assert list(chart_dir.glob("*.tmp.*")) == []
     assert list(values_dir.glob("*.tmp.*")) == []
 
-    retried = attempt("retry")
+    retried = capture()
     assert retried.returncode == 0, retried.stderr
-    retry_paths = [Path(path) for path in retried.stdout.splitlines()]
+    retry_paths = [next(chart_dir.glob("*.dir")), next(values_dir.glob("*.yaml"))]
     assert retry_paths == failed_paths
     assert [path.stat().st_ino for path in retry_paths] == failed_inodes
     assert recovery_state.is_file()
+    assert published_configmap.is_file()
     observed_shells = shell_pids.read_text().splitlines()
     assert len(observed_shells) == 2
     assert len(set(observed_shells)) == 2
-    assert counter.read_text().splitlines() == [
-        "helm_get_values",
-        "server_replica_read",
-        "worker_replica_read",
-        "reconciler_replica_read",
-        "queue_state_capture",
-    ]
+    events = command_log.read_text().splitlines()
+    assert sum(event.startswith("helm get values") for event in events) == 1
+    assert events.count("server_replica_read_attempt") == 2
+    assert events.count("server_replica_read_success") == 1
+    assert events.count("worker_replica_read_success") == 1
+    assert events.count("reconciler_replica_read_success") == 1
+    assert events.count("queue_state_capture_success") == 1
+    assert events.count("configmap_publish") == 1
 
+    functions = capture_block[capture_block.index("sha256_file() {") :]
+    functions = functions[: functions.index("verify_target_pins() {")]
     failure_functions = (
         functions
         + r"""
