@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import pytest
 
@@ -11,10 +11,17 @@ import kdive.providers.infra.libvirt_event_loop as mod
 
 def _reset() -> None:
     mod._STATE.registered = False  # test-only reset of the module guard
+    mod._STATE.started = False
+
+
+@pytest.fixture(autouse=True)
+def _reset_event_loop_state() -> Iterator[None]:
+    _reset()
+    yield
+    _reset()
 
 
 def test_registers_and_spawns_once_idempotent() -> None:
-    _reset()
     registers: list[int] = []
     spawns: list[Callable[[], None]] = []
 
@@ -29,7 +36,25 @@ def test_registers_and_spawns_once_idempotent() -> None:
 
     assert registers == [1]  # registered exactly once
     assert len(spawns) == 1  # run-thread started exactly once
-    _reset()
+
+
+def test_retries_thread_start_without_registering_twice() -> None:
+    registers: list[int] = []
+    spawns: list[Callable[[], None]] = []
+
+    def spawn(target: Callable[[], None]) -> None:
+        spawns.append(target)
+        if len(spawns) == 1:
+            raise RuntimeError("thread start failed")
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        mod.ensure_libvirt_event_loop(register=lambda: registers.append(1), spawn=spawn)
+
+    mod.ensure_libvirt_event_loop(register=lambda: registers.append(1), spawn=spawn)
+    mod.ensure_libvirt_event_loop(register=lambda: registers.append(1), spawn=spawn)
+
+    assert registers == [1]
+    assert len(spawns) == 2
 
 
 def test_run_thread_retries_on_error_until_stopped() -> None:
@@ -68,7 +93,6 @@ def test_spawned_target_drives_the_run_loop(monkeypatch: pytest.MonkeyPatch) -> 
     # ensure_libvirt_event_loop must hand spawn a callable that, when invoked, runs the
     # real event-loop body against the injected ``run`` (and the module's ``time.sleep``
     # for back-off). Invoking the captured target exercises that wiring.
-    _reset()
     captured: list[Callable[[], None]] = []
     run_calls = {"n": 0}
     slept: list[float] = []
@@ -89,4 +113,3 @@ def test_spawned_target_drives_the_run_loop(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert run_calls["n"] == 2  # the injected run was driven, errored once, then stopped
     assert slept == [mod._RETRY_BACKOFF_S]  # back-off used module time.sleep
-    _reset()

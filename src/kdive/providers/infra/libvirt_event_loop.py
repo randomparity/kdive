@@ -31,6 +31,7 @@ class _StopRunLoop(Exception):
 @dataclass
 class _State:
     registered: bool = False
+    started: bool = False
 
 
 _STATE = _State()
@@ -67,13 +68,16 @@ def ensure_libvirt_event_loop(
     """Register libvirt's default event loop and start its run-thread, once per process.
 
     Must be called before any libvirt connection whose stream events matter is opened — libvirt
-    services only connections opened after registration (ADR-0182). Idempotent: a second call is a
-    no-op. The ``register``/``run``/``spawn`` seams are injectable for tests.
+    services only connections opened after registration (ADR-0182). Idempotent after the thread
+    starts; a failed thread start remains retryable without registering libvirt twice. The
+    ``register``/``run``/``spawn`` seams are injectable for tests.
     """
     with _LOCK:
-        if _STATE.registered:
+        if _STATE.started:
             return
-        register()
-        _STATE.registered = True
-    spawn(lambda: _run_loop_body(run, sleep=time.sleep))
+        if not _STATE.registered:
+            register()
+            _STATE.registered = True
+        spawn(lambda: _run_loop_body(run, sleep=time.sleep))
+        _STATE.started = True
     _log.info("libvirt event loop registered and running")
