@@ -76,9 +76,10 @@ async def run_reconciler_body(
     telemetry: Telemetry,
 ) -> None:
     from kdive.providers.assembly.composition import ProviderComposition
-    from kdive.store.objectstore import object_store_from_env
+    from kdive.store.assembly import build_object_store_assembly
 
-    upload_store = object_store_from_env()
+    object_stores = build_object_store_assembly()
+    upload_store = object_stores.store
     provider_composition = ProviderComposition(
         secret_registry=secret_registry, object_store=upload_store
     )
