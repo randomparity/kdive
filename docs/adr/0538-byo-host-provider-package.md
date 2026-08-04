@@ -149,12 +149,17 @@ composition opt-in gate treats a present-but-unparseable `systems.toml` as *not 
 rather than raising, so one bad operator edit cannot take down the MCP server or the unrelated
 providers — ADR-0112's fault-isolation contract, stated for remote-libvirt at
 `src/kdive/providers/remote_libvirt/config.py:131-143`. BYO inherits that behavior and the
-obligation that comes with it: the precise parse error must resurface fail-closed when an op
-resolves the host's configuration, and the `doctor` contribution carries an explicit arm for a
-present-but-unparseable declaration. Without both, an operator who mis-edits a `[[byo_host]]`
-block on a live deployment sees only "no such resource" at allocation, naming neither the file
-nor the defect — and the deploy-time `reconcile-systems --check` arm only helps someone who
-runs it.
+obligation that comes with it, because on a live deployment the Resource rows survive from the
+last good reconcile and what the operator meets is neither uniform nor self-explanatory. A
+**kind-targeted** allocation is refused by `assert_kind_composed`
+(`src/kdive/mcp/tools/lifecycle/allocations/request.py:86`) with `configuration_error` naming
+the kind and the composed set — but neither the file nor the parse defect. A **pool- or
+id-targeted** request skips that check entirely, is granted against the still-present row, and
+fails only later at `systems.create` or at provider resolution — after the tenant has taken the
+capacity slot. So the precise parse error must resurface fail-closed when an op resolves the
+host's configuration, and the `doctor` contribution carries an explicit arm for a
+present-but-unparseable declaration. The deploy-time `reconcile-systems --check` arm only helps
+someone who runs it.
 
 **This rides the existing dispatch seam.** `byo_host` satisfies the same typed
 `ProviderRuntime` ports ([ADR-0063](0063-typed-provider-runtime.md)) and registers behind the

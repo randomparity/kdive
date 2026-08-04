@@ -181,6 +181,16 @@ consumer that provisions no VM. The docstring amendment is what keeps that hones
 the cheaper honesty: a split would be a core change to a portability-gated module, decided
 before any BYO code exists, to separate one field from five.
 
+**The uniqueness check narrows the aliasing hole; it does not close it.** The comparison is
+exact over declared strings, so `lab7` and `lab7.example.com`, or a BMC named once by hostname
+and once by address, are two distinct coordinate tuples that pass while driving one machine —
+and the failure that follows is the cross-tenant one above, not a lesser one. Normalizing the
+cheapest collisions (lower-case the host part, strip a trailing dot) is worth doing and does not
+change the shape: the operator's declaration remains the only place aliasing can be caught, and
+an operator who spells one host two ways gets no signal. This is an accepted residual rather
+than an oversight, recorded so entry 2's implementer knows the check is a narrowing rather than
+a proof.
+
 `concurrent_allocation_cap = 1` makes a BYO host's capacity binary. A lab with four machines
 offers four concurrent Systems, not four times some multiplier. That is what the hardware
 actually offers, and admission's existing per-resource cap expresses it with no new mechanism.
@@ -235,7 +245,8 @@ a healthy one.
   probe would have to prove two reachable endpoints are the same machine, which it cannot do
   reliably — a shared machine-id or boot-id is evidence, not proof, and two genuinely distinct
   hosts restored from one image share both. The declaration is where the operator's intent is
-  legible, and comparing declared coordinates is exact.
+  legible, and comparing declared coordinates is exact **over strings**, which is a narrower
+  claim than uniqueness over machines — see the residual in Consequences.
 - **Let a BYO host carry a `concurrent_allocation_cap` above 1 for partitioning cases.**
   No partitioning case survives a force-crash, which is the operation the provider exists for.
   A host that could safely host two independent debug Systems is a hypervisor, and KDIVE has

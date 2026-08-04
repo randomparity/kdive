@@ -86,6 +86,18 @@ the lease is held:
 - `control.watch_for_crash` and `control.diagnostic_sysrq` refuse with `TRANSPORT_CONFLICT`,
   naming the holding debug session and the action that releases it. SysRq needs to *write* to
   the same channel, so the conflict is symmetric rather than a reader-writer special case.
+  **This costs two core touch-points, and they are named here rather than discovered.** Both
+  tools reach the console through the one seam `RemoteConsoleReader.read_window`
+  (`src/kdive/jobs/handlers/control/diagnostic_sysrq.py:163` and
+  `watch_for_crash.py:192` — the only two consumers in the tree), and core decides what a
+  `pumped=False` window means before the provider is consulted: `diagnostic_sysrq.py:164-169`
+  raises `CONFIGURATION_ERROR` with `reason: console_not_pumped`, which names neither the holder
+  nor the release action, and it fires on the console read that precedes SysRq injection; while
+  `watch_for_crash.py:191-193` discards `pumped` deliberately, so a lease-held watch would poll
+  to its deadline and return `not_fired`. Delivering the refusal therefore means arms in both
+  handlers that propagate the lease conflict instead of re-categorizing or swallowing it. Both
+  files are under `src/kdive/jobs/`, a portability-gate core prefix, and neither is allowlisted
+  today; the milestone design document carries them in its gate table.
 - In-band readiness and health probes are suspended for the session's duration, because a
   stopped machine cannot answer them and a timeout would otherwise be read as a dead host.
 

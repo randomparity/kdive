@@ -31,10 +31,14 @@ The available mechanisms are all already in the tree.
   [ADR-0062](0062-platform-operations.md) §3) is a schedulability axis orthogonal to the health
   `status` enum. Placement skips a cordoned host
   (`src/kdive/services/allocation/admission/placement.py:86`, `:104`), and
-  `resources.set_scheduling` is the operator's path back. It carries no persisted reason: today
-  its only producers are the inventory prune path
-  (`src/kdive/inventory/reconcile/prune.py:52`, for a declared-removed host still in use) and
-  `resources.drain`, whose audited `reason` goes to the audit log rather than to the row.
+  `resources.set_scheduling` is the operator's path back. **No existing producer persists a
+  reason.** There are six write sites — `inventory/reconcile/prune.py:52` and `:85`,
+  `reconciler/cleanup/runtime_resources.py:148`, `mcp/tools/ops/resources/deregister.py:283`
+  and `:347`, and `mcp/tools/ops/resources/host_ops.py:145` (reached by both
+  `resources.set_scheduling` and `resources.drain`) — and every one writes the boolean alone.
+  `resources.drain` takes an audited `reason`, but it goes to the audit log, not the row. So a
+  cordoned host today carries no machine-readable cause, which is what this decision changes for
+  its own writes and what step 0 below must read before it writes.
 - `ErrorCategory.RESTORE_INCOMPLETE` ([ADR-0513](0513-restore-incomplete-failure-category.md))
   already names a restore that can never complete, whose subject's state is indeterminate, and
   whose operator response differs from `infrastructure_failure` — which is a retryable,
@@ -49,8 +53,9 @@ The available mechanisms are all already in the tree.
 **The host is cordoned for the whole restore, and the cordon clears only on verified success.**
 In order:
 
-0. **Cordon the Resource**, with a reason marking a restore in progress. Placement excludes a
-   cordoned Resource on both paths
+0. **Cordon the Resource if it is not already cordoned**, recording in the reason both that a
+   restore is in progress **and whether this teardown is the writer that set the boolean**.
+   Placement excludes a cordoned Resource on both paths
    (`src/kdive/services/allocation/admission/placement.py:86` and the `AND NOT cordoned`
    predicate at `:104`), so from here until step 4 no tenant can be granted this machine.
 1. Re-point the host's bootloader default at the declared `baseline_kernel`, arch-keyed
@@ -98,11 +103,16 @@ an operator rather than a retry. No new `ErrorCategory` is invented. A worker th
 mid-restore therefore leaves an **already-cordoned** host, which is the fail-closed outcome the
 reconciler arm below would otherwise have to produce.
 
-**Clearing is keyed on the reason, never unconditional.** Step 4 clears the cordon only when the
-recorded reason is this teardown's own. An operator who cordoned the host for maintenance while
-a Run was live must not have that cordon silently lifted by an unrelated release completing —
-the two are indistinguishable on the `cordoned` boolean alone, which is what makes the reason
-key load-bearing rather than decorative.
+**Clearing requires that this teardown set the cordon, not merely that it stamped a reason.**
+Step 4 clears only when the reason is this teardown's own **and** records that step 0 flipped the
+boolean. The weaker rule — clear when the reason matches — protects nothing, because step 0 would
+have written that reason itself moments earlier: an operator who cordoned the host for
+maintenance while a Run was live would have their cordon silently lifted by the ordinary release
+that follows. No existing producer persists a reason at all (`_apply_cordon`,
+`src/kdive/mcp/tools/ops/resources/host_ops.py:141-149`, writes only the boolean, and it is what
+both `resources.set_scheduling` and `resources.drain` call), so a pre-existing cordon is
+reason-less and indistinguishable from no cordon unless step 0 reads before it writes. That
+read-before-write is the load-bearing half; the reason key alone is not.
 
 **The reason is persisted on the Resource, under a namespaced `capabilities` key.** A cordon
 whose cause requires cross-referencing an audit log is a cordon an operator will clear without
