@@ -86,9 +86,10 @@ This decision does not change the protocol version KDIVE speaks.
 ## Consequences
 
 A dependency bump that moves either end of the supported range now costs one deliberate edit
-to the declaring module, plus `just doc-constants` to regenerate the sentence. That friction
-is the point: the negotiated range is a compatibility surface for every agent client, and it
-previously moved with no review at all.
+to the declaring module, plus `just doc-constants` and `just resources-docs` to regenerate the
+sentence and the packaged snapshot that mirrors it. That friction is the point: the negotiated
+range is a compatibility surface for every agent client, and it previously moved with no review
+at all.
 
 The `ci` gate gains one offline check. It cannot fail from a GitHub outage, a rate limit,
 or an air-gapped runner, because the only network-dependent mode runs on the cron.

@@ -164,7 +164,17 @@ sentence around the date. A guarded binding here would instead make `just doc-co
 until the contributor found and hand-edited the sentence.
 
 It is picked up by the existing `doc-constants-check` gate, so no new `ci` entry is needed for
-it.
+it — but a second gate stacks on top. `docs/guide/agent-index.md` is an ADR-0151 doc resource:
+`resources/registrar.py` registers it in `DOC_RESOURCES`, and `gen_doc_resources.py` mirrors it
+byte-for-byte into `src/kdive/mcp/resources/_content/agent-index.md`, which
+`resources-docs-check` diffs. The date therefore lives in **two** committed files, and
+`just doc-constants` rewrites only the canonical one. Every rewrite must be followed by
+`just resources-docs` and the regenerated snapshot committed, or `resources-docs-check` goes
+red — including on the implementing PR, which is the first to add the sentence. ADR-0410
+records this same stacking for the tool-count binding in this same file:
+"`resources-docs` then re-mirrors the served snapshot, so the existing `resources-docs-check`
+stacks on top." Note the recipe is `just resources-docs`; `just docs` regenerates only the tool
+reference.
 
 This binding must not be pointed at `docs/adr/0268-tool-gateway-dispatcher.md:27` or
 `docs/design/2026-06-27-tool-gateway-dispatcher-866.md:34`. Both cite "MCP spec (2025-06-18)"
@@ -193,7 +203,7 @@ The dedup search runs over **all** issue states, and the title is built from the
 | exit | matching issue | action | job result |
 | --- | --- | --- | --- |
 | 0 | — | nothing | pass |
-| 1 | none | open one titled `MCP spec drift: upstream <newest> is newer than pinned <declared>`, labels `area:mcp-api`, `type:chore`, `status:needs-triage` | fail |
+| 1 | none | open one titled `MCP spec drift: upstream <newest> not yet adopted`, labels `area:mcp-api`, `type:chore`, `status:needs-triage` | fail |
 | 1 | open | nothing — the open issue is the report | pass |
 | 1 | closed | nothing — the close is a human acknowledgement | pass |
 | 2 | — | file nothing | fail |
@@ -214,9 +224,25 @@ match, refile a duplicate, and fail the job every week thereafter. That is the ~
 outcome this arm exists to prevent, in a worse form than the commenting design it rejects. The
 predicate is *a human has seen this*, not *an issue is open*.
 
-The title embeds the version pair, so a second published revision does not match either a
-closed or an open issue's title and correctly opens a new one. `cancel-in-progress: false`
-keeps a slow run from being killed mid-file.
+**The search is a candidate filter; the dedup is string equality on the title.** The workflow
+runs `gh issue list --state all --search "<quoted title>" --json number,title` and then selects
+only hits whose `title` equals the expected string exactly, treating any other hit as no match.
+Bare search relevance would not do: GitHub issue search matches tokens, not literals, and every
+title this design can produce shares `MCP`, `spec`, `drift`, `upstream` and `adopted`. A search
+for a newly published `2026-11-01` would return the existing `2026-07-28` issue, the workflow
+would read that as "a human has seen this", file nothing, and pass green — permanently, since
+the search deliberately spans closed issues. That is ADR-0518's failure again, and from outside
+it looks identical to genuine parity. The search string must also be quoted, because the title
+contains a colon and `:` is GitHub search's qualifier separator.
+
+The title is keyed on the **upstream revision alone**, not the version pair. Keying on the pair
+would refile on a partial bump: with the `2026-07-28` issue open against declared `2025-11-25`,
+a bump to an intermediate revision edits the declared constant — the whole point of the offline
+gate — and the pair-keyed title would then match nothing and open a second issue for the same
+unadopted revision. The predicate is that a human has seen this upstream revision, so that is
+what the key carries; `declared=` stays in the issue body, which the script's human report
+already writes. A genuinely new upstream revision still changes `<newest>` and correctly opens
+a new issue. `cancel-in-progress: false` keeps a slow run from being killed mid-file.
 
 ## Tests
 
@@ -264,25 +290,38 @@ keeps a slow run from being killed mid-file.
   `schema-guard` sitting in the `ci` aggregate and the prek hook while CI never invoked it, so
   it passed every PR (#1723), and ADR-0410 hit the same thing. A comment is not a guard, and
   the failure mode is green.
+- **`test_mcp_spec_drift_workflow_shape`** — the same `yaml.safe_load` idiom over
+  `mcp-spec-drift.yml`: both the `schedule` and `workflow_dispatch` triggers present,
+  `permissions` of `contents: read` plus `issues: write`, `GITHUB_TOKEN` in the `env:` of both
+  the `--upstream` step and the issue-filing step, `--state all` on the dedup search, and the
+  three label strings matching labels the repository actually has. This is static, so it runs
+  on the branch — which matters because the live run cannot, per the note below.
 
 No test performs network I/O: `newer_revisions` is pure, and the `--upstream` tests inject
 the fetch.
 
-Two things are verified by running them rather than by a unit test, and both are done before
-merge and reported:
+Verification that a unit test cannot reach:
 
-- **Criterion 3** — a `workflow_dispatch` run of `mcp-spec-drift.yml` on the branch. It
-  exercises the real `gh` invocation, the title format, the three labels, and the
-  search-by-title dedup, none of which any unit test reaches. The run is expected to open the
-  `2026-07-28` issue; a second dispatch must find it and pass without commenting, which is the
-  idempotence check.
+- **Criterion 3** — a `workflow_dispatch` or scheduled run of `mcp-spec-drift.yml`, **after
+  merge**, reported back on #1809. It cannot be done before: GitHub resolves dispatchable
+  workflows from the default branch, so a workflow file that exists only on this branch has
+  nothing to dispatch. The run is expected to open the `2026-07-28` issue; a second dispatch
+  must find it and pass without filing, which is the idempotence check. The shape test above is
+  what gives the wiring pre-merge coverage in the meantime — without it the entire issue-filing
+  half would ship unverified, and this is the repository's first issue-filing workflow, so none
+  of it is inherited from working prior art.
 - **Criterion 4** — the existing `doc-constants-check` gate. Pointing the binding at a doc
   whose sentence does not match fails it, which is the assertion. Note this gate cannot run on
   macOS: `gen_doc_constants` imports provider composition, which resolves the Linux-only
   `fallocate` symbol at import time, so it is verified in a Linux container.
 
-One piece of ratification housekeeping belongs to the implementing PR rather than to this
-document: ADR-0537 opens as **Proposed** and must flip to **Accepted** in the same PR that
-lands the script. `scripts/check_adr_status.py` enforces exactly that — its second invariant
-fails any `Proposed` ADR cited from `src/` or `tests/`, "including guard-type ADRs whose
-enforcement ships purely as tests" — and the script and its tests will both cite this record.
+Two pieces of housekeeping belong to the implementing PR rather than to this document, and
+both fail a gate if missed:
+
+- ADR-0537 opens as **Proposed** and must flip to **Accepted** in the same PR that lands the
+  script. `scripts/check_adr_status.py` enforces exactly that — its second invariant fails any
+  `Proposed` ADR cited from `src/` or `tests/`, "including guard-type ADRs whose enforcement
+  ships purely as tests" — and the script and its tests will both cite this record.
+- After adding the sentence to `agent-index.md`, run `just resources-docs` and commit the
+  regenerated `src/kdive/mcp/resources/_content/agent-index.md`, or `resources-docs-check`
+  goes red.
