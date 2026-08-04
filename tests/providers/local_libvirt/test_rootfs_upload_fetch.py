@@ -44,6 +44,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
     _starts_with_qcow2_magic,
     _unlink_orphan_partials,
     fetch_uploaded_rootfs,
+    rootfs_upload_fetch_from_env,
     stage_uploaded_rootfs,
 )
 from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
@@ -1687,6 +1688,38 @@ def _upload(
 
 def _owned_key(inv: UUID) -> str:
     return artifact_key("local", "investigations", str(inv), rootfs_object_name(_TOKEN))
+
+
+def test_from_env_fetch_closes_over_the_injected_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = cast("rootfs_upload_fetch.UploadObjectStore", object())
+    conn = object()
+    expected = tmp_path / "staged-rootfs.qcow2"
+    seen: list[tuple[object, object, RootfsUploadContext]] = []
+    connects: list[tuple[str, bool]] = []
+
+    @contextmanager
+    def fake_connect(dsn: str, *, autocommit: bool) -> Iterator[object]:
+        connects.append((dsn, autocommit))
+        yield conn
+
+    def fake_fetch(
+        received_conn: object,
+        received_store: object,
+        upload: RootfsUploadContext,
+    ) -> Path:
+        seen.append((received_conn, received_store, upload))
+        return expected
+
+    monkeypatch.setattr(rootfs_upload_fetch.config, "require", lambda _setting: "postgresql://test")
+    monkeypatch.setattr(rootfs_upload_fetch.psycopg, "connect", fake_connect)
+    monkeypatch.setattr(rootfs_upload_fetch, "fetch_uploaded_rootfs", fake_fetch)
+    upload = _upload(tmp_path)
+
+    assert rootfs_upload_fetch_from_env(store)(upload) == expected
+    assert seen == [(conn, store, upload)]
+    assert connects == [("postgresql://test", True)]
 
 
 def test_fetch_resolves_by_content_addressed_object_key(tmp_path: Path) -> None:

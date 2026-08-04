@@ -63,6 +63,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_catalog_fetch import 
     rootfs_catalog_fetch_from_env,
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
+    UploadObjectStore,
     rootfs_upload_fetch_from_env,
 )
 from kdive.providers.local_libvirt.lifecycle.storage import (
@@ -84,6 +85,7 @@ from kdive.providers.shared.libvirt_xml import (
 )
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for
 from kdive.serialization import JsonValue
+from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
 
 __all__ = [
     "LocalLibvirtProvisioning",
@@ -217,11 +219,18 @@ class LocalLibvirtProvisioning:
         self._guest_egress = guest_egress
 
     @classmethod
-    def from_env(cls, *, guest_egress: bool = False) -> LocalLibvirtProvisioning:
+    def from_env(
+        cls,
+        *,
+        store: UploadObjectStore = UNCONFIGURED_OBJECT_STORE,
+        guest_egress: bool = False,
+    ) -> LocalLibvirtProvisioning:
         """Build from ``KDIVE_LIBVIRT_URI`` (default ``qemu:///system``); does not connect.
 
         Wires the ``catalog`` rootfs lane (ADR-0228): the catalog fetch lazily opens its own DB
-        connection + object store per call, so constructing the provisioner opens nothing.
+        connection + object store per call. The ``upload`` rootfs lane captures the injected,
+        process-assembled object store and lazily opens its DB connection per call. Constructing
+        the provisioner opens neither connection.
 
         ``guest_egress`` (ADR-0313, #1031) is the operator-resolved egress opt-in for the local
         Resource this provisioner serves; the host-agnostic default is ``False`` (``restrict=on``).
@@ -234,7 +243,7 @@ class LocalLibvirtProvisioning:
             connect=lambda: libvirt.open(host_uri),
             allowed_roots=allowed_roots,
             catalog_fetch=rootfs_catalog_fetch_from_env(allowed_roots),
-            upload_fetch=rootfs_upload_fetch_from_env(),
+            upload_fetch=rootfs_upload_fetch_from_env(store),
             guest_egress=guest_egress,
         )
 

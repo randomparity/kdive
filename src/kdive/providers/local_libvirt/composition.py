@@ -130,6 +130,7 @@ def build_runtime(
 ) -> ProviderRuntime:
     """Build local-libvirt provider ports without opening live provider connections.
 
+    ``store`` is the process-assembled object store captured by each object-store-aware port.
     ``resource_name`` (ADR-0313, #1031) binds the provisioner to a specific local Resource's
     operator ``guest_egress`` opt-in, resolved op-time from ``systems.toml``. The resolver
     chokepoint (``ProviderRuntime.for_resource`` → ``rebind_for_resource``) supplies it per op; a
@@ -138,7 +139,7 @@ def build_runtime(
     guest_egress = (
         local_guest_egress_for_resource(resource_name) if resource_name is not None else False
     )
-    provisioner = LocalLibvirtProvisioning.from_env(guest_egress=guest_egress)
+    provisioner = LocalLibvirtProvisioning.from_env(store=store, guest_egress=guest_egress)
     install = LocalLibvirtInstall.from_env(store=store)
     connector = LocalLibvirtConnect.from_env()
     controller = LocalLibvirtControl.from_env()
