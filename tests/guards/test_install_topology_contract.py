@@ -153,7 +153,7 @@ def test_build_use_recovery_distinguishes_kubernetes_witness_from_compose_wrappe
     )[0]
 
     assert "**Kubernetes:**" in text
-    assert "dedicated lifecycle-witness" in text
+    assert "staged worker-fence upgrade procedure" in text
     assert "**Compose:**" in text
     assert "operator-side lifecycle wrapper" in text
     assert compose_guidance.lower().index("just compose-stop") < compose_guidance.lower().index(
@@ -161,32 +161,55 @@ def test_build_use_recovery_distinguishes_kubernetes_witness_from_compose_wrappe
     )
 
 
-@pytest.mark.parametrize(
-    ("path", "start", "end"),
-    [
-        (_INSTALL, "### Worker-fence authority upgrade", "### Migration 0094"),
-        (_BUILD_USE_RECOVERY, "For a worker-fence upgrade", "Verify registered"),
-        (_KUBERNETES_RUNBOOK, "When upgrading the worker-fence protocol", "**Validate"),
-        (_HELM_REFERENCE, "### Upgrading worker-fence authority", None),
-    ],
-)
-def test_kubernetes_worker_fence_upgrade_orders_witness_and_credentials(
-    path: Path, start: str, end: str | None
-) -> None:
-    section = _section(path, start, end)
-    ordered_steps = (
-        "keep the current credentials while old workers drain",
-        "scale workers to zero while the lifecycle-witness remains healthy",
-        "wait until worker pods and their finalizers are gone",
-        "then stop the lifecycle-witness",
-        "migrate the roles and fence protocol",
-        "rotate the distinct server, worker, reconciler, and lifecycle-witness credentials",
-        "start and verify the lifecycle-witness",
-        "start current workers",
-    )
+def test_canonical_staged_helm_upgrade_preserves_the_fence_boundary() -> None:
+    source = _KUBERNETES_RUNBOOK.read_text()
 
-    positions = []
-    for step in ordered_steps:
-        assert step in section, (path, step)
-        positions.append(section.index(step))
-    assert positions == sorted(positions), path
+    assert "### Staged worker-fence upgrade" in source
+    section = _section(_KUBERNETES_RUNBOOK, "### Staged worker-fence upgrade", "**Validate")
+
+    required = (
+        "helm get values",
+        "deployment/${full}-server",
+        "statefulset/${full}-worker",
+        "deployment/${full}-reconciler",
+        "keep the current witness and credentials healthy",
+        "pod or its finalizer remains",
+        "deployment/${full}-witness",
+        "all four kdive workloads have no running pods",
+        "pg_stat_activity",
+        "pid <> pg_backend_pid()",
+        "operator-authorized backend sql client",
+        "operator_database_url",
+        "--timeout=5m",
+        "do not remove finalizers or hide an error",
+        "lifecyclewitness.replicas=0",
+        "democredentials.postgresql.serverpassword",
+        "democredentials.postgresql.workerpassword",
+        "democredentials.postgresql.reconcilerpassword",
+        "democredentials.postgresql.lifecyclewitnesspassword",
+        "external backends",
+        "--no-hooks",
+        "lifecyclewitness.replicas=1",
+        "wait for the witness rollout and readiness",
+        "server.replicas=${server_replicas}",
+        "worker.replicas=${worker_replicas}",
+        "reconciler.replicas=${reconciler_replicas}",
+        "--reuse-values",
+        "forward recovery",
+    )
+    for phrase in required:
+        assert phrase in section, phrase
+
+    assert section.count("--no-hooks") >= 2
+    assert "do not use `--reuse-values`, `--atomic`, or a rollback" in section
+    assert "|| true" not in section
+
+
+def test_worker_fence_summaries_link_to_the_canonical_staged_runbook() -> None:
+    assert "runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade" in _INSTALL.read_text()
+    assert "kubernetes-deploy.md#staged-worker-fence-upgrade" in _BUILD_USE_RECOVERY.read_text()
+
+    assert (
+        "../../../docs/operating/runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade"
+        in _HELM_REFERENCE.read_text()
+    )

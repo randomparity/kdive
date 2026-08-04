@@ -161,14 +161,125 @@ A `helm upgrade` runs single-responsibility Jobs, so each failure names exactly 
 The validate Job renders only when `systems.configMapName` is set. Migrations are forward-only and
 must be backward-compatible (ADR-0015), so a rollback is image-only.
 
-When upgrading the worker-fence protocol, keep the current credentials while old workers drain.
-Scale workers to zero while the lifecycle-witness remains healthy. Wait until worker Pods and their
-finalizers are gone, then stop the lifecycle-witness. Migrate the roles and fence protocol. Rotate
-the distinct server, worker, reconciler, and lifecycle-witness credentials. Start and verify the
-lifecycle-witness. Then start current workers. Verify their registered incarnations and the server
-recovery tools before resuming queue processing. Rollback cannot restore old-worker claiming;
-recover forward with a current image. Force-deleting Pods, manually removing finalizers, or using
-database-owner credentials bypasses the authority path and retains pins.
+### Staged worker-fence upgrade
+
+Use this procedure for a release carrying the worker-fence protocol. It is stop-old-first and
+forward-only: do not restore an old worker image, force-delete a Pod, remove a finalizer, or
+suppress an error. All Helm stages use the same target chart, image, and target values file.
+Do not use `--reuse-values`, `--atomic`, or a rollback.
+
+```bash
+set -eu
+RELEASE=kdive
+NAMESPACE=<namespace>
+FULL="${RELEASE}-kdive"
+CHART=deploy/helm/kdive
+TARGET_VALUES=kdive-target-values.yaml
+OPERATOR_DATABASE_URL="${OPERATOR_DATABASE_URL:?set an operator-authorized backend SQL URL}"
+
+# Capture overrides and the live desired core counts before any scaling. Edit this one target file
+# now to select the target image and configuration; do not edit it after the hooked all-zero stage.
+helm get values "$RELEASE" -n "$NAMESPACE" -o yaml >"$TARGET_VALUES"
+SERVER_REPLICAS=$(kubectl get deployment/${FULL}-server -n "$NAMESPACE" \
+  -o jsonpath='{.spec.replicas}')
+WORKER_REPLICAS=$(kubectl get statefulset/${FULL}-worker -n "$NAMESPACE" \
+  -o jsonpath='{.spec.replicas}')
+RECONCILER_REPLICAS=$(kubectl get deployment/${FULL}-reconciler -n "$NAMESPACE" \
+  -o jsonpath='{.spec.replicas}')
+```
+
+Keep the current witness and credentials healthy while the worker StatefulSet drains:
+
+```bash
+kubectl scale statefulset/${FULL}-worker -n "$NAMESPACE" --replicas=0
+wait_for_pods_deleted() {
+  local selector=$1
+  local pods
+  pods=$(kubectl get pods -n "$NAMESPACE" -l "$selector" -o jsonpath='{.items[*].metadata.name}')
+  if test -n "$pods"; then
+    kubectl wait --for=delete pod -n "$NAMESPACE" -l "$selector" --timeout=5m
+  fi
+  test -z "$(kubectl get pods -n "$NAMESPACE" -l "$selector" \
+    -o jsonpath='{.items[*].metadata.name}')"
+}
+wait_for_pods_deleted "app=${FULL}-worker"
+```
+
+The five-minute Kubernetes API wall-clock wait applies to each selector in this maintenance stage.
+It fails the stage if a Pod or its finalizer remains; leave workloads stopped, correct the witness,
+or backend failure, and rerun the worker-drain stage. Do not remove finalizers or hide an error.
+Then stop the remaining workloads and prove that all four KDIVE workloads have no running Pods:
+
+```bash
+kubectl scale deployment/${FULL}-server -n "$NAMESPACE" --replicas=0
+kubectl scale deployment/${FULL}-reconciler -n "$NAMESPACE" --replicas=0
+kubectl scale deployment/${FULL}-witness -n "$NAMESPACE" --replicas=0
+for selector in "app=${FULL}-server" "app=${FULL}-worker" "app=${FULL}-reconciler" \
+  "app=${FULL}-witness"; do
+  wait_for_pods_deleted "$selector"
+done
+
+# Use an operator-authorized backend SQL client, not a KDIVE process. This is migration 0095's
+# predicate, excluding this SQL client's own pg_backend_pid(). It must print 0.
+ACTIVE_CLIENTS=$(psql "$OPERATOR_DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc \
+  "SELECT count(*) FROM pg_stat_activity WHERE datid = (SELECT oid FROM pg_database "\
+  "WHERE datname = current_database()) AND pid <> pg_backend_pid() "\
+  "AND backend_type = 'client backend'")
+test "$ACTIVE_CLIENTS" = 0
+```
+
+For the target hooked all-zero upgrade, pass every replica flag explicitly. On bundled backends,
+put all four `demoCredentials.postgresql.serverPassword`,
+`demoCredentials.postgresql.workerPassword`,
+`demoCredentials.postgresql.reconcilerPassword`, and
+`demoCredentials.postgresql.lifecycleWitnessPassword` values in `$TARGET_VALUES` before this stage.
+Its post-upgrade hook migrates and resets those role passwords. On external backends, rotate the
+four database role credentials and referenced Secrets only after this all-zero migration succeeds;
+confirm each target Secret is ready before the witness-only stage.
+
+```bash
+helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" \
+  --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
+  --set lifecycleWitness.replicas=0
+```
+
+If this hooked stage fails, keep all workloads at zero, correct the target migration or
+configuration, and retry this same hooked all-zero stage. After it succeeds, do not change target
+values, credential references, or configuration: `--no-hooks` also skips the external
+ConfigMap hook.
+Correcting the contents of an external Secret at the same reference is allowed before retrying a
+hook-free stage. If target values, a credential reference, or configuration changes, return all
+workloads to zero and
+rerun the hooked all-zero stage.
+
+Start only the witness in a hook-free stage, passing all four replica flags explicitly, then wait
+for the witness rollout and readiness:
+
+```bash
+helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
+  --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
+  --set lifecycleWitness.replicas=1
+kubectl rollout status deployment/${FULL}-witness -n "$NAMESPACE" --timeout=5m
+kubectl wait --for=condition=Ready pod -n "$NAMESPACE" -l "app=${FULL}-witness" --timeout=5m
+```
+
+If credential rotation or witness readiness fails, keep server, worker, and reconciler at zero,
+correct the target credentials or Secrets, and retry this hook-free witness-only stage.
+
+Finally restore the captured core counts in another hook-free stage. The ready witness remains
+available before workers return:
+
+```bash
+helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
+  --set server.replicas=${SERVER_REPLICAS} --set worker.replicas=${WORKER_REPLICAS} \
+  --set reconciler.replicas=${RECONCILER_REPLICAS} --set lifecycleWitness.replicas=1
+```
+
+If this final restore fails, keep the ready witness running, return any partially restored core
+workloads to zero, correct the target release, and retry this hook-free final stage with the
+captured replica counts. Verify worker incarnations and recovery-tool exposure before resuming
+the queue.
+Forward recovery is the only supported path after migration succeeds.
 
 **Validate `systems.toml` against the running image (no DB/S3 needed):**
 

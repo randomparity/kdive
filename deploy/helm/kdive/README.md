@@ -52,13 +52,11 @@ use the normal rolling path.
 
 ## Upgrade
 
-**The release containing migration 0095 is stop-old-first.** Stop or quiesce server and reconciler
-as appropriate, then scale workers to zero while the lifecycle-witness remains healthy. Wait until
-worker Pods and their finalizers are gone, then stop the lifecycle-witness before the migrate hook
-runs. Migration 0095 refuses to run while another database client is connected because pre-0095
-strict Run projections cannot tolerate the new `runs.build_ref` column. After migration, start and
-verify the lifecycle-witness before starting workers, then restore the other desired replicas with
-the new image. Do not use a rolling upgrade or roll back to a pre-0095 image after migration.
+**Worker-fence releases use the [staged worker-fence upgrade procedure](
+../../../docs/operating/runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade).**
+It captures live replica counts, proves every KDIVE workload is stopped for migration, and restores
+workers only after the target-image witness is ready. Do not use a rolling upgrade or an old image
+after the migration.
 
 **Do not upgrade with bare `helm upgrade --reuse-values`.** `--reuse-values` carries the
 previous release's merged values and *ignores the fresh `values.yaml` defaults*, so any
@@ -100,38 +98,9 @@ directories) and `/var/lib/kdive/install` is install staging. State of record is
 durable artifacts are in the object store, so discarding both costs a rebuild or a re-fetch on
 the next run, not data.
 
-**Drain the workers before upgrading.** A bare `helm upgrade` does converge on its own — Helm 3
-deletes resources the new chart no longer renders, matching on name/namespace/**kind**, so the
-old Deployment (a different kind under the same name) and the two shared PVCs are removed. But
-Helm creates the new resources *before* deleting the old ones, so for the length of that window
-the Deployment's pods and the StatefulSet's pods are both claiming jobs — briefly double the
-intended workers, some of them mid-build against volumes that are about to be deleted. Those
-jobs fail and are re-dispatched, which is survivable and pointless. Draining first makes the
-transition deterministic:
-
-```sh
-# 1. Stop the workers and wait for the pods to go away.
-kubectl scale deployment/<release>-kdive-worker --replicas=0 -n <ns>
-# `|| true` because `kubectl wait` exits non-zero on "no matching resources found", which is
-# exactly the state you want if the workers were already drained or the step is re-run.
-kubectl wait --for=delete pod -l app=<release>-kdive-worker -n <ns> --timeout=5m || true
-
-# 2. Upgrade. Helm removes the drained Deployment and the two shared PVCs, and creates the
-#    StatefulSet with a fresh pair of claims per ordinal.
-helm get values <release> -o yaml > kdive-values.yaml
-helm upgrade <release> deploy/helm/kdive -f kdive-values.yaml -n <ns>
-
-# 3. Confirm the old shared claims are gone and each ordinal owns its own pair.
-kubectl get pvc -n <ns>   # expect build-<release>-kdive-worker-N / install-<release>-kdive-worker-N
-```
-
-If step 2 leaves either shared PVC behind — a `helm.sh/resource-policy: keep` annotation, or a
-`pvc-protection` finalizer waiting on a pod that never terminated — delete it by hand once no
-worker pod is running:
-
-```sh
-kubectl delete pvc/<release>-kdive-build pvc/<release>-kdive-install -n <ns>
-```
+For a worker-fence release, use the [staged worker-fence upgrade procedure](
+../../../docs/operating/runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade).
+It uses the current worker StatefulSet and preserves the stop-old-first authority boundary.
 
 Two things change size after the migration:
 
@@ -425,12 +394,8 @@ an ordinal has run. No cluster-wide Pod permission is required.
 
 ### Upgrading worker-fence authority
 
-For an existing release, keep the current credentials while old workers drain. Scale workers to zero
-while the lifecycle-witness remains healthy. Wait until worker Pods and their finalizers are gone,
-then stop the lifecycle-witness. Migrate the roles and fence protocol. Rotate the distinct server,
-worker, reconciler, and lifecycle-witness credentials. Start and verify the lifecycle-witness. Then
-start current workers. Verify the registered worker incarnations and the server's recovery-tool
-exposure before resuming queue processing. A rollback cannot restore old-worker claiming after the
-protocol migration; recover forward with a current worker image. Do not force-delete Pods, remove
-finalizers manually, or use database-owner access to bypass the witness: such bypasses retain pins
-rather than releasing them.
+For an existing release, use the [staged worker-fence upgrade procedure](
+../../../docs/operating/runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade).
+It is the only supported path for migration, credential handling, witness readiness, and worker
+restore. Do not force-delete Pods, remove finalizers manually, or use database-owner access to
+bypass the witness: such bypasses retain pins rather than releasing them.

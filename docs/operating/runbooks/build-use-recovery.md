@@ -43,11 +43,8 @@ refusal shape as a missing use and leaves the pin unchanged.
 
 For a worker-fence upgrade, use the deployment-specific authority sequence:
 
-- **Kubernetes:** Kubernetes uses a dedicated lifecycle-witness. Keep the current credentials while
-  old workers drain. Scale workers to zero while the lifecycle-witness remains healthy. Wait until
-  worker Pods and their finalizers are gone, then stop the lifecycle-witness. Migrate the roles and
-  fence protocol. Rotate the distinct server, worker, reconciler, and lifecycle-witness credentials.
-  Start and verify the lifecycle-witness. Then start current workers.
+- **Kubernetes:** follow the [staged worker-fence upgrade procedure](
+  kubernetes-deploy.md#staged-worker-fence-upgrade).
 - **Compose:** use `just compose-stop` to record old-worker termination and preserve named volumes.
   Select the new image and configuration, then use `just compose-up`. The Compose graph runs the
   migrate one-shot and, for local defaults, role bootstrap before the operator-side lifecycle
