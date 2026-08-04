@@ -73,7 +73,11 @@ CORE_PREFIXES = (
 # filed about. Two things do not inherit: a module that arrived in the new package by another
 # route was never part of the reviewed decision, and content that migrates to a different
 # subsystem is a separate decision needing its own reviewed entry. When the content leaves
-# ``CORE_PREFIXES`` altogether, drop the entry and say where it went.
+# ``CORE_PREFIXES`` altogether, drop the entry and say where it went — and know that dropping
+# is one-way. ``_measure`` runs with ``--no-renames``, so the retired path keeps its historical
+# touched lines and becomes a violation no later allowlist edit can clear: re-adding the entry
+# fails the absent-path check below, and pointing it at the successor fails the prefix check.
+# Only a newer ``BASELINE_TAG`` retires those lines.
 ALLOWED_FILES = frozenset(
     {
         # ResourceKind.REMOTE_LIBVIRT (ADR-0076 named touch-point).
@@ -160,8 +164,11 @@ ALLOWED_FILES = frozenset(
         # are restricted to the tool name + outcome (no provider/tenant data); none of it
         # is provider-specific. mcp/middleware.py was later split into the middleware
         # package; these are the modules that split produced, less its bare-marker init.
-        # Middlewares added to the package afterwards (bare_bearer_hint, compact,
-        # doc_exposure, transport_trace) are their own decisions and are not covered here.
+        # The middleware *modules* added to the package afterwards (bare_bearer_hint, compact,
+        # doc_exposure, transport_trace) are their own decisions and are not covered here — but
+        # shared.py is, and they import from it (doc_exposure takes request_context), so a
+        # change to shared.py made for one of their sakes lands inside this entry and needs
+        # reviewing on its own terms rather than on ADR-0090's.
         "src/kdive/mcp/middleware/binding_errors.py",
         "src/kdive/mcp/middleware/denial_audit.py",
         "src/kdive/mcp/middleware/exposure.py",
@@ -530,7 +537,10 @@ def main() -> int:
         print(
             "\nRefactor the provider logic out of core (the M2 co-equal goal, "
             "docs/design/m2-remote-libvirt.md), or - for a deliberate provider-agnostic "
-            "core change - extend ALLOWED_FILES in this script in the same PR."
+            "core change - extend ALLOWED_FILES in this script in the same PR. A third "
+            "case needs neither: a path whose allowlisted content has since left the core "
+            "surface keeps its historical touched lines under --no-renames, and only a "
+            "newer BASELINE_TAG retires them."
         )
     if bad or stale:
         return 1

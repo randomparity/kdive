@@ -376,6 +376,13 @@ measurement too. Two things entry 17 still owns are below: wiring the gate into 
 missing-`CAPTURE_COVERAGE`-row assertion. A third, the same dead-entry shape reached by a
 carve-out rather than a move, is #1838.
 
+One residue entry 17 will meet the moment it wires the gate up: #1835 dropped
+`src/kdive/reconciler/console_hosting.py` because its content left the core surface for
+`providers/infra/console_hosting.py`, and under `--no-renames` the retired path keeps its 778
+cumulative touched lines. They report as a violation that no allowlist edit can clear —
+re-adding the entry fails the absent-path check, pointing it at the successor fails the prefix
+check — so the `pre-M4` baseline below is what actually retires them, not an allowlist row.
+
 **Surfacing the cordon reason costs no entry**, and it is worth saying why no row for it
 appears above. `describe_resource` already has a provider-owned adornment seam:
 `ResourceDetailCapabilities.projector` on the `for_resource`-bound runtime, merged into the
