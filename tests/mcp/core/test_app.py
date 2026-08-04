@@ -422,17 +422,17 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
         def build_provider_resolver(self) -> object:
             return resolver
 
-    def _build(
+    def _register(
+        registry: HandlerRegistry,
         assembly: handler_module.WorkerHandlerAssembly,
-    ) -> tuple[handler_module.HandlerRegistrar, ...]:
+    ) -> None:
+        del registry
         captured["resolver"] = assembly.resolver
         captured["incarnation_credential"] = assembly.incarnation_credential
         captured["secret_registry"] = assembly.secret_registry
         captured["object_stores"] = assembly.object_stores
 
-        return ()
-
-    monkeypatch.setattr(handler_module, "build_handler_registrars", _build)
+    monkeypatch.setattr(handler_module, "register_all_handlers", _register)
 
     build_handler_registry(
         secret_registry=caller_registry,
