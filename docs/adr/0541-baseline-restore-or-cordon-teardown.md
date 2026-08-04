@@ -139,7 +139,20 @@ the re-read to see anything, `resources.set_scheduling` must stamp an operator-o
 the cordon path — today `_apply_cordon`
 (`src/kdive/mcp/tools/ops/resources/host_ops.py:141-149`) writes the boolean unconditionally and
 records nothing — so that write lands in the same already-declared touch-point as the surfacing
-work. The weaker rule — clear when the reason matches — protects nothing, because step 0 would
+work.
+
+**The re-read sees only the reason-stamped path, and that residual is accepted.** Of the six
+cordon write sites enumerated above, this milestone stamps a reason on one — `_apply_cordon`,
+which serves `resources.set_scheduling` and `resources.drain`. The other four write the boolean
+alone and are invisible to step 4: `mcp/tools/ops/resources/deregister.py:283` and `:347`,
+`inventory/reconcile/prune.py:52`, and `reconciler/cleanup/runtime_resources.py:148`. The
+consequential one is `resources.deregister`, whose documented soft-delete *is* a cordon: run
+against a host mid-restore it sets an already-true boolean, writes nothing else, and a
+successful step 4 then clears the cordon and returns a deliberately deregistered host to the
+pool, with nothing to re-apply it. The prune variant is partly self-healing, since a later
+reconcile pass re-evaluates. Stamping the other four would be four further gated touch-points
+for a narrow window, so the coverage claim above is narrowed to the stamped path rather than the
+mechanism widened. The weaker rule — clear when the reason matches — protects nothing, because step 0 would
 have written that reason itself moments earlier: an operator who cordoned the host for
 maintenance while a Run was live would have their cordon silently lifted by the ordinary release
 that follows. No existing producer persists a reason at all (`_apply_cordon`,

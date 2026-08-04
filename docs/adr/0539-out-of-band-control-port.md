@@ -114,10 +114,13 @@ property of the channel, not of the debugger.
 Postgres, not in worker-local memory, because the process that holds it is exactly the process
 that can vanish. It is a dedicated table keyed on the **Resource** — the serial channel belongs
 to the physical host, and a hold can outlive any one System, so neither a System key nor
-`debug_sessions` (keyed on a run) can represent every holder. A unique constraint on
-`(resource, mode)` for the preempting mode makes that acquisition an insert that either wins or
-conflicts, rather than a read-modify-write two acquirers can race; this repository has built
-three lease tables for that reason already. The table is claimed in the milestone's single migration, ahead of the entry
+`debug_sessions` (keyed on a run) can represent every holder. Uniqueness is **partial**, not whole-table: a unique index on `resource_id`
+restricted to `mode = 'preempting'` makes that one acquisition an insert that either wins or
+conflicts, while reading rows carry no uniqueness at all and simply coexist. A plain
+`UNIQUE (resource)` would allow one hold of any kind, and `UNIQUE (resource, mode)` would allow
+one reading hold — both would refuse the second reading acquirer, which is the crash-watch plus
+SysRq case this design exists to permit. This repository has built three lease tables already,
+but each held a single owner; this is the first with a shared mode. The table is claimed in the milestone's single migration, ahead of the entry
 that first writes it. Every lease carries an expiry with the five-part contract
 (unit, reference clock, scope, consequence, recovery), and a refusal names the holder, the
 expiry, and the release action. A lease whose holding worker is no longer live is reclaimed by
