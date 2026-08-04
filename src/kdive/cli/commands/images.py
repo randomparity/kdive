@@ -21,6 +21,11 @@ from __future__ import annotations
 
 import argparse
 
+from kdive.cli.commands.generated_args import (
+    local_acknowledgement,
+    optional_generated_arg,
+    required_generated_arg,
+)
 from kdive.cli.commands.mutations import run_mutating_tool
 from kdive.cli.commands.reads import collection_rows, fetch_collection_envelope
 from kdive.cli.errors import exit_code_for_envelope
@@ -34,7 +39,7 @@ async def images_list(args: argparse.Namespace) -> int:
     authoritative rather than restating it here. An unrecognized value is refused by argument
     parsing: the flag's ``choices`` are the tool schema's own enum (ADR-0469).
     """
-    scope = getattr(args, "scope", None)
+    scope = optional_generated_arg(args, "scope", str)
     arguments: dict[str, object] = {} if scope is None else {"request": {"scope": scope}}
     envelope = await fetch_collection_envelope("images.list", arguments)
     columns = ["id", "name", "arch", "visibility", "owner", "state"]
@@ -45,19 +50,23 @@ async def images_list(args: argparse.Namespace) -> int:
 async def images_upload(args: argparse.Namespace) -> int:
     """Register a quarantined upload as a project-private image (operator on the project)."""
     arguments: dict[str, object] = {
-        "project": args.project,
-        "name": args.name,
-        "arch": args.arch,
-        "quarantine_key": args.quarantine_key,
+        "project": required_generated_arg(args, "project", str),
+        "name": required_generated_arg(args, "name", str),
+        "arch": required_generated_arg(args, "arch", str),
+        "quarantine_key": required_generated_arg(args, "quarantine_key", str),
     }
-    lifetime = getattr(args, "lifetime_seconds", None)
+    lifetime = optional_generated_arg(args, "lifetime_seconds", int)
     if lifetime is not None:
         arguments["lifetime_seconds"] = lifetime
     return await run_mutating_tool("images.upload", arguments, as_json=args.json)
 
 
 async def images_delete(args: argparse.Namespace) -> int:
-    return await run_mutating_tool("images.delete", {"image_id": args.image_id}, as_json=args.json)
+    return await run_mutating_tool(
+        "images.delete",
+        {"image_id": required_generated_arg(args, "image_id", str)},
+        as_json=args.json,
+    )
 
 
 async def images_prune(args: argparse.Namespace) -> int:
@@ -67,10 +76,12 @@ async def images_prune(args: argparse.Namespace) -> int:
         SystemExit: When ``--expired`` is not supplied; the flag is the explicit
             acknowledgement that this triggers the destructive expiry sweep.
     """
-    if not getattr(args, "expired", False):
+    if not local_acknowledgement(args, "expired"):
         raise SystemExit("images prune is destructive: pass --expired to confirm the sweep")
     return await run_mutating_tool(
-        "images.prune_expired", {"reason": args.reason}, as_json=args.json
+        "images.prune_expired",
+        {"reason": required_generated_arg(args, "reason", str)},
+        as_json=args.json,
     )
 
 
@@ -78,6 +89,10 @@ async def images_extend(args: argparse.Namespace) -> int:
     """Extend a private image's expiry; ``--seconds`` arrives already coerced (ADR-0474)."""
     return await run_mutating_tool(
         "images.extend",
-        {"image_id": args.image_id, "seconds": args.seconds, "reason": args.reason},
+        {
+            "image_id": required_generated_arg(args, "image_id", str),
+            "seconds": required_generated_arg(args, "seconds", int),
+            "reason": required_generated_arg(args, "reason", str),
+        },
         as_json=args.json,
     )

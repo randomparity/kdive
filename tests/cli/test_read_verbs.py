@@ -63,7 +63,13 @@ def _item(object_id: str, status: str, data: dict) -> dict:
 
 
 def _args(**kwargs: object) -> argparse.Namespace:
-    return argparse.Namespace(json=False, **kwargs)
+    generated = {f"genarg_{name}": value for name, value in kwargs.items()}
+    return argparse.Namespace(json=False, **generated)
+
+
+def _json_args(**kwargs: object) -> argparse.Namespace:
+    generated = {f"genarg_{name}": value for name, value in kwargs.items()}
+    return argparse.Namespace(json=True, **generated)
 
 
 def test_resources_list_flattens_items_and_renders(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -81,6 +87,18 @@ def test_resources_list_flattens_items_and_renders(monkeypatch: pytest.MonkeyPat
 def test_resources_list_passes_kind_filter(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     client = _install_session(monkeypatch, _collection([]))
     asyncio.run(reads.resources_list(_args(kind="remote-libvirt")))
+    assert client.calls == [("resources.list", {"request": {"kind": "remote-libvirt"}})]
+
+
+def test_resources_list_uses_the_untouched_parser_namespace_for_request_reshaping(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The protected ``--kind`` value reaches the request wrapper without copying it."""
+    client = _install_session(monkeypatch, _collection([]))
+    args = build_parser().parse_args(["resources", "list", "--kind", "remote-libvirt"])
+
+    assert not hasattr(args, "kind")
+    assert asyncio.run(reads.resources_list(args)) == 0
     assert client.calls == [("resources.list", {"request": {"kind": "remote-libvirt"}})]
 
 
@@ -132,7 +150,7 @@ def test_record_verb_json_mode_emits_whole_envelope(
         "suggested_next_actions": ["systems.release"],
     }
     _install_session(monkeypatch, record)
-    asyncio.run(reads.systems_get(argparse.Namespace(json=True, system_id="s1")))
+    asyncio.run(reads.systems_get(_json_args(system_id="s1")))
     parsed = json.loads(capsys.readouterr().out)
     assert parsed == record
     assert parsed["suggested_next_actions"] == ["systems.release"]
@@ -262,9 +280,9 @@ def test_handler_calls_its_descriptor_tool(verb, monkeypatch, capsys) -> None:
     monkeypatch.setattr(reads, "_session_factory", lambda: _FakeSession(client))
     args = argparse.Namespace(json=False)
     for flag in verb.flags:
-        setattr(args, flag.dest, f"{flag.dest}-val")
+        setattr(args, f"genarg_{flag.dest}", f"{flag.dest}-val")
     for name, value in _VERB_ARG_OVERRIDES.get((verb.group, verb.sub), {}).items():
-        setattr(args, name, value)
+        setattr(args, f"genarg_{name}", value)
     asyncio.run(HANDLER_OVERRIDES[verb.tool](args))
     assert client.calls and client.calls[0][0] == verb.tool
 
@@ -324,7 +342,7 @@ def test_list_verb_json_emits_whole_envelope_with_next_actions(
     envelope = _collection([_item("al-1", "active", {"project": "p", "system": "s"})])
     envelope["suggested_next_actions"] = ["allocations.release"]
     _install_session(monkeypatch, envelope)
-    asyncio.run(reads.allocations_list(argparse.Namespace(json=True, project="p")))
+    asyncio.run(reads.allocations_list(_json_args(project="p")))
     parsed = json.loads(capsys.readouterr().out)
     assert parsed == envelope
     assert parsed["suggested_next_actions"] == ["allocations.release"]
@@ -336,7 +354,7 @@ def test_systems_list_json_emits_whole_envelope_and_passes_state_filter(
 ) -> None:
     envelope = _collection([_item("sy-1", "running", {"project": "p"})])
     client = _install_session(monkeypatch, envelope)
-    asyncio.run(reads.systems_list(argparse.Namespace(json=True, state="running")))
+    asyncio.run(reads.systems_list(_json_args(state="running")))
     assert client.calls == [("systems.list", {"request": {"state": "running"}})]
     assert json.loads(capsys.readouterr().out) == envelope
 
@@ -344,7 +362,7 @@ def test_systems_list_json_emits_whole_envelope_and_passes_state_filter(
 def test_jobs_list_json_emits_whole_envelope(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     envelope = _collection([_item("jo-1", "queued", {"kind": "boot"})])
     client = _install_session(monkeypatch, envelope)
-    asyncio.run(reads.jobs_list(argparse.Namespace(json=True, limit=None)))
+    asyncio.run(reads.jobs_list(_json_args(limit=None)))
     assert client.calls == [("jobs.list", {"request": {}})]
     assert json.loads(capsys.readouterr().out) == envelope
 
@@ -356,7 +374,7 @@ def test_inventory_show_json_emits_whole_envelope_and_passes_project_filter(
         [_item("k1", "ok", {"key": "k1", "backend": "minio", "status": "ready"})]
     )
     client = _install_session(monkeypatch, envelope)
-    asyncio.run(reads.inventory_show(argparse.Namespace(json=True, project="proj-a")))
+    asyncio.run(reads.inventory_show(_json_args(project="proj-a")))
     # ``inventory.list`` takes its filters inside the ``request`` wrapper; this pinned the flat
     # payload the tool rejects until the schema guard caught it (#1611).
     assert client.calls == [("inventory.list", {"request": {"project": "proj-a"}})]
@@ -399,11 +417,7 @@ def test_wait_verb_omitting_timeout_sends_only_the_id(
 
 def _wait_argv(group: str, object_id: str, *tail: str) -> argparse.Namespace:
     """Parse a real ``kdivectl <group> wait`` command line, so the coercion under test runs."""
-    from kdive.cli.commands import registry
-
-    args = build_parser().parse_args([group, "wait", object_id, *tail])
-    verb = next(verb for verb in GENERATED_VERBS if (verb.group, verb.sub) == (group, "wait"))
-    return registry._adapt_handler_args(verb, args)  # noqa: SLF001 - exercises parser-to-handler seam
+    return build_parser().parse_args([group, "wait", object_id, *tail])
 
 
 @pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
@@ -463,7 +477,7 @@ def test_wait_verb_rejects_a_negative_timeout(
     """
     client = _install_session(monkeypatch, _data_envelope({}))
     args = _wait_argv(tool.split(".")[0], "obj-1", "--timeout-s", value)
-    assert args.timeout_s == float(value)
+    assert args.genarg_timeout_s == float(value)
     code = asyncio.run(handler(args))
     assert code == 2
     assert client.calls == []
@@ -482,7 +496,7 @@ def test_wait_verb_json_emits_whole_envelope(
         "suggested_next_actions": [tool],
     }
     _install_session(monkeypatch, envelope)
-    asyncio.run(handler(argparse.Namespace(json=True, timeout_s=None, **{key: "obj-1"})))
+    asyncio.run(handler(_json_args(timeout_s=None, **{key: "obj-1"})))
     assert json.loads(capsys.readouterr().out) == envelope
 
 
@@ -631,8 +645,7 @@ def test_report_json_emits_whole_envelope(monkeypatch: pytest.MonkeyPatch, capsy
     _install_session(monkeypatch, envelope)
     asyncio.run(
         reads.ledger_report(
-            argparse.Namespace(
-                json=True,
+            _json_args(
                 scope="all-projects",
                 group_by=None,
                 since=None,

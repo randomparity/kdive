@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
+import inspect
 
 import pytest
 
@@ -60,6 +62,43 @@ def test_generated_positional_uses_descriptor_and_routes_to_tool_handler(
     assert args.genarg_job_id == "job-1"
     assert asyncio.run(registry.run_verb(args)) == 0
     assert seen == [args]
+
+
+def test_specialized_handlers_use_only_the_generated_argument_boundary() -> None:
+    """Descriptor fields cannot re-enter specialised handlers as namespace attributes."""
+    from kdive.cli.commands import images, mutations, reads, registry
+
+    descriptor_fields = {
+        flag.dest
+        for verb in GENERATED_VERBS
+        if verb.tool in HANDLER_OVERRIDES
+        for flag in verb.flags
+    }
+    for module in (reads, images, mutations):
+        tree = ast.parse(inspect.getsource(module))
+        direct_reads = [
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "args"
+            and node.attr in descriptor_fields
+        ]
+        direct_reads += [
+            node.args[1].value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "args"
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and node.args[1].value in descriptor_fields
+        ]
+        assert not direct_reads, f"{module.__name__}: {direct_reads}"
+    assert "_adapt" + "_handler_args" not in vars(registry)
 
 
 def test_list_verb_takes_its_optional_filter() -> None:

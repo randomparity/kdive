@@ -270,18 +270,6 @@ def _doctor_parser(sub: argparse._SubParsersAction, parent: argparse.ArgumentPar
     parser.add_argument("--with-egress", dest="with_egress", action="store_true")
 
 
-def _adapt_handler_args(verb: GeneratedVerb, args: argparse.Namespace) -> argparse.Namespace:
-    """Expose descriptor-owned parsed values under the legacy special-handler names.
-
-    Parser destinations remain prefixed so no tool parameter can overwrite routing state.  The
-    special renderers predate that protection and read their argument names directly, so copy
-    descriptor values onto the same namespace only after routing has selected the generated verb.
-    """
-    for flag in verb.flags:
-        setattr(args, flag.dest, getattr(args, f"{GENERATED_ARG_PREFIX}{flag.dest}", None))
-    return args
-
-
 async def run_verb(args: argparse.Namespace) -> int:
     """Resolve the generated command path, then select custom execution by its MCP tool.
 
@@ -297,7 +285,7 @@ async def run_verb(args: argparse.Namespace) -> int:
     if generated is not None:
         handler = HANDLER_OVERRIDES.get(generated.tool)
         if handler is not None:
-            return await handler(_adapt_handler_args(generated, args))
+            return await handler(args)
         from kdive.cli import dispatch
 
         return await dispatch.invoke_generated_verb(generated, args)

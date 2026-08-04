@@ -64,12 +64,21 @@ def _install(monkeypatch: pytest.MonkeyPatch, payload: dict | None = None) -> _F
     return client
 
 
-def _args(**kwargs: object) -> argparse.Namespace:
-    return argparse.Namespace(json=False, **kwargs)
+_LOCAL_ACKNOWLEDGEMENTS = {"expired"}
+
+
+def _args(*, json: bool = False, **kwargs: object) -> argparse.Namespace:
+    generated = {
+        f"genarg_{name}": value
+        for name, value in kwargs.items()
+        if name not in _LOCAL_ACKNOWLEDGEMENTS
+    }
+    local = {name: value for name, value in kwargs.items() if name in _LOCAL_ACKNOWLEDGEMENTS}
+    return argparse.Namespace(json=json, **generated, **local)
 
 
 def _json_args(**kwargs: object) -> argparse.Namespace:
-    return argparse.Namespace(json=True, **kwargs)
+    return _args(json=True, **kwargs)
 
 
 def _collection(items: list[dict]) -> dict:
@@ -135,6 +144,19 @@ def test_describe_omits_target_kernel_when_absent(monkeypatch: pytest.MonkeyPatc
     code = asyncio.run(reads.images_get(_args(image_id="img-1", target_kernel=None)))
     assert code == 0
     assert client.calls == [("images.describe", {"image_id": "img-1"})]
+
+
+def test_describe_uses_untouched_parser_values_for_required_and_optional_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _install(
+        monkeypatch, {"object_id": "img-1", "status": "registered", "data": {"name": "fedora"}}
+    )
+    args = build_parser().parse_args(["images", "describe", "img-1", "--target-kernel", "7.1"])
+
+    assert not hasattr(args, "image_id") and not hasattr(args, "target_kernel")
+    assert asyncio.run(reads.images_get(args)) == 0
+    assert client.calls == [("images.describe", {"image_id": "img-1", "target_kernel": "7.1"})]
 
 
 def test_describe_verb_registered_read_only() -> None:
@@ -219,9 +241,37 @@ def test_prune_requires_expired_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.calls == []
 
 
+def test_prune_uses_the_local_expired_acknowledgement_from_the_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _install(monkeypatch)
+    args = build_parser().parse_args(
+        ["images", "prune-expired", "--expired", "--reason", "cleanup"]
+    )
+
+    assert args.expired is True and not hasattr(args, "reason")
+    assert asyncio.run(images.images_prune(args)) == 0
+    assert client.calls == [("images.prune_expired", {"reason": "cleanup"})]
+
+
 def test_extend_calls_images_extend(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install(monkeypatch)
     asyncio.run(images.images_extend(_args(image_id="img-1", seconds=86400, reason="keep")))
+    assert client.calls == [
+        ("images.extend", {"image_id": "img-1", "seconds": 86400, "reason": "keep"})
+    ]
+
+
+def test_extend_uses_the_untouched_parser_namespace_for_numeric_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _install(monkeypatch)
+    args = build_parser().parse_args(
+        ["images", "extend", "img-1", "--seconds", "86400", "--reason", "keep"]
+    )
+
+    assert not hasattr(args, "seconds")
+    assert asyncio.run(images.images_extend(args)) == 0
     assert client.calls == [
         ("images.extend", {"image_id": "img-1", "seconds": 86400, "reason": "keep"})
     ]
@@ -350,8 +400,7 @@ def test_upload_json_flag_threads_through_to_render(
 
 def test_upload_tolerates_missing_lifetime_attr(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install(monkeypatch)
-    bare = argparse.Namespace(
-        json=False,
+    bare = _args(
         project="proj-a",
         name="custom",
         arch="x86_64",
@@ -389,7 +438,7 @@ def test_prune_exit_message_names_the_flag(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_prune_refuses_when_expired_attr_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install(monkeypatch)
-    bare = argparse.Namespace(json=False, reason="x")
+    bare = _args(reason="x")
     with pytest.raises(SystemExit):
         asyncio.run(images.images_prune(bare))
     assert client.calls == []

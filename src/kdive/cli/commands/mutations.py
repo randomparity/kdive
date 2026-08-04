@@ -26,6 +26,11 @@ import json
 import time
 from collections.abc import Mapping
 
+from kdive.cli.commands.generated_args import (
+    local_acknowledgement,
+    optional_generated_arg,
+    required_generated_arg,
+)
 from kdive.cli.errors import exit_code_for_envelope
 from kdive.cli.render import emit, flatten_envelope, render_record
 from kdive.cli.transport import Session, tool_envelope
@@ -120,30 +125,39 @@ async def teardown(args: argparse.Namespace) -> int:
         SystemExit: When ``--force`` is not supplied; the flag is the explicit break-glass
             acknowledgement for this destructive verb.
     """
-    if not getattr(args, "force", False):
+    if not local_acknowledgement(args, "force"):
         raise SystemExit("teardown is destructive: pass --force to confirm break-glass")
-    arguments = {"system_id": args.system_id, "reason": args.reason}
+    arguments = {
+        "system_id": required_generated_arg(args, "system_id", str),
+        "reason": required_generated_arg(args, "reason", str),
+    }
     return await _run("ops.force_teardown", arguments, as_json=args.json)
 
 
 async def allocations_force_release(args: argparse.Namespace) -> int:
-    arguments = {"allocation_id": args.allocation_id, "reason": args.reason}
+    arguments = {
+        "allocation_id": required_generated_arg(args, "allocation_id", str),
+        "reason": required_generated_arg(args, "reason", str),
+    }
     return await _run("ops.force_release", arguments, as_json=args.json)
 
 
 async def resources_set_scheduling(args: argparse.Namespace) -> int:
     """Cordon a host or restore it to schedulable; the server validates ``state``."""
-    arguments = {"resource_id": args.resource_id, "state": args.state}
+    arguments = {
+        "resource_id": required_generated_arg(args, "resource_id", str),
+        "state": required_generated_arg(args, "state", str),
+    }
     return await _run("resources.set_scheduling", arguments, as_json=args.json)
 
 
 async def resources_drain(args: argparse.Namespace) -> int:
     """Cordon a host, then report (``passive``) or force-release (``force_release``) it."""
     arguments: dict[str, object] = {
-        "resource_id": args.resource_id,
-        "mode": getattr(args, "mode", None) or "passive",
+        "resource_id": required_generated_arg(args, "resource_id", str),
+        "mode": optional_generated_arg(args, "mode", str) or "passive",
     }
-    reason = getattr(args, "reason", None)
+    reason = optional_generated_arg(args, "reason", str)
     if reason is not None:
         arguments["reason"] = reason
     return await _run("resources.drain", arguments, as_json=args.json)
