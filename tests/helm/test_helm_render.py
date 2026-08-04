@@ -828,9 +828,9 @@ def _witness_workload(*set_args: str) -> dict[str, Any]:
     raise AssertionError("chart rendered no lifecycle-witness Deployment")
 
 
-def test_lifecycle_witness_replicas_default_to_one_and_accept_zero() -> None:
+def test_lifecycle_witness_enabled_defaults_to_one_and_accepts_false() -> None:
     assert _witness_workload()["spec"]["replicas"] == 1
-    assert _witness_workload("lifecycleWitness.replicas=0")["spec"]["replicas"] == 0
+    assert _witness_workload("lifecycleWitness.enabled=false")["spec"]["replicas"] == 0
 
 
 def test_staged_fence_render_scales_all_kdive_workloads_to_zero() -> None:
@@ -838,7 +838,7 @@ def test_staged_fence_render_scales_all_kdive_workloads_to_zero() -> None:
         "server.replicas=0",
         "worker.replicas=0",
         "reconciler.replicas=0",
-        "lifecycleWitness.replicas=0",
+        "lifecycleWitness.enabled=false",
     )
     workloads = _workloads(*staged_values)
 
@@ -849,18 +849,18 @@ def test_staged_fence_render_scales_all_kdive_workloads_to_zero() -> None:
 @pytest.mark.parametrize(
     "args",
     [
-        ("--set", "lifecycleWitness.replicas=-1"),
-        ("--set", "lifecycleWitness.replicas=2"),
-        ("--set", "lifecycleWitness.replicas=true"),
-        ("--set", "lifecycleWitness.replicas=0.5"),
-        ("--set-string", "lifecycleWitness.replicas=0"),
+        ("--set", "lifecycleWitness.enabled=0"),
+        ("--set", "lifecycleWitness.enabled=0.5"),
+        ("--set-string", "lifecycleWitness.enabled=false"),
+        ("--set-json", "lifecycleWitness.enabled=null"),
+        ("--set-json", "lifecycleWitness.enabled=1e-400"),
     ],
 )
-def test_lifecycle_witness_replicas_reject_invalid_type_or_range(args: tuple[str, str]) -> None:
+def test_lifecycle_witness_enabled_rejects_non_boolean_values(args: tuple[str, str]) -> None:
     res = _template_args("helm", "template", "kdive", CHART, *args)
 
     assert res.returncode != 0
-    assert "lifecycleWitness.replicas must be an integer 0 or 1" in res.stderr
+    assert "lifecycleWitness.enabled must be a boolean" in res.stderr
 
 
 def _rendered_app_workloads(*set_args: str) -> dict[str, dict[str, Any]]:

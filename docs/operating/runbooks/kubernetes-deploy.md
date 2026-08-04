@@ -240,7 +240,7 @@ confirm each target Secret is ready before the witness-only stage.
 ```bash
 helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" \
   --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
-  --set lifecycleWitness.replicas=0
+  --set lifecycleWitness.enabled=false
 ```
 
 If this hooked stage fails, keep all workloads at zero, correct the target migration or
@@ -252,13 +252,13 @@ hook-free stage. If target values, a credential reference, or configuration chan
 workloads to zero and
 rerun the hooked all-zero stage.
 
-Start only the witness in a hook-free stage, passing all four replica flags explicitly, then wait
-for the witness rollout and readiness:
+Start only the witness in a hook-free stage, passing all four workload settings explicitly.
+Then wait for the witness rollout and readiness:
 
 ```bash
 helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
   --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
-  --set lifecycleWitness.replicas=1
+  --set lifecycleWitness.enabled=true
 kubectl rollout status deployment/${FULL}-witness -n "$NAMESPACE" --timeout=5m
 kubectl wait --for=condition=Ready pod -n "$NAMESPACE" -l "app=${FULL}-witness" --timeout=5m
 ```
@@ -272,7 +272,7 @@ available before workers return:
 ```bash
 helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
   --set server.replicas=${SERVER_REPLICAS} --set worker.replicas=${WORKER_REPLICAS} \
-  --set reconciler.replicas=${RECONCILER_REPLICAS} --set lifecycleWitness.replicas=1
+  --set reconciler.replicas=${RECONCILER_REPLICAS} --set lifecycleWitness.enabled=true
 ```
 
 If this final restore fails, keep the ready witness running, return any partially restored core
