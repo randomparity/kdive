@@ -74,20 +74,38 @@ host is back in the state adopt requires; only the adopt predicate is evidence o
 running the same predicate is what makes "returned" mean the same thing as "adoptable". This is
 the precondition module's third caller, and the reason it is one module.
 
-**Step 0 is what makes the invariant continuous rather than eventual**, and it is there because
-the allocation is already gone by the time the restore starts. `_release_locked`
+**Step 0 covers the restore window, and which risk it is covering depends on the order the
+operator took.** There are two, and the records must not conflate them.
+
+*Teardown first, then release* is the sanctioned path: `systems.teardown`'s own agent-facing
+docstring says teardown "drives the System to `torn_down` but leaves its Allocation `active`;
+once the teardown job succeeds, release the freed Allocation with `allocations.release`"
+(`src/kdive/mcp/tools/lifecycle/systems/registrar.py:405-410`). Here the allocation is still
+occupying its cap slot throughout the restore, so step 0 is belt-and-braces rather than
+load-bearing.
+
+*Release or lease-expiry first* is the path where the cordon earns its place. `_release_locked`
 (`src/kdive/services/allocation/release.py:229`) drives `active → releasing → released` in one
 transaction, consulting nothing about the System or its teardown, and `_count_occupying`
 (`src/kdive/services/allocation/admission/core.py:586`) counts only GRANTED/ACTIVE/RELEASING —
-so ADR-0540's `concurrent_allocation_cap = 1` slot frees the moment `allocations.release`
-commits. `teardown_handler` then commits `SystemState.TORN_DOWN` under the System advisory lock
-(`src/kdive/jobs/handlers/systems.py:760-778`) **before** calling the provider at `:783`. Both
-the allocation and the System are therefore terminal, and the Resource pristine to placement,
-for the several minutes the bootloader write, the firmware power-cycle, and the full
-precondition re-check take. Without step 0 the next tenant can be granted the machine inside
-that window — early, they are denied at adopt against the previous tenant's still-running debug
-kernel, which is precisely the misattribution the first rejected alternative below says this
-design avoids; late, they adopt successfully and then meet the previous tenant's power-cycle.
+so ADR-0540's `concurrent_allocation_cap = 1` slot frees the moment that commits, while the host
+is still running the previous tenant's debug kernel. Without step 0 the next tenant granted the
+machine is either denied at adopt against that kernel — the misattribution the first rejected
+alternative below says this design avoids — or adopts successfully and then meets the previous
+tenant's power-cycle.
+
+**And step 0 cannot cover the interval before it runs.** Teardown is a queued job. On the
+release-first path it is not even enqueued until the reconciler's `repair_orphaned_systems`
+sweep selects Systems whose allocation has gone terminal
+(`src/kdive/reconciler/repairs/systems.py:40-79`). So the real sequence is: slot frees → one
+reconciler interval → queue latency → `teardown_handler` → step 0 cordons, and for that whole
+prefix the Resource is `available`, uncordoned, and running a crashed tenant's kernel;
+`_label_candidates` filters on nothing else
+(`src/kdive/services/allocation/admission/placement.py:104`). That residual is **accepted, not
+closed**: cordoning earlier would mean writing from `repair_orphaned_systems`, a further gated
+core touch-point for a window an operator can avoid entirely by following the documented
+teardown-then-release order. It is recorded here so the guarantee is read as covering the
+restore, not the whole interval from a tenant's last operation.
 
 **Nothing else in the release path changes.** `services/allocation/release.py` needs no edit,
 and an implementer should not add one: the cordon is the whole mechanism, and holding an
@@ -150,11 +168,29 @@ ordering step 0 above depends on. A worker that dies mid-restore therefore leave
 `torn_down`, which is terminal: `_TRANSITIONS` maps `SystemState.TORN_DOWN` to `frozenset()`
 (`state.py:249`), so there is no legal edge out of it and no state for the reconciler to key on.
 
-**The reconciler's BYO arm therefore keys on the cordon reason.** The durable marker of a
-restore in flight is the one step 0 writes: a Resource cordoned with a restore-in-progress
-reason. The arm added to ADR-0021's loop fails closed over exactly that — a Resource carrying
-that reason with no live worker attributable to it has its reason replaced with
-`RESTORE_INCOMPLETE` and **stays cordoned**. The System is left in `torn_down` and is not driven
+**The reconciler's BYO arm therefore keys on the cordon reason, which must carry enough to
+judge liveness.** The marker step 0 writes is not just a flag: it records the **teardown job id**
+and a **restore deadline** alongside the in-progress bit and the did-I-flip-the-boolean bit. Both
+additions are load-bearing. "No live worker attributable to it" has to be a join against job
+state, the way [ADR-0086](0086-dead-worker-gdbstub-reconciler-reset.md)'s arm reaps on a
+heartbeat column rather than on elapsed time; a flag alone leaves an implementer with a bare
+threshold and no way to tell a slow restore from a dead one. The deadline carries the five-part
+limit contract (unit, reference clock, scope, consequence, recovery), like the power-cycle and
+re-verify windows — it is the limit whose miscalibration is most expensive, for the reason
+below.
+
+The arm added to ADR-0021's loop fails closed over exactly that — a Resource carrying the
+reason whose owning job is no longer live has its reason replaced with `RESTORE_INCOMPLETE` and
+**stays cordoned**.
+
+**The arm must not fire while the owning job is live, because step 4's re-read turns a false
+positive into a stranded healthy host.** If the arm replaces the reason mid-restore and the
+restore then succeeds, step 4 re-reads a reason that is no longer its own and declines to clear
+— leaving a host that was verified back on its baseline cordoned until an operator intervenes.
+That is why the predicate is job liveness rather than elapsed time: a restore spans a bootloader
+write, firmware POST on real metal, and a full precondition re-check, which this record
+elsewhere calls a materially different wait from a VM boot, and those are exactly the conditions
+under which a naive threshold misfires. The System is left in `torn_down` and is not driven
 to `failed`; that transition does not exist, and adding it would be a `state.py` widen in gated
 core that this milestone has not declared and does not need. It does not retry the restore
 either: a restore is a write to a machine whose state is unknown, and an unattended retry

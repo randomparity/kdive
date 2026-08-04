@@ -75,8 +75,10 @@ protocol, which is what the handle kind names, so the existing encode/decode, th
 engine, and `select_gdb_binary()` all apply with no change. Splitting the two literals is what
 makes this possible, and this is the case they were split for.
 
-**KGDB takes the console lease exclusively, for the session's lifetime.** No splitter. While
-the lease is held:
+**KGDB takes a preempting console lease, for the session's lifetime.** No splitter. It is the
+only preempting holder (ADR-0539): the wire carries the GDB remote protocol rather than console
+text, so suspending collection is a description of what the channel is doing, not a policy
+choice. While the lease is held:
 
 - Console collection is suspended. A **live** read reports this — `ConsoleWindowRead.pumped`
   goes `False` ([ADR-0429](0429-remote-console-read-seam.md)), the property that keeps an empty
@@ -98,17 +100,21 @@ the lease is held:
   handlers that propagate the lease conflict instead of re-categorizing or swallowing it. Both
   files are under `src/kdive/jobs/`, a portability-gate core prefix, and neither is allowlisted
   today; the milestone design document carries them in its gate table.
-- **Each of those two consumers holds the lease across its whole scope, not per console read.**
-  Neither makes a single call: the SysRq capture reads a pre-injection mark
+- **Each of those two consumers holds a *reading* lease across its whole scope, not per console
+  read.** Neither makes a single call: the SysRq capture reads a pre-injection mark
   (`diagnostic_sysrq.py:111`), injects through the Controller, then polls until the console stops
   growing (`:121`); crash watch reads a mark and polls to its deadline
   (`watch_for_crash.py:154-155`). Acquiring per `read_window` call would let a KGDB session take
   the channel *between* the mark read and the injection — and the injection is a **write**, so
   the one consumer whose interleaving is most expensive is exactly the one a per-call lease
   fails to protect, making the milestone's "two consumers never interleave on one line" contract
-  false as written. Each handler therefore opens a lease scope around its whole console
-  interaction and releases it at the end. That is a larger change to those two files than
-  propagating a category, and it is the size their gate-table row is written against.
+  false as written. The hold must be ADR-0539's **reading** mode, not KGDB's preempting one:
+  both handlers poll for console *growth*, so a hold that suspended collection would starve them
+  of the bytes they are waiting for — the capture would return no output and the watch would
+  return not-fired, which is the outcome this bullet exists to prevent. Each handler therefore
+  opens a reading-lease scope around its whole console interaction and releases it at the end.
+  That is a larger change to those two files than propagating a category, and it is the size
+  their gate-table row is written against.
 - In-band readiness and health probes are suspended for the session's duration, because a
   stopped machine cannot answer them and a timeout would otherwise be read as a dead host.
 

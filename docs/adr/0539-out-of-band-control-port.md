@@ -74,9 +74,24 @@ KGDB. Both are the reason the plane exists. Survey work on what else Redfish, IP
 HMC expose — sensors, boot-device override, virtual media, firmware inventory, HMC dump
 management — is #1816 and stays outside this port until a specific use justifies widening it.
 
-**The console is leased, exclusively, with a named holder.** A consumer acquires the channel,
-holds it for a bounded scope, and releases it. While a lease is held, a second acquirer is
-refused with `TRANSPORT_CONFLICT` naming the current holder and the action that releases it.
+**The console is leased, with a named holder, in one of two modes.** A consumer acquires the
+channel, holds it for a bounded scope, and releases it. While a lease is held, a second acquirer
+is refused with `TRANSPORT_CONFLICT` naming the current holder and the action that releases it.
+The two modes differ in what they do to the collector, and the distinction is what keeps the
+lease from starving its own holders:
+
+- A **preempting** hold takes the raw channel and suspends log collection for its scope. KGDB is
+  the only one ([ADR-0542](0542-kgdb-over-leased-serial-channel.md)): it speaks a different
+  protocol on the wire, so nothing else can be reading it.
+- A **reading** hold guarantees that no other consumer preempts the channel for its scope, while
+  collection keeps pumping into it. SysRq capture and crash watch take this mode, because each
+  polls for console *growth* across several reads and a preempting hold would suspend the
+  producer of the bytes it is waiting for — the capture would always return no output and the
+  watch would always return not-fired.
+
+Both modes are exclusive against each other; the difference is only whether the collector keeps
+running underneath. A single "exclusive holder" with no such distinction would have been
+self-defeating for two of the four consumers.
 Log collection is itself a lease holder rather than a privileged background reader, so
 "the collector is pumping" and "KGDB is attached" are the same kind of fact, which the live
 console read seam ([ADR-0429](0429-remote-console-read-seam.md)) already has a field for. The

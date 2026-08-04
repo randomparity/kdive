@@ -44,8 +44,8 @@ neither control plane can issue an NMI, which a provider whose central operation
   [ADR-0539](../adr/0539-out-of-band-control-port.md) (the typed OOB driver port, its Redfish
   / IPMI / HMC implementations, and the leased console channel),
   [ADR-0540](../adr/0540-adopt-only-provisioning.md) (adopt-only `provision`, the
-  `adopted-host` boot method, the three verification moments, the declared-and-verified
-  baseline kernel, and the `arch_traits()` decision),
+  `adopted-host` boot method, the schema-only deploy check plus the live precondition module,
+  the declared-and-verified baseline kernel, and the `arch_traits()` decision),
   [ADR-0541](../adr/0541-baseline-restore-or-cordon-teardown.md) (restore-verify-or-cordon
   teardown and the reconciler drift arm),
   [ADR-0542](../adr/0542-kgdb-over-leased-serial-channel.md) (the `kgdb` debug transport over
@@ -73,7 +73,7 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
 |---|---|---|---|
 | 1 | How is `baseline_kernel` identified? | Operator-declared, verified present at `doctor` **and** at adopt. A captured value records whatever was booted — after a failed teardown, a KDIVE debug kernel — so the host would restore to it indefinitely with no signal. | ADR-0540 |
 | 2 | What `boot_method` does an adopted host declare? | A third value, `adopted-host`, and the pairing validator generalizes from a biconditional to an explicit provider-to-boot-method map. | ADR-0540 |
-| 3 | Console multiplexing between KGDB and log capture | KGDB takes the console lease exclusively. Collection suspends and a live read reports `pumped=False` (the persisted artifact carries no gap marker); `supports_crash_watch` stays `True` and the tools refuse with `transport_conflict` naming the holder. | ADR-0539, ADR-0542 |
+| 3 | Console multiplexing between KGDB and log capture | KGDB takes a **preempting** lease: collection suspends and a live read reports `pumped=False` (the persisted artifact carries no gap marker). SysRq capture and crash watch take a **reading** lease — no other consumer may preempt, but collection keeps pumping, since both poll for console growth. `supports_crash_watch` stays `True` and a contending tool refuses with `transport_conflict` naming the holder. | ADR-0539, ADR-0542 |
 | 4 | Does `arch_traits()` split? | No. Four of its six fields are libvirt domain-render facts; of the two that generalize, `console_device` is a per-host firmware setting on metal. One arch-keyed field does not justify a second table. The module docstring is amended to mark field scope. | ADR-0540 |
 | 5 | fadump detection on real firmware | Open. Owned by entry 13 (#1829), which replaces the QEMU version floor at `src/kdive/providers/shared/fadump_detect.py:18`. Not architecture — a probe choice made against real hardware. |  |
 | 6 | Cost-class coefficient value | Open. An operator pricing input to entry 2 (#1817). The migration must seed *a* row; which number is not a design decision. |  |
@@ -96,20 +96,27 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
   the same protocol. Credentials are username/password refs resolved through the SecretRegistry
   and registered for redaction before first use; unlike ADR-0077's x509 pair, nothing is
   materialized to disk.
-- **A leased console channel.** One serial line, four consumers — log collection, SysRq
-  injection, crash watch, KGDB. The channel is leased with a named holder, and a second
-  acquirer is refused with `transport_conflict` naming the holder and the release action. Log
-  collection is itself an ordinary lease holder rather than a privileged background reader, so
-  a **live** console read reports the suspension through `ConsoleWindowRead.pumped`
+- **A leased console channel, in two modes.** One serial line, four consumers — log collection,
+  SysRq injection, crash watch, KGDB. The channel is leased with a named holder, and a second
+  acquirer is refused with `transport_conflict` naming the holder and the release action. Only
+  KGDB holds it **preempting** (suspending collection, because the wire then carries the GDB
+  remote protocol rather than console text); SysRq capture and crash watch hold it **reading** —
+  no preemption for their scope, while collection keeps pumping, since both poll for console
+  growth and a preempting hold would starve them. Under a preempting hold a **live** console
+  read reports the suspension through `ConsoleWindowRead.pumped`
   ([ADR-0429](../adr/0429-remote-console-read-seam.md)). The persisted per-Run artifact carries
   no such marker, so a lease-shaped hole in it reads as a silent kernel — an accepted
   consequence, recorded in ADR-0539 rather than papered over.
 - **Adopt-only provisioning.** `provision` validates preconditions against the live machine,
   records what it established on the System row, and returns a stable handle. No OS install, no
   re-image, no boot-order change, no firmware write. `boot_method: adopted-host` is the profile
-  contract that says so, and the same precondition module runs at three moments: deploy-time
-  (schema only, ADR-0121's no-I/O contract preserved), operator pre-flight (`doctor`, live),
-  and adopt (live, re-checked because the world drifts between the two).
+  contract that says so. Verification happens in two layers, and keeping them apart is the
+  point. A **schema-only** check at deploy time — `validate_systems`
+  (`src/kdive/inventory/cli.py:66`) — touches neither Postgres nor the object store, so
+  ADR-0121's no-I/O contract holds and the command stays runnable in a pipeline with no database
+  and no network; ADR-0540 rejects wiring live probes into it outright. Separately, **one live
+  precondition module** has three callers: operator pre-flight (`doctor`), adopt (re-checked,
+  because the world drifts between the two), and teardown's step 3 (ADR-0541).
 - **The in-target install seam, reused unchanged.** The kernel goes into the running OS's
   bootloader over SSH — `grubby` on x86 EFI, grub2-PReP or petitboot on PowerVM — pulled
   in-target via presigned GET (ADR-0078, ADR-0082). The worker never pushes a kernel. Readiness
@@ -264,7 +271,8 @@ and 16 are written against:
 Two contract points are load-bearing and tested: **(a)** no OOB credential reaches a persisted
 transcript, a response snippet, or an argv unmasked; **(b)** every console consumer goes
 through the lease, so a suspended collector reports `pumped=False` to a live reader rather than
-empty bytes, and two consumers never interleave on one line.
+empty bytes, and two consumers never interleave on one line — which is what the reading mode
+buys, since it excludes preemption without suspending the producer the reader depends on.
 
 ## MCP tool surface (M4 delta)
 
@@ -334,12 +342,11 @@ gate never inspects. `CORE_PREFIXES` (`scripts/m2_portability_gate.py:44-53`) is
 | `src/kdive/domain/platform/arch_traits.py` | the docstring amendment marking field scope (ADR-0540) | 8 | **no — new entry** |
 | `src/kdive/jobs/handlers/systems.py` | cordon-on-teardown-failure with a reason (ADR-0541) — the provider port cannot do it: `Provisioner.teardown(domain_name)` (`src/kdive/providers/ports/lifecycle.py:130-138`) takes a domain name, gets no connection, and documents only `INFRASTRUCTURE_FAILURE` / `TRANSPORT_FAILURE`. The caller is `teardown_handler` (`src/kdive/jobs/handlers/systems.py:751`, provider call at `:783`). | 16 | **no — new entry** |
 | `src/kdive/mcp/tools/debug/sessions/lifecycle.py` and `.../sessions/registrar.py` | the `kgdb` transport arm: `lifecycle.py` carries the per-transport branching (`_GDBSTUB` / `_DRGN_LIVE` at `:80-81`, the `DEBUG_TRANSPORT_KINDS` check at `:305`, the arms at `:409` and `:427`); `registrar.py` carries the agent-facing `Field` text | 14 | **no — new entry** (see below) |
-| `src/kdive/mcp/tools/ops/resources/host_ops.py` | surfacing the cordon reason and clearing it on uncordon (ADR-0541) — `_apply_cordon` is at `:141`, `resources.set_scheduling` at `:47` | 16 | **no — new entry** (see below) |
+| `src/kdive/mcp/tools/ops/resources/host_ops.py` | the cordon-write path (ADR-0541): `_apply_cordon` (`:141`) writes the boolean unconditionally and records nothing, so it needs the operator-origin reason step 0's read-before-write and step 4's re-read both depend on, plus the clear-on-uncordon arm. `resources.set_scheduling` is at `:47`. | 16 | **no — new entry** (see below) |
 | `src/kdive/jobs/handlers/control/diagnostic_sysrq.py` and `.../control/watch_for_crash.py` | **holding a console-lease scope** and propagating its `transport_conflict` (ADR-0542) — two changes, not one. Each handler brackets its whole multi-read console interaction in a lease scope, because a per-read lease would let KGDB take the channel between SysRq's mark read (`diagnostic_sysrq.py:111`) and its injection. Each also surfaces the conflict instead of core's current handling: `diagnostic_sysrq.py:164-169` raises `configuration_error` / `console_not_pumped` naming no holder, and `watch_for_crash.py:191-193` discards `pumped` deliberately. These two are `read_window`'s only consumers in the tree. | 12, 14 | **no — new entry** |
-| `src/kdive/mcp/tools/catalog/resources.py` (or `.../tools/_resource_envelopes.py`) | surfacing the cordon reason on `resources.describe` (ADR-0541). `describe_resource` is at `catalog/resources.py:185` and its envelope body comes from `resource_capability_data` (`_resource_envelopes.py:25-53`), which projects a **fixed** key set — kind, arch, the three int ceilings, transports, host_cpu, selectable_cpus — so a new namespaced key is silently dropped. The allowlist's `src/kdive/domain/catalog/resources.py` is a different file. | 16 | **no — new entry** |
 | `src/kdive/reconciler/loop.py` | the BYO mid-teardown drift arm and the stranded-console-lease reclaim | 16 | yes (entered for ADR-0086; BYO reuses it) |
 
-**Nine new entries across five issues, not three** — and two of them look like reuse until you
+**Eight new entries across five issues, not three** — and two of them look like reuse until you
 check. `ALLOWED_FILES` is matched by exact path (`violations()`,
 `scripts/m2_portability_gate.py:229-231`); there is no prefix or directory matching. The
 entries ADR-0085 and ADR-0541's surface would have reused —
@@ -355,6 +362,18 @@ class as the drift guard above. Entry 17 owns re-pointing them and adding the ch
 stops it recurring: fail the gate on an `ALLOWED_FILES` member that does not exist on disk.
 That is pre-existing rot rather than BYO's — it affects local-libvirt and remote-libvirt's own
 measurement too — so it is tracked separately as #1835.
+
+**Surfacing the cordon reason costs no entry**, and it is worth saying why the obvious ninth
+row is absent. `describe_resource` already has a provider-owned adornment seam:
+`ResourceDetailCapabilities.projector` on the `for_resource`-bound runtime, merged into the
+envelope at `src/kdive/mcp/tools/catalog/resources.py:217`, which remote-libvirt already uses
+(`providers/remote_libvirt/composition.py:266`, wired at `:360-362`). That code lives under
+`src/kdive/providers/`, outside the gate. It reaches `resources.describe` only — `resources.list`
+keeps showing the bare `cordoned` flag — which matches ADR-0541's operator workflow, where the
+flag says *not schedulable* and describe says *why*. The shared
+`resource_capability_data` projection (`_resource_envelopes.py:25-53`) emits a fixed key set and
+would silently drop a namespaced key, so routing through it would have cost a core touch-point
+for a surface the provider seam already serves.
 
 The three `jobs/` rows are the ones a reader is most likely to miss on their own merits:
 `src/kdive/jobs/` is a core prefix whose allowlisted members are only `worker.py`,
@@ -417,7 +436,7 @@ teardown cordon reason is written by entry 16 and cleared through `resources.set
 | 14 | **#1828 — the KGDB transport.** The third `DebugTransportKind`, the debug-session registrar arm, the allowlist entry, and the console-to-loopback bridge. | 11 | debug |
 | 15 | **#1831 — in-target drgn and vmcore postmortem.** | 13 | debug |
 | 16 | **#1830 — teardown: baseline restore, OOB power-cycle, cordon-and-clear, reconciler drift arm.** The drift arm keys on a Resource cordoned with a restore-in-progress reason and no live worker, **not** on a System state: `torn_down` is terminal (`domain/capacity/state.py:249`) and there is no teardown-in-progress member (ADR-0541). Shares the dead-worker shape and the `reconciler/loop.py` entry with the lease reclaim entry 4 lands. | 12 | lifecycle |
-| 17 | **#1820 — extend the portability gate.** The `pre-M4` baseline tag, the `byo-host` `CAPTURE_COVERAGE` row, the **registered-kinds completeness assertion** that makes a missing row detectable at all, the nine new allowlist entries, **re-pointing the 14 stale `ALLOWED_FILES` paths** plus a guard failing the gate on a member absent from disk, and the CI-wiring decision above. | 2 | tooling |
+| 17 | **#1820 — extend the portability gate.** The `pre-M4` baseline tag, the `byo-host` `CAPTURE_COVERAGE` row, the **registered-kinds completeness assertion** that makes a missing row detectable at all, the eight new allowlist entries, **re-pointing the 14 stale `ALLOWED_FILES` paths** plus a guard failing the gate on a member absent from disk, and the CI-wiring decision above. | 2 | tooling |
 | 18 | **#1832 — operator runbook and agent-facing documentation.** | 13, 16 | docs |
 | 19 | **#1833 — live proof: the full spine on an x86 host with a BMC.** | 14, 15, 16 | proof |
 | 20 | **#1834 — live proof: the full spine on a PowerVM LPAR via HMC**, including fadump. | 6, 14, 15, 16 | proof |
@@ -465,11 +484,10 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
 
 1. **The provider seam is unchanged** (ADR-0063) — `byo_host` satisfies the same
    `ProviderRuntime` ports and registers into a resolver that already exists. The portability
-   hypothesis is measured a third time rather than abandoned, and all nine genuinely new core
+   hypothesis is measured a third time rather than abandoned, and all eight genuinely new core
    touches — the migration, the `arch_traits` docstring, `jobs/handlers/systems.py`, the two
-   debug-session modules, `ops/resources/host_ops.py`, the two control handlers that must hold a
-   console-lease scope, and the `resources.describe` projection — are declared up front rather
-   than
+   debug-session modules, `ops/resources/host_ops.py`, and the two control handlers that must
+   hold a reading-lease scope — are declared up front rather than
    discovered.
 2. **Secrets never leak** (ADR-0012, ADR-0073) — OOB credentials resolve at the worker
    boundary, register for redaction before first use, and release only after
