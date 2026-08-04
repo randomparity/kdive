@@ -15,7 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._runtime_resolution import (
+from kdive.mcp.tools.lifecycle.support._runtime_resolution import (
     _AUTHORIZED_ALLOCATION,
     _AUTHORIZED_BOUND_RUN,
     _AUTHORIZED_RUN_TARGET_KIND,

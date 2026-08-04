@@ -29,7 +29,7 @@ from kdive.mcp.tools._common import authz_denied as _authz_denied
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import stale_handle as _stale_handle
-from kdive.mcp.tools._idempotency import (
+from kdive.mcp.tools.lifecycle.support._idempotency import (
     record_envelope,
     resolve_conflict,
     resolve_envelope_replay,

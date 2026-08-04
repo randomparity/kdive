@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._vmcore_targets import (
+from kdive.mcp.tools.lifecycle.vmcore._vmcore_targets import (
     CONSOLE_CRASH,
     EXPECTED_CONSOLE_CRASH,
     NO_VMCORE,

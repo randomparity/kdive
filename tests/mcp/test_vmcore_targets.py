@@ -12,7 +12,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools._vmcore_targets import (
+from kdive.mcp.tools.lifecycle.vmcore._vmcore_targets import (
     NO_BUILD,
     NO_DEBUGINFO,
     NO_VMCORE,

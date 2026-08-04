@@ -10,7 +10,7 @@ from psycopg import AsyncConnection
 
 from kdive.domain.catalog.images import ImageCatalogEntry
 from kdive.domain.lifecycle.records import System
-from kdive.mcp.tools import _vmcore_kdump_gate as gate
+from kdive.mcp.tools.lifecycle.vmcore import _vmcore_kdump_gate as gate
 from kdive.serialization import JsonValue
 
 _CONN = cast(AsyncConnection, object())

@@ -11,7 +11,6 @@ from pydantic import Field
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools.debug.introspection.common import _OFFLINE_VMCORE, _require_introspection
 from kdive.mcp.tools.debug.introspection.live import (
     _DEFAULT_SCRIPT_TIMEOUT,
@@ -21,6 +20,7 @@ from kdive.mcp.tools.debug.introspection.live import (
     introspect_script,
 )
 from kdive.mcp.tools.debug.introspection.offline import introspect_from_vmcore
+from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.authz.rbac import Role

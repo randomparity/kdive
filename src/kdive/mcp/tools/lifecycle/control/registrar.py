@@ -65,8 +65,8 @@ from kdive.mcp.tools._common import (
     invalid_uuid_error as _invalid_uuid_error,
 )
 from kdive.mcp.tools._common import job_envelope
-from kdive.mcp.tools._idempotency import keyed_mutation
-from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
+from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
+from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime

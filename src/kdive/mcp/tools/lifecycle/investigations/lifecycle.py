@@ -9,12 +9,12 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
-from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.mcp.tools.lifecycle.investigations.common import (
     ExternalRefInput,
     investigation_error_response,
 )
 from kdive.mcp.tools.lifecycle.investigations.view import envelope_for_investigation
+from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
 from kdive.security.authz.context import RequestContext
 from kdive.services.investigations.common import InvestigationServiceError
 from kdive.services.investigations.lifecycle import (

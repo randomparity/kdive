@@ -39,7 +39,6 @@ from kdive.jobs.handlers.runs import common as run_handler_common
 from kdive.jobs.handlers.runs import registrar as runs_handlers
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._runtime_resolution import with_runtime_for_run_target_kind
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
@@ -57,6 +56,7 @@ from kdive.mcp.tools.lifecycle.runs.metadata import (
 )
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
+from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run_target_kind
 from kdive.mcp.tools.lifecycle.vmcore import view as vmcore_view
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry

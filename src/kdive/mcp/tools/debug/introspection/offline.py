@@ -10,7 +10,10 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.errors import CategorizedError
 from kdive.log import bind_context
 from kdive.mcp.responses import ResponseData, ToolResponse
-from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
+from kdive.mcp.tools.lifecycle.vmcore._vmcore_targets import (
+    resolve_run_vmcore_target,
+    vmcore_target_failure,
+)
 from kdive.providers.ports.retrieve import VmcoreIntrospector
 from kdive.security.authz.context import RequestContext
 
