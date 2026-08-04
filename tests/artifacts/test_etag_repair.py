@@ -18,6 +18,7 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts import etag_repair
 from kdive.artifacts.etag_repair import reconcile_row_etag
 from kdive.artifacts.storage import HeadResult
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -117,4 +118,13 @@ def test_a_failed_stat_leaves_the_row_untouched_and_never_raises(
     with caplog.at_level(logging.WARNING, logger="kdive.artifacts.etag_repair"):
         assert _repair(migrated_url, store, "etag-stale") == "etag-stale"
     assert store.heads == [_KEY]
+    assert any(_KEY in record.getMessage() for record in caplog.records)
+
+
+def test_a_failed_row_update_leaves_the_row_untouched_and_never_raises(
+    migrated_url: str, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(etag_repair, "_REFRESH_ETAG_SQL", "UPDATE no_such_table SET etag = %s")
+    with caplog.at_level(logging.WARNING, logger="kdive.artifacts.etag_repair"):
+        assert _repair(migrated_url, _StatStore("etag-observed"), "etag-stale") == "etag-stale"
     assert any(_KEY in record.getMessage() for record in caplog.records)

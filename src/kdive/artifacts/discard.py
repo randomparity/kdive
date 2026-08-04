@@ -24,7 +24,6 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 
 from kdive.artifacts.storage import StoredArtifact
-from kdive.domain.errors import CategorizedError
 from kdive.store.objectstore import ObjectStore
 
 _log = logging.getLogger(__name__)
@@ -91,7 +90,7 @@ async def discard_unregistered_objects(
                 )
                 continue
             await asyncio.to_thread(store.delete_version, obj.key, obj.version_id)
-        except CategorizedError:
+        except Exception:  # noqa: BLE001 - compensating discard must not mask the caller outcome
             _log.warning(
                 "deleting unregistered object %s failed; it has no artifacts row, so no "
                 "reclaim sweep will reach it",
