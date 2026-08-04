@@ -37,6 +37,49 @@ def test_throwaway_fails_when_rootfs_missing() -> None:
     assert "KDIVE_LIVE_VM_ROOTFS" in r.stderr
 
 
+def _debug_stepping_env(tmp_path: Path, *, with_gdb: bool = True) -> dict[str, str]:
+    """Build the standalone kernel-artifact contract for debug stepping."""
+    artifacts = {
+        "KDIVE_LIVE_VM_ROOTFS": tmp_path / "rootfs.qcow2",
+        "KDIVE_LIVE_VM_BZIMAGE": tmp_path / "bzImage",
+        "KDIVE_LIVE_VM_VMLINUX": tmp_path / "vmlinux",
+    }
+    for path in artifacts.values():
+        path.write_bytes(b"x")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for tool in ("dirname", "pwd"):
+        real = shutil.which(tool)
+        if real:
+            (bindir / tool).symlink_to(real)
+    if with_gdb:
+        gdb = bindir / "gdb"
+        gdb.write_text("#!/bin/sh\nexit 0\n")
+        gdb.chmod(0o755)
+
+    return {"PATH": str(bindir), **{name: str(path) for name, path in artifacts.items()}}
+
+
+def test_debug_stepping_ok_when_kernel_artifacts_and_gdb_exist(tmp_path: Path) -> None:
+    r = _run(["debug-stepping"], _debug_stepping_env(tmp_path))
+    assert r.returncode == 0, r.stderr
+
+
+def test_debug_stepping_fails_when_vmlinux_is_missing(tmp_path: Path) -> None:
+    env = _debug_stepping_env(tmp_path)
+    Path(env["KDIVE_LIVE_VM_VMLINUX"]).unlink()
+    r = _run(["debug-stepping"], env)
+    assert r.returncode != 0
+    assert "KDIVE_LIVE_VM_VMLINUX" in r.stderr
+
+
+def test_debug_stepping_fails_without_gdb(tmp_path: Path) -> None:
+    r = _run(["debug-stepping"], _debug_stepping_env(tmp_path, with_gdb=False))
+    assert r.returncode != 0
+    assert "gdb" in r.stderr
+
+
 def test_provisioned_fails_without_system_id() -> None:
     r = _run(["provisioned"], {"KDIVE_S3_ENDPOINT_URL": "http://x", "KDIVE_S3_BUCKET": "b"})
     assert r.returncode != 0

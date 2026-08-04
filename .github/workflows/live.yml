@@ -324,7 +324,7 @@ jobs:
           KDIVE_LIVE_VM_SYSTEM_ID="$(scripts/live-vm/mint-system.sh)"
           export KDIVE_LIVE_VM_SYSTEM_ID
 
-          scripts/live-vm/preflight-env.sh throwaway provisioned
+          scripts/live-vm/preflight-env.sh throwaway provisioned debug-stepping
           # Run pytest directly under the /opt/kdive interpreter — NOT `just test-live`, whose
           # `uv run` would ignore KDIVE_PYTHON, sync a fresh workspace .venv (violating the
           # never-uv-sync-in-workspace invariant), and omit the `live` group that carries drgn (a

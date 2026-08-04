@@ -65,6 +65,12 @@ def test_native_block_exports_warm_store_wiring() -> None:
         assert var in exported, f"{var} not exported in the native run block"
 
 
+def test_native_block_preflights_debug_stepping_with_both_native_families() -> None:
+    steps = _load(_LIVE)["jobs"]["native"]["steps"]
+    run = next(s["run"] for s in steps if "run" in s)
+    assert "preflight-env.sh throwaway provisioned debug-stepping" in run
+
+
 def _tcg_stage_dir() -> str:
     steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
     run = next(s["run"] for s in steps if "run" in s and "spine" in s.get("name", "").lower())

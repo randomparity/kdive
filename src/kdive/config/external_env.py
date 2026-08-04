@@ -139,15 +139,15 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_LIVE_VM_BZIMAGE",
         "test",
         None,
-        "Path to a kernel image that panics early in boot (no usable rootfs) for the gated "
-        "local-libvirt preserve-crash live-attach test (#747); unset → that test skips.",
+        "Path to the kernel image matching KDIVE_LIVE_VM_VMLINUX for the gated local-libvirt "
+        "preserve-crash and debug-stepping proofs; unset → those tests skip.",
     ),
     ExternalEnvVar(
         "KDIVE_LIVE_VM_ROOTFS",
         "test",
         None,
-        "Path to a bootable rootfs qcow2 for the gated live_vm snapshot/revert/resume proof "
-        "(#1254); unset → that test skips.",
+        "Path to a bootable rootfs qcow2 for the gated live_vm throwaway-domain proofs, "
+        "including snapshot/revert/resume and debug stepping; unset → those tests skip.",
     ),
     ExternalEnvVar(
         "KDIVE_LIVE_VM_REMOTE_URI",
@@ -184,15 +184,9 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_LIVE_VM_VMLINUX",
         "test",
         None,
-        "Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_VMCORE for the live_vm crash(8) "
-        "postmortem test (#816). Unset → that test skips.",
-    ),
-    ExternalEnvVar(
-        "KDIVE_LIVE_VM_GDBMI_VMLINUX",
-        "test",
-        None,
         "Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_BZIMAGE for the gated gdb-MI "
-        "debug tool smoke. Unset → that test skips.",
+        "debug proofs and, when KDIVE_LIVE_VM_VMCORE is set, matching that vmcore for the "
+        "crash(8) postmortem proof. Unset → those tests skip.",
     ),
     ExternalEnvVar(
         "KDIVE_LIVE_VM_GDBMI_MODULE_KO",

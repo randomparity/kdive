@@ -3,16 +3,16 @@
 # families, assert each family's requirements are present and FAIL the job (never a green skip)
 # when they are not. Reuses the scripts/live-vm/lib.sh die/require_* idiom.
 #
-# Families are env contracts (throwaway/provisioned/tcg) plus `host`, the libvirt/KVM contract the
-# image BUILD needs. Declare `host` before staging, the env families after it — the env families
-# assert paths that staging produces, so they cannot run first.
+# Families are env contracts (throwaway/provisioned/debug-stepping/tcg) plus `host`, the
+# libvirt/KVM contract the image BUILD needs. Declare `host` before staging, the env families after
+# it — the env families assert paths that staging produces, so they cannot run first.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/live-vm/lib.sh
 source "${here}/lib.sh"
 
-[ "$#" -ge 1 ] || die "usage: preflight-env.sh <host|throwaway|provisioned|tcg> [more...]"
+[ "$#" -ge 1 ] || die "usage: preflight-env.sh <host|throwaway|provisioned|debug-stepping|tcg> [more...]"
 
 # NAME: die unless the named env var is non-empty.
 require_set() {
@@ -71,6 +71,13 @@ check_provisioned() {
   require_set KDIVE_S3_BUCKET
 }
 
+check_debug_stepping() {
+  require_path KDIVE_LIVE_VM_ROOTFS
+  require_path KDIVE_LIVE_VM_BZIMAGE
+  require_path KDIVE_LIVE_VM_VMLINUX
+  require_tools "gdb:gdb"
+}
+
 check_tcg() {
   require_set KDIVE_STACK_BASE_URL
   require_set KDIVE_OIDC_ISSUER
@@ -90,8 +97,9 @@ for family in "$@"; do
   host) check_host ;;
   throwaway) check_throwaway ;;
   provisioned) check_provisioned ;;
+  debug-stepping) check_debug_stepping ;;
   tcg) check_tcg ;;
-  *) die "unknown family '${family}' (expected host|throwaway|provisioned|tcg)" ;;
+  *) die "unknown family '${family}' (expected host|throwaway|provisioned|debug-stepping|tcg)" ;;
   esac
 done
 echo "live_vm preflight: all declared families ($*) have their required env" >&2

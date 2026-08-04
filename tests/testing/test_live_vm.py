@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
+import kdive.testing.live_vm as live_vm_harness
 from kdive.domain.errors import CategorizedError
 from kdive.testing.live_vm import (
     LiveVmBootTimeout,
-    boot_preserved_gdbstub_domain,
     boot_throwaway_domain,
     prepare_session_runtime,
     throwaway_domain_xml,
@@ -243,9 +243,10 @@ def test_preserved_boot_yields_and_tears_down(
     conn = _FakeTransientConn()
     console = tmp_path / "console.log"
     console.write_text("Kernel panic - not syncing\n")  # already panicked → wait returns at once
-    with boot_preserved_gdbstub_domain(
+    with live_vm_harness.boot_gdbstub_domain(
         _GDBSTUB_XML,
         uri="qemu:///session",
+        wait_for="panic",
         console_log=console,
         _connect=lambda _uri: conn,
     ) as live:
@@ -264,9 +265,10 @@ def test_preserved_boot_timeout_raises_and_tears_down(
     console.write_text("booting, no panic\n")
     with (
         pytest.raises(LiveVmBootTimeout),
-        boot_preserved_gdbstub_domain(
+        live_vm_harness.boot_gdbstub_domain(
             _GDBSTUB_XML,
             uri="qemu:///session",
+            wait_for="panic",
             console_log=console,
             wait_timeout_s=-1.0,  # already past the deadline → the panic-wait fails immediately
             _connect=lambda _uri: conn,
@@ -288,9 +290,10 @@ def test_preserved_boot_session_mode_restores_xdg_even_on_body_error(
     console.write_text("Kernel panic - not syncing\n")
     with (
         pytest.raises(RuntimeError),
-        boot_preserved_gdbstub_domain(
+        live_vm_harness.boot_gdbstub_domain(
             _GDBSTUB_XML,
             uri="qemu:///session",
+            wait_for="panic",
             console_log=console,
             _connect=lambda _uri: conn,
         ),
@@ -306,13 +309,55 @@ def test_preserved_boot_unnamed_xml_falls_back(
     conn = _FakeTransientConn()
     console = tmp_path / "console.log"
     console.write_text("Kernel panic - not syncing\n")
-    with boot_preserved_gdbstub_domain(
+    with live_vm_harness.boot_gdbstub_domain(
         "<domain type='kvm'></domain>",  # no <name> → observability fallback, not a boot error
         uri="qemu:///session",
+        wait_for="panic",
         console_log=console,
         _connect=lambda _uri: conn,
     ) as live:
         assert live.name == "<unnamed>"
+
+
+def test_gdbstub_boot_can_wait_for_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
+    conn = _FakeTransientConn()
+
+    with live_vm_harness.boot_gdbstub_domain(
+        _GDBSTUB_XML,
+        uri="qemu:///session",
+        wait_for="active",
+        _connect=lambda _uri: conn,
+    ) as live:
+        assert live.domain is conn.domain
+
+    assert conn.domain.destroyed and conn.closed
+
+
+def test_gdbstub_boot_can_wait_for_ssh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
+    conn = _FakeTransientConn()
+    probes: list[tuple[str, int, float]] = []
+
+    def wait_for_ssh(host: str, port: int, deadline_s: float) -> bool:
+        probes.append((host, port, deadline_s))
+        return True
+
+    monkeypatch.setattr(live_vm_harness, "wait_for_ssh", wait_for_ssh)
+    with live_vm_harness.boot_gdbstub_domain(
+        _GDBSTUB_XML,
+        uri="qemu:///session",
+        wait_for="ssh",
+        ssh_port=49123,
+        wait_timeout_s=17.0,
+        _connect=lambda _uri: conn,
+    ) as live:
+        assert live.ssh_port == 49123
+
+    assert probes == [("127.0.0.1", 49123, 17.0)]
+    assert conn.domain.destroyed and conn.closed
 
 
 def _root(xml: str) -> ET.Element:

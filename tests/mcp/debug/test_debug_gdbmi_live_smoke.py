@@ -10,12 +10,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import os
 import shutil
+import socket
 import subprocess
+import xml.etree.ElementTree as ET
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 from fastmcp import Client, FastMCP
@@ -32,16 +37,23 @@ from kdive.domain.capacity.state import SystemState
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug.operations.runtime import DebugEngineRuntime
 from kdive.mcp.tools.debug.sessions import lifecycle as debug_tools
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
+from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import ModuleDebuginfo
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.testing.live_vm import boot_preserved_gdbstub_domain
-from tests.live_vm import require_live_vm_bzimage
+from kdive.testing.live_vm import boot_gdbstub_domain, create_overlay
+from tests.live_vm import (
+    require_live_vm_bzimage,
+    require_live_vm_throwaway,
+    require_live_vm_vmlinux,
+)
 from tests.mcp.debug.test_debug_live_attach import _render_panicking_domain
 from tests.mcp.debug.test_debug_tools import (
+    _PROFILE,
     _PROFILE_POLICY,
     _ctx,
     _granted_allocation,
@@ -56,6 +68,45 @@ from tests.mcp.systems_support import provider_resolver
 class _ModuleFixture:
     name: str
     path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveDebugSession:
+    client: Client[Any]
+    pool: AsyncConnectionPool
+    session_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveDebugSurface:
+    """Shared real FastMCP/runtime/session setup for the two live gdb-MI proofs."""
+
+    migrated_url: str
+    monkeypatch: pytest.MonkeyPatch
+    transcript_dir: Path
+
+    @contextlib.asynccontextmanager
+    async def session(
+        self,
+        *,
+        vmlinux: Path,
+        module_fixture: _ModuleFixture | None = None,
+        boot_result: dict[str, object] | None = None,
+    ) -> AsyncIterator[_LiveDebugSession]:
+        engine = GdbMiEngine(module_debuginfo_resolver=_module_resolver(module_fixture))
+        runtime = DebugEngineRuntime(
+            engine=engine,
+            attach=_attach_with_vmlinux(engine, vmlinux),
+            transcript_dir=self.transcript_dir,
+        )
+        runtime_resolver = _FixedDebugRuntimeResolver(runtime)
+        async with _pool(self.migrated_url) as pool:
+            session_id = await _start_live_session(pool, runtime_resolver, boot_result=boot_result)
+            try:
+                async with _debug_client(pool, runtime_resolver, self.monkeypatch) as client:
+                    yield _LiveDebugSession(client=client, pool=pool, session_id=session_id)
+            finally:
+                await _end_live_session(pool, runtime_resolver, session_id)
 
 
 class _FixedDebugRuntimeResolver:
@@ -74,19 +125,27 @@ class _FixedDebugRuntimeResolver:
         return self._runtime
 
 
+@pytest.fixture
+def live_debug_surface(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> _LiveDebugSurface:
+    return _LiveDebugSurface(
+        migrated_url=migrated_url,
+        monkeypatch=monkeypatch,
+        transcript_dir=tmp_path / "gdbmi-transcripts",
+    )
+
+
 @pytest.mark.live_vm
 @pytest.mark.live_vm_throwaway
 def test_live_vm_gdbmi_promoted_ops_smoke(  # pragma: no cover - live_vm
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    live_debug_surface: _LiveDebugSurface,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     contract = require_live_vm_bzimage()
-    vmlinux = _required_file("KDIVE_LIVE_VM_GDBMI_VMLINUX", "matching vmlinux")
-    if shutil.which("gdb") is None:
-        pytest.skip("gdb unavailable")
-    try:
-        import libvirt  # noqa: F401, PLC0415  # operator-provided; presence gates the live boot
-    except ImportError:
-        pytest.skip("libvirt-python unavailable")
+    vmlinux = require_live_vm_vmlinux().vmlinux
+    _require_live_debug_dependencies()
 
     monkeypatch.setenv("KDIVE_LIBVIRT_URI", contract.libvirt_uri)
     disk = tmp_path / "garbage.qcow2"
@@ -98,79 +157,194 @@ def test_live_vm_gdbmi_promoted_ops_smoke(  # pragma: no cover - live_vm
 
     final_xml = _render_panicking_domain(bzimage=str(contract.bzimage), disk=disk, console=console)
     module_fixture = _optional_module_fixture()
-    engine = GdbMiEngine(module_debuginfo_resolver=_module_resolver(module_fixture))
-    runtime = DebugEngineRuntime(
-        engine=engine,
-        attach=_attach_with_vmlinux(engine, vmlinux),
-        transcript_dir=tmp_path / "gdbmi-transcripts",
-    )
-    runtime_resolver = _FixedDebugRuntimeResolver(runtime)
+    with boot_gdbstub_domain(
+        final_xml,
+        uri=contract.libvirt_uri,
+        wait_for="panic",
+        console_log=console,
+    ):
+        asyncio.run(_drive_gdbmi_smoke(live_debug_surface, vmlinux, module_fixture))
 
-    with boot_preserved_gdbstub_domain(final_xml, uri=contract.libvirt_uri, console_log=console):
-        asyncio.run(_drive_gdbmi_smoke(migrated_url, runtime_resolver, module_fixture, monkeypatch))
+
+@pytest.mark.live_vm
+@pytest.mark.live_vm_throwaway
+def test_live_vm_debug_advance_modes(  # pragma: no cover - live_vm
+    live_debug_surface: _LiveDebugSurface,
+) -> None:
+    rootfs_contract = require_live_vm_throwaway("qemu:///session", session_required=True)
+    bzimage_contract = require_live_vm_bzimage()
+    vmlinux = require_live_vm_vmlinux().vmlinux
+    _require_live_debug_dependencies()
+    assert bzimage_contract.libvirt_uri == rootfs_contract.libvirt_uri
+    live_debug_surface.monkeypatch.setenv("KDIVE_LIBVIRT_URI", rootfs_contract.libvirt_uri)
+
+    gdb_port, ssh_port = _ephemeral_port_pair()
+    with _rootfs_overlay(rootfs_contract.rootfs) as overlay:
+        xml = _render_stepping_domain(
+            disk=overlay,
+            bzimage=bzimage_contract.bzimage,
+            gdb_port=gdb_port,
+            ssh_port=ssh_port,
+        )
+        with boot_gdbstub_domain(
+            xml,
+            uri=rootfs_contract.libvirt_uri,
+            wait_for="ssh",
+            ssh_port=ssh_port,
+            wait_timeout_s=180.0,
+        ):
+            asyncio.run(_drive_advance_modes(live_debug_surface, vmlinux))
 
 
 async def _drive_gdbmi_smoke(
-    migrated_url: str,
-    runtime_resolver: _FixedDebugRuntimeResolver,
+    surface: _LiveDebugSurface,
+    vmlinux: Path,
     module_fixture: _ModuleFixture | None,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _pool(migrated_url) as pool:
-        session_id = await _start_live_session(pool, runtime_resolver)
-        try:
-            async with _debug_client(pool, runtime_resolver, monkeypatch) as client:
-                disasm = await _call_tool(
-                    client,
-                    "debug.disassemble",
-                    {"session_id": session_id, "symbol": "panic", "instruction_count": 8},
-                )
-                assert disasm.status == "disassembled", disasm
-                instruction_count = disasm.data["instruction_count"]
-                assert isinstance(instruction_count, int)
-                assert instruction_count > 0
+    async with surface.session(
+        vmlinux=vmlinux,
+        module_fixture=module_fixture,
+        boot_result={"boot_outcome": "crashed_halted_live"},
+    ) as live:
+        session_id = live.session_id
+        client = live.client
+        disasm = await _call_tool(
+            client,
+            "debug.disassemble",
+            {"session_id": session_id, "symbol": "panic", "instruction_count": 8},
+        )
+        assert disasm.status == "disassembled", disasm
+        instruction_count = disasm.data["instruction_count"]
+        assert isinstance(instruction_count, int)
+        assert instruction_count > 0
 
-                # #1255 stepping is NOT exercised here: this smoke halts in the noreturn panic
-                # path, and a panic that parks the CPU in a hlt (IF=0) is not steppable — a correct
-                # step_instruction stalls (INFRASTRUCTURE_FAILURE), so asserting it here is
-                # image-dependent and false. The deterministic step proof drives the four verbs at
-                # a resumable, returnable frame on a booted kernel: scripts/live-debug.py step.
+        watch = await _call_tool(
+            client,
+            "debug.set_watchpoint",
+            {"session_id": session_id, "symbol": "jiffies_64", "byte_count": 8},
+        )
+        assert watch.status == "watching", watch
+        listed = await _call_tool(client, "debug.list_watchpoints", {"session_id": session_id})
+        assert listed.status == "listed", listed
+        watchpoint_count = listed.data["count"]
+        assert isinstance(watchpoint_count, int)
+        assert watchpoint_count >= 1
+        cleared = await _call_tool(
+            client,
+            "debug.clear_watchpoint",
+            {"session_id": session_id, "number": watch.data["number"]},
+        )
+        assert cleared.status == "cleared", cleared
 
-                watch = await _call_tool(
-                    client,
-                    "debug.set_watchpoint",
-                    {"session_id": session_id, "symbol": "jiffies_64", "byte_count": 8},
-                )
-                assert watch.status == "watching", watch
-                listed = await _call_tool(
-                    client, "debug.list_watchpoints", {"session_id": session_id}
-                )
-                assert listed.status == "listed", listed
-                watchpoint_count = listed.data["count"]
-                assert isinstance(watchpoint_count, int)
-                assert watchpoint_count >= 1
-                cleared = await _call_tool(
-                    client,
-                    "debug.clear_watchpoint",
-                    {"session_id": session_id, "number": watch.data["number"]},
-                )
-                assert cleared.status == "cleared", cleared
+        modules = await _call_tool(client, "debug.list_modules", {"session_id": session_id})
+        assert modules.status == "listed", modules
+        await _load_module_symbols_when_configured(client, session_id, modules, module_fixture)
 
-                modules = await _call_tool(client, "debug.list_modules", {"session_id": session_id})
-                assert modules.status == "listed", modules
-                await _load_module_symbols_when_configured(
-                    client, session_id, modules, module_fixture
-                )
-        finally:
-            await _end_live_session(pool, runtime_resolver, session_id)
+
+async def _drive_advance_modes(surface: _LiveDebugSurface, vmlinux: Path) -> None:
+    async with surface.session(vmlinux=vmlinux) as live:
+        for mode in ("into", "over", "instruction", "out"):
+            await _exercise_advance_mode(live.client, live.session_id, mode)
+
+        transitions = await _advance_audit_transitions(live.pool, live.session_id)
+        assert sorted(transitions) == sorted(
+            ["advance:into", "advance:over", "advance:instruction", "advance:out"]
+        )
+
+
+async def _exercise_advance_mode(client: Client[Any], session_id: str, mode: str) -> None:
+    breakpoint_number: str | None = None
+    try:
+        breakpoint = await _call_tool(
+            client,
+            "debug.set_breakpoint",
+            {"session_id": session_id, "location": "vfs_read"},
+        )
+        assert breakpoint.status == "set", breakpoint
+        breakpoint_number = str(breakpoint.data["number"])
+
+        continued = await _call_tool(
+            client,
+            "debug.continue",
+            {"session_id": session_id, "timeout_sec": 30.0},
+        )
+        _assert_nonterminal_stop(continued)
+        assert continued.data["reason"] == "breakpoint-hit", continued
+        cleared = await _call_tool(
+            client,
+            "debug.clear_breakpoint",
+            {"session_id": session_id, "number": breakpoint_number},
+        )
+        assert cleared.status == "cleared", cleared
+        breakpoint_number = None
+
+        before = await _read_instruction_pointer(client, session_id)
+        advanced = await _call_tool(
+            client,
+            "debug.advance",
+            {"session_id": session_id, "mode": mode, "timeout_sec": 30.0},
+        )
+        _assert_nonterminal_stop(advanced)
+        assert advanced.error_category is None, advanced
+        assert advanced.suggested_next_actions == [
+            "debug.read_registers",
+            "debug.backtrace",
+            "debug.advance",
+            "debug.continue",
+        ]
+        after = await _read_instruction_pointer(client, session_id)
+        assert after != before, f"mode={mode} did not advance rip ({before} -> {after})"
+        if mode == "out":
+            assert advanced.data["reason"] == "function-finished", advanced
+    finally:
+        if breakpoint_number is not None:
+            cleared = await _call_tool(
+                client,
+                "debug.clear_breakpoint",
+                {"session_id": session_id, "number": breakpoint_number},
+            )
+            assert cleared.status == "cleared", cleared
+
+
+def _assert_nonterminal_stop(response: ToolResponse) -> None:
+    assert response.status == "stopped", response
+    assert response.data["timed_out"] is False, response
+    reason = response.data.get("reason")
+    assert isinstance(reason, str) and reason, response
+    assert not reason.startswith("exited"), response
+
+
+async def _read_instruction_pointer(client: Client[Any], session_id: str) -> str:
+    response = await _call_tool(
+        client,
+        "debug.read_registers",
+        {"session_id": session_id, "registers": ["rip"]},
+    )
+    assert response.status == "read", response
+    instruction_pointer = response.data.get("rip")
+    assert isinstance(instruction_pointer, str) and instruction_pointer, response
+    return instruction_pointer
+
+
+async def _advance_audit_transitions(pool: AsyncConnectionPool, session_id: str) -> list[str]:
+    async with pool.connection() as conn:
+        cursor = await conn.execute(
+            "SELECT transition FROM audit_log "
+            "WHERE object_id = %s AND tool = 'debug.advance' ORDER BY transition",
+            (session_id,),
+        )
+        return [str(row[0]) for row in await cursor.fetchall()]
 
 
 async def _start_live_session(
-    pool: AsyncConnectionPool, runtime_resolver: _FixedDebugRuntimeResolver
+    pool: AsyncConnectionPool,
+    runtime_resolver: _FixedDebugRuntimeResolver,
+    *,
+    boot_result: dict[str, object] | None,
 ) -> str:
     alloc_id = await _granted_allocation(pool)
     sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-    run_id = await _seed_run(pool, sys_id, boot_result={"boot_outcome": "crashed_halted_live"})
+    run_id = await _seed_run(pool, sys_id, boot_result=boot_result)
     handlers = _session_handlers(runtime_resolver)
     resp = await handlers.start_session(pool, _ctx(), run_id=run_id, transport="gdbstub")
     assert resp.status == "live", resp
@@ -287,11 +461,58 @@ def _optional_module_fixture() -> _ModuleFixture | None:
     return _ModuleFixture(name=name, path=path)
 
 
-def _required_file(name: str, description: str) -> Path:
-    raw = os.environ.get(name)
-    if not raw:
-        pytest.skip(f"{name} ({description}) unavailable")
-    path = Path(raw).expanduser()
-    if not path.is_file():
-        pytest.skip(f"{name} ({description}) is not a file")
-    return path
+def _require_live_debug_dependencies() -> None:
+    for tool in ("gdb", "qemu-img"):
+        if shutil.which(tool) is None:
+            pytest.skip(f"{tool} unavailable")
+    try:
+        import libvirt  # noqa: F401, PLC0415  # operator-provided; presence gates the live boot
+    except ImportError:
+        pytest.skip("libvirt-python unavailable")
+
+
+def _ephemeral_port_pair() -> tuple[int, int]:
+    with (
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as gdb_socket,
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as ssh_socket,
+    ):
+        gdb_socket.bind(("127.0.0.1", 0))
+        ssh_socket.bind(("127.0.0.1", 0))
+        gdb_port = int(gdb_socket.getsockname()[1])
+        ssh_port = int(ssh_socket.getsockname()[1])
+    assert gdb_port != ssh_port
+    return gdb_port, ssh_port
+
+
+@contextlib.contextmanager
+def _rootfs_overlay(rootfs: Path) -> Iterator[Path]:
+    overlay = rootfs.with_name(f"kdive-debug-{uuid4().hex}.qcow2")
+    try:
+        create_overlay(rootfs, overlay)
+        yield overlay
+    finally:
+        overlay.unlink(missing_ok=True)
+
+
+def _render_stepping_domain(*, disk: Path, bzimage: Path, gdb_port: int, ssh_port: int) -> str:
+    data = copy.deepcopy(_PROFILE)
+    section = data["provider"]["local-libvirt"]
+    section["rootfs"] = {"kind": "local", "path": str(disk)}
+    section["debug"] = {"gdbstub": True}
+    section.pop("crashkernel", None)
+    profile = ProvisioningProfile.parse(data)
+    rendered = render_domain_xml(
+        uuid4(),
+        profile,
+        disk_path=str(disk),
+        gdb_port=gdb_port,
+        ssh_port=ssh_port,
+        kernel_path=bzimage,
+    )
+    root = ET.fromstring(rendered)  # noqa: S314 - kdive-rendered, trusted
+    name = root.find("name")
+    cmdline = root.find("./os/cmdline")
+    assert name is not None and cmdline is not None and cmdline.text is not None
+    name.text = "kdive-x"  # matches the System row seeded by _seed_system
+    cmdline.text = f"{cmdline.text} nokaslr"
+    return ET.tostring(root, encoding="unicode")

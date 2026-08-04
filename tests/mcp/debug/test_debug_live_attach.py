@@ -28,7 +28,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.testing.live_vm import boot_preserved_gdbstub_domain
+from kdive.testing.live_vm import boot_gdbstub_domain
 from tests.live_vm import require_live_vm_bzimage
 from tests.mcp.debug.test_debug_tools import (
     _PROFILE,
@@ -88,7 +88,12 @@ def test_live_vm_start_session_attaches_to_halted_early_boot_crash(  # pragma: n
                 await handlers.end_session(pool, _ctx(), resp.object_id)
             return resp
 
-    with boot_preserved_gdbstub_domain(final_xml, uri=contract.libvirt_uri, console_log=console):
+    with boot_gdbstub_domain(
+        final_xml,
+        uri=contract.libvirt_uri,
+        wait_for="panic",
+        console_log=console,
+    ):
         resp = asyncio.run(_drive())
         assert resp.status == "live", f"start_session did not attach: {resp.status} {resp.data}"
 
