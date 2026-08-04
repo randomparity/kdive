@@ -20,6 +20,7 @@ import contextlib
 import logging
 import math
 import tempfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import LiteralString, NamedTuple
@@ -75,7 +76,14 @@ class LoopResult:
     canceled: bool  # stopped because the owning job was canceled
 
 
-async def run_capture_loop(*, stat, sleep, canceled, max_bytes: int, max_polls: int) -> LoopResult:
+async def run_capture_loop(
+    *,
+    stat: Callable[[], Awaitable[int]],
+    sleep: Callable[[float], Awaitable[object]],
+    canceled: Callable[[], Awaitable[bool]],
+    max_bytes: int,
+    max_polls: int,
+) -> LoopResult:
     """Poll the growing pcap until the window elapses, it hits ``max_bytes``, or the job cancels.
 
     ``stat``/``sleep``/``canceled`` are injected async callables so the loop is libvirt-free and
