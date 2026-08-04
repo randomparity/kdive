@@ -69,8 +69,24 @@ class _FakeStore:
         return f"https://signed.test/{key}"
 
 
+class _StoreOutage(_FakeStore):
+    """A constructed store whose artifact write fails as a live S3 call can."""
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        del request
+        raise CategorizedError(
+            "object store unavailable",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={},
+        )
+
+
 def _store_factory() -> ReportArtifactStore:
     return _FakeStore()
+
+
+def _store_outage_factory() -> ReportArtifactStore:
+    return _StoreOutage()
 
 
 def _failing_factory() -> ReportArtifactStore:
@@ -342,7 +358,7 @@ def test_store_outage_degrades_to_inline(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
             resp = await _generate(
-                pool, _ctx(), formats=["csv", "xlsx"], store_factory=_failing_factory
+                pool, _ctx(), formats=["csv", "xlsx"], store_factory=_store_outage_factory
             )
         assert resp.status == "ok"
         assert resp.refs == {}

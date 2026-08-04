@@ -25,8 +25,10 @@ through every active service path covered by this change.
 - Report registration receives `ObjectStoreAssembly` and supplies a required `StoreFactory` whose
   result is the assembly's store. Report handlers retain the factory seam so artifact-store
   failures continue to be categorized at request time.
-- The reconciler constructs `ObjectStoreAssembly` at its composition root, then passes the
-  contained store to provider composition and readiness checks.
+- The reconciler runtime body constructs one `ObjectStoreAssembly` and shares `.store` with
+  provider composition and reconciliation configuration.
+- Reconciler readiness retains its fresh `object_store_from_env` factory so each probe checks
+  current object-store connectivity independently.
 - Teardown-only local-libvirt assembly may retain the existing unconfigured-store sentinel because
   it cannot execute artifact-fetching behavior.
 
@@ -65,7 +67,8 @@ Tests first establish the missing wiring by asserting exact object identity at e
   connection;
 - report registration supplies a factory returning the app assembly's store;
 - report handlers require and use the injected factory while preserving artifact-outage behavior;
-- reconciler provider composition and readiness receive the same assembled store.
+- reconciler provider composition and reconciliation configuration receive the same assembled
+  store, while readiness creates fresh clients independently.
 
 Focused tests cover each seam during red-green-refactor. The integrated change then runs the
 repository lint, whole-tree type, and CI recipes.
