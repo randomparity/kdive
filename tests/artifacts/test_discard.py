@@ -179,3 +179,22 @@ def test_a_fault_never_raises_into_the_caller() -> None:
     _discard(store, [_written("a/1", "etag-1")])  # would raise if the fault were propagated
     assert store.attempted == ["a/1"]
     assert store.deleted == []
+
+
+def test_a_row_probe_fault_never_raises_into_the_caller(caplog) -> None:
+    store = _RecordingStore({"a/1": "etag-1"})
+
+    async def _faulting_probe(_key: str) -> bool:
+        raise RuntimeError("artifacts lookup failed")
+
+    with caplog.at_level(logging.WARNING, logger="kdive.artifacts.discard"):
+        asyncio.run(
+            discard_unregistered_objects(
+                cast(ObjectStore, store),
+                [_written("a/1", "etag-1")],
+                still_unregistered=_faulting_probe,
+            )
+        )
+
+    assert store.attempted == []
+    assert any("a/1" in record.getMessage() for record in caplog.records)

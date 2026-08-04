@@ -172,7 +172,7 @@ class _TransientDomain(_ActiveDomain, Protocol):
 
 
 class _TransientConn(Protocol):
-    """The ``virConnect`` slice ``boot_preserved_gdbstub_domain`` drives: transient boot + close."""
+    """The ``virConnect`` slice ``boot_gdbstub_domain`` drives: transient boot + close."""
 
     def createXML(  # noqa: N802 - libvirt binding name
         self, xml: str, flags: int, /
@@ -184,7 +184,7 @@ class _LibvirtConn(_ThrowawayConn, _TransientConn, Protocol):
     """The full ``virConnect`` slice: ``defineXML`` (throwaway) + ``createXML`` (transient) + close.
 
     ``connect_libvirt`` returns this so its result satisfies both the ``boot_throwaway_domain``
-    (``_ThrowawayConn``) and the ``boot_preserved_gdbstub_domain`` (``_TransientConn``) seams.
+    (``_ThrowawayConn``) and the ``boot_gdbstub_domain`` (``_TransientConn``) seams.
     """
 
 
@@ -515,33 +515,33 @@ def _domain_name_from_xml(xml: str) -> str:
 
 
 @contextmanager
-def boot_preserved_gdbstub_domain(
+def boot_gdbstub_domain(
     xml: str,
     *,
     uri: str,
-    console_log: Path,
+    wait_for: str,
+    console_log: Path | None = None,
+    ssh_port: int | None = None,
     wait_timeout_s: float = 30.0,
     _connect: Callable[[str], _TransientConn] = connect_libvirt,
 ) -> Iterator[LiveDomain]:
-    """Boot a transient gdbstub+preserve domain from caller-rendered production XML (ADR-0392).
+    """Boot a transient gdbstub domain from caller-rendered production XML (ADR-0392).
 
-    The gdbstub/preserve-on-crash debug tests (#747, #1255) render kdive's own
-    ``render_domain_xml(..., gdb_port=, debug={gdbstub, preserve_on_crash})`` — pvpanic +
-    ``<on_crash>preserve</on_crash>`` + ``-gdb`` passthrough, **their** subject under test — and add
-    the direct-kernel ``<os>`` + serial-log sink the install step would add. This harness owns only
-    the environment boilerplate around that finished XML: it never renders or duplicates the debug
-    XML (no second builder), so the caller keeps proving the production rendering.
+    Callers render kdive's own ``render_domain_xml(..., gdb_port=, debug={gdbstub, ...})`` so the
+    production ``-gdb`` passthrough remains the subject under test. A preserve-crash caller may use
+    an empty disk and wait for ``panic``; a stepping caller may render a bootable rootfs overlay and
+    wait for ``ssh``. This harness owns only the environment boilerplate around that finished XML:
+    it never renders or duplicates the debug XML, and the caller retains storage ownership.
 
-    It boots the domain **transiently** (``createXML``): the caller bakes an empty scratch disk into
-    the XML to force an early VFS panic, so there is no overlay to stage (unlike
-    ``boot_throwaway_domain``) and a transient domain needs no ``undefineFlags`` on teardown. The
-    session-mode ``XDG_CONFIG_HOME`` redirect (``prepare_session_runtime``) is applied here so a raw
-    ``createXML`` boot no longer overflows the 108-byte QMP-socket limit under ``qemu:///session``
-    (#1323). Waits for the console panic marker, yields the live domain, and guarantees teardown.
+    The domain is transient (``createXML``), so teardown needs no ``undefineFlags``. The session
+    ``XDG_CONFIG_HOME`` redirect prevents the 108-byte QMP-socket overflow under
+    ``qemu:///session`` (#1323). The caller chooses readiness: ``panic`` reads ``console_log``,
+    ``ssh`` probes the production XML's forwarded ``ssh_port``, and ``active`` checks libvirt
+    state. The harness yields after readiness and guarantees domain + connection teardown.
 
-    ``console_log`` must be the same serial-log path baked into ``xml`` so the panic-wait reads the
-    right file. Raises ``LiveVmBootTimeout`` if the guest does not panic before the deadline.
+    Raises ``LiveVmBootTimeout`` if the selected condition is not reached before the deadline.
     """
+    _validate_wait(wait_for, ssh_hostfwd_port=ssh_port, console_log=console_log)
     name = _domain_name_from_xml(xml)
     runtime = prepare_session_runtime(uri)
     conn: _TransientConn | None = None
@@ -549,17 +549,23 @@ def boot_preserved_gdbstub_domain(
     try:
         conn = _connect(uri)
         domain = conn.createXML(xml, 0)
-        if not wait_for_panic(console_log, wait_timeout_s):
+        if not _await_condition(
+            wait_for,
+            domain,
+            deadline_s=wait_timeout_s,
+            ssh_port=ssh_port,
+            console_log=console_log,
+        ):
             raise LiveVmBootTimeout(
-                f"transient gdbstub domain {name!r} (uri {uri}) did not panic on console in "
-                f"{wait_timeout_s}s"
+                f"transient gdbstub domain {name!r} (uri {uri}) did not reach "
+                f"wait_for={wait_for!r} in {wait_timeout_s}s"
             )
         yield LiveDomain(
             name=name,
             domain=domain,
             conn=conn,
             uri=uri,
-            ssh_port=None,
+            ssh_port=ssh_port,
             console_log=console_log,
         )
     finally:

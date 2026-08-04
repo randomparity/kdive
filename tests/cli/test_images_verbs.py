@@ -1,12 +1,12 @@
 """``kdivectl images`` verbs call the right server tool with the expected payload.
 
 The verbs are driven through fakes for the MCP client so the tests are hermetic. ``list``
-is a read passthrough; ``upload``/``delete``/``prune``/``extend`` are curated mutating verbs
-that run the fail-closed token preflight first, then call their server tool (ADR-0089). A
+is a read passthrough; ``upload``/``delete``/``prune``/``extend`` use specialised mutating
+handlers that run the fail-closed token preflight first, then call their server tool (ADR-0089). A
 denial envelope from the server maps to exit ``3``.
 
-``publish`` has no curated verb: it takes the schema-generated shape, so it is exercised over
-the real argv-to-dispatch route rather than by calling a handler directly (ADR-0461).
+``publish`` has no specialised handler: its descriptor takes the generic dispatch path, so it is
+exercised over the real argv-to-dispatch route rather than by calling a handler directly (ADR-0461).
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ import kdive.cli.commands.mutations as mutations
 import kdive.cli.commands.reads as reads
 from kdive.cli import dispatch
 from kdive.cli.__main__ import build_parser
-from kdive.cli.commands.registry import REGISTRY
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands.registry import HANDLER_OVERRIDES
 
 
 class _FakeResult:
@@ -63,12 +64,21 @@ def _install(monkeypatch: pytest.MonkeyPatch, payload: dict | None = None) -> _F
     return client
 
 
-def _args(**kwargs: object) -> argparse.Namespace:
-    return argparse.Namespace(json=False, **kwargs)
+_LOCAL_ACKNOWLEDGEMENTS = {"expired"}
+
+
+def _args(*, json: bool = False, **kwargs: object) -> argparse.Namespace:
+    generated = {
+        f"genarg_{name}": value
+        for name, value in kwargs.items()
+        if name not in _LOCAL_ACKNOWLEDGEMENTS
+    }
+    local = {name: value for name, value in kwargs.items() if name in _LOCAL_ACKNOWLEDGEMENTS}
+    return argparse.Namespace(json=json, **generated, **local)
 
 
 def _json_args(**kwargs: object) -> argparse.Namespace:
-    return argparse.Namespace(json=True, **kwargs)
+    return _args(json=True, **kwargs)
 
 
 def _collection(items: list[dict]) -> dict:
@@ -136,14 +146,27 @@ def test_describe_omits_target_kernel_when_absent(monkeypatch: pytest.MonkeyPatc
     assert client.calls == [("images.describe", {"image_id": "img-1"})]
 
 
+def test_describe_uses_untouched_parser_values_for_required_and_optional_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _install(
+        monkeypatch, {"object_id": "img-1", "status": "registered", "data": {"name": "fedora"}}
+    )
+    args = build_parser().parse_args(["images", "describe", "img-1", "--target-kernel", "7.1"])
+
+    assert not hasattr(args, "image_id") and not hasattr(args, "target_kernel")
+    assert asyncio.run(reads.images_get(args)) == 0
+    assert client.calls == [("images.describe", {"image_id": "img-1", "target_kernel": "7.1"})]
+
+
 def test_describe_verb_registered_read_only() -> None:
-    by_tool = {verb.tool: verb for verb in REGISTRY if verb.group == "images"}
+    by_tool = {verb.tool: verb for verb in GENERATED_VERBS if verb.group == "images"}
     assert by_tool["images.describe"].read_only is True
 
 
 def test_describe_verb_declares_target_kernel_option() -> None:
-    by_tool = {verb.tool: verb for verb in REGISTRY if verb.group == "images"}
-    assert "target_kernel" in by_tool["images.describe"].options
+    by_tool = {verb.tool: verb for verb in GENERATED_VERBS if verb.group == "images"}
+    assert "target_kernel" in {flag.dest for flag in by_tool["images.describe"].flags}
 
 
 def test_upload_calls_images_upload_with_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,9 +241,37 @@ def test_prune_requires_expired_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.calls == []
 
 
+def test_prune_uses_the_local_expired_acknowledgement_from_the_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _install(monkeypatch)
+    args = build_parser().parse_args(
+        ["images", "prune-expired", "--expired", "--reason", "cleanup"]
+    )
+
+    assert args.expired is True and not hasattr(args, "reason")
+    assert asyncio.run(images.images_prune(args)) == 0
+    assert client.calls == [("images.prune_expired", {"reason": "cleanup"})]
+
+
 def test_extend_calls_images_extend(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install(monkeypatch)
     asyncio.run(images.images_extend(_args(image_id="img-1", seconds=86400, reason="keep")))
+    assert client.calls == [
+        ("images.extend", {"image_id": "img-1", "seconds": 86400, "reason": "keep"})
+    ]
+
+
+def test_extend_uses_the_untouched_parser_namespace_for_numeric_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _install(monkeypatch)
+    args = build_parser().parse_args(
+        ["images", "extend", "img-1", "--seconds", "86400", "--reason", "keep"]
+    )
+
+    assert not hasattr(args, "seconds")
+    assert asyncio.run(images.images_extend(args)) == 0
     assert client.calls == [
         ("images.extend", {"image_id": "img-1", "seconds": 86400, "reason": "keep"})
     ]
@@ -349,8 +400,7 @@ def test_upload_json_flag_threads_through_to_render(
 
 def test_upload_tolerates_missing_lifetime_attr(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install(monkeypatch)
-    bare = argparse.Namespace(
-        json=False,
+    bare = _args(
         project="proj-a",
         name="custom",
         arch="x86_64",
@@ -388,7 +438,7 @@ def test_prune_exit_message_names_the_flag(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_prune_refuses_when_expired_attr_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install(monkeypatch)
-    bare = argparse.Namespace(json=False, reason="x")
+    bare = _args(reason="x")
     with pytest.raises(SystemExit):
         asyncio.run(images.images_prune(bare))
     assert client.calls == []
@@ -411,7 +461,7 @@ def test_extend_json_flag_threads_through_to_render(
 
 
 def test_image_verbs_registered_with_expected_read_only_flags() -> None:
-    by_tool = {verb.tool: verb for verb in REGISTRY if verb.group == "images"}
+    by_tool = {verb.tool: verb for verb in GENERATED_VERBS if verb.group == "images"}
     assert by_tool["images.list"].read_only is True
     for mutating in (
         "images.upload",
@@ -422,16 +472,15 @@ def test_image_verbs_registered_with_expected_read_only_flags() -> None:
         assert by_tool[mutating].read_only is False
 
 
-def test_publish_is_not_curated_so_the_generated_verb_wins() -> None:
-    # A curated verb overrides the generated shape at its path, so leaving one here would
-    # re-impose a hand-written payload on a schema-derived tool (ADR-0461).
-    assert not [verb for verb in REGISTRY if verb.group == "images" and verb.sub == "publish"]
+def test_publish_uses_generic_generated_dispatch() -> None:
+    # Its descriptor has no specialised renderer, so argv reaches generic payload assembly.
+    assert "images.publish" not in HANDLER_OVERRIDES
 
 
 # --- `kdivectl images publish` over the real dispatch path -----------------------------------
 #
-# Curated verbs bypass the generated-dispatch seam entirely, so asserting against a hand-called
-# handler cannot tell whether the shipped command line still works. These drive the real route:
+# Specialised handlers and generic descriptors use different execution paths, so asserting against
+# a hand-called handler cannot prove the generic command line works. These drive the real route:
 # argv -> build_parser() -> dispatch.run() -> registry.run_verb() -> invoke_generated_verb(),
 # with only the transport (`_session_factory`) faked.
 

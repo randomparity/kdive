@@ -1,9 +1,11 @@
 # Installing KDIVE
 
-KDIVE runs as three processes — `server`, `worker`, `reconciler` — plus a `migrate`
-one-shot, on top of operator-provided backends (Postgres, an S3-compatible object store,
-and an OIDC issuer). This page covers where the code comes from, what the host needs, and
-the three ways to run it.
+KDIVE's portable core runs as three processes — `server`, `worker`, `reconciler` — plus a
+`migrate` one-shot, on top of operator-provided backends (Postgres, an S3-compatible object store,
+and an OIDC issuer). Kubernetes runs the dedicated `lifecycle-witness` as its fourth long-running
+workload. The `lifecycle-witness` is Kubernetes-only; Compose and systemd keep the three-process
+core, with Compose using an operator-side lifecycle wrapper rather than a witness service. This page
+covers where the code comes from, what the host needs, and the three ways to run it.
 
 The S3-compatible object store is a **required** backend (ADR-0337): it is load-bearing for
 vmcore retrieval, debuginfo staging, console parts, and artifact egress.
@@ -37,13 +39,28 @@ version-aware image. A diagnostic run of an old image must remain quiesced.
 
 ### Worker-fence authority upgrade
 
-For a release carrying the worker-fence protocol, stop old workers before migration. Migrate the
-runtime roles and protocol, rotate the distinct server, worker, reconciler, and lifecycle-witness
-credentials, start the witnesses, and then start current workers. Verify their registered
-incarnations and recovery-tool exposure before resuming queue processing. Rollback cannot restore
-old-worker claiming after this migration; recover forward with a current image. Raw lifecycle
-commands, manual finalizer removal, and database-owner or manual SQL bypasses retain pins rather
-than releasing them.
+For a release carrying the worker-fence protocol, follow the deployment-specific authority sequence:
+
+- **Kubernetes:** follow the [staged worker-fence upgrade procedure](
+  runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade).
+- **Compose:** this three-command path is local-bootstrap-only: with
+  `KDIVE_LOCAL_ROLE_BOOTSTRAP=1`, use `just compose-stop`, select the new image and
+  configuration, then `just compose-up`. It records old-worker termination and preserves named
+  volumes; the Compose graph runs the migrate one-shot and local role bootstrap before the
+  operator-side lifecycle wrapper registers the current worker. That bootstrap resets fixed local
+  development passwords and restores the intended runtime-role memberships.
+  `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` disables local mutation. An
+  externally provisioned Compose-derived deployment must supply an equivalent stop-old, migrate,
+  provision credentials and memberships, and start gate outside this reference workflow.
+  Do not invoke
+  `python -m kdive.processes.lifecycle.compose_worker_lifecycle` directly or use raw
+  Docker/Compose commands;
+  they bypass the public lifecycle path. Compose has no persistent lifecycle-witness service.
+
+Verify registered current incarnations and recovery-tool exposure before resuming queue processing.
+Rollback cannot restore old-worker claiming after this migration; recover forward with a current
+image. Raw lifecycle commands, manual finalizer removal, and database-owner or manual SQL bypasses
+retain pins rather than releasing them.
 
 ### Migration 0094: full-downtime artifact index build
 
@@ -51,27 +68,36 @@ Migration 0094 builds a unique index over the artifact catalog inside KDIVE's at
 transaction. The index build takes a write-blocking table lock, so a deployment that includes 0094
 is a full-downtime maintenance operation, not a rolling upgrade:
 
-1. Stop every old KDIVE server, worker, and reconciler instance. Disable restart controllers so an
-   old process cannot reconnect during the migration.
+1. Stop every old KDIVE long-running workload. On Kubernetes, stop or quiesce server and reconciler
+   as appropriate, then scale workers to zero while the lifecycle-witness remains healthy.
+   Wait until worker Pods and their finalizers are gone, then stop the lifecycle-witness.
+   On Compose or systemd, stop only the three portable core processes. Disable restart controllers
+   so an old process cannot reconnect during the migration.
 2. On the target database, verify `pg_stat_activity` has no sessions from the KDIVE runtime role.
    Do not start migration while any old application session remains.
 3. Run `python -m kdive migrate` once with the new image. If duplicate ownership triples make the
    unique-index build fail, inspect and repair those durable claims before retrying; the migration
    never chooses a winner or deletes data.
-4. Start only the new server, worker, and reconciler image, then verify readiness.
+4. On Kubernetes, start server and reconciler as appropriate, then start and verify the
+   lifecycle-witness before starting workers. On Compose or systemd, start only the new server,
+   worker, and reconciler processes. Verify readiness.
 
-For Kubernetes, scaling the three KDIVE Deployments to zero and waiting for their pods to terminate
-must precede the hooked upgrade that runs migration 0094. For systemd or Compose, stop all three app
-services before the migrate one-shot. A normal rolling `helm upgrade` while old pods still write is
-not supported for the release containing 0094.
+For Kubernetes, complete the ordered shutdown above before the hooked upgrade that runs migration
+0094. For systemd or Compose, stop only the three portable core processes before the migrate
+one-shot. A normal rolling `helm upgrade` while old Pods still write is not supported for the
+release containing 0094.
 
 ### Migration 0095: stop-old-first Run schema expansion
 
 The release containing migration 0095 adds `runs.build_ref`. Older KDIVE processes use strict Run
-models with `SELECT *`, so they cannot read the expanded row shape. Stop every old server, worker,
-and reconciler before running migrations and start only the new image afterward. Migration 0095
-checks `pg_stat_activity` and refuses to run while another client remains connected to the KDIVE
-database. This release is not rolling-upgrade compatible; recover forward if migration has applied.
+models with `SELECT *`, so they cannot read the expanded row shape. On Kubernetes, stop or quiesce
+server and reconciler as appropriate, then scale workers to zero while the lifecycle-witness remains
+healthy. Wait until worker Pods and their finalizers are gone, then stop the lifecycle-witness
+before migration. After migration, start server and reconciler as appropriate, then start and verify
+lifecycle-witness before starting workers. On Compose or systemd, stop only the three portable core
+processes and start only the new deployment afterward. Migration 0095 checks `pg_stat_activity` and
+refuses to run while another client remains connected to the KDIVE database. This release is not
+rolling-upgrade compatible; recover forward if migration has applied.
 
 ## Install paths
 
@@ -96,8 +122,8 @@ Released images are published to the GitHub Container Registry:
 docker pull ghcr.io/randomparity/kdive:latest
 ```
 
-The image runs any of the four entrypoints (`server` / `worker` / `reconciler` / `migrate`)
-via `python -m kdive <command>`. How releases are cut and tagged is described in
+The image runs any of five commands (`server` / `worker` / `reconciler` / `lifecycle-witness` /
+`migrate`) via `python -m kdive <command>`. How releases are cut and tagged is described in
 [the release process](../development/releasing.md).
 
 ### PyPI
@@ -273,6 +299,6 @@ Pick one of the three deployment shapes:
 
 - [Docker Compose](docker-compose.md) — the app tier plus dev backends in one graph;
   the quickest way to a working endpoint for demos and evaluation.
-- [Kubernetes (Helm)](kubernetes.md) — the chart deploys the three processes and the
-  migrate Job against external backends.
+- [Kubernetes (Helm)](kubernetes.md) — the chart deploys the three core processes, a dedicated
+  lifecycle witness, and the migrate Job against external backends.
 - [systemd](systemd.md) — run the processes as host services against external backends.

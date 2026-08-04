@@ -5,14 +5,15 @@ import io
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 from pathlib import Path
 from typing import cast
 
 import pytest
 
-from kdive.processes import compose_worker_lifecycle
-from kdive.processes.compose_worker_lifecycle import ComposeWorkerLifecycle
+from kdive.processes.lifecycle import compose_worker_lifecycle
+from kdive.processes.lifecycle.compose_worker_lifecycle import ComposeWorkerLifecycle
 
 type _CommandEvent = tuple[tuple[str, ...], dict[str, str] | None]
 _NONCE = "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret
@@ -181,6 +182,82 @@ def test_down_volumes_removes_profile_only_managed_volumes_after_compose_down() 
         )
     )
     assert events[down_index + 1] == ("cleanup-volumes", None)
+
+
+def test_lifecycle_offloads_sync_seams_from_the_event_loop() -> None:
+    event_loop_thread = threading.get_ident()
+    callback_threads: dict[str, list[int]] = {}
+    container_id = "a" * 64
+    created = False
+
+    def record(name: str) -> None:
+        callback_threads.setdefault(name, []).append(threading.get_ident())
+
+    def command(argv: tuple[str, ...], env: dict[str, str] | None = None) -> str:
+        nonlocal created
+        record("command")
+        if argv[-3:] == ("create", "--no-recreate", "worker"):
+            created = True
+        return container_id if created and argv[-4:] == ("ps", "--all", "-q", "worker") else ""
+
+    lifecycle = ComposeWorkerLifecycle(
+        command=command,
+        gate=_Gate([]),
+        prepare_credential=lambda: record("prepare-credential"),
+        credential_retained=lambda: record("credential-retained") or False,
+        cleanup_credential=lambda: record("cleanup-credential"),
+        cleanup_managed_volumes=lambda: record("cleanup-volumes"),
+    )
+
+    async def exercise() -> None:
+        await lifecycle.up()
+        await lifecycle.down(volumes=True)
+
+    asyncio.run(exercise())
+
+    assert set(callback_threads) == {
+        "command",
+        "prepare-credential",
+        "credential-retained",
+        "cleanup-credential",
+        "cleanup-volumes",
+    }
+    assert all(
+        callback_thread != event_loop_thread
+        for observed in callback_threads.values()
+        for callback_thread in observed
+    )
+
+
+def test_docker_operations_and_credential_injection_run_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_loop_thread = threading.get_ident()
+    callback_threads: dict[str, int] = {}
+
+    def command(argv: tuple[str, ...], env: dict[str, str] | None = None) -> str:
+        callback_threads["command"] = threading.get_ident()
+        return ""
+
+    def write_credential(path: Path, credential: str) -> None:
+        callback_threads["credential-write"] = threading.get_ident()
+
+    def docker_copy(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        callback_threads["docker-copy"] = threading.get_ident()
+        return subprocess.CompletedProcess(("docker", "cp"), 0)
+
+    monkeypatch.setattr(compose_worker_lifecycle, "_command", command)
+    monkeypatch.setattr(compose_worker_lifecycle, "_write_credential", write_credential)
+    monkeypatch.setattr(compose_worker_lifecycle.subprocess, "run", docker_copy)
+
+    async def exercise() -> None:
+        await compose_worker_lifecycle._docker_operation("start", "a" * 64)
+        await compose_worker_lifecycle._inject_credential(Path("unused"), "a" * 64, _CREDENTIAL)
+
+    asyncio.run(exercise())
+
+    assert set(callback_threads) == {"command", "credential-write", "docker-copy"}
+    assert all(thread != event_loop_thread for thread in callback_threads.values())
 
 
 def test_managed_volume_cleanup_targets_only_exact_project_names(

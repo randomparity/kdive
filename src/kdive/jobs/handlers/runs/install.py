@@ -268,9 +268,9 @@ async def _wait_through_cancellation(task: asyncio.Task[object]) -> bool:
     return cancelled
 
 
-async def _abandon_claim_through_cancellation(conn: AsyncConnection, run_id: UUID) -> None:
+async def _abandon_claim_through_cancellation(conn: AsyncConnection, run_id: UUID) -> bool:
     cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
-    await _wait_through_cancellation(cleanup)
+    return await _wait_through_cancellation(cleanup)
 
 
 async def _run_install_step(
@@ -300,15 +300,15 @@ async def _run_install_step(
     claim_abandoned = False
     provider_error: Exception | None = None
     provider_task = asyncio.create_task(asyncio.to_thread(installer.install, request))
+    cancelled = await _drain_through_cancellation(provider_task)
     try:
-        cancelled = await _wait_through_cancellation(provider_task)
+        provider_task.result()
     except Exception as exc:
         provider_error = exc
-        cancelled = False
-        await _abandon_claim_through_cancellation(conn, run_id)
+        cancelled = await _abandon_claim_through_cancellation(conn, run_id) or cancelled
         claim_abandoned = True
-    if cancelled:
-        await _abandon_claim_through_cancellation(conn, run_id)
+    if cancelled and not claim_abandoned:
+        cancelled = await _abandon_claim_through_cancellation(conn, run_id) or cancelled
         claim_abandoned = True
 
     release = asyncio.create_task(
@@ -319,15 +319,26 @@ async def _run_install_step(
         )
     )
     release_cancelled = await _drain_through_cancellation(release)
+    cancelled = release_cancelled or cancelled
     release_error: BaseException | None = None
     try:
         release.result()
     except (Exception, asyncio.CancelledError) as exc:
         release_error = exc
     if (release_cancelled or release_error is not None) and not claim_abandoned:
-        await _abandon_claim_through_cancellation(conn, run_id)
+        cancelled = await _abandon_claim_through_cancellation(conn, run_id) or cancelled
         claim_abandoned = True
 
+    if cancelled:
+        if provider_error is not None and release_error is not None:
+            _log.warning(
+                "build-use release failed after provider failure for run %s; "
+                "preserving cancellation outcome (%s, %s)",
+                run_id,
+                type(provider_error).__name__,
+                type(release_error).__name__,
+            )
+        raise asyncio.CancelledError
     if provider_error is not None:
         if release_error is not None:
             _log.warning(
@@ -339,8 +350,6 @@ async def _run_install_step(
         raise provider_error
     if release_error is not None:
         raise release_error
-    if cancelled or release_cancelled:
-        raise asyncio.CancelledError
     return True
 
 

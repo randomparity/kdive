@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -281,6 +282,39 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
     }
 
 
+def test_reports_registration_uses_app_owned_store_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = FastMCP("probe")
+    store = object()
+    registry = SecretRegistry()
+    captured: dict[str, object] = {}
+
+    def _register(
+        registered_app: FastMCP,
+        registered_pool: AsyncConnectionPool,
+        *,
+        secret_registry: SecretRegistry,
+        store_factory: object,
+    ) -> None:
+        captured["app"] = registered_app
+        captured["pool"] = registered_pool
+        captured["secret_registry"] = secret_registry
+        captured["store_factory"] = store_factory
+
+    monkeypatch.setattr(tool_module.reports_generate, "register", _register)
+    object_stores = ObjectStoreAssembly(store=cast(Any, store))
+
+    tool_module._report_tools_registrar(registry, object_stores)(app, pool)
+
+    assert captured["app"] is app
+    assert captured["pool"] is pool
+    assert captured["secret_registry"] is registry
+    factory = cast(Callable[[], object], captured["store_factory"])
+    assert factory() is store
+
+
 def test_debug_tools_registrar_wires_enabled_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -422,17 +456,17 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
         def build_provider_resolver(self) -> object:
             return resolver
 
-    def _build(
+    def _register(
+        registry: HandlerRegistry,
         assembly: handler_module.WorkerHandlerAssembly,
-    ) -> tuple[handler_module.HandlerRegistrar, ...]:
+    ) -> None:
+        del registry
         captured["resolver"] = assembly.resolver
         captured["incarnation_credential"] = assembly.incarnation_credential
         captured["secret_registry"] = assembly.secret_registry
         captured["object_stores"] = assembly.object_stores
 
-        return ()
-
-    monkeypatch.setattr(handler_module, "build_handler_registrars", _build)
+    monkeypatch.setattr(handler_module, "register_all_handlers", _register)
 
     build_handler_registry(
         secret_registry=caller_registry,

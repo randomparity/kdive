@@ -149,7 +149,7 @@ gzip-rootfs surface does not silently regress to an unadvertised field.
 
 ### Reclaim sweep (ADR-0441 §6)
 
-**Two** sweeps in `reconciler/cleanup/gc.py`, mirroring ADR-0234's close-driven +
+**Two** sweeps in `reconciler/cleanup/investigation_rootfs.py`, mirroring ADR-0234's close-driven +
 TTL-backstop pair (`gc_investigation_artifacts` + `gc_expired_build_artifacts`):
 
 - **`gc_investigation_uploaded_rootfs` (close-driven)** — investigations with

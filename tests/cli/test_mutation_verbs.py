@@ -14,7 +14,8 @@ import asyncio
 import pytest
 
 from kdive.cli.commands import mutations
-from kdive.cli.commands.registry import REGISTRY
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands.registry import HANDLER_OVERRIDES
 
 
 class _FakeResult:
@@ -55,7 +56,9 @@ def _install_session(monkeypatch: pytest.MonkeyPatch, payload: dict | None = Non
 
 
 def _args(**kwargs: object) -> argparse.Namespace:
-    return argparse.Namespace(json=False, **kwargs)
+    generated = {f"genarg_{name}": value for name, value in kwargs.items() if name != "force"}
+    local = {name: value for name, value in kwargs.items() if name == "force"}
+    return argparse.Namespace(json=False, **generated, **local)
 
 
 def test_force_release_calls_breakglass_tool(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -139,6 +142,21 @@ def test_teardown_requires_force_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.calls == []
 
 
+def test_teardown_uses_the_local_force_acknowledgement_from_the_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kdive.cli.__main__ import build_parser
+
+    client = _install_session(monkeypatch)
+    args = build_parser().parse_args(
+        ["ops", "force-teardown", "sys-1", "--reason", "wedged", "--force"]
+    )
+
+    assert args.force is True and not hasattr(args, "system_id")
+    assert asyncio.run(mutations.teardown(args)) == 0
+    assert client.calls == [("ops.force_teardown", {"system_id": "sys-1", "reason": "wedged"})]
+
+
 def test_preflight_reads_session_token(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _FakeClient({"object_id": "o", "status": "ok", "data": {}})
     seen: list[str] = []
@@ -161,8 +179,7 @@ def test_mutating_verbs_are_registered_and_not_read_only() -> None:
         "resources.set_scheduling",
         "resources.drain",
     }
-    registered = {verb.tool for verb in REGISTRY if not verb.read_only}
-    assert mutating_tools <= registered
-    for verb in REGISTRY:
-        if verb.tool in mutating_tools:
-            assert verb.read_only is False
+    assert mutating_tools <= set(HANDLER_OVERRIDES)
+    generated = {verb.tool: verb for verb in GENERATED_VERBS}
+    for tool in mutating_tools:
+        assert generated[tool].read_only is False

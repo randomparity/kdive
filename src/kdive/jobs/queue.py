@@ -109,11 +109,14 @@ async def enqueue(
 
     Raises:
         ValueError: ``max_attempts < 1`` (a job that ``dequeue`` could never claim).
+        ValueError: ``recycle_canceled`` without ``recycle_terminal``.
         ValueError: ``kind`` is a retired historical kind without an active handler.
         ValueError: ``dispatch_lane`` is blank.
     """
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
+    if recycle_canceled and not recycle_terminal:
+        raise ValueError("recycle_canceled requires recycle_terminal")
     if kind in RETIRED_JOB_KINDS:
         raise ValueError(f"job kind {kind.value!r} is retired and cannot be enqueued")
     if not dispatch_lane:
@@ -446,43 +449,14 @@ async def latest_succeeded_job_for_system(
 _TERMINAL_JOB_STATES: frozenset[JobState] = frozenset(
     {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED}
 )
-"""Job states a job never leaves — the states from which a job explains a System's outcome."""
+# Terminal states considered when attributing a System lifecycle outcome.
 
 
 async def latest_failed_job_for_system(conn: AsyncConnection, system_id: UUID) -> Job | None:
-    """Return the job that most recently failed ``system_id``, or ``None`` (ADR-0454).
+    """Return the newest failed attributable lifecycle job, else ``None`` (ADR-0454).
 
-    The ``systems`` table carries no failure category, so ``systems.get`` recovers one by
-    reading the job that put the System in ``failed``. Two predicates make that attribution
-    honest rather than merely convenient:
-
-    - ``kind = ANY(SYSTEM_FAILING_JOB_KINDS)`` — only the kinds whose handlers actually write
-      ``SystemState.FAILED``. A System also accumulates failed jobs of kinds that never touch
-      its state, and the newest failed job of *any* kind answers a different question.
-    - **The newest job in a terminal state, attributed only if that state is ``failed``.** The
-      query deliberately does *not* filter to ``failed`` and take the newest match: that skips
-      *over* a newer ``canceled`` or ``succeeded`` job to reach a stale older failure. A
-      canceled ``restore`` is the concrete case — cancelling one satisfies
-      ``repair_stalled_restoring_systems``' "no restore job queued/running" predicate, so the
-      System reaches ``failed`` with nothing to attribute, and a skip-over would report an
-      unrelated earlier provision failure as authoritative. If the last system-lifecycle job to
-      finish did not fail, this returns ``None`` and the caller applies its default.
-
-    ``error_category`` is written only on :func:`fail`'s dead-letter branch (a requeue clears
-    ``failure_context`` and leaves the category NULL), so a ``failed`` row is exactly the row
-    that carries an answer.
-
-    Matches on ``payload->>'system_id'``, the join key
-    :func:`latest_succeeded_job_for_system` and ``jobs.list`` already use. Newest first by
-    ``(created_at, id)`` — enqueue order, not completion order, which is the same order for the
-    serialized system-lifecycle kinds and is kept forward-moving by the ADR-0447 recycle.
-
-    Args:
-        conn: The connection to read on.
-        system_id: The System whose failure is being attributed.
-
-    Returns:
-        The newest system-lifecycle job for the System when it dead-lettered, else ``None``.
+    Only System-failing kinds qualify. The newest terminal row by ``(created_at, id)`` wins, so a
+    newer success or cancellation masks an older failure rather than attributing it.
     """
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(

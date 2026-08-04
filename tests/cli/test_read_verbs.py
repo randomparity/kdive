@@ -1,4 +1,4 @@
-"""Curated read verbs call the right tool, flatten the envelope, and render rows/records.
+"""Specialised read handlers call the right tool, flatten the envelope, and render rows/records.
 
 The verbs are driven through fakes for the MCP client so the tests are hermetic: a fake
 client returns a deserialized ``ToolResponse``-shaped payload (``object_id`` + ``status``
@@ -15,7 +15,8 @@ import pytest
 
 import kdive.cli.commands.reads as reads
 from kdive.cli.__main__ import build_parser
-from kdive.cli.commands.registry import REGISTRY
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands.registry import HANDLER_OVERRIDES
 
 
 class _FakeResult:
@@ -62,7 +63,13 @@ def _item(object_id: str, status: str, data: dict) -> dict:
 
 
 def _args(**kwargs: object) -> argparse.Namespace:
-    return argparse.Namespace(json=False, **kwargs)
+    generated = {f"genarg_{name}": value for name, value in kwargs.items()}
+    return argparse.Namespace(json=False, **generated)
+
+
+def _json_args(**kwargs: object) -> argparse.Namespace:
+    generated = {f"genarg_{name}": value for name, value in kwargs.items()}
+    return argparse.Namespace(json=True, **generated)
 
 
 def test_resources_list_flattens_items_and_renders(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -80,6 +87,18 @@ def test_resources_list_flattens_items_and_renders(monkeypatch: pytest.MonkeyPat
 def test_resources_list_passes_kind_filter(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     client = _install_session(monkeypatch, _collection([]))
     asyncio.run(reads.resources_list(_args(kind="remote-libvirt")))
+    assert client.calls == [("resources.list", {"request": {"kind": "remote-libvirt"}})]
+
+
+def test_resources_list_uses_the_untouched_parser_namespace_for_request_reshaping(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The protected ``--kind`` value reaches the request wrapper without copying it."""
+    client = _install_session(monkeypatch, _collection([]))
+    args = build_parser().parse_args(["resources", "list", "--kind", "remote-libvirt"])
+
+    assert not hasattr(args, "kind")
+    assert asyncio.run(reads.resources_list(args)) == 0
     assert client.calls == [("resources.list", {"request": {"kind": "remote-libvirt"}})]
 
 
@@ -131,7 +150,7 @@ def test_record_verb_json_mode_emits_whole_envelope(
         "suggested_next_actions": ["systems.release"],
     }
     _install_session(monkeypatch, record)
-    asyncio.run(reads.systems_get(argparse.Namespace(json=True, system_id="s1")))
+    asyncio.run(reads.systems_get(_json_args(system_id="s1")))
     parsed = json.loads(capsys.readouterr().out)
     assert parsed == record
     assert parsed["suggested_next_actions"] == ["systems.release"]
@@ -217,28 +236,31 @@ def test_data_shaped_lists_ignore_missing_list_data(
     assert out and len(out.splitlines()) == 1
 
 
-def test_every_registry_verb_has_a_handler() -> None:
-    # The registry is the single source of truth; every entry must resolve to a callable.
-    for verb in REGISTRY:
-        assert callable(verb.handler)
+def test_every_handler_override_is_callable() -> None:
+    assert all(callable(handler) for handler in HANDLER_OVERRIDES.values())
 
 
 def test_report_verb_is_registered_read_only_and_scope_required() -> None:
-    # One curated verb now covers both scopes: --scope is required so the CLI never picks a
-    # scope for the caller, and it sits at the merged tool's generated path so it overrides
-    # the schema-derived shape instead of adding a second path.
-    by_path = {(v.group, v.sub): v for v in REGISTRY}
-    report = by_path[("accounting", "report")]
-    assert report.tool == "accounting.report" and report.read_only
-    assert report.required_options == ("scope",)
-    assert report.options == ("projects", "group_by", "since", "until")
+    # One specialised handler covers both scopes: --scope is required so the CLI never picks a
+    # scope for the caller, and its descriptor owns the generated path instead of adding one.
+    by_tool = {verb.tool: verb for verb in GENERATED_VERBS}
+    report = by_tool["accounting.report"]
+    assert report.read_only
+    assert next(flag for flag in report.flags if flag.dest == "scope").required
+    assert {flag.dest for flag in report.flags} == {
+        "scope",
+        "projects",
+        "group_by",
+        "since",
+        "until",
+    }
     assert "platform_auditor" in report.help  # help notes the role the wide scope needs
-    usage = by_path[("accounting", "usage")]
-    assert usage.tool == "accounting.usage" and usage.read_only
-    assert usage.options == ("project", "investigation_id")
+    usage = by_tool["accounting.usage"]
+    assert usage.read_only
+    assert {flag.dest for flag in usage.flags} == {"project", "investigation_id"}
 
 
-_READ_VERBS = [v for v in REGISTRY if v.read_only]
+_READ_VERBS = [v for v in GENERATED_VERBS if v.read_only and v.tool in HANDLER_OVERRIDES]
 
 #: Values a verb needs beyond the generic ``"<name>-val"`` placeholder: an enum-valued
 #: option needs a real member, a numeric one needs a parseable number, and a verb whose
@@ -252,17 +274,16 @@ _VERB_ARG_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
 
 
 @pytest.mark.parametrize("verb", _READ_VERBS, ids=lambda v: f"{v.group}.{v.sub}")
-def test_handler_calls_the_tool_the_registry_declares(verb, monkeypatch, capsys) -> None:
-    # Bind verb.tool (what the read-only gate test checks) to the handler's real call, so a
-    # registry that declares a read-only tool but dispatches to another would fail here.
+def test_handler_calls_its_descriptor_tool(verb, monkeypatch, capsys) -> None:
+    # Bind the descriptor's tool (what the read-only gate checks) to the handler's real call.
     client = _FakeClient(_collection([]))
     monkeypatch.setattr(reads, "_session_factory", lambda: _FakeSession(client))
     args = argparse.Namespace(json=False)
-    for name in (*verb.positionals, *verb.options, *verb.required_options):
-        setattr(args, name, f"{name}-val")
+    for flag in verb.flags:
+        setattr(args, f"genarg_{flag.dest}", f"{flag.dest}-val")
     for name, value in _VERB_ARG_OVERRIDES.get((verb.group, verb.sub), {}).items():
-        setattr(args, name, value)
-    asyncio.run(verb.handler(args))
+        setattr(args, f"genarg_{name}", value)
+    asyncio.run(HANDLER_OVERRIDES[verb.tool](args))
     assert client.calls and client.calls[0][0] == verb.tool
 
 
@@ -316,12 +337,12 @@ def test_record_verb_denial_exits_authorization_denied(
 def test_list_verb_json_emits_whole_envelope_with_next_actions(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    # A curated list verb's --json is the server envelope verbatim: nested item envelopes plus
-    # the navigation contract (suggested_next_actions) the old column projection dropped.
+    # A specialised list handler's --json is the server envelope verbatim, including nested
+    # item envelopes and the navigation contract (suggested_next_actions).
     envelope = _collection([_item("al-1", "active", {"project": "p", "system": "s"})])
     envelope["suggested_next_actions"] = ["allocations.release"]
     _install_session(monkeypatch, envelope)
-    asyncio.run(reads.allocations_list(argparse.Namespace(json=True, project="p")))
+    asyncio.run(reads.allocations_list(_json_args(project="p")))
     parsed = json.loads(capsys.readouterr().out)
     assert parsed == envelope
     assert parsed["suggested_next_actions"] == ["allocations.release"]
@@ -333,7 +354,7 @@ def test_systems_list_json_emits_whole_envelope_and_passes_state_filter(
 ) -> None:
     envelope = _collection([_item("sy-1", "running", {"project": "p"})])
     client = _install_session(monkeypatch, envelope)
-    asyncio.run(reads.systems_list(argparse.Namespace(json=True, state="running")))
+    asyncio.run(reads.systems_list(_json_args(state="running")))
     assert client.calls == [("systems.list", {"request": {"state": "running"}})]
     assert json.loads(capsys.readouterr().out) == envelope
 
@@ -341,7 +362,7 @@ def test_systems_list_json_emits_whole_envelope_and_passes_state_filter(
 def test_jobs_list_json_emits_whole_envelope(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     envelope = _collection([_item("jo-1", "queued", {"kind": "boot"})])
     client = _install_session(monkeypatch, envelope)
-    asyncio.run(reads.jobs_list(argparse.Namespace(json=True, limit=None)))
+    asyncio.run(reads.jobs_list(_json_args(limit=None)))
     assert client.calls == [("jobs.list", {"request": {}})]
     assert json.loads(capsys.readouterr().out) == envelope
 
@@ -353,7 +374,7 @@ def test_inventory_show_json_emits_whole_envelope_and_passes_project_filter(
         [_item("k1", "ok", {"key": "k1", "backend": "minio", "status": "ready"})]
     )
     client = _install_session(monkeypatch, envelope)
-    asyncio.run(reads.inventory_show(argparse.Namespace(json=True, project="proj-a")))
+    asyncio.run(reads.inventory_show(_json_args(project="proj-a")))
     # ``inventory.list`` takes its filters inside the ``request`` wrapper; this pinned the flat
     # payload the tool rejects until the schema guard caught it (#1611).
     assert client.calls == [("inventory.list", {"request": {"project": "proj-a"}})]
@@ -407,7 +428,7 @@ def test_wait_verb_sends_the_timeout_as_a_number(
     """``--timeout-s`` reaches the tool as a ``float``, driven through the real parser.
 
     Both tools declare ``timeout_s`` as a JSON ``number``. The coercion now happens at the
-    parser seam, read off the generated verb at the same path (ADR-0474 decision 1), so this
+    parser seam, read from the descriptor (ADR-0474 decision 1), so this
     drives ``build_parser`` rather than handing the handler a value argparse could not produce.
     ``0`` is the documented point read and must arrive as ``0.0``, not be dropped.
     """
@@ -456,7 +477,7 @@ def test_wait_verb_rejects_a_negative_timeout(
     """
     client = _install_session(monkeypatch, _data_envelope({}))
     args = _wait_argv(tool.split(".")[0], "obj-1", "--timeout-s", value)
-    assert args.timeout_s == float(value)
+    assert args.genarg_timeout_s == float(value)
     code = asyncio.run(handler(args))
     assert code == 2
     assert client.calls == []
@@ -475,7 +496,7 @@ def test_wait_verb_json_emits_whole_envelope(
         "suggested_next_actions": [tool],
     }
     _install_session(monkeypatch, envelope)
-    asyncio.run(handler(argparse.Namespace(json=True, timeout_s=None, **{key: "obj-1"})))
+    asyncio.run(handler(_json_args(timeout_s=None, **{key: "obj-1"})))
     assert json.loads(capsys.readouterr().out) == envelope
 
 
@@ -624,8 +645,7 @@ def test_report_json_emits_whole_envelope(monkeypatch: pytest.MonkeyPatch, capsy
     _install_session(monkeypatch, envelope)
     asyncio.run(
         reads.ledger_report(
-            argparse.Namespace(
-                json=True,
+            _json_args(
                 scope="all-projects",
                 group_by=None,
                 since=None,

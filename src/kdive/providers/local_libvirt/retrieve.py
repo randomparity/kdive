@@ -50,8 +50,6 @@ from kdive.providers.shared.debug_common.core_file import (
 )
 from kdive.providers.shared.debug_common.crash_postmortem import (
     _real_run_crash,
-    default_fetch_object,
-    default_fetch_versioned_object,
 )
 from kdive.providers.shared.debug_common.crash_postmortem import (
     run_crash_postmortem as _run_crash_postmortem,
@@ -61,7 +59,8 @@ from kdive.providers.shared.runtime_paths import (
     domain_name_for,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import object_store_from_env
+from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
+from kdive.store.objectstore import ObjectStore
 
 _log = logging.getLogger(__name__)
 
@@ -128,11 +127,13 @@ class LocalLibvirtRetrieve:
         self._secret_registry = secret_registry
 
     @classmethod
-    def from_env(cls, *, secret_registry: SecretRegistry) -> LocalLibvirtRetrieve:
+    def from_env(
+        cls, *, secret_registry: SecretRegistry, store: ObjectStore = UNCONFIGURED_OBJECT_STORE
+    ) -> LocalLibvirtRetrieve:
         """Build from env; does not poll the host, open S3, or spawn `crash` (lazy seams)."""
         return cls(
             tenant="local",
-            store_factory=object_store_from_env,
+            store_factory=lambda: store,
             wait_for_vmcore=_real_wait_for_vmcore,
             read_vmcore_build_id=_real_read_build_id,
             read_vmcore_build_id_from_file=read_core_build_id_from_file,
@@ -140,8 +141,10 @@ class LocalLibvirtRetrieve:
                 core, read_core_dmesg_from_file, secret_registry
             ),
             host_dump_capture=_real_host_dump_capture,
-            fetch_object=default_fetch_object,
-            fetch_versioned_object=default_fetch_versioned_object,
+            fetch_object=lambda ref: store.get_artifact(ref, None).data,
+            fetch_versioned_object=lambda ref, version_id: (
+                store.get_artifact(ref, None, version_id=version_id).data
+            ),
             run_crash=_real_run_crash,
             secret_registry=secret_registry,
         )

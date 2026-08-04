@@ -30,7 +30,6 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.domain.errors import CategorizedError
 from kdive.store.objectstore import ObjectStore
 
 _log = logging.getLogger(__name__)
@@ -64,19 +63,19 @@ async def reconcile_row_etag(
     """
     try:
         head = await asyncio.to_thread(store.head, object_key)
-    except CategorizedError:
+        if head is None or head.etag == row_etag:
+            return
+        async with conn.transaction():
+            await conn.execute(_REFRESH_ETAG_SQL, (head.etag, row_id))
+    except Exception:  # noqa: BLE001 - advisory repair must not mask the caller outcome
         _log.warning(
-            "stat of %s failed; leaving artifacts row %s describing etag %s",
+            "reconciling etag for %s failed; leaving artifacts row %s describing etag %s",
             object_key,
             row_id,
             row_etag,
             exc_info=True,
         )
         return
-    if head is None or head.etag == row_etag:
-        return
-    async with conn.transaction():
-        await conn.execute(_REFRESH_ETAG_SQL, (head.etag, row_id))
     _log.info(
         "artifacts row %s re-pointed at %s's current etag after a concurrent overwrite",
         row_id,

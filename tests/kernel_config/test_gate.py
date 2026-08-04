@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, cast
 from unittest.mock import patch
 from uuid import uuid4
 
+import pytest
 from psycopg import AsyncConnection
 
 from kdive.kernel_config.gate import (
@@ -21,6 +23,7 @@ from kdive.kernel_config.gate import (
     crash_capture_refusal,
     debuginfo_unloadable_warning,
     debuginfo_warning,
+    missing_effective_config_nudge,
     rootfs_mount_warning,
 )
 from kdive.kernel_config.parse import KernelConfig
@@ -147,6 +150,40 @@ def test_rootfs_no_supported_filesystem_names_both_alternatives():
     assert warning is not None
     assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
     assert "mount" in warning["remediation"]
+
+
+def test_missing_effective_config_nudge_lookup_error_fails_open_with_traceback(
+    caplog: pytest.LogCaptureFixture,
+):
+    async def _boom(conn: Any, run_id: Any) -> None:
+        raise RuntimeError("lookup failed")
+
+    with (
+        patch("kdive.kernel_config.gate.effective_config_key", _boom),
+        caplog.at_level(logging.WARNING, logger="kdive.kernel_config.gate"),
+    ):
+        got = asyncio.run(missing_effective_config_nudge(_CONN, _RUN_ID))
+
+    assert got is None
+    assert len(caplog.records) == 1
+    assert str(_RUN_ID) in caplog.records[0].getMessage()
+    assert caplog.records[0].exc_info is not None
+
+
+def test_missing_effective_config_nudge_cancellation_propagates_without_fail_open_warning(
+    caplog: pytest.LogCaptureFixture,
+):
+    async def _cancel(conn: Any, run_id: Any) -> None:
+        raise asyncio.CancelledError
+
+    with (
+        patch("kdive.kernel_config.gate.effective_config_key", _cancel),
+        caplog.at_level(logging.WARNING, logger="kdive.kernel_config.gate"),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        asyncio.run(missing_effective_config_nudge(_CONN, _RUN_ID))
+
+    assert not caplog.records
 
 
 _KEXEC_LOAD_ONLY = frozenset(

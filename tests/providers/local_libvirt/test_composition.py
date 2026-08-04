@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -32,6 +32,7 @@ from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPl
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.objectstore import ObjectStore
 
 
 def test_discovery_registration_targets_local_libvirt() -> None:
@@ -91,6 +92,46 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
     }
     assert runtime.rootfs is not None
     assert runtime.rootfs.validator is not None
+
+
+def test_build_runtime_threads_store_to_the_provisioner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = cast(ObjectStore, object())
+    seen: list[object] = []
+
+    class CapturingProvisioning:
+        @classmethod
+        def from_env(
+            cls, *, store: ObjectStore, guest_egress: bool = False
+        ) -> LocalLibvirtProvisioning:
+            del cls, guest_egress
+            seen.append(store)
+            return LocalLibvirtProvisioning(connect=cast(Any, lambda: object()))
+
+    monkeypatch.setattr(composition, "LocalLibvirtProvisioning", CapturingProvisioning)
+
+    composition.build_runtime(secret_registry=SecretRegistry(), store=store)
+
+    assert seen == [store]
+
+
+def test_build_runtime_threads_store_to_module_debuginfo_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = cast(ObjectStore, object())
+    seen: list[ObjectStore] = []
+
+    def fake_resolver(store_arg: ObjectStore) -> object:
+        seen.append(store_arg)
+        return object()
+
+    monkeypatch.setattr(composition, "real_module_debuginfo_resolver", fake_resolver)
+
+    composition.build_runtime(secret_registry=SecretRegistry(), store=store)
+
+    assert len(seen) == 1
+    assert seen[0] is store
 
 
 def test_local_runtime_sets_rebind_for_resource() -> None:

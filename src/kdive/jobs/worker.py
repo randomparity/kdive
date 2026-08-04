@@ -23,7 +23,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -35,15 +35,13 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
 from kdive.domain.operations.jobs import Job
+from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry, JobHandler
 from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
 from kdive.jobs.worker_telemetry import JobSpan, WorkerTelemetry
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
-
-if TYPE_CHECKING:
-    from kdive.health.heartbeat import Heartbeat
 
 _log = logging.getLogger(__name__)
 _CONTEXT_VALUE_MAX = 1000
@@ -217,7 +215,7 @@ class Worker:
         if self._heartbeat is None:
             return None
         return asyncio.create_task(
-            _tick_until_stop(
+            tick_until_stop(
                 self._heartbeat,
                 stop,
                 self._heartbeat_tick,
@@ -484,23 +482,3 @@ def _context_key(key: str) -> str:
 
 def _redacted(redactor: Redactor, value: str) -> str:
     return redactor.redact_text(value)[:_CONTEXT_VALUE_MAX]
-
-
-async def _tick_until_stop(
-    heartbeat: Heartbeat,
-    stop: asyncio.Event,
-    interval: float,
-    sleep_until_stop: Callable[[asyncio.Event, float], Awaitable[None]] = _sleep_until_stop,
-) -> None:
-    """Bump ``heartbeat`` every ``interval`` seconds until ``stop`` is set or cancelled.
-
-    Runs concurrently with the claim loop so a long-running job never starves the
-    ``/livez`` signal (ADR-0090 §5); a wedged event loop stops this ticker too, so a truly
-    stuck worker still reads not-live.
-    """
-    heartbeat.tick()
-    while not stop.is_set():
-        await sleep_until_stop(stop, interval)
-        if stop.is_set():
-            break
-        heartbeat.tick()

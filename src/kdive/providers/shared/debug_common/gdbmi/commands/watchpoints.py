@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment, GdbWatchpointRef
+from kdive.providers.shared.debug_common.gdbmi._errors import config_error
 from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     MiRecord,
     breakpoint_rows,
@@ -39,13 +40,6 @@ class _WatchpointHost(Protocol):
     def _watchpoint_ref_from(self, entry: dict[str, Any]) -> GdbWatchpointRef: ...
 
 
-def _config_error(
-    message: str, *, code: str, details: dict[str, object] | None = None
-) -> CategorizedError:
-    merged: dict[str, object] = {"code": code, **(details or {})}
-    return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR, details=merged)
-
-
 class GdbMiWatchpointCommands:
     """Hardware write-watchpoint GDB/MI commands."""
 
@@ -59,7 +53,7 @@ class GdbMiWatchpointCommands:
     ) -> GdbWatchpointRef:
         """Set a hardware **write** watchpoint on a symbol/address window (ADR-0277)."""
         if not isinstance(byte_count, int) or byte_count not in WATCH_BYTE_SIZES:
-            raise _config_error(
+            raise config_error(
                 f"byte_count must be one of {list(WATCH_BYTE_SIZES)}",
                 code="bad_byte_count",
                 details={"byte_count": byte_count, "supported": list(WATCH_BYTE_SIZES)},
@@ -82,7 +76,7 @@ class GdbMiWatchpointCommands:
     def clear_watchpoint(self: _WatchpointHost, attachment: GdbMiAttachment, number: str) -> None:
         """Delete a watchpoint by ``number`` via ``-break-delete`` (ADR-0277)."""
         if not _BREAK_ID_RE.match(number):
-            raise _config_error(
+            raise config_error(
                 f"watchpoint id must be numeric, got {number!r}",
                 code="bad_watchpoint_id",
                 details={"number": number},

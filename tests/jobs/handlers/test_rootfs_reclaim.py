@@ -42,8 +42,11 @@ from kdive.jobs.handlers.artifacts.rootfs_reclaim import (
 )
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_name
 from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
-from kdive.reconciler.cleanup import gc
-from kdive.reconciler.cleanup.gc import sweep_expired_investigation_rootfs_reclaim
+from kdive.reconciler.cleanup import investigation_rootfs
+from kdive.reconciler.cleanup.investigation_rootfs import (
+    sweep_expired_investigation_rootfs_reclaim,
+)
+from tests.db_waits import wait_until_backend_waiting
 from tests.reconciler.conftest import connect
 
 _FROZEN = datetime(2026, 7, 24, 0, 0, tzinfo=UTC)
@@ -731,6 +734,7 @@ def test_investigation_lock_serializes_a_concurrent_bind(migrated_url: str, tmp_
         store = _RecordingStore()
 
         binder = await connect(migrated_url)
+        handler_conn = await connect(migrated_url)
         handler: asyncio.Task[str | None] | None = None
         try:
             async with (
@@ -740,15 +744,24 @@ def test_investigation_lock_serializes_a_concurrent_bind(migrated_url: str, tmp_
                 # The bind's System row is inserted but NOT yet committed, and its lock is held.
                 await _seed_system(binder, inv, "provisioning", _upload_profile())
                 handler = asyncio.create_task(
-                    _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads)
+                    reclaim_investigation_rootfs_handler(
+                        handler_conn,
+                        _job(inv, [artifact_id]),
+                        artifact_store=store,
+                        rootfs_dir=str(rootfs_dir),
+                        uploads_dir=str(uploads),
+                    )
                 )
-                await asyncio.sleep(0.3)
+                await wait_until_backend_waiting(
+                    binder, handler_conn.info.backend_pid, locktype="advisory"
+                )
                 assert not handler.done()  # blocked on the lock the binder holds
                 assert staged.exists()
+            assert await asyncio.wait_for(handler, timeout=10) == "0"
         finally:
+            await handler_conn.close()
             await binder.close()
 
-        assert await asyncio.wait_for(handler, timeout=10) == "0"
         # The handler resumed only after the bind committed, so it saw the pre-overlay referencer.
         assert staged.exists()
         assert store.deleted == []
@@ -1157,7 +1170,9 @@ def test_the_deferred_checksum_is_re_selected_by_the_ttl_lane_on_the_next_pass(
                     (str(inv),),
                 )
                 with pytest.MonkeyPatch.context() as patch:
-                    patch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+                    patch.setattr(
+                        investigation_rootfs, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0)
+                    )
                     reissued = await sweep_expired_investigation_rootfs_reclaim(
                         conn, timedelta(days=30)
                     )
@@ -1170,7 +1185,7 @@ def test_the_deferred_checksum_is_re_selected_by_the_ttl_lane_on_the_next_pass(
             ) == ("1")
             assert not staged.exists()
             with pytest.MonkeyPatch.context() as patch:
-                patch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+                patch.setattr(investigation_rootfs, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
                 assert (
                     await sweep_expired_investigation_rootfs_reclaim(conn, timedelta(days=30)) == 0
                 )

@@ -24,7 +24,7 @@ from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.schema.tool_index import build_instructions
 from kdive.mcp.verbosity import compact_responses_enabled
-from kdive.processes.worker_incarnation import (
+from kdive.processes.lifecycle.worker_incarnation import (
     DockerWorkerDeathVerifier,
     KubernetesWorkerDeathVerifier,
     WorkerDeathVerifier,
@@ -83,7 +83,10 @@ def build_app(
             meter=meter or metrics.get_meter("kdive.mcp"),
         )
     )
-    composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
+    stores = object_store_assembly or build_object_store_assembly()
+    composition = provider_composition or ProviderComposition(
+        secret_registry=secret_registry, object_store=stores.store
+    )
     resolver = composition.build_provider_resolver()
     app.add_middleware(UsageTrackingMiddleware(pool, secret_registry=composition.secret_registry))
     app.add_middleware(ToolExposureMiddleware(resolver))
@@ -109,11 +112,7 @@ def build_app(
         secret_registry=composition.secret_registry,
         reaper=composition.build_reconciler_reaper(),
         dump_volume_reaper=composition.build_reconciler_dump_volume_reaper(),
-        object_stores=(
-            object_store_assembly
-            if object_store_assembly is not None
-            else build_object_store_assembly()
-        ),
+        object_stores=stores,
         worker_death_verifier=durable_witness,
     )
     for register in build_plane_registrars(assembly):

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
+from unittest.mock import patch
 from uuid import uuid4
 
+import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
@@ -52,6 +55,12 @@ class _Store:
         if self._exc is not None:
             raise self._exc
         return FetchedArtifact(self._data, Sensitivity.SENSITIVE, "build")
+
+
+class _DegenerateDecisionFault:
+    @property
+    def is_degenerate(self) -> bool:
+        raise RuntimeError("degenerate decision failed")
 
 
 def _conn(row: dict[str, Any] | None) -> AsyncConnection[Any]:
@@ -136,6 +145,120 @@ def test_store_error_fails_open_to_none():
     exc = CategorizedError("gone", category=ErrorCategory.STALE_HANDLE)
     got = asyncio.run(load_effective_config(conn, uuid4(), store_factory=lambda: _Store(exc=exc)))
     assert got is None
+
+
+def test_store_factory_runtime_error_fails_open_with_traceback(caplog: pytest.LogCaptureFixture):
+    run_id = uuid4()
+    with caplog.at_level(logging.WARNING, logger="kdive.kernel_config.fetch"):
+        got = asyncio.run(
+            load_effective_config(
+                _conn({"object_key": "k"}),
+                run_id,
+                store_factory=lambda: (_ for _ in ()).throw(RuntimeError("factory failed")),
+            )
+        )
+
+    assert got is None
+    assert len(caplog.records) == 1
+    assert str(run_id) in caplog.records[0].getMessage()
+    assert caplog.records[0].exc_info is not None
+
+
+def test_store_fetch_value_error_fails_open_with_traceback(caplog: pytest.LogCaptureFixture):
+    run_id = uuid4()
+    with caplog.at_level(logging.WARNING, logger="kdive.kernel_config.fetch"):
+        got = asyncio.run(
+            load_effective_config(
+                _conn({"object_key": "k"}),
+                run_id,
+                store_factory=lambda: _Store(exc=ValueError("fetch failed")),
+            )
+        )
+
+    assert got is None
+    assert len(caplog.records) == 1
+    assert str(run_id) in caplog.records[0].getMessage()
+    assert caplog.records[0].exc_info is not None
+
+
+def test_key_lookup_runtime_error_fails_open_with_traceback(caplog: pytest.LogCaptureFixture):
+    run_id = uuid4()
+
+    async def _boom(conn: Any, run_id: Any) -> None:
+        raise RuntimeError("lookup failed")
+
+    with (
+        patch("kdive.kernel_config.fetch.effective_config_key", _boom),
+        caplog.at_level(logging.WARNING, logger="kdive.kernel_config.fetch"),
+    ):
+        got = asyncio.run(load_effective_config(_conn({"object_key": "k"}), run_id))
+
+    assert got is None
+    assert len(caplog.records) == 1
+    assert str(run_id) in caplog.records[0].getMessage()
+    assert caplog.records[0].exc_info is not None
+
+
+def test_parse_runtime_error_fails_open_with_traceback(caplog: pytest.LogCaptureFixture):
+    run_id = uuid4()
+
+    def _boom(data: bytes) -> None:
+        raise RuntimeError("parse failed")
+
+    with (
+        patch("kdive.kernel_config.fetch.parse_kernel_config", _boom),
+        caplog.at_level(logging.WARNING, logger="kdive.kernel_config.fetch"),
+    ):
+        got = asyncio.run(
+            load_effective_config(
+                _conn({"object_key": "k"}), run_id, store_factory=lambda: _Store(_GOOD)
+            )
+        )
+
+    assert got is None
+    assert len(caplog.records) == 1
+    assert str(run_id) in caplog.records[0].getMessage()
+    assert caplog.records[0].exc_info is not None
+
+
+def test_degenerate_decision_runtime_error_fails_open_with_traceback(
+    caplog: pytest.LogCaptureFixture,
+):
+    run_id = uuid4()
+
+    with (
+        patch(
+            "kdive.kernel_config.fetch.parse_kernel_config",
+            return_value=_DegenerateDecisionFault(),
+        ),
+        caplog.at_level(logging.WARNING, logger="kdive.kernel_config.fetch"),
+    ):
+        got = asyncio.run(
+            load_effective_config(
+                _conn({"object_key": "k"}), run_id, store_factory=lambda: _Store(_GOOD)
+            )
+        )
+
+    assert got is None
+    assert len(caplog.records) == 1
+    assert str(run_id) in caplog.records[0].getMessage()
+    assert caplog.records[0].exc_info is not None
+
+
+def test_key_lookup_cancellation_propagates_without_fail_open_warning(
+    caplog: pytest.LogCaptureFixture,
+):
+    async def _cancel(conn: Any, run_id: Any) -> None:
+        raise asyncio.CancelledError
+
+    with (
+        patch("kdive.kernel_config.fetch.effective_config_key", _cancel),
+        caplog.at_level(logging.WARNING, logger="kdive.kernel_config.fetch"),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        asyncio.run(load_effective_config(_conn({"object_key": "k"}), uuid4()))
+
+    assert not caplog.records
 
 
 def test_degenerate_config_fails_open_to_none():

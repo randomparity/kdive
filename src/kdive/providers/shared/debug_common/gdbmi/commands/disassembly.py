@@ -11,6 +11,7 @@ from kdive.providers.ports.debug import (
     GdbInstruction,
     GdbMiAttachment,
 )
+from kdive.providers.shared.debug_common.gdbmi._errors import config_error
 from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     MiRecord,
     disassembly_rows,
@@ -50,13 +51,6 @@ class _DisassemblyHost(Protocol):
     def _redact_instruction(self, instruction: GdbInstruction) -> GdbInstruction: ...
 
 
-def _config_error(
-    message: str, *, code: str, details: dict[str, object] | None = None
-) -> CategorizedError:
-    merged: dict[str, object] = {"code": code, **(details or {})}
-    return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR, details=merged)
-
-
 class GdbMiDisassemblyCommands:
     """Disassembly and symbol/address target resolution commands."""
 
@@ -74,7 +68,7 @@ class GdbMiDisassemblyCommands:
             or instruction_count < 1
             or instruction_count > MAX_DISASSEMBLE_INSTRUCTIONS
         ):
-            raise _config_error(
+            raise config_error(
                 f"instruction_count must be between 1 and {MAX_DISASSEMBLE_INSTRUCTIONS}",
                 code="bad_instruction_count",
                 details={"instruction_count": instruction_count},
@@ -106,7 +100,7 @@ class GdbMiDisassemblyCommands:
         has_symbol = symbol is not None
         has_address = address is not None
         if has_symbol == has_address:
-            raise _config_error(
+            raise config_error(
                 "exactly one of symbol or address is required",
                 code="bad_target",
                 details={"symbol": symbol, "address": address},
@@ -114,7 +108,7 @@ class GdbMiDisassemblyCommands:
         if symbol is not None:
             return self.resolve_symbol(attachment, symbol)
         if not isinstance(address, int) or address < 0 or address > 0xFFFFFFFFFFFFFFFF:
-            raise _config_error(
+            raise config_error(
                 "address out of range", code="bad_address", details={"address": address}
             )
         return address

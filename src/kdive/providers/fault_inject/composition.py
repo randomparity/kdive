@@ -40,7 +40,8 @@ from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvi
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.fault_inject.retrieve import FaultInjectRetrieve
 from kdive.providers.infra.reaping import InfraReaper
-from kdive.store.objectstore import object_store_from_env
+from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
+from kdive.store.objectstore import ObjectStore
 
 _POOL = "fault-inject"
 # Synthetic provider cost reuses seeded `local`; unseeded classes fail closed in accounting.
@@ -86,13 +87,16 @@ def build_reaper(inventory: FaultInjectInventory) -> InfraReaper:
 
 
 def build_runtime(
-    *, inventory: FaultInjectInventory | None = None, engine: FaultEngine | None = None
+    *,
+    store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
+    inventory: FaultInjectInventory | None = None,
+    engine: FaultEngine | None = None,
 ) -> ProviderRuntime:
     """Build fault-inject mock provider ports (ADR-0072 happy path; ADR-0074 faults)."""
     inventory = inventory if inventory is not None else FaultInjectInventory()
     provisioner = FaultInjectProvisioning(inventory)
     install = FaultInjectInstall()
-    retrieve = FaultInjectRetrieve(store_factory=object_store_from_env)
+    retrieve = FaultInjectRetrieve(store_factory=lambda: store)
     introspect = FaultInjectIntrospect()
     faulted_install = FaultedInstall(install, engine) if engine is not None else install
     return ProviderRuntime(

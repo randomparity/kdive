@@ -288,14 +288,18 @@ changelog:
 
 # Start the operator backing services (Postgres + MinIO + mock OIDC) for a live run.
 compose-up:
-    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker-member:kdive-worker-local@postgres:5432/kdive}" uv run python -m kdive.processes.compose_worker_lifecycle up # pragma: allowlist secret — local dev only
+    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker-member:kdive-worker-local@postgres:5432/kdive}" uv run python -m kdive.processes.lifecycle.compose_worker_lifecycle up # pragma: allowlist secret — local dev only
+
+# Stop the stack after recording worker termination, preserving named volumes for an upgrade.
+compose-stop:
+    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" uv run python -m kdive.processes.lifecycle.compose_worker_lifecycle down # pragma: allowlist secret — local dev only
 
 compose-recreate-worker:
-    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker-member:kdive-worker-local@postgres:5432/kdive}" uv run python -m kdive.processes.compose_worker_lifecycle recreate # pragma: allowlist secret — local dev only
+    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker-member:kdive-worker-local@postgres:5432/kdive}" uv run python -m kdive.processes.lifecycle.compose_worker_lifecycle recreate # pragma: allowlist secret — local dev only
 
 # Stop the operator backing services and remove their volumes.
 compose-down:
-    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" uv run python -m kdive.processes.compose_worker_lifecycle down --volumes # pragma: allowlist secret — local dev only
+    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" uv run python -m kdive.processes.lifecycle.compose_worker_lifecycle down --volumes # pragma: allowlist secret — local dev only
 
 # Run the isolated executable Compose/Docker lifecycle proof. The explicit environment makes
 # unavailable Docker a failure and guarantees that the sole carrier cannot report a skip as proof.

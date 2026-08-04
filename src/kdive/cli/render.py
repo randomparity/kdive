@@ -1,6 +1,6 @@
 """Operator-facing output: a plain aligned table by default, the server envelope with ``--json``.
 
-Every curated verb renders a human-facing table by default and, with ``--json``, prints the
+Specialised handler overrides render a human-facing table by default and, with ``--json``, print the
 server response envelope verbatim via :func:`render_envelope` — the one thing ``--json`` means
 across the whole surface (ADR-0421 §6). :func:`emit` is the shared branch each verb calls.
 
@@ -23,9 +23,9 @@ def _cell(value: object) -> str:
 
 
 def emit(envelope: Mapping[str, object], table: Callable[[], None], *, as_json: bool) -> None:
-    """Print the whole envelope as JSON on ``--json``, else run the curated ``table`` renderer.
+    """Print the whole envelope as JSON on ``--json``, else run the supplied table renderer.
 
-    This is the single definition of what ``--json`` means for a curated verb: the server
+    This is the single definition of what ``--json`` means for a specialised handler: the server
     response envelope verbatim (ADR-0421 §6), not a hand-picked column projection. ``table`` is
     a zero-argument callable that renders the default human table when ``--json`` is not set.
     """
@@ -53,7 +53,7 @@ def flatten_envelope(envelope: object) -> dict[str, object]:
     ``id`` comes from ``object_id`` and ``state`` from ``status``; every ``data`` key is lifted
     to a top-level cell. Accepts ``object`` because the items of a collection envelope arrive
     untyped from the wire; a non-mapping (e.g. a degraded row) flattens to an empty row rather
-    than raising. This is the shared projection the curated read/mutation verbs also use.
+    than raising. This is the shared projection specialised read/mutation handlers also use.
     """
     if not isinstance(envelope, Mapping):
         return {}
@@ -83,13 +83,13 @@ def render_envelope(envelope: Mapping[str, object], *, as_json: bool) -> None:
 
     * ``as_json=True`` prints the WHOLE envelope unprojected, so the agent-navigation contract
       (``suggested_next_actions``, ``refs``, ``error_category``, nested ``items``) survives. This
-      is what ``--json`` emits on every curated and generated verb (ADR-0421 §6).
-    * The table path (``as_json=False``, used by the *generated* verbs whose columns nobody
+      is what ``--json`` emits on every descriptor-owned verb (ADR-0421 §6).
+    * The table path (``as_json=False``, used by descriptor-driven verbs whose columns nobody
       chose) flattens a collection's ``items`` via :func:`flatten_envelope` and tables them over
       the *union* of all row keys in stable first-seen order; a single envelope (empty ``items``)
       renders as a record.
 
-    Curated verbs supply their own fixed-column table via :func:`render` / :func:`render_report`;
+    Specialised handlers supply fixed-column tables via :func:`render` / :func:`render_report`;
     they reach this function only through :func:`emit`'s ``--json`` branch.
     """
     if as_json:

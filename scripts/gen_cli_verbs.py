@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
@@ -42,7 +43,7 @@ from typing import Any, cast
 from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
+from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedLocalFlag, GeneratedVerb
 from kdive.cli.reserved_flags import RESERVED_CLI_FLAGS, derive_cli_flag
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.assembly.schema_catalog import CatalogWorkerDeathVerifier
@@ -63,7 +64,7 @@ server tool without regenerating fails ``just ci``.
 
 from __future__ import annotations
 
-from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
+from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedLocalFlag, GeneratedVerb
 
 '''
 
@@ -73,6 +74,95 @@ _SCALAR_ARGTYPE = {"string": "str", "integer": "int", "number": "float"}
 _NO_DEFS: Mapping[str, Any] = MappingProxyType({})
 
 _REF_PREFIX = "#/$defs/"
+
+
+@dataclass(frozen=True)
+class _ParserShape:
+    """One deliberate presentation override for a stable, hand-oriented CLI verb.
+
+    Tool schemas remain the source of parameter type, enum, and help text.  This small policy
+    only records the presentation a schema cannot express: which otherwise-valid fields are
+    part of the compact CLI, which IDs are positional, and the two parser-only acknowledgements
+    consumed by bespoke handlers.  A missing entry deliberately means the generic, complete
+    schema-derived flag surface.
+    """
+
+    fields: tuple[str, ...]
+    positionals: tuple[str, ...] = ()
+    required: tuple[str, ...] = ()
+    local_flags: tuple[GeneratedLocalFlag, ...] = ()
+    confirm_destructive: bool = False
+    help: str = ""
+
+
+_FORCE_CONFIRM = GeneratedLocalFlag("--force", "force", "")
+_EXPIRED_CONFIRM = GeneratedLocalFlag("--expired", "expired", "")
+
+# The custom handler map in ``commands.registry`` is intentionally separate from this table:
+# handlers own rendering and payload rewrites, while this generator owns every command path and
+# parser shape.  Keep this as data, not a second parser implementation.
+_PARSER_SHAPES: Mapping[str, _ParserShape] = MappingProxyType(
+    {
+        "resources.list": _ParserShape(("kind",)),
+        "resources.describe": _ParserShape(("resource_id",), ("resource_id",)),
+        "allocations.list": _ParserShape(("project",), required=("project",)),
+        "systems.list": _ParserShape(("state",)),
+        "systems.get": _ParserShape(("system_id",), ("system_id",)),
+        "runs.get": _ParserShape(("run_id",), ("run_id",)),
+        "jobs.list": _ParserShape(()),
+        "jobs.wait": _ParserShape(
+            ("job_id", "timeout_s"),
+            ("job_id",),
+            help="read or poll one job; --timeout-s 0 is the point read",
+        ),
+        "allocations.wait": _ParserShape(
+            ("allocation_id", "timeout_s"),
+            ("allocation_id",),
+            help="read or poll one allocation; --timeout-s 0 is the point read",
+        ),
+        # The two accounting schemas are discriminated unions. Their handler-facing CLI fields
+        # are supplied below by ``_shape_flags`` after recursively locating branch properties.
+        "accounting.usage": _ParserShape(
+            ("project", "investigation_id"),
+            help="spend rollup for one --project or one --investigation-id",
+        ),
+        "accounting.report": _ParserShape(
+            ("scope", "projects", "group_by", "since", "until"),
+            required=("scope",),
+            help="accounting rollup; --scope granted-set or all-projects (platform_auditor)",
+        ),
+        "inventory.list": _ParserShape(("project",)),
+        "secrets.list": _ParserShape(()),
+        "ops.force_teardown": _ParserShape(
+            ("system_id", "reason"),
+            ("system_id",),
+            ("reason",),
+            (_FORCE_CONFIRM,),
+        ),
+        "ops.force_release": _ParserShape(
+            ("allocation_id", "reason"), ("allocation_id",), ("reason",)
+        ),
+        "resources.set_scheduling": _ParserShape(
+            ("resource_id", "state"),
+            ("resource_id", "state"),
+            help="set a host 'cordoned' or 'schedulable' (requires a platform_operator token)",
+        ),
+        "resources.drain": _ParserShape(("resource_id", "mode", "reason"), ("resource_id",)),
+        "images.list": _ParserShape(("scope",)),
+        "images.describe": _ParserShape(("image_id", "target_kernel"), ("image_id",)),
+        "images.upload": _ParserShape(
+            ("project", "name", "arch", "quarantine_key", "lifetime_seconds"),
+            required=("project", "name", "arch", "quarantine_key"),
+        ),
+        "images.delete": _ParserShape(("image_id",), ("image_id",)),
+        "images.prune_expired": _ParserShape(
+            ("reason",), required=("reason",), local_flags=(_EXPIRED_CONFIRM,)
+        ),
+        "images.extend": _ParserShape(
+            ("image_id", "seconds", "reason"), ("image_id",), ("seconds", "reason")
+        ),
+    }
+)
 
 
 def _resolve_ref(spec: dict[str, Any], defs: Mapping[str, Any]) -> dict[str, Any]:
@@ -163,6 +253,96 @@ def _flag_for(
     return GeneratedFlag(flag, dest, required, help_, arg_type=argtype)
 
 
+def _named_specs(
+    schema: Mapping[str, Any], name: str, defs: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Return every schema property named ``name``, including union-branch properties.
+
+    The ordinary generator only sees top-level fields (or a single ``request`` object).  The
+    accounting verbs intentionally expose a compact CLI over discriminated request unions, so
+    their parser fields live one level deeper.  Traversal is bounded and reference-resolved: it
+    is a schema lookup, not a general JSON Schema evaluator.
+    """
+    found: list[dict[str, Any]] = []
+
+    def walk(node: Mapping[str, Any], depth: int) -> None:
+        if depth > 4:
+            return
+        resolved = _resolve_ref(dict(node), defs)
+        properties = resolved.get("properties")
+        if isinstance(properties, Mapping):
+            candidate = properties.get(name)
+            if isinstance(candidate, dict):
+                found.append(candidate)
+            for child in properties.values():
+                if isinstance(child, Mapping):
+                    walk(child, depth + 1)
+        for key in ("oneOf", "anyOf", "allOf"):
+            variants = resolved.get(key)
+            if isinstance(variants, list):
+                for variant in variants:
+                    if isinstance(variant, Mapping):
+                        walk(variant, depth + 1)
+
+    walk(schema, 0)
+    return found
+
+
+def _shape_flag(
+    tool_name: str,
+    schema: Mapping[str, Any],
+    name: str,
+    shape: _ParserShape,
+    defs: Mapping[str, Any],
+) -> GeneratedFlag:
+    """Derive one selected parser field, including accounting's union-backed fields.
+
+    ``--projects`` intentionally remains the historical comma-delimited string accepted by the
+    accounting renderer, even though its MCP request field is an array. ``--since``/``--until``
+    are likewise CLI conveniences that the handler folds into the request's ``window`` tuple.
+    These are presentation semantics, not tool payload fields, and therefore live only here.
+    """
+    if name in {"since", "until"}:
+        return GeneratedFlag(
+            derive_cli_flag(name), name, name in shape.required, "", arg_type="str"
+        )
+    specs = _named_specs(schema, name, defs)
+    if not specs:
+        raise ValueError(f"{name!r} is not a property in the schema for shaped CLI verb")
+    if tool_name == "accounting.report" and name == "scope":
+        values = tuple(str(spec["const"]) for spec in specs if "const" in spec)
+        if not values:
+            raise ValueError("accounting report scope has no branch constants")
+        # Preserve the established CLI boundary: the handler owns scope validation and emits
+        # its own usage error. The branch constants prove this is a scalar string, but are not
+        # argparse choices for this shaped command.
+        return GeneratedFlag(
+            derive_cli_flag(name), name, name in shape.required, "", arg_type="str"
+        )
+    flag = _flag_for(name, specs[0], name in shape.required, defs)
+    if flag is None:
+        raise ValueError(f"{name!r} is not scalar-derivable for shaped CLI verb")
+    if name == "projects":
+        # ``reads._projects_arg`` owns the comma split; an argparse ``append`` would change
+        # its input type and break the documented --projects a,b spelling.
+        return GeneratedFlag(flag.name, flag.dest, flag.required, flag.help, arg_type="str")
+    return flag
+
+
+def _shape_is_applicable(
+    schema: Mapping[str, Any], shape: _ParserShape, defs: Mapping[str, Any]
+) -> bool:
+    """Return whether a live schema carries every non-convenience field a shape selects.
+
+    This keeps pure-transform unit tests useful when they deliberately pass a skeletal synthetic
+    schema under a real tool name. The committed-artifact drift check exercises the full live
+    registry, where every shaped tool must satisfy this lookup to receive its override.
+    """
+    return all(
+        name in {"since", "until"} or _named_specs(schema, name, defs) for name in shape.fields
+    )
+
+
 def _verb_for(tool: Any) -> GeneratedVerb:
     """Transform one registered tool into its :class:`GeneratedVerb` descriptor.
 
@@ -206,16 +386,30 @@ def _verb_for(tool: Any) -> GeneratedVerb:
             f"{tool.name!r} requires {sorted(required or top_required)} but derives no flags "
             "and no --<param>-json escape; the verb would be uninvokable"
         )
+    shape = _PARSER_SHAPES.get(tool.name)
+    if shape is not None and not _shape_is_applicable(schema, shape, defs):
+        shape = None
+    if shape is not None:
+        # A shaped verb is still generated from the live schema, but intentionally exposes its
+        # compact documented surface instead of every transport-level filter.  Its custom
+        # handler owns any payload rewrite (the accounting discriminators and report window).
+        flags = [_shape_flag(tool.name, schema, name, shape, defs) for name in shape.fields]
+        json_params = []
     return GeneratedVerb(
         group=group,
         sub=op.replace("_", "-"),
         tool=tool.name,
         read_only=bool(ann and ann.readOnlyHint),
         destructive=bool(ann and ann.destructiveHint),
-        help=help_,
+        help=shape.help if shape is not None and shape.help else help_,
         unwrap_request=unwrap,
         flags=tuple(flags),
         json_params=tuple(json_params),
+        positionals=shape.positionals if shape is not None else (),
+        local_flags=shape.local_flags if shape is not None else (),
+        confirm_destructive=shape.confirm_destructive
+        if shape is not None
+        else bool(ann and ann.destructiveHint),
     )
 
 

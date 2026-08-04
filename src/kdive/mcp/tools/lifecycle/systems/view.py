@@ -415,10 +415,8 @@ async def get_system(
             except CategorizedError:
                 supports_snapshots = None
                 supports_traffic_capture = None
-            # The `systems` table carries no failure category, so a `failed` System's real
-            # reason is recovered from the job that failed it (ADR-0454). One extra query — a
-            # sequential scan of `jobs`, which carries no index supporting it (ADR-0454 §1) —
-            # on the `failed` branch only; every other state pays nothing.
+            # System rows normally carry their failure category; job lookup is the NULL fallback.
+            # The payload ``system_id`` expression supporting this lookup is indexed (ADR-0491).
             failing_job = (
                 await queue.latest_failed_job_for_system(conn, system.id)
                 if system.state is SystemState.FAILED

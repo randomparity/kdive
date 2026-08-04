@@ -490,7 +490,7 @@ MCP-layer tests), so the gap was mutation-attributability, not behavior. `images
 — also a real coverage gap — was closed by #1298; the other **12** gained direct mirror unit tests
 in #1304 (each imports its module by dotted path; PG-independent "fast" targets):
 `services/investigations/{metadata,lifecycle,view}`, `mcp/tools/ops/audit/{read_pipeline,registrar}`,
-`mcp/tools/ops/inventory/registrar`, `mcp/tools/_vmcore_kdump_gate`,
+`mcp/tools/ops/inventory/registrar`, `mcp/tools/lifecycle/vmcore/_vmcore_kdump_gate`,
 `images/cataloging/{object_keys,read_model}`, `images/rootfs/baseline`, `providers/shared/host_cpu`,
 `jobs/handlers/runs/ports`. The bucket is closed again.
 

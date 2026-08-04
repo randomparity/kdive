@@ -14,6 +14,7 @@ from kdive.providers.shared.debug_common.crash_postmortem import (
     run_crash_postmortem,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.live_vm import LIVE_VM_VMLINUX_ENV, require_live_vm_vmlinux
 
 
 def _run(stdout: bytes) -> CrashResult:
@@ -290,7 +291,6 @@ def test_real_run_crash_builds_fixed_argv_and_pipes_script(
 # injects a fake ``run_crash``.
 
 _LIVE_VMCORE_ENV = "KDIVE_LIVE_VM_VMCORE"
-_LIVE_VMLINUX_ENV = "KDIVE_LIVE_VM_VMLINUX"
 
 
 @pytest.mark.live_vm
@@ -306,15 +306,16 @@ def test_live_vm_real_crash_runs_sys_over_a_real_core() -> None:  # pragma: no c
     import shutil as _shutil
 
     vmcore = os.environ.get(_LIVE_VMCORE_ENV)
-    vmlinux = os.environ.get(_LIVE_VMLINUX_ENV)
-    if not vmcore or not vmlinux:
+    if not vmcore:
         pytest.skip(
-            f"{_LIVE_VMCORE_ENV}/{_LIVE_VMLINUX_ENV} not set; needs a real captured core + vmlinux"
+            f"{_LIVE_VMCORE_ENV}/{LIVE_VM_VMLINUX_ENV} not set; "
+            "needs a real captured core + vmlinux"
         )
+    vmlinux = require_live_vm_vmlinux().vmlinux
     if not _shutil.which("crash"):
         pytest.skip("crash(8) not installed on this host")
 
-    result = _real_run_crash(Path(vmlinux), Path(vmcore), "sys\nquit\n")
+    result = _real_run_crash(vmlinux, Path(vmcore), "sys\nquit\n")
 
     assert result.exit_status == 0, result.stderr.decode("utf-8", "replace")
     # crash's `sys` banner always prints these labels over a real core.

@@ -422,7 +422,7 @@ def test_unsupported_provider_pins_message(migrated_url: str, monkeypatch) -> No
         async with _pool(migrated_url) as pool:
             await pool.open()
             run_id, _ = await _seed_ready_run(pool)
-            resolver = provider_resolver(traffic_capturer=None)
+            resolver = provider_resolver(traffic_capturer=None, supports_traffic_capture=False)
 
             async def _fake_loop(**_kwargs):
                 return capture_traffic.LoopResult(False, False)

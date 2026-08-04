@@ -8,8 +8,9 @@ runner are injected here.
 from __future__ import annotations
 
 import asyncio
+import threading
 
-from kdive.diagnostics.checks import CheckStatus
+from kdive.diagnostics.checks import CheckStatus, run_check
 from kdive.diagnostics.multiarch_gdb import diagnostic_contribution as local_diagnostics
 from kdive.diagnostics.provider_checks import PseriesFadumpCheck, PseriesFadumpOutcome
 from kdive.diagnostics.pseries_fadump import default_pseries_fadump_probe
@@ -60,6 +61,42 @@ def test_not_applicable_when_no_ppc64_emulator() -> None:
     probe = default_pseries_fadump_probe(which=_which({}), run_version=_run)
     assert _outcome(probe) is PseriesFadumpOutcome.NOT_APPLICABLE
     assert calls == []
+
+
+def test_blocking_version_probe_is_bounded_by_run_check_timeout() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    watchdog_released = threading.Event()
+
+    def _blocking_version(_argv: list[str]) -> str:
+        started.set()
+        if not release.wait(timeout=1.0):
+            watchdog_released.set()
+        return "QEMU emulator version 10.2.0"
+
+    probe = default_pseries_fadump_probe(
+        which=_which({"qemu-system-ppc64": "/usr/bin/qemu-system-ppc64"}),
+        run_version=_blocking_version,
+    )
+    check = PseriesFadumpCheck(provider="local-libvirt", probe=probe)
+
+    async def _exercise_timeout() -> CheckStatus:
+        task = asyncio.create_task(run_check(check, timeout=0.01))
+        try:
+            while not started.is_set():
+                if task.done():
+                    await task
+                    raise AssertionError("fadump version runner did not start")
+                await asyncio.sleep(0)
+            result = await task
+            assert not watchdog_released.is_set()
+            assert not release.is_set()
+            assert "did not respond within" in result.detail
+            return result.status
+        finally:
+            release.set()
+
+    assert asyncio.run(_exercise_timeout()) is CheckStatus.ERROR
 
 
 def test_check_maps_outcomes_to_statuses() -> None:

@@ -26,6 +26,8 @@ from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.security.authz.rbac import Role
+from kdive.services.runs.complete_build import CompleteBuildFinalizer
+from kdive.services.runs.steps import BuildStepResult
 from tests.clock import STORE_MTIME
 from tests.mcp.systems_support import provisioning_profile as _provisioning_profile
 
@@ -161,6 +163,30 @@ async def seed_external_run_with_manifest(
             ),
         )
     return run_id
+
+
+async def run_by_id(conn_pool: AsyncConnectionPool, run_id: Any) -> Run:
+    """Load a seeded Run and fail the test when it is unexpectedly absent."""
+    async with conn_pool.connection() as conn:
+        run = await RUNS.get(conn, run_id)
+    assert run is not None
+    return run
+
+
+async def complete_build(
+    conn_pool: AsyncConnectionPool,
+    run_id: Any,
+    finalizer: CompleteBuildFinalizer,
+) -> BuildStepResult:
+    """Finalize a build with the standard complete-build request context."""
+    run = await run_by_id(conn_pool, run_id)
+    async with conn_pool.connection() as conn:
+        return await finalizer.complete(conn, ctx(), run, build_id=None, cmdline="console=ttyS0")
+
+
+def build_output(run_id: Any) -> BuildOutput:
+    """Return the standard external-build output for a Run."""
+    return BuildOutput(f"local/runs/{run_id}/kernel", "", "build-id")
 
 
 class FakeValidator:

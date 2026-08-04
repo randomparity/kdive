@@ -12,10 +12,12 @@ from tests.live_vm import (
     require_live_vm_provisioned,
     require_live_vm_remote,
     require_live_vm_throwaway,
+    require_live_vm_vmlinux,
     resolve_bzimage_contract,
     resolve_provisioned_contract,
     resolve_remote_contract,
     resolve_throwaway_contract,
+    resolve_vmlinux_contract,
 )
 
 _REMOTE_URI = "qemu+tls://host.example/system"
@@ -146,6 +148,41 @@ def test_bzimage_returns_contract_when_available(
     contract = require_live_vm_bzimage()
     assert contract.libvirt_uri == "qemu:///session"
     assert contract.bzimage == bzimage
+
+
+def test_vmlinux_absent_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_LIVE_VM_VMLINUX", raising=False)
+    result = resolve_vmlinux_contract()
+    assert result.state is LiveVmEnvState.ABSENT
+    assert "KDIVE_LIVE_VM_VMLINUX" in result.reason
+
+
+def test_vmlinux_misconfigured_when_not_a_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_VMLINUX", "/nonexistent/vmlinux")
+    result = resolve_vmlinux_contract()
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+
+
+def test_vmlinux_returns_matching_debug_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vmlinux = tmp_path / "vmlinux.debug"
+    vmlinux.write_bytes(b"ELF")
+    monkeypatch.setenv("KDIVE_LIVE_VM_VMLINUX", str(vmlinux))
+    contract = require_live_vm_vmlinux()
+    assert contract.vmlinux == vmlinux
+
+
+def test_vmlinux_skips_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_LIVE_VM_VMLINUX", raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        require_live_vm_vmlinux()
+
+
+def test_vmlinux_fails_loud_when_misconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_VMLINUX", "/nonexistent/vmlinux")
+    with pytest.raises(pytest.fail.Exception):
+        require_live_vm_vmlinux()
 
 
 def test_provisioned_absent_when_system_id_unset(monkeypatch: pytest.MonkeyPatch) -> None:

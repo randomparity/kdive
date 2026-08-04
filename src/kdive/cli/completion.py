@@ -1,7 +1,7 @@
 """Offline shell completion over the merged ``kdivectl`` verb surface (ADR-0424).
 
 A static walk of :func:`kdive.cli.__main__.build_parser` — the single constructor of the whole
-curated + generated verb tree (ADR-0421) — records, for each subcommand path, the tokens
+descriptor-owned verb tree (ADR-0421) — records, for each subcommand path, the tokens
 completable *at* that path: a group's child verbs plus the inherited ``--json``, a leaf verb's
 ``--`` flags, and the root's subcommands. The tree is baked into a self-contained bash or zsh
 script (no ``argcomplete``/``shtab`` dependency, no per-keystroke Python), so completion resolves

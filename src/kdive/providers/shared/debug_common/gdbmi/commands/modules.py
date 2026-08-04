@@ -8,6 +8,7 @@ from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment, GdbModule, GdbModuleList
+from kdive.providers.shared.debug_common.gdbmi._errors import config_error
 from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import MiRecord, evaluate_value
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     ModuleDebuginfo,
@@ -73,13 +74,6 @@ class _ModuleHost(Protocol):
     def _add_symbol_file(
         self, attachment: GdbMiAttachment, module: str, path: Path, base: int
     ) -> None: ...
-
-
-def _config_error(
-    message: str, *, code: str, details: dict[str, object] | None = None
-) -> CategorizedError:
-    merged: dict[str, object] = {"code": code, **(details or {})}
-    return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR, details=merged)
 
 
 class GdbMiModuleCommands:
@@ -223,7 +217,7 @@ class GdbMiModuleCommands:
     ) -> GdbModule:
         """Load one module's symbols at its freshly-read base, identity-checked (ADR-0278)."""
         if not _MODULE_NAME_RE.match(module):
-            raise _config_error(
+            raise config_error(
                 f"module name must be a bare identifier, got {module!r}",
                 code="bad_module_name",
                 details={"module": module},
@@ -332,7 +326,7 @@ class GdbMiModuleCommands:
     ) -> None:
         text = self._mi_path(path)
         if '"' in text:
-            raise _config_error(
+            raise config_error(
                 "staged module path is not safely quotable", code="add_symbol_failed"
             )
         command = f'-interpreter-exec console "add-symbol-file {text} 0x{base:x}"'

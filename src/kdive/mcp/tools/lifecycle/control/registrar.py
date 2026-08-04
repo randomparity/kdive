@@ -65,8 +65,8 @@ from kdive.mcp.tools._common import (
     invalid_uuid_error as _invalid_uuid_error,
 )
 from kdive.mcp.tools._common import job_envelope
-from kdive.mcp.tools._idempotency import keyed_mutation
-from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
+from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
+from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
@@ -522,6 +522,14 @@ async def _capture_traffic(
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
     """Register the `control.*` tools on ``app``, bound to ``pool``."""
 
+    _register_control_power(app, pool)
+    _register_control_force_crash(app, pool, resolver)
+    _register_control_diagnostic_sysrq(app, pool, resolver)
+    _register_control_watch_for_crash(app, pool, resolver)
+    _register_control_capture_traffic(app, pool, resolver)
+
+
+def _register_control_power(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="control.power",
         annotations=_docmeta.mutating(),
@@ -561,6 +569,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             idempotency_key=idempotency_key,
         )
 
+
+def _register_control_force_crash(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="control.force_crash",
         annotations=_docmeta.destructive(),
@@ -584,6 +596,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             idempotency_key=idempotency_key,
         )
 
+
+def _register_control_diagnostic_sysrq(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="control.diagnostic_sysrq",
         annotations=_docmeta.mutating(),
@@ -633,6 +649,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             idempotency_key=idempotency_key,
         )
 
+
+def _register_control_watch_for_crash(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="control.watch_for_crash",
         annotations=_docmeta.mutating(),
@@ -688,6 +708,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             idempotency_key=idempotency_key,
         )
 
+
+def _register_control_capture_traffic(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="control.capture_traffic",
         annotations=_docmeta.mutating(),

@@ -11,7 +11,6 @@ import asyncio
 
 import pytest
 from fastmcp import FastMCP
-from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
@@ -22,17 +21,12 @@ from kdive.mcp.schema.tool_index import (
     retired_names_for,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.mcp.conftest import AUDIENCE, ISSUER
-
-
-def _verifier() -> JWTVerifier:
-    kp = RSAKeyPair.generate()
-    return JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
+from tests.mcp.auth_support import verifier
 
 
 def _built_app() -> FastMCP:
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    return build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    return build_app(pool, verifier=verifier(), secret_registry=SecretRegistry())
 
 
 def _registered_tool_names() -> set[str]:

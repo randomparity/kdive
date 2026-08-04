@@ -52,7 +52,7 @@ from kdive.mcp.tools.ops.security import breakglass as ops_breakglass_tools
 from kdive.mcp.tools.ops.security import secrets as ops_secrets_tools
 from kdive.mcp.tools.reports import generate as reports_generate
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
-from kdive.processes.worker_incarnation import WorkerDeathVerifier
+from kdive.processes.lifecycle.worker_incarnation import WorkerDeathVerifier
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import DumpVolumeReaper, InfraReaper
@@ -212,9 +212,17 @@ def _ops_secrets_tools_registrar(secret_registry: SecretRegistry) -> PlaneRegist
     return _register
 
 
-def _report_tools_registrar(secret_registry: SecretRegistry) -> PlaneRegistrar:
+def _report_tools_registrar(
+    secret_registry: SecretRegistry,
+    object_stores: ObjectStoreAssembly,
+) -> PlaneRegistrar:
     def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
-        reports_generate.register(app, pool, secret_registry=secret_registry)
+        reports_generate.register(
+            app,
+            pool,
+            secret_registry=secret_registry,
+            store_factory=lambda: object_stores.store,
+        )
 
     return _register
 
@@ -257,7 +265,7 @@ def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
         _pool_only_plane_registrar(register_accounting_usage),
         _pool_only_plane_registrar(register_accounting_reports),
         _pool_only_plane_registrar(register_accounting_admin),
-        _report_tools_registrar(assembly.secret_registry),
+        _report_tools_registrar(assembly.secret_registry, assembly.object_stores),
         _reconcile_tools_registrar(
             reaper=assembly.reaper,
             dump_volume_reaper=assembly.dump_volume_reaper,

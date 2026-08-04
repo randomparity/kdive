@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import cast
 
 import pytest
@@ -19,6 +19,8 @@ from kdive.processes.runtime import (
 )
 from kdive.reconciler.loop import ReconcileConfig
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.assembly import ObjectStoreAssembly
+from kdive.store.objectstore import ObjectStore
 
 
 def _warm_open() -> list[str]:
@@ -89,7 +91,6 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(
         "kdive.processes.reconciler.install_stop", lambda: __import__("asyncio").Event()
     )
-    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: object())
 
     async def _no_serve(*a: object, **k: object) -> None:
         return None
@@ -109,7 +110,34 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     expected_resetter = object()
     expected_dump_volume_reaper = object()
     expected_registry = SecretRegistry()
+    sentinel_store = cast(ObjectStore, object())
     constructed: dict[str, object] = {}
+    readiness_store_factory: Callable[[], object] | None = None
+    constructed_assemblies: list[ObjectStoreAssembly] = []
+
+    def _fresh_readiness_store() -> object:
+        return object()
+
+    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", _fresh_readiness_store)
+
+    def _build_object_store_assembly() -> ObjectStoreAssembly:
+        assembly = ObjectStoreAssembly(store=sentinel_store)
+        constructed_assemblies.append(assembly)
+        return assembly
+
+    monkeypatch.setattr(
+        "kdive.store.assembly.build_object_store_assembly",
+        _build_object_store_assembly,
+    )
+
+    def _capture_readiness_store_factory(**kwargs: object) -> object:
+        nonlocal readiness_store_factory
+        readiness_store_factory = cast(Callable[[], object], kwargs["object_store_factory"])
+        return object()
+
+    monkeypatch.setattr(
+        "kdive.health.processes.worker.build_worker_probe", _capture_readiness_store_factory
+    )
 
     class _FakeConsoleHosting:
         def __init__(self) -> None:
@@ -126,8 +154,11 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     expected_hosting = _FakeConsoleHosting()
 
     class _FakeProviderComposition:
-        def __init__(self, *, secret_registry: SecretRegistry | None = None) -> None:
+        def __init__(
+            self, *, secret_registry: SecretRegistry | None = None, object_store: object
+        ) -> None:
             assert secret_registry is expected_registry
+            constructed["object_store"] = object_store
 
         def build_provider_resolver(self) -> _FakeResolver:
             return _FakeResolver()
@@ -162,6 +193,8 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
         constructed["dump_volume_reaper"] = config.dump_volume_reaper
         constructed["debug_session_telemetry"] = config.debug_session_telemetry
         constructed["system_object_hosting_gate"] = config.system_object_hosting_gate
+        constructed["upload_store"] = config.upload_store
+        constructed["image_store"] = config.image_store
 
     async def _fake_run(self: object, stop: object) -> None:
         events.append("run")
@@ -181,6 +214,12 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     assert constructed["resetter"] is expected_resetter
     assert constructed["dump_volume_reaper"] is expected_dump_volume_reaper
     assert constructed["system_object_hosting_gate"] is expected_hosting
+    assert constructed["object_store"] is sentinel_store
+    assert constructed["upload_store"] is sentinel_store
+    assert constructed["image_store"] is sentinel_store
+    assert len(constructed_assemblies) == 1
+    assert readiness_store_factory is not None
+    assert readiness_store_factory() is not readiness_store_factory()
 
     # Assembly must hand both telemetry planes a *live* instance built from the process
     # meter. Both classes default to a no-op `.disabled()` elsewhere, so asserting the

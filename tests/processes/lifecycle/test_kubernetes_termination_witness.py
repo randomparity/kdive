@@ -10,10 +10,10 @@ from typing import cast
 import pytest
 from psycopg import AsyncConnection, sql
 
-import kdive.processes.kubernetes_credential_broker as credential_broker
-import kdive.processes.lifecycle_witness as lifecycle_witness
-from kdive.processes.kubernetes_credential_broker import KubernetesCredentialBroker
-from kdive.processes.kubernetes_termination_witness import (
+import kdive.processes.lifecycle.kubernetes_credential_broker as credential_broker
+import kdive.processes.lifecycle.lifecycle_witness as lifecycle_witness
+from kdive.processes.lifecycle.kubernetes_credential_broker import KubernetesCredentialBroker
+from kdive.processes.lifecycle.kubernetes_termination_witness import (
     KubernetesTerminationWitness,
     run_witness,
 )
@@ -27,7 +27,7 @@ from tests.reconciler.conftest import connect
 
 def test_lifecycle_witness_process_exposes_its_runner() -> None:
     assert lifecycle_witness.run_lifecycle_witness_body.__module__ == (
-        "kdive.processes.lifecycle_witness"
+        "kdive.processes.lifecycle.lifecycle_witness"
     )
 
 

@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "kdive.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ if .Values.lifecycleWitness.enabled }}1{{ else }}0{{ end }}
   selector:
     matchLabels:
       app: {{ include "kdive.fullname" . }}-witness

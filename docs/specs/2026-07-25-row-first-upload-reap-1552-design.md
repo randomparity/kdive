@@ -32,7 +32,8 @@ deadline while a reap fails partway — narrow, but reachable.
 ### Two claims in the issue body that do not hold
 
 1. *"A row deleted with objects present is a leak the #768 expiry reaper already handles."* It is
-   not. `gc_expired_build_artifacts` (`reconciler/cleanup/gc.py`) is **row-driven** over
+   not. `gc_expired_build_artifacts` (`reconciler/cleanup/artifact_retention.py`) is **row-driven**
+   over
    `artifacts`, and the reaper by construction only ever deletes objects that have **no**
    `artifacts` row — so a row-first orphan is structurally invisible to it. The only prefix-driven
    orphan scan covers the `images/` prefix (`reconciler/cleanup/images.py`, `list_image_objects`),

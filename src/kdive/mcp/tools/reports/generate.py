@@ -56,7 +56,6 @@ from kdive.serialization import JsonValue
 from kdive.services.reports.artifacts import ReportArtifactStore, write_report_artifacts
 from kdive.services.reports.core import Report, ReportScope, Row, Section, generate_report
 from kdive.services.reports.sections import registry
-from kdive.store.objectstore import object_store_from_env
 
 _REPORT_OBJECT_ID = "report"
 _TOOL = "reports.generate"
@@ -277,7 +276,7 @@ async def generate(
     *,
     secret_registry: SecretRegistry,
     request: GenerateReportRequest,
-    store_factory: StoreFactory = object_store_from_env,
+    store_factory: StoreFactory,
 ) -> ToolResponse:
     """Dispatch the typed ``reports.generate`` request model to its explicit handler."""
     if isinstance(request, AllProjectsGenerateRequest):
@@ -308,7 +307,7 @@ async def generate_granted_set(
     projects: list[str] | None = None,
     window: object = None,
     formats: list[str] | None = None,
-    store_factory: StoreFactory = object_store_from_env,
+    store_factory: StoreFactory,
 ) -> ToolResponse:
     """Generate a report over the caller's granted projects (``viewer`` floor)."""
     with bind_context(principal=ctx.principal):
@@ -358,7 +357,7 @@ async def generate_all_projects(
     secret_registry: SecretRegistry,
     window: object = None,
     formats: list[str] | None = None,
-    store_factory: StoreFactory = object_store_from_env,
+    store_factory: StoreFactory,
 ) -> ToolResponse:
     """Generate a platform-wide report over every project (``platform_auditor``)."""
     with bind_context(principal=ctx.principal):
@@ -448,7 +447,13 @@ async def _audit_all_projects(
         )
 
 
-def register(app: FastMCP, pool: AsyncConnectionPool, *, secret_registry: SecretRegistry) -> None:
+def register(
+    app: FastMCP,
+    pool: AsyncConnectionPool,
+    *,
+    secret_registry: SecretRegistry,
+    store_factory: StoreFactory,
+) -> None:
     """Register the ``reports.generate`` tool on ``app``, bound to ``pool``."""
 
     @app.tool(
@@ -488,4 +493,5 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, secret_registry: Secret
             current_context(),
             secret_registry=secret_registry,
             request=request,
+            store_factory=store_factory,
         )

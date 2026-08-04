@@ -1,7 +1,7 @@
 # kdive Helm chart
 
-Deploys four kdive processes — server, worker, reconciler, lifecycle witness — plus a migrate
-one-shot Job, against operator-provided Postgres/MinIO/OIDC backends. Implements
+Deploys four long-running Kubernetes workloads — server, worker, reconciler, lifecycle witness —
+plus a migrate one-shot Job, against operator-provided Postgres/MinIO/OIDC backends. Implements
 ADR-0088 (deployment & packaging).
 
 This README is the value/flag reference. For an end-to-end bring-up — building and
@@ -52,12 +52,11 @@ use the normal rolling path.
 
 ## Upgrade
 
-**The release containing migration 0095 is stop-old-first.** Scale the server, worker, and
-reconciler workloads to zero and wait for every old Pod to terminate before the migrate hook runs.
-Migration 0095 refuses to run while another database client is connected because pre-0095 strict
-Run projections cannot tolerate the new `runs.build_ref` column. Run the hooked upgrade only after
-the old Pods are gone, then restore the desired replicas with the new image. Do not use a rolling
-upgrade or roll back to a pre-0095 image after migration.
+**Worker-fence releases use the [staged worker-fence upgrade procedure](
+../../../docs/operating/runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade).**
+It captures live replica counts, proves every KDIVE workload is stopped for migration, and restores
+workers only after the target-image witness is ready. Do not use a rolling upgrade or an old image
+after the migration.
 
 **Do not upgrade with bare `helm upgrade --reuse-values`.** `--reuse-values` carries the
 previous release's merged values and *ignores the fresh `values.yaml` defaults*, so any
@@ -99,38 +98,9 @@ directories) and `/var/lib/kdive/install` is install staging. State of record is
 durable artifacts are in the object store, so discarding both costs a rebuild or a re-fetch on
 the next run, not data.
 
-**Drain the workers before upgrading.** A bare `helm upgrade` does converge on its own — Helm 3
-deletes resources the new chart no longer renders, matching on name/namespace/**kind**, so the
-old Deployment (a different kind under the same name) and the two shared PVCs are removed. But
-Helm creates the new resources *before* deleting the old ones, so for the length of that window
-the Deployment's pods and the StatefulSet's pods are both claiming jobs — briefly double the
-intended workers, some of them mid-build against volumes that are about to be deleted. Those
-jobs fail and are re-dispatched, which is survivable and pointless. Draining first makes the
-transition deterministic:
-
-```sh
-# 1. Stop the workers and wait for the pods to go away.
-kubectl scale deployment/<release>-kdive-worker --replicas=0 -n <ns>
-# `|| true` because `kubectl wait` exits non-zero on "no matching resources found", which is
-# exactly the state you want if the workers were already drained or the step is re-run.
-kubectl wait --for=delete pod -l app=<release>-kdive-worker -n <ns> --timeout=5m || true
-
-# 2. Upgrade. Helm removes the drained Deployment and the two shared PVCs, and creates the
-#    StatefulSet with a fresh pair of claims per ordinal.
-helm get values <release> -o yaml > kdive-values.yaml
-helm upgrade <release> deploy/helm/kdive -f kdive-values.yaml -n <ns>
-
-# 3. Confirm the old shared claims are gone and each ordinal owns its own pair.
-kubectl get pvc -n <ns>   # expect build-<release>-kdive-worker-N / install-<release>-kdive-worker-N
-```
-
-If step 2 leaves either shared PVC behind — a `helm.sh/resource-policy: keep` annotation, or a
-`pvc-protection` finalizer waiting on a pod that never terminated — delete it by hand once no
-worker pod is running:
-
-```sh
-kubectl delete pvc/<release>-kdive-build pvc/<release>-kdive-install -n <ns>
-```
+For a worker-fence release, use the [staged worker-fence upgrade procedure](
+../../../docs/operating/runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade).
+It uses the current worker StatefulSet and preserves the stop-old-first authority boundary.
 
 Two things change size after the migration:
 
@@ -234,8 +204,9 @@ for any caller and must never front a real RBAC boundary.
 
 ## Health probes & scrape (ADR-0090 §5)
 
-Every Deployment wires `livenessProbe` → `/livez` and `readinessProbe` → `/readyz` on
-the process's aux port (`server` 9464, `worker` 9465, `reconciler` 9466), and carries
+Every long-running workload wires `livenessProbe` → `/livez` and `readinessProbe` → `/readyz` on
+the process's aux port (`server` 9464, `worker` 9465, `reconciler` 9466, and
+`lifecycle-witness` 9467), and carries
 `prometheus.io/scrape` pod annotations pointing a pull-based collector at `/metrics` on
 that port. Liveness tracks the loop being alive, readiness tracks the process's own
 backend set — a failing `/readyz` (a backend down) withdraws/gates the pod but does
@@ -255,7 +226,7 @@ Ingress/LoadBalancer to expose it outside the cluster.
 ### Bundled Prometheus (opt-in — ADR-0189)
 
 Nothing scrapes the `/metrics` above by default. Set `bundledObservability=true` to deploy an
-in-cluster Prometheus that discovers all three components via the `prometheus.io/scrape`
+in-cluster Prometheus that discovers all four components via the `prometheus.io/scrape`
 annotations and collects them:
 
 ```sh
@@ -270,7 +241,7 @@ on `pods`, scoped to the release namespace), the scrape-config `ConfigMap`, the 
 
 ```sh
 kubectl port-forward svc/<release>-kdive-prometheus 9090:9090
-# open http://localhost:9090/targets — all three components (server/worker/reconciler) should be UP
+# open http://localhost:9090/targets — server/worker/reconciler/witness all UP
 # then query e.g. kdive_job_queue_depth to confirm kdive_* series are present
 ```
 
@@ -305,9 +276,11 @@ aux `/metrics` is never re-exposed off the cluster (keep it that way; do not Nod
         path: /metrics
       - targetPort: 9466   # reconciler
         path: /metrics
+      - targetPort: 9467   # lifecycle witness
+        path: /metrics
   ```
 
-  (Each endpoint targets every selected pod, so the two ports a given pod does not listen on
+  (Each endpoint targets every selected pod, so the three ports a given pod does not listen on
   show as down — harmless. To avoid that, reuse the bundled chart's annotation-relabeling job
   from `templates/demo/prometheus-config.yaml` as an Operator `additionalScrapeConfigs` instead.)
 
@@ -339,8 +312,8 @@ kubectl create secret generic kdive-database \
 Point `databaseCredentials.migration`, `.server`, `.worker`, `.reconciler`, and
 `.lifecycleWitness` at their respective Secret names and keys. The chart rejects missing refs and
 any detectable reuse of the migration ref. The migration Job receives only the migration ref;
-runtime Pods receive only their process ref, with the lifecycle-witness ref additionally confined
-to the reconciler. Ref changes roll only affected runtime workloads.
+runtime Pods receive only their process ref, with the lifecycle-witness ref confined to the
+dedicated lifecycle-witness workload. Ref changes roll only affected runtime workloads.
 
 ### File-ref secrets (`secrets.secretName`)
 
@@ -421,10 +394,8 @@ an ordinal has run. No cluster-wide Pod permission is required.
 
 ### Upgrading worker-fence authority
 
-For an existing release, stop old workers before the Helm upgrade. The upgrade migrates the runtime
-roles and fence protocol; then rotate the distinct server, worker, reconciler, and lifecycle-witness
-database credentials, start the witness, and start current workers. Verify the registered worker
-incarnations and the server's recovery-tool exposure before resuming queue processing. A rollback
-cannot restore old-worker claiming after the protocol migration; recover forward with a current
-worker image. Do not force-delete Pods, remove finalizers manually, or use database-owner access to
+For an existing release, use the [staged worker-fence upgrade procedure](
+../../../docs/operating/runbooks/kubernetes-deploy.md#staged-worker-fence-upgrade).
+It is the only supported path for migration, credential handling, witness readiness, and worker
+restore. Do not force-delete Pods, remove finalizers manually, or use database-owner access to
 bypass the witness: such bypasses retain pins rather than releasing them.

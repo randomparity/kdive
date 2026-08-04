@@ -47,7 +47,7 @@ from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import SnapshotPayload
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._runtime_resolution import with_runtime_for_system
+from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_system
 from kdive.mcp.tools.lifecycle.systems.snapshot import (
     delete_snapshot,
     list_snapshots,

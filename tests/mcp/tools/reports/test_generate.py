@@ -17,6 +17,8 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from fastmcp import FastMCP
+from fastmcp.tools.function_tool import FunctionTool
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import TypeAdapter
@@ -31,6 +33,7 @@ from kdive.mcp.tools.reports import generate as generate_module
 from kdive.mcp.tools.reports.generate import (
     AllProjectsGenerateRequest,
     GenerateReportRequest,
+    GrantedSetGenerateRequest,
     StoreFactory,
     generate,
 )
@@ -66,8 +69,24 @@ class _FakeStore:
         return f"https://signed.test/{key}"
 
 
+class _StoreOutage(_FakeStore):
+    """A constructed store whose artifact write fails as a live S3 call can."""
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        del request
+        raise CategorizedError(
+            "object store unavailable",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={},
+        )
+
+
 def _store_factory() -> ReportArtifactStore:
     return _FakeStore()
+
+
+def _store_outage_factory() -> ReportArtifactStore:
+    return _StoreOutage()
 
 
 def _failing_factory() -> ReportArtifactStore:
@@ -106,7 +125,7 @@ async def _generate(
     projects: list[str] | None = None,
     window: list[str | None] | None = None,
     formats: list[str] | None = None,
-    store_factory: StoreFactory = _store_factory,
+    store_factory: StoreFactory,
 ) -> ToolResponse:
     """Drive ``reports.generate`` through the real dispatcher with a parsed request model.
 
@@ -125,6 +144,50 @@ async def _generate(
         request=request,
         store_factory=store_factory,
     )
+
+
+def test_registered_wrapper_passes_injected_store_factory_to_generate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = FastMCP("reports-registrar-test")
+    ctx = _ctx()
+    registry = SecretRegistry()
+    store_factory = _store_factory
+    captured: dict[str, object] = {}
+
+    async def _generate_report(
+        registered_pool: AsyncConnectionPool,
+        registered_ctx: RequestContext,
+        *,
+        secret_registry: SecretRegistry,
+        request: GenerateReportRequest,
+        store_factory: StoreFactory,
+    ) -> ToolResponse:
+        captured["pool"] = registered_pool
+        captured["ctx"] = registered_ctx
+        captured["secret_registry"] = secret_registry
+        captured["request"] = request
+        captured["store_factory"] = store_factory
+        return ToolResponse.success("report", "generated")
+
+    monkeypatch.setattr(generate_module, "current_context", lambda: ctx)
+    monkeypatch.setattr(generate_module, "generate", _generate_report)
+    generate_module.register(app, pool, secret_registry=registry, store_factory=store_factory)
+    tool = next(tool for tool in asyncio.run(app.list_tools()) if tool.name == "reports.generate")
+
+    response = asyncio.run(
+        cast(FunctionTool, tool).fn(GrantedSetGenerateRequest(scope="granted-set"))
+    )
+
+    assert response.status == "generated"
+    assert captured == {
+        "pool": pool,
+        "ctx": ctx,
+        "secret_registry": registry,
+        "request": GrantedSetGenerateRequest(scope="granted-set"),
+        "store_factory": store_factory,
+    }
 
 
 @asynccontextmanager
@@ -190,7 +253,9 @@ def test_granted_set_viewer_returns_all_sections_and_refs(migrated_url: str) -> 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
-            resp = await _generate(pool, _ctx(), formats=["csv", "xlsx"])
+            resp = await _generate(
+                pool, _ctx(), formats=["csv", "xlsx"], store_factory=_store_factory
+            )
         assert resp.status == "ok"
         assert {item.data["section"] for item in resp.items} == _SECTIONS
         assert "xlsx" in resp.refs
@@ -215,7 +280,13 @@ def test_granted_set_role_less_named_project_propagates_role_denied(migrated_url
     async def _run() -> RoleDenied:
         async with _pool(migrated_url) as pool:
             with pytest.raises(RoleDenied) as excinfo:
-                await _generate(pool, _ctx(role=None), projects=["proj"], formats=["csv"])
+                await _generate(
+                    pool,
+                    _ctx(role=None),
+                    projects=["proj"],
+                    formats=["csv"],
+                    store_factory=_store_factory,
+                )
         return excinfo.value
 
     denial = asyncio.run(_run())
@@ -234,7 +305,13 @@ def test_granted_set_non_member_named_project_names_no_role(migrated_url: str) -
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await _generate(pool, _ctx(), projects=["other-proj"], formats=["csv"])
+            resp = await _generate(
+                pool,
+                _ctx(),
+                projects=["other-proj"],
+                formats=["csv"],
+                store_factory=_store_factory,
+            )
         assert resp.status == "error"
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         assert "missing_roles" not in resp.data
@@ -246,12 +323,19 @@ def test_granted_set_non_member_named_project_names_no_role(migrated_url: str) -
 def test_all_projects_requires_platform_auditor(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            denied = await _generate(pool, _ctx(), scope="all-projects", formats=["csv"])
+            denied = await _generate(
+                pool,
+                _ctx(),
+                scope="all-projects",
+                formats=["csv"],
+                store_factory=_store_factory,
+            )
             ok = await _generate(
                 pool,
                 _ctx(platform=frozenset({PlatformRole.PLATFORM_AUDITOR})),
                 scope="all-projects",
                 formats=["csv"],
+                store_factory=_store_factory,
             )
         assert denied.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         assert ok.status == "ok"
@@ -274,7 +358,7 @@ def test_store_outage_degrades_to_inline(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
             resp = await _generate(
-                pool, _ctx(), formats=["csv", "xlsx"], store_factory=_failing_factory
+                pool, _ctx(), formats=["csv", "xlsx"], store_factory=_store_outage_factory
             )
         assert resp.status == "ok"
         assert resp.refs == {}
@@ -387,7 +471,11 @@ def test_matrix_all_projects_allowed(migrated_url: str, identity: str) -> None:
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
             resp = await _generate(
-                pool, _matrix_ctx(identity), scope="all-projects", formats=["csv"]
+                pool,
+                _matrix_ctx(identity),
+                scope="all-projects",
+                formats=["csv"],
+                store_factory=_store_factory,
             )
         assert resp.status == "ok"
         assert resp.data["scope"] == "all-projects"
@@ -412,7 +500,11 @@ def test_matrix_all_projects_denied(migrated_url: str, identity: str) -> None:
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
             resp = await _generate(
-                pool, _matrix_ctx(identity), scope="all-projects", formats=["csv"]
+                pool,
+                _matrix_ctx(identity),
+                scope="all-projects",
+                formats=["csv"],
+                store_factory=_store_factory,
             )
         assert resp.status == "error"
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
@@ -427,7 +519,9 @@ def test_matrix_granted_set_allowed(migrated_url: str, identity: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
-            resp = await _generate(pool, _matrix_ctx(identity), formats=["csv"])
+            resp = await _generate(
+                pool, _matrix_ctx(identity), formats=["csv"], store_factory=_store_factory
+            )
         assert resp.status == "ok"
         assert resp.data["scope"] == "granted-set"
 
@@ -446,7 +540,9 @@ def test_matrix_granted_set_without_project_grant_names_no_project(
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
-            resp = await _generate(pool, _matrix_ctx(identity), formats=["csv"])
+            resp = await _generate(
+                pool, _matrix_ctx(identity), formats=["csv"], store_factory=_store_factory
+            )
         assert resp.status == "ok"
         assert resp.data["scope"] == "granted-set"
         assert all(item.data["count"] == 0 for item in resp.items)
@@ -495,10 +591,18 @@ def test_audit_rows_stay_distinguishable_under_one_tool_name(migrated_url: str) 
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
             multi = _ctx(projects=("proj", "proj-b"))
-            assert (await _generate(pool, multi, formats=["csv"])).status == "ok"
+            assert (
+                await _generate(pool, multi, formats=["csv"], store_factory=_store_factory)
+            ).status == "ok"
             auditor = _ctx(platform=frozenset({PlatformRole.PLATFORM_AUDITOR}))
             assert (
-                await _generate(pool, auditor, scope="all-projects", formats=["csv"])
+                await _generate(
+                    pool,
+                    auditor,
+                    scope="all-projects",
+                    formats=["csv"],
+                    store_factory=_store_factory,
+                )
             ).status == "ok"
         rows = sorted(await _platform_audit_rows(migrated_url), key=lambda r: str(r[3]))
         assert [r[2] for r in rows] == ["reports.generate", "reports.generate"]
@@ -516,7 +620,9 @@ def test_single_project_granted_set_is_not_audited(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
-            assert (await _generate(pool, _ctx(), formats=["csv"])).status == "ok"
+            assert (
+                await _generate(pool, _ctx(), formats=["csv"], store_factory=_store_factory)
+            ).status == "ok"
         assert await _platform_audit_rows(migrated_url) == []
 
     asyncio.run(_run())
@@ -528,14 +634,26 @@ def test_all_projects_denial_audited_only_with_a_platform_role(migrated_url: str
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
-            denied = await _generate(pool, _ctx(), scope="all-projects", formats=["csv"])
+            denied = await _generate(
+                pool,
+                _ctx(),
+                scope="all-projects",
+                formats=["csv"],
+                store_factory=_store_factory,
+            )
             assert denied.status == "error"
             assert await _platform_audit_rows(migrated_url) == []
             operator = _ctx(
                 projects=(), role=None, platform=frozenset({PlatformRole.PLATFORM_OPERATOR})
             )
             assert (
-                await _generate(pool, operator, scope="all-projects", formats=["csv"])
+                await _generate(
+                    pool,
+                    operator,
+                    scope="all-projects",
+                    formats=["csv"],
+                    store_factory=_store_factory,
+                )
             ).status == "error"
         rows = await _platform_audit_rows(migrated_url)
         assert len(rows) == 1

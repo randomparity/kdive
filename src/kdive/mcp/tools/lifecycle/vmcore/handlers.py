@@ -27,10 +27,13 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import kdump_capability_refusal as _kdump_capability_refusal
-from kdive.mcp.tools._idempotency import keyed_mutation
-from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
-from kdive.mcp.tools._vmcore_kdump_gate import refusing_kdump_capability
-from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
+from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
+from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run
+from kdive.mcp.tools.lifecycle.vmcore._vmcore_kdump_gate import refusing_kdump_capability
+from kdive.mcp.tools.lifecycle.vmcore._vmcore_targets import (
+    resolve_run_vmcore_target,
+    vmcore_target_failure,
+)
 from kdive.mcp.tools.lifecycle.vmcore.view import (
     console_crash_redirect,
     postmortem_success_response,

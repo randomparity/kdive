@@ -11,26 +11,30 @@ import pytest
 from kdive.db.locks import LockScope
 from kdive.domain.capacity.state import InvestigationState
 from kdive.mcp.tools.lifecycle.runs import steps as run_steps_module
-from kdive.reconciler.cleanup import gc as gc_module
-from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts, gc_investigation_artifacts
+from kdive.reconciler.cleanup import artifact_retention as artifact_retention_module
+from kdive.reconciler.cleanup.artifact_retention import (
+    gc_expired_build_artifacts,
+    gc_investigation_artifacts,
+)
 from kdive.services.runs import admission as run_admission_module
 from kdive.services.runs import complete_build as complete_build_module
 from kdive.services.runs.complete_build import CompleteBuildFinalizer
-from tests.mcp.complete_build_support import FakeValidator, seed_external_run_with_manifest
-from tests.mcp.lifecycle.test_runs_tools import (
-    _create,
-    _ctx,
-    _install,
-    _pool,
-    _seed_investigation,
-    _seed_investigation_build,
-    _seed_system,
+from tests.mcp.complete_build_support import (
+    FakeValidator,
+    build_output,
+    complete_build,
+    seed_external_run_with_manifest,
+)
+from tests.mcp.lifecycle.runs_support import create as create_run
+from tests.mcp.lifecycle.runs_support import ctx as request_context
+from tests.mcp.lifecycle.runs_support import install as install_run
+from tests.mcp.lifecycle.runs_support import pool as run_pool
+from tests.mcp.lifecycle.runs_support import (
+    seed_investigation,
+    seed_investigation_build,
+    seed_system,
 )
 from tests.reconciler.conftest import connect
-from tests.services.runs.test_complete_build import (
-    _complete,
-    _output,
-)
 
 
 class _Store:
@@ -60,10 +64,10 @@ def test_real_create_wins_before_reclaim_lock(
             yield
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            investigation_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            system_id = await _seed_system(pool)
-            build_ref = await _seed_investigation_build(pool, investigation_id)
+        async with run_pool(migrated_url) as pool:
+            investigation_id = await seed_investigation(pool, state=InvestigationState.OPEN)
+            system_id = await seed_system(pool)
+            build_ref = await seed_investigation_build(pool, investigation_id)
             async with pool.connection() as conn:
                 await conn.execute(
                     "UPDATE investigations SET cleanup_pending_at = now() - interval '2 days' "
@@ -71,7 +75,13 @@ def test_real_create_wins_before_reclaim_lock(
                     (investigation_id,),
                 )
             create = asyncio.create_task(
-                _create(pool, _ctx(), investigation_id, system_id, build_ref=build_ref)
+                create_run(
+                    pool,
+                    request_context(),
+                    investigation_id,
+                    system_id,
+                    build_ref=build_ref,
+                )
             )
             await acquired.wait()
             reclaimer = await connect(migrated_url)
@@ -98,7 +108,7 @@ def test_reclaim_lock_wins_and_real_create_rejects_reference(
 ) -> None:
     acquired = asyncio.Event()
     release = asyncio.Event()
-    original_lock = gc_module.advisory_xact_lock
+    original_lock = artifact_retention_module.advisory_xact_lock
 
     @asynccontextmanager
     async def paused_lock(conn, scope, key):
@@ -108,10 +118,10 @@ def test_reclaim_lock_wins_and_real_create_rejects_reference(
             yield
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            investigation_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-            system_id = await _seed_system(pool)
-            build_ref = await _seed_investigation_build(pool, investigation_id)
+        async with run_pool(migrated_url) as pool:
+            investigation_id = await seed_investigation(pool, state=InvestigationState.OPEN)
+            system_id = await seed_system(pool)
+            build_ref = await seed_investigation_build(pool, investigation_id)
             async with pool.connection() as conn:
                 await conn.execute(
                     "UPDATE investigation_builds SET expires_at = now() - interval '1 second' "
@@ -125,9 +135,9 @@ def test_reclaim_lock_wins_and_real_create_rejects_reference(
                 )
                 await acquired.wait()
                 create = asyncio.create_task(
-                    _create(
+                    create_run(
                         pool,
-                        _ctx(),
+                        request_context(),
                         investigation_id,
                         system_id,
                         build_ref=build_ref,
@@ -147,15 +157,21 @@ def test_reclaim_lock_wins_and_real_create_rejects_reference(
             assert response.suggested_next_actions == ["runs.create"]
 
     with monkeypatch.context() as patched:
-        patched.setattr(gc_module, "advisory_xact_lock", paused_lock)
+        patched.setattr(artifact_retention_module, "advisory_xact_lock", paused_lock)
         asyncio.run(_run())
 
 
 async def _seed_reusable_run(pool, *, expired: bool = True):
-    investigation_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
-    system_id = await _seed_system(pool)
-    build_ref = await _seed_investigation_build(pool, investigation_id)
-    response = await _create(pool, _ctx(), investigation_id, system_id, build_ref=build_ref)
+    investigation_id = await seed_investigation(pool, state=InvestigationState.OPEN)
+    system_id = await seed_system(pool)
+    build_ref = await seed_investigation_build(pool, investigation_id)
+    response = await create_run(
+        pool,
+        request_context(),
+        investigation_id,
+        system_id,
+        build_ref=build_ref,
+    )
     async with pool.connection() as conn:
         await conn.execute(
             "UPDATE investigations SET cleanup_pending_at = now() - interval '2 days' "
@@ -176,7 +192,7 @@ def test_reclaim_wins_and_real_install_rejects_reclaiming_reference(
 ) -> None:
     acquired = asyncio.Event()
     release = asyncio.Event()
-    original_lock = gc_module.advisory_xact_lock
+    original_lock = artifact_retention_module.advisory_xact_lock
 
     @asynccontextmanager
     async def paused_lock(conn, scope, key):
@@ -186,7 +202,7 @@ def test_reclaim_wins_and_real_install_rejects_reclaiming_reference(
             yield
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with run_pool(migrated_url) as pool:
             _investigation_id, _build_ref, run_id = await _seed_reusable_run(pool, expired=False)
             reclaim_conn = await connect(migrated_url)
             try:
@@ -194,7 +210,7 @@ def test_reclaim_wins_and_real_install_rejects_reclaiming_reference(
                     gc_investigation_artifacts(reclaim_conn, _Store(), timedelta(days=1))
                 )
                 await acquired.wait()
-                install = asyncio.create_task(_install(pool, _ctx(), run_id))
+                install = asyncio.create_task(install_run(pool, request_context(), run_id))
                 await asyncio.sleep(0)
                 assert not install.done()
                 release.set()
@@ -206,7 +222,7 @@ def test_reclaim_wins_and_real_install_rejects_reclaiming_reference(
             assert response.data["reason"] == "build_ref_not_found"
 
     with monkeypatch.context() as patched:
-        patched.setattr(gc_module, "advisory_xact_lock", paused_lock)
+        patched.setattr(artifact_retention_module, "advisory_xact_lock", paused_lock)
         asyncio.run(_run())
 
 
@@ -226,9 +242,9 @@ def test_real_install_wins_and_queued_job_pins_generation(
             yield
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with run_pool(migrated_url) as pool:
             investigation_id, build_ref, run_id = await _seed_reusable_run(pool, expired=False)
-            install = asyncio.create_task(_install(pool, _ctx(), run_id))
+            install = asyncio.create_task(install_run(pool, request_context(), run_id))
             await acquired.wait()
             reclaim_conn = await connect(migrated_url)
             try:
@@ -266,10 +282,10 @@ async def _seed_completion_race(pool):
             "(SELECT investigation_id FROM runs WHERE id = %s) WHERE id = %s",
             (old_run_id, new_run_id),
         )
-    old = await _complete(
+    old = await complete_build(
         pool,
         old_run_id,
-        CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(old_run_id))),
+        CompleteBuildFinalizer(validate_complete_build=FakeValidator(build_output(old_run_id))),
     )
     assert old.build_ref is not None
     async with pool.connection() as conn:
@@ -304,15 +320,15 @@ def test_real_complete_build_wins_and_reclaim_isolates_new_generation(
 
     async def _run() -> None:
         nonlocal pause_enabled
-        async with _pool(migrated_url) as pool:
+        async with run_pool(migrated_url) as pool:
             investigation_id, old, new_run_id = await _seed_completion_race(pool)
             pause_enabled = True
             completion = asyncio.create_task(
-                _complete(
+                complete_build(
                     pool,
                     new_run_id,
                     CompleteBuildFinalizer(
-                        validate_complete_build=FakeValidator(_output(new_run_id))
+                        validate_complete_build=FakeValidator(build_output(new_run_id))
                     ),
                 )
             )
@@ -349,7 +365,7 @@ def test_reclaim_wins_and_real_complete_build_publishes_fresh_generation(
 ) -> None:
     acquired = asyncio.Event()
     release = asyncio.Event()
-    original_lock = gc_module.advisory_xact_lock
+    original_lock = artifact_retention_module.advisory_xact_lock
 
     @asynccontextmanager
     async def paused_lock(conn, scope, key):
@@ -359,7 +375,7 @@ def test_reclaim_wins_and_real_complete_build_publishes_fresh_generation(
             yield
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with run_pool(migrated_url) as pool:
             _investigation_id, old, new_run_id = await _seed_completion_race(pool)
             reclaimer = await connect(migrated_url)
             try:
@@ -368,11 +384,11 @@ def test_reclaim_wins_and_real_complete_build_publishes_fresh_generation(
                 )
                 await acquired.wait()
                 completion = asyncio.create_task(
-                    _complete(
+                    complete_build(
                         pool,
                         new_run_id,
                         CompleteBuildFinalizer(
-                            validate_complete_build=FakeValidator(_output(new_run_id))
+                            validate_complete_build=FakeValidator(build_output(new_run_id))
                         ),
                     )
                 )
@@ -386,5 +402,5 @@ def test_reclaim_wins_and_real_complete_build_publishes_fresh_generation(
             assert fresh.build_ref is not None and fresh.build_ref != old.build_ref
 
     with monkeypatch.context() as patched:
-        patched.setattr(gc_module, "advisory_xact_lock", paused_lock)
+        patched.setattr(artifact_retention_module, "advisory_xact_lock", paused_lock)
         asyncio.run(_run())

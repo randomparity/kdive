@@ -95,7 +95,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
 from kdive.providers.shared.rootfs_fetch_leases import acquire_fetch_lease, release_fetch_lease
 from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
 from kdive.providers.shared.staging_partials import unlink_partial_if_unheld
-from kdive.store.objectstore import artifact_key, object_store_from_env
+from kdive.store.objectstore import artifact_key
 
 _log = logging.getLogger(__name__)
 
@@ -216,20 +216,19 @@ def _fetch_lock_name(investigation_id: UUID, token: str) -> str:
     return f"rootfs-fetch:{investigation_id}:{token}"
 
 
-def rootfs_upload_fetch_from_env() -> UploadFetch:
+def rootfs_upload_fetch_from_env(store: UploadObjectStore) -> UploadFetch:
     """A synchronous ``(RootfsUploadContext) -> Path`` uploaded-rootfs fetch (ADR-0441).
 
-    Opens a short-lived **autocommit** sync ``psycopg`` connection per call to resolve the System's
-    investigation and the committed object (the provision seam runs in a thread and owns no async
-    pool; the catalog fetch, ADR-0228, opens its own sync connection the same way). Autocommit so
-    the session advisory lock held across the multi-GiB download never keeps a transaction open (an
-    ``advisory_xact_lock`` would trip ``idle_in_transaction_session_timeout``). A present staged
-    file is reused once it re-passes the format gate (ADR-0443). S3 is a required backend
-    (ADR-0337).
+    Closes over the process-assembled object store and opens a short-lived **autocommit** sync
+    ``psycopg`` connection per call to resolve the System's investigation and committed object.
+    The provision seam runs in a thread and owns no async pool; the catalog fetch, ADR-0228, opens
+    its own sync connection the same way. Autocommit ensures the session advisory lock held across
+    the multi-GiB download never keeps a transaction open (an ``advisory_xact_lock`` would trip
+    ``idle_in_transaction_session_timeout``). A present staged file is reused once it re-passes the
+    format gate (ADR-0443). S3 is a required backend (ADR-0337).
     """
 
     def _fetch(upload: RootfsUploadContext) -> Path:
-        store = object_store_from_env()
         with psycopg.connect(config.require(DATABASE_URL), autocommit=True) as conn:
             return fetch_uploaded_rootfs(conn, store, upload)
 

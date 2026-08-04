@@ -30,7 +30,6 @@ from kdive.services.systems.admission import (
     ProvisionJobAdmitted,
     SystemAdmission,
 )
-from tests.mcp.lifecycle.test_systems_tools import _seed_system
 from tests.mcp.systems_support import (
     TEST_COMPONENT_SOURCES as _TEST_COMPONENT_SOURCES,
 )
@@ -52,6 +51,7 @@ from tests.mcp.systems_support import (
 from tests.mcp.systems_support import (
     provisioning_profile as _profile,
 )
+from tests.mcp.systems_support import seed_system
 
 _X86_GUEST_ARCHES = {
     "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"},
@@ -153,7 +153,7 @@ def test_provision_on_failed_system_surfaces_failing_job_reason(migrated_url: st
     async def _run() -> tuple[AdmissionFailure | ProvisionJobAdmitted, str, str]:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            system_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
+            system_id = await seed_system(pool, alloc_id, SystemState.FAILED)
             job = await _enqueue_provision(pool, system_id, alloc_id)
             await _fail_provision_job(
                 pool,
@@ -186,7 +186,7 @@ def test_provision_on_failed_system_without_failed_job_omits_reason(migrated_url
     async def _run() -> AdmissionFailure | ProvisionJobAdmitted:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            await _seed_system(pool, alloc_id, SystemState.FAILED)
+            await seed_system(pool, alloc_id, SystemState.FAILED)
             # A succeeded provision job on the same dedup key must not be treated as the failure.
             job = await _enqueue_provision(pool, str(UUID(int=0)), alloc_id)
             async with pool.connection() as conn:

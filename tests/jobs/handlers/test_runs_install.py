@@ -193,6 +193,86 @@ def test_cancelled_install_keeps_build_use_until_provider_thread_exits(
     assert order == ["provider-exit", "abandon", "release"]
 
 
+def test_cancelled_install_provider_failure_reraises_cancellation_after_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = threading.Event()
+    release_provider = threading.Event()
+    provider_exited = threading.Event()
+    run_id, expected_job_id, use_id = uuid4(), uuid4(), uuid4()
+    credential = SecretStr("worker-test-incarnation-credential")
+    active_uses: set[object] = set()
+    order: list[str] = []
+    provider_error = CategorizedError(
+        "provider install failed",
+        category=ErrorCategory.INSTALL_FAILURE,
+    )
+
+    class Installer:
+        def install(self, request: object) -> None:
+            entered.set()
+            assert release_provider.wait(10)
+            provider_exited.set()
+            order.append("provider-failed")
+            raise provider_error
+
+    async def claimed(*args: object) -> object:
+        return SimpleNamespace(claimed=True)
+
+    async def acquire(*args: object, **kwargs: object) -> object:
+        active_uses.add(use_id)
+        return use_id
+
+    async def abandon(*args: object) -> None:
+        assert provider_exited.is_set()
+        assert active_uses == {use_id}
+        order.append("abandon")
+
+    async def release(*args: object, **kwargs: object) -> bool:
+        assert provider_exited.is_set()
+        assert active_uses == {use_id}
+        active_uses.remove(use_id)
+        order.append("release")
+        return True
+
+    monkeypatch.setattr(runs_install, "claim_run_step", claimed)
+    monkeypatch.setattr(runs_install, "acquire_build_use", acquire)
+    monkeypatch.setattr(runs_install, "abandon_run_step_best_effort", abandon)
+    monkeypatch.setattr(runs_install, "release_build_use", release)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            runs_install._run_install_step(
+                cast(AsyncConnection, object()),
+                run_id,
+                Installer(),
+                cast(InstallRequest, object()),
+                job_id=expected_job_id,
+                attempt=2,
+                incarnation_credential=credential,
+            )
+        )
+        try:
+            assert await asyncio.to_thread(entered.wait, 10)
+            assert active_uses == {use_id}
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            assert active_uses == {use_id}
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            assert active_uses == {use_id}
+        finally:
+            release_provider.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+    assert not active_uses
+    assert order == ["provider-failed", "abandon", "release"]
+
+
 @pytest.mark.parametrize("release_fails", [False, True])
 def test_cancellation_during_release_drains_release_before_abandoning(
     monkeypatch: pytest.MonkeyPatch, *, release_fails: bool
@@ -272,13 +352,8 @@ def test_cancellation_during_release_drains_release_before_abandoning(
         assert not abandoned.is_set()
         assert active_uses == {use_id}
         allow_release.set()
-        if release_fails:
-            with pytest.raises(RuntimeError) as caught:
-                await task
-            assert caught.value is release_error
-        else:
-            with pytest.raises(asyncio.CancelledError):
-                await task
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
     asyncio.run(exercise())
     assert not active_uses

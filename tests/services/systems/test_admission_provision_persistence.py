@@ -25,7 +25,6 @@ from kdive.services.systems.admission import (
     ProvisionJobAdmitted,
     SystemAdmission,
 )
-from tests.mcp.lifecycle.test_systems_tools import _seed_system
 from tests.mcp.systems_support import (
     TEST_COMPONENT_SOURCES as _TEST_COMPONENT_SOURCES,
 )
@@ -44,6 +43,7 @@ from tests.mcp.systems_support import (
 from tests.mcp.systems_support import (
     provisioning_profile as _profile,
 )
+from tests.mcp.systems_support import seed_system
 
 
 def _admission() -> SystemAdmission:
@@ -138,7 +138,7 @@ def test_provision_on_unrecoverable_system_requires_recycle(migrated_url: str) -
     async def _run() -> tuple[AdmissionFailure | ProvisionJobAdmitted, str]:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            system_id = await _seed_system(pool, alloc_id, SystemState.TORN_DOWN)
+            system_id = await seed_system(pool, alloc_id, SystemState.TORN_DOWN)
             return await _provision(_admission(), pool, alloc_id), system_id
 
     result, system_id = asyncio.run(_run())

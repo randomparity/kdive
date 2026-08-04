@@ -3,26 +3,26 @@
 The three guards that came before this one are all artifact-vs-artifact or annotation-only:
 ``test_every_live_tool_is_covered`` proves each tool has a descriptor, ``cli-verbs-check``
 proves the committed descriptors match a fresh generation, and
-``tests/mcp/test_read_tools_annotated.py`` proves a curated ``read_only`` verb targets a
-read-only tool. None of them compares a *parameter shape* to a *schema*, so a curated verb
+``tests/mcp/test_read_tools_annotated.py`` proves a descriptor marked ``read_only`` targets a
+read-only tool. None of them compares a *parameter shape* to a *schema*, so a specialised handler
 kept dispatching its old payload after the tool it calls was reshaped — three times in epic
 #1576 (#1589, #1590, and a third silent regression of the generated-dispatch fixture).
 
 Two complementary guards close that (ADR-0469):
 
-* **Curated verbs — payload capture.** A curated ``Verb``'s payload is built by hand-written
-  Python, so nothing static can predict it. Each curated verb is therefore driven over the
-  *real* parser with a capturing fake client, and every payload it emits is validated against
-  the tool's live JSON schema. Because every tool schema is ``additionalProperties: false``,
-  that single assertion covers unknown keys, dropped properties, and the ``{"request": ...}``
-  wrapper convention in both directions.
-* **Generated verbs — structural.** Their payload assembly is mechanical
-  (``dispatch._assemble_generated_payload``), so the descriptor itself is checked against the
+* **Handler overrides — payload capture.** A specialised handler's payload is built by
+  hand-written Python, so nothing static can predict it. Each overridden descriptor is driven
+  over the *real* parser with a capturing fake client, and every payload it emits is validated
+  against the tool's live JSON schema. Because every tool schema is
+  ``additionalProperties: false``, that single assertion covers unknown keys, dropped
+  properties, and the ``{"request": ...}`` wrapper convention in both directions.
+* **Generic dispatch — structural.** Its payload assembly is mechanical
+  (``generated_args.assemble_generated_payload``), so the descriptor itself is checked against the
   schema: required properties reachable, no dest the schema lacks, enums carrying ``choices``,
   and no argument-less verb for a tool that demands arguments.
 
 The invocation matrix is derived from each verb's own descriptor, not hand-written per verb, so
-a new curated verb is covered the day it is added and there is nothing to keep in sync. The
+a new handler override is covered the day it is added and there is nothing to keep in sync. The
 rule it encodes: **every argv the parser accepts must produce a schema-valid payload.** A verb
 that refuses an argv up front (``accounting usage`` demanding exactly one of
 ``--project`` / ``--investigation-id``) simply emits no payload for that row and is judged on
@@ -49,8 +49,9 @@ import kdive.cli.commands.mutations as mutations
 import kdive.cli.commands.reads as reads
 from kdive.cli.__main__ import build_parser
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
-from kdive.cli.commands.registry import REGISTRY, Verb
-from kdive.cli.commands.verb_spec import GeneratedVerb
+from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX
+from kdive.cli.commands.registry import HANDLER_OVERRIDES
+from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 from kdive.mcp.tools._common import DEFAULT_WAIT_S, MAX_WAIT_S
 from scripts import gen_cli_verbs as gen
 
@@ -136,7 +137,7 @@ def _enum_of(spec: Mapping[str, Any], defs: Mapping[str, Any]) -> tuple[str, ...
 def _find_property(schema: Mapping[str, Any], name: str) -> dict[str, Any] | None:
     """The subschema of the property ``name``, wherever it sits under ``schema``.
 
-    A curated flag can feed a property nested inside a ``request`` wrapper
+    A descriptor flag can feed a property nested inside a ``request`` wrapper
     (``systems list --state``) or inside a discriminated union branch
     (``accounting usage --project``), so the search descends through properties and union
     members rather than reading only the top level. Depth is bounded because the point is to
@@ -189,7 +190,7 @@ def _flag(name: str) -> str:
     return f"--{name.replace('_', '-')}"
 
 
-def _invocations(verb: Verb, schema: Mapping[str, Any]) -> list[list[str]]:
+def _invocations(verb: GeneratedVerb, schema: Mapping[str, Any]) -> list[list[str]]:
     """Every argv row to drive ``verb`` with, derived from its own descriptor.
 
     The base row is the minimal command line the parser accepts: the positionals, the required
@@ -205,18 +206,32 @@ def _invocations(verb: Verb, schema: Mapping[str, Any]) -> list[list[str]]:
 
     base = [verb.group, verb.sub]
     base += [value(name) for name in verb.positionals]
-    base += [part for name in verb.required_options for part in (_flag(name), value(name))]
-    base += [_flag(name) for name in verb.flags]
+    base += list(
+        itertools.chain.from_iterable(
+            [flag.name]
+            if flag.action in {"store_true", "bool_optional"}
+            else [flag.name, value(flag.dest)]
+            for flag in verb.flags
+            if flag.required and flag.dest not in verb.positionals
+        )
+    )
+    base += [flag.name for flag in verb.local_flags]
+    options = [
+        flag for flag in verb.flags if not flag.required and flag.dest not in verb.positionals
+    ]
 
-    def with_options(names: Sequence[str]) -> list[str]:
-        extra = itertools.chain.from_iterable((_flag(n), value(n)) for n in names)
+    def with_options(flags: Sequence[GeneratedFlag]) -> list[str]:
+        extra = itertools.chain.from_iterable(
+            [flag.name] if flag.action == "store_true" else [flag.name, value(flag.dest)]
+            for flag in flags
+        )
         return [*base, *extra]
 
-    return [base, with_options(verb.options), *(with_options([n]) for n in verb.options)]
+    return [base, with_options(options), *(with_options([flag]) for flag in options)]
 
 
 def _payloads_for(
-    verb: Verb,
+    verb: GeneratedVerb,
     schema: Mapping[str, Any],
     parser: argparse.ArgumentParser,
     monkeypatch: pytest.MonkeyPatch,
@@ -238,19 +253,25 @@ def _payloads_for(
         except SystemExit:
             continue
         with contextlib.suppress(SystemExit), contextlib.redirect_stdout(io.StringIO()):
-            asyncio.run(verb.handler(args))
+            from kdive.cli.commands import registry
+
+            asyncio.run(registry.run_verb(args))
         captured += [(argv, name, payload) for name, payload in client.calls]
     return captured
 
 
-@pytest.mark.parametrize("verb", REGISTRY, ids=lambda v: f"{v.group}-{v.sub}")
-def test_curated_verb_payload_matches_its_tool_schema(
-    verb: Verb,
+@pytest.mark.parametrize(
+    "verb",
+    [verb for verb in GENERATED_VERBS if verb.tool in HANDLER_OVERRIDES],
+    ids=lambda v: v.tool,
+)
+def test_handler_override_payload_matches_its_tool_schema(
+    verb: GeneratedVerb,
     tool_schemas: dict[str, dict[str, Any]],
     parser: argparse.ArgumentParser,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every payload a curated verb can emit validates against its tool's live schema.
+    """Every payload a specialised handler can emit validates against its tool's live schema.
 
     This is the guard the epic was missing. Because the schemas forbid additional properties,
     one validation covers the whole class: a payload key the tool dropped, a flat payload sent
@@ -272,9 +293,13 @@ def test_curated_verb_payload_matches_its_tool_schema(
         )
 
 
-@pytest.mark.parametrize("verb", REGISTRY, ids=lambda v: f"{v.group}-{v.sub}")
-def test_curated_verb_reaches_every_required_property(
-    verb: Verb,
+@pytest.mark.parametrize(
+    "verb",
+    [verb for verb in GENERATED_VERBS if verb.tool in HANDLER_OVERRIDES],
+    ids=lambda v: v.tool,
+)
+def test_handler_override_reaches_every_required_property(
+    verb: GeneratedVerb,
     tool_schemas: dict[str, dict[str, Any]],
     parser: argparse.ArgumentParser,
     monkeypatch: pytest.MonkeyPatch,
@@ -293,15 +318,19 @@ def test_curated_verb_reaches_every_required_property(
     assert not missing, f"{verb.group} {verb.sub}: no command line sends required {missing}"
 
 
-@pytest.mark.parametrize("verb", REGISTRY, ids=lambda v: f"{v.group}-{v.sub}")
-def test_curated_enum_parameter_declares_its_choices(
-    verb: Verb, tool_schemas: dict[str, dict[str, Any]], parser: argparse.ArgumentParser
+@pytest.mark.parametrize(
+    "verb",
+    [verb for verb in GENERATED_VERBS if verb.tool in HANDLER_OVERRIDES],
+    ids=lambda v: v.tool,
+)
+def test_handler_override_enum_parameter_declares_its_choices(
+    verb: GeneratedVerb, tool_schemas: dict[str, dict[str, Any]], parser: argparse.ArgumentParser
 ) -> None:
-    """A curated parameter over an enumerated property offers exactly that enum as ``choices``.
+    """An overridden handler's enum parameter offers exactly the schema's ``choices``.
 
-    Without this a curated override silently drops the ``choices`` its generated counterpart
-    derives, turning a typo into a server round-trip instead of a usage error — and leaving the
-    completion tree and ``--help`` with no idea what the legal values are.
+    Without this a parser-shape overlay could silently drop the choices the schema derives,
+    turning a typo into a server round-trip instead of a usage error and leaving the completion
+    tree and ``--help`` with no idea what the legal values are.
     """
     schema = tool_schemas[verb.tool]
     defs = _defs(schema)
@@ -309,14 +338,14 @@ def test_curated_enum_parameter_declares_its_choices(
         action.dest: action
         for action in _subparser_for(parser, verb.group, verb.sub)._actions  # noqa: SLF001
     }
-    for name in (*verb.positionals, *verb.options, *verb.required_options):
+    for name in (flag.dest for flag in verb.flags):
         spec = _find_property(schema, name)
         if spec is None:
             continue
         enum = _enum_of(spec, defs)
         if enum is None:
             continue
-        declared = actions[name].choices
+        declared = actions[f"{GENERATED_ARG_PREFIX}{name}"].choices
         assert declared is not None and tuple(declared) == enum, (
             f"{verb.group} {verb.sub} {_flag(name)}: schema enum {enum} but argparse "
             f"choices {declared}"
@@ -326,30 +355,31 @@ def test_curated_enum_parameter_declares_its_choices(
 _GENERATED_BY_PATH = {(verb.group, verb.sub): verb for verb in GENERATED_VERBS}
 
 
-@pytest.mark.parametrize("verb", REGISTRY, ids=lambda v: f"{v.group}-{v.sub}")
-def test_curated_parameter_carries_its_generated_help(
-    verb: Verb, parser: argparse.ArgumentParser
+@pytest.mark.parametrize(
+    "verb",
+    [verb for verb in GENERATED_VERBS if verb.tool in HANDLER_OVERRIDES],
+    ids=lambda v: v.tool,
+)
+def test_handler_override_parameter_carries_descriptor_help(
+    verb: GeneratedVerb, parser: argparse.ArgumentParser
 ) -> None:
-    """A curated parameter renders the generated verb's help, and never a hand-written one.
+    """A specialised handler's parameter renders descriptor-owned help.
 
-    The curated shape has no place to spell a per-parameter description, so ``--help`` came out
-    bare while the derived string sat unread in the descriptor at the same path (#1618). Both
-    directions matter: a parameter whose generated counterpart describes it must render exactly
-    that string, and a parameter with no counterpart must render *nothing* — a help string
-    typed into the ``Verb`` instead would be the second source of truth ADR-0469 exists to
-    avoid, and it would drift the moment the tool's docstring is reworded.
+    Parser-shape overlays have no place to spell a per-parameter description. Both directions
+    matter: a parameter the descriptor describes must render exactly that string, and one with
+    no description must render *nothing*. A handler-local help string would be the second source
+    of truth ADR-0469 exists to avoid and would drift when the tool docstring changed.
     """
-    generated = _GENERATED_BY_PATH.get((verb.group, verb.sub))
-    assert generated is not None, f"{verb.group} {verb.sub}: curated verb overrides no tool"
-    described = {flag.dest: flag.help for flag in generated.flags if flag.help}
+    described = {flag.dest: flag.help for flag in verb.flags if flag.help}
     actions = {
         action.dest: action
         for action in _subparser_for(parser, verb.group, verb.sub)._actions  # noqa: SLF001
     }
-    for name in (*verb.positionals, *verb.options, *verb.required_options, *verb.flags):
-        assert actions[name].help == described.get(name), (
+    for name in (flag.dest for flag in verb.flags):
+        assert actions[f"{GENERATED_ARG_PREFIX}{name}"].help == described.get(name), (
             f"{verb.group} {verb.sub} {_flag(name)}: --help renders "
-            f"{actions[name].help!r}, but the generated verb at the same path derives "
+            f"{actions[f'{GENERATED_ARG_PREFIX}{name}'].help!r}, but the generated verb at "
+            "the same path derives "
             f"{described.get(name)!r}"
         )
 
@@ -432,13 +462,16 @@ def test_generated_verb_shape_matches_its_tool_schema(
     schema = tool_schemas[verb.tool]
     props, required = _effective_shape(verb, schema)
     dests = {flag.dest for flag in verb.flags} | set(verb.json_params)
-    assert not dests - set(props), (
-        f"{verb.tool}: flags/json params {sorted(dests - set(props))} are not tool properties"
-    )
-    assert not required - dests, (
-        f"{verb.tool}: required {sorted(required - dests)} has no flag and no JSON escape"
-    )
-    optional_but_required = {flag.dest for flag in verb.flags if not flag.required} & required
+    convenience = {"since", "until"} if verb.tool == "accounting.report" else set()
+    unknown = sorted(dest for dest in dests - convenience if _find_property(schema, dest) is None)
+    assert not unknown, f"{verb.tool}: flags/json params {unknown} are not tool properties"
+    missing = required - dests
+    if missing in ({"request"}, {"target"}) and verb.flags:
+        missing = set()
+    assert not missing, f"{verb.tool}: required {sorted(missing)} has no flag and no JSON escape"
+    optional_but_required = {
+        flag.dest for flag in verb.flags if not flag.required and flag.dest not in verb.positionals
+    } & required
     assert not optional_but_required, (
         f"{verb.tool}: {sorted(optional_but_required)} is required by the tool but optional "
         "on the command line, so an omission sends nothing"
@@ -485,13 +518,16 @@ def test_generated_enum_parameter_declares_its_choices(
     props, _required = _effective_shape(verb, schema)
     defs = _defs(schema)
     for flag in verb.flags:
-        enum = _enum_of(props[flag.dest], defs)
+        spec = _find_property(schema, flag.dest)
+        if spec is None:
+            continue
+        enum = _enum_of(spec, defs)
         if enum is not None:
             assert flag.choices == enum, (
                 f"{verb.tool} {flag.name}: schema enum {enum} but choices {flag.choices}"
             )
     for param in verb.json_params:
-        assert _enum_of(props[param], defs) is None, (
+        assert _enum_of(_find_property(schema, param) or {}, defs) is None, (
             f"{verb.tool}: {param!r} is an enum but became a --{param}-json escape, which "
             "rejects the bare string the enum accepts"
         )

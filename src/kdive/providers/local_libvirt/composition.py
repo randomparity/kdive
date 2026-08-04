@@ -55,6 +55,8 @@ from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
 )
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
+from kdive.store.objectstore import ObjectStore
 
 _POOL = "local-libvirt"
 _COST_CLASS = "local"
@@ -103,7 +105,9 @@ def build_rootfs_build_plane(*, workspace: Path | None = None) -> LocalLibvirtRo
     return LocalLibvirtRootfsBuildPlane.from_env(workspace=workspace)
 
 
-def _rebind_for_resource(secret_registry: SecretRegistry) -> Callable[[str], ProviderRuntime]:
+def _rebind_for_resource(
+    secret_registry: SecretRegistry, store: ObjectStore
+) -> Callable[[str], ProviderRuntime]:
     """Per-Resource rebind factory (ADR-0187/0313), mirroring remote-libvirt's shape.
 
     Captures only ``secret_registry`` (not ``build_runtime``'s enclosing scope) so a long-lived
@@ -111,16 +115,22 @@ def _rebind_for_resource(secret_registry: SecretRegistry) -> Callable[[str], Pro
     """
 
     def rebind(resource_name: str) -> ProviderRuntime:
-        return build_runtime(secret_registry=secret_registry, resource_name=resource_name)
+        return build_runtime(
+            secret_registry=secret_registry, store=store, resource_name=resource_name
+        )
 
     return rebind
 
 
 def build_runtime(
-    *, secret_registry: SecretRegistry, resource_name: str | None = None
+    *,
+    secret_registry: SecretRegistry,
+    store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
+    resource_name: str | None = None,
 ) -> ProviderRuntime:
     """Build local-libvirt provider ports without opening live provider connections.
 
+    ``store`` is the process-assembled object store captured by each object-store-aware port.
     ``resource_name`` (ADR-0313, #1031) binds the provisioner to a specific local Resource's
     operator ``guest_egress`` opt-in, resolved op-time from ``systems.toml``. The resolver
     chokepoint (``ProviderRuntime.for_resource`` → ``rebind_for_resource``) supplies it per op; a
@@ -129,13 +139,15 @@ def build_runtime(
     guest_egress = (
         local_guest_egress_for_resource(resource_name) if resource_name is not None else False
     )
-    provisioner = LocalLibvirtProvisioning.from_env(guest_egress=guest_egress)
-    install = LocalLibvirtInstall.from_env()
+    provisioner = LocalLibvirtProvisioning.from_env(store=store, guest_egress=guest_egress)
+    install = LocalLibvirtInstall.from_env(store=store)
     connector = LocalLibvirtConnect.from_env()
     controller = LocalLibvirtControl.from_env()
     traffic_capturer = LocalLibvirtTrafficCapture.from_env()
-    retrieve = LocalLibvirtRetrieve.from_env(secret_registry=secret_registry)
-    vmcore_introspector = LocalLibvirtVmcoreIntrospect.from_env(secret_registry=secret_registry)
+    retrieve = LocalLibvirtRetrieve.from_env(secret_registry=secret_registry, store=store)
+    vmcore_introspector = LocalLibvirtVmcoreIntrospect.from_env(
+        secret_registry=secret_registry, store=store
+    )
     live_introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=secret_registry)
     return ProviderRuntime(
         profile_policy=LocalLibvirtProfilePolicy(),
@@ -177,7 +189,7 @@ def build_runtime(
             attach_seam=default_attach_seam,
             engine=GdbMiEngine(
                 redactor_factory=lambda: Redactor(registry=secret_registry),
-                module_debuginfo_resolver=real_module_debuginfo_resolver(),
+                module_debuginfo_resolver=real_module_debuginfo_resolver(store),
             ),
         ),
         rootfs=RootfsCapabilities(
@@ -190,7 +202,7 @@ def build_runtime(
         # Per-Resource rebind (ADR-0187/0313, #1031): bind the operator guest_egress opt-in for the
         # allocated Resource by name. Previously unset (identity) — local now resolves per op.
         binding=ResourceBindingCapabilities(
-            rebind_for_resource=_rebind_for_resource(secret_registry)
+            rebind_for_resource=_rebind_for_resource(secret_registry, store)
         ),
         # Internal RAM+disk/disk-only domain snapshots (ADR-0378, #1254). Matches
         # ``support.supports_snapshots``; a snapshot-incapable provider leaves both unset.

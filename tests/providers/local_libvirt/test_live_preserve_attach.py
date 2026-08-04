@@ -6,7 +6,7 @@ kernel image that panics early in boot when it cannot mount its root (a bare bzI
 usable rootfs), optionally overriding ``KDIVE_LIBVIRT_URI`` (default ``qemu:///session`` so it
 needs no root). The test renders the real provisioning XML (its SUT), adds the direct-kernel
 ``<os>`` the install step adds in the full pipeline, and hands the finished XML to
-``boot_preserved_gdbstub_domain`` — which starts the domain against a deliberately empty disk to
+``boot_gdbstub_domain`` — which starts the domain against a deliberately empty disk to
 force the panic, waits for it, and tears the transient domain down. The test then asserts the stub
 answers ``rsp_reachable``.
 """
@@ -22,7 +22,7 @@ import pytest
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.shared.debug_common.rsp import rsp_reachable
-from kdive.testing.live_vm import boot_preserved_gdbstub_domain
+from kdive.testing.live_vm import boot_gdbstub_domain
 from tests.live_vm import require_live_vm_bzimage
 
 _GDB_PORT = 51234
@@ -58,7 +58,12 @@ def test_live_vm_preserve_crash_stub_is_reachable(tmp_path: Path) -> None:  # pr
 
     # The harness boot both proves libvirt accepts the new pvpanic + <on_crash>preserve</on_crash>
     # + -gdb passthrough XML (createXML raising is a failure) and waits for the early-boot panic.
-    with boot_preserved_gdbstub_domain(final_xml, uri=contract.libvirt_uri, console_log=console):
+    with boot_gdbstub_domain(
+        final_xml,
+        uri=contract.libvirt_uri,
+        wait_for="panic",
+        console_log=console,
+    ):
         # The crash signal is the console panic; the stub stays reachable on the halted vCPU
         # (domain may remain RUNNING with panic=0, so this does NOT assert VIR_DOMAIN_CRASHED).
         assert rsp_reachable("127.0.0.1", _GDB_PORT), "gdbstub not reachable on the halted panic"

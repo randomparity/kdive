@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import http.client
 import re
@@ -74,11 +75,11 @@ class WorkerLifecycleGate:
 
     async def register_and_start(self, container_id: str) -> None:
         """Persist the nonce/full-ID binding before the never-started worker starts."""
-        holder, container = self._identity(container_id)
+        holder, container = await asyncio.to_thread(self._identity, container_id)
         state = _nested_mapping(container.get("State"))
         if state is None or state.get("Status") != "created":
             raise RuntimeError("only a never-started worker may be registered")
-        credential = self.credential()
+        credential = await asyncio.to_thread(self.credential)
         if not _CREDENTIAL.fullmatch(credential):
             raise RuntimeError("worker lifecycle credential must be a 256-bit lowercase hex value")
         credential_hash = hashlib.sha256(credential.encode()).digest()
@@ -88,7 +89,7 @@ class WorkerLifecycleGate:
 
     async def reconcile(self, container_id: str) -> bool:
         """Reconcile one retained worker; return whether a replacement must be created."""
-        holder, container = self._identity(container_id)
+        holder, container = await asyncio.to_thread(self._identity, container_id)
         state = _nested_mapping(container.get("State"))
         status = state.get("Status") if state is not None else None
         if status == "created":
@@ -96,7 +97,7 @@ class WorkerLifecycleGate:
             return False
         if status == "running":
             # Exact idempotent registration proves the running container matches its active row.
-            credential = self.credential()
+            credential = await asyncio.to_thread(self.credential)
             if not _CREDENTIAL.fullmatch(credential):
                 raise RuntimeError(
                     "worker lifecycle credential must be a 256-bit lowercase hex value"
@@ -110,13 +111,13 @@ class WorkerLifecycleGate:
 
     async def terminate_and_remove(self, container_id: str) -> None:
         """Persist exact terminal evidence before removing Docker's retained record."""
-        holder, container = self._identity(container_id)
+        holder, container = await asyncio.to_thread(self._identity, container_id)
         state = _nested_mapping(container.get("State"))
         if state is None:
             raise RuntimeError("managed worker has no authoritative Docker state")
         if state.get("Status") not in {"exited", "dead"}:
             await self.stop(container_id)
-            holder, container = self._identity(container_id)
+            holder, container = await asyncio.to_thread(self._identity, container_id)
             state = _nested_mapping(container.get("State"))
         if state is None or state.get("Status") not in {"exited", "dead"}:
             raise RuntimeError("exact worker container did not reach a retained terminal state")

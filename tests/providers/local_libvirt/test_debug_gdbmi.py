@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from kdive.artifacts.read_model import ArtifactReadRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.tools.debug.sessions.registry import GdbMiSessionRegistry
 from kdive.providers.ports.debug import (
@@ -2237,7 +2238,8 @@ class _RecordingFetch:
 def test_resolve_fetches_present_ref_to_dest(tmp_path: Path) -> None:
     fetch = _RecordingFetch(data=b"ELFDATA")
     resolver = DebuginfoResolver(
-        read_debuginfo_ref=lambda run_id: "local/runs/r1/vmlinux", fetch_object=fetch
+        read_debuginfo_ref=lambda run_id: ArtifactReadRef("local/runs/r1/vmlinux", None),
+        fetch_object=fetch,
     )
     dest = tmp_path / "vmlinux"
     result = resolver.resolve("r1", dest)
@@ -2267,7 +2269,8 @@ def test_resolve_propagates_fetch_error(tmp_path: Path) -> None:
     )
     fetch = _RecordingFetch(error=boom)
     resolver = DebuginfoResolver(
-        read_debuginfo_ref=lambda run_id: "local/runs/r1/vmlinux", fetch_object=fetch
+        read_debuginfo_ref=lambda run_id: ArtifactReadRef("local/runs/r1/vmlinux", None),
+        fetch_object=fetch,
     )
     dest = tmp_path / "vmlinux"
     with pytest.raises(CategorizedError) as exc:
@@ -2280,7 +2283,9 @@ def test_resolve_writes_to_dest_not_run_id_derived_path(tmp_path: Path) -> None:
     # The resolver writes where it is told; it computes no run_id-derived path itself (the private
     # per-attach staging dir is the seam's responsibility). A hostile run_id never reaches the path.
     fetch = _RecordingFetch(data=b"SYMBOLS")
-    resolver = DebuginfoResolver(read_debuginfo_ref=lambda run_id: "key", fetch_object=fetch)
+    resolver = DebuginfoResolver(
+        read_debuginfo_ref=lambda run_id: ArtifactReadRef("key", None), fetch_object=fetch
+    )
     dest = tmp_path / "custom-name"
     resolver.resolve("../../etc/passwd", dest)
     assert dest.read_bytes() == b"SYMBOLS"

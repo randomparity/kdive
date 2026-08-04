@@ -62,7 +62,8 @@ from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S, LIBVIR
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
 from kdive.providers.shared.runtime_paths import domain_name_for
-from kdive.store.objectstore import object_store_from_env
+from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
+from kdive.store.objectstore import ObjectStore
 
 _log = logging.getLogger(__name__)
 
@@ -603,7 +604,7 @@ class LocalLibvirtInstall:
         self._booter = booter
 
     @classmethod
-    def from_env(cls) -> LocalLibvirtInstall:
+    def from_env(cls, *, store: ObjectStore = UNCONFIGURED_OBJECT_STORE) -> LocalLibvirtInstall:
         """Build from the ``KDIVE_*`` environment; does not connect to libvirt or the store.
 
         The kernel seam is the real object-store **stream** (`_real_stream` → `_stream_object`,
@@ -622,13 +623,17 @@ class LocalLibvirtInstall:
         scratch_root = Path(scratch_raw) if scratch_raw else None
         return cls(
             connect=lambda: libvirt.open(host_uri),
-            stream_kernel=_real_stream,
-            fetch_initrd=_real_fetch,
+            stream_kernel=lambda ref, version_id: _stream_object(store, ref, version_id=version_id),
+            fetch_initrd=lambda ref, dest, version_id: _stage_object(
+                store, ref, dest, version_id=version_id
+            ),
             readiness=_real_readiness,
             staging_root=staging_root,
             boot_window_polls=_boot_window_polls(),
             scratch_root=scratch_root,
-            fetch_modules=_real_fetch,
+            fetch_modules=lambda ref, dest, version_id: _stage_object(
+                store, ref, dest, version_id=version_id
+            ),
             kernel_writer=_RealGuestKernelWriter(),
         )
 
@@ -668,10 +673,6 @@ def _stage_object(
     write_staged_bytes(dest, data)
 
 
-def _real_fetch(ref: str, dest: Path, version_id: str | None) -> None:  # pragma: no cover - live_vm
-    _stage_object(object_store_from_env(), ref, dest, version_id=version_id)
-
-
 class _ObjectStreamReader(Protocol):
     def get_artifact_stream(
         self, key: str, etag: str | None, *, version_id: str | None = None
@@ -690,13 +691,6 @@ def _stream_object(
     at this one call site so a host-free unit test pins it (guarding an empty-etag regression).
     """
     return store.get_artifact_stream(ref, None, version_id=version_id)
-
-
-def _real_stream(
-    ref: str,
-    version_id: str | None,
-) -> contextlib.AbstractContextManager[StreamedArtifact]:  # pragma: no cover - live_vm
-    return _stream_object(object_store_from_env(), ref, version_id=version_id)
 
 
 __all__ = [

@@ -11,28 +11,21 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.repositories import ALLOCATIONS, DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
+from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import (
-    AllocationState,
     DebugSessionState,
-    InvestigationState,
     RunState,
     SystemState,
 )
-from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
+from kdive.domain.lifecycle.records import System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug.introspection import gate as introspect_gate
@@ -45,10 +38,7 @@ from kdive.prereqs.system_bootstrap_key import (
 )
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
-from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
-from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.ports.handles import (
     SystemHandle,
     TransportHandle,
@@ -63,33 +53,23 @@ from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.debug import lifecycle as debug_service_lifecycle
+from tests.mcp.debug.session_support import (
+    FIXED_TIME,
+    PROFILE,
+    PROFILE_POLICY,
+    granted_allocation,
+    request_context,
+    seed_run,
+    seed_session,
+    seed_system,
+)
+from tests.mcp.debug.session_support import (
+    pool as open_pool,
+)
 from tests.mcp.systems_support import provider_resolver
-from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
-_DT = datetime(2026, 1, 1, tzinfo=UTC)
-_PROFILE_POLICY = LocalLibvirtProfilePolicy()
 _FAULT_POLICY = FaultInjectProfilePolicy()
 _REMOTE_POLICY = RemoteLibvirtProfilePolicy()
-
-_PROFILE: dict[str, Any] = {
-    "schema_version": 1,
-    "arch": "x86_64",
-    "vcpu": 4,
-    "memory_mb": 4096,
-    "disk_gb": 20,
-    "boot_method": "direct-kernel",
-    "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v6.9",
-    "provider": {
-        "local-libvirt": {
-            "domain_xml_params": {"machine": "q35"},
-            "rootfs": {
-                "kind": "local",
-                "path": "/var/lib/kdive/rootfs/fedora-40.qcow2",
-            },
-            "crashkernel": "256M",
-        }
-    },
-}
 
 
 class _FakeConnector:
@@ -142,19 +122,12 @@ class _FixedDebugRuntimeResolver:
         return self._runtime
 
 
-def _ctx(
-    role: Role | None = Role.OPERATOR, *, projects: tuple[str, ...] = ("proj",)
-) -> RequestContext:
-    roles = {"proj": role} if role is not None else {}
-    return RequestContext(principal="user-1", agent_session="s", projects=projects, roles=roles)
-
-
 def _handlers(
     connector: _FakeConnector,
     *,
     runtime: Any | None = None,
     secret_registry: SecretRegistry | None = None,
-    profile_policy: ProfilePolicy = _PROFILE_POLICY,
+    profile_policy: ProfilePolicy = PROFILE_POLICY,
     live_introspector: Any | None = None,
 ) -> debug_tools.DebugSessionHandlers:
     registry = secret_registry if secret_registry is not None else SecretRegistry()
@@ -178,7 +151,7 @@ async def _start_session(
     transport: str = "gdbstub",
     connector: _FakeConnector,
     secret_registry: SecretRegistry | None = None,
-    profile_policy: ProfilePolicy = _PROFILE_POLICY,
+    profile_policy: ProfilePolicy = PROFILE_POLICY,
     live_introspector: Any | None = None,
 ):
     return await _handlers(
@@ -203,132 +176,6 @@ async def _end_session(
     )
 
 
-@asynccontextmanager
-async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
-    pool = AsyncConnectionPool(url, min_size=1, max_size=4, open=False)
-    await pool.open()
-    try:
-        yield pool
-    finally:
-        await pool.close()
-
-
-async def _granted_allocation(pool: AsyncConnectionPool) -> str:
-    disc = LocalLibvirtDiscovery(
-        host_uri="qemu:///system", connect=lambda: FakeLibvirtConn(), concurrent_allocation_cap=2
-    )
-    async with pool.connection() as conn:
-        res = await register_discovered_resource(
-            conn, disc.list_resources()[0], pool="local-libvirt", cost_class="local"
-        )
-        alloc = await ALLOCATIONS.insert(
-            conn,
-            Allocation(
-                id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
-                principal="user-1",
-                project="proj",
-                resource_id=res.id,
-                state=AllocationState.GRANTED,
-            ),
-        )
-    return str(alloc.id)
-
-
-async def _seed_system(pool: AsyncConnectionPool, alloc_id: str, state: SystemState) -> str:
-    async with pool.connection() as conn:
-        system = await SYSTEMS.insert(
-            conn,
-            System(
-                id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
-                principal="user-1",
-                project="proj",
-                allocation_id=UUID(alloc_id),
-                state=state,
-                provisioning_profile=copy.deepcopy(_PROFILE),
-                domain_name="kdive-x",
-            ),
-        )
-    return str(system.id)
-
-
-async def _seed_run(
-    pool: AsyncConnectionPool,
-    sys_id: str,
-    *,
-    state: RunState = RunState.SUCCEEDED,
-    booted: bool = True,
-    boot_result: dict[str, Any] | None = None,
-) -> str:
-    async with pool.connection() as conn:
-        inv = await INVESTIGATIONS.insert(
-            conn,
-            Investigation(
-                id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
-                principal="user-1",
-                project="proj",
-                title="t",
-                state=InvestigationState.ACTIVE,
-            ),
-        )
-        run = await RUNS.insert(
-            conn,
-            Run(
-                id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
-                principal="user-1",
-                project="proj",
-                investigation_id=inv.id,
-                system_id=UUID(sys_id),
-                target_kind=ResourceKind.LOCAL_LIBVIRT,
-                state=state,
-                build_profile={},
-            ),
-        )
-        if booted:
-            await conn.execute(
-                "INSERT INTO run_steps (run_id, step, state, result) "
-                "VALUES (%s, 'boot', 'succeeded', %s)",
-                (run.id, Jsonb({} if boot_result is None else boot_result)),
-            )
-    return str(run.id)
-
-
-async def _seed_session(
-    pool: AsyncConnectionPool,
-    run_id: str,
-    state: DebugSessionState,
-    *,
-    transport: str = "gdbstub",
-) -> str:
-    port = 22 if transport == "drgn-live" else 1234
-    handle_kind = cast(TransportHandleKind, transport)
-    async with pool.connection() as conn:
-        session = await DEBUG_SESSIONS.insert(
-            conn,
-            DebugSession(
-                id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
-                principal="user-1",
-                project="proj",
-                run_id=UUID(run_id),
-                state=state,
-                transport=transport,
-                transport_handle=TransportHandleData(
-                    kind=handle_kind, host="127.0.0.1", port=port
-                ).encode(),
-            ),
-        )
-    return str(session.id)
-
-
 async def _session_count(pool: AsyncConnectionPool) -> int:
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT count(*) AS n FROM debug_sessions")
@@ -341,13 +188,13 @@ async def _session_count(pool: AsyncConnectionPool) -> int:
 
 def test_start_session_attaches_and_row_is_live(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
             conn_fake = _FakeConnector()
             resp = await _start_session(
-                pool, _ctx(), run_id=run_id, transport="gdbstub", connector=conn_fake
+                pool, request_context(), run_id=run_id, transport="gdbstub", connector=conn_fake
             )
             assert resp.status == "live"
             assert resp.data["project"] == "proj"
@@ -390,22 +237,24 @@ def test_start_session_unsupported_transport_is_capability_unsupported(migrated_
     # ADR-0209: a provider whose descriptor does not advertise the requested transport rejects the
     # session up front with capability_unsupported — no debug_sessions row, no transport opened.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
             conn_fake = _FakeConnector()
             handlers = debug_tools.DebugSessionHandlers.from_resolver(
                 provider_resolver(
                     connector=conn_fake,
-                    profile_policy=_PROFILE_POLICY,
+                    profile_policy=PROFILE_POLICY,
                     supported_debug_transports=frozenset(),
                 ),
                 runtime_resolver=None,
                 secret_registry=SecretRegistry(),
             )
             before = await _session_count(pool)
-            resp = await handlers.start_session(pool, _ctx(), run_id=run_id, transport="gdbstub")
+            resp = await handlers.start_session(
+                pool, request_context(), run_id=run_id, transport="gdbstub"
+            )
             after = await _session_count(pool)
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -426,25 +275,25 @@ def test_start_session_admits_gdbstub_but_rejects_drgn_live_on_gdbstub_only_prov
     # runs. (Local now advertises both transports — #697/ADR-0218 — so the descriptor here is a
     # deliberately narrowed fake driving the admission gate, not local's live descriptor.)
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
             conn_fake = _FakeConnector()
             handlers = debug_tools.DebugSessionHandlers.from_resolver(
                 provider_resolver(
                     connector=conn_fake,
-                    profile_policy=_PROFILE_POLICY,
+                    profile_policy=PROFILE_POLICY,
                     supported_debug_transports=frozenset({"gdbstub"}),
                 ),
                 runtime_resolver=None,
                 secret_registry=SecretRegistry(),
             )
             admitted = await handlers.start_session(
-                pool, _ctx(), run_id=run_id, transport="gdbstub"
+                pool, request_context(), run_id=run_id, transport="gdbstub"
             )
             rejected = await handlers.start_session(
-                pool, _ctx(), run_id=run_id, transport="drgn-live"
+                pool, request_context(), run_id=run_id, transport="drgn-live"
             )
         assert admitted.status == "live"  # gdbstub admitted, transport opened
         assert ("kdive-x", "gdbstub") in conn_fake.opened
@@ -458,16 +307,16 @@ def test_start_session_admits_gdbstub_but_rejects_drgn_live_on_gdbstub_only_prov
 
 def test_second_start_session_is_transport_conflict(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_a = await _seed_run(pool, sys_id)
-            run_b = await _seed_run(pool, sys_id)
-            await _seed_session(pool, run_a, DebugSessionState.LIVE)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_a = await seed_run(pool, sys_id)
+            run_b = await seed_run(pool, sys_id)
+            await seed_session(pool, run_a, DebugSessionState.LIVE)
             before = await _session_count(pool)
             conn_fake = _FakeConnector()
             resp = await _start_session(
-                pool, _ctx(), run_id=run_b, transport="gdbstub", connector=conn_fake
+                pool, request_context(), run_id=run_b, transport="gdbstub", connector=conn_fake
             )
             after = await _session_count(pool)
         assert resp.status == "error"
@@ -485,10 +334,10 @@ def test_locked_recheck_closes_transport_when_system_crashed(migrated_url: str) 
     """The lost-race branch: System flipped non-ready between the pre-read and the lock."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, UUID(run_id))
                 system = await SYSTEMS.get(conn, UUID(sys_id))
@@ -510,7 +359,9 @@ def test_locked_recheck_closes_transport_when_system_crashed(migrated_url: str) 
                     transport="gdbstub",
                     connector=conn_fake,
                 )
-                resp = await debug_lifecycle._insert_session_locked(conn, _ctx(), request, handle)
+                resp = await debug_lifecycle._insert_session_locked(
+                    conn, request_context(), request, handle
+                )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.object_id == run_id  # the rejection is attributed to the run
@@ -525,12 +376,12 @@ def test_locked_recheck_closes_transport_when_conflict_appears(migrated_url: str
     """The lost-race branch: another attach committed between the pre-read and the lock."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_a = await _seed_run(pool, sys_id)
-            run_b = await _seed_run(pool, sys_id)
-            await _seed_session(pool, run_a, DebugSessionState.LIVE)  # the race winner
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_a = await seed_run(pool, sys_id)
+            run_b = await seed_run(pool, sys_id)
+            await seed_session(pool, run_a, DebugSessionState.LIVE)  # the race winner
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, UUID(run_b))
                 system = await SYSTEMS.get(conn, UUID(sys_id))
@@ -544,7 +395,9 @@ def test_locked_recheck_closes_transport_when_conflict_appears(migrated_url: str
                     transport="gdbstub",
                     connector=conn_fake,
                 )
-                resp = await debug_lifecycle._insert_session_locked(conn, _ctx(), request, handle)
+                resp = await debug_lifecycle._insert_session_locked(
+                    conn, request_context(), request, handle
+                )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "transport_conflict"
         assert resp.object_id == run_b  # the rejection is attributed to the losing run
@@ -558,10 +411,10 @@ def test_locked_recheck_torn_down_system_reports_torn_down(migrated_url: str) ->
     """The lost-race branch: the System row is gone by the time the lock is held."""
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, UUID(run_id))
                 assert run is not None
@@ -569,13 +422,13 @@ def test_locked_recheck_torn_down_system_reports_torn_down(migrated_url: str) ->
                 # re-read returns None, so admission reports the "torn_down" sentinel.
                 phantom = System(
                     id=uuid4(),
-                    created_at=_DT,
-                    updated_at=_DT,
+                    created_at=FIXED_TIME,
+                    updated_at=FIXED_TIME,
                     principal="user-1",
                     project="proj",
                     allocation_id=UUID(alloc_id),
                     state=SystemState.READY,
-                    provisioning_profile=copy.deepcopy(_PROFILE),
+                    provisioning_profile=copy.deepcopy(PROFILE),
                     domain_name="kdive-x",
                 )
                 conn_fake = _FakeConnector()
@@ -587,7 +440,9 @@ def test_locked_recheck_torn_down_system_reports_torn_down(migrated_url: str) ->
                     transport="gdbstub",
                     connector=conn_fake,
                 )
-                resp = await debug_lifecycle._insert_session_locked(conn, _ctx(), request, handle)
+                resp = await debug_lifecycle._insert_session_locked(
+                    conn, request_context(), request, handle
+                )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.object_id == run_id
@@ -600,13 +455,13 @@ def test_locked_recheck_torn_down_system_reports_torn_down(migrated_url: str) ->
 
 def test_start_session_run_not_succeeded_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id, state=RunState.CREATED, booted=False)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id, state=RunState.CREATED, booted=False)
             conn_fake = _FakeConnector()
             resp = await _start_session(
-                pool, _ctx(), run_id=run_id, transport="gdbstub", connector=conn_fake
+                pool, request_context(), run_id=run_id, transport="gdbstub", connector=conn_fake
             )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -622,12 +477,16 @@ def test_start_session_run_not_succeeded_is_config_error(migrated_url: str) -> N
 
 def test_start_session_unbooted_run_is_boot_first(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id, booted=False)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id, booted=False)
             resp = await _start_session(
-                pool, _ctx(), run_id=run_id, transport="gdbstub", connector=_FakeConnector()
+                pool,
+                request_context(),
+                run_id=run_id,
+                transport="gdbstub",
+                connector=_FakeConnector(),
             )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -641,12 +500,16 @@ def test_start_session_unbooted_run_is_boot_first(migrated_url: str) -> None:
 
 def test_start_session_non_ready_system_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            run_id = await seed_run(pool, sys_id)
             resp = await _start_session(
-                pool, _ctx(), run_id=run_id, transport="gdbstub", connector=_FakeConnector()
+                pool,
+                request_context(),
+                run_id=run_id,
+                transport="gdbstub",
+                connector=_FakeConnector(),
             )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -660,13 +523,13 @@ def test_start_session_admitted_on_paused_system(migrated_url: str) -> None:
     # #1254: a start_paused restore leaves the guest PAUSED; a gdbstub attach is the only way to
     # inspect/breakpoint it before resuming, so debug.start_session must admit PAUSED.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.PAUSED)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.PAUSED)
+            run_id = await seed_run(pool, sys_id)
             conn_fake = _FakeConnector()
             resp = await _start_session(
-                pool, _ctx(), run_id=run_id, transport="gdbstub", connector=conn_fake
+                pool, request_context(), run_id=run_id, transport="gdbstub", connector=conn_fake
             )
         assert resp.status == "live"
         assert conn_fake.opened == [("kdive-x", "gdbstub")]
@@ -676,10 +539,10 @@ def test_start_session_admitted_on_paused_system(migrated_url: str) -> None:
 
 def test_start_session_rejects_expected_crash_run(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(
                 pool,
                 sys_id,
                 boot_result={"boot_outcome": "expected_crash_observed"},
@@ -687,7 +550,7 @@ def test_start_session_rejects_expected_crash_run(migrated_url: str) -> None:
             conn_fake = _FakeConnector()
             resp = await _start_session(
                 pool,
-                _ctx(),
+                request_context(),
                 run_id=run_id,
                 transport="gdbstub",
                 connector=conn_fake,
@@ -712,15 +575,15 @@ def test_start_session_rejects_expected_crash_run(migrated_url: str) -> None:
 def test_start_session_admits_gdbstub_for_crashed_halted_live(migrated_url: str) -> None:
     # A halted early-boot panic with a live stub (ADR-0233, #747) is live-debuggable over gdbstub.
     async def _run() -> tuple[Any, list[Any], str]:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(
                 pool, sys_id, boot_result={"boot_outcome": "crashed_halted_live"}
             )
             conn_fake = _FakeConnector()
             resp = await _start_session(
-                pool, _ctx(), run_id=run_id, transport="gdbstub", connector=conn_fake
+                pool, request_context(), run_id=run_id, transport="gdbstub", connector=conn_fake
             )
             async with pool.connection() as c, c.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
@@ -739,15 +602,15 @@ def test_start_session_admits_gdbstub_for_crashed_halted_live(migrated_url: str)
 def test_start_session_rejects_drgn_live_for_crashed_halted_live(migrated_url: str) -> None:
     # A halted/panicked guest has no running sshd, so drgn-live cannot attach (ADR-0233).
     async def _run() -> tuple[Any, int, list[Any]]:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(
                 pool, sys_id, boot_result={"boot_outcome": "crashed_halted_live"}
             )
             conn_fake = _FakeConnector()
             resp = await _start_session(
-                pool, _ctx(), run_id=run_id, transport="drgn-live", connector=conn_fake
+                pool, request_context(), run_id=run_id, transport="drgn-live", connector=conn_fake
             )
             count = await _session_count(pool)
         return resp, count, conn_fake.opened
@@ -764,13 +627,13 @@ def test_start_session_rejects_drgn_live_for_crashed_halted_live(migrated_url: s
 
 def test_start_session_bad_transport_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
             conn_fake = _FakeConnector()
             resp = await _start_session(
-                pool, _ctx(), run_id=run_id, transport="serial", connector=conn_fake
+                pool, request_context(), run_id=run_id, transport="serial", connector=conn_fake
             )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -796,10 +659,10 @@ def test_start_session_connector_failure_maps_category(
     migrated_url: str, category: ErrorCategory, expected: str
 ) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
             conn_fake = _FakeConnector(
                 raises=CategorizedError(
                     "x",
@@ -808,7 +671,7 @@ def test_start_session_connector_failure_maps_category(
                 )
             )
             resp = await _start_session(
-                pool, _ctx(), run_id=run_id, transport="gdbstub", connector=conn_fake
+                pool, request_context(), run_id=run_id, transport="gdbstub", connector=conn_fake
             )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == expected
@@ -820,13 +683,13 @@ def test_start_session_connector_failure_maps_category(
 
 def test_start_session_cross_project_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
             resp = await _start_session(
                 pool,
-                _ctx(projects=("other",)),
+                request_context(projects=("other",)),
                 run_id=run_id,
                 transport="gdbstub",
                 connector=_FakeConnector(),
@@ -841,9 +704,13 @@ def test_start_session_cross_project_is_config_error(migrated_url: str) -> None:
 
 def test_start_session_malformed_uuid_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
+        async with open_pool(migrated_url) as pool:
             resp = await _start_session(
-                pool, _ctx(), run_id="not-a-uuid", transport="gdbstub", connector=_FakeConnector()
+                pool,
+                request_context(),
+                run_id="not-a-uuid",
+                transport="gdbstub",
+                connector=_FakeConnector(),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
         # ADR-0174: actionable reason + non-null detail for the malformed-id parse failure.
@@ -855,14 +722,14 @@ def test_start_session_malformed_uuid_is_config_error(migrated_url: str) -> None
 
 def test_start_session_without_operator_raises(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
             with pytest.raises(AuthorizationError):
                 await _start_session(
                     pool,
-                    _ctx(Role.VIEWER),
+                    request_context(Role.VIEWER),
                     run_id=run_id,
                     transport="gdbstub",
                     connector=_FakeConnector(),
@@ -925,14 +792,14 @@ class _ConnectionRecordingPool:
 
 
 def _fault_inject_profile() -> dict[str, Any]:
-    profile = copy.deepcopy(_PROFILE)
+    profile = copy.deepcopy(PROFILE)
     profile["provider"] = {"fault-inject": {}}
     return profile
 
 
 async def _seed_drgn_system(pool: AsyncConnectionPool, alloc_id: str) -> str:
     """Seed a ready local System with a per-System bootstrap key (drgn-live now gates on it)."""
-    sys_id = await _seed_profiled_system(pool, alloc_id, copy.deepcopy(_PROFILE))
+    sys_id = await _seed_profiled_system(pool, alloc_id, copy.deepcopy(PROFILE))
     async with pool.connection() as conn:
         await ensure_system_bootstrap_key(conn, UUID(sys_id), secret_registry=SecretRegistry())
     return sys_id
@@ -954,8 +821,8 @@ async def _seed_profiled_system(
             conn,
             System(
                 id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
+                created_at=FIXED_TIME,
+                updated_at=FIXED_TIME,
                 principal="user-1",
                 project="proj",
                 allocation_id=UUID(alloc_id),
@@ -969,14 +836,14 @@ async def _seed_profiled_system(
 
 def test_start_session_drgn_live_attaches_and_row_records_transport(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             connector = _OrderRecordingConnector([])
             resp = await _start_session(
                 pool,
-                _ctx(),
+                request_context(),
                 run_id=run_id,
                 transport="drgn-live",
                 connector=connector,
@@ -1019,14 +886,14 @@ def test_start_session_drgn_live_warns_when_config_lacks_debuginfo(migrated_url:
     cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_KERNEL"}))  # no DWARF/BTF
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)  # no debuginfo_ref
+            run_id = await seed_run(pool, sys_id)  # no debuginfo_ref
             with _patch_effective_config(cfg):
                 resp = await _start_session(
                     pool,
-                    _ctx(),
+                    request_context(),
                     run_id=run_id,
                     transport="drgn-live",
                     connector=_OrderRecordingConnector([]),
@@ -1051,14 +918,14 @@ def test_start_session_drgn_live_no_warning_when_config_has_debuginfo(migrated_u
     cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"}))
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             with _patch_effective_config(cfg):
                 resp = await _start_session(
                     pool,
-                    _ctx(),
+                    request_context(),
                     run_id=run_id,
                     transport="drgn-live",
                     connector=_OrderRecordingConnector([]),
@@ -1080,10 +947,10 @@ def test_start_session_drgn_live_uploaded_vmlinux_suppresses_warning(migrated_ur
     from kdive.kernel_config.parse import KernelConfig
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             async with pool.connection() as conn:
                 await conn.execute(
                     "UPDATE runs SET debuginfo_ref = %s WHERE id = %s",
@@ -1092,7 +959,7 @@ def test_start_session_drgn_live_uploaded_vmlinux_suppresses_warning(migrated_ur
             with _patch_effective_config(KernelConfig(frozenset())):
                 resp = await _start_session(
                     pool,
-                    _ctx(),
+                    request_context(),
                     run_id=run_id,
                     transport="drgn-live",
                     connector=_OrderRecordingConnector([]),
@@ -1109,14 +976,14 @@ def test_start_session_gdbstub_never_warns_missing_debuginfo(migrated_url: str) 
     from kdive.kernel_config.parse import KernelConfig
 
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
             with _patch_effective_config(KernelConfig(frozenset())):
                 resp = await _start_session(
                     pool,
-                    _ctx(),
+                    request_context(),
                     run_id=run_id,
                     transport="gdbstub",
                     connector=_OrderRecordingConnector([]),
@@ -1168,15 +1035,15 @@ def test_start_session_drgn_live_blind_guest_warns_debuginfo_unloadable(migrated
     # resolve at runtime. The attach stays `live` (non-fatal) but carries a debuginfo_unloadable
     # warning BEFORE any introspect call, with the feature-config next action.
     async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)  # no debuginfo_ref
+            run_id = await seed_run(pool, sys_id)  # no debuginfo_ref
             port = _AttachProbeIntrospector(probe_raises=_attach_failure())
             with _patch_effective_config(_btf_config()):
                 resp = await _start_session(
                     pool,
-                    _ctx(),
+                    request_context(),
                     run_id=run_id,
                     transport="drgn-live",
                     connector=_OrderRecordingConnector([]),
@@ -1201,15 +1068,15 @@ def test_start_session_drgn_live_blind_guest_warns_debuginfo_unloadable(migrated
 def test_start_session_drgn_live_probe_success_adds_no_warning(migrated_url: str) -> None:
     # The probe resolves (run_script returns) -> BTF loads at runtime -> attach carries no warning.
     async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             port = _AttachProbeIntrospector()
             with _patch_effective_config(_btf_config()):
                 resp = await _start_session(
                     pool,
-                    _ctx(),
+                    request_context(),
                     run_id=run_id,
                     transport="drgn-live",
                     connector=_OrderRecordingConnector([]),
@@ -1227,10 +1094,10 @@ def test_start_session_drgn_live_indeterminate_probe_adds_no_warning(migrated_ur
     # A probe that fails on a transport fault (not DEBUG_ATTACH_FAILURE) is indeterminate: fail
     # open, add no warning, and never block the attach (mirrors probe_symbol_resolution semantics).
     async def _run() -> ToolResponse:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             transport_fault = CategorizedError(
                 "ssh dropped", category=ErrorCategory.TRANSPORT_FAILURE
             )
@@ -1238,7 +1105,7 @@ def test_start_session_drgn_live_indeterminate_probe_adds_no_warning(migrated_ur
             with _patch_effective_config(_btf_config()):
                 return await _start_session(
                     pool,
-                    _ctx(),
+                    request_context(),
                     run_id=run_id,
                     transport="drgn-live",
                     connector=_OrderRecordingConnector([]),
@@ -1256,15 +1123,15 @@ def test_start_session_drgn_live_static_warning_skips_runtime_probe(migrated_url
     from kdive.kernel_config.parse import KernelConfig
 
     async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             port = _AttachProbeIntrospector(probe_raises=_attach_failure())
             with _patch_effective_config(KernelConfig(frozenset({"DEBUG_INFO"}))):  # no BTF
                 resp = await _start_session(
                     pool,
-                    _ctx(),
+                    request_context(),
                     run_id=run_id,
                     transport="drgn-live",
                     connector=_OrderRecordingConnector([]),
@@ -1283,10 +1150,10 @@ def test_start_session_drgn_live_uploaded_vmlinux_skips_runtime_probe(migrated_u
     from kdive.kernel_config.parse import KernelConfig
 
     async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             async with pool.connection() as conn:
                 await conn.execute(
                     "UPDATE runs SET debuginfo_ref = %s WHERE id = %s",
@@ -1296,7 +1163,7 @@ def test_start_session_drgn_live_uploaded_vmlinux_skips_runtime_probe(migrated_u
             with _patch_effective_config(KernelConfig(frozenset())):
                 resp = await _start_session(
                     pool,
-                    _ctx(),
+                    request_context(),
                     run_id=run_id,
                     transport="drgn-live",
                     connector=_OrderRecordingConnector([]),
@@ -1314,15 +1181,15 @@ def test_start_session_gdbstub_never_runs_runtime_probe(migrated_url: str) -> No
     # gdbstub symbolizes host-side, so the drgn-live runtime probe never fires for it even when the
     # static gate would be silent.
     async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
             port = _AttachProbeIntrospector(probe_raises=_attach_failure())
             with _patch_effective_config(_btf_config()):
                 resp = await _start_session(
                     pool,
-                    _ctx(),
+                    request_context(),
                     run_id=run_id,
                     transport="gdbstub",
                     connector=_OrderRecordingConnector([]),
@@ -1342,16 +1209,16 @@ def test_start_session_drgn_live_seeds_bootstrap_key_before_opening_transport(
     # ADR-0315: drgn-live seeds the redaction registry from the per-System bootstrap key in the
     # attach-request prep (before _open_transport), so the key is masked before any transport IO.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             private_key = await _bootstrap_private_key(pool, sys_id)
             registry = SecretRegistry()
             connector = _OrderRecordingConnector([])
             resp = await _start_session(
                 pool,
-                _ctx(),
+                request_context(),
                 run_id=run_id,
                 transport="drgn-live",
                 connector=connector,
@@ -1369,10 +1236,10 @@ def test_start_session_resolves_connector_before_seeding_bootstrap_key(migrated_
     # A connector-resolution failure short-circuits before the bootstrap-key seed, so the key is
     # never loaded into the registry.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             private_key = await _bootstrap_private_key(pool, sys_id)
             registry = SecretRegistry()
             handlers = debug_tools.DebugSessionHandlers.from_resolver(
@@ -1383,7 +1250,7 @@ def test_start_session_resolves_connector_before_seeding_bootstrap_key(migrated_
 
             resp = await handlers.start_session(
                 pool,
-                _ctx(),
+                request_context(),
                 run_id=run_id,
                 transport="drgn-live",
             )
@@ -1398,10 +1265,10 @@ def test_start_session_resolves_connector_before_seeding_bootstrap_key(migrated_
 
 def test_start_session_cleans_up_open_transport_on_insert_failure(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             log: list[str] = []
             connector = _OrderRecordingConnector(log)
 
@@ -1414,14 +1281,16 @@ def test_start_session_cleans_up_open_transport_on_insert_failure(migrated_url: 
                 raise RuntimeError("insert failed")
 
             handlers = debug_tools.DebugSessionHandlers.from_resolver(
-                provider_resolver(connector=connector, profile_policy=_PROFILE_POLICY),
+                provider_resolver(connector=connector, profile_policy=PROFILE_POLICY),
                 runtime_resolver=None,
                 insert_session_locked=_raise_after_open,
                 secret_registry=SecretRegistry(),
             )
 
             with pytest.raises(RuntimeError, match="insert failed"):
-                await handlers.start_session(pool, _ctx(), run_id=run_id, transport="drgn-live")
+                await handlers.start_session(
+                    pool, request_context(), run_id=run_id, transport="drgn-live"
+                )
 
         assert log == ["open:drgn-live"]
         assert connector.closed == ["drgn-live://127.0.0.1:22"]
@@ -1431,17 +1300,17 @@ def test_start_session_cleans_up_open_transport_on_insert_failure(migrated_url: 
 
 def test_start_session_opens_transport_between_db_connections(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
             log: list[str] = []
             recording_pool: Any = _ConnectionRecordingPool(pool, log)
             connector = _OrderRecordingConnector(log)
 
             resp = await _handlers(connector).start_session(
                 recording_pool,
-                _ctx(),
+                request_context(),
                 run_id=run_id,
                 transport="gdbstub",
             )
@@ -1462,14 +1331,14 @@ def test_start_session_drgn_live_no_bootstrap_key_is_config_error(migrated_url: 
     # ADR-0315/ADR-0289: drgn-live fails closed if the System has no per-System bootstrap key row,
     # before any transport is opened.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)  # no bootstrap key
-            run_id = await _seed_run(pool, sys_id)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)  # no bootstrap key
+            run_id = await seed_run(pool, sys_id)
             connector = _FakeConnector()
             resp = await _start_session(
                 pool,
-                _ctx(),
+                request_context(),
                 run_id=run_id,
                 transport="drgn-live",
                 connector=connector,
@@ -1487,14 +1356,14 @@ def test_start_session_drgn_live_fault_inject_skips_bootstrap_key(migrated_url: 
     # A fault-inject profile realizes drgn-live off the SSH forward, so
     # drgn_live_seeds_bootstrap_key is False: the session opens with no bootstrap-key seed.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_profiled_system(pool, alloc_id, _fault_inject_profile())
-            run_id = await _seed_run(pool, sys_id)  # note: no bootstrap key seeded
+            run_id = await seed_run(pool, sys_id)  # note: no bootstrap key seeded
             connector = _FakeConnector()
             resp = await _start_session(
                 pool,
-                _ctx(),
+                request_context(),
                 run_id=run_id,
                 transport="drgn-live",
                 connector=connector,
@@ -1508,16 +1377,16 @@ def test_start_session_drgn_live_invalid_profile_is_config_error(migrated_url: s
     # A stored profile that no longer parses (mangled provider key) surfaces as configuration_error
     # from the bootstrap-key prep, before any transport is opened.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            profile = copy.deepcopy(_PROFILE)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            profile = copy.deepcopy(PROFILE)
             profile["provider"] = {"local_libvirt": profile["provider"]["local-libvirt"]}
             sys_id = await _seed_profiled_system(pool, alloc_id, profile)
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             connector = _FakeConnector()
             resp = await _start_session(
                 pool,
-                _ctx(),
+                request_context(),
                 run_id=run_id,
                 transport="drgn-live",
                 connector=connector,
@@ -1533,16 +1402,16 @@ def test_drgn_live_bootstrap_key_stays_masked_after_session_ends(migrated_url: s
     # for the process lifetime — unlike the retired session-scoped credential, it is NOT released at
     # end_session (the key is long-lived and reused across sessions).
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             private_key = await _bootstrap_private_key(pool, sys_id)
             registry = SecretRegistry()
 
             start = await _start_session(
                 pool,
-                _ctx(),
+                request_context(),
                 run_id=run_id,
                 transport="drgn-live",
                 connector=_FakeConnector(),
@@ -1552,7 +1421,7 @@ def test_drgn_live_bootstrap_key_stays_masked_after_session_ends(migrated_url: s
             assert private_key in registry.snapshot()
             await _end_session(
                 pool,
-                _ctx(),
+                request_context(),
                 start.object_id,
                 connector=_FakeConnector(),
                 secret_registry=registry,
@@ -1565,16 +1434,16 @@ def test_drgn_live_bootstrap_key_stays_masked_after_session_ends(migrated_url: s
 
 def test_second_ssh_attach_is_transport_conflict(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_a = await _seed_run(pool, sys_id)
-            run_b = await _seed_run(pool, sys_id)
-            await _seed_session(pool, run_a, DebugSessionState.LIVE, transport="drgn-live")
+            run_a = await seed_run(pool, sys_id)
+            run_b = await seed_run(pool, sys_id)
+            await seed_session(pool, run_a, DebugSessionState.LIVE, transport="drgn-live")
             connector = _FakeConnector()
             resp = await _start_session(
                 pool,
-                _ctx(),
+                request_context(),
                 run_id=run_b,
                 transport="drgn-live",
                 connector=connector,
@@ -1588,15 +1457,15 @@ def test_second_ssh_attach_is_transport_conflict(migrated_url: str) -> None:
 def test_gdbstub_and_ssh_sessions_coexist_on_one_system(migrated_url: str) -> None:
     # Per-transport scoping (ADR-0039 §4): an existing gdbstub session must not block ssh.
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_drgn_system(pool, alloc_id)
-            run_a = await _seed_run(pool, sys_id)
-            run_b = await _seed_run(pool, sys_id)
-            await _seed_session(pool, run_a, DebugSessionState.LIVE, transport="gdbstub")
+            run_a = await seed_run(pool, sys_id)
+            run_b = await seed_run(pool, sys_id)
+            await seed_session(pool, run_a, DebugSessionState.LIVE, transport="gdbstub")
             resp = await _start_session(
                 pool,
-                _ctx(),
+                request_context(),
                 run_id=run_b,
                 transport="drgn-live",
                 connector=_FakeConnector(),
@@ -1633,15 +1502,15 @@ def test_start_session_drgn_live_remote_skips_credential_and_stores_domain_handl
     migrated_url: str,
 ) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
             sys_id = await _seed_profiled_system(pool, alloc_id, _remote_profile())
-            run_id = await _seed_run(pool, sys_id)
+            run_id = await seed_run(pool, sys_id)
             connector = _DomainHandleConnector()
             # Remote drgn-live opens over the guest agent: no bootstrap-key seed at start_session.
             resp = await _start_session(
                 pool,
-                _ctx(),
+                request_context(),
                 run_id=run_id,
                 transport="drgn-live",
                 connector=connector,
@@ -1667,13 +1536,13 @@ def test_start_session_drgn_live_remote_skips_credential_and_stores_domain_handl
 
 def test_end_session_detaches_live(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
-            session_id = await _seed_session(pool, run_id, DebugSessionState.LIVE)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
+            session_id = await seed_session(pool, run_id, DebugSessionState.LIVE)
             conn_fake = _FakeConnector()
-            resp = await _end_session(pool, _ctx(), session_id, connector=conn_fake)
+            resp = await _end_session(pool, request_context(), session_id, connector=conn_fake)
             assert resp.status == "detached"
             assert resp.object_id == session_id  # the detached session is echoed back
             assert resp.data["project"] == "proj"
@@ -1701,12 +1570,14 @@ def test_end_session_detaches_live(migrated_url: str) -> None:
 
 def test_end_session_already_detached_is_idempotent(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
-            session_id = await _seed_session(pool, run_id, DebugSessionState.DETACHED)
-            resp = await _end_session(pool, _ctx(), session_id, connector=_FakeConnector())
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
+            session_id = await seed_session(pool, run_id, DebugSessionState.DETACHED)
+            resp = await _end_session(
+                pool, request_context(), session_id, connector=_FakeConnector()
+            )
             assert resp.status == "detached"
             assert resp.object_id == session_id  # idempotent replay echoes the session
             assert resp.data["project"] == "proj"
@@ -1722,12 +1593,14 @@ def test_end_session_already_detached_is_idempotent(migrated_url: str) -> None:
 
 def test_end_session_detaches_attach(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
-            session_id = await _seed_session(pool, run_id, DebugSessionState.ATTACH)
-            resp = await _end_session(pool, _ctx(), session_id, connector=_FakeConnector())
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
+            session_id = await seed_session(pool, run_id, DebugSessionState.ATTACH)
+            resp = await _end_session(
+                pool, request_context(), session_id, connector=_FakeConnector()
+            )
             assert resp.status == "detached"
             async with pool.connection() as c, c.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
@@ -1745,17 +1618,17 @@ def test_end_session_close_failure_still_detaches(
     migrated_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
-            session_id = await _seed_session(pool, run_id, DebugSessionState.LIVE)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
+            session_id = await seed_session(pool, run_id, DebugSessionState.LIVE)
             expected_handle = TransportHandleData(
                 kind="gdbstub", host="127.0.0.1", port=1234
             ).encode()
             with caplog.at_level(logging.WARNING, logger="kdive.services.debug.lifecycle"):
                 resp = await _end_session(
-                    pool, _ctx(), session_id, connector=_RaisingCloseConnector()
+                    pool, request_context(), session_id, connector=_RaisingCloseConnector()
                 )
             assert resp.status == "detached"
             async with pool.connection() as c, c.cursor(row_factory=dict_row) as cur:
@@ -1776,13 +1649,13 @@ def test_end_session_close_failure_still_detaches(
 
 def test_end_session_unexpected_close_failure_still_detaches(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
-            session_id = await _seed_session(pool, run_id, DebugSessionState.LIVE)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
+            session_id = await seed_session(pool, run_id, DebugSessionState.LIVE)
             resp = await _end_session(
-                pool, _ctx(), session_id, connector=_UnexpectedRaisingCloseConnector()
+                pool, request_context(), session_id, connector=_UnexpectedRaisingCloseConnector()
             )
             assert resp.status == "detached"
             async with pool.connection() as c, c.cursor(row_factory=dict_row) as cur:
@@ -1795,8 +1668,10 @@ def test_end_session_unexpected_close_failure_still_detaches(migrated_url: str) 
 
 def test_end_session_malformed_uuid_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await _end_session(pool, _ctx(), "not-a-uuid", connector=_FakeConnector())
+        async with open_pool(migrated_url) as pool:
+            resp = await _end_session(
+                pool, request_context(), "not-a-uuid", connector=_FakeConnector()
+            )
         assert resp.status == "error" and resp.error_category == "configuration_error"
         # ADR-0174: actionable reason + non-null detail for the malformed-id parse failure.
         assert resp.data["reason"] == "invalid_uuid"
@@ -1807,13 +1682,13 @@ def test_end_session_malformed_uuid_is_config_error(migrated_url: str) -> None:
 
 def test_end_session_cross_project_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
-            session_id = await _seed_session(pool, run_id, DebugSessionState.LIVE)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
+            session_id = await seed_session(pool, run_id, DebugSessionState.LIVE)
             resp = await _end_session(
-                pool, _ctx(projects=("other",)), session_id, connector=_FakeConnector()
+                pool, request_context(projects=("other",)), session_id, connector=_FakeConnector()
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
@@ -1822,12 +1697,14 @@ def test_end_session_cross_project_is_config_error(migrated_url: str) -> None:
 
 def test_end_session_without_operator_raises(migrated_url: str) -> None:
     async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            run_id = await _seed_run(pool, sys_id)
-            session_id = await _seed_session(pool, run_id, DebugSessionState.LIVE)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
+            session_id = await seed_session(pool, run_id, DebugSessionState.LIVE)
             with pytest.raises(AuthorizationError):
-                await _end_session(pool, _ctx(Role.VIEWER), session_id, connector=_FakeConnector())
+                await _end_session(
+                    pool, request_context(Role.VIEWER), session_id, connector=_FakeConnector()
+                )
 
     asyncio.run(_run())

@@ -132,6 +132,13 @@ class ResourceBindingCapabilities:
     rebind_for_resource: Callable[[str], ProviderRuntime]
 
 
+def _require_capability_port_parity(
+    *, advertised: bool, port: object | None, capability_name: str, port_name: str
+) -> None:
+    if advertised != (port is not None):
+        raise ValueError(f"{capability_name} must match whether {port_name} is configured")
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderRuntime:
     """Typed provider ports for the active runtime."""
@@ -166,6 +173,20 @@ class ProviderRuntime:
     # Host-side traffic capture port (ADR-0385); ``None`` when unsupported (kept consistent with
     # ``support.supports_traffic_capture is False``).
     traffic_capturer: TrafficCapturer | None = None
+
+    def __post_init__(self) -> None:
+        _require_capability_port_parity(
+            advertised=self.support.supports_snapshots,
+            port=self.snapshot,
+            capability_name="support.supports_snapshots",
+            port_name="snapshot",
+        )
+        _require_capability_port_parity(
+            advertised=self.support.supports_traffic_capture,
+            port=self.traffic_capturer,
+            capability_name="support.supports_traffic_capture",
+            port_name="traffic_capturer",
+        )
 
     async def register_discovery(self, pool: AsyncConnectionPool) -> None:
         if self.discovery_registrar is not None:

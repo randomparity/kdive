@@ -44,7 +44,7 @@ from kdive.reconciler.cleanup.images import ImageMtime
 from kdive.reconciler.loop import reconcile_once
 from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import connect, seed_run, seed_system
-from tests.reconciler.test_image_sweeps import _insert_image_row
+from tests.reconciler.image_catalog_support import insert_image_row
 
 # Ages chosen to clear each repair's default window: image publish grace 1h; report
 # retention 7d; investigation cleanup grace 1d; build-artifact retention 30d.
@@ -249,11 +249,11 @@ def test_reconcile_once_threads_stores_into_every_store_consuming_repair(
         build_key = "local/runs/expired-build"
         async with await connect(migrated_url) as seed:
             # dangling: a registered row whose object is absent from the store, past deadline.
-            await _insert_image_row(
+            await insert_image_row(
                 seed, name="gone", object_key=_DANGLING_KEY, pending_age=timedelta(hours=2)
             )
             # expired-private: a private row already past its expiry, object present in store.
-            await _insert_image_row(
+            await insert_image_row(
                 seed,
                 name="priv",
                 visibility="private",

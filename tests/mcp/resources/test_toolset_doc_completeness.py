@@ -18,7 +18,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.resources.registrar import DOC_RESOURCES
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.mcp.test_tool_index import _verifier
+from tests.mcp.auth_support import verifier
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TOOLSET_RE = re.compile(r"toolsets/(?P<ns>[a-z_]+)\.md$")
@@ -29,7 +29,7 @@ _BACKTICKED_TOOL_RE = re.compile(r"`([a-z_]+\.[a-z_]+)`")
 def _live_tool_names() -> set[str]:
     """Return every registered tool name from a built app (no database access)."""
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app: FastMCP = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    app: FastMCP = build_app(pool, verifier=verifier(), secret_registry=SecretRegistry())
 
     async def _run() -> set[str]:
         return {t.name for t in await app.list_tools()}

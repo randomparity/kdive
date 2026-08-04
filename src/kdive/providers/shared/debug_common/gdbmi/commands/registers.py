@@ -7,6 +7,7 @@ from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment
+from kdive.providers.shared.debug_common.gdbmi._errors import config_error
 from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     MiRecord,
     register_values_by_number,
@@ -25,13 +26,6 @@ class _RegisterHost(Protocol):
     def _redactor(self) -> Redactor: ...
 
 
-def _config_error(
-    message: str, *, code: str, details: dict[str, object] | None = None
-) -> CategorizedError:
-    merged: dict[str, object] = {"code": code, **(details or {})}
-    return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR, details=merged)
-
-
 class GdbMiRegisterCommands:
     """Register-read GDB/MI commands."""
 
@@ -41,11 +35,11 @@ class GdbMiRegisterCommands:
         register_names: list[str],
     ) -> dict[str, object]:
         if not isinstance(register_names, list) or not register_names:
-            raise _config_error("registers must be a non-empty list", code="bad_register")
+            raise config_error("registers must be a non-empty list", code="bad_register")
         requested: list[str] = []
         for name in register_names:
             if not isinstance(name, str) or not _REGISTER_RE.match(name):
-                raise _config_error(f"invalid register name {name!r}", code="bad_register")
+                raise config_error(f"invalid register name {name!r}", code="bad_register")
             requested.append(name)
         # gdb keys register VALUES by ordinal number; map names->ordinals via
         # -data-list-register-names, then return only the requested names.

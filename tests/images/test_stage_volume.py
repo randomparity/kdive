@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
+from importlib.util import resolve_name
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.rootfs import stage_volume as stage_volume_module
 from kdive.images.rootfs.stage_volume import (
     StageVolumeDeps,
     _TargetRow,
@@ -17,6 +21,74 @@ from kdive.images.rootfs.stage_volume import (
 
 _ROW_ID = uuid4()
 _VOLUME = "fedora-44.qcow2"
+
+
+def _is_provider_module(name: str) -> bool:
+    """Whether ``name`` is the provider package or one of its submodules."""
+    return name == "kdive.providers" or name.startswith("kdive.providers.")
+
+
+def _provider_imports(tree: ast.AST, package: str) -> list[str]:
+    """Return provider modules imported by ``tree``, resolving relative imports from ``package``."""
+    imports: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            candidates = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            resolved = (
+                resolve_name(f"{'.' * node.level}{module}", package) if node.level else module
+            )
+            candidates = [resolved]
+            if not _is_provider_module(resolved):
+                candidates.extend(f"{resolved}.{alias.name}" for alias in node.names)
+        else:
+            continue
+        imports.extend(candidate for candidate in candidates if _is_provider_module(candidate))
+    return imports
+
+
+def test_stage_volume_module_remains_provider_neutral() -> None:
+    """The neutral orchestration owns no CLI assembly or provider composition imports."""
+    module = inspect.getmodule(stage_volume)
+    assert module is stage_volume_module
+    assert not hasattr(module, "add_stage_volume_parser")
+    assert not hasattr(module, "run_stage_volume")
+
+    package = module.__package__
+    assert package is not None
+    assert _provider_imports(ast.parse(inspect.getsource(module)), package) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param("import kdive.providers", ["kdive.providers"], id="direct-provider"),
+        pytest.param(
+            "import kdive.providers.remote_libvirt",
+            ["kdive.providers.remote_libvirt"],
+            id="direct-provider-submodule",
+        ),
+        pytest.param(
+            "from ...providers import remote_libvirt",
+            ["kdive.providers"],
+            id="relative-provider",
+        ),
+        pytest.param(
+            "from ... import providers",
+            ["kdive.providers"],
+            id="relative-package-provider",
+        ),
+        pytest.param("import kdive.providers_extra", [], id="non-provider-near-match"),
+    ],
+)
+def test_stage_volume_provider_import_detector_catches_all_import_forms(
+    source: str, expected: list[str]
+) -> None:
+    """The layering guard resolves absolute and package-relative provider imports."""
+    package = stage_volume_module.__package__
+    assert package is not None
+    assert _provider_imports(ast.parse(source), package) == expected
 
 
 class _Recorder:

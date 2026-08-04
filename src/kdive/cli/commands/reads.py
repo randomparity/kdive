@@ -15,6 +15,7 @@ import argparse
 import sys
 from collections.abc import Mapping
 
+from kdive.cli.commands.generated_args import optional_generated_arg, required_generated_arg
 from kdive.cli.errors import exit_code_for_envelope
 from kdive.cli.render import emit, flatten_envelope, render, render_record, render_report
 from kdive.cli.transport import Session, tool_envelope
@@ -49,7 +50,7 @@ async def fetch_collection_envelope(
 def _payload(args: argparse.Namespace, *names: str) -> dict[str, object]:
     payload: dict[str, object] = {}
     for name in names:
-        value = getattr(args, name, None)
+        value = optional_generated_arg(args, name, str)
         if value is not None:
             payload[name] = value
     return payload
@@ -81,11 +82,18 @@ async def resources_list(args: argparse.Namespace) -> int:
 
 
 async def resources_get(args: argparse.Namespace) -> int:
-    return await _record("resources.describe", args, {"resource_id": args.resource_id})
+    return await _record(
+        "resources.describe",
+        args,
+        {"resource_id": required_generated_arg(args, "resource_id", str)},
+    )
 
 
 async def images_get(args: argparse.Namespace) -> int:
-    payload = {"image_id": args.image_id, **_payload(args, "target_kernel")}
+    payload = {
+        "image_id": required_generated_arg(args, "image_id", str),
+        **_payload(args, "target_kernel"),
+    }
     return await _record("images.describe", args, payload)
 
 
@@ -110,11 +118,13 @@ async def systems_list(args: argparse.Namespace) -> int:
 
 
 async def systems_get(args: argparse.Namespace) -> int:
-    return await _record("systems.get", args, {"system_id": args.system_id})
+    return await _record(
+        "systems.get", args, {"system_id": required_generated_arg(args, "system_id", str)}
+    )
 
 
 async def runs_get(args: argparse.Namespace) -> int:
-    return await _record("runs.get", args, {"run_id": args.run_id})
+    return await _record("runs.get", args, {"run_id": required_generated_arg(args, "run_id", str)})
 
 
 async def jobs_list(args: argparse.Namespace) -> int:
@@ -144,7 +154,7 @@ async def _wait(tool: str, args: argparse.Namespace, id_key: str, object_id: str
     hot spin. Zero stays legal — it is the documented point read (ADR-0470 decision 3).
     """
     payload: dict[str, object] = {id_key: object_id}
-    timeout = getattr(args, "timeout_s", None)
+    timeout = optional_generated_arg(args, "timeout_s", float)
     if timeout is not None:
         if timeout < 0:
             # "finite" is the parser's job now, so this says only what it still checks.
@@ -156,12 +166,17 @@ async def _wait(tool: str, args: argparse.Namespace, id_key: str, object_id: str
 
 async def jobs_wait(args: argparse.Namespace) -> int:
     """Read or poll one job (``jobs.wait``); ``--timeout-s 0`` is the point read."""
-    return await _wait("jobs.wait", args, "job_id", args.job_id)
+    return await _wait("jobs.wait", args, "job_id", required_generated_arg(args, "job_id", str))
 
 
 async def allocations_wait(args: argparse.Namespace) -> int:
     """Read or poll one allocation (``allocations.wait``); ``--timeout-s 0`` is the point read."""
-    return await _wait("allocations.wait", args, "allocation_id", args.allocation_id)
+    return await _wait(
+        "allocations.wait",
+        args,
+        "allocation_id",
+        required_generated_arg(args, "allocation_id", str),
+    )
 
 
 def _data_list(envelope: Mapping[str, object], key: str) -> list[object]:
@@ -193,8 +208,8 @@ async def ledger_get(args: argparse.Namespace) -> int:
     ``--investigation-id`` must be given; neither or both is a usage error (exit 2) rather
     than an opaque server-side discriminator failure.
     """
-    project = getattr(args, "project", None)
-    investigation_id = getattr(args, "investigation_id", None)
+    project = optional_generated_arg(args, "project", str)
+    investigation_id = optional_generated_arg(args, "investigation_id", str)
     if (project is None) == (investigation_id is None):
         print("error: give exactly one of --project or --investigation-id", file=sys.stderr)
         return 2
@@ -238,8 +253,8 @@ def _window_payload(args: argparse.Namespace) -> dict[str, object]:
     one bound is given the other half of the pair is ``None`` (a half-open window). Values
     pass through verbatim; the tool's parser owns ISO-8601/timezone validation.
     """
-    since = getattr(args, "since", None)
-    until = getattr(args, "until", None)
+    since = optional_generated_arg(args, "since", str)
+    until = optional_generated_arg(args, "until", str)
     if since is None and until is None:
         return {}
     return {"window": [since, until]}
@@ -251,7 +266,7 @@ def _projects_arg(args: argparse.Namespace) -> list[str] | None:
     Whitespace is trimmed and empty tokens dropped. A given-but-all-empty value yields an
     empty list, which the caller rejects as a usage error rather than sending ``projects=[]``.
     """
-    raw = getattr(args, "projects", None)
+    raw = optional_generated_arg(args, "projects", str)
     if raw is None:
         return None
     return [name.strip() for name in raw.split(",") if name.strip()]
@@ -285,7 +300,7 @@ async def ledger_report(args: argparse.Namespace) -> int:
     a ``platform_auditor`` token. Both send the scope in the discriminated ``request``, so
     the CLI never picks a scope on the caller's behalf.
     """
-    scope = args.scope
+    scope = required_generated_arg(args, "scope", str)
     if scope not in _REPORT_SCOPES:
         print(f"error: --scope must be one of {', '.join(_REPORT_SCOPES)}", file=sys.stderr)
         return 2

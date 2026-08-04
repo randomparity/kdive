@@ -2,7 +2,7 @@
 
 The generic ``kdivectl tool call`` passthrough fail-closed-gates on ``readOnlyHint``
 (ADR-0089). A domain read tool that forgets ``annotations=_docmeta.read_only()`` is
-therefore unreachable without a curated verb. This guard holds every such tool to the
+therefore unreachable without its descriptor-owned CLI path. This guard holds every such tool to the
 hint, making the milestone's "lists/inspects every domain object" claim falsifiable.
 
 ``secrets.list`` (a #252 net-new read tool) carries the same hint: it is a domain read
@@ -16,7 +16,8 @@ import asyncio
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.cli.commands.registry import REGISTRY
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands.registry import HANDLER_OVERRIDES
 from kdive.mcp.assembly.app import build_app
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
@@ -66,25 +67,27 @@ def test_read_tools_carry_read_only_hint() -> None:
     assert not not_annotated, f"read tools unreachable via passthrough: {not_annotated}"
 
 
-def test_every_curated_read_verb_targets_a_read_only_tool() -> None:
-    # Derive the guarded set from the SAME registry that drives dispatch, so a future verb
-    # wired to a mutating tool fails here instead of silently reaching it (ADR-0089).
+def test_every_specialized_read_handler_targets_a_read_only_tool() -> None:
+    # Generated descriptors own mutation classification; the handler map only specializes
+    # presentation and must not route around that contract.
     tools = _tools_by_name()
+    generated = {verb.tool: verb for verb in GENERATED_VERBS}
     offenders = [
-        verb.tool
-        for verb in REGISTRY
-        if verb.read_only and (verb.tool not in tools or not _is_read_only(tools[verb.tool]))
+        name
+        for name in HANDLER_OVERRIDES
+        if generated[name].read_only and (name not in tools or not _is_read_only(tools[name]))
     ]
-    assert not offenders, f"curated read verbs target non-read-only tools: {offenders}"
+    assert not offenders, f"specialized read handlers target non-read-only tools: {offenders}"
 
 
 def test_mutating_verbs_target_non_read_only_tools() -> None:
     # The dual of the read-only guard: a verb declared mutating MUST target a tool that is
     # provably not read-only, so the read-only passthrough can never reach it (ADR-0089).
     tools = _tools_by_name()
+    generated = {verb.tool: verb for verb in GENERATED_VERBS}
     leaks = [
-        verb.tool
-        for verb in REGISTRY
-        if not verb.read_only and (verb.tool not in tools or _is_read_only(tools[verb.tool]))
+        name
+        for name in HANDLER_OVERRIDES
+        if not generated[name].read_only and (name not in tools or _is_read_only(tools[name]))
     ]
     assert not leaks, f"mutating verbs target read-only/unknown tools: {leaks}"

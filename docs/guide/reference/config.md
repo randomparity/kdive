@@ -234,17 +234,16 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_GUEST_IMAGE_RHEL` | — | Path to a rhel-family (rocky/centos/fedora) *-kdive-ready qcow2 for the per-family SSH-reachability live_stack test (#956, ADR-0294); unset → the rhel parameter skips. |
 | `KDIVE_IMAGE` | — | Container image ref under test for the image smoke test; unset → the smoke test skips. |
 | `KDIVE_LIVE_SSH_TARGET` | — | SSH target gating the criterion-5 live_stack tier; unset → the live_stack suite skips. |
-| `KDIVE_LIVE_VM_BZIMAGE` | — | Path to a kernel image that panics early in boot (no usable rootfs) for the gated local-libvirt preserve-crash live-attach test (#747); unset → that test skips. |
+| `KDIVE_LIVE_VM_BZIMAGE` | — | Path to the kernel image matching KDIVE_LIVE_VM_VMLINUX for the gated local-libvirt preserve-crash and debug-stepping proofs; unset → those tests skip. |
 | `KDIVE_LIVE_VM_GDBMI_MODULE_KO` | — | Path to a loaded module .ko for the optional gated gdb-MI module-symbol load smoke. Unset → that portion of the test skips. |
 | `KDIVE_LIVE_VM_GDBMI_MODULE_NAME` | — | Loaded module name matching KDIVE_LIVE_VM_GDBMI_MODULE_KO for the optional gated gdb-MI module-symbol load smoke. Defaults to the .ko path stem. |
-| `KDIVE_LIVE_VM_GDBMI_VMLINUX` | — | Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_BZIMAGE for the gated gdb-MI debug tool smoke. Unset → that test skips. |
 | `KDIVE_LIVE_VM_REMOTE_BASE_IMAGE` | — | Operator-staged base-image volume name the live_vm_remote provision profile feeds into base_image_volume (#1424, ADR-0425). Required once KDIVE_LIVE_VM_REMOTE_URI is set. |
 | `KDIVE_LIVE_VM_REMOTE_RECONCILER` | — | Presence marker for a running reconciler (its metrics endpoint, or 1) that the live_vm_remote family needs for its reconciler-resident console collector (#1424, ADR-0425). Presence-checked, not probed. Required once KDIVE_LIVE_VM_REMOTE_URI is set. |
 | `KDIVE_LIVE_VM_REMOTE_URI` | — | qemu+tls:// control URI of an operator-provided remote-libvirt host for the live_vm_remote family (#1424, ADR-0425); the trigger for require_live_vm_remote. Unset → that family skips; a non-qemu+tls:// URI or one carrying no_verify fails loud (remote mandates mutual TLS). |
-| `KDIVE_LIVE_VM_ROOTFS` | — | Path to a bootable rootfs qcow2 for the gated live_vm snapshot/revert/resume proof (#1254); unset → that test skips. |
+| `KDIVE_LIVE_VM_ROOTFS` | — | Path to a bootable rootfs qcow2 for the gated live_vm throwaway-domain proofs, including snapshot/revert/resume and debug stepping; unset → those tests skip. |
 | `KDIVE_LIVE_VM_SYSTEM_ID` | — | System id of a pre-provisioned live VM for the gated local-libvirt install test. |
 | `KDIVE_LIVE_VM_VMCORE` | — | Path to a real captured vmcore for the live_vm crash(8) postmortem test (#816); paired with KDIVE_LIVE_VM_VMLINUX. Unset → that test skips. |
-| `KDIVE_LIVE_VM_VMLINUX` | — | Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_VMCORE for the live_vm crash(8) postmortem test (#816). Unset → that test skips. |
+| `KDIVE_LIVE_VM_VMLINUX` | — | Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_BZIMAGE for the gated gdb-MI debug proofs and, when KDIVE_LIVE_VM_VMCORE is set, matching that vmcore for the crash(8) postmortem proof. Unset → those tests skip. |
 | `KDIVE_OIDC_CLIENT_ID` | `kdive-test` | OIDC client id the live_stack harness presents to the mock issuer. |
 | `KDIVE_OIDC_IMAGE` | — | docker-compose oidc override: set to the published GHCR mirror digest to PULL it (ADR-0358); unset → compose builds deploy/mock-oidc locally as kdive-mock-oidc:dev. |
 | `KDIVE_PPC64LE_BUNDLE` | — | Directory holding kernel.tar.gz (the ADR-0343 combined tar: ELF boot/vmlinuz + lib/modules/<ver>/) and initrd.img for the #1146 uploaded-bundle boot proof live_stack test (epic #1139); unset → that test skips. |

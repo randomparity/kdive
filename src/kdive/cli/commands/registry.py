@@ -1,8 +1,8 @@
-"""Registry mapping ``(group, subcommand)`` to a CLI verb handler and its argparse shape.
+"""Build and dispatch the schema-generated ``kdivectl`` command surface.
 
-The registry is the single source of truth: :func:`add_subparsers` builds the parser tree
-from it and :func:`run_verb` dispatches against it, so adding a verb is one ``Verb`` entry.
-Mutating verbs (a later M2.2 task) append their own entries to this same tuple (ADR-0089).
+The committed generated descriptors own every MCP command path and parser shape.  This module
+only keeps the small tool-keyed handler map for commands with specialised rendering or payload
+assembly; it never re-declares a command path or its argument grammar.
 """
 
 from __future__ import annotations
@@ -10,21 +10,19 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 
 import kdive.cli.commands.doctor as doctor
 import kdive.cli.commands.images as images
 import kdive.cli.commands.mutations as mutations
 import kdive.cli.commands.reads as reads
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
-from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
+from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX
+from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedLocalFlag, GeneratedVerb
 from kdive.cli.reserved_flags import derive_cli_flag
 
 __all__ = [
-    "GENERATED_ARG_PREFIX",
-    "REGISTRY",
-    "Verb",
+    "HANDLER_OVERRIDES",
     "add_subparsers",
     "doctor",
     "images",
@@ -32,181 +30,38 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True)
-class Verb:
-    """One CLI verb: its ``group subcommand`` path, handler, MCP tool, and argparse shape.
-
-    ``tool`` is the MCP tool the handler calls. It is declared here so the read-only gate
-    test (``tests/mcp/test_read_tools_annotated.py``) can prove, from the same registry that
-    drives dispatch, that no curated read verb reaches a non-read-only tool (ADR-0089).
-
-    ``read_only`` distinguishes the curated read verbs (default ``True``) from the
-    break-glass mutating verbs (``False``), whose ``tool`` is intentionally a
-    ``destructive()``-annotated server tool. The gate test only holds read-only verbs to
-    the read-only hint; the mutating verbs are never reachable through the *read-only* default
-    of the ``tool call`` passthrough (a destructive tool needs an explicit ``--allow-destructive``
-    opt-in there — ADR-0107).
-
-    ``required_options`` are ``--`` options the underlying tool declares as required
-    arguments (no server-side default); the CLI marks them ``required=True`` so an omission
-    fails up front with a clean usage error (exit 2) rather than an opaque server-side
-    missing-argument error. ``options`` stay optional (default ``None``).
-
-    Which bucket a parameter belongs in is not a matter of taste: the schema guard
-    (``tests/cli/test_verb_schema_guard.py``) drives every argv this shape accepts and
-    validates the resulting payload against the tool's live JSON schema, so a
-    schema-required property parked in ``options`` fails — an omitted optional sends
-    ``null`` where the tool declares a value (ADR-0469).
-    """
-
-    group: str
-    sub: str
-    handler: Callable[[argparse.Namespace], Awaitable[int]]
-    tool: str
-    positionals: tuple[str, ...] = ()
-    options: tuple[str, ...] = ()
-    required_options: tuple[str, ...] = ()
-    flags: tuple[str, ...] = ()
-    read_only: bool = True
-    help: str = ""
+Handler = Callable[[argparse.Namespace], Awaitable[int]]
 
 
-REGISTRY: tuple[Verb, ...] = (
-    Verb("resources", "list", reads.resources_list, "resources.list", options=("kind",)),
-    Verb("resources", "describe", reads.resources_get, "resources.describe", ("resource_id",)),
-    Verb(
-        "allocations",
-        "list",
-        reads.allocations_list,
-        "allocations.list",
-        required_options=("project",),
-    ),
-    Verb("systems", "list", reads.systems_list, "systems.list", options=("state",)),
-    Verb("systems", "get", reads.systems_get, "systems.get", ("system_id",)),
-    Verb("runs", "get", reads.runs_get, "runs.get", ("run_id",)),
-    Verb("jobs", "list", reads.jobs_list, "jobs.list"),
-    Verb(
-        "jobs",
-        "wait",
-        reads.jobs_wait,
-        "jobs.wait",
-        ("job_id",),
-        options=("timeout_s",),
-        help="read or poll one job; --timeout-s 0 is the point read",
-    ),
-    Verb(
-        "allocations",
-        "wait",
-        reads.allocations_wait,
-        "allocations.wait",
-        ("allocation_id",),
-        options=("timeout_s",),
-        help="read or poll one allocation; --timeout-s 0 is the point read",
-    ),
-    Verb(
-        "accounting",
-        "usage",
-        reads.ledger_get,
-        "accounting.usage",
-        options=("project", "investigation_id"),
-        help="spend rollup for one --project or one --investigation-id",
-    ),
-    Verb(
-        "accounting",
-        "report",
-        reads.ledger_report,
-        "accounting.report",
-        required_options=("scope",),
-        options=("projects", "group_by", "since", "until"),
-        help="accounting rollup; --scope granted-set or all-projects (platform_auditor)",
-    ),
-    Verb("inventory", "list", reads.inventory_show, "inventory.list", options=("project",)),
-    Verb("secrets", "list", reads.secrets_list, "secrets.list"),
-    Verb(
-        "ops",
-        "force-teardown",
-        mutations.teardown,
-        "ops.force_teardown",
-        ("system_id",),
-        required_options=("reason",),
-        flags=("force",),
-        read_only=False,
-    ),
-    Verb(
-        "ops",
-        "force-release",
-        mutations.allocations_force_release,
-        "ops.force_release",
-        ("allocation_id",),
-        required_options=("reason",),
-        read_only=False,
-    ),
-    Verb(
-        "resources",
-        "set-scheduling",
-        mutations.resources_set_scheduling,
-        "resources.set_scheduling",
-        ("resource_id", "state"),
-        read_only=False,
-        help="set a host 'cordoned' or 'schedulable' (requires a platform_operator token)",
-    ),
-    Verb(
-        "resources",
-        "drain",
-        mutations.resources_drain,
-        "resources.drain",
-        ("resource_id",),
-        options=("mode", "reason"),
-        read_only=False,
-    ),
-    Verb("images", "list", images.images_list, "images.list", options=("scope",)),
-    Verb(
-        "images",
-        "describe",
-        reads.images_get,
-        "images.describe",
-        ("image_id",),
-        options=("target_kernel",),
-    ),
-    Verb(
-        "images",
-        "upload",
-        images.images_upload,
-        "images.upload",
-        required_options=("project", "name", "arch", "quarantine_key"),
-        options=("lifetime_seconds",),
-        read_only=False,
-    ),
-    Verb(
-        "images",
-        "delete",
-        images.images_delete,
-        "images.delete",
-        ("image_id",),
-        read_only=False,
-    ),
-    Verb(
-        "images",
-        "prune-expired",
-        images.images_prune,
-        "images.prune_expired",
-        required_options=("reason",),
-        flags=("expired",),
-        read_only=False,
-    ),
-    Verb(
-        "images",
-        "extend",
-        images.images_extend,
-        "images.extend",
-        ("image_id",),
-        required_options=("seconds", "reason"),
-        read_only=False,
-    ),
-)
+# These handlers specialise rendering or reshape descriptor-owned parser values into the MCP
+# payload. They are keyed by tool because paths belong exclusively to ``GENERATED_VERBS``.
+HANDLER_OVERRIDES: dict[str, Handler] = {
+    "resources.list": reads.resources_list,
+    "resources.describe": reads.resources_get,
+    "allocations.list": reads.allocations_list,
+    "systems.list": reads.systems_list,
+    "systems.get": reads.systems_get,
+    "runs.get": reads.runs_get,
+    "jobs.list": reads.jobs_list,
+    "jobs.wait": reads.jobs_wait,
+    "allocations.wait": reads.allocations_wait,
+    "accounting.usage": reads.ledger_get,
+    "accounting.report": reads.ledger_report,
+    "inventory.list": reads.inventory_show,
+    "secrets.list": reads.secrets_list,
+    "ops.force_teardown": mutations.teardown,
+    "ops.force_release": mutations.allocations_force_release,
+    "resources.set_scheduling": mutations.resources_set_scheduling,
+    "resources.drain": mutations.resources_drain,
+    "images.list": images.images_list,
+    "images.describe": reads.images_get,
+    "images.upload": images.images_upload,
+    "images.delete": images.images_delete,
+    "images.prune_expired": images.images_prune,
+    "images.extend": images.images_extend,
+}
 
 
-_CURATED_BY_PATH: dict[tuple[str, str], Verb] = {(v.group, v.sub): v for v in REGISTRY}
 _GENERATED_BY_PATH: dict[tuple[str, str], GeneratedVerb] = {
     (v.group, v.sub): v for v in GENERATED_VERBS
 }
@@ -234,9 +89,8 @@ def _finite_float(raw: str) -> float:
     return value
 
 
-#: How argparse consumes a value for each ``GeneratedFlag.arg_type``. The single map both halves
-#: of the parser read — :func:`_add_generated_flag` for the schema-generated flags and
-#: :func:`_derived_type` for the curated ones — so the finite check lands on both at once.
+#: How argparse consumes each ``GeneratedFlag.arg_type``.  Both option and positional forms use
+#: this one map, so schema-derived numeric validation cannot drift between presentations.
 #: ``int`` stays the builtin: it already refuses ``inf``/``nan``/``1.5`` with the ``ValueError``
 #: argparse renders as a usage error, so a wrapper there would change no outcome.
 _ARG_TYPES: dict[str, Callable[[str], object]] = {
@@ -244,11 +98,6 @@ _ARG_TYPES: dict[str, Callable[[str], object]] = {
     "int": int,
     "float": _finite_float,
 }
-
-#: Generated-verb flag values land on the namespace under this prefix (``genarg_<param>``),
-#: so a tool parameter named ``command``/``subcommand``/``json`` can never clobber argparse's
-#: routing keys. The generic dispatch handler (#1450) strips the prefix to rebuild the payload.
-GENERATED_ARG_PREFIX = "genarg_"
 
 
 def _json_parent() -> argparse.ArgumentParser:
@@ -262,111 +111,9 @@ def _json_parent() -> argparse.ArgumentParser:
     return parent
 
 
-def _curated_flags(verb: Verb) -> dict[str, GeneratedFlag]:
-    """The generated verb's flags at ``verb``'s path, keyed by the parameter name they feed.
-
-    A curated :class:`Verb` overrides the generated shape at its path, and the hand-written
-    shape has no place to spell an enum or a per-parameter description. Rather than restate
-    either by hand — a second copy that goes stale the moment the enum grows a member or the
-    tool's docstring is reworded — both are read off the *generated* verb at the same path,
-    whose flags the generator derives from the live tool schema and ``cli-verbs-check`` keeps
-    in sync. A curated parameter with no generated counterpart contributes nothing
-    (ADR-0469).
-    """
-    generated = _GENERATED_BY_PATH.get((verb.group, verb.sub))
-    if generated is None:
-        return {}
-    return {flag.dest: flag for flag in generated.flags}
-
-
-def _derived_choices(derived: Mapping[str, GeneratedFlag], name: str) -> tuple[str, ...] | None:
-    """``name``'s schema-derived enum values, or ``None`` when it is not enumerated.
-
-    Empty is normalized to ``None`` because argparse reads an empty ``choices`` as "no value is
-    legal", which would reject every command line for a non-enum parameter.
-    """
-    flag = derived.get(name)
-    return (flag.choices or None) if flag is not None else None
-
-
-def _derived_help(derived: Mapping[str, GeneratedFlag], name: str) -> str | None:
-    """``name``'s schema-derived ``--help`` text, or ``None`` when the schema describes none.
-
-    Empty is normalized to ``None`` so a described-nowhere parameter renders as a bare flag
-    rather than a blank help column.
-    """
-    flag = derived.get(name)
-    return (flag.help or None) if flag is not None else None
-
-
-def _derived_type(
-    derived: Mapping[str, GeneratedFlag], name: str
-) -> Callable[[str], object] | None:
-    """``name``'s schema-derived argparse ``type=``, or ``None`` to leave it a string.
-
-    Curated options were declared with no ``type=``, so a parameter the tool schema types as a
-    JSON ``number`` arrived at its handler as the raw ``str`` argparse read from ``argv`` and died
-    there in a hand-written ``int()`` — a traceback on exit 1 where every other malformed argument
-    is a usage error on exit 2 (ADR-0474 decision 1).
-
-    Absent is normalized to ``None`` because that is already argparse's own default for ``type=``
-    (its registry maps ``None`` to the identity function), so a curated parameter with no
-    generated counterpart needs no special case to stay a string.
-    """
-    flag = derived.get(name)
-    if flag is None or flag.arg_type is None:
-        return None
-    return _ARG_TYPES[flag.arg_type]
-
-
-def _verb_parser(
-    group_parser: argparse._SubParsersAction, verb: Verb, parent: argparse.ArgumentParser
+def _add_generated_flag(
+    parser: argparse.ArgumentParser, flag: GeneratedFlag, *, positional: bool
 ) -> None:
-    """Add ``verb``'s sub-subparser, declaring its positionals and ``--`` options.
-
-    The three value-taking buckets read ``type``/``choices``/``help`` off the generated verb at
-    the same path; the ``store_true`` bucket reads ``help`` alone, because ``_StoreTrueAction``
-    accepts neither ``type`` nor ``choices`` and passing either raises ``TypeError`` while the
-    parser is being built. That is why these four calls stay spelled out rather than sharing a
-    ``**kwargs`` helper — the buckets genuinely do not take the same keywords (ADR-0474).
-    """
-    parser = group_parser.add_parser(verb.sub, parents=[parent], help=verb.help or None)
-    derived = _curated_flags(verb)
-    for positional in verb.positionals:
-        parser.add_argument(
-            positional,
-            type=_derived_type(derived, positional),
-            choices=_derived_choices(derived, positional),
-            help=_derived_help(derived, positional),
-        )
-    for option in verb.options:
-        parser.add_argument(
-            f"--{option.replace('_', '-')}",
-            dest=option,
-            default=None,
-            type=_derived_type(derived, option),
-            choices=_derived_choices(derived, option),
-            help=_derived_help(derived, option),
-        )
-    for option in verb.required_options:
-        parser.add_argument(
-            f"--{option.replace('_', '-')}",
-            dest=option,
-            required=True,
-            type=_derived_type(derived, option),
-            choices=_derived_choices(derived, option),
-            help=_derived_help(derived, option),
-        )
-    for flag in verb.flags:
-        parser.add_argument(
-            f"--{flag.replace('_', '-')}",
-            dest=flag,
-            action="store_true",
-            help=_derived_help(derived, flag),
-        )
-
-
-def _add_generated_flag(parser: argparse.ArgumentParser, flag: GeneratedFlag) -> None:
     """Declare one schema-derived ``--flag`` on ``parser`` per its :class:`GeneratedFlag`.
 
     Honors ``action`` (``store_true`` / ``bool_optional`` / ``append``), ``arg_type``
@@ -379,6 +126,18 @@ def _add_generated_flag(parser: argparse.ArgumentParser, flag: GeneratedFlag) ->
     dest = f"{GENERATED_ARG_PREFIX}{flag.dest}"
     help_ = flag.help or None
     choices = flag.choices or None
+    metavar = None if choices is not None else flag.dest.upper()
+    if positional:
+        if flag.action is not None:
+            raise ValueError(f"positional {flag.dest!r} cannot use {flag.action!r}")
+        parser.add_argument(
+            dest,
+            metavar=flag.dest,
+            choices=choices,
+            type=_ARG_TYPES[flag.arg_type] if flag.arg_type is not None else str,
+            help=help_,
+        )
+        return
     if flag.action == "store_true":
         parser.add_argument(flag.name, dest=dest, action="store_true", help=help_)
     elif flag.action == "bool_optional":
@@ -396,6 +155,7 @@ def _add_generated_flag(parser: argparse.ArgumentParser, flag: GeneratedFlag) ->
             action="append",
             required=flag.required,
             choices=choices,
+            metavar=metavar,
             help=help_,
         )
     else:
@@ -405,9 +165,15 @@ def _add_generated_flag(parser: argparse.ArgumentParser, flag: GeneratedFlag) ->
             default=None,
             required=flag.required,
             choices=choices,
+            metavar=metavar,
             type=_ARG_TYPES[flag.arg_type] if flag.arg_type is not None else str,
             help=help_,
         )
+
+
+def _add_generated_local_flag(parser: argparse.ArgumentParser, flag: GeneratedLocalFlag) -> None:
+    """Add a descriptor-owned acknowledgement that never becomes MCP payload data."""
+    parser.add_argument(flag.name, dest=flag.dest, action="store_true", help=flag.help or None)
 
 
 def _json_container_arg(value: str) -> str:
@@ -443,6 +209,7 @@ def _add_generated_json_flag(parser: argparse.ArgumentParser, param: str) -> Non
         f"{derive_cli_flag(param)}-json",
         dest=f"{GENERATED_ARG_PREFIX}{param}_json",
         default=None,
+        metavar=f"{param.upper()}_JSON",
         type=_json_container_arg,
         help=f"JSON-encoded value (object or array) for the {param!r} parameter",
     )
@@ -453,20 +220,22 @@ def _generated_verb_parser(
     verb: GeneratedVerb,
     parent: argparse.ArgumentParser,
 ) -> None:
-    """Add a schema-generated verb's sub-subparser, declaring its scalar and JSON ``--flags``.
+    """Add one descriptor-defined verb parser.
 
-    A verb the committed artifact marks ``destructive`` also gets ``--yes`` so its typed-``yes``
-    confirmation (ADR-0421 decision 4, driven by :func:`kdive.cli.dispatch.invoke_generated_verb`)
-    is dischargeable non-interactively. ``--yes`` is reserved (``RESERVED_CLI_FLAGS``), so it can
+    A descriptor with ``confirm_destructive`` gets ``--yes`` so its typed-``yes`` confirmation
+    (ADR-0421 decision 4, driven by :func:`kdive.cli.dispatch.invoke_generated_verb`) is
+    dischargeable non-interactively. ``--yes`` is reserved (``RESERVED_CLI_FLAGS``), so it can
     never shadow a generated parameter flag. The live-annotation tier still governs the actual
-    ceremony at call time — the committed ``destructive`` bit only decides whether the flag exists.
+    ceremony at call time; descriptor metadata only decides whether the flag exists.
     """
     parser = group_parser.add_parser(verb.sub, parents=[parent], help=verb.help or None)
     for flag in verb.flags:
-        _add_generated_flag(parser, flag)
+        _add_generated_flag(parser, flag, positional=flag.dest in verb.positionals)
     for param in verb.json_params:
         _add_generated_json_flag(parser, param)
-    if verb.destructive:
+    for flag in verb.local_flags:
+        _add_generated_local_flag(parser, flag)
+    if verb.confirm_destructive:
         parser.add_argument(
             "--yes",
             dest="yes",
@@ -476,13 +245,7 @@ def _generated_verb_parser(
 
 
 def add_subparsers(sub: argparse._SubParsersAction) -> None:
-    """Add one subparser per verb across the merged generated + curated surface.
-
-    Every registered MCP tool contributes a verb at its canonical ``group subcommand`` path
-    (derived from the tool name). A curated :class:`Verb` overrides the argparse shape at its
-    derived path — never a second path — so its hand-tuned positionals/options win; every other
-    path takes the schema-derived generated shape.
-    """
+    """Add one descriptor-owned subparser for every generated MCP verb."""
     parent = _json_parent()
     groups: dict[str, argparse._SubParsersAction] = {}
     for generated in GENERATED_VERBS:
@@ -491,19 +254,16 @@ def add_subparsers(sub: argparse._SubParsersAction) -> None:
             parser = sub.add_parser(generated.group)
             group_parser = parser.add_subparsers(dest="subcommand", required=True)
             groups[generated.group] = group_parser
-        curated = _CURATED_BY_PATH.get((generated.group, generated.sub))
-        if curated is not None:
-            _verb_parser(group_parser, curated, parent)
-        else:
-            _generated_verb_parser(group_parser, generated, parent)
+        _generated_verb_parser(group_parser, generated, parent)
     _doctor_parser(sub, parent)
 
 
 def _doctor_parser(sub: argparse._SubParsersAction, parent: argparse.ArgumentParser) -> None:
     """Add the ``doctor`` verb: a deployment-diagnostics gate, not a generic read verb.
 
-    It is wired here (not as a ``Verb``) because it has a bespoke flag (``--with-egress``),
-    renders a fixed verdict table, and maps its own gate-safe exit codes (ADR-0091 §5).
+    It has no MCP tool descriptor because it runs local diagnostics. Its bespoke
+    ``--with-egress`` flag, fixed verdict table, and gate-safe exit codes therefore remain a
+    standalone CLI path (ADR-0091 §5).
     """
     parser = sub.add_parser("doctor", parents=[parent], help="run deployment diagnostics")
     parser.add_argument("--provider", dest="provider", default=None)
@@ -511,22 +271,21 @@ def _doctor_parser(sub: argparse._SubParsersAction, parent: argparse.ArgumentPar
 
 
 async def run_verb(args: argparse.Namespace) -> int:
-    """Resolve ``(command, subcommand)`` against the merged verb surface and dispatch it.
+    """Resolve the generated command path, then select custom execution by its MCP tool.
 
-    A curated :class:`Verb` at the path runs its hand-written handler. Any other registered
-    tool routes through the generic generated-verb seam, which invokes the tool via the same
-    ``tool call`` passthrough (:func:`kdive.cli.dispatch.invoke_generated_verb`).
+    A handler override changes rendering or payload shaping only.  It never participates in path
+    resolution or parser construction.
 
     Raises:
         SystemExit: When no registered tool matches the parsed command/subcommand.
     """
     subcommand = getattr(args, "subcommand", None)
     key = (args.command, subcommand)
-    curated = _CURATED_BY_PATH.get(key)
-    if curated is not None:
-        return await curated.handler(args)
     generated = _GENERATED_BY_PATH.get(key)
     if generated is not None:
+        handler = HANDLER_OVERRIDES.get(generated.tool)
+        if handler is not None:
+            return await handler(args)
         from kdive.cli import dispatch
 
         return await dispatch.invoke_generated_verb(generated, args)

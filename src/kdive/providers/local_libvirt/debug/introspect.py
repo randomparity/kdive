@@ -1,16 +1,5 @@
-"""Offline drgn introspection of a captured vmcore on the host (ADR-0033).
+"""Local-libvirt offline vmcore drgn introspection (ADR-0033).
 
-`LocalLibvirtVmcoreIntrospect` realizes the `VmcoreIntrospector` port, mirroring
-`LocalLibvirtRetrieve`'s `CrashPostmortem`: fetching the raw core + `vmlinux` from the
-object store, verifying the core's build-id against the Run's recorded build-id
-(provenance), opening drgn against the staged core, and running three fixed helpers
-(tasks, modules, sysinfo). `from_env` wires the real shared drgn seams (ADR-0210 §2); the
-orchestration, provenance, dispatch, byte-cap, and redaction stay unit-tested with a fake
-`_Program`, and the drgn open itself runs only under the `live_vm` gate. The assembled report
-is `Redactor`-scrubbed **inside the port** — the port is the single redaction boundary, so any
-later persistence is of already-redacted text. The real drgn package is an operator-provided
-live-host prerequisite, not a normal service dependency: the open seam imports it lazily, so a
-host without drgn surfaces a `MISSING_DEPENDENCY` from the open seam, not an ``ImportError``.
 Live SSH-backed drgn introspection lives in ``live_introspect.py``.
 """
 
@@ -37,6 +26,8 @@ from kdive.providers.shared.debug_common.introspect import (
     assemble_report,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
+from kdive.store.objectstore import ObjectStore
 
 # --- LocalLibvirtVmcoreIntrospect (the realized port) --------------------------------------
 
@@ -48,18 +39,7 @@ type _RunHelper = Callable[[_Program, str], dict[str, object]]
 
 
 class LocalLibvirtVmcoreIntrospect:
-    """The realized offline-introspection port (ADR-0033).
-
-    Stages the raw core + ``vmlinux`` from the object store, verifies the core's build-id
-    against the Run's recorded build-id (provenance), opens drgn against the staged core
-    (``live_vm`` seam), runs the three helpers, redacts and byte-caps the assembled report,
-    and returns it — the port is the single redaction boundary.
-
-    ``from_env`` wires the real ``open_program``/``run_helper`` seams; on a host without drgn the
-    open seam raises ``MISSING_DEPENDENCY`` (it imports drgn lazily). A test may still pass ``None``
-    seams to exercise the off-gate guard, which raises ``MISSING_DEPENDENCY`` before touching the
-    store, mirroring ``LocalLibvirtRetrieve.run``'s seam guard.
-    """
+    """Realizes the offline ``VmcoreIntrospector`` port (ADR-0033)."""
 
     def __init__(
         self,
@@ -80,20 +60,22 @@ class LocalLibvirtVmcoreIntrospect:
         self._report_byte_cap = _REPORT_BYTE_CAP
 
     @classmethod
-    def from_env(cls, *, secret_registry: SecretRegistry) -> LocalLibvirtVmcoreIntrospect:
-        """Build from env with the real drgn seams (lazy: drgn imports on first use).
+    def from_env(
+        cls, *, secret_registry: SecretRegistry, store: ObjectStore = UNCONFIGURED_OBJECT_STORE
+    ) -> LocalLibvirtVmcoreIntrospect:
+        """Build with real drgn seams.
 
-        drgn stays an operator-provided live-host prerequisite — the open seam imports it inside
-        the call, so composition builds on hosts without it and ``from_vmcore`` raises the
-        documented ``MISSING_DEPENDENCY`` from the open seam (not an up-front ``None`` guard).
+        An absent package raises ``MISSING_DEPENDENCY`` on first use.
         """
         # ``open_vmcore_program`` returns ``DrgnProgramAdapter`` (its ``iter_*`` are typed
         # ``list[object]``); cast it to the seam alias whose ``_Program`` reads the same surface
         # with the narrower helper-facing element types. ``run_introspection_helper`` accepts
         # ``Any`` for ``program`` so it needs no cast.
         return cls(
-            fetch_object=_real_fetch_object,
-            fetch_versioned_object=_real_fetch_versioned_object,
+            fetch_object=lambda ref: store.get_artifact(ref, None).data,
+            fetch_versioned_object=lambda ref, version_id: (
+                store.get_artifact(ref, None, version_id=version_id).data
+            ),
             read_vmcore_build_id=read_vmcoreinfo_build_id,
             secret_registry=secret_registry,
             open_program=cast("_OpenProgram", open_vmcore_program),
@@ -108,15 +90,17 @@ class LocalLibvirtVmcoreIntrospect:
         debuginfo_version_id: str | None = None,
         expected_build_id: str,
     ) -> IntrospectOutput:
-        """Open the core, run the helpers, and return a redacted, size-bounded report.
+        """Fetch and verify the core, fetch debuginfo, stage both, run helpers, and return the
+        shared report assembler's redacted, byte-capped report.
 
         Raises:
             CategorizedError: ``MISSING_DEPENDENCY`` if the drgn seams were not configured
-                (off-gate); ``CONFIGURATION_ERROR`` for a malformed ref rejected by an
-                injected fetch/build-id seam or a build-id provenance mismatch;
+                (off-gate); ``CONFIGURATION_ERROR`` for a malformed ref reported by an injected
+                fetch/build-id seam or a build-id provenance mismatch;
                 ``STALE_HANDLE`` when a referenced object is missing;
                 ``INFRASTRUCTURE_FAILURE`` for object-store IO failures; or
                 ``DEBUG_ATTACH_FAILURE`` if drgn cannot open the core or load the vmlinux.
+            RuntimeError: if versioned debuginfo is requested without a versioned fetch seam.
         """
         if self._open_program is None or self._run_helper is None:
             raise CategorizedError(

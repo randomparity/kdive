@@ -3,8 +3,8 @@
 The long-running processes are `python -m kdive {server|worker|reconciler|lifecycle-witness}`:
 `server` runs the FastMCP streamable-HTTP app, `worker` runs the job-queue worker
 loop, and `reconciler` runs the drift-repair loop (ADR-0021). One-shot operator
-commands share the same parser: `migrate`, `install-fixtures`, `seed-project`, and
-`build-fs`. Every command configures the structured logger first (ADR-0014).
+commands share the same parser: `migrate`, `install-fixtures`, `seed-project`, `build-fs`, and
+`stage-volume`. Every command configures the structured logger first (ADR-0014).
 """
 
 from __future__ import annotations
@@ -26,10 +26,16 @@ from kdive.config.core_settings import (
 )
 from kdive.db.pool import create_pool
 from kdive.domain.errors import CategorizedError
-from kdive.images.rootfs.command import add_build_fs_parser, run_build_fs
-from kdive.images.rootfs.stage_volume import add_stage_volume_parser, run_stage_volume
+from kdive.images.rootfs.command import (
+    add_build_fs_parser,
+    add_stage_volume_parser,
+    run_build_fs,
+    run_stage_volume,
+)
 from kdive.mcp.middleware.transport_trace import mcp_trace_enabled
-from kdive.processes.lifecycle_witness import run_lifecycle_witness as _run_lifecycle_witness
+from kdive.processes.lifecycle.lifecycle_witness import (
+    run_lifecycle_witness as _run_lifecycle_witness,
+)
 from kdive.processes.reconciler import run_reconciler as _run_reconciler
 from kdive.processes.server import run_server as _run_server
 from kdive.processes.worker import run_worker as _run_worker

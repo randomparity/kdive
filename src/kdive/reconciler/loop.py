@@ -21,7 +21,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import Any, Protocol, cast
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -33,6 +33,7 @@ from kdive.config.core_settings import (
     UPLOAD_ORPHAN_GRACE,
     UPLOAD_TTL_SECONDS,
 )
+from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.infra.reaping import (
@@ -40,18 +41,17 @@ from kdive.providers.infra.reaping import (
     InfraReaper,
     NullDumpVolumeReaper,
 )
-from kdive.reconciler.cleanup import gc as gc_repairs
+from kdive.reconciler.cleanup import (
+    artifact_retention,
+    idempotency,
+    investigation_rootfs,
+    provider_reaping,
+)
 from kdive.reconciler.cleanup.images import (
     repair_dangling_images as _repair_dangling_images,
 )
 from kdive.reconciler.cleanup.images import (
     repair_leaked_images as _repair_leaked_images,
-)
-from kdive.reconciler.cleanup.provider_reaping import (
-    repair_leaked_domains as _repair_leaked_domains,
-)
-from kdive.reconciler.cleanup.provider_reaping import (
-    repair_leaked_probe_guests as _repair_leaked_probe_guests,
 )
 from kdive.reconciler.cleanup.runtime_resources import ResourceProbe
 from kdive.reconciler.cleanup.runtime_resources import (
@@ -92,32 +92,35 @@ from kdive.services.images.retention import (
     repair_expired_private_images as _repair_expired_private_images,
 )
 
-if TYPE_CHECKING:
-    from kdive.health.heartbeat import Heartbeat
-
 _log = logging.getLogger(__name__)
 
 DEFAULT_QUEUE_MAX_WAIT = allocation_repairs.DEFAULT_QUEUE_MAX_WAIT
 DEFAULT_CRASHED_IDLE_GRACE = allocation_repairs.DEFAULT_CRASHED_IDLE_GRACE
-DEFAULT_IDEMPOTENCY_RETENTION = gc_repairs.DEFAULT_IDEMPOTENCY_RETENTION
-DEFAULT_DUMP_VOLUME_GRACE = gc_repairs.DEFAULT_DUMP_VOLUME_GRACE
-DEFAULT_REPORT_ARTIFACT_RETENTION = gc_repairs.DEFAULT_REPORT_ARTIFACT_RETENTION
-DEFAULT_INVESTIGATION_CLEANUP_GRACE = gc_repairs.DEFAULT_INVESTIGATION_CLEANUP_GRACE
-DEFAULT_BUILD_ARTIFACT_RETENTION = gc_repairs.DEFAULT_BUILD_ARTIFACT_RETENTION
-DEFAULT_INVESTIGATION_ROOTFS_RETENTION = gc_repairs.DEFAULT_INVESTIGATION_ROOTFS_RETENTION
+DEFAULT_IDEMPOTENCY_RETENTION = idempotency.DEFAULT_IDEMPOTENCY_RETENTION
+DEFAULT_DUMP_VOLUME_GRACE = provider_reaping.DEFAULT_DUMP_VOLUME_GRACE
+DEFAULT_REPORT_ARTIFACT_RETENTION = artifact_retention.DEFAULT_REPORT_ARTIFACT_RETENTION
+DEFAULT_INVESTIGATION_CLEANUP_GRACE = artifact_retention.DEFAULT_INVESTIGATION_CLEANUP_GRACE
+DEFAULT_BUILD_ARTIFACT_RETENTION = artifact_retention.DEFAULT_BUILD_ARTIFACT_RETENTION
+DEFAULT_INVESTIGATION_ROOTFS_RETENTION = investigation_rootfs.DEFAULT_INVESTIGATION_ROOTFS_RETENTION
 
 _expire_one = allocation_repairs._expire_one
-_gc_idempotency_keys = gc_repairs.gc_idempotency_keys
-_gc_report_artifacts = gc_repairs.gc_report_artifacts
-_gc_system_artifacts = gc_repairs.gc_system_artifacts
-_gc_investigation_artifacts = gc_repairs.gc_investigation_artifacts
-_gc_expired_build_artifacts = gc_repairs.gc_expired_build_artifacts
-_sweep_investigation_rootfs_reclaim = gc_repairs.sweep_investigation_rootfs_reclaim
-_sweep_expired_investigation_rootfs_reclaim = gc_repairs.sweep_expired_investigation_rootfs_reclaim
-_sweep_unowned_investigation_rootfs_staging = gc_repairs.sweep_unowned_investigation_rootfs_staging
+_gc_idempotency_keys = idempotency.gc_idempotency_keys
+_gc_report_artifacts = artifact_retention.gc_report_artifacts
+_gc_system_artifacts = artifact_retention.gc_system_artifacts
+_gc_investigation_artifacts = artifact_retention.gc_investigation_artifacts
+_gc_expired_build_artifacts = artifact_retention.gc_expired_build_artifacts
+_sweep_investigation_rootfs_reclaim = investigation_rootfs.sweep_investigation_rootfs_reclaim
+_sweep_expired_investigation_rootfs_reclaim = (
+    investigation_rootfs.sweep_expired_investigation_rootfs_reclaim
+)
+_sweep_unowned_investigation_rootfs_staging = (
+    investigation_rootfs.sweep_unowned_investigation_rootfs_staging
+)
 _promote_pending = allocation_promotion.promote_pending
-_reap_console_collectors = gc_repairs.reap_console_collectors
-_reap_orphaned_dump_volumes = gc_repairs.reap_orphaned_dump_volumes
+_reap_console_collectors = provider_reaping.reap_console_collectors
+_reap_orphaned_dump_volumes = provider_reaping.reap_orphaned_dump_volumes
+_repair_leaked_domains = provider_reaping.repair_leaked_domains
+_repair_leaked_probe_guests = provider_reaping.repair_leaked_probe_guests
 _reap_orphaned_active_allocations = allocation_repairs.reap_orphaned_active_allocations
 _reap_queue_timeouts_for = allocation_repairs.reap_queue_timeouts_for
 _repair_abandoned_jobs = job_repairs.repair_abandoned_jobs
@@ -154,7 +157,7 @@ class ReconcileUploadStore(
     UploadOrphanStore,
     UploadStore,
     SystemObjectVersionStore,
-    gc_repairs.ArtifactObjectDeleter,
+    artifact_retention.ArtifactObjectDeleter,
     Protocol,
 ):
     """Object-store surface required by upload and artifact-retention reconciler lanes.
@@ -738,7 +741,7 @@ class Reconciler:
         if self._config.heartbeat is None:
             return None
         return asyncio.create_task(
-            _tick_until_stop(
+            tick_until_stop(
                 self._config.heartbeat,
                 stop,
                 self._heartbeat_tick,
@@ -762,23 +765,3 @@ class Reconciler:
             next_due = time.monotonic() + interval
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=interval)
-
-
-async def _tick_until_stop(
-    heartbeat: Heartbeat,
-    stop: asyncio.Event,
-    interval: float,
-    sleep_until_stop: Callable[[asyncio.Event, float], Awaitable[None]] = _sleep_until_stop,
-) -> None:
-    """Bump ``heartbeat`` every ``interval`` seconds until ``stop`` is set or cancelled.
-
-    Runs concurrently with the pass loop so a long-running pass never starves the
-    ``/livez`` signal (ADR-0090 §5); a wedged event loop stops this ticker too, so a truly
-    stuck reconciler still reads not-live.
-    """
-    heartbeat.tick()
-    while not stop.is_set():
-        await sleep_until_stop(stop, interval)
-        if stop.is_set():
-            break
-        heartbeat.tick()

@@ -3,8 +3,13 @@
 from pathlib import Path
 
 
+def _recipe(justfile: str, name: str) -> str:
+    return justfile.split(f"{name}:", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
+
+
 def test_lifecycle_recipes_require_role_specific_database_authorities() -> None:
     justfile = (Path(__file__).resolve().parents[2] / "justfile").read_text()
+    lifecycle_module = "python -m kdive.processes.lifecycle.compose_worker_lifecycle"
     witness_default = (
         "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="
         '"${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:'
@@ -15,8 +20,25 @@ def test_lifecycle_recipes_require_role_specific_database_authorities() -> None:
         'kdive-worker-member:kdive-worker-local@postgres:5432/kdive}"'
     )
 
-    assert justfile.count(witness_default) == 3
+    assert justfile.count(witness_default) == 4
     assert justfile.count(worker_default) == 2
+    assert justfile.count(lifecycle_module) == 4
+    assert lifecycle_module.replace(".lifecycle", "") not in justfile
+
+
+def test_compose_stop_preserves_volumes_while_compose_down_removes_them() -> None:
+    justfile = (Path(__file__).resolve().parents[2] / "justfile").read_text()
+    witness_default = "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="
+
+    assert "compose-stop:" in justfile
+    stop_recipe = _recipe(justfile, "compose-stop")
+    down_recipe = _recipe(justfile, "compose-down")
+
+    assert witness_default in stop_recipe
+    assert witness_default in down_recipe
+    assert "python -m kdive.processes.lifecycle.compose_worker_lifecycle down" in stop_recipe
+    assert "--volumes" not in stop_recipe
+    assert "--volumes" in down_recipe
 
 
 def test_documented_recipes_do_not_expose_raw_worker_lifecycle() -> None:

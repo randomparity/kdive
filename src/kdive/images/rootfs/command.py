@@ -1,4 +1,4 @@
-"""CLI assembly for the local `build-fs` filesystem-image build command."""
+"""CLI assembly for the rootfs filesystem-image operator commands."""
 
 from __future__ import annotations
 
@@ -15,8 +15,12 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
 from kdive.images.rootfs.kinds import RootfsImageKind
 from kdive.images.rootfs.specs import catalog_rootfs_build
+from kdive.images.rootfs.stage_volume import stage_volume
 from kdive.images.rootfs.staged_provenance import write_config_sibling, write_sidecar
-from kdive.providers.assembly.composition import build_local_rootfs_build_plane
+from kdive.providers.assembly.composition import (
+    build_local_rootfs_build_plane,
+    build_stage_volume_deps,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -53,6 +57,20 @@ def add_build_fs_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]
         default=None,
         dest="packages",
         help="extra guest package (repeatable); defaults to the catalog image kind's package set",
+    )
+
+
+def add_stage_volume_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register ``stage-volume``: upload a built qcow2 to a remote-libvirt pool + capture config."""
+    stage = sub.add_parser(
+        "stage-volume",
+        help="upload a built qcow2 to a remote-libvirt storage pool and capture its kernel config",
+    )
+    stage.add_argument("--provider", default="remote-libvirt", help="the target provider")
+    stage.add_argument("--image", required=True, help="the declared [[image]] catalog name")
+    stage.add_argument("--arch", default="x86_64", help="the image arch (default x86_64)")
+    stage.add_argument(
+        "--from", dest="source", required=True, help="the local built qcow2 to upload"
     )
 
 
@@ -142,6 +160,19 @@ def run_build_fs(args: argparse.Namespace) -> None:
         output.digest,
     )
     print(f"export KDIVE_GUEST_IMAGE={shlex.quote(str(dest))}")
+
+
+def run_stage_volume(args: argparse.Namespace) -> None:
+    """Wire the env-backed seams and run one ``stage-volume`` orchestration."""
+    qcow2 = Path(args.source).resolve()
+    if not qcow2.is_file():
+        raise CategorizedError(
+            f"stage-volume source qcow2 does not exist: {qcow2}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"source": str(qcow2)},
+        )
+    deps = build_stage_volume_deps(args.provider)
+    stage_volume(args.provider, args.image, args.arch, qcow2, deps)
 
 
 def _write_provenance_sidecar(dest: Path, output: RootfsBuildOutput) -> None:

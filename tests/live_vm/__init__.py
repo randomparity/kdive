@@ -24,6 +24,7 @@ import pytest
 
 LIVE_VM_ROOTFS_ENV = "KDIVE_LIVE_VM_ROOTFS"
 LIVE_VM_BZIMAGE_ENV = "KDIVE_LIVE_VM_BZIMAGE"
+LIVE_VM_VMLINUX_ENV = "KDIVE_LIVE_VM_VMLINUX"
 LIVE_VM_SYSTEM_ID_ENV = "KDIVE_LIVE_VM_SYSTEM_ID"
 LIBVIRT_URI_ENV = "KDIVE_LIBVIRT_URI"
 
@@ -65,15 +66,22 @@ class ThrowawayContract:
 
 @dataclass(frozen=True, slots=True)
 class BzimageContract:
-    """The gdbstub-preserve debug family's resolved env: an early-panicking bzImage + a URI.
+    """The gdbstub debug family's resolved env: a directly bootable bzImage + a URI.
 
-    The debug tests (#747/#1255) boot this bare kernel against an empty scratch disk to force an
-    early VFS panic, then attach kdive's gdbstub — so they key off a raw ``bzImage``, not the
-    bootable rootfs the throwaway family stages an overlay on (ADR-0392).
+    The preserve test boots it against an empty scratch disk to force an early VFS panic; the
+    stepping proof boots the same image against the throwaway rootfs overlay. Both attach kdive's
+    gdbstub and pair this image with ``KDIVE_LIVE_VM_VMLINUX``.
     """
 
     bzimage: Path
     libvirt_uri: str
+
+
+@dataclass(frozen=True, slots=True)
+class VmlinuxContract:
+    """The matching kernel debuginfo used by live gdb-MI and vmcore tests."""
+
+    vmlinux: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,18 +156,17 @@ def resolve_throwaway_contract(default_uri: str) -> EnvResolution[ThrowawayContr
 
 
 def resolve_bzimage_contract(default_uri: str) -> EnvResolution[BzimageContract]:
-    """Resolve the gdbstub-preserve debug family's env: an early-panicking bzImage + a URI.
+    """Resolve the gdbstub debug family's env: a directly bootable bzImage + a URI.
 
     Skip discipline mirrors ``resolve_throwaway_contract``: env unset → ABSENT (skip); set but not a
-    readable file → MISCONFIGURED (fail loud). No writable-parent check — this family boots the
-    kernel directly and the caller stages its scratch disk under the pytest ``tmp_path``, so the
-    bzImage's own directory need not be writable.
+    readable file → MISCONFIGURED (fail loud). No writable-parent check — callers boot this file
+    directly, so its own directory need not be writable.
     """
     raw = os.environ.get(LIVE_VM_BZIMAGE_ENV)
     if not raw:
         return EnvResolution(
             LiveVmEnvState.ABSENT,
-            reason=f"{LIVE_VM_BZIMAGE_ENV} unset; point it at an early-panicking kernel image",
+            reason=f"{LIVE_VM_BZIMAGE_ENV} unset; point it at the kernel image under test",
         )
     bzimage = Path(raw)
     if not bzimage.is_file():
@@ -171,6 +178,23 @@ def resolve_bzimage_contract(default_uri: str) -> EnvResolution[BzimageContract]
         LiveVmEnvState.AVAILABLE,
         BzimageContract(bzimage=bzimage, libvirt_uri=_resolved_uri(default_uri)),
     )
+
+
+def resolve_vmlinux_contract() -> EnvResolution[VmlinuxContract]:
+    """Resolve the shared matching-vmlinux env gate used by live debug consumers."""
+    raw = os.environ.get(LIVE_VM_VMLINUX_ENV)
+    if not raw:
+        return EnvResolution(
+            LiveVmEnvState.ABSENT,
+            reason=f"{LIVE_VM_VMLINUX_ENV} unset; point it at matching vmlinux debuginfo",
+        )
+    vmlinux = Path(raw)
+    if not vmlinux.is_file():
+        return EnvResolution(
+            LiveVmEnvState.MISCONFIGURED,
+            reason=f"{LIVE_VM_VMLINUX_ENV}={raw} does not point at a readable file",
+        )
+    return EnvResolution(LiveVmEnvState.AVAILABLE, VmlinuxContract(vmlinux=vmlinux))
 
 
 def resolve_provisioned_contract(default_uri: str) -> EnvResolution[ProvisionedContract]:
@@ -290,10 +314,21 @@ def require_live_vm_throwaway(
 def require_live_vm_bzimage(default_uri: str = "qemu:///session") -> BzimageContract:
     """Skip if the bzImage env is absent, fail loud if it is set-but-not-a-file, else return it.
 
-    The default URI is ``qemu:///session`` because the gdbstub-preserve debug boot needs no root
-    (ADR-0223 root-readback); ``KDIVE_LIBVIRT_URI`` is the operator override, as for every family.
+    The default URI is ``qemu:///session`` so the non-root live runner owns the domain and its
+    readback artifacts; ``KDIVE_LIBVIRT_URI`` is the operator override, as for every family.
     """
     resolution = resolve_bzimage_contract(default_uri)
+    if resolution.state is LiveVmEnvState.ABSENT:
+        pytest.skip(resolution.reason)
+    if resolution.state is LiveVmEnvState.MISCONFIGURED:
+        pytest.fail(resolution.reason)
+    assert resolution.contract is not None
+    return resolution.contract
+
+
+def require_live_vm_vmlinux() -> VmlinuxContract:
+    """Skip if matching debuginfo is absent, fail loud if misconfigured, else return it."""
+    resolution = resolve_vmlinux_contract()
     if resolution.state is LiveVmEnvState.ABSENT:
         pytest.skip(resolution.reason)
     if resolution.state is LiveVmEnvState.MISCONFIGURED:

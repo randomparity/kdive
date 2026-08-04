@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 
 from opentelemetry import metrics
@@ -31,9 +30,6 @@ class WorkerHandlerAssembly:
     object_stores: ObjectStoreAssembly
 
 
-type HandlerRegistrar = Callable[[HandlerRegistry], None]
-
-
 def build_handler_registry(
     *,
     secret_registry: SecretRegistry,
@@ -41,200 +37,85 @@ def build_handler_registry(
     provider_composition: ProviderComposition | None = None,
 ) -> HandlerRegistry:
     """Build the worker's `HandlerRegistry` from provider-aware handler registrars."""
-    composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
+    stores = build_object_store_assembly()
+    composition = provider_composition or ProviderComposition(
+        secret_registry=secret_registry, object_store=stores.store
+    )
     registry = HandlerRegistry()
     assembly = WorkerHandlerAssembly(
         resolver=composition.build_provider_resolver(),
         incarnation_credential=incarnation_credential,
         secret_registry=composition.secret_registry,
-        object_stores=build_object_store_assembly(),
+        object_stores=stores,
     )
-    for register in build_handler_registrars(assembly):
-        register(registry)
+    register_all_handlers(registry, assembly)
     return registry
 
 
-def _system_handlers_registrar(
-    *,
-    resolver: ProviderResolver,
-    secret_registry: SecretRegistry,
-    object_stores: ObjectStoreAssembly,
-) -> HandlerRegistrar:
-    def _register(registry: HandlerRegistry) -> None:
-        systems.register_handlers(
-            registry,
-            resolver=resolver,
-            secret_registry=secret_registry,
-            artifact_store=object_stores.store,
-        )
-
-    return _register
-
-
-def _run_handlers_registrar(
-    *,
-    resolver: ProviderResolver,
-    incarnation_credential: SecretStr,
-    secret_registry: SecretRegistry,
-    object_stores: ObjectStoreAssembly,
-) -> HandlerRegistrar:
-    def _register(registry: HandlerRegistry) -> None:
-        runs.register_handlers(
-            registry,
-            ports=runs.RunHandlerPorts(
-                resolver=resolver,
-                incarnation_credential=incarnation_credential,
-                secret_registry=secret_registry,
-                artifact_store=object_stores.store,
-            ),
-        )
-
-    return _register
-
-
-def _console_rotate_handler_registrar(
-    *, secret_registry: SecretRegistry, object_stores: ObjectStoreAssembly
-) -> HandlerRegistrar:
-    def _register(registry: HandlerRegistry) -> None:
-        console_rotate.register_handlers(
-            registry,
-            secret_registry=secret_registry,
-            artifact_store=object_stores.store,
-        )
-
-    return _register
-
-
-def _control_handlers_registrar(resolver: ProviderResolver) -> HandlerRegistrar:
-    def _register(registry: HandlerRegistry) -> None:
-        control.register_handlers(registry, resolver=resolver)
-
-    return _register
-
-
-def _diagnostic_sysrq_handler_registrar(
-    *,
-    resolver: ProviderResolver,
-    secret_registry: SecretRegistry,
-    object_stores: ObjectStoreAssembly,
-) -> HandlerRegistrar:
-    def _register(registry: HandlerRegistry) -> None:
-        from kdive.jobs.handlers.control import diagnostic_sysrq
-
-        diagnostic_sysrq.register_handlers(
-            registry,
-            resolver=resolver,
-            secret_registry=secret_registry,
-            artifact_store=object_stores.store,
-        )
-
-    return _register
-
-
-def _capture_traffic_handler_registrar(
-    *, resolver: ProviderResolver, object_stores: ObjectStoreAssembly
-) -> HandlerRegistrar:
-    def _register(registry: HandlerRegistry) -> None:
-        from kdive.jobs.handlers.control import capture_traffic
-
-        capture_traffic.register_handlers(
-            registry, resolver=resolver, artifact_store=object_stores.store
-        )
-
-    return _register
-
-
-def _watch_for_crash_handler_registrar(
-    *, resolver: ProviderResolver, secret_registry: SecretRegistry
-) -> HandlerRegistrar:
-    def _register(registry: HandlerRegistry) -> None:
-        from kdive.jobs.handlers.control import watch_for_crash
-
-        watch_for_crash.register_handlers(
-            registry, resolver=resolver, secret_registry=secret_registry
-        )
-
-    return _register
-
-
-def _vmcore_handlers_registrar(
-    *, resolver: ProviderResolver, object_stores: ObjectStoreAssembly
-) -> HandlerRegistrar:
-    def _register(registry: HandlerRegistry) -> None:
-        vmcore.register_handlers(
-            registry,
-            resolver=resolver,
-            artifact_store=object_stores.store,
-            telemetry=CaptureTelemetry(meter=metrics.get_meter("kdive.worker")),
-        )
-
-    return _register
-
-
-def _rootfs_reclaim_handler_registrar(object_stores: ObjectStoreAssembly) -> HandlerRegistrar:
-    def _register(registry: HandlerRegistry) -> None:
-        from kdive.jobs.handlers.artifacts import rootfs_reclaim
-
-        rootfs_reclaim.register_handlers(registry, artifact_store=object_stores.store)
-
-    return _register
-
-
-def _register_diagnostics_handlers(registry: HandlerRegistry) -> None:
-    from kdive.jobs.handlers import diagnostics as diagnostics_handler
-
-    diagnostics_handler.register_handlers(registry)
-
-
-def _image_build_handler_registrar(
-    *, resolver: ProviderResolver, object_stores: ObjectStoreAssembly
-) -> HandlerRegistrar:
-    def _register(registry: HandlerRegistry) -> None:
-        image_build.register_handlers(
-            registry,
-            resolver=resolver,
-            store=object_stores.store,
-        )
-
-    return _register
-
-
-def build_handler_registrars(assembly: WorkerHandlerAssembly) -> tuple[HandlerRegistrar, ...]:
-    """Build worker registrars from the narrow dependencies each group uses."""
-    return (
-        _system_handlers_registrar(
-            resolver=assembly.resolver,
-            secret_registry=assembly.secret_registry,
-            object_stores=assembly.object_stores,
-        ),
-        _run_handlers_registrar(
+def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAssembly) -> None:
+    """Register every active worker handler using the process assembly ports."""
+    systems.register_handlers(
+        registry,
+        resolver=assembly.resolver,
+        secret_registry=assembly.secret_registry,
+        artifact_store=assembly.object_stores.store,
+    )
+    runs.register_handlers(
+        registry,
+        ports=runs.RunHandlerPorts(
             resolver=assembly.resolver,
             incarnation_credential=assembly.incarnation_credential,
             secret_registry=assembly.secret_registry,
-            object_stores=assembly.object_stores,
+            artifact_store=assembly.object_stores.store,
         ),
-        _console_rotate_handler_registrar(
-            secret_registry=assembly.secret_registry,
-            object_stores=assembly.object_stores,
-        ),
-        _control_handlers_registrar(assembly.resolver),
-        _diagnostic_sysrq_handler_registrar(
-            resolver=assembly.resolver,
-            secret_registry=assembly.secret_registry,
-            object_stores=assembly.object_stores,
-        ),
-        _capture_traffic_handler_registrar(
-            resolver=assembly.resolver, object_stores=assembly.object_stores
-        ),
-        _watch_for_crash_handler_registrar(
-            resolver=assembly.resolver, secret_registry=assembly.secret_registry
-        ),
-        _vmcore_handlers_registrar(
-            resolver=assembly.resolver, object_stores=assembly.object_stores
-        ),
-        _image_build_handler_registrar(
-            resolver=assembly.resolver, object_stores=assembly.object_stores
-        ),
-        _rootfs_reclaim_handler_registrar(assembly.object_stores),
-        _register_diagnostics_handlers,
     )
+    console_rotate.register_handlers(
+        registry,
+        secret_registry=assembly.secret_registry,
+        artifact_store=assembly.object_stores.store,
+    )
+    control.register_handlers(registry, resolver=assembly.resolver)
+
+    from kdive.jobs.handlers.control import diagnostic_sysrq
+
+    diagnostic_sysrq.register_handlers(
+        registry,
+        resolver=assembly.resolver,
+        secret_registry=assembly.secret_registry,
+        artifact_store=assembly.object_stores.store,
+    )
+
+    from kdive.jobs.handlers.control import capture_traffic
+
+    capture_traffic.register_handlers(
+        registry,
+        resolver=assembly.resolver,
+        artifact_store=assembly.object_stores.store,
+    )
+
+    from kdive.jobs.handlers.control import watch_for_crash
+
+    watch_for_crash.register_handlers(
+        registry,
+        resolver=assembly.resolver,
+        secret_registry=assembly.secret_registry,
+    )
+    vmcore.register_handlers(
+        registry,
+        resolver=assembly.resolver,
+        artifact_store=assembly.object_stores.store,
+        telemetry=CaptureTelemetry(meter=metrics.get_meter("kdive.worker")),
+    )
+    image_build.register_handlers(
+        registry,
+        resolver=assembly.resolver,
+        store=assembly.object_stores.store,
+    )
+
+    from kdive.jobs.handlers.artifacts import rootfs_reclaim
+
+    rootfs_reclaim.register_handlers(registry, artifact_store=assembly.object_stores.store)
+
+    from kdive.jobs.handlers import diagnostics
+
+    diagnostics.register_handlers(registry)

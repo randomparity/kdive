@@ -20,7 +20,7 @@ from kdive.mcp.resources import registrar
 from kdive.mcp.resources.registrar import DOC_RESOURCES
 from kdive.security.authz.errors import AuthError
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.mcp.test_tool_index import _verifier
+from tests.mcp.auth_support import verifier
 
 _OPERATOR_URI = "resource://kdive/docs/guide/agent-index-operator.md"
 _ALL_URI = "resource://kdive/docs/guide/agent-index.md"
@@ -158,7 +158,7 @@ def _gated_app(monkeypatch: pytest.MonkeyPatch) -> FastMCP:
     )
     monkeypatch.setattr(registrar, "DOC_RESOURCES", (*DOC_RESOURCES, fixture))
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    return build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    return build_app(pool, verifier=verifier(), secret_registry=SecretRegistry())
 
 
 def _wire_error(app: FastMCP, uri: str) -> ErrorData:

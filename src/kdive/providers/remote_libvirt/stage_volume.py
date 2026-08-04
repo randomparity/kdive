@@ -1,9 +1,4 @@
-"""Env-backed seam wiring for ``kdive stage-volume`` (ADR-0336).
-
-Split from :mod:`kdive.images.rootfs.stage_volume` so the orchestration stays a pure, unit-tested
-function while the process-level wiring — a sync DB connection, the object store, and the mutual-TLS
-libvirt volume upload — lives behind :func:`build_stage_volume_deps`.
-"""
+"""Remote-libvirt wiring for the ``kdive stage-volume`` operator command (ADR-0336)."""
 
 from __future__ import annotations
 
@@ -18,15 +13,8 @@ from kdive.config.core_settings import DATABASE_URL
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.cataloging.object_keys import config_write_request
-from kdive.images.rootfs.stage_volume import (
-    StageVolumeDeps,
-    _TargetRow,
-    capture_kernel_config,
-)
-from kdive.providers.remote_libvirt.config import (
-    RemoteLibvirtConfig,
-    all_remote_configs_by_name,
-)
+from kdive.images.rootfs.stage_volume import StageVolumeDeps, _TargetRow, capture_kernel_config
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, all_remote_configs_by_name
 from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,
     remote_connection,
@@ -41,12 +29,7 @@ from kdive.store.objectstore import object_store_from_env
 
 
 def _resolve_single_remote_config(provider: str) -> RemoteLibvirtConfig:
-    """The lone declared ``[[remote_libvirt]]`` instance's config, or a fix-hint failure.
-
-    ``stage-volume`` targets a host; with exactly one declared instance the choice is unambiguous.
-    Zero or many instances fail with a ``CONFIGURATION_ERROR`` naming the declared instances so the
-    operator declares or disambiguates before staging.
-    """
+    """Return the lone remote config, or raise an actionable configuration error."""
     if provider != "remote-libvirt":
         raise CategorizedError(
             f"stage-volume supports provider 'remote-libvirt', not {provider!r}",
@@ -93,13 +76,7 @@ def _upload_volume(config_: RemoteLibvirtConfig, volume: str, qcow2: Path) -> No
 
 
 def _attach_config(provider: str, name: str, arch: str, row_id: UUID, config_bytes: bytes) -> None:
-    """Upload the captured config and set the row's ``kernel_config_key`` (advisory step).
-
-    Both the object store put and the DB update raise :class:`CategorizedError` so the orchestration
-    treats an attach miss as advisory (the volume already landed). A raw ``psycopg.Error`` is mapped
-    here so a transient DB blip after a successful upload does not crash the command — a re-run
-    (idempotent volume upload) re-attaches the offer.
-    """
+    """Upload the captured config and set the row's ``kernel_config_key`` (advisory step)."""
     request = config_write_request(
         provider, name, arch, ImageVisibility.PUBLIC, None, config=config_bytes
     )
@@ -120,7 +97,7 @@ def _attach_config(provider: str, name: str, arch: str, row_id: UUID, config_byt
 
 
 def build_stage_volume_deps(provider: str) -> StageVolumeDeps:
-    """Wire the env-backed :class:`StageVolumeDeps` for one ``stage-volume`` run."""
+    """Wire the remote-libvirt dependencies for one ``stage-volume`` run."""
     remote = _resolve_single_remote_config(provider)
     return StageVolumeDeps(
         find_row=_find_staged_row,

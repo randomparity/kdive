@@ -279,6 +279,9 @@ named template that a rendered manifest (the ConfigMap) includes.
 {{- if and .Values.bundledBackends (ne (.Values.service.type | toString) "ClusterIP") -}}
 {{- fail "bundledBackends is demo-only and its issuer mints valid kdive tokens for any caller: service.type must stay ClusterIP (reach MCP via `kubectl port-forward`). Expose MCP only on the external-backend path, behind a real IdP." -}}
 {{- end -}}
+{{- if not (kindIs "bool" .Values.lifecycleWitness.enabled) -}}
+{{- fail "lifecycleWitness.enabled must be a boolean" -}}
+{{- end -}}
 {{- $databaseRefs := dict -}}
 {{- range $name := list "migration" "server" "worker" "reconciler" "lifecycleWitness" -}}
   {{- $ref := index $.Values.databaseCredentials $name -}}

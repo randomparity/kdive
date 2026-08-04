@@ -8,11 +8,13 @@ live app build.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+import kdive.cli.commands.verb_spec as verb_spec
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 from kdive.cli.reserved_flags import RESERVED_CLI_FLAGS
@@ -47,9 +49,20 @@ def test_generated_flag_defaults() -> None:
 
 def test_generated_verb_defaults() -> None:
     verb = GeneratedVerb(
-        group="demo", sub="get", tool="demo.get", read_only=True, destructive=False
+        group="demo",
+        sub="get",
+        tool="demo.get",
+        read_only=True,
+        destructive=False,
+        confirm_destructive=False,
     )
     assert (verb.help, verb.unwrap_request, verb.flags, verb.json_params) == ("", False, (), ())
+
+
+def test_generated_verb_requires_explicit_destructive_confirmation() -> None:
+    constructor = cast(Callable[..., GeneratedVerb], vars(verb_spec)["GeneratedVerb"])
+    with pytest.raises(TypeError, match="confirm_destructive"):
+        constructor(group="demo", sub="get", tool="demo.get", read_only=True, destructive=False)
 
 
 # --- Drift guard: the committed module tracks the live registry -----------------------------
@@ -131,6 +144,32 @@ def test_request_wrapper_unwraps_to_flat_scalar_flags() -> None:
 def test_op_underscores_become_a_dashed_subcommand() -> None:
     verb = gen._verb_for(_tool("resources.set_scheduling", {"properties": {}}))
     assert (verb.group, verb.sub) == ("resources", "set-scheduling")
+
+
+def test_unshaped_destructive_tool_derives_yes_confirmation() -> None:
+    verb = gen._verb_for(
+        _tool("demo.erase", {"properties": {}}, annotations=_Ann(destructiveHint=True))
+    )
+    assert verb.destructive is True
+    assert verb.confirm_destructive is True
+
+
+def test_shaped_destructive_tool_suppresses_generic_yes_confirmation() -> None:
+    verb = gen._verb_for(
+        _tool(
+            "images.extend",
+            {
+                "properties": {
+                    "image_id": {"type": "string"},
+                    "seconds": {"type": "integer"},
+                    "reason": {"type": "string"},
+                }
+            },
+            annotations=_Ann(destructiveHint=True),
+        )
+    )
+    assert verb.destructive is True
+    assert verb.confirm_destructive is False
 
 
 def test_discriminated_request_falls_back_to_the_whole_param_json_escape() -> None:

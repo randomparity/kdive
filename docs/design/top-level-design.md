@@ -73,6 +73,11 @@ below. Each should become an [ADR](../adr/) before implementation.
         └───────────┬──────────────┘    │  console/gdb transcripts     │
                     ▼                    └──────────────────────────────┘
    providers: local-libvirt │ fault-inject │ remote-libvirt │ cloud │ baremetal-bmc │ powervm …
+
+     Kubernetes API ── bounded Pod authority ──▶ lifecycle-witness ──▶ Postgres
+       (Kubernetes-only)                                worker-incarnation state
+     worker init ────── mTLS credential broker ────────────▲
+       projected Pod token; one credential delivered to tmpfs
 ```
 
 - **MCP over streamable HTTP** — the service is remote and multi-user; agents
@@ -82,8 +87,29 @@ below. Each should become an [ADR](../adr/) before implementation.
 - **Worker tier** — pulls jobs from a durable queue; long-running ops are jobs
   with pollable status. Pools are scoped per resource class so a flaky BMC pool
   cannot starve local builds. Hard per-tenant sandboxing is deferred.
+- **Lifecycle witness** — a platform-optional, Kubernetes-specific authority process, separate
+  from the server, worker, and reconciler. The shipped Helm chart always deploys it as a fourth
+  singleton control-plane workload; the reference Compose deployment instead uses an operator-run
+  lifecycle gate. It binds worker incarnations to exact Pod UIDs, delivers init-only credentials,
+  records terminal evidence in Postgres, and only then removes the Pod finalizer. It accepts only
+  `Succeeded` or `Failed` Pods at configured StatefulSet ordinals, persists the exact `(namespace,
+  name, UID)` active-to-terminated transition, then removes the finalizer with a UID-,
+  resourceVersion-, and finalizer-value-fenced JSON Patch. A missing registration, API or database
+  failure, or patch conflict retains the finalizer for retry. It is not a general job worker or
+  drift reconciler.
 - **Postgres = system-of-record** for structured state and accounting/audit
   ledgers; **object store** for bulk artifacts, referenced by row.
+
+The lifecycle witness owns deliberately narrow state and trust boundaries. Its dedicated Postgres
+role may register and terminate Kubernetes worker incarnations and read or acknowledge their
+encrypted credential envelopes. Its dedicated service account may read and patch finalizers only
+on the configured, bounded worker Pod names and may submit TokenReviews. Only this process receives
+the witness database credential, credential-broker TLS private key, envelope key, and the
+service-account authority to read or patch those Pods and submit TokenReviews. The worker init
+container receives only a separate, short-lived broker-audience token and the broker CA; the
+long-running worker receives neither that token nor the private key or envelope key. The server and
+reconciler receive none of the witness authority. A witness failure therefore retains finalizers
+and blocks new worker credential delivery rather than accepting unaudited cleanup evidence.
 
 ## Domain model
 
@@ -500,13 +526,15 @@ Milestone-based. ("Sprint" is avoided per the project doc-style guard.)
   of the band gate). See
   [the design](../archive/superpowers/specs/2026-06-10-m2x-productionization-band-design.md).*
 
-- **M2.1 — Deployment & packaging.** Official container image(s) for the three
-  processes (one image, entrypoints matching `python -m kdive
-  {server|worker|reconciler}`); a reference compose + Helm deployment that brings
+- **M2.1 — Deployment & packaging.** Official container image(s) for the process
+  entrypoints (one image, matching `python -m kdive
+  {server|worker|reconciler|lifecycle-witness}`); a reference compose + Helm deployment that brings
   the app tier up against the existing Postgres/MinIO/OIDC backends; and one
   documented configuration surface (the `KDIVE_*` env contract) with a generated
-  config reference. Replaces the hand-rolled bootstrap; the image is the artifact
-  M2.2–M2.4 run in.
+  config reference. `lifecycle-witness` is the optional Kubernetes authority described above; the
+  shipped Helm topology runs all four long-running processes, while the reference Compose topology
+  uses its own operator-run lifecycle gate. Replaces the hand-rolled bootstrap; the image is the
+  artifact M2.2–M2.4 run in.
 - **M2.2 — Admin CLI (`kdivectl`).** A supported administrative surface over
   platform state for operators (`platform_admin` / `platform_operator`), not
   agents, over the same service seams the MCP tools use (no second source of

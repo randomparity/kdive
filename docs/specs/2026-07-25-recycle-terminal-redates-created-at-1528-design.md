@@ -30,8 +30,9 @@ attributable to the caller who saw the failure. That is why this is P3.
 
 The dangerous shape is a *background* recycler on a timer, which would re-block the lane every tick
 with nobody watching. #1522 hit exactly that shape (a ~30 s reconciler sweep) and avoided the
-primitive entirely: `reconciler/cleanup/gc.py` `_enqueue_rootfs_reclaim` deletes the settled row and
-inserts a fresh one — which gets a fresh `created_at` — behind a 5-minute backoff, with
+primitive entirely: `reconciler/cleanup/investigation_rootfs.py` `_enqueue_rootfs_reclaim` deletes
+the settled row and inserts a fresh one — which gets a fresh `created_at` — behind a 5-minute
+backoff, with
 `max_attempts=1`. That was a local workaround, not a fix to the primitive.
 
 (The campaign brief cited PR #1533 as the workaround; #1533 is the upload-deadline change and does

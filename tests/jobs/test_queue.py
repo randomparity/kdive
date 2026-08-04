@@ -187,6 +187,22 @@ def test_enqueue_rejects_max_attempts_below_one(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_enqueue_rejects_canceled_recycling_without_terminal_recycling(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            with pytest.raises(ValueError, match="recycle_canceled requires recycle_terminal"):
+                await queue.enqueue(
+                    conn,
+                    JobKind.INSTALL,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    "dk-invalid-recycle",
+                    recycle_canceled=True,
+                )
+
+    asyncio.run(_run())
+
+
 def test_enqueue_rejects_blank_dispatch_lane(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:

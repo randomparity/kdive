@@ -78,8 +78,11 @@ async def seed_project(
 
 async def register_discovered_resources(pool: AsyncConnectionPool) -> None:
     from kdive.providers.assembly.composition import ProviderComposition
+    from kdive.store.assembly import build_object_store_assembly
 
-    await ProviderComposition().build_provider_resolver().register_all_discovery(pool)
+    stores = build_object_store_assembly()
+    resolver = ProviderComposition(object_store=stores.store).build_provider_resolver()
+    await resolver.register_all_discovery(pool)
 
 
 @dataclass(frozen=True, slots=True)

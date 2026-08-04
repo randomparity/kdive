@@ -51,22 +51,24 @@ run that is no coverage" failure this framework exists to kill. So each family
 has its own `require_live_vm_*` gate that fails loud on a mis-set env. Three
 additive sub-markers exist — `live_vm_throwaway`, `live_vm_provisioned`, and
 `live_vm_remote` — and every test keeps the bare `live_vm` marker alongside its
-sub-marker. The gdbstub-preserve debug tests are **not** a fourth sub-marker:
-they reuse `live_vm_throwaway`, told apart from the ordinary throwaway tests by
-their env (`KDIVE_LIVE_VM_BZIMAGE`) and gate (`require_live_vm_bzimage`), not by
-marker.
+sub-marker. The gdbstub debug tests are **not** a fourth sub-marker: both the
+preserve-crash and stepping proofs reuse `live_vm_throwaway`. Their
+`KDIVE_LIVE_VM_BZIMAGE` / `KDIVE_LIVE_VM_VMLINUX` inputs and corresponding
+gates distinguish them from ordinary throwaway tests; stepping also consumes
+`KDIVE_LIVE_VM_ROOTFS`.
 
 | Family (sub-marker) | Required env | Default libvirt mode | Served by |
 | --- | --- | --- | --- |
 | Throwaway (`live_vm_throwaway`) | `KDIVE_LIVE_VM_ROOTFS` (a bootable rootfs qcow2) | `qemu:///system` (per-test; some tests force `qemu:///session`) | `boot_throwaway_domain` (`kdive.testing.live_vm`) |
-| gdbstub-preserve debug (`live_vm_throwaway`, shared) | `KDIVE_LIVE_VM_BZIMAGE` (an early-panicking kernel) | `qemu:///session` | `boot_preserved_gdbstub_domain` (`kdive.testing.live_vm`); the caller renders the domain XML (ADR-0392) |
+| gdbstub debug (`live_vm_throwaway`, shared) | `KDIVE_LIVE_VM_BZIMAGE` + matching `KDIVE_LIVE_VM_VMLINUX`; the stepping proof also needs `KDIVE_LIVE_VM_ROOTFS` | `qemu:///session` | `boot_gdbstub_domain` (`kdive.testing.live_vm`); the caller renders the domain XML (ADR-0392) |
 | Provisioned (`live_vm_provisioned`) | `KDIVE_LIVE_VM_SYSTEM_ID` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` | `qemu:///system` | an externally provisioned System through the live stack |
 | Remote (`live_vm_remote`) | `KDIVE_LIVE_VM_REMOTE_URI` (a `qemu+tls://` host) + `KDIVE_LIVE_VM_REMOTE_BASE_IMAGE` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` + `KDIVE_LIVE_VM_REMOTE_RECONCILER` | `qemu+tls://` (operator-named; no default host) | direct provider ops against a genuinely remote libvirt host (ADR-0425) |
 
 The env reads live in `tests/live_vm/__init__.py` (kept out of `src/` so the
 ADR-0087 config-env guard is not tripped by test-only vars). That module also
 exposes the `require_live_vm_throwaway` / `require_live_vm_bzimage` /
-`require_live_vm_provisioned` / `require_live_vm_remote` gates — the `live_vm`
+`require_live_vm_vmlinux` / `require_live_vm_provisioned` /
+`require_live_vm_remote` gates — the `live_vm`
 analogue of the `require_issuer` / `require_stack` / `require_guest_arch` gates
 the stack tiers use.
 
@@ -226,11 +228,14 @@ its overlay) on exit. `mode` (session/system) is per-test. Two waits carry a
 required companion argument, enforced up front: `wait_for="panic"` needs
 `console_log` (the panic-wait reads the serial console) and `wait_for="ssh"`
 needs `ssh_hostfwd_port` — pass them or the call raises before any domain
-boots. The gdbstub-preserve debug tests boot through a sibling harness in the
-same module, `boot_preserved_gdbstub_domain(xml, *, uri, console_log)`, which
-takes the caller's already-rendered production domain XML: the debug rendering
-(`render_domain_xml(..., gdb_port=…, debug=…)`) is their subject under test, so
-by ADR-0392 the caller keeps rendering it rather than the harness hiding it.
+boots. The gdbstub debug tests boot through a sibling harness in the same
+module, `boot_gdbstub_domain(xml, *, uri, wait_for, console_log=None,
+ssh_port=None)`, which takes the caller's already-rendered production domain
+XML. It supports the same `active` / `panic` / `ssh` readiness choices while
+keeping the transient-domain teardown needed by these tests. The debug
+rendering (`render_domain_xml(..., gdb_port=…, debug=…)`) is their subject under
+test, so by ADR-0392 the caller keeps rendering it rather than the harness
+hiding it.
 
 ## Manual proof: the investigation-scoped uploaded rootfs
 

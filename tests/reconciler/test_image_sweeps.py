@@ -56,6 +56,7 @@ from kdive.services.images.retention import (
 from kdive.services.images.upload import _project_usage
 from tests.clock import STORE_MTIME
 from tests.reconciler.conftest import connect, run_repair, seed_system
+from tests.reconciler.image_catalog_support import insert_image_row
 
 
 class _FakeImageStore:
@@ -193,58 +194,6 @@ class _FenceConnection:
         return _FenceCursor(self._store, self._key)
 
 
-async def _insert_image_row(
-    conn: psycopg.AsyncConnection,
-    *,
-    provider: str = "local-libvirt",
-    name: str = "debian",
-    arch: str = "x86_64",
-    state: str = "registered",
-    visibility: str = "public",
-    object_key: str | None = "images/local-libvirt/debian/x86_64.qcow2",
-    owner: str | None = None,
-    pending_age: timedelta = timedelta(hours=2),
-    expires_in: timedelta | None = None,
-    kernel_config_key: str | None = None,
-    digest: str | None = None,
-    size_bytes: int = 0,
-    publication_principal: str | None = None,
-) -> UUID:
-    """Insert one image_catalog row with DB-clock-relative pending_since/expires_at."""
-    expires_clause = "now() + make_interval(secs => %(expires_secs)s)" if expires_in else "NULL"
-    cur = await conn.execute(
-        "INSERT INTO image_catalog "
-        "(provider, name, arch, format, root_device, object_key, kernel_config_key, digest, "
-        " visibility, owner, expires_at, state, size_bytes, publication_attempt_id, "
-        "publication_principal, pending_since) "
-        "VALUES (%(provider)s, %(name)s, %(arch)s, 'qcow2', '/dev/vda', %(object_key)s, "
-        " %(kernel_config_key)s, %(digest)s, %(visibility)s, %(owner)s, "
-        f"{expires_clause}, %(state)s, %(size_bytes)s, %(publication_attempt_id)s, "
-        "%(publication_principal)s, "
-        "now() - make_interval(secs => %(pending_secs)s)) "
-        "RETURNING id",
-        {
-            "provider": provider,
-            "name": name,
-            "arch": arch,
-            "object_key": object_key,
-            "kernel_config_key": kernel_config_key,
-            "digest": None if object_key is None else digest or "sha256:" + "a" * 64,
-            "visibility": visibility,
-            "owner": owner,
-            "state": state,
-            "size_bytes": size_bytes,
-            "publication_attempt_id": uuid4() if state == "pending" else None,
-            "publication_principal": publication_principal,
-            "pending_secs": pending_age.total_seconds(),
-            "expires_secs": (expires_in or timedelta()).total_seconds(),
-        },
-    )
-    row = await cur.fetchone()
-    assert row is not None
-    return row[0]
-
-
 async def _set_catalog_rootfs(
     conn: psycopg.AsyncConnection, system_id: UUID, *, provider: str, name: str
 ) -> None:
@@ -351,7 +300,7 @@ def test_leaked_sweep_protects_live_image_config(migrated_url: str) -> None:
 
     async def _run() -> None:
         async with await connect(migrated_url) as conn:
-            await _insert_image_row(conn, object_key=qcow2_key, kernel_config_key=config_key)
+            await insert_image_row(conn, object_key=qcow2_key, kernel_config_key=config_key)
         store = _FakeImageStore(
             {qcow2_key: timedelta(hours=2), config_key: timedelta(hours=2)}  # both past grace
         )
@@ -422,7 +371,7 @@ def test_pending_row_inside_deadline_protects_its_object(migrated_url: str) -> N
         key = "images/local-libvirt/pub/x86_64.qcow2"
         async with await connect(migrated_url) as seed:
             # A pending publish in flight: row exists, written recently (inside grace).
-            await _insert_image_row(
+            await insert_image_row(
                 seed,
                 name="pub",
                 state="pending",
@@ -459,7 +408,7 @@ def test_dangling_row_with_missing_object_past_deadline_is_removed(migrated_url:
     async def _run() -> None:
         key = "images/local-libvirt/gone/x86_64.qcow2"
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed, name="gone", object_key=key, pending_age=timedelta(hours=2)
             )
         store = _FakeImageStore({})  # object HEAD missing
@@ -476,7 +425,7 @@ def test_dangling_row_with_missing_object_past_deadline_is_removed(migrated_url:
 def test_object_less_defined_row_is_skipped(migrated_url: str) -> None:
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="baseline",
                 state="defined",
@@ -498,7 +447,7 @@ def test_dangling_row_inside_deadline_is_left_alone(migrated_url: str) -> None:
     async def _run() -> None:
         key = "images/local-libvirt/young/x86_64.qcow2"
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="young",
                 state="pending",
@@ -520,7 +469,7 @@ def test_dangling_skips_row_whose_object_is_present(migrated_url: str) -> None:
     async def _run() -> None:
         key = "images/local-libvirt/healthy/x86_64.qcow2"
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed, name="healthy", object_key=key, pending_age=timedelta(hours=2)
             )
         store = _FakeImageStore({key: timedelta(hours=2)})  # object present
@@ -541,7 +490,7 @@ def test_multiple_dangling_rows_all_removed_and_counted(migrated_url: str) -> No
         async with await connect(migrated_url) as seed:
             for i in range(3):
                 row_ids.append(
-                    await _insert_image_row(
+                    await insert_image_row(
                         seed,
                         name=f"gone{i}",
                         object_key=f"images/local-libvirt/gone{i}/x86_64.qcow2",
@@ -569,10 +518,10 @@ def test_dangling_present_row_does_not_halt_subsequent_removal(migrated_url: str
     async def _run() -> None:
         present_key = "images/local-libvirt/healthy/x86_64.qcow2"
         async with await connect(migrated_url) as seed:
-            present_id = await _insert_image_row(
+            present_id = await insert_image_row(
                 seed, name="healthy", object_key=present_key, pending_age=timedelta(hours=2)
             )
-            missing_id = await _insert_image_row(
+            missing_id = await insert_image_row(
                 seed,
                 name="gone",
                 object_key="images/local-libvirt/gone/x86_64.qcow2",
@@ -598,7 +547,7 @@ def test_abandoned_matching_publication_is_registered(migrated_url: str) -> None
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="recovered",
                 state="pending",
@@ -730,7 +679,7 @@ def test_invalid_abandoned_publication_is_deleted(
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name=case,
                 state="pending",
@@ -760,7 +709,7 @@ def test_recovered_publication_reconciles_config_key(
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="configured",
                 state="pending",
@@ -795,7 +744,7 @@ def test_config_head_failure_keeps_publication_pending_for_retry(migrated_url: s
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="config-error",
                 state="pending",
@@ -827,7 +776,7 @@ def test_recovered_private_publication_audits_persisted_principal(migrated_url: 
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="private",
                 state="pending",
@@ -862,7 +811,7 @@ def test_missing_private_principal_reclaims_matching_object_and_quota(migrated_u
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="no-actor",
                 state="pending",
@@ -903,7 +852,7 @@ def test_private_recovery_audit_failure_rolls_back_registration(
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="audit-error",
                 state="pending",
@@ -939,7 +888,7 @@ def test_unproven_invalid_object_deletion_keeps_row_for_retry(
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name=failure,
                 state="pending",
@@ -977,10 +926,10 @@ def test_typed_store_failure_isolated_so_later_candidate_progresses(
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
-            failing_id = await _insert_image_row(
+            failing_id = await insert_image_row(
                 seed, name="a-failing", state="pending", object_key=failing_key
             )
-            healthy_id = await _insert_image_row(
+            healthy_id = await insert_image_row(
                 seed, name="b-healthy", state="pending", object_key=healthy_key
             )
         store = _FakeImageStore({failing_key: timedelta(hours=2)}, typed_head_errors={failing_key})
@@ -1008,7 +957,7 @@ def test_repair_terminal_count_includes_registered_and_removed(migrated_url: str
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
-            await _insert_image_row(
+            await insert_image_row(
                 seed,
                 name="valid",
                 state="pending",
@@ -1016,7 +965,7 @@ def test_repair_terminal_count_includes_registered_and_removed(migrated_url: str
                 digest=_digest(valid),
                 size_bytes=len(valid),
             )
-            await _insert_image_row(
+            await insert_image_row(
                 seed,
                 name="invalid",
                 state="pending",
@@ -1024,7 +973,7 @@ def test_repair_terminal_count_includes_registered_and_removed(migrated_url: str
                 digest=_digest(b"expected"),
                 size_bytes=len(b"expected"),
             )
-            await _insert_image_row(
+            await insert_image_row(
                 seed,
                 name="missing",
                 state="pending",
@@ -1058,7 +1007,7 @@ def test_dangling_repair_rejects_an_enclosing_transaction_before_store_access(
 
     async def _run() -> None:
         async with await connect(migrated_url) as conn:
-            await _insert_image_row(
+            await insert_image_row(
                 conn,
                 name="nested",
                 state="pending",
@@ -1079,7 +1028,7 @@ def test_expired_private_image_is_deleted(migrated_url: str) -> None:
     async def _run() -> None:
         key = "images/local-libvirt__proj/priv/x86_64.qcow2"
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="priv",
                 visibility="private",
@@ -1104,7 +1053,7 @@ def test_multiple_expired_private_images_are_all_counted(migrated_url: str) -> N
         key_a = "images/local-libvirt__proj/priv-a/x86_64.qcow2"
         key_b = "images/local-libvirt__proj/priv-b/x86_64.qcow2"
         async with await connect(migrated_url) as seed:
-            await _insert_image_row(
+            await insert_image_row(
                 seed,
                 name="priv-a",
                 visibility="private",
@@ -1112,7 +1061,7 @@ def test_multiple_expired_private_images_are_all_counted(migrated_url: str) -> N
                 object_key=key_a,
                 expires_in=timedelta(seconds=-1),
             )
-            await _insert_image_row(
+            await insert_image_row(
                 seed,
                 name="priv-b",
                 visibility="private",
@@ -1134,7 +1083,7 @@ def test_unexpired_private_image_is_kept(migrated_url: str) -> None:
     async def _run() -> None:
         key = "images/local-libvirt__proj/live/x86_64.qcow2"
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="live",
                 visibility="private",
@@ -1158,7 +1107,7 @@ def test_expired_pending_private_image_is_not_an_expiry_candidate(migrated_url: 
     async def _run() -> None:
         key = "images/local-libvirt__proj/publishing/x86_64/attempt.qcow2"
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="publishing",
                 state="pending",
@@ -1185,7 +1134,7 @@ def test_private_expiry_locked_reread_rejects_candidate_that_became_pending(
     async def _run() -> None:
         key = "images/local-libvirt__proj/rearmed/x86_64/attempt.qcow2"
         async with await connect(migrated_url) as conn:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 conn,
                 name="rearmed",
                 visibility="private",
@@ -1214,7 +1163,7 @@ def test_expired_private_referenced_by_non_terminal_system_is_skipped(migrated_u
     async def _run() -> None:
         key = "images/local-libvirt__proj/used/x86_64.qcow2"
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="used",
                 visibility="private",
@@ -1242,7 +1191,7 @@ def test_expired_private_referenced_by_terminal_system_is_deleted(migrated_url: 
 
         key = "images/local-libvirt__proj/dead/x86_64.qcow2"
         async with await connect(migrated_url) as seed:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 seed,
                 name="dead",
                 visibility="private",
@@ -1269,7 +1218,7 @@ def test_concurrent_extend_under_lock_is_honored(migrated_url: str) -> None:
     async def _run() -> None:
         key = "images/local-libvirt__proj/extended/x86_64.qcow2"
         async with await connect(migrated_url) as conn:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 conn,
                 name="extended",
                 visibility="private",
@@ -1298,7 +1247,7 @@ def test_expire_one_private_image_deletes_when_still_expired(migrated_url: str) 
     async def _run() -> None:
         key = "images/local-libvirt__proj/stale/x86_64.qcow2"
         async with await connect(migrated_url) as conn:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 conn,
                 name="stale",
                 visibility="private",
@@ -1321,7 +1270,7 @@ def test_private_expiry_deletes_config_object(migrated_url: str) -> None:
 
     async def _run() -> None:
         async with await connect(migrated_url) as conn:
-            await _insert_image_row(
+            await insert_image_row(
                 conn,
                 name="withcfg",
                 visibility="private",
@@ -1345,7 +1294,7 @@ def test_expire_one_private_image_defers_when_referenced_under_lock(migrated_url
     async def _run() -> None:
         key = "images/local-libvirt__proj/locked/x86_64.qcow2"
         async with await connect(migrated_url) as conn:
-            row_id = await _insert_image_row(
+            row_id = await insert_image_row(
                 conn,
                 name="locked",
                 visibility="private",

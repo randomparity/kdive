@@ -4,7 +4,34 @@ from __future__ import annotations
 
 import libvirt
 
+from kdive.artifacts.storage import ArtifactWriteRequest, FetchedArtifact, StoredArtifact
+from kdive.domain.catalog.artifacts import Sensitivity
 from tests.providers.remote_libvirt.conftest import libvirt_error
+
+
+class FakeObjectStore:
+    """An in-memory object store for remote-libvirt console tests."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        key = request.key()
+        self.objects[key] = request.data
+        return StoredArtifact(
+            key,
+            f"etag-{len(self.objects)}",
+            request.sensitivity,
+            "console",
+            version_id="test-version",
+        )
+
+    def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
+        del etag
+        return FetchedArtifact(self.objects[key], Sensitivity.REDACTED, "console")
+
+    def list_prefix(self, prefix: str) -> list[str]:
+        return [key for key in self.objects if key.startswith(prefix)]
 
 
 class FakeDomain:

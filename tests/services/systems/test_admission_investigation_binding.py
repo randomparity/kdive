@@ -27,6 +27,7 @@ from kdive.services.systems.admission import (
     ProvisionJobAdmitted,
     SystemAdmission,
 )
+from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.systems_support import (
     TEST_COMPONENT_SOURCES as _TEST_COMPONENT_SOURCES,
 )
@@ -235,7 +236,7 @@ def test_bind_serializes_with_concurrent_close(migrated_url: str) -> None:
                 bind = asyncio.create_task(
                     _create(_admission(), pool, alloc_id, investigation_id=inv_id)
                 )
-                await asyncio.sleep(0.3)
+                await wait_until_any_backend_waiting(holder, locktype="advisory")
                 assert not bind.done()  # blocked on the INVESTIGATION lock, not racing past it
                 await holder.commit()  # release the lock; the close is now durable
             finally:

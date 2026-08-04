@@ -23,6 +23,7 @@ from kdive.db.pool import create_pool, database_url
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.rootfs.stage_volume import StageVolumeDeps
 from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
@@ -48,6 +49,7 @@ from kdive.providers.infra.console_hosting import (
     RunningSystems,
 )
 from kdive.providers.infra.reaping import DumpVolumeReaper, InfraReaper
+from kdive.providers.remote_libvirt import stage_volume
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
     is_remote_libvirt_configured,
@@ -89,7 +91,8 @@ from kdive.providers.shared.debug_common.gdbmi.policy.hostpolicy import allow_ac
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
-from kdive.store.objectstore import object_store_from_env
+from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
+from kdive.store.objectstore import ObjectStore
 
 _POOL = "remote-libvirt"
 # Reuses seeded `local`; a remote seed row would be DDL beyond migration 0020.
@@ -176,6 +179,7 @@ def _open_console_for_system(
 async def build_console_hosting(
     *,
     secret_registry: SecretRegistry,
+    store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
     running_systems_factory: RunningSystemsFactory,
     console_telemetry: ConsoleTelemetry | None = None,
 ) -> ConsoleHosting | None:
@@ -189,7 +193,6 @@ async def build_console_hosting(
         return None
 
     conninfo = database_url()
-    store = object_store_from_env()
     secret_backend = secret_backend_from_env(registry=secret_registry)
 
     part_store = RemoteConsolePartStore(store, conninfo)
@@ -246,13 +249,13 @@ def _no_discovery_target() -> DiscoveryRegistrationTarget:
     )
 
 
-def _debug_capabilities(secret_registry: SecretRegistry) -> DebugCapabilities:
+def _debug_capabilities(secret_registry: SecretRegistry, store: ObjectStore) -> DebugCapabilities:
     return DebugCapabilities(
         attach_seam=remote_attach_seam,
         engine=GdbMiEngine(
             redactor_factory=lambda: Redactor(registry=secret_registry),
             host_policy=allow_acl_remote,
-            module_debuginfo_resolver=real_module_debuginfo_resolver(),
+            module_debuginfo_resolver=real_module_debuginfo_resolver(store),
         ),
     )
 
@@ -273,19 +276,28 @@ def _resource_detail_projector(
     )
 
 
-def _rebind_for_resource(secret_registry: SecretRegistry) -> Callable[[str], ProviderRuntime]:
+def _rebind_for_resource(
+    secret_registry: SecretRegistry, store: ObjectStore
+) -> Callable[[str], ProviderRuntime]:
     def rebind(resource_name: str) -> ProviderRuntime:
         return build_runtime(
             secret_registry=secret_registry,
+            store=store,
             config_factory=lambda: remote_config_for_resource(resource_name),
         )
 
     return rebind
 
 
+def build_stage_volume_deps(provider: str) -> StageVolumeDeps:
+    """Build remote-libvirt dependencies for the ``stage-volume`` CLI operation."""
+    return stage_volume.build_stage_volume_deps(provider)
+
+
 def build_runtime(
     *,
     secret_registry: SecretRegistry,
+    store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
     config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
 ) -> ProviderRuntime:
     """Build remote-libvirt ports; buildable without operator config (ADR-0076).
@@ -297,13 +309,21 @@ def build_runtime(
     config — it operates on a fetched vmcore, not the remote libvirt host.
     """
     installer = RemoteLibvirtInstall.from_env(
-        secret_registry=secret_registry, config_factory=config_factory
+        secret_registry=secret_registry, store=store, config_factory=config_factory
     )
     retriever = RemoteLibvirtRetriever.from_env(
-        secret_registry=secret_registry, config_factory=config_factory
+        secret_registry=secret_registry, store=store, config_factory=config_factory
     )
-    crash_postmortem = CrashPostmortemAdapter(secret_registry=secret_registry)
-    vmcore_introspector = RemoteLibvirtVmcoreIntrospect.from_env(secret_registry=secret_registry)
+    crash_postmortem = CrashPostmortemAdapter(
+        secret_registry=secret_registry,
+        fetch_object=lambda ref: store.get_artifact(ref, None).data,
+        fetch_versioned_object=lambda ref, version_id: (
+            store.get_artifact(ref, None, version_id=version_id).data
+        ),
+    )
+    vmcore_introspector = RemoteLibvirtVmcoreIntrospect.from_env(
+        secret_registry=secret_registry, store=store
+    )
     live_introspector = RemoteLibvirtLiveIntrospect.from_env(
         secret_registry=secret_registry, config_factory=config_factory
     )
@@ -355,7 +375,7 @@ def build_runtime(
             # (ADR-0367/0433, #1435). The deferred ADR-0427 opt-in; matches the reader factory.
             supports_crash_watch=True,
         ),
-        debug=_debug_capabilities(secret_registry),
+        debug=_debug_capabilities(secret_registry, store),
         rootfs=RootfsCapabilities(build_plane=RemoteLibvirtRootfsBuildPlane.from_env()),
         resource_details=ResourceDetailCapabilities(
             staged_volume_probe=_staged_volume_probe(config_factory),
@@ -370,8 +390,10 @@ def build_runtime(
         # System's console (ADR-0433, #1435). Built lazily at job time so this composition stays
         # buildable without S3 config (ADR-0076), like the snapshotter's own lazy store.
         console=ConsoleCapabilities(
-            snapshotter=RemoteLibvirtConsoleSnapshotter(),
-            reader_factory=lambda: build_remote_console_reader(secret_registry=secret_registry),
+            snapshotter=RemoteLibvirtConsoleSnapshotter(store),
+            reader_factory=lambda: build_remote_console_reader(
+                secret_registry=secret_registry, store=store
+            ),
         ),
         # Internal RAM+disk/disk-only domain snapshots over qemu+tls (ADR-0428, #1430). Matches
         # ``support.supports_snapshots``; the teardown path reclaims them via ``delete_all``.
@@ -389,6 +411,6 @@ def build_runtime(
         # platform must not inject a root device or it overrides that (ADR-0183, #587).
         platform_root_cmdline=None,
         binding=ResourceBindingCapabilities(
-            rebind_for_resource=_rebind_for_resource(secret_registry)
+            rebind_for_resource=_rebind_for_resource(secret_registry, store)
         ),
     )

@@ -146,6 +146,10 @@ def _template(*set_args: str) -> subprocess.CompletedProcess[str]:
     args = ["helm", "template", "kdive", CHART]
     for s in set_args:
         args += ["--set", s]
+    return _template_args(*args)
+
+
+def _template_args(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, capture_output=True, text=True, check=False)
 
 
@@ -499,7 +503,11 @@ def test_worker_credential_broker_is_private_tls_and_init_only() -> None:
     assert worker["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
     init = worker["spec"]["template"]["spec"]["initContainers"][0]
     worker_container = worker["spec"]["template"]["spec"]["containers"][0]
-    assert init["command"] == ["python", "-m", "kdive.processes.kubernetes_credential_init"]
+    assert init["command"] == [
+        "python",
+        "-m",
+        "kdive.processes.lifecycle.kubernetes_credential_init",
+    ]
     assert any(
         volume["emptyDir"].get("medium") == "Memory"
         for volume in worker["spec"]["template"]["spec"]["volumes"]
@@ -811,6 +819,52 @@ def _workloads(*set_args: str) -> dict[str, dict[str, Any]]:
     StatefulSet (ADR-0514). Extra ``--set`` args layer onto the external-backend base.
     """
     return _rendered_app_workloads("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+
+
+def _witness_workload(*set_args: str) -> dict[str, Any]:
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+    assert res.returncode == 0, res.stderr
+    for doc in yaml.safe_load_all(res.stdout):
+        if not (isinstance(doc, dict) and doc.get("kind") == "Deployment"):
+            continue
+        if str(doc.get("metadata", {}).get("name", "")).endswith("-witness"):
+            return doc
+    raise AssertionError("chart rendered no lifecycle-witness Deployment")
+
+
+def test_lifecycle_witness_enabled_defaults_to_one_and_accepts_false() -> None:
+    assert _witness_workload()["spec"]["replicas"] == 1
+    assert _witness_workload("lifecycleWitness.enabled=false")["spec"]["replicas"] == 0
+
+
+def test_staged_fence_render_scales_all_kdive_workloads_to_zero() -> None:
+    staged_values = (
+        "server.replicas=0",
+        "worker.replicas=0",
+        "reconciler.replicas=0",
+        "lifecycleWitness.enabled=false",
+    )
+    workloads = _workloads(*staged_values)
+
+    assert {workload["spec"]["replicas"] for workload in workloads.values()} == {0}
+    assert _witness_workload(*staged_values)["spec"]["replicas"] == 0
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--set", "lifecycleWitness.enabled=0"),
+        ("--set", "lifecycleWitness.enabled=0.5"),
+        ("--set-string", "lifecycleWitness.enabled=false"),
+        ("--set-json", "lifecycleWitness.enabled=null"),
+        ("--set-json", "lifecycleWitness.enabled=1e-400"),
+    ],
+)
+def test_lifecycle_witness_enabled_rejects_non_boolean_values(args: tuple[str, str]) -> None:
+    res = _template_args("helm", "template", "kdive", CHART, *args)
+
+    assert res.returncode != 0
+    assert "lifecycleWitness.enabled must be a boolean" in res.stderr
 
 
 def _rendered_app_workloads(*set_args: str) -> dict[str, dict[str, Any]]:

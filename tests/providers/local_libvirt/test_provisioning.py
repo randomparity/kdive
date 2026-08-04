@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import libvirt
@@ -34,7 +34,9 @@ from kdive.providers.local_libvirt.lifecycle.provisioning import (
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     RootfsMaterializationContext,
+    RootfsUploadContext,
 )
+from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import UploadObjectStore
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.shared import libvirt_xml as libvirt_xml_contract
 from kdive.providers.shared.libvirt_xml import (
@@ -2105,6 +2107,23 @@ def test_from_env_connect_callable_opens_the_configured_uri(
     assert isinstance(conn, _ProvConn)
 
 
+def test_from_env_threads_injected_store_to_upload_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = cast(UploadObjectStore, object())
+    seen: list[object] = []
+
+    def fake_upload_fetch(received_store: object) -> Callable[[RootfsUploadContext], Path]:
+        seen.append(received_store)
+        return lambda _upload: Path("/staged-rootfs.qcow2")
+
+    monkeypatch.setattr(provisioning_module, "rootfs_upload_fetch_from_env", fake_upload_fetch)
+
+    LocalLibvirtProvisioning.from_env(store=store)
+
+    assert seen == [store]
+
+
 def test_provision_failure_message_and_details_carry_system_id() -> None:
     # A define/start failure surfaces a PROVISIONING_FAILURE whose human message names the
     # operation and whose details carry the System id for triage.
@@ -2181,8 +2200,6 @@ def test_provision_upload_rootfs_stages_via_injected_fetch() -> None:
     # The wired upload lane (ADR-0434): provisioning an `upload` rootfs runs the real
     # _materialize_rootfs_base, which calls the injected upload_fetch and passes its returned
     # path to make_overlay as the base.
-    from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import RootfsUploadContext
-
     seen: list[RootfsUploadContext] = []
     made: list[tuple[str, str]] = []
     staged = Path(provisioning_module.UPLOADS_DIR) / "local-systems-staged-rootfs.qcow2"

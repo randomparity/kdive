@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -450,12 +451,12 @@ def test_build_console_hosting_returns_none_when_not_configured(
 ) -> None:
     async def _run() -> None:
         monkeypatch.setattr(remote_composition, "database_url", lambda: "postgresql://db/kdive")
-        monkeypatch.setattr(remote_composition, "object_store_from_env", lambda: object())
         # No declared remote instance → bootstrap degrades to None (no console hosting).
         monkeypatch.setattr(remote_composition, "is_remote_libvirt_configured", lambda: False)
 
         hosting = await remote_composition.build_console_hosting(
             secret_registry=SecretRegistry(),
+            store=cast(Any, object()),
             running_systems_factory=lambda _pool: _FakeRunningSystems(),
         )
         assert hosting is None
@@ -472,16 +473,18 @@ def test_build_console_hosting_preserves_object_store_config_error(
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
 
-        def _raise_store() -> object:
-            raise error
-
         monkeypatch.setattr(remote_composition, "is_remote_libvirt_configured", lambda: True)
         monkeypatch.setattr(remote_composition, "database_url", lambda: "postgresql://db/kdive")
-        monkeypatch.setattr(remote_composition, "object_store_from_env", _raise_store)
+        monkeypatch.setattr(
+            remote_composition,
+            "RemoteConsolePartStore",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+        )
 
         with pytest.raises(CategorizedError) as caught:
             await remote_composition.build_console_hosting(
                 secret_registry=SecretRegistry(),
+                store=cast(Any, object()),
                 running_systems_factory=lambda _pool: _FakeRunningSystems(),
             )
 
@@ -497,7 +500,6 @@ def test_build_console_hosting_opens_host_pool_and_returns_registry(
         leader_conn = _FakeLeaderConn()
         host_pool = _FakePool()
         monkeypatch.setattr(remote_composition, "database_url", lambda: "postgresql://db/kdive")
-        monkeypatch.setattr(remote_composition, "object_store_from_env", lambda: object())
         monkeypatch.setattr(remote_composition, "is_remote_libvirt_configured", lambda: True)
         monkeypatch.setattr(remote_composition, "secret_backend_from_env", lambda **_: object())
         monkeypatch.setattr(remote_composition, "create_pool", lambda **_: host_pool)
@@ -513,6 +515,7 @@ def test_build_console_hosting_opens_host_pool_and_returns_registry(
 
         hosting = await remote_composition.build_console_hosting(
             secret_registry=SecretRegistry(),
+            store=cast(Any, object()),
             running_systems_factory=lambda _pool: _FakeRunningSystems(),
         )
 

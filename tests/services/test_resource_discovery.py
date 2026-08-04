@@ -19,6 +19,7 @@ from kdive.providers.core.resource_registration import (
     register_discovered_resource,
     register_or_refresh_discovered_resource,
 )
+from tests.db_waits import wait_until_any_backend_waiting
 
 
 class _Discovery:
@@ -271,7 +272,7 @@ def test_concurrent_operator_cap_is_not_lost_by_refresh(migrated_url: str) -> No
                 refresh = asyncio.create_task(
                     _ensure(pool, _Discovery(cap=1, extra={"pseries_fadump": True}))
                 )
-                await asyncio.sleep(0.3)
+                await wait_until_any_backend_waiting(op_conn, locktype="transactionid")
                 assert not refresh.done()  # blocked on the FOR UPDATE row lock
                 await op_conn.execute(
                     "UPDATE resources SET capabilities = "

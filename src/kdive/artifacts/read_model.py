@@ -75,20 +75,15 @@ class RunFetchContext:
 
 @dataclass(frozen=True, slots=True)
 class ArtifactReadRef:
-    """Object key plus an immutable version pin; ``None`` is explicit legacy fallback."""
+    """Object key and version pin; reusable refs require an immutable pin, while ``None`` is
+    legacy."""
 
     key: str
     version_id: str | None
 
 
 async def run_fetch_context(conn: AsyncConnection, run_id: UUID) -> RunFetchContext | None:
-    """Return the Run's project, bound System id, and vmlinux ref, or ``None`` if absent.
-
-    The fetch-raw egress addresses both assets through the Run: ``vmlinux`` is the Run's own
-    ``debuginfo_ref`` and the raw ``vmcore`` is the core of the System the Run booted
-    (``system_id``). ``debuginfo_ref`` normalizes an empty/NULL value to ``None`` so the caller
-    treats "no vmlinux" uniformly.
-    """
+    """Return Run-owned raw-fetch context, normalizing an empty vmlinux ref to ``None``."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_RUN_FETCH_CONTEXT_SQL, (run_id,))
         row = await cur.fetchone()
@@ -117,11 +112,7 @@ async def system_project(conn: AsyncConnection, system_id: UUID) -> str | None:
 
 
 async def raw_vmcore_key(conn: AsyncConnection, run_id: UUID) -> str | None:
-    """Return the Run's raw ``vmcore-{method}`` object key, or ``None`` (ADR-0244).
-
-    Cores are owned by the Run that crashed (``owner_kind='runs'``); the redacted dmesg sibling
-    (``-redacted``) is excluded so only the raw core resolves.
-    """
+    """Return a Run-owned raw vmcore key, excluding its ``-redacted`` sibling (ADR-0244)."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             _RAW_VMCORE_KEY_SQL,
@@ -132,15 +123,7 @@ async def raw_vmcore_key(conn: AsyncConnection, run_id: UUID) -> str | None:
 
 
 async def redacted_vmcore_artifact_id(conn: AsyncConnection, run_id: UUID) -> str | None:
-    """Return the Run's redacted vmcore artifact id, or ``None`` (ADR-0466).
-
-    The single reference the capture plane publishes: a ``capture_vmcore`` job stores it as its
-    ``result_ref`` and ``runs.get`` surfaces it as ``refs.vmcore``, so a viewer holding either the
-    job id or the Run id reaches the core with ``artifacts.get`` — no separate listing tool. The
-    redacted sibling is selected by key shape (``.../vmcore-{method}-redacted``), the same
-    convention ``raw_vmcore_key`` excludes. ``None`` when the Run has no core, or when the raw core
-    survives but its redacted sibling has been reclaimed.
-    """
+    """Return a Run-owned redacted vmcore id, or ``None`` when its sibling is absent (ADR-0466)."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             _REDACTED_VMCORE_ID_SQL,
@@ -151,12 +134,7 @@ async def redacted_vmcore_artifact_id(conn: AsyncConnection, run_id: UUID) -> st
 
 
 async def raw_pcap_key(conn: AsyncConnection, run_id: UUID, artifact_id: UUID | None) -> str | None:
-    """Object key of a Run-owned pcap: the exact one by ``artifact_id``, or the newest (ADR-0385).
-
-    A Run may own several pcaps (one per ``capture_traffic`` job). ``artifact_id`` selects one and
-    validates it belongs to this Run (``owner_kind='runs'``, ``retention_class='pcap'``); ``None``
-    resolves the newest. Returns ``None`` for an absent id, a cross-Run id, or a Run with no pcap.
-    """
+    """Return a Run-owned pcap by id, or the newest by ``(created_at, id)`` when id is ``None``."""
     async with conn.cursor(row_factory=dict_row) as cur:
         if artifact_id is not None:
             await cur.execute(_RAW_PCAP_KEY_BY_ID_SQL, (artifact_id, run_id))
@@ -167,11 +145,7 @@ async def raw_pcap_key(conn: AsyncConnection, run_id: UUID, artifact_id: UUID | 
 
 
 async def effective_config_key(conn: AsyncConnection, run_id: UUID) -> str | None:
-    """Return the Run's uploaded ``effective_config`` object key, or ``None`` (ADR-0318).
-
-    The agent's ``.config`` is a Run-owned (``owner_kind='runs'``) upload accepted but not
-    validated; its object key is read here for the debug-feature config gate.
-    """
+    """Return a Run's ``effective_config`` key for the debug-feature gate, or ``None``."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_EFFECTIVE_CONFIG_KEY_SQL, (run_id, _EFFECTIVE_CONFIG_KEY_LIKE))
         row = await cur.fetchone()
@@ -179,12 +153,7 @@ async def effective_config_key(conn: AsyncConnection, run_id: UUID) -> str | Non
 
 
 def debuginfo_ref_for_run_sync(conn: Connection, run_id: UUID) -> ArtifactReadRef | None:
-    """Return the Run's published debuginfo (vmlinux) object key, or ``None``.
-
-    Sync because the gdb-MI attach seam runs off the event loop (``asyncio.to_thread``) and owns no
-    async pool. ``None`` covers both an absent Run row and a row whose ``debuginfo_ref`` is NULL;
-    the caller (the gdb-MI debuginfo resolver) treats both as ``no_debuginfo``.
-    """
+    """Return a Run's vmlinux ref off the event loop; reusable builds require an immutable pin."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_DEBUGINFO_REF_SQL, (run_id,))
         row = cur.fetchone()
@@ -200,12 +169,7 @@ def debuginfo_ref_for_run_sync(conn: Connection, run_id: UUID) -> ArtifactReadRe
 
 
 def kernel_ref_for_run_sync(conn: Connection, run_id: UUID) -> ArtifactReadRef | None:
-    """Return the Run's published combined kernel+modules tar object key, or ``None``.
-
-    Sync for the same reason as :func:`debuginfo_ref_for_run_sync` (the gdb-MI ops run off the
-    event loop). ``None`` covers both an absent Run row and a NULL ``kernel_ref``; the caller (the
-    module-debuginfo resolver) treats both as ``no_module_debuginfo``.
-    """
+    """Return a Run's kernel ref off the event loop; reusable builds require an immutable pin."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_KERNEL_REF_SQL, (run_id,))
         row = cur.fetchone()

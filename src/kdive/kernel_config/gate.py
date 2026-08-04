@@ -15,6 +15,7 @@ today). Each seam formats its own envelope from the returned payload.
 
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -32,6 +33,8 @@ from kdive.kernel_config.support import (
     unmet_clauses,
 )
 from kdive.serialization import JsonValue
+
+_log = logging.getLogger(__name__)
 
 _EXTERNAL_BUILD_CONTRACT_URI = "resource://kdive/contracts/external-build"
 
@@ -138,9 +141,18 @@ async def missing_effective_config_nudge(
     once a config is present (uploaded), whether or not it is readable or complete: the warning
     path (present but missing symbols) and a plain success (present and complete) already cover
     those. Keys on artifact *presence* — a present-but-unreadable config is treated as provided,
-    not absent. Advisory only: the completion always succeeds.
+    not absent. If presence cannot be established, returns ``None`` rather than claiming absence.
+    Task cancellation still propagates. Advisory only: the completion always succeeds.
     """
-    key = await effective_config_key(conn, run_id)
+    try:
+        key = await effective_config_key(conn, run_id)
+    except Exception:  # noqa: BLE001 - this advisory must fail open for ordinary lookup faults
+        _log.warning(
+            "effective_config presence lookup failed for run %s; omitting nudge",
+            run_id,
+            exc_info=True,
+        )
+        return None
     if key is not None:
         return None
     return {

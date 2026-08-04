@@ -8,7 +8,7 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import SystemState
-from kdive.reconciler.cleanup.gc import gc_system_artifacts
+from kdive.reconciler.cleanup.artifact_retention import gc_system_artifacts
 from tests.reconciler.conftest import connect, run_repair, seed_system
 
 

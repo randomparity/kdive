@@ -17,8 +17,8 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.reconciler.cleanup import gc as gc_module
-from kdive.reconciler.cleanup.gc import gc_expired_build_artifacts
+from kdive.reconciler.cleanup import artifact_retention
+from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifacts
 from kdive.services.runs.build_use import recover_build_use_after_confirmed_worker_death
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
@@ -395,7 +395,7 @@ def test_generation_reclaim_pass_is_ordered_bounded_and_resumes(
         finally:
             await conn.close()
 
-        monkeypatch.setattr(gc_module, "_BUILD_GENERATIONS_PER_PASS", 2)
+        monkeypatch.setattr(artifact_retention, "_BUILD_GENERATIONS_PER_PASS", 2)
         store = _RecordingStore()
         conn = await connect(migrated_url)
         try:
@@ -448,8 +448,8 @@ def test_generation_scan_bounds_work_before_eligibility_and_pin_joins(
                     ),
                 )
 
-            monkeypatch.setattr(gc_module, "_BUILD_GENERATION_SCAN_PER_PASS", 3)
-            assert await gc_module._generation_candidates(conn, expired=True) == []
+            monkeypatch.setattr(artifact_retention, "_BUILD_GENERATION_SCAN_PER_PASS", 3)
+            assert await artifact_retention._generation_candidates(conn, expired=True) == []
             cursor = await (
                 await conn.execute(
                     "SELECT investigation_id, generation FROM investigation_build_gc_cursor "
@@ -457,7 +457,7 @@ def test_generation_scan_bounds_work_before_eligibility_and_pin_joins(
                 )
             ).fetchone()
             assert cursor == (UUID(int=3), UUID(int=3))
-            assert await gc_module._generation_candidates(conn, expired=True) == [
+            assert await artifact_retention._generation_candidates(conn, expired=True) == [
                 (UUID(int=4), UUID(int=4))
             ]
         finally:
@@ -498,8 +498,10 @@ def test_generation_scan_never_exceeds_the_hard_one_thousand_row_ceiling(
                     ],
                 )
 
-            monkeypatch.setattr(gc_module, "_BUILD_GENERATION_SCAN_PER_PASS", 1_001)
-            candidates = await gc_module._generation_candidates(conn, expired=True, limit=1_001)
+            monkeypatch.setattr(artifact_retention, "_BUILD_GENERATION_SCAN_PER_PASS", 1_001)
+            candidates = await artifact_retention._generation_candidates(
+                conn, expired=True, limit=1_001
+            )
 
             assert len(candidates) == 1_000
             assert candidates[-1] == (investigation_id, UUID(int=1_000))
@@ -527,7 +529,7 @@ def test_generation_scan_plan_uses_primary_key_before_bounded_limit(migrated_url
                     "SELECT investigation_id, generation FROM investigation_builds "
                     "WHERE (investigation_id, generation) > (%s, %s) "
                     "ORDER BY investigation_id, generation LIMIT %s",
-                    (UUID(int=0), UUID(int=0), gc_module._BUILD_GENERATION_SCAN_PER_PASS),
+                    (UUID(int=0), UUID(int=0), artifact_retention._BUILD_GENERATION_SCAN_PER_PASS),
                 )
             ).fetchone()
             assert plan_row is not None
@@ -588,7 +590,7 @@ def test_pinned_generation_does_not_consume_reclaim_budget(
         finally:
             await conn.close()
 
-        monkeypatch.setattr(gc_module, "_BUILD_GENERATIONS_PER_PASS", 1)
+        monkeypatch.setattr(artifact_retention, "_BUILD_GENERATIONS_PER_PASS", 1)
         store = _RecordingStore()
         conn = await connect(migrated_url)
         try:

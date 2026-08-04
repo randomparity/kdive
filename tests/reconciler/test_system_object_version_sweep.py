@@ -20,7 +20,7 @@ from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.console_hosting import CollectorRegistry, ConsoleHostingLoop
 from kdive.reconciler.cleanup import system_object_versions as sweep
-from kdive.reconciler.cleanup.gc import reap_console_collectors
+from kdive.reconciler.cleanup.provider_reaping import reap_console_collectors
 from tests.reconciler.conftest import connect, run_repair, seed_system
 
 _NOW = datetime(2026, 7, 31, tzinfo=UTC)

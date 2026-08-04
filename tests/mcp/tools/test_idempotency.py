@@ -12,7 +12,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools import _idempotency
+from kdive.mcp.tools.lifecycle.support import _idempotency
 
 
 @asynccontextmanager

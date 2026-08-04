@@ -161,8 +161,9 @@ R8a. **Bounded retention and search ergonomics, disclosed.** Console parts are o
 (`owner_kind='systems'`) and are reclaimed at **teardown** (the teardown handler deletes the
 System's console-part rows + objects and the sidecar). There is **no in-life expiry sweep**: the
 existing artifact-expiry reconciler (#768) pins `owner_kind='runs'` and deliberately excludes
-system-owned `console`/`vmcore` evidence (`reconciler/cleanup/gc.py`), so console parts grow for the
-System's lifetime and are bounded only by teardown — a long-lived, chatty System accumulates parts
+system-owned `console`/`vmcore` evidence (`reconciler/cleanup/artifact_retention.py`), so console
+parts grow for the System's lifetime and are bounded only by teardown — a long-lived, chatty System
+accumulates parts
 until it is torn down. This work does **not** add `artifacts.list` pagination (`data.truncated` stays
 `False`), so a chatty multi-hour run can make `artifacts.list` return many part rows. `artifacts.get`
 on the newest part (cheap, newest-first) covers the live-tail case. For finding an older event across
