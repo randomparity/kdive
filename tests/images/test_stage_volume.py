@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.rootfs import stage_volume as stage_volume_module
 from kdive.images.rootfs.stage_volume import (
     StageVolumeDeps,
     _TargetRow,
@@ -17,6 +20,24 @@ from kdive.images.rootfs.stage_volume import (
 
 _ROW_ID = uuid4()
 _VOLUME = "fedora-44.qcow2"
+
+
+def test_stage_volume_module_remains_provider_neutral() -> None:
+    """The neutral orchestration owns no CLI assembly or provider composition imports."""
+    module = inspect.getmodule(stage_volume)
+    assert module is stage_volume_module
+    assert not hasattr(module, "add_stage_volume_parser")
+    assert not hasattr(module, "run_stage_volume")
+
+    imports = ast.parse(inspect.getsource(module))
+    provider_imports = [
+        node.module
+        for node in ast.walk(imports)
+        if isinstance(node, ast.ImportFrom)
+        and node.module is not None
+        and node.module.startswith("kdive.providers")
+    ]
+    assert provider_imports == []
 
 
 class _Recorder:

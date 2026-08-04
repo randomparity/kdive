@@ -1,4 +1,4 @@
-"""CLI behavior for `build-fs`: the required `--image` catalog path."""
+"""CLI behavior for the rootfs operator commands."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ import pytest
 from kdive.__main__ import build_parser
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
-from kdive.images.rootfs.command import run_build_fs
+from kdive.images.rootfs import command
+from kdive.images.rootfs.command import run_build_fs, run_stage_volume
 
 
 def _patch_plane(
@@ -93,6 +94,59 @@ def test_build_fs_requires_image() -> None:
     """The legacy no-`--image` virt-builder path is no longer a CLI contract."""
     with pytest.raises(SystemExit):
         build_parser().parse_args(["build-fs"])
+
+
+def test_stage_volume_parser_uses_remote_libvirt_x86_64_defaults() -> None:
+    """`stage-volume` parses the image source with its provider and arch defaults."""
+    args = build_parser().parse_args(
+        ["stage-volume", "--image", "fedora-44", "--from", "/tmp/image.qcow2"]
+    )
+
+    assert args.command == "stage-volume"
+    assert args.provider == "remote-libvirt"
+    assert args.arch == "x86_64"
+    assert args.image == "fedora-44"
+    assert args.source == "/tmp/image.qcow2"
+
+
+def test_run_stage_volume_wires_resolved_source_and_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The command resolves the source and passes its composed dependencies to the operation."""
+    source = tmp_path / "image.qcow2"
+    source.write_bytes(b"qcow2")
+    sentinel = object()
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(command, "build_stage_volume_deps", lambda _provider: sentinel)
+    monkeypatch.setattr(command, "stage_volume", lambda *args: calls.append(args))
+
+    args = build_parser().parse_args(
+        ["stage-volume", "--image", "fedora-44", "--from", str(source)]
+    )
+    run_stage_volume(args)
+
+    assert calls == [("remote-libvirt", "fedora-44", "x86_64", source.resolve(), sentinel)]
+
+
+def test_run_stage_volume_missing_source_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing qcow2 fails before command composition builds provider dependencies."""
+    missing = tmp_path / "missing.qcow2"
+
+    def _unreached(_provider: str) -> object:  # pragma: no cover - must not be called
+        raise AssertionError("dependency construction must not run for a missing source")
+
+    monkeypatch.setattr(command, "build_stage_volume_deps", _unreached)
+    args = build_parser().parse_args(
+        ["stage-volume", "--image", "fedora-44", "--from", str(missing)]
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        run_stage_volume(args)
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details == {"source": str(missing.resolve())}
 
 
 def test_build_fs_image_resolves_el9_package_set_without_standalone_makedumpfile(

@@ -20,14 +20,13 @@ Order and failure semantics:
 
 from __future__ import annotations
 
-import argparse
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError
 from kdive.images.planes.provenance_probes import (
     DEFAULT_BOOT_ENTRIES_PROBE,
     DEFAULT_KERNEL_CONFIG_PROBE,
@@ -49,7 +48,7 @@ class _TargetRow:
 
 @dataclass(frozen=True, slots=True)
 class StageVolumeDeps:
-    """The injected seams the orchestration drives (env-wired by :func:`run_stage_volume`)."""
+    """The injected seams the stage-volume CLI composition provides to the orchestration."""
 
     find_row: Callable[[str, str, str], _TargetRow]
     capture_config: Callable[[Path], bytes | None]
@@ -108,32 +107,3 @@ def stage_volume(provider: str, name: str, arch: str, qcow2: Path, deps: StageVo
             arch,
             exc_info=True,
         )
-
-
-def add_stage_volume_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register ``stage-volume``: upload a built qcow2 to a remote-libvirt pool + capture config."""
-    stage = sub.add_parser(
-        "stage-volume",
-        help="upload a built qcow2 to a remote-libvirt storage pool and capture its kernel config",
-    )
-    stage.add_argument("--provider", default="remote-libvirt", help="the target provider")
-    stage.add_argument("--image", required=True, help="the declared [[image]] catalog name")
-    stage.add_argument("--arch", default="x86_64", help="the image arch (default x86_64)")
-    stage.add_argument(
-        "--from", dest="source", required=True, help="the local built qcow2 to upload"
-    )
-
-
-def run_stage_volume(args: argparse.Namespace) -> None:
-    """Wire the env-backed seams and run one ``stage-volume`` orchestration."""
-    from kdive.providers.assembly.composition import build_stage_volume_deps
-
-    qcow2 = Path(args.source).resolve()
-    if not qcow2.is_file():
-        raise CategorizedError(
-            f"stage-volume source qcow2 does not exist: {qcow2}",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"source": str(qcow2)},
-        )
-    deps = build_stage_volume_deps(args.provider)
-    stage_volume(args.provider, args.image, args.arch, qcow2, deps)
