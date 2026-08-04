@@ -39,14 +39,14 @@ version-aware image. A diagnostic run of an old image must remain quiesced.
 
 ### Worker-fence authority upgrade
 
-For a release carrying the worker-fence protocol, stop old workers before migration and migrate the
-runtime roles and protocol. Then follow the deployment-specific authority sequence:
+For a release carrying the worker-fence protocol, follow the deployment-specific authority sequence:
 
-- **Kubernetes:** follow the [Kubernetes deploy runbook](runbooks/kubernetes-deploy.md), rotate the
-  separate server, worker, reconciler, and lifecycle-witness credentials, and scale workers to zero
-  while the lifecycle-witness remains healthy. Wait until worker Pods and their finalizers are gone,
-  then stop the lifecycle-witness before migration. After migration, start and verify the
-  lifecycle-witness before starting workers.
+- **Kubernetes:** follow the [Kubernetes deploy runbook](runbooks/kubernetes-deploy.md). Keep the
+  current credentials while old workers drain. Scale workers to zero while the lifecycle-witness
+  remains healthy. Wait until worker Pods and their finalizers are gone, then stop the
+  lifecycle-witness. Migrate the roles and fence protocol. Rotate the distinct server, worker,
+  reconciler, and lifecycle-witness credentials. Start and verify the lifecycle-witness. Then start
+  current workers.
 - **Compose:** rotate the separate server, worker, reconciler, and lifecycle-witness credentials
   used by the lifecycle recipes. Use `just compose-up` or `just compose-recreate-worker` to run the
   operator-side lifecycle wrapper and gate current workers; Compose has no persistent

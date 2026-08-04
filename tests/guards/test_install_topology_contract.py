@@ -3,6 +3,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 from kdive.config.registry import RUNNABLE
 
 _ROOT = Path(__file__).parents[2]
@@ -22,6 +24,13 @@ _IMAGE_COMMAND_INVENTORY = re.compile(
 
 def _normalized(path: Path) -> str:
     return " ".join(path.read_text().split())
+
+
+def _section(path: Path, start: str, end: str | None = None) -> str:
+    text = path.read_text().split(start, maxsplit=1)[1]
+    if end is not None:
+        text = text.split(end, maxsplit=1)[0]
+    return " ".join(text.split()).lower()
 
 
 def test_install_documents_the_five_image_commands_and_kubernetes_witness_topology() -> None:
@@ -105,10 +114,32 @@ def test_build_use_recovery_distinguishes_kubernetes_witness_from_compose_wrappe
     )
 
 
-def test_kubernetes_migrations_keep_the_witness_alive_until_workers_terminate() -> None:
-    for path in (_INSTALL, _HELM_REFERENCE, _BUILD_USE_RECOVERY, _KUBERNETES_RUNBOOK):
-        text = _normalized(path).lower()
-        assert "scale workers to zero while the lifecycle-witness remains healthy" in text, path
-        assert "wait until worker pods and their finalizers are gone" in text, path
-        assert "then stop the lifecycle-witness" in text, path
-        assert "start and verify the lifecycle-witness before starting workers" in text, path
+@pytest.mark.parametrize(
+    ("path", "start", "end"),
+    [
+        (_INSTALL, "### Worker-fence authority upgrade", "### Migration 0094"),
+        (_BUILD_USE_RECOVERY, "For a worker-fence upgrade", "Verify registered"),
+        (_KUBERNETES_RUNBOOK, "When upgrading the worker-fence protocol", "**Validate"),
+        (_HELM_REFERENCE, "### Upgrading worker-fence authority", None),
+    ],
+)
+def test_kubernetes_worker_fence_upgrade_orders_witness_and_credentials(
+    path: Path, start: str, end: str | None
+) -> None:
+    section = _section(path, start, end)
+    ordered_steps = (
+        "keep the current credentials while old workers drain",
+        "scale workers to zero while the lifecycle-witness remains healthy",
+        "wait until worker pods and their finalizers are gone",
+        "then stop the lifecycle-witness",
+        "migrate the roles and fence protocol",
+        "rotate the distinct server, worker, reconciler, and lifecycle-witness credentials",
+        "start and verify the lifecycle-witness",
+        "start current workers",
+    )
+
+    positions = []
+    for step in ordered_steps:
+        assert step in section, (path, step)
+        positions.append(section.index(step))
+    assert positions == sorted(positions), path

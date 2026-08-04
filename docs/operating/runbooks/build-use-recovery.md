@@ -43,11 +43,11 @@ refusal shape as a missing use and leaves the pin unchanged.
 
 For a worker-fence upgrade, use the deployment-specific authority sequence:
 
-- **Kubernetes:** operators rotate the distinct server, worker, reconciler, and lifecycle-witness
-  credentials. Kubernetes uses a dedicated lifecycle-witness. Scale workers to zero while the
-  lifecycle-witness remains healthy. Wait until worker Pods and their finalizers are gone, then stop
-  the lifecycle-witness. Migrate the roles and fence protocol. Start and verify the
-  lifecycle-witness before starting workers.
+- **Kubernetes:** Kubernetes uses a dedicated lifecycle-witness. Keep the current credentials while
+  old workers drain. Scale workers to zero while the lifecycle-witness remains healthy. Wait until
+  worker Pods and their finalizers are gone, then stop the lifecycle-witness. Migrate the roles and
+  fence protocol. Rotate the distinct server, worker, reconciler, and lifecycle-witness credentials.
+  Start and verify the lifecycle-witness. Then start current workers.
 - **Compose:** stop old workers through the supported operator-side lifecycle wrapper's `down`
   action before migrating the roles and fence protocol. Rotate the distinct server, worker,
   reconciler, and lifecycle-witness credentials used by the lifecycle recipes. Use the wrapper to
