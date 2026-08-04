@@ -234,6 +234,21 @@ def test_stale_entries_names_the_allowlist_paths_absent_from_the_tree(tmp_path: 
     assert stale == sorted(stale)
 
 
+def test_stale_entries_reports_an_entry_outside_the_core_prefixes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # parse_numstat drops every path failing the prefix test, so such an entry matches
+    # nothing however real its file is — dead the same way as an absent path. It is the
+    # natural mistake when allowlisted content leaves the core surface: re-point at the
+    # successor instead of dropping the entry.
+    outside = "src/kdive/providers/infra/console_hosting.py"
+    (tmp_path / outside).parent.mkdir(parents=True)
+    (tmp_path / outside).touch()
+    monkeypatch.setattr(gate, "ALLOWED_FILES", frozenset({outside}))
+
+    assert stale_entries(tmp_path) == [outside]
+
+
 def test_stale_entries_rejects_a_directory_standing_in_for_a_file(tmp_path: Path) -> None:
     # An entry is matched against numstat paths, which are always files. A directory of
     # the same name allowlists nothing, so it is as stale as an absent path.
@@ -267,6 +282,21 @@ def test_gate_fails_on_a_stale_allowlist_entry(
     out = capsys.readouterr().out
     assert "STALE ENTRY" in out
     assert "src/kdive/domain/gone.py" in out
+
+
+def test_report_mode_exits_nonzero_on_a_stale_entry(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `--report` writes the committed record, so a caller under `set -e` regenerating it
+    # trusts the exit status: a report reading "gate FAILED" that exits 0 records the
+    # failure and reports success — the silent-staleness shape one layer up.
+    monkeypatch.setattr(gate, "ALLOWED_FILES", frozenset({"src/kdive/domain/gone.py"}))
+    monkeypatch.setattr(gate, "_measure", lambda: {})
+    monkeypatch.setattr(sys, "argv", ["m2_portability_gate.py", "--report"])
+
+    assert gate.main() == 1
+
+    assert "## Stale allowlist entries" in capsys.readouterr().out
 
 
 def _git(repo: Path, *args: str) -> None:

@@ -10,13 +10,14 @@ resolution or evil merge), which ``--no-merges`` numstat never sees. The allowli
 the ADR-0076 set: the ``ResourceKind`` enum value, the one M2 migration, and the
 additive ``presign_get`` primitive. Extending it is a deliberate, reviewed decision —
 edit this file in the same PR. Allowlist paths are matched exactly, so the gate also
-reports any entry naming no file and fails on it: such an entry allowlists nothing while
-the modules that replaced it count as violations (#1835). That check catches the
-move-or-delete shape only. An entry naming a file is not thereby live — content carved
-out of a module that stays in place leaves the entry pointing at a shell, which nothing
-here detects; see the note above ``ALLOWED_FILES`` for what review has to do instead.
+reports any entry that allowlists nothing and fails on it: an entry naming no file, or
+one outside ``CORE_PREFIXES``, matches nothing the measurement can emit while the modules
+that replaced it count as violations (#1835). Those checks catch the move-or-delete shape
+only. An entry passing them is not thereby live — content carved out of a module that
+stays in place leaves the entry pointing at a shell, which nothing here detects; see the
+note above ``ALLOWED_FILES`` for what review has to do instead.
 
-Exit codes: 0 gate passes; 1 a stale allowlist entry or violations found; 2 the
+Exit codes: 0 gate passes; 1 a dead allowlist entry or violations found; 2 the
 baseline tag is unavailable.
 Stdlib-only: CI runs it without a synced environment (``just m2-gate``).
 """
@@ -291,15 +292,22 @@ def violations(touched: dict[str, int]) -> dict[str, int]:
 
 
 def stale_entries(root: Path) -> list[str]:
-    """The ``ALLOWED_FILES`` members naming no file under ``root``, sorted.
+    """The ``ALLOWED_FILES`` members that allowlist nothing, sorted.
 
     An entry is matched against numstat paths exactly — there is no prefix or directory
     matching — so an entry whose module moved or became a package stops allowlisting
     anything, while the modules that replaced it register as violations (#1835). A
     directory is as stale as an absent path: numstat names files.
 
-    This is a floor, not a liveness check, in three ways. An entry naming no file is
-    definitely dead; an entry naming a file may still be dead.
+    An entry outside ``CORE_PREFIXES`` is dead the same way and reported the same way.
+    ``parse_numstat`` drops every path failing that prefix test before the map reaches
+    ``violations``, so such an entry matches nothing however real its file is. That is the
+    natural mistake to make when allowlisted content leaves the core surface — re-point at
+    the successor instead of dropping the entry — and it is the one instruction in the note
+    above ``ALLOWED_FILES`` that would otherwise go unmechanized.
+
+    This is a floor, not a liveness check, in three ways. An entry failing neither test
+    above may still be dead.
 
     Content carved out of a module that stays in place leaves the entry pointing at a
     shell that allowlists nothing. That shape has no cheap mechanical test — ``_measure``
@@ -318,7 +326,11 @@ def stale_entries(root: Path) -> list[str]:
     how the gate's own tests drive it over throwaway repositories. Invoking the script by
     absolute path from another checkout measures one tree and checks staleness in another.
     """
-    return sorted(path for path in ALLOWED_FILES if not (root / path).is_file())
+    return sorted(
+        path
+        for path in ALLOWED_FILES
+        if not path.startswith(CORE_PREFIXES) or not (root / path).is_file()
+    )
 
 
 def render_capture_coverage() -> list[str]:
@@ -378,9 +390,10 @@ def render_report(touched: dict[str, int], stale: list[str]) -> str:
         lines += [
             "## Stale allowlist entries",
             "",
-            "These entries name no file in the tree, so they allowlist nothing while the modules",
-            "that replaced them fall under Violations below. Every classification in this report",
-            "is unreliable until they are re-pointed (#1835).",
+            "These entries allowlist nothing — each names no file in the tree, or a path outside",
+            "the core prefixes the measurement covers — while the modules that replaced them fall",
+            "under Violations below. Every classification in this report is unreliable until they",
+            "are re-pointed (#1835).",
             "",
             *(f"- `{path}`" for path in stale),
             "",
@@ -404,7 +417,7 @@ def render_report(touched: dict[str, int], stale: list[str]) -> str:
             "**Verdict: gate FAILED** — provider-specific changes reached the core surface.",
         ]
     elif stale:
-        lines.append("**Verdict: gate FAILED** — the allowlist has entries naming no file.")
+        lines.append("**Verdict: gate FAILED** — the allowlist has entries that allowlist nothing.")
     else:
         lines.append(
             "**Verdict: gate passed** — no core surface touched outside the ADR-0076 allowlist."
@@ -498,15 +511,16 @@ def main() -> int:
         print(f"  allowlisted  {count:>6}  {path}")
     if stale:
         print(
-            "\ngate FAILED - these ALLOWED_FILES entries name no file in the tree, so they "
-            "allowlist nothing while the modules that replaced them count as violations:"
+            "\ngate FAILED - these ALLOWED_FILES entries allowlist nothing (each names no file "
+            "in the tree, or a path outside CORE_PREFIXES), while the modules that replaced "
+            "them count as violations:"
         )
         for path in stale:
             print(f"  STALE ENTRY          {path}")
         print(
-            "\nRe-point each entry at the module that now holds its allowlisted content, "
-            "keeping its justification comment attached, or drop the entry when that "
-            "content left the core surface."
+            "\nRe-point each entry at the module under a core prefix that now holds its "
+            "allowlisted content, keeping its justification comment attached, or drop the "
+            "entry when that content left the core surface."
         )
     bad = violations(touched)
     if bad:
