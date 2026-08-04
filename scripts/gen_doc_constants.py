@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kdive.config.core_settings import MAX_UPLOAD_BYTES
+from kdive.mcp import MCP_PROTOCOL_VERSION
 from kdive.mcp.tools._common import DEFAULT_WAIT_S
 from kdive.mcp.tools.catalog.artifacts.uploads import SINGLE_PUT_MAX_BYTES
 from scripts.gen_tool_reference import _registry_tools
@@ -100,6 +101,18 @@ def bindings() -> list[Binding]:
             pattern=re.compile(r"the tool's own (\d+)-second\s+default"),
             expected=str(int(DEFAULT_WAIT_S)),
             writable=False,
+        ),
+        # Writable, like the tool count above and unlike the two `.py` bindings: the guarded
+        # kind exists to keep generators off hand-authored source docstrings, and this target
+        # is a doc (ADR-0537). `write()` substitutes capture group 1 alone, so the sentence
+        # around the date is untouched. agent-index.md is also an ADR-0151 doc resource, so
+        # `resources-docs` must re-mirror the snapshot after every rewrite.
+        Binding(
+            label="MCP protocol revision",
+            path=_ROOT / "docs" / "guide" / "agent-index.md",
+            pattern=re.compile(r"MCP protocol revision (\d{4}-\d{2}-\d{2})"),
+            expected=MCP_PROTOCOL_VERSION,
+            writable=True,
         ),
     ]
 

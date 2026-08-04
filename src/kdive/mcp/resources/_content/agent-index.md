@@ -17,6 +17,9 @@ registered tool. `tools.search` and `tools.invoke` are always available. Both pa
 the same RBAC. If an operator enables the core-set gateway, only a small core set is listed
 directly, so reach everything else through `tools.search` / `tools.invoke`.
 
+The server negotiates MCP protocol revision 2025-11-25; a client offering an older supported
+revision negotiates down rather than failing.
+
 ## The typical session
 
 A reproduce-and-investigate session moves through these stages. Each names the toolset and
