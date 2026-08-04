@@ -56,6 +56,53 @@ def test_compose_documents_its_operator_side_lifecycle_wrapper_not_a_witness_ser
         assert "start the lifecycle witnesses" not in text, path
 
 
+def test_public_compose_guides_document_stop_and_destructive_teardown() -> None:
+    for path in (_COMPOSE_DOC, _COMPOSE_REFERENCE):
+        text = _normalized(path)
+
+        assert "four supported worker lifecycle recipes" in text, path
+        for recipe in (
+            "`just compose-up`",
+            "`just compose-stop`",
+            "`just compose-recreate-worker`",
+            "`just compose-down`",
+        ):
+            assert recipe in text, (path, recipe)
+        assert "`just compose-stop` preserves named volumes" in text, path
+        assert "`just compose-down` removes named volumes" in text, path
+
+
+@pytest.mark.parametrize(
+    ("path", "start", "end"),
+    [
+        (_COMPOSE_DOC, "## Upgrading worker-fence authority", "The Compose-managed bucket"),
+        (_COMPOSE_REFERENCE, "## Upgrading worker-fence authority", "`docker compose up` resolves"),
+        (_INSTALL, "- **Compose:**", "Verify registered"),
+        (_BUILD_USE_RECOVERY, "- **Compose:**", "Verify registered"),
+    ],
+)
+def test_compose_worker_fence_guidance_uses_the_public_stop_workflow(
+    path: Path, start: str, end: str
+) -> None:
+    section = _section(path, start, end)
+    ordered_steps = (
+        "just compose-stop",
+        "select the new image and configuration",
+        "just compose-up",
+        "migrate one-shot",
+    )
+
+    positions = []
+    for step in ordered_steps:
+        assert step in section, (path, step)
+        positions.append(section.index(step))
+    assert positions == sorted(positions), path
+    assert "raw docker/compose commands" in section, path
+    assert (
+        "do not invoke `python -m kdive.processes.compose_worker_lifecycle` directly" in section
+    ), path
+
+
 def test_helm_confines_witness_credentials_to_its_dedicated_workload() -> None:
     text = _normalized(_HELM_REFERENCE)
 
@@ -109,8 +156,8 @@ def test_build_use_recovery_distinguishes_kubernetes_witness_from_compose_wrappe
     assert "dedicated lifecycle-witness" in text
     assert "**Compose:**" in text
     assert "operator-side lifecycle wrapper" in text
-    assert compose_guidance.lower().index("stop old workers") < compose_guidance.lower().index(
-        "migrating the roles"
+    assert compose_guidance.lower().index("just compose-stop") < compose_guidance.lower().index(
+        "migrate one-shot"
     )
 
 

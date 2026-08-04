@@ -19,8 +19,10 @@ production deployment:
 just compose-up   # builds the image, runs the backends + migrate, then gates the worker
 ```
 
-The `compose-up`, `compose-recreate-worker`, and `compose-down` recipes are the only supported
-worker lifecycle. Their operator-side lifecycle wrapper binds the exact full container ID to a
+The four supported worker lifecycle recipes are `just compose-up`, `just compose-stop`,
+`just compose-recreate-worker`, and `just compose-down`. `just compose-stop` preserves named
+volumes after recording worker termination; `just compose-down` removes named volumes for a
+destructive teardown. Their operator-side lifecycle wrapper binds the exact full container ID to a
 random nonce in Postgres before start and records retained terminal inspect evidence before removal.
 Compose does not run a persistent lifecycle-witness service. Raw Compose/Docker lifecycle commands
 and host-launched workers bypass that chain and are unsupported. On a database failure, the wrapper
@@ -57,14 +59,14 @@ heartbeat begins another bounded lease, so the ceiling is not a total job-runtim
 
 ## Upgrading worker-fence authority
 
-For an existing deployment, stop old workers; migrate the runtime roles and fence protocol; rotate
-the separate server, worker, reconciler, and lifecycle-witness login credentials used by the
-lifecycle recipes; then use `just compose-up` or `just compose-recreate-worker` to run the
-operator-side lifecycle wrapper and gate current workers. Verify registered current incarnations and
-the server's recovery-tool exposure before resuming queue processing. An image rollback cannot
-restore old claiming after the protocol migration, so recover forward with a current worker image.
-Do not use raw Compose/Docker lifecycle commands or manual SQL to bypass this order: those bypasses
-retain pins.
+For an existing deployment, use `just compose-stop` to record old-worker termination and preserve
+named volumes. Select the new image and configuration, then use `just compose-up`. The Compose graph
+runs the migrate one-shot and, for local defaults, role bootstrap before the operator-side lifecycle
+wrapper registers the current worker. Verify registered current incarnations and the server's
+recovery-tool exposure before resuming queue processing. An image rollback cannot restore old
+claiming after the protocol migration, so recover forward with a current worker image. Do not invoke
+`python -m kdive.processes.compose_worker_lifecycle` directly or use raw Docker/Compose commands;
+they bypass the public lifecycle path and retain pins.
 
 `docker compose up` resolves the graph rather than relying on the operator to order it:
 the app services pull in a healthy Postgres, the `minio-init` bucket-creation one-shot
@@ -145,7 +147,7 @@ host* (where `iss=http://localhost:8090/default` matches host-minted tokens).
 ## Teardown
 
 ```bash
-just compose-down   # records worker termination, then drops the named volumes
+just compose-down   # records worker termination, then removes named volumes
 ```
 
 ## Image provenance — verify before you run a published image

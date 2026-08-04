@@ -17,11 +17,13 @@ the stack. Compose does not run a persistent lifecycle-witness service:
 just compose-up
 ```
 
-Use `just compose-recreate-worker` to replace the worker and `just compose-down` to tear the
-stack down. These are the only supported worker lifecycle commands: they preserve exact
-worker-incarnation evidence in Postgres. Raw Compose/Docker lifecycle commands and host workers
-bypass that evidence boundary. A database failure is fail-closed, retaining the never-started or
-terminal worker so the same recipe can be retried after Postgres recovers.
+The four supported worker lifecycle recipes are `just compose-up`, `just compose-stop`,
+`just compose-recreate-worker`, and `just compose-down`. `just compose-stop` preserves named
+volumes after recording worker termination; `just compose-down` removes named volumes for a
+destructive teardown. These recipes preserve exact worker-incarnation evidence in Postgres. Raw
+Compose/Docker lifecycle commands and host workers bypass that evidence boundary. A database failure
+is fail-closed, retaining the never-started or terminal worker so the same recipe can be retried
+after Postgres recovers.
 
 Configuration is read from `KDIVE_*` variables; see
 [the config reference](../guide/reference/config.md) for every setting.
@@ -40,15 +42,15 @@ Compose does it from the graph.
 
 ## Upgrading worker-fence authority
 
-For a deployment that already has workers, stop old workers before applying the worker-fence
-migrations. Then migrate the roles and fence protocol and rotate the distinct server, worker,
-reconciler, and lifecycle-witness credentials used by the lifecycle recipes. Use `just compose-up`
-or `just compose-recreate-worker` to run the operator-side lifecycle wrapper and gate only current
-workers. Verify that every current worker has registered its incarnation and that the server lists
-the recovery tools before resuming queue processing. Do not roll an old worker image back into this
-sequence: rollback cannot restore its ability to claim protocol-required jobs; recover forward with a
-current image. Raw Compose/Docker lifecycle commands and manual database changes bypass the wrapper
-and retain pins rather than releasing them.
+For a deployment that already has workers, use `just compose-stop` to record old-worker termination
+and preserve named volumes. Select the new image and configuration, then use `just compose-up`.
+The Compose graph runs the migrate one-shot and, for local defaults, role bootstrap before the
+operator-side lifecycle wrapper registers the current worker. Verify that every current worker has
+registered its incarnation and that the server lists the recovery tools before resuming queue
+processing. Do not roll an old worker image back into this sequence: rollback cannot restore its
+ability to claim protocol-required jobs; recover forward with a current image. Do not invoke
+`python -m kdive.processes.compose_worker_lifecycle` directly or use raw Docker/Compose commands;
+they bypass the public lifecycle path and retain pins rather than releasing them.
 
 The Compose-managed bucket supplies the ADR-0524 store contract. When replacing it with an
 external store, follow the stop-old-first adoption order and IAM requirements in

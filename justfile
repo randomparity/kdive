@@ -290,6 +290,10 @@ changelog:
 compose-up:
     KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker-member:kdive-worker-local@postgres:5432/kdive}" uv run python -m kdive.processes.compose_worker_lifecycle up # pragma: allowlist secret — local dev only
 
+# Stop the stack after recording worker termination, preserving named volumes for an upgrade.
+compose-stop:
+    KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" uv run python -m kdive.processes.compose_worker_lifecycle down # pragma: allowlist secret — local dev only
+
 compose-recreate-worker:
     KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="${KDIVE_LIFECYCLE_WITNESS_DATABASE_URL:-postgresql://kdive-witness-member:kdive-witness-local@localhost:${KDIVE_POSTGRES_PORT:-5432}/kdive}" KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-postgresql://kdive-worker-member:kdive-worker-local@postgres:5432/kdive}" uv run python -m kdive.processes.compose_worker_lifecycle recreate # pragma: allowlist secret — local dev only
 

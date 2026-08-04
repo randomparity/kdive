@@ -47,10 +47,12 @@ For a release carrying the worker-fence protocol, follow the deployment-specific
   lifecycle-witness. Migrate the roles and fence protocol. Rotate the distinct server, worker,
   reconciler, and lifecycle-witness credentials. Start and verify the lifecycle-witness. Then start
   current workers.
-- **Compose:** rotate the separate server, worker, reconciler, and lifecycle-witness credentials
-  used by the lifecycle recipes. Use `just compose-up` or `just compose-recreate-worker` to run the
-  operator-side lifecycle wrapper and gate current workers; Compose has no persistent
-  lifecycle-witness service.
+- **Compose:** use `just compose-stop` to record old-worker termination and preserve named volumes.
+  Select the new image and configuration, then use `just compose-up`. The Compose graph runs the
+  migrate one-shot and, for local defaults, role bootstrap before the operator-side lifecycle
+  wrapper registers the current worker. Do not invoke
+  `python -m kdive.processes.compose_worker_lifecycle` directly or use raw Docker/Compose commands;
+  they bypass the public lifecycle path. Compose has no persistent lifecycle-witness service.
 
 Verify registered current incarnations and recovery-tool exposure before resuming queue processing.
 Rollback cannot restore old-worker claiming after this migration; recover forward with a current
