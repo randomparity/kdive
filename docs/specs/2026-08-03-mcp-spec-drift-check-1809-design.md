@@ -236,25 +236,34 @@ match, refile a duplicate, and fail the job every week thereafter. That is the ~
 outcome this arm exists to prevent, in a worse form than the commenting design it rejects. The
 predicate is *a human has seen this*, not *an issue is open*.
 
-**The search is a candidate filter; the dedup is string equality on the title.** The workflow
-runs `gh issue list --state all --search "<quoted title>" --json number,title` and then selects
-only hits whose `title` equals the expected string exactly, treating any other hit as no match.
-Bare search relevance would not do: GitHub issue search matches tokens, not literals, and every
-title this design can produce shares `MCP`, `spec`, `drift`, `upstream` and `adopted`. A search
-for a newly published `2026-11-01` would return the existing `2026-07-28` issue, the workflow
-would read that as "a human has seen this", file nothing, and pass green — permanently, since
-the search deliberately spans closed issues. That is ADR-0518's failure again, and from outside
-it looks identical to genuine parity. The search string must also be quoted, because the title
-contains a colon and `:` is GitHub search's qualifier separator.
+**The dedup key is the upstream revision, not the title.** The workflow runs
+`gh issue list --state all --label area:mcp-api --search "<newest> in:title" --json number,title`
+and selects hits whose title contains the revision.
 
-The title is keyed on the **upstream revision alone**, not the version pair. Keying on the pair
-would refile on a partial bump: with the `2026-07-28` issue open against declared `2025-11-25`,
-a bump to an intermediate revision edits the declared constant — the whole point of the offline
-gate — and the pair-keyed title would then match nothing and open a second issue for the same
-unadopted revision. The predicate is that a human has seen this upstream revision, so that is
-what the key carries; `declared=` stays in the issue body, which the script's human report
-already writes. A genuinely new upstream revision still changes `<newest>` and correctly opens
-a new issue. `cancel-in-progress: false` keeps a slow run from being killed mid-file.
+Measured behaviour, against this repository with gh 2.96.0: GitHub issue search **ANDs** its
+terms. Searching a real issue's exact title returns that one issue; replacing any single token
+with a nonsense token returns zero hits, as does a title differing only in its date. So a
+near-miss does not silently match the previous revision's issue — the `contains` select is
+defence-in-depth against tokenization surprises, not the fix for a relevance-ranking failure.
+(Shell-quoting the search string, incidentally, only keeps it one argv element; it does not
+escape the colon for GitHub's query parser. The colon is simply harmless here. Literal matching
+would need `--search '"<title>" in:title'`.)
+
+Keying on the revision rather than the whole title is what makes the arm match its own
+predicate — *a human has seen this revision*. A maintainer retitling the issue during triage,
+say to fold it under an `mcp` 2.0.0 epic, would break a full-title key in both halves at once
+and file a duplicate for a revision someone had demonstrably already seen. A retitle is
+stronger evidence of attention than a close, and the design already honours a close via
+`--state all`. The label narrows the candidate set so an unrelated issue that merely mentions
+the date cannot match.
+
+For the same reason the title carries the revision alone and not the version pair: with the
+`2026-07-28` issue open against declared `2025-11-25`, a partial bump to an intermediate
+revision edits the declared constant — the whole point of the offline gate — and a pair-keyed
+title would match nothing and open a second issue for the same unadopted revision. `declared=`
+stays in the issue body, which the script's human report already writes. A genuinely new
+upstream revision still changes `<newest>` and correctly opens a new issue.
+`cancel-in-progress: false` keeps a slow run from being killed mid-file.
 
 ## Tests
 

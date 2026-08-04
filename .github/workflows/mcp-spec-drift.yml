@@ -99,15 +99,23 @@ jobs:
           fi
           title="MCP spec drift: upstream ${NEWEST} not yet adopted"
 
-          # The search is a candidate filter; the dedup is exact-title equality. GitHub issue
-          # search matches tokens, not literals, so a bare non-empty test would match the
-          # previous revision's issue and silently bury a newer one. --state all: a closed
-          # issue is a human acknowledgement, and re-filing over it would produce a duplicate
-          # every week. The search string is quoted because the title contains a colon,
-          # GitHub search's qualifier separator.
-          existing="$(gh issue list --state all --search "${title}" \
+          # Dedup on the revision, not on the whole title. The revision is the identifying
+          # fact — the predicate this arm implements is "a human has seen this revision" —
+          # and it survives a maintainer retitling the issue during triage, which keying on
+          # the full title would not: a retitle would break both halves at once and file a
+          # duplicate for a revision someone had demonstrably already seen.
+          #
+          # --state all, because a closed issue is a human acknowledgement; re-filing over it
+          # would produce a duplicate every week. The label narrows the candidate set so an
+          # unrelated issue that merely mentions the date cannot match. GitHub issue search
+          # ANDs its terms, so this returns only issues whose title carries the revision; the
+          # `contains` select is defence-in-depth against tokenization surprises.
+          # NEWEST is constrained to ^\d{4}-\d{2}-\d{2}\Z by the script, so embedding it in
+          # the jq program is safe.
+          existing="$(gh issue list --state all --label "area:mcp-api" \
+            --search "${NEWEST} in:title" \
             --json number,title \
-            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+            --jq "map(select(.title | contains(\"${NEWEST}\"))) | .[0].number // empty")"
 
           if [[ -n "${existing}" ]]; then
             echo "already tracked as #${existing}; nothing to file"

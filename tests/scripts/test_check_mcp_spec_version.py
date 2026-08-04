@@ -197,6 +197,21 @@ def test_mcp_spec_drift_workflow_dedups_across_closed_issues() -> None:
     assert "--state all" in filing["run"]
 
 
+def test_mcp_spec_drift_workflow_dedups_on_the_revision_not_the_title() -> None:
+    """The revision is the identifying fact, and it survives a triage retitle.
+
+    Keying on the whole title breaks both halves of the dedup at once when a maintainer
+    renames the issue — filing a duplicate for a revision someone demonstrably already saw.
+    The mutation this catches is a bare `.[0].number // empty`, which selects any search hit.
+    """
+    filing = next(step for step in _drift_steps() if "gh issue create" in step.get("run", ""))
+    run = filing["run"]
+
+    assert "select(.title | contains(" in run, "dedup must filter hits, not take the first"
+    assert "${NEWEST} in:title" in run
+    assert '--label "area:mcp-api"' in run  # narrows candidates to this workflow's issues
+
+
 def test_mcp_spec_drift_workflow_uses_the_expected_labels() -> None:
     """Catches a typo in the workflow. It cannot detect a label renamed in the repo — that
     would fail `gh issue create` at run time, and no offline test can see it."""
