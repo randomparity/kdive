@@ -1,12 +1,7 @@
 """Remote-libvirt introspection ports (ADR-0079/0083).
 
-`RemoteLibvirtVmcoreIntrospect` runs the offline drgn path on the worker (fetch core +
-vmlinux, verify build-id provenance, run the shared helpers, redact + byte-cap) — no live
-reachability.
-`RemoteLibvirtLiveIntrospect` runs the in-guest drgn helper via the guest-agent seam. Both reuse
-``debug_common.introspect.assemble_report`` as the single redaction boundary. The drgn open/exec
-paths are ``live_vm``-gated; orchestration, provenance, and error contracts are unit-tested with
-fakes.
+``RemoteLibvirtVmcoreIntrospect`` owns worker-side offline vmcore inspection without live
+reachability. ``RemoteLibvirtLiveIntrospect`` owns in-guest drgn through the guest-agent seam.
 """
 
 from __future__ import annotations
@@ -73,7 +68,7 @@ type _RunHelper = Callable[[_Program, str], dict[str, object]]
 
 
 class RemoteLibvirtVmcoreIntrospect:
-    """Worker-side offline drgn introspection of a remote-captured vmcore (ADR-0033/0083)."""
+    """Realizes the worker-side offline ``VmcoreIntrospector`` port (ADR-0033/0083)."""
 
     def __init__(
         self,
@@ -96,11 +91,9 @@ class RemoteLibvirtVmcoreIntrospect:
     def from_env(
         cls, *, secret_registry: SecretRegistry, store: ObjectStore = UNCONFIGURED_OBJECT_STORE
     ) -> RemoteLibvirtVmcoreIntrospect:
-        """Build from env with the real drgn seams (lazy: drgn imports on first use).
+        """Build with real drgn seams.
 
-        drgn stays an operator-provided live-host prerequisite — the seams import it
-        inside the call, so composition builds on hosts without it and ``from_vmcore``
-        raises the documented ``MISSING_DEPENDENCY`` there instead of an import error.
+        An absent package raises ``MISSING_DEPENDENCY`` on first use.
         """
         return cls(
             fetch_object=lambda ref: store.get_artifact(ref, None).data,
@@ -121,13 +114,16 @@ class RemoteLibvirtVmcoreIntrospect:
         debuginfo_version_id: str | None = None,
         expected_build_id: str,
     ) -> IntrospectOutput:
-        """Open the core, run the helpers, return a redacted, size-bounded report.
+        """Fetch and verify the core, fetch debuginfo, stage both, run helpers, and return the
+        shared report assembler's redacted, byte-capped report.
 
         Raises:
             CategorizedError: ``MISSING_DEPENDENCY`` off the ``live_vm`` gate;
-                ``CONFIGURATION_ERROR`` for a build-id provenance mismatch;
-                ``INFRASTRUCTURE_FAILURE`` for object-store IO; ``DEBUG_ATTACH_FAILURE`` if drgn
-                cannot open the core.
+                ``CONFIGURATION_ERROR`` for a malformed ref reported by an injected fetch/build-id
+                seam or a build-id provenance mismatch; ``STALE_HANDLE`` when a referenced object
+                is missing; ``INFRASTRUCTURE_FAILURE`` for object-store IO failures; or
+                ``DEBUG_ATTACH_FAILURE`` if drgn cannot open the core or load the vmlinux.
+            RuntimeError: if versioned debuginfo is requested without a versioned fetch seam.
         """
         if self._open_program is None or self._run_helper is None:
             raise CategorizedError(
