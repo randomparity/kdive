@@ -51,10 +51,11 @@ run that is no coverage" failure this framework exists to kill. So each family
 has its own `require_live_vm_*` gate that fails loud on a mis-set env. Three
 additive sub-markers exist — `live_vm_throwaway`, `live_vm_provisioned`, and
 `live_vm_remote` — and every test keeps the bare `live_vm` marker alongside its
-sub-marker. The gdbstub-preserve debug tests are **not** a fourth sub-marker:
-they reuse `live_vm_throwaway`, told apart from the ordinary throwaway tests by
-their env (`KDIVE_LIVE_VM_BZIMAGE`) and gate (`require_live_vm_bzimage`), not by
-marker.
+sub-marker. The gdbstub debug tests are **not** a fourth sub-marker: both the
+preserve-crash and stepping proofs reuse `live_vm_throwaway`. Their
+`KDIVE_LIVE_VM_BZIMAGE` / `KDIVE_LIVE_VM_VMLINUX` inputs and corresponding
+gates distinguish them from ordinary throwaway tests; stepping also consumes
+`KDIVE_LIVE_VM_ROOTFS`.
 
 | Family (sub-marker) | Required env | Default libvirt mode | Served by |
 | --- | --- | --- | --- |

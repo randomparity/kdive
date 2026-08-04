@@ -15,6 +15,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
@@ -193,7 +194,48 @@ def test_live_vm_debug_advance_modes(  # pragma: no cover - live_vm
             ssh_port=ssh_port,
             wait_timeout_s=180.0,
         ):
-            asyncio.run(_drive_advance_modes(live_debug_surface, vmlinux))
+            asyncio.run(_drive_advance_modes(live_debug_surface, vmlinux, ssh_port))
+
+
+def test_continue_to_vfs_read_closes_ssh_trigger_on_tool_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise() -> None:
+        banner_received: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+        disconnected = asyncio.Event()
+
+        async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                banner_received.set_result(await reader.readline())
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                disconnected.set()
+
+        server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+        socket_address = server.sockets[0].getsockname()
+        ssh_port = int(socket_address[1])
+
+        async def fail_call(
+            _client: Client[Any], tool: str, arguments: dict[str, object]
+        ) -> ToolResponse:
+            assert tool == "debug.continue"
+            assert arguments["session_id"] == "session-x"
+            banner = await asyncio.wait_for(banner_received, timeout=1.0)
+            assert banner == b"SSH-2.0-kdive-live-test\r\n"
+            raise RuntimeError("continue failed")
+
+        monkeypatch.setattr(sys.modules[__name__], "_call_tool", fail_call)
+        try:
+            with pytest.raises(RuntimeError, match="continue failed"):
+                await _continue_to_vfs_read(cast(Any, object()), "session-x", ssh_port)
+            await asyncio.wait_for(disconnected.wait(), timeout=1.0)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(exercise())
 
 
 async def _drive_gdbmi_smoke(
@@ -241,10 +283,10 @@ async def _drive_gdbmi_smoke(
         await _load_module_symbols_when_configured(client, session_id, modules, module_fixture)
 
 
-async def _drive_advance_modes(surface: _LiveDebugSurface, vmlinux: Path) -> None:
+async def _drive_advance_modes(surface: _LiveDebugSurface, vmlinux: Path, ssh_port: int) -> None:
     async with surface.session(vmlinux=vmlinux) as live:
         for mode in ("into", "over", "instruction", "out"):
-            await _exercise_advance_mode(live.client, live.session_id, mode)
+            await _exercise_advance_mode(live.client, live.session_id, mode, ssh_port)
 
         transitions = await _advance_audit_transitions(live.pool, live.session_id)
         assert sorted(transitions) == sorted(
@@ -252,7 +294,9 @@ async def _drive_advance_modes(surface: _LiveDebugSurface, vmlinux: Path) -> Non
         )
 
 
-async def _exercise_advance_mode(client: Client[Any], session_id: str, mode: str) -> None:
+async def _exercise_advance_mode(
+    client: Client[Any], session_id: str, mode: str, ssh_port: int
+) -> None:
     breakpoint_number: str | None = None
     try:
         breakpoint = await _call_tool(
@@ -263,11 +307,7 @@ async def _exercise_advance_mode(client: Client[Any], session_id: str, mode: str
         assert breakpoint.status == "set", breakpoint
         breakpoint_number = str(breakpoint.data["number"])
 
-        continued = await _call_tool(
-            client,
-            "debug.continue",
-            {"session_id": session_id, "timeout_sec": 30.0},
-        )
+        continued = await _continue_to_vfs_read(client, session_id, ssh_port)
         _assert_nonterminal_stop(continued)
         assert continued.data["reason"] == "breakpoint-hit", continued
         cleared = await _call_tool(
@@ -304,6 +344,54 @@ async def _exercise_advance_mode(client: Client[Any], session_id: str, mode: str
                 {"session_id": session_id, "number": breakpoint_number},
             )
             assert cleared.status == "cleared", cleared
+
+
+async def _continue_to_vfs_read(
+    client: Client[Any], session_id: str, ssh_port: int
+) -> ToolResponse:
+    """Resume with a queued SSH client read so ``vfs_read`` is not ambient-I/O dependent."""
+    release_trigger = asyncio.Event()
+    trigger_task = asyncio.create_task(_hold_ssh_read_trigger(ssh_port, release_trigger))
+    continue_task = asyncio.create_task(
+        _call_tool(
+            client,
+            "debug.continue",
+            {"session_id": session_id, "timeout_sec": 30.0},
+        )
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {continue_task, trigger_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if trigger_task in done:
+            await trigger_task
+            raise RuntimeError("SSH read trigger ended before debug.continue stopped")
+        return await continue_task
+    finally:
+        release_trigger.set()
+        if not continue_task.done():
+            continue_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await continue_task
+        if not trigger_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(trigger_task), timeout=1.0)
+            except TimeoutError:
+                trigger_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await trigger_task
+
+
+async def _hold_ssh_read_trigger(ssh_port: int, release: asyncio.Event) -> None:
+    """Send a client banner that makes guest sshd call read(2), then hold the socket open."""
+    _reader, writer = await asyncio.open_connection("127.0.0.1", ssh_port)
+    try:
+        writer.write(b"SSH-2.0-kdive-live-test\r\n")
+        await writer.drain()
+        await release.wait()
+    finally:
+        writer.close()
+        await writer.wait_closed()
 
 
 def _assert_nonterminal_stop(response: ToolResponse) -> None:

@@ -37,7 +37,9 @@ def test_throwaway_fails_when_rootfs_missing() -> None:
     assert "KDIVE_LIVE_VM_ROOTFS" in r.stderr
 
 
-def _debug_stepping_env(tmp_path: Path, *, with_gdb: bool = True) -> dict[str, str]:
+def _debug_stepping_env(
+    tmp_path: Path, *, with_gdb: bool = True, with_qemu_img: bool = True
+) -> dict[str, str]:
     """Build the standalone kernel-artifact contract for debug stepping."""
     artifacts = {
         "KDIVE_LIVE_VM_ROOTFS": tmp_path / "rootfs.qcow2",
@@ -57,6 +59,10 @@ def _debug_stepping_env(tmp_path: Path, *, with_gdb: bool = True) -> dict[str, s
         gdb = bindir / "gdb"
         gdb.write_text("#!/bin/sh\nexit 0\n")
         gdb.chmod(0o755)
+    if with_qemu_img:
+        qemu_img = bindir / "qemu-img"
+        qemu_img.write_text("#!/bin/sh\nexit 0\n")
+        qemu_img.chmod(0o755)
 
     return {"PATH": str(bindir), **{name: str(path) for name, path in artifacts.items()}}
 
@@ -78,6 +84,12 @@ def test_debug_stepping_fails_without_gdb(tmp_path: Path) -> None:
     r = _run(["debug-stepping"], _debug_stepping_env(tmp_path, with_gdb=False))
     assert r.returncode != 0
     assert "gdb" in r.stderr
+
+
+def test_debug_stepping_fails_without_qemu_img(tmp_path: Path) -> None:
+    r = _run(["debug-stepping"], _debug_stepping_env(tmp_path, with_qemu_img=False))
+    assert r.returncode != 0
+    assert "qemu-img" in r.stderr
 
 
 def test_provisioned_fails_without_system_id() -> None:

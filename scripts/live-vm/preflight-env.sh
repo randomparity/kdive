@@ -75,7 +75,7 @@ check_debug_stepping() {
   require_path KDIVE_LIVE_VM_ROOTFS
   require_path KDIVE_LIVE_VM_BZIMAGE
   require_path KDIVE_LIVE_VM_VMLINUX
-  require_tools "gdb:gdb"
+  require_tools "gdb:gdb" "qemu-img:qemu-utils"
 }
 
 check_tcg() {
