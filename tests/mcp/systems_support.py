@@ -218,8 +218,14 @@ def provider_resolver(
             if bootstrap_key_customizer is None
             else BootstrapKeyCapabilities(customizer=bootstrap_key_customizer)
         ),
-        snapshot=cast(Any, snapshotter) if snapshotter is not None else None,
-        traffic_capturer=cast(Any, traffic_capturer) if traffic_capturer is not None else None,
+        snapshot=cast(Any, snapshotter if snapshotter is not None else unused_port)
+        if supports_snapshots
+        else None,
+        traffic_capturer=cast(
+            Any, traffic_capturer if traffic_capturer is not None else unused_port
+        )
+        if supports_traffic_capture
+        else None,
         # ``console_reader`` models a provider (remote-libvirt) whose console is read through the
         # ADR-0429 strict read seam rather than a worker-local file; the control handlers pick the
         # remote path when ``console.reader_factory`` is set (ADR-0433, #1435).
