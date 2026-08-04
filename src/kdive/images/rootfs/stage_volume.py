@@ -126,7 +126,7 @@ def add_stage_volume_parser(sub: argparse._SubParsersAction[argparse.ArgumentPar
 
 def run_stage_volume(args: argparse.Namespace) -> None:
     """Wire the env-backed seams and run one ``stage-volume`` orchestration."""
-    from kdive.images.rootfs.stage_volume_wiring import build_stage_volume_deps
+    from kdive.providers.assembly.composition import build_stage_volume_deps
 
     qcow2 = Path(args.source).resolve()
     if not qcow2.is_file():

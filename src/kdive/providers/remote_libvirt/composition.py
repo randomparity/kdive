@@ -23,6 +23,7 @@ from kdive.db.pool import create_pool, database_url
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.rootfs.stage_volume import StageVolumeDeps
 from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
@@ -48,6 +49,7 @@ from kdive.providers.infra.console_hosting import (
     RunningSystems,
 )
 from kdive.providers.infra.reaping import DumpVolumeReaper, InfraReaper
+from kdive.providers.remote_libvirt import stage_volume
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
     is_remote_libvirt_configured,
@@ -281,6 +283,11 @@ def _rebind_for_resource(secret_registry: SecretRegistry) -> Callable[[str], Pro
         )
 
     return rebind
+
+
+def build_stage_volume_deps(provider: str) -> StageVolumeDeps:
+    """Build remote-libvirt dependencies for the ``stage-volume`` CLI operation."""
+    return stage_volume.build_stage_volume_deps(provider)
 
 
 def build_runtime(

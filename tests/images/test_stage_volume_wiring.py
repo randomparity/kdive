@@ -1,9 +1,9 @@
 """Tests for the ``kdive stage-volume`` env-backed wiring (ADR-0336).
 
-``stage_volume_wiring`` is the impure half of ``stage-volume`` (a sync DB connection, the
-object store, and the remote-libvirt config resolver); ``test_stage_volume.py`` covers the
-pure orchestration via a fake ``StageVolumeDeps``. These tests exercise the wiring functions
-directly against psycopg/config/object-store doubles so the module's four declared
+``providers.remote_libvirt.stage_volume`` is the impure half of ``stage-volume`` (a sync DB
+connection, the object store, and the remote-libvirt config resolver). ``test_stage_volume.py``
+covers the pure orchestration via a fake ``StageVolumeDeps``. These tests exercise the wiring
+functions directly against psycopg/config/object-store doubles so the module's four declared
 ``CategorizedError`` branches (provider mismatch, wrong declared-instance count, absent
 staged row, and the ``psycopg.Error`` -> ``INFRASTRUCTURE_FAILURE`` mapping) run without a
 live database. ``_find_staged_row``'s own connection/query failures are not categorized in
@@ -21,14 +21,14 @@ import pytest
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.rootfs import stage_volume_wiring as wiring
 from kdive.images.rootfs.stage_volume import _TargetRow
-from kdive.images.rootfs.stage_volume_wiring import (
+from kdive.providers.remote_libvirt import stage_volume as wiring
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
+from kdive.providers.remote_libvirt.stage_volume import (
     _attach_config,
     _find_staged_row,
     _resolve_single_remote_config,
 )
-from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 
 
 def _remote_config(uri: str = "qemu+tls://host/system") -> RemoteLibvirtConfig:

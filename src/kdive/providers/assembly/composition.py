@@ -19,6 +19,7 @@ import kdive.config as config
 from kdive.config.core_settings import FAULT_INJECT, LOCAL_LIBVIRT_ENABLED
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.images.planes.base import RootfsBuildPlane
+from kdive.images.rootfs.stage_volume import StageVolumeDeps
 from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
 from kdive.providers.core.resolver import ProviderResolver
@@ -122,6 +123,11 @@ def build_local_rootfs_build_plane(*, workspace: Path | None = None) -> RootfsBu
     provider's internals directly; ``workspace`` overrides the default build/publish location.
     """
     return local_composition.build_rootfs_build_plane(workspace=workspace)
+
+
+def build_stage_volume_deps(provider: str) -> StageVolumeDeps:
+    """Build provider-owned dependencies for the ``stage-volume`` CLI operation."""
+    return remote_composition.build_stage_volume_deps(provider)
 
 
 def _fault_inject_enabled(enable_fault_inject: bool | None) -> bool:
