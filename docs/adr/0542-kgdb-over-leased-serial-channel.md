@@ -140,10 +140,12 @@ actionable rather than mysterious.
 
 ## Consequences
 
-The core touch is one enum value plus two modules of the debug-session package under
-`mcp/tools/` — `sessions/lifecycle.py`, which carries the per-transport branching, and
-`sessions/registrar.py`, which carries the agent-facing `Field` text — declared in the R9
-allowlist up front. Keeping `TransportHandleKind` unchanged is what holds it to that:
+The core touch is two modules of the debug-session package under `mcp/tools/` —
+`sessions/lifecycle.py`, which carries the per-transport branching, and `sessions/registrar.py`,
+which carries the agent-facing `Field` text — declared in the R9 allowlist up front. The enum
+value itself is **not** gated: `DebugTransportKind` lives at
+`src/kdive/providers/ports/lifecycle.py:27`, and `src/kdive/providers/` is outside
+`CORE_PREFIXES`. Keeping `TransportHandleKind` unchanged is what holds it to that:
 the alternative — a fourth handle kind — would have widened the decode path, the handle
 round-trip tests, and every consumer that switches on realization.
 

@@ -26,8 +26,10 @@ reader expects. `_pair_boot_method_with_provider` (`:394-403`) is a **biconditio
 `remote = provider.remote_libvirt_section is not None`, `disk_image = boot_method is
 DISK_IMAGE`, and it raises when the two disagree. A third boot-method value does not break it —
 it slips through. An `adopted-host` profile with a `byo_host` section evaluates `False != False`
-and raises nothing, and so would `adopted-host` paired with a local-libvirt section, or with no
-provider section at all. The check is not too strict for a third value; it is silent about one.
+and raises nothing, and so would `adopted-host` paired with a local-libvirt section. (A profile
+with *no* provider section never reaches this check — `_require_exactly_one_provider` (`:306-315`)
+rejects it first, and entry 3 must extend that validator for `byo_host_section` anyway.) The
+check is not too strict for a third value; it is silent about one.
 That is the argument for the generalization, and it means the work is *adding* a constraint that
 does not exist rather than loosening one that does.
 
@@ -102,9 +104,9 @@ protects something else.
    because the world drifts between a `doctor` run and an allocation. Results are recorded on
    the System row, so what adopt established is auditable rather than inferred.
 
-The pre-flight and adopt checks are one module with two callers. That shared module is why
-#1824 (doctor) follows #1823 (adopt) rather than preceding it: writing the checks twice is how
-they come to disagree.
+The pre-flight and adopt checks are one module with two callers in this record; ADR-0541's
+teardown step 3 makes a third. That shared module is why #1824 (doctor) follows #1823 (adopt)
+rather than preceding it: writing the checks twice is how they come to disagree.
 
 **`baseline_kernel` is operator-declared and verified at adopt.** The `[[byo_host]]`
 declaration carries the version string, and its presence in the host's bootloader is a
@@ -157,18 +159,22 @@ declarations of one machine apart from two machines that happen to answer alike.
 
 ## Consequences
 
-`adopted-host` is a value in a core enum and the pairing generalization is a core change, both
-in `src/kdive/profiles/` — declared in the R9 portability allowlist up front rather than
-discovered by the gate. The generalization from a biconditional to a map is provider-agnostic
-work that pays for itself at the fourth provider; it is the kind of change ADR-0076's
-hypothesis expects a new provider to force, and recording it here is what makes the gate's
-verdict meaningful instead of a surprise.
+Both changes land in `src/kdive/profiles/`, which is **outside** the portability gate's
+`CORE_PREFIXES` (`scripts/m2_portability_gate.py:44-53` covers `domain/`, `db/`, `jobs/`,
+`reconciler/`, `services/`, `store/`, `security/`, `mcp/`). So `adopted-host` and the pairing
+generalization cost no allowlist entry, and the milestone's gated touch-points are enumerated in
+the design document rather than here. That does not make them free: the generalization from a
+biconditional to a map is provider-agnostic work that pays for itself at the fourth provider,
+and it is the kind of change ADR-0076's hypothesis expects a new provider to force. It is the
+gating claim that would have been wrong, and adding an allowlist entry for a path the gate never
+inspects is the rot #1835 exists to stop.
 
-Three verification moments means the same predicate is evaluated up to three times per host.
-That is deliberate: the deploy-time arm catches a typo without infrastructure, the pre-flight
-arm catches a dead host before an agent waits on one, and the adopt arm catches the drift
-between them. The cost is one shared module and the discipline of not letting the callers
-diverge.
+Two layers, not three moments of one check. The deploy-time arm is schema-only and shares no
+code with the live module — it catches a typo without infrastructure, which is exactly why it
+may not probe. The live predicate is then evaluated twice here: pre-flight catches a dead host
+before an agent waits on one, and adopt catches the drift between them.
+[ADR-0541](0541-baseline-restore-or-cordon-teardown.md) adds a third caller at teardown step 3.
+The cost is one shared module and the discipline of not letting its callers diverge.
 
 A declared baseline kernel is a declaration that can go stale, and it will: operators patch
 hosts. The failure is loud and early — adopt refuses, naming the version it could not find —

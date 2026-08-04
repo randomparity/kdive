@@ -188,8 +188,9 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
   `object_write_leases` (0084), `rootfs_fetch_leases` (0087) — and a `capabilities` key has no
   unique constraint, so two acquirers would race on a read-modify-write. It is keyed on the
   **Resource**, not the System: the serial channel belongs to the physical host, and log
-  collection is an ordinary holder (ADR-0539), so a System-keyed or `debug_sessions`-keyed
-  lease could not represent every holder.
+  a hold can outlive any one System (ADR-0539), so a System-keyed or `debug_sessions`-keyed
+  lease could not represent every holder. It carries the hold's **mode**, since only the
+  preempting mode is exclusive.
 - The cost-class seed is not optional. Admission resolves the coefficient fail-closed, so a
   cost class with no row denies every allocation with a message about cost classes rather than
   about the host. `src/kdive/db/schema/0032_remote_cost_class_coefficient.sql` is the record of
@@ -269,10 +270,11 @@ and 16 are written against:
    until the moment it mattered.
 
 Two contract points are load-bearing and tested: **(a)** no OOB credential reaches a persisted
-transcript, a response snippet, or an argv unmasked; **(b)** every console consumer goes
-through the lease, so a suspended collector reports `pumped=False` to a live reader rather than
-empty bytes, and two consumers never interleave on one line — which is what the reading mode
-buys, since it excludes preemption without suspending the producer the reader depends on.
+transcript, a response snippet, or an argv unmasked; **(b)** the three channel states compose
+as ADR-0539's matrix says — reading holds share, a preempting hold excludes everything, and a
+preempted collector reports `pumped=False` to a live reader rather than returning empty bytes.
+No consumer ever reads a line another is writing, and no consumer is starved by a hold taken to
+protect it.
 
 ## MCP tool surface (M4 delta)
 
@@ -368,12 +370,15 @@ row is absent. `describe_resource` already has a provider-owned adornment seam:
 `ResourceDetailCapabilities.projector` on the `for_resource`-bound runtime, merged into the
 envelope at `src/kdive/mcp/tools/catalog/resources.py:217`, which remote-libvirt already uses
 (`providers/remote_libvirt/composition.py:266`, wired at `:360-362`). That code lives under
-`src/kdive/providers/`, outside the gate. It reaches `resources.describe` only — `resources.list`
-keeps showing the bare `cordoned` flag — which matches ADR-0541's operator workflow, where the
-flag says *not schedulable* and describe says *why*. The shared
-`resource_capability_data` projection (`_resource_envelopes.py:25-53`) emits a fixed key set and
-would silently drop a namespaced key, so routing through it would have cost a core touch-point
-for a surface the provider seam already serves.
+`src/kdive/providers/`, outside the gate. It reaches `resources.describe` only, and the surface division is worth stating precisely
+because it is not the obvious one: **neither `resources.list` nor `resources.describe` emits the
+`cordoned` flag today** — the only tool that does is `resources.availability`
+(`src/kdive/mcp/tools/catalog/availability.py:280`). So the operator path is
+`resources.availability` for *that a host is cordoned* and `resources.describe` for *why*, and
+entry 16 owes documentation of that pairing rather than a new flag. Routing the reason through
+the shared `resource_capability_data` projection (`_resource_envelopes.py:25-56`) instead would
+have cost a core touch-point, since that projection emits a fixed key set and would drop a
+namespaced key silently.
 
 The three `jobs/` rows are the ones a reader is most likely to miss on their own merits:
 `src/kdive/jobs/` is a core prefix whose allowlisted members are only `worker.py`,
@@ -431,9 +436,9 @@ teardown cordon reason is written by entry 16 and cleared through `resources.set
 | 9 | **#1824 — the `doctor` diagnostics contribution.** Second caller of the entry-8 precondition module, plus an arm reporting a present-but-unparseable `[[byo_host]]` declaration (ADR-0538) — the case the runtime degrades on silently. | 8 | diagnostics |
 | 10 | **#1825 — install and boot/readiness.** In-target presigned-GET pull, arch-keyed bootloader write, `kgdboc` on the cmdline, boot-id readiness. | 8 | build-install |
 | 11 | **#1826 — the console plane over the leased OOB channel.** Collect, rotate, snapshot; reuses `providers/console_parts/`. | 4, 8 | console |
-| 12 | **#1827 — control: SysRq force-crash and OOB power.** Sets `supports_diagnostic_sysrq` and `supports_crash_watch`. | 11 | control |
+| 12 | **#1827 — control: SysRq force-crash and OOB power.** Sets `supports_diagnostic_sysrq` and `supports_crash_watch`, and **brackets both control handlers in a reading-lease scope** (ADR-0539/0542). Entry 14 then adds the conflict propagation to the same two files, so entry 12 lands first rather than beside it. | 11 | control |
 | 13 | **#1829 — crash capture and retrieve.** kdump on both arches, fadump on POWER; owns replacing the QEMU-version-floor fadump probe (open question 5). | 10, 12 | capture |
-| 14 | **#1828 — the KGDB transport.** The third `DebugTransportKind`, the debug-session registrar arm, the allowlist entry, and the console-to-loopback bridge. | 11 | debug |
+| 14 | **#1828 — the KGDB transport.** The third `DebugTransportKind`, the debug-session registrar arm, the console-to-loopback bridge, and the **`transport_conflict` propagation** in the two control handlers entry 12 bracketed. Entry 17 owns every `ALLOWED_FILES` edit, including the entries this work needs. | 11, 12 | debug |
 | 15 | **#1831 — in-target drgn and vmcore postmortem.** | 13 | debug |
 | 16 | **#1830 — teardown: baseline restore, OOB power-cycle, cordon-and-clear, reconciler drift arm.** The drift arm keys on a Resource cordoned with a restore-in-progress reason and no live worker, **not** on a System state: `torn_down` is terminal (`domain/capacity/state.py:249`) and there is no teardown-in-progress member (ADR-0541). Shares the dead-worker shape and the `reconciler/loop.py` entry with the lease reclaim entry 4 lands. | 12 | lifecycle |
 | 17 | **#1820 — extend the portability gate.** The `pre-M4` baseline tag, the `byo-host` `CAPTURE_COVERAGE` row, the **registered-kinds completeness assertion** that makes a missing row detectable at all, the eight new allowlist entries, **re-pointing the 14 stale `ALLOWED_FILES` paths** plus a guard failing the gate on a member absent from disk, and the CI-wiring decision above. | 2 | tooling |
@@ -441,7 +446,7 @@ teardown cordon reason is written by entry 16 and cleared through `resources.set
 | 19 | **#1833 — live proof: the full spine on an x86 host with a BMC.** | 14, 15, 16 | proof |
 | 20 | **#1834 — live proof: the full spine on a PowerVM LPAR via HMC**, including fadump. | 6, 14, 15, 16 | proof |
 
-**Merge wave:** `1` → `{2, 7}` → `{3, 4, 17}` → `{5, 6, 8}` → `{9, 10, 11}` → `{12, 14}` →
+**Merge wave:** `1` → `{2, 7}` → `{3, 4, 17}` → `{5, 6, 8}` → `{9, 10, 11}` → `12` → `14` →
 `{13, 16}` → `{15, 18}` → `{19, 20}`. Entry 4 sits *after* entry 2 rather than beside it, because
 it writes a table entry 2 creates — entries are worked in parallel worktrees, so entry 4 merging
 first would otherwise be the ordinary case, not the unlucky one.
@@ -472,7 +477,9 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
 - **Expected rebase zones:** `providers/assembly/composition.py` (entry 2 registers; 3–16 wire
   ports), `src/kdive/domain/catalog/resources.py` (one enum value, entry 2),
   `tests/db/test_migrate.py` (entry 2's migration), and the generated `docs/guide/reference/*`
-  only if a tool docstring shifts — regenerate with `just docs`, never hand-edit.
+  only if a tool docstring shifts — regenerate with `just docs`, never hand-edit. Add
+  `jobs/handlers/control/diagnostic_sysrq.py` and `watch_for_crash.py`: entries 12 and 14 both
+  edit them, which is why 14 follows 12 rather than sharing its wave.
 - **Provisioning parity is the extender's job.** Every host tool a live tier needs is declared
   in the owning Ansible role in the same PR that introduces it. Entries 19 and 20 are where this
   bites: an undeclared host dep passes on a warmed dev box and breaks the next clean runner
@@ -496,15 +503,18 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
 3. **The out-of-band path never falls back in-band** (ADR-0539) — the plane exists to work when
    in-band access is gone, so a fallback would make an OOB failure invisible until the moment
    it mattered. `doctor` reports OOB reachability before allocation instead.
-4. **One console, one holder** (ADR-0539, ADR-0542) — every consumer goes through the lease. A
-   suspended collector reports `pumped=False` to a live reader rather than empty bytes, and a
-   refused acquirer is told who holds the channel and how to get it. The per-Run artifact carries
-   no gap marker; ADR-0539 records that as accepted rather than solved.
+4. **One console, one preemptor** (ADR-0539, ADR-0542) — collection is the channel's default
+   state; reading holds share it and exclude preemption; only KGDB preempts, and it excludes
+   everything. A preempted collector reports `pumped=False` to a live reader rather than empty
+   bytes, and a refused acquirer is told who holds the channel and how to get it. The per-Run
+   artifact carries no gap marker; ADR-0539 records that as accepted rather than solved.
 5. **A crashed host never silently becomes the next allocation's starting point** (ADR-0541) —
-   and the guarantee is continuous, not just true at the endpoints. The host is cordoned from
-   the start of the restore until it has been verified back on its declared baseline, so there
-   is no window in which a machine mid-restore is schedulable, even though its allocation and
-   System both went terminal before the restore began. A worker that dies mid-restore leaves an
+   across the restore, on both teardown/release orderings. The host is cordoned from the start of
+   the restore until it has been verified back on its declared baseline, which is what covers the
+   window the capacity slot frees in: on either ordering the slot goes before the restore ends,
+   whether by an early `allocations.release` or by the two-minute orphaned-active reaper. The
+   interval *before* teardown is enqueued is an accepted residual (ADR-0541), not a covered one.
+   A worker that dies mid-restore leaves an
    already-cordoned host; the reconciler never retries a restore over unknown state.
 6. **`byo_host` is opt-in** — the runtime and its discovery registrar compose only when an
    operator declares a `[[byo_host]]` entry, so a deployment without one has no bookable BYO

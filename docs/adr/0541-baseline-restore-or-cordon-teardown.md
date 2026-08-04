@@ -80,9 +80,14 @@ operator took.** There are two, and the records must not conflate them.
 *Teardown first, then release* is the sanctioned path: `systems.teardown`'s own agent-facing
 docstring says teardown "drives the System to `torn_down` but leaves its Allocation `active`;
 once the teardown job succeeds, release the freed Allocation with `allocations.release`"
-(`src/kdive/mcp/tools/lifecycle/systems/registrar.py:405-410`). Here the allocation is still
-occupying its cap slot throughout the restore, so step 0 is belt-and-braces rather than
-load-bearing.
+(`src/kdive/mcp/tools/lifecycle/systems/registrar.py:405-410`). **Step 0 is load-bearing here
+too**, which is not obvious: `teardown_handler` commits `TORN_DOWN` at `systems.py:770` before
+the provider call at `:783`, `torn_down` is not a member of `_LIVE_SYSTEM_STATES`
+(`src/kdive/reconciler/repairs/allocations.py:69-77`), and `reap_orphaned_active_allocations`
+releases a still-`active` allocation whose System has gone terminal once its row has settled for
+`DEFAULT_ORPHANED_ACTIVE_GRACE` — two minutes (`:85`). A restore spanning a bootloader write,
+firmware POST and a full precondition re-check outlasts that comfortably, so the cap slot frees
+mid-restore on this ordering as well.
 
 *Release or lease-expiry first* is the path where the cordon earns its place. `_release_locked`
 (`src/kdive/services/allocation/release.py:229`) drives `active → releasing → released` in one
@@ -103,9 +108,10 @@ prefix the Resource is `available`, uncordoned, and running a crashed tenant's k
 `_label_candidates` filters on nothing else
 (`src/kdive/services/allocation/admission/placement.py:104`). That residual is **accepted, not
 closed**: cordoning earlier would mean writing from `repair_orphaned_systems`, a further gated
-core touch-point for a window an operator can avoid entirely by following the documented
-teardown-then-release order. It is recorded here so the guarantee is read as covering the
-restore, not the whole interval from a tenant's last operation.
+core touch-point for a window an operator narrows — though does not remove — by following the documented
+teardown-then-release order, since the two-minute reaper grace replaces the reconciler-interval
+wait. It is recorded here so the guarantee is read as covering the restore, not the whole
+interval from a tenant's last operation.
 
 **Nothing else in the release path changes.** `services/allocation/release.py` needs no edit,
 and an implementer should not add one: the cordon is the whole mechanism, and holding an
@@ -144,7 +150,16 @@ read-before-write is the load-bearing half; the reason key alone is not.
 
 **The reason is persisted on the Resource, under a namespaced `capabilities` key.** A cordon
 whose cause requires cross-referencing an audit log is a cordon an operator will clear without
-understanding. The key is written by teardown, surfaced on `resources.describe`, and cleared
+understanding. It is readable only while the BYO runtime composes, though: `describe_resource`
+resolves the runtime first (`src/kdive/mcp/tools/catalog/resources.py:207`) and
+`ProviderResolver.resolve` fails the whole envelope closed for an unregistered kind. So a
+cordoned host in a deployment whose `[[byo_host]]` block has been made unparseable
+([ADR-0538](0538-byo-host-provider-package.md)'s accepted degrade) or removed while an
+allocation was live (the prune arm cordons rather than deletes,
+`src/kdive/inventory/reconcile/prune.py:50-54`) answers `resources.describe` with a
+configuration error instead of the reason — at the moment an operator most wants it. `doctor`
+(#1824) is the path that still works there, because reporting a parse defect needs no composed
+runtime. The key is written by teardown, surfaced on `resources.describe`, and cleared
 when an operator uncordons through `resources.set_scheduling`. Reconcile merges rather than
 replaces, so the key survives a reconcile pass. This is a jsonb key rather than a column
 because R9 budgets one migration for the whole epic and a cordon reason does not need the

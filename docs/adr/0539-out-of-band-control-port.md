@@ -74,39 +74,50 @@ KGDB. Both are the reason the plane exists. Survey work on what else Redfish, IP
 HMC expose — sensors, boot-device override, virtual media, firmware inventory, HMC dump
 management — is #1816 and stays outside this port until a specific use justifies widening it.
 
-**The console is leased, with a named holder, in one of two modes.** A consumer acquires the
-channel, holds it for a bounded scope, and releases it. While a lease is held, a second acquirer
-is refused with `TRANSPORT_CONFLICT` naming the current holder and the action that releases it.
-The two modes differ in what they do to the collector, and the distinction is what keeps the
-lease from starving its own holders:
+**The channel has three states, and the compatibility between them is the contract.** Log
+collection is the channel's **default state**, not a lease holder: it pumps whenever nothing has
+taken the channel from it. On top of that there are two kinds of hold, and stating which
+combinations are legal is the part an implementer cannot infer:
 
-- A **preempting** hold takes the raw channel and suspends log collection for its scope. KGDB is
-  the only one ([ADR-0542](0542-kgdb-over-leased-serial-channel.md)): it speaks a different
-  protocol on the wire, so nothing else can be reading it.
-- A **reading** hold guarantees that no other consumer preempts the channel for its scope, while
-  collection keeps pumping into it. SysRq capture and crash watch take this mode, because each
-  polls for console *growth* across several reads and a preempting hold would suspend the
-  producer of the bytes it is waiting for — the capture would always return no output and the
-  watch would always return not-fired.
+| | collector pumping | another **reading** hold | a **preempting** hold |
+|---|---|---|---|
+| **reading** hold acquires | yes — it does not stop the collector | **yes, shared** | no — refused |
+| **preempting** hold acquires | yes — it suspends the collector | no — refused | no — refused |
 
-Both modes are exclusive against each other; the difference is only whether the collector keeps
-running underneath. A single "exclusive holder" with no such distinction would have been
-self-defeating for two of the four consumers.
-Log collection is itself a lease holder rather than a privileged background reader, so
-"the collector is pumping" and "KGDB is attached" are the same kind of fact, which the live
-console read seam ([ADR-0429](0429-remote-console-read-seam.md)) already has a field for. The
-consequences of that choice for KGDB specifically are
+- A **reading** hold reserves the channel against preemption for its scope while collection keeps
+  pumping into it. SysRq capture and crash watch take this mode, because each polls for console
+  *growth* across several reads: a hold that stopped the collector would starve the holder of the
+  bytes it is waiting for. Reading holds are **shared** — several may coexist — which is what
+  keeps the provider's own force-crash-under-watch workflow working. A crash watch polls to a
+  deadline clamped at `WATCH_MAX_DEADLINE_S = 300.0` (`src/kdive/jobs/payloads.py:235`), so an
+  exclusive reading hold would refuse the SysRq injection that watch exists to observe, for up to
+  five minutes.
+- A **preempting** hold takes the raw channel and suspends collection for its scope. KGDB is the
+  only one ([ADR-0542](0542-kgdb-over-leased-serial-channel.md)): the wire then carries the GDB
+  remote protocol rather than console text, so suspension describes what the channel is doing
+  rather than choosing a policy. It is exclusive against everything, including reading holds.
+
+A refusal names the current holder and the action that releases it. Only a preempting hold is a
+single exclusive row, so `byo_console_leases` carries the mode: the unique-per-resource
+constraint applies to the preempting mode, and reading holds are recorded as concurrent rows
+whose presence blocks preemption. Modelling the collector as one more exclusive holder — which
+an earlier draft of this decision did — makes the reading mode unacquirable, because the
+collector would hold the only row whenever it is doing its job.
+Because collection is the default state rather than a privileged reader with its own path,
+"the collector is pumping" and "a preempting hold is attached" are the two values of one fact,
+which the live console read seam ([ADR-0429](0429-remote-console-read-seam.md)) already has a
+field for. The consequences of that choice for KGDB specifically are
 [ADR-0542](0542-kgdb-over-leased-serial-channel.md); the lease itself is here because it is a
 property of the channel, not of the debugger.
 
 **A lease is persisted, expiring, and reclaimable — its holder can die.** Lease state lives in
 Postgres, not in worker-local memory, because the process that holds it is exactly the process
 that can vanish. It is a dedicated table keyed on the **Resource** — the serial channel belongs
-to the physical host, and log collection is an ordinary holder, so neither a System key nor
-`debug_sessions` (keyed on a run) can represent every holder. A unique constraint on the
-resource makes acquisition an insert that either wins or conflicts, rather than a
-read-modify-write two acquirers can race; this repository has built three lease tables for that
-reason already. The table is claimed in the milestone's single migration, ahead of the entry
+to the physical host, and a hold can outlive any one System, so neither a System key nor
+`debug_sessions` (keyed on a run) can represent every holder. A unique constraint on
+`(resource, mode)` for the preempting mode makes that acquisition an insert that either wins or
+conflicts, rather than a read-modify-write two acquirers can race; this repository has built
+three lease tables for that reason already. The table is claimed in the milestone's single migration, ahead of the entry
 that first writes it. Every lease carries an expiry with the five-part contract
 (unit, reference clock, scope, consequence, recovery), and a refusal names the holder, the
 expiry, and the release action. A lease whose holding worker is no longer live is reclaimed by
@@ -158,10 +169,9 @@ The port is the epic's widest interface commitment. #1818 (Redfish), #1821 (IPMI
 than last: the HMC is the implementation most likely to prove the shape wrong, and it lands
 while a revision is still cheap.
 
-Making log collection an ordinary lease holder rather than a background reader is a change of
-posture from remote-libvirt, where a reconciler-resident collector streams the console
-continuously. On an adopted host the collector can be preempted, so a console artifact may
-have a gap, and the gap is legible on one seam only. A **live** read reports it:
+Making collection preemptible is a change of posture from remote-libvirt, where a
+reconciler-resident collector streams the console continuously and nothing can stop it. On an
+adopted host a preempting hold suspends it, so a console artifact may have a gap, and the gap is legible on one seam only. A **live** read reports it:
 `ConsoleWindowRead.pumped` (`src/kdive/providers/ports/console.py:64-82`) is what
 [ADR-0429](0429-remote-console-read-seam.md) added so an empty read is never mistaken for "the
 kernel printed nothing", and a suspended collector sets it `False`. The persisted per-Run
