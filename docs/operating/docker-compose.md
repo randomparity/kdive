@@ -10,7 +10,8 @@ pre-building the image — is in [`deploy/compose/README.md`](../../deploy/compo
 
 ## Bring-up
 
-The lifecycle wrapper resolves the graph and gates the worker, so one command starts the stack:
+The operator-side lifecycle wrapper resolves the graph and gates the worker, so one command starts
+the stack. Compose does not run a persistent lifecycle-witness service:
 
 ```bash
 just compose-up
@@ -40,12 +41,13 @@ Compose does it from the graph.
 ## Upgrading worker-fence authority
 
 For a deployment that already has workers, stop old workers before applying the worker-fence
-migrations. Then migrate the roles and fence protocol, rotate the distinct server, worker,
-reconciler, and lifecycle-witness credentials, start the lifecycle witnesses, and start only current
+migrations. Then migrate the roles and fence protocol and rotate the distinct server, worker,
+reconciler, and lifecycle-witness credentials used by the lifecycle recipes. Use `just compose-up`
+or `just compose-recreate-worker` to run the operator-side lifecycle wrapper and gate only current
 workers. Verify that every current worker has registered its incarnation and that the server lists
 the recovery tools before resuming queue processing. Do not roll an old worker image back into this
 sequence: rollback cannot restore its ability to claim protocol-required jobs; recover forward with a
-current image. Raw Compose/Docker lifecycle commands and manual database changes bypass the witness
+current image. Raw Compose/Docker lifecycle commands and manual database changes bypass the wrapper
 and retain pins rather than releasing them.
 
 The Compose-managed bucket supplies the ADR-0524 store contract. When replacing it with an

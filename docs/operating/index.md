@@ -1,9 +1,10 @@
 # Operating KDIVE
 
-KDIVE runs as three processes — `server`, `worker`, `reconciler` — plus a
-`migrate` one-shot, on top of operator-provided backends (Postgres, an
-S3-compatible object store, and an OIDC issuer). These pages cover how to install
-the code, the three deployment shapes, the libvirt providers, and the live
+KDIVE's portable core runs as three processes — `server`, `worker`, `reconciler` — plus a
+`migrate` one-shot, on top of operator-provided backends (Postgres, an S3-compatible object store,
+and an OIDC issuer). Kubernetes adds a dedicated fourth `lifecycle-witness` workload; Compose and
+systemd retain the portable core, with Compose using an operator-side lifecycle wrapper. These pages
+cover how to install the code, the three deployment shapes, the libvirt providers, and the live
 runbooks.
 
 ## Install and run modes
@@ -12,7 +13,7 @@ runbooks.
 |---|---|
 | [Install](install.md) | Install paths, host prerequisites, and the run modes |
 | [Docker Compose](docker-compose.md) | App tier plus dev backends in one graph |
-| [Kubernetes (Helm)](kubernetes.md) | The chart for the three processes and the migrate Job |
+| [Kubernetes (Helm)](kubernetes.md) | The chart for four long-running workloads and the migrate Job |
 | [systemd](systemd.md) | Running the processes as host services |
 | [Platform and architecture support](platform-support.md) | Supported arches, accelerators, and per-distro customize-boot tiers |
 

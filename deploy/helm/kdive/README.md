@@ -1,7 +1,7 @@
 # kdive Helm chart
 
-Deploys four kdive processes — server, worker, reconciler, lifecycle witness — plus a migrate
-one-shot Job, against operator-provided Postgres/MinIO/OIDC backends. Implements
+Deploys four long-running Kubernetes workloads — server, worker, reconciler, lifecycle witness —
+plus a migrate one-shot Job, against operator-provided Postgres/MinIO/OIDC backends. Implements
 ADR-0088 (deployment & packaging).
 
 This README is the value/flag reference. For an end-to-end bring-up — building and
@@ -52,12 +52,12 @@ use the normal rolling path.
 
 ## Upgrade
 
-**The release containing migration 0095 is stop-old-first.** Scale the server, worker, and
-reconciler workloads to zero and wait for every old Pod to terminate before the migrate hook runs.
-Migration 0095 refuses to run while another database client is connected because pre-0095 strict
-Run projections cannot tolerate the new `runs.build_ref` column. Run the hooked upgrade only after
-the old Pods are gone, then restore the desired replicas with the new image. Do not use a rolling
-upgrade or roll back to a pre-0095 image after migration.
+**The release containing migration 0095 is stop-old-first.** Scale the server, worker, reconciler,
+and lifecycle-witness workloads to zero and wait for every old Pod to terminate before the migrate
+hook runs. Migration 0095 refuses to run while another database client is connected because
+pre-0095 strict Run projections cannot tolerate the new `runs.build_ref` column. Run the hooked
+upgrade only after the old Pods are gone, then restore the desired replicas with the new image. Do
+not use a rolling upgrade or roll back to a pre-0095 image after migration.
 
 **Do not upgrade with bare `helm upgrade --reuse-values`.** `--reuse-values` carries the
 previous release's merged values and *ignores the fresh `values.yaml` defaults*, so any
@@ -339,8 +339,8 @@ kubectl create secret generic kdive-database \
 Point `databaseCredentials.migration`, `.server`, `.worker`, `.reconciler`, and
 `.lifecycleWitness` at their respective Secret names and keys. The chart rejects missing refs and
 any detectable reuse of the migration ref. The migration Job receives only the migration ref;
-runtime Pods receive only their process ref, with the lifecycle-witness ref additionally confined
-to the reconciler. Ref changes roll only affected runtime workloads.
+runtime Pods receive only their process ref, with the lifecycle-witness ref confined to the
+dedicated lifecycle-witness workload. Ref changes roll only affected runtime workloads.
 
 ### File-ref secrets (`secrets.secretName`)
 

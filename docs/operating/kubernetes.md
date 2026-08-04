@@ -1,6 +1,6 @@
 # Running KDIVE on Kubernetes
 
-The Helm chart under `deploy/helm/kdive` deploys four KDIVE processes
+The Helm chart under `deploy/helm/kdive` deploys four long-running Kubernetes workloads
 (`server` / `worker` / `reconciler` / `lifecycle-witness`) plus a `migrate` one-shot Job, against
 operator-provided Postgres, S3-compatible object storage, and an OIDC issuer.
 
@@ -41,8 +41,9 @@ never reach the database ahead of the migration.
 
 Each process waits up to ten seconds at start for its first database connection before it
 begins serving. If it cannot get one it logs an ERROR record reading
-`no database connection within 10s of process start` and exits, so the pod restarts — a database outage surfaces as `CrashLoopBackOff` on all three Deployments rather
-than as pods that are Running and permanently not-Ready. Check the pod logs for that record
+`no database connection within 10s of process start` and exits, so the Pod restarts — a database
+outage surfaces as `CrashLoopBackOff` on all four long-running workloads rather than as Pods that
+are Running and permanently not-Ready. Check the Pod logs for that record
 before looking at the KDIVE processes themselves; the usual cause is the database, its
 credentials, or a NetworkPolicy, not the chart. The record cannot narrow it further on its
 own: the pooling layer reports an unreachable host, a wrong password, and a missing

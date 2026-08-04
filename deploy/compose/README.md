@@ -20,10 +20,11 @@ just compose-up   # builds the image, runs the backends + migrate, then gates th
 ```
 
 The `compose-up`, `compose-recreate-worker`, and `compose-down` recipes are the only supported
-worker lifecycle. They bind the exact full container ID to a random nonce in Postgres before
-start and record retained terminal inspect evidence before removal. Raw Compose/Docker lifecycle
-commands and host-launched workers bypass that chain and are unsupported. On a database failure,
-the wrapper leaves the never-started or terminal worker retained; restore Postgres and retry.
+worker lifecycle. Their operator-side lifecycle wrapper binds the exact full container ID to a
+random nonce in Postgres before start and records retained terminal inspect evidence before removal.
+Compose does not run a persistent lifecycle-witness service. Raw Compose/Docker lifecycle commands
+and host-launched workers bypass that chain and are unsupported. On a database failure, the wrapper
+leaves the never-started or terminal worker retained; restore Postgres and retry.
 On a clean local database, Postgres creates the separate `kdive-migration` owner first. Migrations
 create the four NOLOGIN capabilities, then the `role-bootstrap` one-shot creates distinct
 `kdive-server-member`, `kdive-worker-member`, `kdive-reconciler-member`, and
@@ -57,11 +58,13 @@ heartbeat begins another bounded lease, so the ceiling is not a total job-runtim
 ## Upgrading worker-fence authority
 
 For an existing deployment, stop old workers; migrate the runtime roles and fence protocol; rotate
-the separate server, worker, reconciler, and lifecycle-witness login credentials; start the
-lifecycle witness; then start current workers. Verify registered current incarnations and the
-server's recovery-tool exposure before resuming queue processing. An image rollback cannot restore
-old claiming after the protocol migration, so recover forward with a current worker image. Do not use
-raw Compose/Docker lifecycle commands or manual SQL to bypass this order: those bypasses retain pins.
+the separate server, worker, reconciler, and lifecycle-witness login credentials used by the
+lifecycle recipes; then use `just compose-up` or `just compose-recreate-worker` to run the
+operator-side lifecycle wrapper and gate current workers. Verify registered current incarnations and
+the server's recovery-tool exposure before resuming queue processing. An image rollback cannot
+restore old claiming after the protocol migration, so recover forward with a current worker image.
+Do not use raw Compose/Docker lifecycle commands or manual SQL to bypass this order: those bypasses
+retain pins.
 
 `docker compose up` resolves the graph rather than relying on the operator to order it:
 the app services pull in a healthy Postgres, the `minio-init` bucket-creation one-shot
