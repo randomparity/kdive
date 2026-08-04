@@ -105,64 +105,71 @@ class ComposeWorkerLifecycle:
         self._cleanup_credential = cleanup_credential
         self._cleanup_managed_volumes = cleanup_managed_volumes
 
-    def _worker_id(self) -> str | None:
-        value = self._command((*_COMPOSE, *_PROFILE, "ps", "--all", "-q", "worker"), None).strip()
+    async def _run_command(
+        self, argv: tuple[str, ...], extra_env: dict[str, str] | None = None
+    ) -> str:
+        return await asyncio.to_thread(self._command, argv, extra_env)
+
+    async def _worker_id(self) -> str | None:
+        value = (
+            await self._run_command((*_COMPOSE, *_PROFILE, "ps", "--all", "-q", "worker"))
+        ).strip()
         return value or None
 
-    def _require_safe_absence(self) -> None:
-        if self._credential_retained():
+    async def _require_safe_absence(self) -> None:
+        if await asyncio.to_thread(self._credential_retained):
             raise RuntimeError(
                 "managed worker is absent but its retained worker credential remains"
             )
 
     async def _create(self) -> None:
-        self._prepare_credential()
+        await asyncio.to_thread(self._prepare_credential)
         nonce = self._nonce()
-        self._command(
+        await self._run_command(
             (*_COMPOSE, *_PROFILE, "create", "--no-recreate", "worker"),
             {
                 "KDIVE_WORKER_INCARNATION_NONCE": nonce,
                 **self._create_environment(),
             },
         )
-        container_id = self._worker_id()
+        container_id = await self._worker_id()
         if container_id is None:
             raise RuntimeError("Compose did not retain the created worker container")
         await self._gate.register_and_start(container_id)
 
     async def up(self) -> None:
         """Start the non-worker graph, then create, bind, and start the worker."""
-        self._command((*_COMPOSE, "up", "-d", "--wait", "--wait-timeout", "120"), None)
-        current = self._worker_id()
+        await self._run_command((*_COMPOSE, "up", "-d", "--wait", "--wait-timeout", "120"))
+        current = await self._worker_id()
         if current is None:
-            self._require_safe_absence()
+            await self._require_safe_absence()
             await self._create()
         elif await self._gate.reconcile(current):
-            self._cleanup_credential()
+            await asyncio.to_thread(self._cleanup_credential)
             await self._create()
 
     async def recreate(self) -> None:
         """Terminate the old generation before creating its replacement."""
-        current = self._worker_id()
+        current = await self._worker_id()
         if current is not None:
             await self._gate.terminate_and_remove(current)
-            self._cleanup_credential()
+            await asyncio.to_thread(self._cleanup_credential)
         else:
-            self._require_safe_absence()
+            await self._require_safe_absence()
         await self._create()
 
     async def down(self, *, volumes: bool = False) -> None:
         """Record worker termination before removing the database and gate."""
-        current = self._worker_id()
+        current = await self._worker_id()
         if current is not None:
             await self._gate.terminate_and_remove(current)
-            self._cleanup_credential()
+            await asyncio.to_thread(self._cleanup_credential)
         else:
-            self._require_safe_absence()
+            await self._require_safe_absence()
         args = (*_COMPOSE, "down", *(("--volumes",) if volumes else ()), "--remove-orphans")
-        self._command(args, None)
+        await self._run_command(args)
         if volumes:
-            self._cleanup_managed_volumes()
+            await asyncio.to_thread(self._cleanup_managed_volumes)
 
 
 def _bounded_command(
@@ -324,7 +331,7 @@ def _bounded_inspect_schema(decoded: object) -> Mapping[str, object] | None:
 
 
 async def _docker_operation(operation: str, container_id: str) -> None:
-    _command(("docker", operation, container_id), None)
+    await asyncio.to_thread(_command, ("docker", operation, container_id), None)
 
 
 async def _register(holder: str, container_id: str, credential_hash: bytes) -> None:
@@ -443,6 +450,10 @@ def _write_credential(path: Path, credential: str) -> None:
 
 
 async def _inject_credential(path: Path, container_id: str, credential: str) -> None:
+    await asyncio.to_thread(_inject_credential_blocking, path, container_id, credential)
+
+
+def _inject_credential_blocking(path: Path, container_id: str, credential: str) -> None:
     if not _FULL_ID.fullmatch(container_id) or not _CREDENTIAL.fullmatch(credential):
         raise RuntimeError("worker credential injection requires exact bounded inputs")
     _write_credential(path, credential)

@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import threading
 from typing import cast
 
 import pytest
@@ -103,6 +104,38 @@ def test_gate_commits_binding_before_start_and_termination_before_remove() -> No
         "remove",
     ]
     assert str(events[-2][1]).endswith(":succeeded")
+
+
+def test_gate_offloads_inspect_and_credential_io_from_the_event_loop() -> None:
+    event_loop_thread = threading.get_ident()
+    callback_threads: dict[str, int] = {}
+    container_id = "a" * 64
+    state = _worker(container_id, "0" * 32, status="created")
+
+    def inspect(value: str) -> dict[str, object]:
+        callback_threads["inspect"] = threading.get_ident()
+        return state
+
+    def credential() -> str:
+        callback_threads["credential"] = threading.get_ident()
+        return _CREDENTIAL
+
+    gate = WorkerLifecycleGate(
+        project="kdive",
+        inspect=inspect,
+        register=lambda holder, binding, credential_hash: _done(),
+        terminate=lambda holder, binding, outcome: _done(),
+        credential=credential,
+        inject=lambda value, supplied: _done(),
+        start=_done,
+        stop=_done,
+        remove=_done,
+    )
+
+    asyncio.run(gate.register_and_start(container_id))
+
+    assert set(callback_threads) == {"inspect", "credential"}
+    assert all(thread != event_loop_thread for thread in callback_threads.values())
 
 
 def test_registration_outage_prevents_credential_injection_and_start() -> None:
