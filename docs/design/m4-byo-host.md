@@ -160,8 +160,9 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
      that either wins or conflicts; and
   4. `systems.byo_adopt_facts jsonb` — where adopt records what it established (ADR-0540), and
      what ADR-0541's teardown compares the returned host against.
-- **Items 3 and 4 land several waves before anything writes them**, and that is the deliberate
-  trade. ADR-0517 makes migration numbers strictly ascending across merges, so a second
+- **Items 3 and 4 land ahead of their writers**, and that is the deliberate trade. The gap
+  differs per item: the lease table is written by entry 4 in the very next wave, and the
+  adopt-facts column by entry 8 two waves later. ADR-0517 makes migration numbers strictly ascending across merges, so a second
   schema-touching entry — entry 4 for the lease, entry 8 for the facts — would make every
   rebase between them a renumber, which is precisely the cost the "one migration, claimed up
   front" rule exists to avoid. Unused schema for two waves is cheaper than two serialization
@@ -311,6 +312,7 @@ gate never inspects. `CORE_PREFIXES` (`scripts/m2_portability_gate.py:44-53`) is
 `src/kdive/profiles/provisioning.py` (the `adopted-host` value, the pairing map, and
 `ProviderSection.byo_host_section`), `src/kdive/inventory/model.py` and
 `src/kdive/inventory/reconcile/` (the declaration model and reconcile arm),
+`src/kdive/profiles/provider_sections.py` (the `PROVIDER_SECTIONS` row),
 `src/kdive/providers/` in its entirety (the package, the OOB port, and the
 `DebugTransportKind` literal at `providers/ports/lifecycle.py:27-28`).
 
@@ -321,19 +323,34 @@ gate never inspects. `CORE_PREFIXES` (`scripts/m2_portability_gate.py:44-53`) is
 | `src/kdive/domain/catalog/resources.py` | `ResourceKind.BYO_HOST` | 2 | yes (ADR-0076 touch-point) |
 | `src/kdive/db/schema/0112_resources_kind_byo_host.sql` | the one migration | 2 | **no — new entry** |
 | `src/kdive/domain/platform/arch_traits.py` | the docstring amendment marking field scope (ADR-0540) | 8 | **no — new entry** |
-| `src/kdive/jobs/handlers/systems.py` | cordon-on-teardown-failure with a reason (ADR-0541) — the provider port cannot do it: `Teardown.teardown(domain_name)` (`providers/ports/lifecycle.py:130-138`) takes a domain name, gets no connection, and documents only `INFRASTRUCTURE_FAILURE` / `TRANSPORT_FAILURE`. The caller is `teardown_handler` (`:751`, provider call at `:783`). | 16 | **no — new entry** |
-| `src/kdive/mcp/tools/debug/sessions.py` | the `kgdb` transport arm on the debug-session registrar | 14 | yes (entered for ADR-0085; BYO reuses it) |
+| `src/kdive/jobs/handlers/systems.py` | cordon-on-teardown-failure with a reason (ADR-0541) — the provider port cannot do it: `Provisioner.teardown(domain_name)` (`src/kdive/providers/ports/lifecycle.py:130-138`) takes a domain name, gets no connection, and documents only `INFRASTRUCTURE_FAILURE` / `TRANSPORT_FAILURE`. The caller is `teardown_handler` (`src/kdive/jobs/handlers/systems.py:751`, provider call at `:783`). | 16 | **no — new entry** |
+| `src/kdive/mcp/tools/debug/sessions/lifecycle.py` and `.../sessions/registrar.py` | the `kgdb` transport arm: `lifecycle.py` carries the per-transport branching (`_GDBSTUB` / `_DRGN_LIVE` at `:80-81`, the `DEBUG_TRANSPORT_KINDS` check at `:305`, the arms at `:409` and `:427`); `registrar.py` carries the agent-facing `Field` text | 14 | **no — new entry** (see below) |
+| `src/kdive/mcp/tools/ops/resources/host_ops.py` | surfacing the cordon reason and clearing it on uncordon (ADR-0541) — `_apply_cordon` is at `:141`, `resources.set_scheduling` at `:47` | 16 | **no — new entry** (see below) |
 | `src/kdive/reconciler/loop.py` | the BYO mid-teardown drift arm and the stranded-console-lease reclaim | 16 | yes (entered for ADR-0086; BYO reuses it) |
-| `src/kdive/mcp/tools/ops/resources.py` | surfacing the cordon reason and clearing it on uncordon (ADR-0541) | 16 | yes (`m2_portability_gate.py:95`) |
 
-`jobs/handlers/systems.py` is the entry a reader is most likely to miss, and it is the one that
-matters: `src/kdive/jobs/` is a core prefix whose allowlisted members are only `worker.py`,
+**Six new entries across four issues, not three** — and two of them look like reuse until you
+check. `ALLOWED_FILES` is matched by exact path (`violations()`,
+`scripts/m2_portability_gate.py:229-231`); there is no prefix or directory matching. The
+entries ADR-0085 and ADR-0541's surface would have reused —
+`src/kdive/mcp/tools/debug/sessions.py`, `.../debug/introspect.py`, and
+`.../ops/resources.py` — **name files that no longer exist**. Each became a package, so the
+allowlist strings match nothing while every file inside those packages sits under
+`src/kdive/mcp/`, a core prefix.
+
+This is not confined to the three BYO would have leaned on. **14 of the 54 `ALLOWED_FILES`
+entries point at paths absent from the tree** — roughly a quarter of the allowlist protects
+nothing, silently, and a gate that reports no violation over a stale entry is the same failure
+class as the drift guard above. Entry 17 owns re-pointing them and adding the cheap guard that
+stops it recurring: fail the gate on an `ALLOWED_FILES` member that does not exist on disk.
+That is pre-existing rot rather than BYO's, so it is tracked separately as well.
+
+`jobs/handlers/systems.py` is the entry a reader is most likely to miss on its own merits:
+`src/kdive/jobs/` is a core prefix whose allowlisted members are only `worker.py`,
 `worker_telemetry.py`, `queue.py`, `payloads.py`, and `handlers/image_build.py`. Nothing in the
 tree cordons on teardown failure today — the two existing cordon writers are
 `inventory/reconcile/prune.py:52` (not a core prefix) and
 `reconciler/cleanup/runtime_resources.py:148` (gated, and not allowlisted; only
-`reconciler/loop.py` is). ADR-0541's restore-or-cordon rule therefore requires a **third** new
-allowlist entry, not two.
+`reconciler/loop.py` is).
 
 Three further facts about the gate, each verified against the tree rather than inherited from
 M2's design doc. Two of them say the enforcement M2's document describes is not there:
@@ -368,9 +385,9 @@ and 20 are the operator-run proofs on real hardware.
 | # | Issue | Depends on | Area |
 |---|---|---|---|
 | 1 | **The ADR set + this document.** Five ADRs and the milestone contract; open questions 1–4 resolved. | — | design |
-| 2 | **#1817 — `ResourceKind.BYO_HOST`, migration, inventory schema, package skeleton.** `ByoHostInstance` + `InventoryDoc` field + the host-coordinate uniqueness check (ADR-0540) + the reconcile arm, which is the sole writer of BYO's `capabilities` keys **including `guest_arches` and `pseries_fadump`**; `systems.toml.example`; and `providers/byo_host/` with a buildable runtime whose ports are fail-closed stubs. Inseparable: the CHECK widen and the registered runtime must land together. Test work is larger than a rename: `build_provider_resolver` gains an `enable_byo_host` parameter and both resolver-constructing parity tests (`tests/db/test_resource_kind_parity.py:40`, `:55`) pass it, or `assert allowed <= buildable` (`:44`) fails the moment the CHECK admits the kind; `test_check_admits_all_three_kinds` (`:25`, asserting at `:30`) is renamed and widened, and `test_every_registered_kind_is_check_allowed` (`:49`) is the third test in the set. | 1 | providers + db |
+| 2 | **#1817 — `ResourceKind.BYO_HOST`, migration, inventory schema, package skeleton.** `ByoHostInstance` + `InventoryDoc` field + the host-coordinate uniqueness check (ADR-0540) + the reconcile arm, which is the sole writer of BYO's `capabilities` keys **including `guest_arches` and `pseries_fadump`**; `systems.toml.example`; and `providers/byo_host/` with a buildable runtime whose ports are fail-closed stubs. Inseparable: the CHECK widen and the registered runtime must land together. A second inseparability, alongside the CHECK/runtime one: entry 2 makes `byo-host` composable, and `src/kdive/mcp/tools/lifecycle/systems/profile_examples.py:120` indexes `PROVIDER_SECTIONS[kind]` for every composed kind **unguarded** (its sibling `src/kdive/profiles/provider_sections.py:58` guards the same lookup). So entry 2 adds the `PROVIDER_SECTIONS` row too — a placeholder until entry 3 supplies the real model — or an operator who opts in between the two merges gets a `KeyError` from the profile-examples tool rather than a fail-closed stub refusal. Test work is larger than a rename: `build_provider_resolver` gains an `enable_byo_host` parameter and both resolver-constructing parity tests (`tests/db/test_resource_kind_parity.py:40`, `:55`) pass it, or `assert allowed <= buildable` (`:44`) fails the moment the CHECK admits the kind; `test_check_admits_all_three_kinds` (`:25`, asserting at `:30`) is renamed and widened, and `test_every_registered_kind_is_check_allowed` (`:49`) is the third test in the set. | 1 | providers + db |
 | 3 | **#1819 — provisioning profile section and policy.** `ByoHostProfile`, `ProviderSection.byo_host_section`, `ByoHostProfilePolicy`, and the `adopted-host` boot method with the generalized pairing map. | 2 | provisioning |
-| 4 | **#1818 — the OOB control port seam and the Redfish driver.** The typed protocol under `providers/byo_host/oob/`, the console lease, and Redfish. | 1 | providers + security |
+| 4 | **#1818 — the OOB control port seam and the Redfish driver.** The typed protocol under `providers/byo_host/oob/`, the console lease, and Redfish. Depends on entry 2 as well as entry 1: the lease writes `byo_console_leases`, which entry 2's migration creates, and it lives in the `providers/byo_host/` package entry 2 skeletons. | 1, 2 | providers + security |
 | 5 | **#1821 — the IPMI driver.** Additive behind the entry-4 seam. | 4 | providers |
 | 6 | **#1822 — the HMC driver for PowerVM LPARs.** Power, partition identity, vterm. Sequenced early: it is the driver most likely to force a port revision. | 4 | providers |
 | 7 | **#1816 — survey the OOB surface beyond power and console.** Read-only spike; produces findings and follow-on issues, not code. | — | providers |
@@ -383,13 +400,15 @@ and 20 are the operator-run proofs on real hardware.
 | 14 | **#1828 — the KGDB transport.** The third `DebugTransportKind`, the debug-session registrar arm, the allowlist entry, and the console-to-loopback bridge. | 11 | debug |
 | 15 | **#1831 — in-target drgn and vmcore postmortem.** | 13 | debug |
 | 16 | **#1830 — teardown: baseline restore, OOB power-cycle, cordon, reconciler drift arm.** Also owns the **stranded-console-lease reclaim** (ADR-0539), which shares the dead-worker shape and the same `reconciler/loop.py` allowlist entry as the mid-teardown arm. | 12 | lifecycle |
-| 17 | **#1820 — extend the portability gate.** The `pre-M4` baseline tag, the `byo-host` `CAPTURE_COVERAGE` row, the **registered-kinds completeness assertion** that makes a missing row detectable at all, the three new allowlist entries, and the CI-wiring decision above. | 2 | tooling |
+| 17 | **#1820 — extend the portability gate.** The `pre-M4` baseline tag, the `byo-host` `CAPTURE_COVERAGE` row, the **registered-kinds completeness assertion** that makes a missing row detectable at all, the six new allowlist entries, **re-pointing the 14 stale `ALLOWED_FILES` paths** plus a guard failing the gate on a member absent from disk, and the CI-wiring decision above. | 2 | tooling |
 | 18 | **#1832 — operator runbook and agent-facing documentation.** | 13, 16 | docs |
 | 19 | **#1833 — live proof: the full spine on an x86 host with a BMC.** | 14, 15, 16 | proof |
 | 20 | **#1834 — live proof: the full spine on a PowerVM LPAR via HMC**, including fadump. | 6, 14, 15, 16 | proof |
 
-**Merge wave:** `1` → `{2, 4, 7}` → `{3, 5, 6, 17}` → `8` → `{9, 10, 11}` → `{12, 14}` →
-`{13, 16}` → `{15, 18}` → `{19, 20}`.
+**Merge wave:** `1` → `{2, 7}` → `{3, 4, 17}` → `{5, 6, 8}` → `{9, 10, 11}` → `{12, 14}` →
+`{13, 16}` → `{15, 18}` → `{19, 20}`. Entry 4 sits *after* entry 2 rather than beside it, because
+it writes a table entry 2 creates — entries are worked in parallel worktrees, so entry 4 merging
+first would otherwise be the ordinary case, not the unlucky one.
 
 ### Sequencing & shared seams (no separate plan)
 
@@ -400,9 +419,9 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
 - **One migration, claimed up front.** Entry 2 owns `0112_resources_kind_byo_host.sql` — the
   only DDL this milestone — and lands early and alone, because ADR-0517 makes migration numbers
   strictly ascending across merges and a second schema-touching entry would force a
-  renumber-on-rebase. That is why it also carries the console-lease table and the adopt-facts
-  column, which entries 4 and 8 are the first to write: schema unused for two waves is the
-  price of keeping the epic to one serialization point.
+  renumber-on-rebase. That is why it also carries the console-lease table (written by entry 4,
+  one wave later) and the adopt-facts column (entry 8, three waves later): briefly-unused schema
+  is the price of keeping the epic to one serialization point.
 - **One precondition module, three callers.** Entry 8 writes it, entry 9 (`doctor`) calls it,
   entry 16 (teardown) calls it. Writing the checks twice is how they come to disagree, which is
   why 9 follows 8 rather than preceding it.
@@ -429,9 +448,9 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
 
 1. **The provider seam is unchanged** (ADR-0063) — `byo_host` satisfies the same
    `ProviderRuntime` ports and registers into a resolver that already exists. The portability
-   hypothesis is measured a third time rather than abandoned, and the three genuinely new core
-   touches (the migration, the `arch_traits` docstring, and `jobs/handlers/systems.py` for
-   cordon-on-teardown-failure) are declared up front rather than
+   hypothesis is measured a third time rather than abandoned, and all six genuinely new core
+   touches — the migration, the `arch_traits` docstring, `jobs/handlers/systems.py`, the two
+   debug-session modules, and `ops/resources/host_ops.py` — are declared up front rather than
    discovered.
 2. **Secrets never leak** (ADR-0012, ADR-0073) — OOB credentials resolve at the worker
    boundary, register for redaction before first use, and release only after

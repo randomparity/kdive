@@ -46,7 +46,8 @@ The available mechanisms are all already in the tree.
 
 ## Decision
 
-**Teardown restores, verifies, and only then frees.** In order:
+**Teardown restores and verifies, and a host it cannot verify does not return to the
+schedulable pool.** In order:
 
 1. Re-point the host's bootloader default at the declared `baseline_kernel`, arch-keyed
    (`grubby` on x86, grub2-PReP or petitboot on a PowerVM LPAR).
@@ -56,19 +57,30 @@ The available mechanisms are all already in the tree.
 3. Re-run the adopt preconditions — the same module `provision` and `doctor` call
    (ADR-0540) — against the rebooted host, including that the running kernel is now the
    declared baseline.
-4. Free the Resource.
 
 Step 3 is the load-bearing one. A power-cycle that returns is not evidence that the host is
 back in the state adopt requires; only the adopt predicate is evidence of that, and running
 the same predicate is what makes "returned" mean the same thing as "adoptable". This is the
 precondition module's third caller, and the reason it is one module.
 
-**Any failure cordons the host with a reason; it never frees it.** If the bootloader write
-fails, if the power-cycle does not return, if the host comes back on the wrong kernel, or if
-any adopt precondition fails, the Resource is cordoned and the reason is recorded. The failure
-surfaces as `RESTORE_INCOMPLETE` — an existing category whose meaning is exactly this: a
-restore that did not complete, leaving indeterminate state, needing an operator rather than a
-retry. No new `ErrorCategory` is invented.
+**The cordon is the mechanism, not a withheld release.** This decision does not reorder or gate
+anything in the existing teardown path, and an implementer should not go looking for a step to
+gate. `teardown_handler` writes `SystemState.TORN_DOWN` and commits it under the System
+advisory lock **before** it calls the provider
+(`src/kdive/jobs/handlers/systems.py:760-778`, provider call at `:783`), so by the time a BYO
+restore can fail the System is already terminal; and the handler never touches the Resource at
+all — freeing is `src/kdive/services/allocation/release.py` on the allocation path, which
+**needs no change for this**. What keeps an unverified host out of rotation is the cordon
+itself: both placement paths exclude a cordoned Resource
+(`src/kdive/services/allocation/admission/placement.py:86` and the `AND NOT cordoned` predicate
+at `:104`), whether or not the allocation has released.
+
+**Any failure cordons the host with a reason.** If the bootloader write fails, if the
+power-cycle does not return, if the host comes back on the wrong kernel, or if any adopt
+precondition fails, the Resource is cordoned and the reason is recorded. The failure surfaces
+as `RESTORE_INCOMPLETE` — an existing category whose meaning is exactly this: a restore that
+did not complete, leaving indeterminate state, needing an operator rather than a retry. No new
+`ErrorCategory` is invented.
 
 **The reason is persisted on the Resource, under a namespaced `capabilities` key.** A cordon
 whose cause requires cross-referencing an audit log is a cordon an operator will clear without
@@ -124,13 +136,16 @@ holding host facts. The tension is real and the alternative was worse — an aud
 reason is one an operator will not read before clearing the cordon. The clearing obligation is
 explicit: uncordoning removes the key, so a stale reason cannot linger on a schedulable host.
 
-**The cordon is not the provider's write, and cannot be.** `Teardown.teardown(domain_name)`
+**The cordon is not the provider's write, and cannot be.** `Provisioner.teardown(domain_name)`
 (`src/kdive/providers/ports/lifecycle.py:130-138`) takes a domain name, receives no database
 connection, and documents only `INFRASTRUCTURE_FAILURE` / `TRANSPORT_FAILURE`. Cordoning a
 Resource, persisting the reason, and raising `RESTORE_INCOMPLETE` therefore happen in the
 caller, `teardown_handler` (`src/kdive/jobs/handlers/systems.py:751`; the provider call is at
 `:783`) — which is inside the portability gate's core prefixes and is not among that package's
-allowlisted files. This decision consequently costs the milestone a declared core touch-point
+allowlisted files. `teardown` is a member of `Provisioner`, not a port of its own — the
+Protocol classes in that module are `Provisioner`, `Installer`, `Booter`, `Connector`,
+`Controller`, and `Snapshotter`. This decision consequently costs the milestone a declared
+core touch-point
 rather than being pure provider work, and it is recorded in the milestone design doc's gate
 table for that reason. Widening the port to take a connection would spread the same coupling to
 every provider that has no use for it; keeping the write in the one handler that already owns

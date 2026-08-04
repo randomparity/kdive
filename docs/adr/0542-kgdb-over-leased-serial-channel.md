@@ -52,11 +52,14 @@ them separate:
 - `TransportHandleKind = Literal["gdbstub", "ssh", "drgn-live"]` (`:21`) — the realization,
   serialized as `<kind>://host:port` (`:41-50`), always a loopback endpoint.
 
-Widening the agent-facing literal touches the debug-session registrar under `mcp/tools/`,
-which is inside the portability gate's core prefixes
-(`scripts/m2_portability_gate.py:44-53`). There is precedent: ADR-0085's drgn-live
-generalization allowlisted `src/kdive/mcp/tools/debug/sessions.py` and `introspect.py` as
-deliberate, reviewed core touches.
+Widening the agent-facing literal touches the debug-session registrar under `mcp/tools/`, which
+is inside the portability gate's core prefixes (`scripts/m2_portability_gate.py:44-53`). There
+is precedent for treating that as a deliberate, reviewed core touch: ADR-0085's drgn-live
+generalization did exactly this. The precedent's *allowlist entries* do not transfer, though —
+they name `src/kdive/mcp/tools/debug/sessions.py` and `introspect.py`, and both are now
+packages, so those strings match nothing under the gate's exact-path rule
+(`violations()`, `:229-231`). This decision therefore owes new entries naming the real modules,
+which the milestone design document records.
 
 ## Decision
 
@@ -107,8 +110,10 @@ actionable rather than mysterious.
 
 ## Consequences
 
-The core touch is one enum value plus the debug-session registrar under `mcp/tools/`, declared
-in the R9 allowlist up front. Keeping `TransportHandleKind` unchanged is what holds it to that:
+The core touch is one enum value plus two modules of the debug-session package under
+`mcp/tools/` — `sessions/lifecycle.py`, which carries the per-transport branching, and
+`sessions/registrar.py`, which carries the agent-facing `Field` text — declared in the R9
+allowlist up front. Keeping `TransportHandleKind` unchanged is what holds it to that:
 the alternative — a fourth handle kind — would have widened the decode path, the handle
 round-trip tests, and every consumer that switches on realization.
 

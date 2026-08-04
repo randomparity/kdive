@@ -21,10 +21,15 @@ arrives at install time. `disk-image` means the operator staged a base-OS image 
 provisioning deploys (`:385`, `:449`); nobody staged anything — the OS was installed out of
 band, possibly years ago.
 
-The pairing validator makes this structural rather than cosmetic.
-`_pair_boot_method_with_provider` (`:394`) is a **biconditional**: `disk-image` and the
-remote-libvirt section "require each other". Two values and two provider families fit a
-biconditional. A third of either breaks it, whichever value BYO picks.
+The pairing validator makes this structural rather than cosmetic, though not in the direction a
+reader expects. `_pair_boot_method_with_provider` (`:394-403`) is a **biconditional**:
+`remote = provider.remote_libvirt_section is not None`, `disk_image = boot_method is
+DISK_IMAGE`, and it raises when the two disagree. A third boot-method value does not break it —
+it slips through. An `adopted-host` profile with a `byo_host` section evaluates `False != False`
+and raises nothing, and so would `adopted-host` paired with a local-libvirt section, or with no
+provider section at all. The check is not too strict for a third value; it is silent about one.
+That is the argument for the generalization, and it means the work is *adding* a constraint that
+does not exist rather than loosening one that does.
 
 **Verification has to happen at more than one moment, and one of those moments forbids I/O.**
 `reconcile-systems --check` (`src/kdive/inventory/cli.py:66`) validates a declaration touching
