@@ -113,18 +113,20 @@ one scoped by label or pull request and accept the cost, under its own ADR.
 - **A later provider could leak into core without an automated signal.** This is the real
   cost, accepted deliberately: the gate has not provided that signal since 2026-06-12 in any
   case, so nothing operative is lost — only the appearance of one.
-- **Four recent records keep reasoning from the gate**, and this decision is what makes that
-  reasoning historical: [ADR-0538](0538-byo-host-provider-package.md) §BYO portability,
+- **Other records keep reasoning from the gate, and this decision is what makes that
+  reasoning historical.** Seven name `scripts/m2_portability_gate.py` outright: recent ones —
+  [ADR-0538](0538-byo-host-provider-package.md) §BYO portability,
   [ADR-0540](0540-adopt-only-provisioning.md) and
-  [ADR-0542](0542-kgdb-over-leased-serial-channel.md) each cite `CORE_PREFIXES` or
-  `CAPTURE_COVERAGE` in `scripts/m2_portability_gate.py`, and ADR-0538 assigns entry-17 work
-  on that basis. [ADR-0541](0541-baseline-restore-or-cordon-teardown.md) reaches it without
-  naming the path: it accepts a `jobs/handlers/systems.py` write as "a declared core
-  touch-point … recorded in the milestone design doc's gate table", and that table is one of
-  the things this change removes, so the cost it priced no longer exists. They are not amended: three amendments would add more text than the
-  risk removes, and a reader arriving from any of them lands here. Four older records —
-  ADR-0086, ADR-0087, ADR-0114 and ADR-0122 — cite the script as context for work already
-  completed; they are historical for the same reason and are likewise not amended.
+  [ADR-0542](0542-kgdb-over-leased-serial-channel.md) — cite `CORE_PREFIXES` or
+  `CAPTURE_COVERAGE` living there, with ADR-0538 assigning entry-17 work on that basis; older
+  ones — ADR-0086, ADR-0087, ADR-0114 and ADR-0122 — cite it as context for work already
+  completed. Others reach the gate without naming it, and this list is not exhaustive: M2-era
+  records treat it as a live constraint throughout, and
+  [ADR-0541](0541-baseline-restore-or-cordon-teardown.md) prices a `jobs/handlers/systems.py`
+  write as "a declared core touch-point … recorded in the milestone design doc's gate table" —
+  a table this change removes, so the cost it priced no longer exists. None is amended:
+  amending each would add more text than the risk removes, and a reader arriving from any of
+  them lands here.
 - **`docs/design/m2-remote-libvirt.md` gets a pointer, not a rewrite.** M2's design doc
   describes the gate as a per-PR CI check in six places. It is the record of a completed
   Milestone, so this change adds one note naming ADR-0543 rather than restating the document

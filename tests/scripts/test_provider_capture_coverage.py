@@ -18,8 +18,8 @@ from kdive.domain.capture import CaptureMethod
 from kdive.providers.assembly.composition import build_local_runtime, build_remote_runtime
 from kdive.security.secrets.secret_registry import SecretRegistry
 
-# Remote advertises console/host_dump/gdbstub/kdump (M2.5 exit, ADR-0084; no fadump — that is
-# a local pseries opt-in). Local advertises {kdump, fadump, host_dump}: ADR-0208 narrows its
+# Remote advertises console/host_dump/gdbstub/kdump (M2.5 exit; no fadump — that is a local
+# pseries opt-in). Local advertises {kdump, fadump, host_dump}: ADR-0208 narrows its
 # capture set to the core-producing methods it can actually fetch a vmcore for, dropping the
 # non-core console/gdbstub half-truths; HOST_DUMP's seam landed in M2.8 B4 (ADR-0211, libvirt
 # domain core dump); FADUMP shares the kdump overlay harvest (ADR-0349, host support gated at
