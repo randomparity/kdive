@@ -342,7 +342,8 @@ entries point at paths absent from the tree** — roughly a quarter of the allow
 nothing, silently, and a gate that reports no violation over a stale entry is the same failure
 class as the drift guard above. Entry 17 owns re-pointing them and adding the cheap guard that
 stops it recurring: fail the gate on an `ALLOWED_FILES` member that does not exist on disk.
-That is pre-existing rot rather than BYO's, so it is tracked separately as well.
+That is pre-existing rot rather than BYO's — it affects local-libvirt and remote-libvirt's own
+measurement too — so it is tracked separately as #1835.
 
 `jobs/handlers/systems.py` is the entry a reader is most likely to miss on its own merits:
 `src/kdive/jobs/` is a core prefix whose allowlisted members are only `worker.py`,
