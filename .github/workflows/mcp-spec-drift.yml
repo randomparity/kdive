@@ -1,0 +1,138 @@
+# Weekly upstream clock for the MCP specification (ADR-0537).
+#
+# The offline half of the drift guard gates every PR from ci.yml. This is the other half: it
+# asks whether the specification repository has published a revision newer than the one
+# src/kdive/mcp declares. It deliberately gates nothing — a PR must not depend on github.com
+# being reachable, and the newest revision is usually one KDIVE cannot adopt without a major
+# `mcp` bump.
+#
+# Exit codes are the interface: 1 means drift was determined, 2 means it could not be. Only 1
+# files an issue, and only when no issue for that revision already exists in any state. That
+# idempotence is what keeps the badge meaningful — drift is the expected state for months at a
+# time, so a job that filed or commented weekly would be permanently red and an actually
+# broken check would look identical to the expected one.
+
+name: mcp-spec-drift
+
+on:
+  schedule:
+    # Mondays 12:00 UTC. Cron is best-effort on GitHub Actions; weekly is precise enough.
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-spec-drift
+  # Never cancel: a run killed between `gh issue list` and `gh issue create` would either
+  # lose the report or file a duplicate on the next pass.
+  cancel-in-progress: false
+
+jobs:
+  check-drift:
+    name: upstream spec revision
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # read the checkout to run the guard
+      # File and search the tracking issue that is this job's entire output. Scoped to this
+      # job rather than the workflow, so the elevated grant covers only the drift check.
+      issues: write # open/search the drift tracking issue, this job's only output
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install libvirt build headers
+        # libvirt-python has no wheels; it compiles against the system libvirt headers, so
+        # `uv sync` fails without libvirt-dev present.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvirt-dev
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Check upstream spec revisions
+        id: check
+        # GITHUB_TOKEN is not exported into step environments automatically. Without it the
+        # script's Authorization header is inert and the unauthenticated GitHub API limit is
+        # 60/hour per IP, which Actions runners share.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          uv run python scripts/check_mcp_spec_version.py --upstream
+          echo "exit_code=$?" >> "${GITHUB_OUTPUT}"
+
+      - name: Open a tracking issue on newly detected drift
+        # Runs on exit 1 only. Exit 2 (could not determine) and any other code file nothing —
+        # the job simply fails, because reporting drift that was never measured is the defect
+        # this design exists to avoid.
+        if: steps.check.outputs.exit_code == '1'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Script-emitted and constrained to ^\d{4}-\d{2}-\d{2}$, but passed through env
+          # rather than interpolated into the script body all the same.
+          NEWEST: ${{ steps.check.outputs.newest }}
+          DECLARED: ${{ steps.check.outputs.declared }}
+        run: |
+          set -euo pipefail
+          title="MCP spec drift: upstream ${NEWEST} not yet adopted"
+
+          # The search is a candidate filter; the dedup is exact-title equality. GitHub issue
+          # search matches tokens, not literals, so a bare non-empty test would match the
+          # previous revision's issue and silently bury a newer one. --state all: a closed
+          # issue is a human acknowledgement, and re-filing over it would produce a duplicate
+          # every week. The search string is quoted because the title contains a colon,
+          # GitHub search's qualifier separator.
+          existing="$(gh issue list --state all --search "${title}" \
+            --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+
+          if [[ -n "${existing}" ]]; then
+            echo "already tracked as #${existing}; nothing to file"
+            exit 0
+          fi
+
+          body_file="$(mktemp)"
+          {
+            echo "The MCP specification repository publishes revision \`${NEWEST}\`, which is"
+            echo "newer than the revision KDIVE declares (\`${DECLARED}\`, in"
+            echo "\`src/kdive/mcp/__init__.py\`)."
+            echo
+            echo "This is a report, not a regression: KDIVE negotiates whatever the pinned"
+            echo "\`mcp\` dependency supports, so adopting a newer revision needs an \`mcp\`"
+            echo "release that supports it first. See ADR-0537."
+            echo
+            echo "When that lands: edit \`src/kdive/mcp/__init__.py\`, then run"
+            echo "\`just doc-constants\` and \`just resources-docs\` and commit the"
+            echo "regenerated files. \`just mcp-spec-check\` verifies the result."
+            echo
+            echo "Filed by \`.github/workflows/mcp-spec-drift.yml\`. It will not file again"
+            echo "for \`${NEWEST}\` while this issue exists, open or closed."
+          } > "${body_file}"
+
+          gh issue create \
+            --title "${title}" \
+            --label "area:mcp-api" \
+            --label "type:chore" \
+            --label "status:needs-triage" \
+            --body-file "${body_file}"
+
+      - name: Fail the run when drift was reported or could not be determined
+        # The badge means: newly-detected drift, or a check that could not run. It does not
+        # mean "drift is still outstanding" — that is what the tracking issue is for.
+        if: steps.check.outputs.exit_code != '0'
+        env:
+          EXIT_CODE: ${{ steps.check.outputs.exit_code }}
+        run: |
+          echo "::error::check_mcp_spec_version.py --upstream exited ${EXIT_CODE}"
+          exit 1

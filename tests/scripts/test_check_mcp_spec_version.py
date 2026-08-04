@@ -135,6 +135,67 @@ def _ci_run_steps() -> list[str]:
     ]
 
 
+def _drift_workflow() -> dict:
+    return yaml.safe_load(_DRIFT_WORKFLOW.read_text(encoding="utf-8"))
+
+
+def _drift_steps() -> list[dict]:
+    doc = _drift_workflow()
+    return [step for job in doc["jobs"].values() for step in job.get("steps", [])]
+
+
+def test_mcp_spec_drift_workflow_has_both_triggers() -> None:
+    """The cron is the point; workflow_dispatch is how criterion 3 gets verified at all."""
+    doc = _drift_workflow()
+    # PyYAML parses the bare `on:` key as the boolean True.
+    triggers = doc[True] if True in doc else doc["on"]
+
+    assert "schedule" in triggers
+    assert "workflow_dispatch" in triggers
+    assert "pull_request" not in triggers  # it must never gate a PR
+
+
+def test_mcp_spec_drift_workflow_can_file_an_issue_and_no_more() -> None:
+    """Least privilege: it reads the repo and writes issues, nothing else."""
+    permissions = _drift_workflow()["jobs"]["check-drift"]["permissions"]
+
+    assert permissions == {"contents": "read", "issues": "write"}
+
+
+def test_mcp_spec_drift_workflow_wires_the_token_into_both_steps() -> None:
+    """Actions does not export GITHUB_TOKEN into step environments on its own.
+
+    Without it the script's Authorization header is inert — so the documented rate-limit
+    mitigation silently never applies — and `gh` has no credential at all.
+    """
+    steps = _drift_steps()
+    fetching = next(step for step in steps if step.get("id") == "check")
+    filing = next(step for step in steps if "gh issue create" in step.get("run", ""))
+
+    for step in (fetching, filing):
+        assert "GITHUB_TOKEN" in step.get("env", {}), f"{step.get('name')} carries no token"
+
+
+def test_mcp_spec_drift_workflow_dedups_across_closed_issues() -> None:
+    """Searching open-only re-arms weekly filing the moment a maintainer closes the issue.
+
+    Closing it is the ordinary disposition once the work is folded into an mcp 2.0.0 epic or
+    a docs/debt record, so the predicate must be that a human has seen the revision.
+    """
+    filing = next(step for step in _drift_steps() if "gh issue create" in step.get("run", ""))
+
+    assert "--state all" in filing["run"]
+
+
+def test_mcp_spec_drift_workflow_labels_exist_in_the_repo() -> None:
+    """The three labels are real; a wrong one fails `gh issue create` with a red badge that
+    is indistinguishable from the newly-detected-drift red the design reserves."""
+    filing = next(step for step in _drift_steps() if "gh issue create" in step.get("run", ""))
+
+    for label in ("area:mcp-api", "type:chore", "status:needs-triage"):
+        assert label in filing["run"]
+
+
 def test_ci_workflow_runs_the_mcp_spec_check_recipe() -> None:
     """Criterion 1 rests on a hand-listed ci.yml step, not on the `ci` recipe.
 
