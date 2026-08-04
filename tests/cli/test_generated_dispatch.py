@@ -1,4 +1,4 @@
-"""Generic dispatch for schema-generated ``kdivectl`` verbs (#1450, ADR-0423).
+"""Generic dispatch for descriptor-owned ``kdivectl`` verbs (#1450, ADR-0423).
 
 Covers the three halves the generic handler unites: payload assembly from the parsed namespace
 (strip the ``genarg_`` dest prefix, fold in ``--<param>-json`` values, honor ``unwrap_request``),
@@ -248,7 +248,7 @@ def test_read_only_verb_dispatches_with_no_flag(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_mutating_verb_dispatches_without_any_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Naming the verb is the acknowledgement; no --allow-mutating exists on a generated verb.
+    # Naming the descriptor-owned verb is the acknowledgement; no --allow-mutating exists here.
     client = _install(monkeypatch, _mutating_tool("resources.set_status"))
     assert _run(_verb("resources.set_status", read_only=False), _ns()) == 0
     assert client.calls == [("resources.set_status", {})]
@@ -360,7 +360,7 @@ def test_default_output_renders_a_table(monkeypatch: pytest.MonkeyPatch, capsys)
     assert "sys-1" in out and "suggested_next_actions" not in out
 
 
-# --- parser surface: --yes exists only on destructive generated verbs ------------------------
+# --- parser surface: --yes exists only on destructive generic descriptors ---------------------
 
 
 def test_destructive_generated_verb_accepts_yes() -> None:
@@ -382,7 +382,7 @@ def test_read_only_generated_verb_rejects_yes() -> None:
 
 
 def test_fixtures_list_verb_no_longer_parses() -> None:
-    # `fixtures.list` is gone from the registry, so neither a curated nor a generated verb
+    # `fixtures.list` is gone from the descriptor set, so no CLI verb
     # sits at that path; `fixtures validate` still does.
     with pytest.raises(SystemExit):
         build_parser().parse_args(["fixtures", "list"])

@@ -5,12 +5,13 @@ requested one into a mutation tier, admits it only when the caller opted in to t
 (``--allow-mutating`` / ``--allow-destructive``), runs the token-``exp`` preflight for mutating
 tiers, confirms a destructive call (typed ``yes`` on a TTY, or ``--yes``), calls the tool, prints
 the structured result, and derives the exit code from the response envelope. ``login`` mints and
-caches a bearer token; curated verbs route through ``commands.run_verb``.
+caches a bearer token; descriptor-owned MCP verbs route through ``commands.run_verb``.
 
-Schema-generated verbs route through :func:`invoke_generated_verb` (ADR-0423), which unites the
-passthrough's live-annotation tier ceremony with typed argparse arguments: it assembles the tool
-payload from the parsed namespace, resolves the tier from the live annotations, drives the
-mutating/destructive ceremony from that tier, and renders through :func:`render_envelope`.
+Every MCP command path and parser shape comes from a :class:`GeneratedVerb` descriptor.
+``HANDLER_OVERRIDES`` selects specialised rendering or payload assembly after the descriptor
+selects the command; all other descriptors route through :func:`invoke_generated_verb` (ADR-0423).
+That generic path unites the passthrough's live-annotation tier ceremony with typed argparse
+arguments and renders through :func:`render_envelope`.
 """
 
 from __future__ import annotations
@@ -178,7 +179,7 @@ async def _tool_call(args: argparse.Namespace) -> int:
 
 
 async def invoke_generated_verb(verb: GeneratedVerb, args: argparse.Namespace) -> int:
-    """Dispatch one schema-generated verb: payload, tier, ceremony, call, render, exit (ADR-0423).
+    """Dispatch one descriptor-owned verb: payload, tier, ceremony, call, render, exit (ADR-0423).
 
     Assembles the tool payload from the parsed namespace (:func:`_assemble_generated_payload`),
     resolves the verb's tier from the *live* server annotations — never the committed artifact, so
@@ -208,7 +209,7 @@ async def invoke_generated_verb(verb: GeneratedVerb, args: argparse.Namespace) -
 def _generated_ceremony_refusal(
     verb: GeneratedVerb, tier: ToolTier, args: argparse.Namespace, *, token: str
 ) -> str | None:
-    """Return a refusal message when the generated-verb ceremony blocks the call, else ``None``.
+    """Return a refusal message when descriptor-driven ceremony blocks the call, else ``None``.
 
     An ``UNKNOWN`` tier is fail-closed (unclassifiable tools are unreachable). Both mutating tiers
     run the token-``exp`` preflight; a destructive tier further requires the typed-``yes`` confirm.
@@ -236,7 +237,7 @@ def _generated_ceremony_refusal(
 
 
 def _assemble_generated_payload(verb: GeneratedVerb, args: argparse.Namespace) -> dict[str, object]:
-    """Build a generated verb's MCP argument payload from its parsed argparse namespace.
+    """Build a descriptor-owned MCP argument payload from its parsed argparse namespace.
 
     Each scalar/append flag value and each ``--<param>-json`` value lands on the namespace under
     the ``registry.GENERATED_ARG_PREFIX`` dest; this strips the prefix to rebuild the tool payload.
@@ -247,7 +248,7 @@ def _assemble_generated_payload(verb: GeneratedVerb, args: argparse.Namespace) -
     A ``--<param>-json`` value was validated to a JSON container at parse time
     (:func:`registry._json_container_arg`), so it re-parses cleanly.
     For an ``unwrap_request`` verb the whole body is re-wrapped under a single ``request`` key (and
-    no key at all when nothing was given), exactly as the curated read verbs do by hand.
+    no key at all when nothing was given), matching the specialised handler contract.
     """
     prefix = commands.GENERATED_ARG_PREFIX
     body: dict[str, object] = {}

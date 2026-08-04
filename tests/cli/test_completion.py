@@ -1,9 +1,9 @@
-"""Offline shell completion over the merged curated + generated verb surface (ADR-0424).
+"""Offline shell completion over the descriptor-owned verb surface (ADR-0424).
 
 Three layers of proof:
 
-- The static walk (:func:`build_completion_tree`) reaches the root, curated verbs, generated
-  verbs, and per-verb flags, and keys the root under the ``/`` sentinel bash needs.
+- The static walk (:func:`build_completion_tree`) reaches the root, descriptor-owned verbs,
+  and per-verb flags, and keys the root under the ``/`` sentinel bash needs.
 - The emitted subcommand resolves with **no token and no server** — it is dispatched before any
   ``Session`` is built, so a ``Session`` constructor that raises does not stop it.
 - The generated bash and zsh scripts, sourced in a real shell, resolve groups → verbs → flags and
@@ -29,19 +29,19 @@ def test_tree_root_lists_subcommands_and_top_flag() -> None:
     root = _tree()[_ROOT]
     assert "--json" in root
     assert {"login", "tool", "doctor", "completion"} <= set(root)
-    # Groups from the merged surface (curated + generated) appear at the root.
+    # Groups from the descriptor-owned MCP surface appear at the root.
     assert {"resources", "allocations", "images"} <= set(root)
 
 
-def test_tree_curated_verb_flags() -> None:
+def test_tree_specialized_handler_verb_flags() -> None:
     tree = _tree()
     assert "list" in tree["resources"]
     assert set(tree["resources list"]) == {"--help", "--json", "--kind"}
 
 
-def test_tree_generated_verb_reachable_with_its_flags() -> None:
+def test_tree_generic_descriptor_verb_reachable_with_its_flags() -> None:
     tree = _tree()
-    # A schema-generated verb (no curated override) is reachable at its path with its flags.
+    # A descriptor with no specialised handler is reachable at its path with its flags.
     assert "estimate" in tree["accounting"]
     estimate = tree["accounting estimate"]
     assert "--json" in estimate

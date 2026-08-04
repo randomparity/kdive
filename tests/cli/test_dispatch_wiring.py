@@ -1,4 +1,4 @@
-"""The curated read verbs are wired into the parser and reachable through ``dispatch.run``."""
+"""Descriptor-owned CLI verbs are wired into the parser and reachable through dispatch."""
 
 from __future__ import annotations
 
@@ -9,28 +9,67 @@ import pytest
 
 from kdive.cli import dispatch
 from kdive.cli.__main__ import build_parser
-from kdive.cli.commands.registry import REGISTRY
-from tests.cli.verb_argv import required_argv_for_curated
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands.registry import HANDLER_OVERRIDES
+from tests.cli.verb_argv import required_argv_for_generated
 
 
-def test_curated_verb_is_a_known_subcommand() -> None:
+def test_descriptor_verb_is_a_known_subcommand() -> None:
     args = build_parser().parse_args(["resources", "list"])
     assert args.command == "resources" and args.subcommand == "list"
 
 
 def test_record_verb_takes_its_positional() -> None:
     args = build_parser().parse_args(["systems", "get", "sys-1"])
-    assert args.system_id == "sys-1"
+    assert args.genarg_system_id == "sys-1"
+
+
+def test_descriptor_help_uses_operator_facing_metavars(capsys: pytest.CaptureFixture[str]) -> None:
+    parser = build_parser()
+    for verb in GENERATED_VERBS:
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args([verb.group, verb.sub, "--help"])
+
+        assert excinfo.value.code == 0
+        help_text = capsys.readouterr().out
+        assert "GENARG_" not in help_text, verb.tool
+        if verb.tool == "images.extend":
+            assert "image_id" in help_text
+            assert "--reason REASON" in help_text
+
+
+def test_generated_positional_uses_descriptor_and_routes_to_tool_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A special renderer changes dispatch only; the generated descriptor owns its argv shape."""
+    from kdive.cli.commands import registry
+    from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+
+    verb = next(verb for verb in GENERATED_VERBS if verb.tool == "jobs.wait")
+    assert verb.positionals == ("job_id",)
+    assert "jobs.wait" in HANDLER_OVERRIDES
+
+    seen: list[argparse.Namespace] = []
+
+    async def _handler(args: argparse.Namespace) -> int:
+        seen.append(args)
+        return 0
+
+    monkeypatch.setitem(registry.HANDLER_OVERRIDES, "jobs.wait", _handler)
+    args = build_parser().parse_args(["jobs", "wait", "job-1"])
+    assert args.genarg_job_id == "job-1"
+    assert asyncio.run(registry.run_verb(args)) == 0
+    assert seen == [args]
 
 
 def test_list_verb_takes_its_optional_filter() -> None:
     args = build_parser().parse_args(["resources", "list", "--kind", "remote-libvirt"])
-    assert args.kind == "remote-libvirt"
+    assert args.genarg_kind == "remote-libvirt"
 
 
 def test_optional_filter_defaults_to_none() -> None:
     args = build_parser().parse_args(["systems", "list"])
-    assert args.state is None
+    assert args.genarg_state is None
 
 
 def test_json_flag_accepted_after_the_verb() -> None:
@@ -51,12 +90,10 @@ def test_json_absent_after_verb_does_not_clobber_top_level() -> None:
     assert args.json is False
 
 
-def test_every_registry_verb_parses_through_the_built_parser() -> None:
+def test_every_descriptor_verb_parses_through_the_built_parser() -> None:
     parser = build_parser()
-    for verb in REGISTRY:
-        # Curated parameters take their type and enum from the generated verb at the same path
-        # (ADR-0469, ADR-0474), so a bare "<name>-val" no longer parses for a numeric one.
-        args = parser.parse_args([verb.group, verb.sub, *required_argv_for_curated(verb)])
+    for verb in GENERATED_VERBS:
+        args = parser.parse_args([verb.group, verb.sub, *required_argv_for_generated(verb)])
         assert args.command == verb.group and args.subcommand == verb.sub
 
 
@@ -71,21 +108,21 @@ def test_project_required_verb_rejects_a_missing_project() -> None:
 @pytest.mark.parametrize(("group", "sub"), [("allocations", "list"), ("accounting", "usage")])
 def test_project_required_verb_accepts_an_explicit_project(group: str, sub: str) -> None:
     args = build_parser().parse_args([group, sub, "--project", "proj-a"])
-    assert args.project == "proj-a"
+    assert args.genarg_project == "proj-a"
 
 
 def test_usage_verb_offers_both_targets() -> None:
-    # accounting.usage discriminates on target.kind, so the curated verb must keep both
-    # doors open — dropping --investigation-id would delete the investigation read path.
+    # accounting.usage discriminates on target.kind, so its descriptor must keep both doors
+    # open — dropping --investigation-id would delete the investigation read path.
     args = build_parser().parse_args(["accounting", "usage", "--investigation-id", "inv-1"])
-    assert args.investigation_id == "inv-1" and args.project is None
+    assert args.genarg_investigation_id == "inv-1" and args.genarg_project is None
 
 
 def test_inventory_project_filter_stays_optional() -> None:
     # ``inventory.list`` is a cross-project auditor read; ``--project`` is a narrowing
     # filter, not a requirement.
     args = build_parser().parse_args(["inventory", "list"])
-    assert args.project is None
+    assert args.genarg_project is None
 
 
 def test_secrets_list_has_no_project_flag() -> None:
@@ -95,15 +132,14 @@ def test_secrets_list_has_no_project_flag() -> None:
 
 
 def test_images_list_carries_the_scope_flag() -> None:
-    # ``images list`` is CURATED, so it overrides the generated shape at its path — the scope
-    # flag exists only because the curated verb declares it. It is the operator replacement for
-    # the removed ``fixtures list`` verb (ADR-0465), so parse it from real argv.
+    # The generator's presentation overlay selects ``scope`` for this path. It is the operator
+    # replacement for the removed ``fixtures list`` verb (ADR-0465), so parse it from real argv.
     args = build_parser().parse_args(["images", "list", "--scope", "public_baseline"])
-    assert args.scope == "public_baseline"
-    assert build_parser().parse_args(["images", "list"]).scope is None
+    assert args.genarg_scope == "public_baseline"
+    assert build_parser().parse_args(["images", "list"]).genarg_scope is None
 
 
-def test_dispatch_routes_curated_verb_to_run_verb(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dispatch_routes_descriptor_verb_to_run_verb(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[argparse.Namespace] = []
 
     async def _fake_run_verb(args: argparse.Namespace) -> int:
@@ -195,16 +231,16 @@ def test_report_parses_scope_window_and_group_by() -> None:
         ]
     )
     assert args.command == "accounting" and args.subcommand == "report"
-    assert args.scope == "all-projects"
-    assert args.group_by == "principal"
-    assert args.since == "2026-01-01T00:00:00+00:00" and args.until is None
+    assert args.genarg_scope == "all-projects"
+    assert args.genarg_group_by == "principal"
+    assert args.genarg_since == "2026-01-01T00:00:00+00:00" and args.genarg_until is None
 
 
 def test_report_parses_projects_flag() -> None:
     args = build_parser().parse_args(
         ["accounting", "report", "--scope", "granted-set", "--projects", "a,b"]
     )
-    assert args.subcommand == "report" and args.projects == "a,b"
+    assert args.subcommand == "report" and args.genarg_projects == "a,b"
 
 
 def test_report_requires_an_explicit_scope() -> None:
@@ -214,8 +250,10 @@ def test_report_requires_an_explicit_scope() -> None:
     assert excinfo.value.code == 2
 
 
-def test_run_verb_routes_generated_only_verb_to_the_seam(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A non-curated generated path resolves to its tool and routes through the passthrough seam.
+def test_run_verb_routes_generic_handler_verb_to_the_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A path with no handler override resolves to its tool and uses generic dispatch.
     from kdive.cli.commands import registry
     from kdive.cli.commands.verb_spec import GeneratedVerb
 
@@ -252,18 +290,17 @@ def test_documented_point_read_invocation_parses(
     """The point-read invocation shape `docs/operating/runbooks/kdivectl.md` documents parses.
 
     `jobs.get` / `allocations.get` were removed (ADR-0468) and the point read became
-    `wait` with a zero timeout; ADR-0470 then gave it back its positional id with a curated
-    verb. The runbook line is hand-written markdown no generator checks, so this pins the exact
-    documented invocation — the bare id, and `--timeout-s 0` still spelled out rather than
+    `wait` with a zero timeout; ADR-0470 then made the generated descriptor present its id as a
+    positional. The runbook line is hand-written markdown no generator checks, so this pins the
+    exact documented invocation — the bare id, and `--timeout-s 0` still spelled out rather than
     defaulted — and keeping the runbook's wording in step with it is a review obligation.
     """
     args = build_parser().parse_args(argv)
-    assert getattr(args, dest) == expected_id
+    assert getattr(args, f"genarg_{dest}") == expected_id
     # The parser coerces it (ADR-0474); the runbook still spells the zero out rather than
     # relying on a default, which is the part this test pins.
-    assert args.timeout_s == 0.0
-    assert isinstance(args.timeout_s, float)
-    assert not [k for k in vars(args) if k.startswith("genarg")]
+    assert args.genarg_timeout_s == 0.0
+    assert isinstance(args.genarg_timeout_s, float)
 
 
 @pytest.mark.parametrize(
@@ -276,8 +313,8 @@ def test_documented_point_read_invocation_parses(
 def test_generated_wait_flag_form_is_gone(argv: list[str]) -> None:
     """`--job-id` / `--allocation-id` no longer parse (ADR-0470, breaking change).
 
-    A curated `Verb` *replaces* the generated parser at its path rather than adding to it, so
-    the flag form ADR-0468 §5 documented ceased to exist when the positional form landed.
+    The generated descriptor owns one parser shape, so the flag form ADR-0468 §5 documented
+    ceased to exist when its presentation metadata changed to a positional.
     """
     with pytest.raises(SystemExit):
         build_parser().parse_args(argv)
@@ -294,8 +331,8 @@ def test_wait_verb_omitted_timeout_stays_none(argv: list[str], dest: str) -> Non
     than restating it, so the namespace must not carry a CLI-chosen value here.
     """
     args = build_parser().parse_args(argv)
-    assert getattr(args, dest) == argv[-1]
-    assert args.timeout_s is None
+    assert getattr(args, f"genarg_{dest}") == argv[-1]
+    assert args.genarg_timeout_s is None
 
 
 @pytest.mark.parametrize("argv", [["jobs", "get", "j-1"], ["allocations", "get", "a-1"]])

@@ -14,7 +14,8 @@ import asyncio
 import pytest
 
 from kdive.cli.commands import mutations
-from kdive.cli.commands.registry import REGISTRY
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands.registry import HANDLER_OVERRIDES
 
 
 class _FakeResult:
@@ -161,8 +162,7 @@ def test_mutating_verbs_are_registered_and_not_read_only() -> None:
         "resources.set_scheduling",
         "resources.drain",
     }
-    registered = {verb.tool for verb in REGISTRY if not verb.read_only}
-    assert mutating_tools <= registered
-    for verb in REGISTRY:
-        if verb.tool in mutating_tools:
-            assert verb.read_only is False
+    assert mutating_tools <= set(HANDLER_OVERRIDES)
+    generated = {verb.tool: verb for verb in GENERATED_VERBS}
+    for tool in mutating_tools:
+        assert generated[tool].read_only is False

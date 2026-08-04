@@ -3,7 +3,7 @@
 Regression for the live failure: ``ToolResponse.items`` is self-referential, so a tool's
 output schema is cyclic and fastmcp's client cannot rebuild the typed ``.data`` view —
 it logs "maximum recursion depth exceeded" and leaves ``CallToolResult.data`` ``None``
-while ``structured_content`` still carries the same envelope dict. Every curated verb must
+while ``structured_content`` still carries the same envelope dict. Every specialised handler must
 flatten ``structured_content`` so the CLI works against a real server (ADR-0089).
 """
 

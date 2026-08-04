@@ -9,12 +9,12 @@ preflight before their one MCP call, exactly like the break-glass mutations:
 verb maps to a non-zero exit, so an unprivileged or cross-project invocation is observable as
 exit ``3``.
 
-``images publish`` is not curated: it takes the schema-generated verb, so its flags and payload
-come from the live ``images.publish`` schema (ADR-0423, ADR-0461).
+``images publish`` has no specialised handler override, so the descriptor-driven generic path
+derives its flags and payload from the live ``images.publish`` schema (ADR-0423, ADR-0461).
 
 ``images list`` carries ``--scope``, the operator path to the public baseline catalog that the
-removed ``fixtures list`` verb used to print (ADR-0465). A curated verb overrides the generated
-shape at its path, so the flag has to be declared here to exist at all.
+removed ``fixtures list`` verb used to print (ADR-0465). Its descriptor owns that flag; this
+module only owns specialised rendering.
 """
 
 from __future__ import annotations

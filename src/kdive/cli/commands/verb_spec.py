@@ -2,14 +2,13 @@
 
 The generator (:mod:`scripts.gen_cli_verbs`) emits :data:`GENERATED_VERBS` in the
 committed module :mod:`kdive.cli.commands._generated_verbs` as a tuple of
-:class:`GeneratedVerb`, one per registered MCP tool. These are the *data* the later
-parser-merge (#1448) and generic dispatch (#1450) consume; this module only defines
-their shape, so the generated file imports a stable type rather than redefining it.
+:class:`GeneratedVerb`, one per registered MCP tool. A descriptor is the sole source for
+its command path and parser shape; this module defines that stable type so the generated
+file does not redefine it.
 
-A :class:`GeneratedVerb` mirrors the fields of :class:`kdive.cli.commands.registry.Verb`
-that are derivable from a tool schema — ``group``/``sub``/``tool``/``read_only`` — and
-adds the schema-derived flag detail (:class:`GeneratedFlag`) and the ``request``-wrapper
-unwrap marker that the hand-curated verbs encode by hand today.
+Most fields come directly from the tool schema. Generator-owned presentation policy adds
+positionals, local acknowledgement flags, and destructive-confirmation behavior where the
+operator-facing CLI intentionally differs from a flat schema projection.
 """
 
 from __future__ import annotations
@@ -45,6 +44,15 @@ class GeneratedFlag:
 
 
 @dataclass(frozen=True)
+class GeneratedLocalFlag:
+    """A parser-only acknowledgement flag that is never sent to an MCP tool."""
+
+    name: str
+    dest: str
+    help: str
+
+
+@dataclass(frozen=True)
 class GeneratedVerb:
     """One CLI verb derived from a registered MCP tool.
 
@@ -55,11 +63,15 @@ class GeneratedVerb:
     ``unwrap_request`` is set for the tools whose sole parameter is a ``request`` wrapper
     object: their flags are the *wrapper body's* scalar fields, flattened, and are
     re-wrapped under a single ``{"request": ...}`` key at call time (with no ``request``
-    key when no flag is given), exactly as the curated read verbs do by hand.
+    key when no flag is given), including for tools dispatched by specialised handlers.
 
     ``json_params`` names the parameters that are *not* scalar-derivable (nested objects,
     object arrays, typeless/tuple arrays, or scalar unions). This generator emits no flag
     for them; the ``--<param>-json`` escape that surfaces them is a separate entry (#1449).
+
+    ``confirm_destructive`` controls whether this path exposes the generic ``--yes`` ceremony.
+    ``None`` retains the legacy default of following :attr:`destructive`; generated descriptors
+    set it explicitly so a bespoke historical handler can retain its narrower CLI surface.
     """
 
     group: str
@@ -71,3 +83,6 @@ class GeneratedVerb:
     unwrap_request: bool = False
     flags: tuple[GeneratedFlag, ...] = ()
     json_params: tuple[str, ...] = field(default_factory=tuple)
+    positionals: tuple[str, ...] = ()
+    local_flags: tuple[GeneratedLocalFlag, ...] = ()
+    confirm_destructive: bool | None = None

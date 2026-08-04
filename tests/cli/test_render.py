@@ -1,6 +1,6 @@
 """``render``/``render_record``/``render_report`` emit the default human table.
 
-``--json`` is no longer a projection here: every curated verb's ``--json`` prints the whole
+``--json`` is no longer a projection here: every specialised handler's ``--json`` prints the whole
 server envelope via :func:`render_envelope` (ADR-0421 §6), routed through :func:`emit`. The
 table renderers below are the default (non-``--json``) path only and take no ``as_json`` flag.
 """
@@ -141,7 +141,7 @@ def test_render_report_footer_projects_onto_total_columns(capsys) -> None:
     assert "total_reserved" in out  # the missing total keeps its (blank) footer slot
 
 
-# --- emit: the single --json branch shared by every curated verb (ADR-0421 §6) ---
+# --- emit: the single --json branch shared by specialised handlers (ADR-0421 §6) ---
 
 
 def test_emit_json_prints_whole_envelope_and_skips_table(capsys) -> None:

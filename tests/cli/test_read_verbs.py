@@ -1,4 +1,4 @@
-"""Curated read verbs call the right tool, flatten the envelope, and render rows/records.
+"""Specialised read handlers call the right tool, flatten the envelope, and render rows/records.
 
 The verbs are driven through fakes for the MCP client so the tests are hermetic: a fake
 client returns a deserialized ``ToolResponse``-shaped payload (``object_id`` + ``status``
@@ -15,7 +15,8 @@ import pytest
 
 import kdive.cli.commands.reads as reads
 from kdive.cli.__main__ import build_parser
-from kdive.cli.commands.registry import REGISTRY
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands.registry import HANDLER_OVERRIDES
 
 
 class _FakeResult:
@@ -217,28 +218,31 @@ def test_data_shaped_lists_ignore_missing_list_data(
     assert out and len(out.splitlines()) == 1
 
 
-def test_every_registry_verb_has_a_handler() -> None:
-    # The registry is the single source of truth; every entry must resolve to a callable.
-    for verb in REGISTRY:
-        assert callable(verb.handler)
+def test_every_handler_override_is_callable() -> None:
+    assert all(callable(handler) for handler in HANDLER_OVERRIDES.values())
 
 
 def test_report_verb_is_registered_read_only_and_scope_required() -> None:
-    # One curated verb now covers both scopes: --scope is required so the CLI never picks a
-    # scope for the caller, and it sits at the merged tool's generated path so it overrides
-    # the schema-derived shape instead of adding a second path.
-    by_path = {(v.group, v.sub): v for v in REGISTRY}
-    report = by_path[("accounting", "report")]
-    assert report.tool == "accounting.report" and report.read_only
-    assert report.required_options == ("scope",)
-    assert report.options == ("projects", "group_by", "since", "until")
+    # One specialised handler covers both scopes: --scope is required so the CLI never picks a
+    # scope for the caller, and its descriptor owns the generated path instead of adding one.
+    by_tool = {verb.tool: verb for verb in GENERATED_VERBS}
+    report = by_tool["accounting.report"]
+    assert report.read_only
+    assert next(flag for flag in report.flags if flag.dest == "scope").required
+    assert {flag.dest for flag in report.flags} == {
+        "scope",
+        "projects",
+        "group_by",
+        "since",
+        "until",
+    }
     assert "platform_auditor" in report.help  # help notes the role the wide scope needs
-    usage = by_path[("accounting", "usage")]
-    assert usage.tool == "accounting.usage" and usage.read_only
-    assert usage.options == ("project", "investigation_id")
+    usage = by_tool["accounting.usage"]
+    assert usage.read_only
+    assert {flag.dest for flag in usage.flags} == {"project", "investigation_id"}
 
 
-_READ_VERBS = [v for v in REGISTRY if v.read_only]
+_READ_VERBS = [v for v in GENERATED_VERBS if v.read_only and v.tool in HANDLER_OVERRIDES]
 
 #: Values a verb needs beyond the generic ``"<name>-val"`` placeholder: an enum-valued
 #: option needs a real member, a numeric one needs a parseable number, and a verb whose
@@ -252,17 +256,16 @@ _VERB_ARG_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
 
 
 @pytest.mark.parametrize("verb", _READ_VERBS, ids=lambda v: f"{v.group}.{v.sub}")
-def test_handler_calls_the_tool_the_registry_declares(verb, monkeypatch, capsys) -> None:
-    # Bind verb.tool (what the read-only gate test checks) to the handler's real call, so a
-    # registry that declares a read-only tool but dispatches to another would fail here.
+def test_handler_calls_its_descriptor_tool(verb, monkeypatch, capsys) -> None:
+    # Bind the descriptor's tool (what the read-only gate checks) to the handler's real call.
     client = _FakeClient(_collection([]))
     monkeypatch.setattr(reads, "_session_factory", lambda: _FakeSession(client))
     args = argparse.Namespace(json=False)
-    for name in (*verb.positionals, *verb.options, *verb.required_options):
-        setattr(args, name, f"{name}-val")
+    for flag in verb.flags:
+        setattr(args, flag.dest, f"{flag.dest}-val")
     for name, value in _VERB_ARG_OVERRIDES.get((verb.group, verb.sub), {}).items():
         setattr(args, name, value)
-    asyncio.run(verb.handler(args))
+    asyncio.run(HANDLER_OVERRIDES[verb.tool](args))
     assert client.calls and client.calls[0][0] == verb.tool
 
 
@@ -316,8 +319,8 @@ def test_record_verb_denial_exits_authorization_denied(
 def test_list_verb_json_emits_whole_envelope_with_next_actions(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    # A curated list verb's --json is the server envelope verbatim: nested item envelopes plus
-    # the navigation contract (suggested_next_actions) the old column projection dropped.
+    # A specialised list handler's --json is the server envelope verbatim, including nested
+    # item envelopes and the navigation contract (suggested_next_actions).
     envelope = _collection([_item("al-1", "active", {"project": "p", "system": "s"})])
     envelope["suggested_next_actions"] = ["allocations.release"]
     _install_session(monkeypatch, envelope)
@@ -396,7 +399,11 @@ def test_wait_verb_omitting_timeout_sends_only_the_id(
 
 def _wait_argv(group: str, object_id: str, *tail: str) -> argparse.Namespace:
     """Parse a real ``kdivectl <group> wait`` command line, so the coercion under test runs."""
-    return build_parser().parse_args([group, "wait", object_id, *tail])
+    from kdive.cli.commands import registry
+
+    args = build_parser().parse_args([group, "wait", object_id, *tail])
+    verb = next(verb for verb in GENERATED_VERBS if (verb.group, verb.sub) == (group, "wait"))
+    return registry._adapt_handler_args(verb, args)  # noqa: SLF001 - exercises parser-to-handler seam
 
 
 @pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
@@ -407,7 +414,7 @@ def test_wait_verb_sends_the_timeout_as_a_number(
     """``--timeout-s`` reaches the tool as a ``float``, driven through the real parser.
 
     Both tools declare ``timeout_s`` as a JSON ``number``. The coercion now happens at the
-    parser seam, read off the generated verb at the same path (ADR-0474 decision 1), so this
+    parser seam, read from the descriptor (ADR-0474 decision 1), so this
     drives ``build_parser`` rather than handing the handler a value argparse could not produce.
     ``0`` is the documented point read and must arrive as ``0.0``, not be dropped.
     """

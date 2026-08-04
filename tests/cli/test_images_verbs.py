@@ -1,12 +1,12 @@
 """``kdivectl images`` verbs call the right server tool with the expected payload.
 
 The verbs are driven through fakes for the MCP client so the tests are hermetic. ``list``
-is a read passthrough; ``upload``/``delete``/``prune``/``extend`` are curated mutating verbs
-that run the fail-closed token preflight first, then call their server tool (ADR-0089). A
+is a read passthrough; ``upload``/``delete``/``prune``/``extend`` use specialised mutating
+handlers that run the fail-closed token preflight first, then call their server tool (ADR-0089). A
 denial envelope from the server maps to exit ``3``.
 
-``publish`` has no curated verb: it takes the schema-generated shape, so it is exercised over
-the real argv-to-dispatch route rather than by calling a handler directly (ADR-0461).
+``publish`` has no specialised handler: its descriptor takes the generic dispatch path, so it is
+exercised over the real argv-to-dispatch route rather than by calling a handler directly (ADR-0461).
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ import kdive.cli.commands.mutations as mutations
 import kdive.cli.commands.reads as reads
 from kdive.cli import dispatch
 from kdive.cli.__main__ import build_parser
-from kdive.cli.commands.registry import REGISTRY
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands.registry import HANDLER_OVERRIDES
 
 
 class _FakeResult:
@@ -137,13 +138,13 @@ def test_describe_omits_target_kernel_when_absent(monkeypatch: pytest.MonkeyPatc
 
 
 def test_describe_verb_registered_read_only() -> None:
-    by_tool = {verb.tool: verb for verb in REGISTRY if verb.group == "images"}
+    by_tool = {verb.tool: verb for verb in GENERATED_VERBS if verb.group == "images"}
     assert by_tool["images.describe"].read_only is True
 
 
 def test_describe_verb_declares_target_kernel_option() -> None:
-    by_tool = {verb.tool: verb for verb in REGISTRY if verb.group == "images"}
-    assert "target_kernel" in by_tool["images.describe"].options
+    by_tool = {verb.tool: verb for verb in GENERATED_VERBS if verb.group == "images"}
+    assert "target_kernel" in {flag.dest for flag in by_tool["images.describe"].flags}
 
 
 def test_upload_calls_images_upload_with_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -411,7 +412,7 @@ def test_extend_json_flag_threads_through_to_render(
 
 
 def test_image_verbs_registered_with_expected_read_only_flags() -> None:
-    by_tool = {verb.tool: verb for verb in REGISTRY if verb.group == "images"}
+    by_tool = {verb.tool: verb for verb in GENERATED_VERBS if verb.group == "images"}
     assert by_tool["images.list"].read_only is True
     for mutating in (
         "images.upload",
@@ -422,16 +423,15 @@ def test_image_verbs_registered_with_expected_read_only_flags() -> None:
         assert by_tool[mutating].read_only is False
 
 
-def test_publish_is_not_curated_so_the_generated_verb_wins() -> None:
-    # A curated verb overrides the generated shape at its path, so leaving one here would
-    # re-impose a hand-written payload on a schema-derived tool (ADR-0461).
-    assert not [verb for verb in REGISTRY if verb.group == "images" and verb.sub == "publish"]
+def test_publish_uses_generic_generated_dispatch() -> None:
+    # Its descriptor has no specialised renderer, so argv reaches generic payload assembly.
+    assert "images.publish" not in HANDLER_OVERRIDES
 
 
 # --- `kdivectl images publish` over the real dispatch path -----------------------------------
 #
-# Curated verbs bypass the generated-dispatch seam entirely, so asserting against a hand-called
-# handler cannot tell whether the shipped command line still works. These drive the real route:
+# Specialised handlers and generic descriptors use different execution paths, so asserting against
+# a hand-called handler cannot prove the generic command line works. These drive the real route:
 # argv -> build_parser() -> dispatch.run() -> registry.run_verb() -> invoke_generated_verb(),
 # with only the transport (`_session_factory`) faked.
 

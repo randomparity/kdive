@@ -133,6 +133,32 @@ def test_op_underscores_become_a_dashed_subcommand() -> None:
     assert (verb.group, verb.sub) == ("resources", "set-scheduling")
 
 
+def test_unshaped_destructive_tool_derives_yes_confirmation() -> None:
+    verb = gen._verb_for(
+        _tool("demo.erase", {"properties": {}}, annotations=_Ann(destructiveHint=True))
+    )
+    assert verb.destructive is True
+    assert verb.confirm_destructive is True
+
+
+def test_shaped_destructive_tool_suppresses_generic_yes_confirmation() -> None:
+    verb = gen._verb_for(
+        _tool(
+            "images.extend",
+            {
+                "properties": {
+                    "image_id": {"type": "string"},
+                    "seconds": {"type": "integer"},
+                    "reason": {"type": "string"},
+                }
+            },
+            annotations=_Ann(destructiveHint=True),
+        )
+    )
+    assert verb.destructive is True
+    assert verb.confirm_destructive is False
+
+
 def test_discriminated_request_falls_back_to_the_whole_param_json_escape() -> None:
     # A `request` that is a discriminated union (accounting.report, reports.generate,
     # audit.query) has no object body to flatten. Flattening to zero flags would leave the

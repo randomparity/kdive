@@ -28,7 +28,7 @@ def tool_envelope(result: object) -> Mapping[str, object]:
     schema, but :class:`~kdive.mcp.responses.ToolResponse` is self-referential
     (``items: list[ToolResponse]``), so that schema is cyclic; some fastmcp versions fail the
     rebuild and leave ``data`` ``None`` while ``structured_content`` still carries the same
-    dict. The curated verbs flatten plain dicts, so the schema-independent
+    dict. Specialised handlers flatten plain dicts, so the schema-independent
     ``structured_content`` is both the robust and the correct source (ADR-0019/0089).
 
     Raises:

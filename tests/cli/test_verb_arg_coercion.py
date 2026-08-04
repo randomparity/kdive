@@ -1,7 +1,7 @@
 """A numeric CLI argument is coerced at the parser seam, and a float must be finite (ADR-0474).
 
-Curated options carry no type of their own — the coercion is read off the *generated* verb at the
-same path, exactly as ``choices`` and ``help`` already are (ADR-0469). These tests drive the real
+Every option's coercion comes from its generated descriptor, including fields selected by a
+presentation overlay for a specialised handler (ADR-0469). These tests drive the real
 ``build_parser`` rather than a handler, because the defect they pin (#1619) is that a malformed
 value used to survive parsing and die later in a handler's bare ``int()``.
 
@@ -18,15 +18,14 @@ from _pytest.mark import ParameterSet
 
 from kdive.cli.__main__ import build_parser, main
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
-from kdive.cli.commands.registry import _ARG_TYPES, GENERATED_ARG_PREFIX, REGISTRY, _curated_flags
+from kdive.cli.commands.registry import _ARG_TYPES, GENERATED_ARG_PREFIX
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
-from tests.cli.verb_argv import required_argv_for_curated, required_argv_for_generated
+from tests.cli.verb_argv import required_argv_for_generated
 
-#: Every curated parameter whose generated counterpart is a JSON ``number``, with the argv tail
-#: that reaches it and the Python type it must land on the namespace as. Derived by hand here on
-#: purpose: the production seam derives the same set from ``_curated_flags``, so restating it in
-#: the test is what makes a silent widening (or narrowing) of that set visible.
-_CURATED_NUMERIC = [
+#: Numeric fields selected by a presentation overlay, with the argv tail that reaches each one
+#: and the Python type it must land on the namespace as. This explicit matrix makes a silent
+#: widening or narrowing of that operator-facing set visible.
+_NUMERIC = [
     pytest.param(["jobs", "wait", "job-1"], "--timeout-s", "timeout_s", float, id="jobs-wait"),
     pytest.param(
         ["allocations", "wait", "alloc-1"],
@@ -69,9 +68,9 @@ _CURATED_NUMERIC = [
 _MALFORMED = ["abc", "", "1.2.3", "inf", "-inf", "nan", "NaN", "infinity", "1e", "0x10", "1e400"]
 
 
-@pytest.mark.parametrize(("head", "flag", "dest", "expected"), _CURATED_NUMERIC)
+@pytest.mark.parametrize(("head", "flag", "dest", "expected"), _NUMERIC)
 @pytest.mark.parametrize("value", _MALFORMED)
-def test_curated_numeric_option_refuses_a_malformed_value(
+def test_numeric_option_refuses_a_malformed_value(
     head: list[str], flag: str, dest: str, expected: type, value: str, capsys
 ) -> None:
     """A non-numeric value is an argparse usage error (exit 2), never a handler ``ValueError``.
@@ -90,18 +89,18 @@ def test_curated_numeric_option_refuses_a_malformed_value(
     assert f"argument {flag}:" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(("head", "flag", "dest", "expected"), _CURATED_NUMERIC)
-def test_curated_numeric_option_lands_as_a_number(
+@pytest.mark.parametrize(("head", "flag", "dest", "expected"), _NUMERIC)
+def test_numeric_option_lands_as_a_number(
     head: list[str], flag: str, dest: str, expected: type
 ) -> None:
     """A well-formed value arrives on the namespace already coerced, not as the raw ``str``."""
     args = build_parser().parse_args([*head, flag, "12"])
-    assert getattr(args, dest) == 12
-    assert isinstance(getattr(args, dest), expected)
+    assert getattr(args, f"{GENERATED_ARG_PREFIX}{dest}") == 12
+    assert isinstance(getattr(args, f"{GENERATED_ARG_PREFIX}{dest}"), expected)
 
 
-@pytest.mark.parametrize(("head", "flag", "dest", "expected"), _CURATED_NUMERIC)
-def test_curated_numeric_option_omitted_stays_none(
+@pytest.mark.parametrize(("head", "flag", "dest", "expected"), _NUMERIC)
+def test_numeric_option_omitted_stays_none(
     head: list[str], flag: str, dest: str, expected: type
 ) -> None:
     """Coercion never fires for an absent option, so an omitted value stays ``None``.
@@ -113,11 +112,11 @@ def test_curated_numeric_option_omitted_stays_none(
     if flag == "--seconds":
         pytest.skip(f"{flag} is a required option and cannot be omitted")
     args = build_parser().parse_args(head)
-    assert getattr(args, dest) is None
+    assert getattr(args, f"{GENERATED_ARG_PREFIX}{dest}") is None
 
 
 @pytest.mark.parametrize("value", ["3.5", "0", "-1.5"])
-def test_curated_float_option_keeps_a_fractional_value(value: str) -> None:
+def test_float_option_keeps_a_fractional_value(value: str) -> None:
     """``--timeout-s`` is a float, not an int: a fractional timeout must survive the seam.
 
     ``-1.5`` pins the *sign* as well as the fraction — a coercion that quietly took the magnitude
@@ -125,12 +124,12 @@ def test_curated_float_option_keeps_a_fractional_value(value: str) -> None:
     an accepted wait.
     """
     args = build_parser().parse_args(["jobs", "wait", "job-1", f"--timeout-s={value}"])
-    assert args.timeout_s == float(value)
-    assert isinstance(args.timeout_s, float)
+    assert args.genarg_timeout_s == float(value)
+    assert isinstance(args.genarg_timeout_s, float)
 
 
 @pytest.mark.parametrize("value", ["1.5", "0.5", "2e3"])
-def test_curated_int_option_refuses_a_non_integer(value: str) -> None:
+def test_int_option_refuses_a_non_integer(value: str) -> None:
     """``--seconds`` is an int; a fractional value is a usage error, not a silent truncation."""
     with pytest.raises(SystemExit) as excinfo:
         build_parser().parse_args(
@@ -139,7 +138,7 @@ def test_curated_int_option_refuses_a_non_integer(value: str) -> None:
     assert excinfo.value.code == 2
 
 
-def test_curated_int_option_accepts_a_negative_value() -> None:
+def test_int_option_accepts_a_negative_value() -> None:
     """A negative integer parses: a range bound is not something the parser can answer.
 
     ``GeneratedFlag`` carries no schema ``minimum`` (ADR-0474 decision 3), so the seam types the
@@ -149,7 +148,7 @@ def test_curated_int_option_accepts_a_negative_value() -> None:
     args = build_parser().parse_args(
         ["images", "extend", "img-1", "--reason", "r", "--seconds", "-1"]
     )
-    assert args.seconds == -1
+    assert args.genarg_seconds == -1
 
 
 def _required_tail(verb: GeneratedVerb, skip: str) -> list[str]:
@@ -159,13 +158,10 @@ def _required_tail(verb: GeneratedVerb, skip: str) -> list[str]:
     under test, which would make every assertion below pass no matter what ``_ARG_TYPES`` holds —
     the exact vacuity this helper exists to prevent.
 
-    A curated ``Verb`` **replaces** the generated parser at its path, so ``jobs wait`` takes a
-    positional id and has no ``--job-id`` at all. The required surface therefore has to come from
-    whichever shape actually sits at the path, not from the generated descriptor unconditionally.
+    The generated descriptor for ``jobs wait`` records a positional id and no ``--job-id``.
+    Required argv therefore has to follow the descriptor's presentation metadata, not assume
+    every schema property is exposed as an option.
     """
-    curated = {(v.group, v.sub): v for v in REGISTRY}.get((verb.group, verb.sub))
-    if curated is not None:
-        return required_argv_for_curated(curated, skip)
     return required_argv_for_generated(verb, skip)
 
 
@@ -184,10 +180,10 @@ def _generated_float_flags() -> list[ParameterSet]:
 def test_generated_float_flag_refuses_a_non_finite_value(
     verb: GeneratedVerb, flag: GeneratedFlag, value: str, capsys
 ) -> None:
-    """The finite check is repo-wide, not scoped to the four curated parameters (decision 2).
+    """The finite check is repo-wide, not scoped to the four overlaid parameters (decision 2).
 
-    ``_ARG_TYPES`` is the one map both halves of the parser read, so every generated float flag
-    is covered by construction. All six are timeouts or deadlines in seconds, where an infinite
+    ``_ARG_TYPES`` is the one map every descriptor flag uses, so every generated float flag is
+    covered by construction. All six are timeouts or deadlines in seconds, where an infinite
     or undefined value has no meaning the wire format could carry.
 
     The whole required surface is supplied and the *message* is asserted, not just the exit code:
@@ -218,9 +214,7 @@ def test_generated_float_flag_accepts_a_finite_value(
     """
     argv = [verb.group, verb.sub, *_required_tail(verb, flag.name), f"{flag.name}=1.5"]
     args = build_parser().parse_args(argv)
-    value = getattr(args, flag.dest, None)
-    if value is None:  # a curated verb overrides this path and keeps the bare dest
-        value = getattr(args, f"{GENERATED_ARG_PREFIX}{flag.dest}", None)
+    value = getattr(args, f"{GENERATED_ARG_PREFIX}{flag.dest}", None)
     assert value == 1.5
     assert isinstance(value, float)
 
@@ -237,20 +231,19 @@ def test_every_generated_float_flag_is_covered() -> None:
     assert len(_generated_float_flags()) == 6, "ADR-0474 decision 2 enumerates exactly 6"
 
 
-def test_curated_parameter_without_a_generated_counterpart_stays_a_string() -> None:
-    """A curated option the generated verb does not know contributes no type (ADR-0469).
+def test_accounting_convenience_parameters_stay_strings() -> None:
+    """Accounting's union-derived presentation fields remain strings (ADR-0469).
 
-    Both ``accounting`` verbs *do* have a generated twin, but its whole payload is a nested
-    object carried in ``json_params``, so it declares no scalar flags at all and
-    ``_curated_flags`` returns ``{}`` from the empty comprehension. Every one of these options
-    must still accept an arbitrary string rather than being coerced or — the argparse trap —
-    rejected outright.
+    Their tool schemas wrap the values in discriminated unions. The generator recursively finds
+    the selected branch properties and emits string flags for the operator-facing overlay. Each
+    must accept an arbitrary string rather than being coerced or, by the argparse trap, rejected
+    outright.
     """
     args = build_parser().parse_args(
         ["accounting", "report", "--scope", "anything", "--since", "2026-01-01"]
     )
-    assert args.scope == "anything"
-    assert isinstance(args.since, str)
+    assert args.genarg_scope == "anything"
+    assert isinstance(args.genarg_since, str)
 
 
 def test_store_true_flags_still_build_and_parse() -> None:
@@ -269,20 +262,8 @@ def test_store_true_flags_still_build_and_parse() -> None:
     assert teardown.force
 
 
-def test_curated_types_are_derived_not_restated() -> None:
-    """Every curated parameter's parser type is the generated flag's, at the same path.
-
-    This is the acceptance criterion that the coercion is *derived*: a tool parameter that
-    changes from ``integer`` to ``number`` in its schema must move the CLI with it, with no
-    hand-written second copy to go stale.
-
-    Scope, stated so this is not read as more than it is: the assertion is that the parser hands
-    each parameter whatever ``_ARG_TYPES`` maps its schema type to — the *wiring*. It is
-    deliberately not a check on what that map contains, which would be circular here (remapping
-    an entry moves both sides at once). The map's content is pinned behaviourally instead, by the
-    refusal and acceptance tests above: remapping ``float`` to the builtin ``float`` or to ``int``
-    reddens those, not this.
-    """
+def test_descriptor_types_are_not_restated() -> None:
+    """Each parser action uses exactly the descriptor's type mapping."""
     parser = build_parser()
     actions = {
         (group, sub): {a.dest: a for a in choice._actions}  # noqa: SLF001 - argparse exposes no public read
@@ -290,24 +271,18 @@ def test_curated_types_are_derived_not_restated() -> None:
         for sub, choice in _subparser_choices(group_parser).items()
     }
     numeric = 0
-    for verb in REGISTRY:
-        derived = _curated_flags(verb)
+    for verb in GENERATED_VERBS:
         by_dest = actions.get((verb.group, verb.sub), {})
-        for name in (*verb.positionals, *verb.options, *verb.required_options):
-            flag = derived.get(name)
-            action = by_dest.get(name)
-            if flag is None or action is None or flag.arg_type is None:
+        for flag in verb.flags:
+            action = by_dest.get(f"{GENERATED_ARG_PREFIX}{flag.dest}")
+            if action is None or flag.arg_type is None or flag.action == "append":
                 continue
-            # Identity, not merely "some callable": the parser must hand this parameter the very
-            # object `_ARG_TYPES` maps its schema type to, so remapping that entry moves the CLI.
             assert action.type is _ARG_TYPES[flag.arg_type], (
-                f"{verb.group} {verb.sub} --{name} is {action.type!r}, "
+                f"{verb.group} {verb.sub} {flag.name} is {action.type!r}, "
                 f"not the derived {_ARG_TYPES[flag.arg_type]!r}"
             )
             numeric += flag.arg_type != "str"
-    # Counts only the numeric params — the surface this guard exists for. Counting every curated
-    # param would let the numeric set fall to zero while the sentinel still read comfortably high.
-    assert numeric == 4, f"the curated numeric surface changed size ({numeric}); ADR-0474 lists 4"
+    assert numeric >= 4, f"the numeric descriptor surface disappeared ({numeric})"
 
 
 def _subparser_choices(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:

@@ -14,16 +14,12 @@ import pytest
 
 from kdive.cli.__main__ import build_parser
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
-from kdive.cli.commands.registry import GENERATED_ARG_PREFIX, REGISTRY
+from kdive.cli.commands.registry import GENERATED_ARG_PREFIX
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 
-# Every generated verb that carries at least one non-scalar (``json_params``) parameter. A
-# curated ``Verb`` overrides the argparse shape at its path, so those paths do not take the
-# generated json-flag surface and are excluded.
-_CURATED_PATHS = {(v.group, v.sub) for v in REGISTRY}
-_JSON_PARAM_VERBS = [
-    v for v in GENERATED_VERBS if v.json_params and (v.group, v.sub) not in _CURATED_PATHS
-]
+# Every descriptor that carries at least one non-scalar parameter exposes its JSON-flag surface,
+# even when its tool uses a specialised renderer.
+_JSON_PARAM_VERBS = [v for v in GENERATED_VERBS if v.json_params]
 
 # The specific tools the issue names as carrying nested-object / object-array params.
 _TARGET_TOOLS = {
