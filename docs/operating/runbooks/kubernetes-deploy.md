@@ -168,29 +168,374 @@ forward-only: do not restore an old worker image, force-delete a Pod, remove a f
 suppress an error. All Helm stages use the same target chart, image, and target values file.
 Do not use `--reuse-values`, `--atomic`, or a rollback.
 
-```bash
-set -eu
-RELEASE=kdive
-NAMESPACE=<namespace>
-FULL="${RELEASE}-kdive"
-CHART=deploy/helm/kdive
-TARGET_VALUES=kdive-target-values.yaml
-OPERATOR_DATABASE_URL="${OPERATOR_DATABASE_URL:?set an operator-authorized backend SQL URL}"
+#### Stage 1 — Capture restartable recovery state
 
-# Capture overrides and the live desired core counts before any scaling. Edit this one target file
-# now to select the target image and configuration; do not edit it after the hooked all-zero stage.
-helm get values "$RELEASE" -n "$NAMESPACE" -o yaml >"$TARGET_VALUES"
+Set the namespace explicitly. The release and repository chart path default to the reference
+names, but may be overridden in the environment. Run every block in Bash from the repository root.
+For a new attempt, capture the current overrides into a new restricted target-values file:
+
+```bash
+set -euo pipefail
+umask 077
+: "${NAMESPACE:?set the target namespace}"
+RELEASE=${RELEASE:-kdive}
+CHART=${CHART:-deploy/helm/kdive}
+TARGET_VALUES=${TARGET_VALUES:-kdive-target-values.yaml}
+RECOVERY_STATE_FILE=${RECOVERY_STATE_FILE:-${RELEASE}-fence-upgrade.state}
+TARGET_VALUES_TMP="${TARGET_VALUES}.tmp"
+RECOVERY_STATE_TMP="${RECOVERY_STATE_FILE}.tmp"
+COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"
+FULL="${RELEASE}-kdive"
+RECOVERY_STATE="${FULL}-fence-upgrade"
+QUEUE_STATE_JOB="${FULL}-fence-queue-state"
+DB_CLIENT_JOB="${FULL}-fence-db-check"
+INCARNATION_JOB="${FULL}-fence-worker-check"
+
+validate_short_name() {
+  local name=$1
+  case "$name" in
+    "" | *[!a-z0-9-]* | -* | *-)
+      echo "invalid generated Kubernetes name: $name" >&2
+      exit 2
+      ;;
+  esac
+  test "${#name}" -le 63 || {
+    echo "generated Kubernetes name exceeds 63 characters: $name" >&2
+    exit 2
+  }
+}
+
+for name in "$RECOVERY_STATE" "$QUEUE_STATE_JOB" "$DB_CLIENT_JOB" "$INCARNATION_JOB"; do
+  validate_short_name "$name"
+done
+test ! -e "$TARGET_VALUES" || {
+  echo "target values already exist: $TARGET_VALUES; do not overwrite them" >&2
+  exit 2
+}
+for path in "$TARGET_VALUES_TMP" "$RECOVERY_STATE_FILE" "$RECOVERY_STATE_TMP" \
+  "$COMPLETED_STATE"; do
+  test ! -e "$path" || {
+    echo "recovery artifact already exists: $path; inspect it before retrying" >&2
+    exit 2
+  }
+done
+
+helm get values "$RELEASE" -n "$NAMESPACE" -o yaml >"$TARGET_VALUES_TMP"
+chmod 0600 "$TARGET_VALUES_TMP"
+mv -- "$TARGET_VALUES_TMP" "$TARGET_VALUES"
+test "$(stat -c '%a' "$TARGET_VALUES")" = 600 || {
+  echo "target values are not mode 0600: $TARGET_VALUES" >&2
+  exit 2
+}
+```
+
+Edit this one target file now to select the target image and configuration, then run
+`chmod 0600 "$TARGET_VALUES"`. Do not edit it after Stage 4. The next block renders that edited
+file before any workload scale, extracts only the target migration Job's image and
+`KDIVE_DATABASE_URL` Secret reference, captures the live counts and queue state, and publishes the
+local record atomically before creating the cluster record. It never reads, stores, or prints a
+Secret value. If a diagnostic Job from an interrupted attempt exists, inspect its failed logs first,
+then set `RETRY_DIAGNOSTIC=1`; the retry deletes only that exact Job.
+
+```bash
+set -euo pipefail
+umask 077
+: "${NAMESPACE:?set the target namespace}"
+RELEASE=${RELEASE:-kdive}
+CHART=${CHART:-deploy/helm/kdive}
+TARGET_VALUES=${TARGET_VALUES:-kdive-target-values.yaml}
+RECOVERY_STATE_FILE=${RECOVERY_STATE_FILE:-${RELEASE}-fence-upgrade.state}
+TARGET_VALUES_TMP="${TARGET_VALUES}.tmp"
+RECOVERY_STATE_TMP="${RECOVERY_STATE_FILE}.tmp"
+COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"
+FULL="${RELEASE}-kdive"
+RECOVERY_STATE="${FULL}-fence-upgrade"
+QUEUE_STATE_JOB="${FULL}-fence-queue-state"
+DB_CLIENT_JOB="${FULL}-fence-db-check"
+INCARNATION_JOB="${FULL}-fence-worker-check"
+RETRY_DIAGNOSTIC="${RETRY_DIAGNOSTIC:-}"
+
+validate_nonnegative_count() {
+  case "$1" in
+    "" | *[!0-9]*)
+      echo "invalid live replica count: $1" >&2
+      exit 2
+      ;;
+  esac
+}
+
+validate_short_name() {
+  local name=$1
+  case "$name" in
+    "" | *[!a-z0-9-]* | -* | *-)
+      echo "invalid generated Kubernetes name: $name" >&2
+      exit 2
+      ;;
+  esac
+  test "${#name}" -le 63 || {
+    echo "generated Kubernetes name exceeds 63 characters: $name" >&2
+    exit 2
+  }
+}
+
+for name in "$RECOVERY_STATE" "$QUEUE_STATE_JOB" "$DB_CLIENT_JOB" "$INCARNATION_JOB"; do
+  validate_short_name "$name"
+done
+test -f "$TARGET_VALUES" || {
+  echo "missing edited target values: $TARGET_VALUES; run the new-attempt block first" >&2
+  exit 2
+}
+chmod 0600 "$TARGET_VALUES"
+test "$(stat -c '%a' "$TARGET_VALUES")" = 600
+for path in "$TARGET_VALUES_TMP" "$RECOVERY_STATE_FILE" "$RECOVERY_STATE_TMP" \
+  "$COMPLETED_STATE"; do
+  test ! -e "$path" || {
+    echo "recovery artifact already exists: $path; use the Stage 1 retry block" >&2
+    exit 2
+  }
+done
+
+read -r TARGET_IMAGE MIGRATION_SECRET MIGRATION_KEY < <(
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" \
+    --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
+    --set lifecycleWitness.enabled=false --show-only templates/job-migrate.yaml |
+    kubectl create --dry-run=client -f - -o jsonpath='{.spec.template.spec.containers['\
+'?(@.name=="migrate")].image}{"\t"}{.spec.template.spec.containers['\
+'?(@.name=="migrate")].env[?(@.name=="KDIVE_DATABASE_URL")].valueFrom.secretKeyRef.name}'\
+'{"\t"}{.spec.template.spec.containers[?(@.name=="migrate")].env['\
+'?(@.name=="KDIVE_DATABASE_URL")].valueFrom.secretKeyRef.key}{"\n"}'
+)
+test -n "$TARGET_IMAGE" && test -n "$MIGRATION_SECRET" && test -n "$MIGRATION_KEY" || {
+  echo "target migration Job lacks an image or KDIVE_DATABASE_URL Secret reference" >&2
+  exit 2
+}
+
 SERVER_REPLICAS=$(kubectl get deployment/${FULL}-server -n "$NAMESPACE" \
   -o jsonpath='{.spec.replicas}')
 WORKER_REPLICAS=$(kubectl get statefulset/${FULL}-worker -n "$NAMESPACE" \
   -o jsonpath='{.spec.replicas}')
 RECONCILER_REPLICAS=$(kubectl get deployment/${FULL}-reconciler -n "$NAMESPACE" \
   -o jsonpath='{.spec.replicas}')
+validate_nonnegative_count "$SERVER_REPLICAS"
+validate_nonnegative_count "$WORKER_REPLICAS"
+validate_nonnegative_count "$RECONCILER_REPLICAS"
+
+CURRENT_MIGRATION_SECRET=$(kubectl get job/${FULL}-migrate -n "$NAMESPACE" \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="migrate")]'\
+'.env[?(@.name=="KDIVE_DATABASE_URL")].valueFrom.secretKeyRef.name}')
+CURRENT_MIGRATION_KEY=$(kubectl get job/${FULL}-migrate -n "$NAMESPACE" \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="migrate")]'\
+'.env[?(@.name=="KDIVE_DATABASE_URL")].valueFrom.secretKeyRef.key}')
+test -n "$CURRENT_MIGRATION_SECRET" && test -n "$CURRENT_MIGRATION_KEY" || {
+  echo "current migration Job lacks its KDIVE_DATABASE_URL Secret reference" >&2
+  exit 2
+}
+
+if kubectl get job "$QUEUE_STATE_JOB" -n "$NAMESPACE" -o name; then
+  test "$RETRY_DIAGNOSTIC" = 1 || {
+    echo "inspect logs for $QUEUE_STATE_JOB, then retry with RETRY_DIAGNOSTIC=1" >&2
+    exit 2
+  }
+  kubectl delete job "$QUEUE_STATE_JOB" -n "$NAMESPACE" \
+    --ignore-not-found --wait=true --timeout=2m
+fi
+kubectl create -n "$NAMESPACE" -f - <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${QUEUE_STATE_JOB}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 60
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: queue-state
+          image: "${TARGET_IMAGE}"
+          env:
+            - name: KDIVE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ${CURRENT_MIGRATION_SECRET}
+                  key: ${CURRENT_MIGRATION_KEY}
+          command: ["python", "-c"]
+          args:
+            - |
+              import os
+              import psycopg
+
+              query = "SELECT queue_paused FROM ops_control WHERE singleton = true"
+              with psycopg.connect(os.environ["KDIVE_DATABASE_URL"]) as connection:
+                  rows = connection.execute(query).fetchall()
+              if len(rows) != 1:
+                  raise SystemExit(f"expected singleton ops_control row, got {len(rows)}")
+              print("true" if rows[0][0] else "false")
+EOF
+if ! kubectl wait --for=condition=complete job/${QUEUE_STATE_JOB} -n "$NAMESPACE" \
+  --timeout=75s; then
+  kubectl logs job/${QUEUE_STATE_JOB} -n "$NAMESPACE" --tail=100
+  exit 1
+fi
+PRIOR_QUEUE_PAUSED=$(kubectl logs job/${QUEUE_STATE_JOB} -n "$NAMESPACE" --tail=1)
+case "$PRIOR_QUEUE_PAUSED" in
+  true | false) ;;
+  *)
+    echo "invalid captured queue state: $PRIOR_QUEUE_PAUSED" >&2
+    exit 2
+    ;;
+esac
+kubectl delete job "$QUEUE_STATE_JOB" -n "$NAMESPACE" \
+  --ignore-not-found --wait=true --timeout=2m
+
+{
+  printf 'RELEASE=%q\n' "$RELEASE"
+  printf 'NAMESPACE=%q\n' "$NAMESPACE"
+  printf 'FULL=%q\n' "$FULL"
+  printf 'CHART=%q\n' "$CHART"
+  printf 'TARGET_VALUES=%q\n' "$TARGET_VALUES"
+  printf 'RECOVERY_STATE=%q\n' "$RECOVERY_STATE"
+  printf 'SERVER_REPLICAS=%q\n' "$SERVER_REPLICAS"
+  printf 'WORKER_REPLICAS=%q\n' "$WORKER_REPLICAS"
+  printf 'RECONCILER_REPLICAS=%q\n' "$RECONCILER_REPLICAS"
+  printf 'QUEUE_STATE_JOB=%q\n' "$QUEUE_STATE_JOB"
+  printf 'DB_CLIENT_JOB=%q\n' "$DB_CLIENT_JOB"
+  printf 'INCARNATION_JOB=%q\n' "$INCARNATION_JOB"
+  printf 'TARGET_IMAGE=%q\n' "$TARGET_IMAGE"
+  printf 'MIGRATION_SECRET=%q\n' "$MIGRATION_SECRET"
+  printf 'MIGRATION_KEY=%q\n' "$MIGRATION_KEY"
+  printf 'PRIOR_QUEUE_PAUSED=%q\n' "$PRIOR_QUEUE_PAUSED"
+} >"$RECOVERY_STATE_TMP"
+bash -n "$RECOVERY_STATE_TMP"
+chmod 0600 "$RECOVERY_STATE_TMP"
+mv -- "$RECOVERY_STATE_TMP" "$RECOVERY_STATE_FILE"
+
+kubectl create configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+  --from-literal=server_replicas="$SERVER_REPLICAS" \
+  --from-literal=worker_replicas="$WORKER_REPLICAS" \
+  --from-literal=reconciler_replicas="$RECONCILER_REPLICAS" \
+  --from-literal=prior_queue_paused="$PRIOR_QUEUE_PAUSED"
+
+verify_recovery_configmap() {
+  local key_count cm_server cm_worker cm_reconciler cm_queue
+  key_count=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o go-template='{{len .data}}')
+  cm_server=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.server_replicas}')
+  cm_worker=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.worker_replicas}')
+  cm_reconciler=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.reconciler_replicas}')
+  cm_queue=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.prior_queue_paused}')
+  test "$key_count" = 4 &&
+    test "$cm_server" = "$SERVER_REPLICAS" &&
+    test "$cm_worker" = "$WORKER_REPLICAS" &&
+    test "$cm_reconciler" = "$RECONCILER_REPLICAS" &&
+    test "$cm_queue" = "$PRIOR_QUEUE_PAUSED" || {
+      echo "recovery ConfigMap does not exactly match the local recovery state" >&2
+      exit 2
+    }
+}
+verify_recovery_configmap
 ```
 
-Keep the current witness and credentials healthy while the worker StatefulSet drains:
+The queue snapshot Job has a 60-second controller deadline and a 75-second API wait. Its query is
+limited to the singleton row and uses the current migration credential by Secret reference. A
+failure leaves that exact Job for inspection; it does not expose the credential.
+
+If local publication succeeds but ConfigMap creation or verification fails, do not recapture live
+counts or queue state. Run this retry block. It refuses a leftover temporary file, sources the
+restricted local record, creates the ConfigMap only when absent, and verifies the exact four-key
+record:
 
 ```bash
+set -euo pipefail
+umask 077
+RECOVERY_STATE_FILE=${RECOVERY_STATE_FILE:-${RELEASE:-kdive}-fence-upgrade.state}
+RECOVERY_STATE_TMP="${RECOVERY_STATE_FILE}.tmp"
+test -f "$RECOVERY_STATE_FILE" || {
+  echo "missing local recovery state: $RECOVERY_STATE_FILE; do not scale workloads" >&2
+  exit 2
+}
+test ! -e "$RECOVERY_STATE_TMP" || {
+  echo "temporary recovery state exists: $RECOVERY_STATE_TMP; inspect it before retrying" >&2
+  exit 2
+}
+bash -n "$RECOVERY_STATE_FILE"
+source "$RECOVERY_STATE_FILE"
+chmod 0600 "$TARGET_VALUES"
+
+if ! kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" -o name; then
+  kubectl create configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    --from-literal=server_replicas="$SERVER_REPLICAS" \
+    --from-literal=worker_replicas="$WORKER_REPLICAS" \
+    --from-literal=reconciler_replicas="$RECONCILER_REPLICAS" \
+    --from-literal=prior_queue_paused="$PRIOR_QUEUE_PAUSED"
+fi
+
+verify_recovery_configmap() {
+  local key_count cm_server cm_worker cm_reconciler cm_queue
+  key_count=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o go-template='{{len .data}}')
+  cm_server=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.server_replicas}')
+  cm_worker=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.worker_replicas}')
+  cm_reconciler=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.reconciler_replicas}')
+  cm_queue=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    -o jsonpath='{.data.prior_queue_paused}')
+  test "$key_count" = 4 &&
+    test "$cm_server" = "$SERVER_REPLICAS" &&
+    test "$cm_worker" = "$WORKER_REPLICAS" &&
+    test "$cm_reconciler" = "$RECONCILER_REPLICAS" &&
+    test "$cm_queue" = "$PRIOR_QUEUE_PAUSED" || {
+      echo "recovery ConfigMap does not exactly match the local recovery state" >&2
+      exit 2
+    }
+}
+verify_recovery_configmap
+```
+
+#### Stage 2 — Drain workers through the current witness
+
+Keep the current witness and credentials healthy. Compare the local counts to the cluster record,
+temporarily start one old server when the captured count is zero, and idempotently pause queue
+claiming through the authenticated, audited CLI before draining workers:
+
+```bash
+set -euo pipefail
+: "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+source "$RECOVERY_STATE_FILE"
+: "${KDIVE_SERVER_URL:?set the current MCP URL ending in /mcp}"
+: "${KDIVE_TOKEN:?set a platform-operator bearer token}"
+
+CM_SERVER_REPLICAS=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+  -o jsonpath='{.data.server_replicas}')
+CM_WORKER_REPLICAS=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+  -o jsonpath='{.data.worker_replicas}')
+CM_RECONCILER_REPLICAS=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+  -o jsonpath='{.data.reconciler_replicas}')
+test "$CM_SERVER_REPLICAS" = "$SERVER_REPLICAS" &&
+  test "$CM_WORKER_REPLICAS" = "$WORKER_REPLICAS" &&
+  test "$CM_RECONCILER_REPLICAS" = "$RECONCILER_REPLICAS" || {
+    echo "local replica counts differ from the recovery ConfigMap; stop and inspect both" >&2
+    exit 2
+  }
+
+if test "$SERVER_REPLICAS" -eq 0; then
+  kubectl scale deployment/${FULL}-server -n "$NAMESPACE" --replicas=1
+fi
+kubectl rollout status deployment/${FULL}-server -n "$NAMESPACE" --timeout=5m
+kubectl wait --for=condition=Ready pod -n "$NAMESPACE" \
+  -l "app=${FULL}-server" --timeout=5m
+timeout 60s uv run kdivectl --json ops set-queue-paused --paused
+
 kubectl scale statefulset/${FULL}-worker -n "$NAMESPACE" --replicas=0
 wait_for_pods_deleted() {
   local selector=$1
@@ -205,12 +550,33 @@ wait_for_pods_deleted() {
 wait_for_pods_deleted "app=${FULL}-worker"
 ```
 
-The five-minute Kubernetes API wall-clock wait applies to each selector in this maintenance stage.
-It fails the stage if a Pod or its finalizer remains; leave workloads stopped, correct the witness,
-or backend failure, and rerun the worker-drain stage. Do not remove finalizers or hide an error.
-Then stop the remaining workloads and prove that all four KDIVE workloads have no running Pods:
+The old-server rollout and readiness waits each have a five-minute Kubernetes API wall-clock limit;
+the audited pause call has a 60-second operator-host wall-clock limit; the worker deletion wait has
+a five-minute API limit. A failure leaves the recovery records intact. Restore old-server
+availability if needed and rerun Stage 2: scaling to one, setting the queue to paused, and scaling
+workers to zero are all idempotent. Do not remove finalizers or hide an error.
+
+#### Stage 3 — Stop all workloads and prove migration safety
+
+Stop the remaining workloads and prove that all four KDIVE workloads have no running Pods:
 
 ```bash
+set -euo pipefail
+: "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+source "$RECOVERY_STATE_FILE"
+
+wait_for_pods_deleted() {
+  local selector=$1
+  local pods
+  pods=$(kubectl get pods -n "$NAMESPACE" -l "$selector" \
+    -o jsonpath='{.items[*].metadata.name}')
+  if test -n "$pods"; then
+    kubectl wait --for=delete pod -n "$NAMESPACE" -l "$selector" --timeout=5m
+  fi
+  test -z "$(kubectl get pods -n "$NAMESPACE" -l "$selector" \
+    -o jsonpath='{.items[*].metadata.name}')"
+}
+
 kubectl scale deployment/${FULL}-server -n "$NAMESPACE" --replicas=0
 kubectl scale deployment/${FULL}-reconciler -n "$NAMESPACE" --replicas=0
 kubectl scale deployment/${FULL}-witness -n "$NAMESPACE" --replicas=0
@@ -219,25 +585,88 @@ for selector in "app=${FULL}-server" "app=${FULL}-worker" "app=${FULL}-reconcile
   wait_for_pods_deleted "$selector"
 done
 
-# Use an operator-authorized backend SQL client, not a KDIVE process. This is migration 0095's
-# predicate, excluding this SQL client's own pg_backend_pid(). It must print 0.
-ACTIVE_CLIENTS=$(psql "$OPERATOR_DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc \
-  "SELECT count(*) FROM pg_stat_activity WHERE datid = (SELECT oid FROM pg_database "\
-  "WHERE datname = current_database()) AND pid <> pg_backend_pid() "\
-  "AND backend_type = 'client backend'")
-test "$ACTIVE_CLIENTS" = 0
+RETRY_DIAGNOSTIC="${RETRY_DIAGNOSTIC:-}"
+if kubectl get job "$DB_CLIENT_JOB" -n "$NAMESPACE" -o name; then
+  test "$RETRY_DIAGNOSTIC" = 1 || {
+    echo "inspect logs for $DB_CLIENT_JOB, then retry with RETRY_DIAGNOSTIC=1" >&2
+    exit 2
+  }
+  kubectl delete job "$DB_CLIENT_JOB" -n "$NAMESPACE" \
+    --ignore-not-found --wait=true --timeout=2m
+fi
+kubectl create -n "$NAMESPACE" -f - <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${DB_CLIENT_JOB}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 60
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: db-check
+          image: "${TARGET_IMAGE}"
+          env:
+            - name: KDIVE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ${MIGRATION_SECRET}
+                  key: ${MIGRATION_KEY}
+          command: ["python", "-c"]
+          args:
+            - |
+              import os
+              import psycopg
+
+              query = """
+                  SELECT count(*) FROM pg_stat_activity
+                  WHERE datid = (
+                      SELECT oid FROM pg_database WHERE datname = current_database()
+                  )
+                    AND pid <> pg_backend_pid()
+                    AND backend_type = 'client backend'
+              """
+              with psycopg.connect(os.environ["KDIVE_DATABASE_URL"]) as connection:
+                  active = connection.execute(query).fetchone()[0]
+              if active:
+                  raise SystemExit(f"database still has {active} client backend(s)")
+              print("database has no other client backends")
+EOF
+if ! kubectl wait --for=condition=complete job/${DB_CLIENT_JOB} -n "$NAMESPACE" \
+  --timeout=75s; then
+  kubectl logs job/${DB_CLIENT_JOB} -n "$NAMESPACE" --tail=100
+  exit 1
+fi
+kubectl logs job/${DB_CLIENT_JOB} -n "$NAMESPACE" --tail=20
 ```
 
-For the target hooked all-zero upgrade, pass every replica flag explicitly. On bundled backends,
+The Job deadline is 60 seconds of Kubernetes controller wall time; the per-stage API wait allows
+75 seconds for scheduling and completion. A timeout or nonzero client count stops maintenance with
+all workloads at zero. Inspect the retained Job and its last 100 log lines, correct or disconnect
+the other PostgreSQL client, then rerun Stage 3 with `RETRY_DIAGNOSTIC=1`. The retry deletes only
+the exact Job with a two-minute API timeout before recreating it.
+
+#### Stage 4 — Run the hooked all-zero target migration
+
+For the target hooked all-zero upgrade, pass every workload state explicitly. On bundled backends,
 put all four `demoCredentials.postgresql.serverPassword`,
 `demoCredentials.postgresql.workerPassword`,
 `demoCredentials.postgresql.reconcilerPassword`, and
 `demoCredentials.postgresql.lifecycleWitnessPassword` values in `$TARGET_VALUES` before this stage.
 Its post-upgrade hook migrates and resets those role passwords. On external backends, rotate the
-four database role credentials and referenced Secrets only after this all-zero migration succeeds;
-confirm each target Secret is ready before the witness-only stage.
+four database role credentials and referenced Secrets only after this all-zero migration succeeds.
 
 ```bash
+set -euo pipefail
+: "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+source "$RECOVERY_STATE_FILE"
+
 helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" \
   --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
   --set lifecycleWitness.enabled=false
@@ -247,15 +676,38 @@ If this hooked stage fails, keep all workloads at zero, correct the target migra
 configuration, and retry this same hooked all-zero stage. After it succeeds, do not change target
 values, credential references, or configuration: `--no-hooks` also skips the external
 ConfigMap hook.
-Correcting the contents of an external Secret at the same reference is allowed before retrying a
-hook-free stage. If target values, a credential reference, or configuration changes, return all
-workloads to zero and
-rerun the hooked all-zero stage.
 
-Start only the witness in a hook-free stage, passing all four workload settings explicitly.
-Then wait for the witness rollout and readiness:
+#### Stage 5 — Correct target credential content
+
+For bundled backends, Stage 4's post-upgrade hook has already reset the four runtime-role passwords
+from the target `demoCredentials` values. For external backends, complete the deployment-specific
+database-role and same-reference Secret-content rotation now. Confirm every target Secret key is
+ready before continuing; this runbook does not invent commands for an external secret manager.
+
+The diagnostic image and migration Secret name/key remain the pinned target-render inputs captured
+before Stage 2. Do not replace them with fields from a live or previous migration Job. Verify that
+the target Secret reference now resolves without printing its value before continuing.
 
 ```bash
+set -euo pipefail
+: "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+source "$RECOVERY_STATE_FILE"
+
+kubectl get secret "$MIGRATION_SECRET" -n "$NAMESPACE" \
+  -o go-template='{{range $key, $_ := .data}}{{println $key}}{{end}}' |
+  rg -Fx -- "$MIGRATION_KEY"
+```
+
+#### Stage 6 — Start or refresh only the witness
+
+Start only the witness in a hook-free stage, passing all four workload settings explicitly, then
+wait for its rollout and readiness:
+
+```bash
+set -euo pipefail
+: "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+source "$RECOVERY_STATE_FILE"
+
 helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
   --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
   --set lifecycleWitness.enabled=true
@@ -263,23 +715,354 @@ kubectl rollout status deployment/${FULL}-witness -n "$NAMESPACE" --timeout=5m
 kubectl wait --for=condition=Ready pod -n "$NAMESPACE" -l "app=${FULL}-witness" --timeout=5m
 ```
 
-If credential rotation or witness readiness fails, keep server, worker, and reconciler at zero,
-correct the target credentials or Secrets, and retry this hook-free witness-only stage.
-
-Finally restore the captured core counts in another hook-free stage. The ready witness remains
-available before workers return:
+Each witness command has a five-minute Kubernetes API wall-clock limit for this stage. A timeout
+keeps the three core workloads at zero. If an external Secret's content at the same reference was
+wrong, correct it, delete the one unready witness Pod without force, and prove the replacement
+ready:
 
 ```bash
-helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
-  --set server.replicas=${SERVER_REPLICAS} --set worker.replicas=${WORKER_REPLICAS} \
-  --set reconciler.replicas=${RECONCILER_REPLICAS} --set lifecycleWitness.enabled=true
+set -euo pipefail
+: "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+source "$RECOVERY_STATE_FILE"
+
+WITNESS_POD=$(kubectl get pod -n "$NAMESPACE" -l "app=${FULL}-witness" \
+  -o jsonpath='{.items[*].metadata.name}')
+case "$WITNESS_POD" in
+  "" | *" "*)
+    echo "expected exactly one witness Pod, got: $WITNESS_POD" >&2
+    exit 2
+    ;;
+esac
+kubectl delete pod "$WITNESS_POD" -n "$NAMESPACE" --wait=true --timeout=5m
+kubectl rollout status deployment/${FULL}-witness -n "$NAMESPACE" --timeout=5m
+kubectl wait --for=condition=Ready pod -n "$NAMESPACE" \
+  -l "app=${FULL}-witness" --timeout=5m
 ```
 
-If this final restore fails, keep the ready witness running, return any partially restored core
-workloads to zero, correct the target release, and retry this hook-free final stage with the
-captured replica counts. Verify worker incarnations and recovery-tool exposure before resuming
-the queue.
-Forward recovery is the only supported path after migration succeeds.
+If target values, a credential reference, or configuration must change, set all four workloads to
+zero again, edit the target file, and return to the hooked Stage 4. Do not apply changed target
+values through a hook-free retry.
+
+#### Stage 7 — Restore captured core counts
+
+Concretely compare every local count with the create-once cluster record, then restore workers and
+the reconciler in a hook-free stage. When the captured server count is zero, temporarily run one
+target server for the authenticated Stage 8 proofs:
+
+```bash
+set -euo pipefail
+: "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+source "$RECOVERY_STATE_FILE"
+
+validate_nonnegative_count() {
+  case "$1" in
+    "" | *[!0-9]*)
+      echo "invalid persisted replica count: $1" >&2
+      exit 2
+      ;;
+  esac
+}
+CM_SERVER_REPLICAS=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+  -o jsonpath='{.data.server_replicas}')
+CM_WORKER_REPLICAS=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+  -o jsonpath='{.data.worker_replicas}')
+CM_RECONCILER_REPLICAS=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+  -o jsonpath='{.data.reconciler_replicas}')
+validate_nonnegative_count "$CM_SERVER_REPLICAS"
+validate_nonnegative_count "$CM_WORKER_REPLICAS"
+validate_nonnegative_count "$CM_RECONCILER_REPLICAS"
+test "$CM_SERVER_REPLICAS" = "$SERVER_REPLICAS" || {
+  echo "local server count differs from the recovery ConfigMap" >&2
+  exit 2
+}
+test "$CM_WORKER_REPLICAS" = "$WORKER_REPLICAS" || {
+  echo "local worker count differs from the recovery ConfigMap" >&2
+  exit 2
+}
+test "$CM_RECONCILER_REPLICAS" = "$RECONCILER_REPLICAS" || {
+  echo "local reconciler count differs from the recovery ConfigMap" >&2
+  exit 2
+}
+
+VERIFY_SERVER_REPLICAS=$SERVER_REPLICAS
+if test "$SERVER_REPLICAS" -eq 0; then
+  VERIFY_SERVER_REPLICAS=1
+fi
+
+helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
+  --set server.replicas=${VERIFY_SERVER_REPLICAS} --set worker.replicas=${WORKER_REPLICAS} \
+  --set reconciler.replicas=${RECONCILER_REPLICAS} --set lifecycleWitness.enabled=true
+kubectl rollout status deployment/${FULL}-server -n "$NAMESPACE" --timeout=5m
+kubectl rollout status statefulset/${FULL}-worker -n "$NAMESPACE" --timeout=5m
+kubectl rollout status deployment/${FULL}-reconciler -n "$NAMESPACE" --timeout=5m
+```
+
+Each rollout has its own five-minute Kubernetes API wall-clock limit; the three checks can consume
+at most 15 minutes in this stage. A failure leaves the ready witness running. Reapply the hook-free
+all-core-zero state, correct a transient runtime fault without changing target values, and retry
+Stage 7. A target-values change requires another all-zero hooked Stage 4.
+
+#### Stage 8 — Prove restored worker and recovery authority
+
+The queue remains paused. Capture the exact current worker Pod names and UIDs. A second
+secret-referenced diagnostic Job must
+match them to active, credential-acknowledged rows at the current fence protocol; zero restored
+workers requires both sets to be empty:
+
+```bash
+set -euo pipefail
+: "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"
+if test -e "$COMPLETED_STATE"; then
+  source "$COMPLETED_STATE"
+  kubectl delete job "$QUEUE_STATE_JOB" -n "$NAMESPACE" \
+    --ignore-not-found --wait=true --timeout=2m
+  kubectl delete job "$DB_CLIENT_JOB" -n "$NAMESPACE" \
+    --ignore-not-found --wait=true --timeout=2m
+  kubectl delete job "$INCARNATION_JOB" -n "$NAMESPACE" \
+    --ignore-not-found --wait=true --timeout=2m
+  kubectl delete configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+    --ignore-not-found --wait=true --timeout=2m
+  exit 0
+fi
+source "$RECOVERY_STATE_FILE"
+: "${KDIVE_SERVER_URL:?set the deployed MCP URL ending in /mcp}"
+: "${KDIVE_TOKEN:?set a platform-operator bearer token with project viewer grants}"
+
+CURRENT_SERVER_REPLICAS=$(kubectl get deployment/${FULL}-server -n "$NAMESPACE" \
+  -o jsonpath='{.spec.replicas}')
+case "$CURRENT_SERVER_REPLICAS" in
+  "" | *[!0-9]*)
+    echo "invalid current target server replica count: $CURRENT_SERVER_REPLICAS" >&2
+    exit 2
+    ;;
+esac
+if test "$CURRENT_SERVER_REPLICAS" -eq 0; then
+  kubectl scale deployment/${FULL}-server -n "$NAMESPACE" --replicas=1
+fi
+kubectl rollout status deployment/${FULL}-server -n "$NAMESPACE" --timeout=5m
+kubectl wait --for=condition=Ready pod -n "$NAMESPACE" \
+  -l "app=${FULL}-server" --timeout=5m
+timeout 60s uv run kdivectl --json ops set-queue-paused --paused
+
+WORKER_REPLICAS=$(kubectl get configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+  -o jsonpath='{.data.worker_replicas}')
+case "$WORKER_REPLICAS" in
+  "" | *[!0-9]*)
+    echo "invalid persisted worker replica count: $WORKER_REPLICAS" >&2
+    exit 2
+    ;;
+esac
+EXPECTED_WORKERS_B64=$(
+  kubectl get pods -n "$NAMESPACE" -l "app=${FULL}-worker" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\n"}{end}' |
+    uv run python -c \
+      'import base64, sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())'
+)
+
+RETRY_DIAGNOSTIC="${RETRY_DIAGNOSTIC:-}"
+if kubectl get job "$INCARNATION_JOB" -n "$NAMESPACE" -o name; then
+  test "$RETRY_DIAGNOSTIC" = 1 || {
+    echo "inspect logs for $INCARNATION_JOB, then retry with RETRY_DIAGNOSTIC=1" >&2
+    exit 2
+  }
+  kubectl delete job "$INCARNATION_JOB" -n "$NAMESPACE" \
+    --ignore-not-found --wait=true --timeout=2m
+fi
+kubectl create -n "$NAMESPACE" -f - <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${INCARNATION_JOB}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 60
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: incarnation-check
+          image: "${TARGET_IMAGE}"
+          env:
+            - name: KDIVE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ${MIGRATION_SECRET}
+                  key: ${MIGRATION_KEY}
+            - name: EXPECTED_WORKERS_B64
+              value: "${EXPECTED_WORKERS_B64}"
+            - name: EXPECTED_WORKER_COUNT
+              value: "${WORKER_REPLICAS}"
+            - name: WORKER_NAMESPACE
+              value: "${NAMESPACE}"
+            - name: WORKER_PREFIX
+              value: "${FULL}-worker-"
+          command: ["python", "-c"]
+          args:
+            - |
+              import base64
+              import os
+              import psycopg
+              from kdive.services.runs.worker_incarnations import (
+                  CURRENT_WORKER_FENCE_PROTOCOL,
+              )
+
+              decoded = base64.b64decode(os.environ["EXPECTED_WORKERS_B64"]).decode()
+              expected = {
+                  tuple(line.split("\t", maxsplit=1))
+                  for line in decoded.splitlines()
+                  if line
+              }
+              expected_count = int(os.environ["EXPECTED_WORKER_COUNT"])
+              if len(expected) != expected_count:
+                  raise SystemExit(
+                      f"ready worker Pod count {len(expected)} != {expected_count}"
+                  )
+              query = """
+                  SELECT authority_binding ->> 'name', authority_binding ->> 'uid',
+                         fence_protocol,
+                         credential_acknowledged_at IS NOT NULL,
+                         credential_envelope IS NULL
+                  FROM worker_incarnations
+                  WHERE authority_kind = 'kubernetes'
+                    AND state = 'active'
+                    AND authority_binding ->> 'namespace' = %s
+                    AND authority_binding ->> 'name' LIKE %s
+              """
+              with psycopg.connect(os.environ["KDIVE_DATABASE_URL"]) as connection:
+                  rows = connection.execute(
+                      query,
+                      (os.environ["WORKER_NAMESPACE"], os.environ["WORKER_PREFIX"] + "%"),
+                  ).fetchall()
+              invalid = [
+                  row[:2]
+                  for row in rows
+                  if row[2] != CURRENT_WORKER_FENCE_PROTOCOL or not row[3] or not row[4]
+              ]
+              actual = {(row[0], row[1]) for row in rows}
+              if invalid or actual != expected:
+                  raise SystemExit(
+                      f"worker incarnation mismatch: expected={sorted(expected)!r} "
+                      f"actual={sorted(actual)!r} invalid={invalid!r}"
+                  )
+              print(f"verified {len(actual)} current worker incarnation(s)")
+EOF
+if ! kubectl wait --for=condition=complete job/${INCARNATION_JOB} -n "$NAMESPACE" \
+  --timeout=75s; then
+  kubectl logs job/${INCARNATION_JOB} -n "$NAMESPACE" --tail=100
+  exit 1
+fi
+kubectl logs job/${INCARNATION_JOB} -n "$NAMESPACE" --tail=20
+```
+
+The target-server rollout and readiness waits each have a five-minute API limit, and the repeated
+audited queue pause has a 60-second operator-host limit. This makes a retry after a partially
+completed zero-server disposition start the verifier and reestablish the proof boundary before it
+does anything else. The incarnation Job has a 60-second controller deadline and a 75-second API
+wait. On failure, retain its last 100 log lines and the recovery records, correct the target worker or
+witness, then rerun the applicable forward stage with `RETRY_DIAGNOSTIC=1`. Its retry deletes only
+the exact Job with a two-minute API timeout.
+
+Finally, from the authenticated operator workstation, use the real MCP session client to prove
+both recovery tools are exposed and make one bounded read call:
+
+```bash
+set -euo pipefail
+: "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
+source "$RECOVERY_STATE_FILE"
+: "${KDIVE_SERVER_URL:?set the deployed MCP URL ending in /mcp}"
+: "${KDIVE_TOKEN:?set a platform-operator bearer token with project viewer grants}"
+
+timeout 60s uv run python - <<'PY'
+import asyncio
+import os
+
+from fastmcp import Client
+from fastmcp.client.auth import BearerAuth
+
+
+async def main() -> None:
+    required = {"ops.build_uses_list", "ops.recover_build_use"}
+    async with Client(
+        os.environ["KDIVE_SERVER_URL"],
+        auth=BearerAuth(os.environ["KDIVE_TOKEN"]),
+    ) as client:
+        names = {tool.name for tool in await client.list_tools()}
+    missing = required - names
+    if missing:
+        raise SystemExit(f"recovery tools are not exposed: {sorted(missing)}")
+
+
+asyncio.run(main())
+PY
+timeout 60s uv run kdivectl --json ops build-uses-list --limit 1
+
+case "$PRIOR_QUEUE_PAUSED" in
+  true)
+    timeout 60s uv run kdivectl --json ops set-queue-paused --paused
+    ;;
+  false)
+    timeout 60s uv run kdivectl --json ops set-queue-paused --no-paused
+    ;;
+  *)
+    echo "invalid prior queue state in recovery file: $PRIOR_QUEUE_PAUSED" >&2
+    exit 2
+    ;;
+esac
+
+if test "$SERVER_REPLICAS" -eq 0; then
+  helm upgrade "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
+    --set server.replicas=0 --set worker.replicas=${WORKER_REPLICAS} \
+    --set reconciler.replicas=${RECONCILER_REPLICAS} --set lifecycleWitness.enabled=true
+  wait_for_server_deleted() {
+    local pods
+    pods=$(kubectl get pods -n "$NAMESPACE" -l "app=${FULL}-server" \
+      -o jsonpath='{.items[*].metadata.name}')
+    if test -n "$pods"; then
+      kubectl wait --for=delete pod -n "$NAMESPACE" \
+        -l "app=${FULL}-server" --timeout=5m
+    fi
+    test -z "$(kubectl get pods -n "$NAMESPACE" -l "app=${FULL}-server" \
+      -o jsonpath='{.items[*].metadata.name}')"
+  }
+  wait_for_server_deleted
+fi
+
+umask 077
+test ! -e "$COMPLETED_STATE" || {
+  echo "completion archive already exists: $COMPLETED_STATE" >&2
+  exit 2
+}
+bash -n "$RECOVERY_STATE_FILE"
+mv -- "$RECOVERY_STATE_FILE" "$COMPLETED_STATE"
+kubectl delete job "$QUEUE_STATE_JOB" -n "$NAMESPACE" \
+  --ignore-not-found --wait=true --timeout=2m
+kubectl delete job "$DB_CLIENT_JOB" -n "$NAMESPACE" \
+  --ignore-not-found --wait=true --timeout=2m
+kubectl delete job "$INCARNATION_JOB" -n "$NAMESPACE" \
+  --ignore-not-found --wait=true --timeout=2m
+kubectl delete configmap "$RECOVERY_STATE" -n "$NAMESPACE" \
+  --ignore-not-found --wait=true --timeout=2m
+```
+
+Each MCP command has its own 60-second operator-host wall-clock limit. A timeout, authentication
+failure, missing tool, or failed list call retains every recovery record and diagnostic Job. Fix
+the endpoint, token/grants, or target verifier configuration and rerun Stage 8. Queue claiming stays
+paused until both the incarnation and authenticated MCP proofs pass. The captured prior queue state
+is restored before a temporary target server is removed. That removal has a five-minute API
+wall-clock limit; rerun Stage 8 after correcting the server endpoint if it times out.
+
+The local state is atomically renamed to its completion archive before cleanup begins. Each cleanup
+delete names one exact object, ignores an already-absent object, waits for deletion, and has a
+two-minute Kubernetes API wall-clock limit. If cleanup is interrupted, rerun the Stage 8 block: the
+completion branch performs only those bounded exact deletions and does not require the deleted
+ConfigMap or repeat any proof. Changing target configuration instead requires returning all
+workloads to zero and resuming at hooked Stage 4. Forward recovery is the only supported path after
+migration succeeds.
 
 **Validate `systems.toml` against the running image (no DB/S3 needed):**
 

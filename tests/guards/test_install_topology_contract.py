@@ -1,6 +1,7 @@
 """Operator documentation must describe each deployment's actual process topology."""
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -197,48 +198,206 @@ def test_build_use_recovery_distinguishes_kubernetes_witness_from_compose_wrappe
     )
 
 
-def test_canonical_staged_helm_upgrade_preserves_the_fence_boundary() -> None:
+_STAGED_UPGRADE_MARKERS = (
+    "#### Stage 1 — Capture restartable recovery state",
+    "#### Stage 2 — Drain workers through the current witness",
+    "#### Stage 3 — Stop all workloads and prove migration safety",
+    "#### Stage 4 — Run the hooked all-zero target migration",
+    "#### Stage 5 — Correct target credential content",
+    "#### Stage 6 — Start or refresh only the witness",
+    "#### Stage 7 — Restore captured core counts",
+    "#### Stage 8 — Prove restored worker and recovery authority",
+)
+
+
+def _staged_upgrade_stages() -> tuple[str, dict[str, str]]:
     source = _KUBERNETES_RUNBOOK.read_text()
 
     assert "### Staged worker-fence upgrade" in source
-    section = _section(_KUBERNETES_RUNBOOK, "### Staged worker-fence upgrade", "**Validate")
+    staged = source.split("### Staged worker-fence upgrade", maxsplit=1)[1].split(
+        "**Validate", maxsplit=1
+    )[0]
+    positions = [staged.index(marker) for marker in _STAGED_UPGRADE_MARKERS]
+    assert positions == sorted(positions)
+    assert all(staged.count(marker) == 1 for marker in _STAGED_UPGRADE_MARKERS)
+    boundaries = [*positions, len(staged)]
+    stages = {
+        marker: staged[boundaries[index] : boundaries[index + 1]]
+        for index, marker in enumerate(_STAGED_UPGRADE_MARKERS)
+    }
+    return staged, stages
 
-    required = (
-        "helm get values",
-        "deployment/${full}-server",
-        "statefulset/${full}-worker",
-        "deployment/${full}-reconciler",
-        "keep the current witness and credentials healthy",
-        "pod or its finalizer remains",
-        "deployment/${full}-witness",
-        "all four kdive workloads have no running pods",
-        "pg_stat_activity",
-        "pid <> pg_backend_pid()",
-        "operator-authorized backend sql client",
-        "operator_database_url",
+
+def test_canonical_staged_helm_upgrade_stages_one_to_four_are_restart_safe() -> None:
+    staged, stages = _staged_upgrade_stages()
+
+    stage_1 = stages[_STAGED_UPGRADE_MARKERS[0]]
+    for phrase in (
+        "set -euo pipefail",
+        ': "${NAMESPACE:?set the target namespace}"',
+        "umask 077",
+        'test ! -e "$TARGET_VALUES"',
+        'chmod 0600 "$TARGET_VALUES_TMP"',
+        'helm template "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$TARGET_VALUES"',
+        "--show-only templates/job-migrate.yaml",
+        "TARGET_IMAGE",
+        "MIGRATION_SECRET",
+        "MIGRATION_KEY",
+        "RECOVERY_STATE",
+        "validate_nonnegative_count",
+        "validate_short_name",
+        'DB_CLIENT_JOB="${FULL}-fence-db-check"',
+        'INCARNATION_JOB="${FULL}-fence-worker-check"',
+        "%q",
+        'bash -n "$RECOVERY_STATE_TMP"',
+        'mv -- "$RECOVERY_STATE_TMP" "$RECOVERY_STATE_FILE"',
+        "kubectl create configmap",
+        "verify_recovery_configmap",
+        "${FULL}-fence-upgrade",
+    ):
+        assert phrase in stage_1, phrase
+    assert "kubectl apply" not in stage_1
+    assert "CURRENT_IMAGE" not in staged
+    assert "NAMESPACE=<namespace>" not in staged
+
+    stage_2 = stages[_STAGED_UPGRADE_MARKERS[1]]
+    for phrase in (
+        'source "$RECOVERY_STATE_FILE"',
+        'test "$CM_SERVER_REPLICAS" = "$SERVER_REPLICAS"',
+        'test "$SERVER_REPLICAS" -eq 0',
+        "--replicas=1",
+        "timeout 60s uv run kdivectl --json ops set-queue-paused --paused",
+        "kubectl scale statefulset/${FULL}-worker",
+        "wait_for_pods_deleted",
         "--timeout=5m",
-        "do not remove finalizers or hide an error",
-        "lifecyclewitness.enabled=false",
-        "democredentials.postgresql.serverpassword",
-        "democredentials.postgresql.workerpassword",
-        "democredentials.postgresql.reconcilerpassword",
-        "democredentials.postgresql.lifecyclewitnesspassword",
-        "external backends",
-        "--no-hooks",
-        "lifecyclewitness.enabled=true",
-        "wait for the witness rollout and readiness",
-        "server.replicas=${server_replicas}",
-        "worker.replicas=${worker_replicas}",
-        "reconciler.replicas=${reconciler_replicas}",
-        "--reuse-values",
-        "forward recovery",
+    ):
+        assert phrase in stage_2, phrase
+    assert stage_2.index("set-queue-paused --paused") < stage_2.index(
+        "scale statefulset/${FULL}-worker"
     )
-    for phrase in required:
-        assert phrase in section, phrase
 
-    assert section.count("--no-hooks") >= 2
-    assert "do not use `--reuse-values`, `--atomic`, or a rollback" in section
-    assert "|| true" not in section
+    stage_3 = stages[_STAGED_UPGRADE_MARKERS[2]]
+    for phrase in (
+        'source "$RECOVERY_STATE_FILE"',
+        "activeDeadlineSeconds: 60",
+        "secretKeyRef:",
+        "name: ${MIGRATION_SECRET}",
+        "key: ${MIGRATION_KEY}",
+        'image: "${TARGET_IMAGE}"',
+        "pid <> pg_backend_pid()",
+        "backend_type = 'client backend'",
+        'RETRY_DIAGNOSTIC="${RETRY_DIAGNOSTIC:-}"',
+        'kubectl delete job "$DB_CLIENT_JOB"',
+        "--ignore-not-found --wait=true --timeout=2m",
+        "kubectl logs job/${DB_CLIENT_JOB}",
+        "--timeout=75s",
+    ):
+        assert phrase in stage_3, phrase
+    assert "OPERATOR_DATABASE_URL" not in staged
+    assert 'psql "$OPERATOR_DATABASE_URL"' not in staged
+
+    stage_4 = stages[_STAGED_UPGRADE_MARKERS[3]]
+    assert 'source "$RECOVERY_STATE_FILE"' in stage_4
+    assert "lifecycleWitness.enabled=false" in stage_4
+    assert "--no-hooks" not in "\n".join(re.findall(r"```bash\n(.*?)```", stage_4, flags=re.DOTALL))
+
+
+def test_canonical_staged_helm_upgrade_stages_five_to_seven_restore_safely() -> None:
+    _, stages = _staged_upgrade_stages()
+
+    stage_5 = stages[_STAGED_UPGRADE_MARKERS[4]]
+    assert 'source "$RECOVERY_STATE_FILE"' in stage_5
+    assert "bundled backends" in stage_5.lower()
+    assert "external backends" in stage_5.lower()
+
+    stage_6 = stages[_STAGED_UPGRADE_MARKERS[5]]
+    for phrase in (
+        'source "$RECOVERY_STATE_FILE"',
+        "--no-hooks",
+        "lifecycleWitness.enabled=true",
+        'kubectl delete pod "$WITNESS_POD"',
+        "--wait=true",
+        "kubectl rollout status deployment/${FULL}-witness",
+        "kubectl wait --for=condition=Ready pod",
+        "--timeout=5m",
+    ):
+        assert phrase in stage_6, phrase
+    assert "rollout restart" not in stage_6
+
+    stage_7 = stages[_STAGED_UPGRADE_MARKERS[6]]
+    for phrase in (
+        'source "$RECOVERY_STATE_FILE"',
+        "kubectl get configmap",
+        "validate_nonnegative_count",
+        'test "$CM_SERVER_REPLICAS" = "$SERVER_REPLICAS"',
+        'test "$CM_WORKER_REPLICAS" = "$WORKER_REPLICAS"',
+        'test "$CM_RECONCILER_REPLICAS" = "$RECONCILER_REPLICAS"',
+        "VERIFY_SERVER_REPLICAS=1",
+        "--no-hooks",
+        "server.replicas=${VERIFY_SERVER_REPLICAS}",
+        "worker.replicas=${WORKER_REPLICAS}",
+        "reconciler.replicas=${RECONCILER_REPLICAS}",
+        "--timeout=5m",
+    ):
+        assert phrase in stage_7, phrase
+
+
+def test_canonical_staged_helm_upgrade_stage_eight_proves_and_cleans_up() -> None:
+    _, stages = _staged_upgrade_stages()
+
+    stage_8 = stages[_STAGED_UPGRADE_MARKERS[7]]
+    for phrase in (
+        'source "$RECOVERY_STATE_FILE"',
+        "credential_acknowledged_at IS NOT NULL",
+        "credential_envelope IS NULL",
+        "state = 'active'",
+        "CURRENT_WORKER_FENCE_PROTOCOL",
+        "WORKER_REPLICAS",
+        "secretKeyRef:",
+        '"ops.build_uses_list"',
+        '"ops.recover_build_use"',
+        "BearerAuth",
+        "list_tools",
+        "timeout 60s uv run kdivectl --json ops build-uses-list --limit 1",
+        "KDIVE_SERVER_URL",
+        "KDIVE_TOKEN",
+        "CURRENT_SERVER_REPLICAS",
+        'kubectl delete job "$INCARNATION_JOB"',
+        "--ignore-not-found --wait=true --timeout=2m",
+        "set-queue-paused --no-paused",
+        "set-queue-paused --paused",
+        'test "$SERVER_REPLICAS" -eq 0',
+        "wait_for_server_deleted",
+        'COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"',
+        'mv -- "$RECOVERY_STATE_FILE" "$COMPLETED_STATE"',
+        'kubectl delete configmap "$RECOVERY_STATE"',
+    ):
+        assert phrase in stage_8, phrase
+    proof_end = stage_8.index("ops build-uses-list --limit 1")
+    assert stage_8.index("set-queue-paused --paused") < stage_8.index(
+        'kubectl create -n "$NAMESPACE" -f - <<EOF'
+    )
+    assert proof_end < stage_8.index("set-queue-paused --no-paused")
+    assert proof_end < stage_8.rindex("set-queue-paused --paused")
+    assert stage_8.index('mv -- "$RECOVERY_STATE_FILE" "$COMPLETED_STATE"') < stage_8.rindex(
+        'kubectl delete configmap "$RECOVERY_STATE"'
+    )
+    cleanup = stage_8.split('if test -e "$COMPLETED_STATE"', maxsplit=1)[1].split("fi", maxsplit=1)[
+        0
+    ]
+    assert 'source "$COMPLETED_STATE"' in cleanup
+    assert cleanup.count("--ignore-not-found --wait=true --timeout=2m") >= 2
+    assert "-l " not in cleanup
+
+
+def test_canonical_staged_helm_upgrade_bash_blocks_parse() -> None:
+    staged, _ = _staged_upgrade_stages()
+
+    for block in re.findall(r"```bash\n(.*?)```", staged, flags=re.DOTALL):
+        parsed = subprocess.run(
+            ["bash", "-n", "-c", block], text=True, capture_output=True, check=False
+        )
+        assert parsed.returncode == 0, parsed.stderr
 
 
 def test_worker_fence_summaries_link_to_the_canonical_staged_runbook() -> None:
