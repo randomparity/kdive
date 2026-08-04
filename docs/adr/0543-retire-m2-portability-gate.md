@@ -46,7 +46,17 @@ Re-baselining per Milestone does not fix that: separating one Milestone's commit
 concurrent platform work needs scoping by label or pull request, which is a different
 instrument with a different cost.
 
-Nothing depends on the gate. `m2-gate` is in no workflow and is not one of the `ci`
+Enforcement was switched off by decision, immediately before the merge that would have
+tripped it. `c07d731a3` (2026-06-09 11:41) added an `m2-portability` job to `ci.yml` and put
+`m2-gate` in the `ci` recipe, so for roughly 66 hours the gate was the per-PR check M2's
+design doc describes. `b06f3fc15` ("Remove M2 gate from PR checks", 2026-06-12 06:04) deleted
+both. The gate was last green at `41a5650d3` (2026-06-11 18:49) and reached 57 violations at
+`4df88572a` (2026-06-12 06:35) — 31 minutes after the removal, and it never returned to green.
+That sequence is the strongest evidence for this decision: the project already concluded in
+June that the gate was not worth blocking pull requests on, and simply left the script behind.
+This ADR ratifies that and removes the artifact.
+
+So nothing depends on the gate today. `m2-gate` is in no workflow and is not one of the `ci`
 recipe's members; it is reachable only by hand. Its one committed output,
 `docs/<archive>/reports/m2-portability.md`, was last regenerated 2026-06-12 and still reads
 "Verdict: gate passed — no core surface touched outside the ADR-0076 allowlist" over a
