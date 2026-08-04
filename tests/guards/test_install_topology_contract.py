@@ -249,7 +249,7 @@ def test_canonical_staged_helm_upgrade_stages_one_to_four_are_restart_safe() -> 
         "umask 077",
         'test ! -e "$TARGET_VALUES"',
         'chmod 0600 "$TARGET_VALUES_TMP"',
-        'helm template "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES"',
+        'helm template "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES_SNAPSHOT"',
         "--show-only templates/job-migrate.yaml",
         "TARGET_IMAGE",
         "TARGET_IMAGE_PULL_POLICY",
@@ -376,6 +376,8 @@ def test_canonical_staged_helm_upgrade_pins_target_render_and_repin() -> None:
     for phrase in (
         "sha256_chart()",
         'TARGET_VALUES_SHA256=$(sha256_file "$TARGET_VALUES")',
+        'TARGET_VALUES_SNAPSHOT=$(publish_values_snapshot "$TARGET_VALUES" '
+        '"$TARGET_VALUES_SHA256")',
         'TARGET_CHART_SHA256=$(sha256_chart "$CHART")',
         "TARGET_IMAGE_PULL_POLICY",
         'validate_pull_policy "$TARGET_IMAGE_PULL_POLICY"',
@@ -408,7 +410,7 @@ def test_canonical_staged_helm_upgrade_pins_target_render_and_repin() -> None:
 
     repin_block = _block_containing(stage_1, "TARGET_VALUES_NEXT:?set")
     for phrase in (
-        'TARGET_VALUES_TMP="${TARGET_VALUES}.tmp"',
+        "TARGET_VALUES_SNAPSHOT",
         "TARGET_VALUES_NEXT",
         "helm template",
         "TARGET_IMAGE_PULL_POLICY",
@@ -444,10 +446,11 @@ def test_canonical_staged_helm_upgrade_snapshots_chart_without_toc_tou() -> None
         'test -d "$chart" && test ! -L "$chart"',
         'chmod 0700 "$RECOVERY_CHART_DIR"',
         'chmod 0600 "$temporary"',
-        'mv -- "$temporary" "$target"',
+        'mv -T -n -- "$temporary" "$target"',
         'actual=$(sha256_chart "$temporary")',
         'actual_source_chart=$(sha256_chart "$CHART")',
         'actual_target_chart=$(sha256_chart "$TARGET_CHART")',
+        'actual_target_values=$(sha256_file "$TARGET_VALUES_SNAPSHOT")',
     ):
         assert phrase in initial_block, phrase
 
@@ -458,10 +461,19 @@ def test_canonical_staged_helm_upgrade_snapshots_chart_without_toc_tou() -> None
     live_capture = initial_block.index("SERVER_REPLICAS=$(kubectl get deployment/${FULL}-server")
     assert snapshot < render < live_capture
     assert render < initial_block.index('write_recovery_state "$RECOVERY_STATE_TMP"')
-    helm_invocations = re.findall(r"helm (?:template|upgrade)[^\n]*", staged)
+    helm_invocations = []
+    for block in _bash_blocks(staged):
+        lines = block.splitlines()
+        helm_invocations.extend(
+            "\n".join(lines[index : index + 4])
+            for index, line in enumerate(lines)
+            if re.search(r"helm (?:template|upgrade)", line)
+        )
     assert helm_invocations
     assert all('"$TARGET_CHART"' in invocation for invocation in helm_invocations)
     assert all('"$CHART"' not in invocation for invocation in helm_invocations)
+    assert all('-f "$TARGET_VALUES_SNAPSHOT"' in invocation for invocation in helm_invocations)
+    assert all('-f "$TARGET_VALUES"' not in invocation for invocation in helm_invocations)
 
 
 def test_canonical_staged_helm_upgrade_chart_hash_handles_both_chart_forms(
@@ -472,7 +484,7 @@ def test_canonical_staged_helm_upgrade_chart_hash_handles_both_chart_forms(
         stages[_STAGED_UPGRADE_MARKERS[0]], 'name: "${CURRENT_MIGRATION_SECRET}"'
     )
     functions = initial_block[initial_block.index("sha256_file() {") :]
-    functions = functions[: functions.index("publish_chart_snapshot() {")]
+    functions = functions[: functions.index("publish_chart_snapshot() (")]
     chart = tmp_path / "chart with spaces"
     chart.mkdir()
     (chart / "Chart.yaml").write_text("name: test\n")
@@ -501,6 +513,83 @@ def test_canonical_staged_helm_upgrade_chart_hash_handles_both_chart_forms(
     assert digest(chart).stdout != first.stdout
 
 
+def test_canonical_staged_helm_upgrade_reuses_private_input_snapshots(tmp_path: Path) -> None:
+    _, stages = _staged_upgrade_stages()
+    initial_block = _block_containing(
+        stages[_STAGED_UPGRADE_MARKERS[0]], 'name: "${CURRENT_MIGRATION_SECRET}"'
+    )
+    assert "publish_values_snapshot() (" in initial_block
+    assert 'mktemp "${target}.tmp.XXXXXX"' in initial_block
+    assert initial_block.index("trap cleanup_snapshot_publish EXIT") < initial_block.index(
+        'temporary=$(mktemp "${target}.tmp.XXXXXX")'
+    )
+    capture_block = _block_containing(
+        stages[_STAGED_UPGRADE_MARKERS[0]], 'helm get values "$RELEASE"'
+    )
+    refusal_loop = capture_block[capture_block.index("for path in ") :]
+    refusal_loop = refusal_loop[: refusal_loop.index("done")]
+    assert '"$RECOVERY_CHART_DIR"' not in refusal_loop
+    assert '"$RECOVERY_VALUES_DIR"' not in refusal_loop
+    functions = initial_block[initial_block.index("sha256_file() {") :]
+    functions = functions[: functions.index("verify_target_pins() {")]
+    source_chart = tmp_path / "source chart"
+    source_chart.mkdir()
+    (source_chart / "Chart.yaml").write_text("name: test\n")
+    source_values = tmp_path / "operator values.yaml"
+    source_values.write_text("image: target\n")
+    chart_dir = tmp_path / "private chart snapshots"
+    values_dir = tmp_path / "private values snapshots"
+    script = (
+        functions
+        + r"""
+set -euo pipefail
+CHART=$1
+TARGET_VALUES=$2
+RECOVERY_CHART_DIR=$3
+RECOVERY_VALUES_DIR=$4
+chart_digest=$(sha256_chart "$CHART")
+values_digest=$(sha256_file "$TARGET_VALUES")
+TARGET_CHART=$(publish_chart_snapshot "$CHART" "$chart_digest")
+TARGET_VALUES_SNAPSHOT=$(publish_values_snapshot "$TARGET_VALUES" "$values_digest")
+printf '%s\n%s\n' "$TARGET_CHART" "$TARGET_VALUES_SNAPSHOT"
+"""
+    )
+
+    def publish() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                script,
+                "_",
+                str(source_chart),
+                str(source_values),
+                str(chart_dir),
+                str(values_dir),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    first = publish()
+    assert first.returncode == 0, first.stderr
+    snapshot_paths = [Path(path) for path in first.stdout.splitlines()]
+    snapshot_inodes = [path.stat().st_ino for path in snapshot_paths]
+    (chart_dir / "unrelated.tmp.leftover").write_text("ignore me\n")
+    (values_dir / "unrelated.tmp.leftover").write_text("ignore me\n")
+    second = publish()
+    assert second.returncode == 0, second.stderr
+    assert second.stdout == first.stdout
+    assert [path.stat().st_ino for path in snapshot_paths] == snapshot_inodes
+    assert snapshot_paths[1].stat().st_mode & 0o777 == 0o600
+    snapshot_paths[1].write_text("mismatched final\n")
+    assert publish().returncode != 0
+    snapshot_paths[1].write_text(source_values.read_text())
+    snapshot_paths[0].joinpath("Chart.yaml").write_text("mismatched final\n")
+    assert publish().returncode != 0
+
+
 def test_canonical_staged_helm_upgrade_pin_guard_rejects_input_drift(tmp_path: Path) -> None:
     _, stages = _staged_upgrade_stages()
     initial_block = _block_containing(
@@ -515,13 +604,16 @@ def test_canonical_staged_helm_upgrade_pin_guard_rejects_input_drift(tmp_path: P
         (chart / "Chart.yaml").write_text("name: test\n")
     values = tmp_path / "target values.yaml"
     values.write_text("image: target\n")
+    values_snapshot = tmp_path / "snapshot values.yaml"
+    values_snapshot.write_text("image: target\n")
     script = (
         functions
         + r"""
 CHART=$1
 TARGET_CHART=$2
 TARGET_VALUES=$3
-mode=$4
+TARGET_VALUES_SNAPSHOT=$4
+mode=$5
 TARGET_VALUES_SHA256=$(sha256_file "$TARGET_VALUES")
 TARGET_CHART_SHA256=$(sha256_chart "$CHART")
 TARGET_IMAGE=example.invalid/kdive:test
@@ -531,6 +623,7 @@ MIGRATION_KEY=null
 case "$mode" in
   clean) ;;
   values) printf 'changed\n' >>"$TARGET_VALUES" ;;
+  values_snapshot) printf 'changed\n' >>"$TARGET_VALUES_SNAPSHOT" ;;
   source) printf 'changed\n' >>"$CHART/Chart.yaml" ;;
   snapshot) printf 'changed\n' >>"$TARGET_CHART/Chart.yaml" ;;
   tuple) TARGET_IMAGE_PULL_POLICY=sometimes ;;
@@ -549,6 +642,7 @@ verify_target_pins
                 str(source_chart),
                 str(target_chart),
                 str(values),
+                str(values_snapshot),
                 mode,
             ],
             text=True,
@@ -557,10 +651,11 @@ verify_target_pins
         )
 
     assert verify("clean").returncode == 0
-    for mode in ("values", "source", "snapshot", "tuple"):
+    for mode in ("values", "values_snapshot", "source", "snapshot", "tuple"):
         source_chart.joinpath("Chart.yaml").write_text("name: test\n")
         target_chart.joinpath("Chart.yaml").write_text("name: test\n")
         values.write_text("image: target\n")
+        values_snapshot.write_text("image: target\n")
         assert verify(mode).returncode != 0, mode
 
 
@@ -571,6 +666,7 @@ def test_canonical_staged_helm_upgrade_persists_exact_target_contract() -> None:
     )
     persisted = (
         "TARGET_CHART",
+        "TARGET_VALUES_SNAPSHOT",
         "TARGET_VALUES_SHA256",
         "TARGET_CHART_SHA256",
         "TARGET_IMAGE",
@@ -710,9 +806,9 @@ def test_canonical_staged_helm_upgrade_repin_preserves_live_capture() -> None:
     assert "STAGE3_CHART_SHA256=" in repin
     assert "render_recovery_configmap | kubectl apply -f -" in repin
     assert repin.count("kubectl apply -f -") == 1
-    assert repin.index('chmod 0600 "$TARGET_VALUES_TMP"') < repin.index(
-        'mv -- "$TARGET_VALUES_TMP" "$TARGET_VALUES"'
-    )
+    local_publish = 'mv -- "$RECOVERY_STATE_TMP" "$RECOVERY_STATE_FILE"'
+    cluster_publish = "render_recovery_configmap | kubectl apply -f -"
+    assert repin.index(local_publish) < repin.index(cluster_publish)
     assert "SELECT queue_paused" not in repin
     assert "SERVER_REPLICAS=$(kubectl get" not in repin
     assert "WORKER_REPLICAS=$(kubectl get" not in repin
@@ -843,6 +939,7 @@ def test_canonical_staged_helm_upgrade_stage_eight_proves_and_cleans_up() -> Non
         'COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"',
         'mv -- "$RECOVERY_STATE_FILE" "$COMPLETED_STATE"',
         'mv -- "$RECOVERY_CHART_DIR" "$COMPLETED_CHART_DIR"',
+        'mv -- "$RECOVERY_VALUES_DIR" "$COMPLETED_VALUES_DIR"',
         'kubectl delete configmap "$RECOVERY_STATE"',
     ):
         assert phrase in stage_8, phrase

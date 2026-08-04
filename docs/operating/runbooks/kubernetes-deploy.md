@@ -165,8 +165,9 @@ must be backward-compatible (ADR-0015), so a rollback is image-only.
 
 Use this procedure for a release carrying the worker-fence protocol. It is stop-old-first and
 forward-only: do not restore an old worker image, force-delete a Pod, remove a finalizer, or
-suppress an error. All Helm stages use the same target chart, image, and target values file.
-Do not use `--reuse-values`, `--atomic`, or a rollback.
+suppress an error. All Helm stages use private, digest-addressed snapshots of the same target chart
+and values plus the same rendered image. The mutable operator inputs are drift checks only after
+Stage 1; Helm never reads them. Do not use `--reuse-values`, `--atomic`, or a rollback.
 
 #### Stage 1 — Capture restartable recovery state
 
@@ -183,6 +184,7 @@ CHART=${CHART:-deploy/helm/kdive}
 TARGET_VALUES=${TARGET_VALUES:-kdive-target-values.yaml}
 RECOVERY_STATE_FILE=${RECOVERY_STATE_FILE:-${RELEASE}-fence-upgrade.state}
 RECOVERY_CHART_DIR="${RECOVERY_STATE_FILE}.charts"
+RECOVERY_VALUES_DIR="${RECOVERY_STATE_FILE}.values"
 TARGET_VALUES_TMP="${TARGET_VALUES}.tmp"
 RECOVERY_STATE_TMP="${RECOVERY_STATE_FILE}.tmp"
 COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"
@@ -214,7 +216,7 @@ test ! -e "$TARGET_VALUES" || {
   exit 2
 }
 for path in "$TARGET_VALUES_TMP" "$RECOVERY_STATE_FILE" "$RECOVERY_STATE_TMP" \
-  "$RECOVERY_CHART_DIR" "$COMPLETED_STATE"; do
+  "$COMPLETED_STATE"; do
   test ! -e "$path" || {
     echo "recovery artifact already exists: $path; inspect it before retrying" >&2
     exit 2
@@ -248,6 +250,7 @@ CHART=${CHART:-deploy/helm/kdive}
 TARGET_VALUES=${TARGET_VALUES:-kdive-target-values.yaml}
 RECOVERY_STATE_FILE=${RECOVERY_STATE_FILE:-${RELEASE}-fence-upgrade.state}
 RECOVERY_CHART_DIR="${RECOVERY_STATE_FILE}.charts"
+RECOVERY_VALUES_DIR="${RECOVERY_STATE_FILE}.values"
 TARGET_VALUES_TMP="${TARGET_VALUES}.tmp"
 RECOVERY_STATE_TMP="${RECOVERY_STATE_FILE}.tmp"
 COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"
@@ -400,8 +403,19 @@ sha256_chart() (
   sha256_file "$manifest"
 )
 
-publish_chart_snapshot() {
-  local chart=$1 digest=$2 suffix target temporary actual
+publish_chart_snapshot() (
+  set -euo pipefail
+  local chart=$1 digest=$2 suffix target temporary= actual status
+  cleanup_snapshot_publish() {
+    status=$?
+    trap - EXIT
+    if test -n "$temporary" && ! rm -r -- "$temporary"; then
+      echo "failed to remove chart snapshot temporary: $temporary" >&2
+      test "$status" -ne 0 || status=1
+    fi
+    exit "$status"
+  }
+  trap cleanup_snapshot_publish EXIT
   test ! -L "$RECOVERY_CHART_DIR" || {
     echo "recovery chart directory must not be a symlink: $RECOVERY_CHART_DIR" >&2
     exit 2
@@ -423,11 +437,6 @@ publish_chart_snapshot() {
     exit 2
   fi
   target="${RECOVERY_CHART_DIR}/${digest}.${suffix}"
-  temporary="${target}.tmp"
-  test ! -e "$temporary" || {
-    echo "leftover chart snapshot temporary exists: $temporary" >&2
-    exit 2
-  }
   if test -e "$target"; then
     actual=$(sha256_chart "$target")
     test "$actual" = "$digest" || {
@@ -435,12 +444,14 @@ publish_chart_snapshot() {
       exit 2
     }
     printf '%s\n' "$target"
-    return
+    exit 0
   fi
   if test "$suffix" = dir; then
-    cp -a -- "$chart" "$temporary"
+    temporary=$(mktemp -d "${target}.tmp.XXXXXX")
+    cp -a -- "$chart/." "$temporary/"
     chmod -R u=rwX,go= "$temporary"
   else
+    temporary=$(mktemp "${target}.tmp.XXXXXX")
     cp -- "$chart" "$temporary"
     chmod 0600 "$temporary"
   fi
@@ -449,22 +460,98 @@ publish_chart_snapshot() {
     echo "chart changed while snapshotting; inspect and remove $temporary, then retry" >&2
     exit 2
   }
-  mv -- "$temporary" "$target"
+  mv -T -n -- "$temporary" "$target"
+  actual=$(sha256_chart "$target")
+  test "$actual" = "$digest" || {
+    echo "published chart snapshot hash mismatch: $target" >&2
+    exit 2
+  }
+  test -e "$temporary" || temporary=
   printf '%s\n' "$target"
-}
+)
+
+publish_values_snapshot() (
+  set -euo pipefail
+  local source=$1 digest=$2 target temporary= actual status
+  cleanup_snapshot_publish() {
+    status=$?
+    trap - EXIT
+    if test -n "$temporary" && ! rm -f -- "$temporary"; then
+      echo "failed to remove values snapshot temporary: $temporary" >&2
+      test "$status" -ne 0 || status=1
+    fi
+    exit "$status"
+  }
+  trap cleanup_snapshot_publish EXIT
+  test -f "$source" && test ! -L "$source" || {
+    echo "target values source must be a regular non-symlink file: $source" >&2
+    exit 2
+  }
+  test ! -L "$RECOVERY_VALUES_DIR" || {
+    echo "recovery values directory must not be a symlink: $RECOVERY_VALUES_DIR" >&2
+    exit 2
+  }
+  if test ! -e "$RECOVERY_VALUES_DIR"; then
+    mkdir -- "$RECOVERY_VALUES_DIR"
+  fi
+  test -d "$RECOVERY_VALUES_DIR" || {
+    echo "recovery values path is not a directory: $RECOVERY_VALUES_DIR" >&2
+    exit 2
+  }
+  chmod 0700 "$RECOVERY_VALUES_DIR"
+  target="${RECOVERY_VALUES_DIR}/${digest}.yaml"
+  if test -e "$target"; then
+    test -f "$target" && test ! -L "$target" || {
+      echo "existing values snapshot is not a regular file: $target" >&2
+      exit 2
+    }
+    test "$(stat -c '%a' "$target")" = 600 || {
+      echo "existing values snapshot is not mode 0600: $target" >&2
+      exit 2
+    }
+    actual=$(sha256_file "$target")
+    test "$actual" = "$digest" || {
+      echo "existing values snapshot hash mismatch: $target" >&2
+      exit 2
+    }
+    printf '%s\n' "$target"
+    exit 0
+  fi
+  temporary=$(mktemp "${target}.tmp.XXXXXX")
+  cp -- "$source" "$temporary"
+  chmod 0600 "$temporary"
+  actual=$(sha256_file "$temporary")
+  test "$actual" = "$digest" || {
+    echo "target values changed while snapshotting; retry from the unchanged source" >&2
+    exit 2
+  }
+  mv -T -n -- "$temporary" "$target"
+  actual=$(sha256_file "$target")
+  test "$actual" = "$digest" || {
+    echo "published values snapshot hash mismatch: $target" >&2
+    exit 2
+  }
+  test -e "$temporary" || temporary=
+  printf '%s\n' "$target"
+)
 
 verify_target_pins() {
-  local actual_values actual_source_chart actual_target_chart
+  local actual_source_values actual_target_values actual_source_chart actual_target_chart
   validate_sha256 "$TARGET_VALUES_SHA256" "target values"
   validate_sha256 "$TARGET_CHART_SHA256" "target chart"
   validate_pull_policy "$TARGET_IMAGE_PULL_POLICY"
   validate_secret_name "$MIGRATION_SECRET"
   validate_secret_key "$MIGRATION_KEY"
-  actual_values=$(sha256_file "$TARGET_VALUES")
+  actual_source_values=$(sha256_file "$TARGET_VALUES")
+  actual_target_values=$(sha256_file "$TARGET_VALUES_SNAPSHOT")
   actual_source_chart=$(sha256_chart "$CHART")
   actual_target_chart=$(sha256_chart "$TARGET_CHART")
-  test "$actual_values" = "$TARGET_VALUES_SHA256" || {
-    echo "target values changed; use the Stage 1 repin path and rerun Stage 3" >&2
+  test "$actual_source_values" = "$TARGET_VALUES_SHA256" || {
+    echo "target values source changed; use the Stage 1 repin path and rerun Stage 3" >&2
+    exit 2
+  }
+  test "$actual_target_values" = "$TARGET_VALUES_SHA256" || {
+    echo "private target values snapshot changed; stop and inspect recovery artifacts" >&2
     exit 2
   }
   test "$actual_source_chart" = "$TARGET_CHART_SHA256" || {
@@ -564,7 +651,9 @@ write_recovery_state() {
     printf 'TARGET_VALUES=%q\n' "$TARGET_VALUES"
     printf 'RECOVERY_STATE=%q\n' "$RECOVERY_STATE"
     printf 'RECOVERY_CHART_DIR=%q\n' "$RECOVERY_CHART_DIR"
+    printf 'RECOVERY_VALUES_DIR=%q\n' "$RECOVERY_VALUES_DIR"
     printf 'TARGET_CHART=%q\n' "$TARGET_CHART"
+    printf 'TARGET_VALUES_SNAPSHOT=%q\n' "$TARGET_VALUES_SNAPSHOT"
     printf 'SERVER_REPLICAS=%q\n' "$SERVER_REPLICAS"
     printf 'WORKER_REPLICAS=%q\n' "$WORKER_REPLICAS"
     printf 'RECONCILER_REPLICAS=%q\n' "$RECONCILER_REPLICAS"
@@ -581,7 +670,8 @@ write_recovery_state() {
     printf 'STAGE3_CHART_SHA256=%q\n' "$STAGE3_CHART_SHA256"
     printf 'PRIOR_QUEUE_PAUSED=%q\n' "$PRIOR_QUEUE_PAUSED"
     declare -f validate_secret_name validate_secret_key validate_pull_policy validate_sha256
-    declare -f sha256_file sha256_chart publish_chart_snapshot verify_target_pins
+    declare -f sha256_file sha256_chart publish_chart_snapshot publish_values_snapshot
+    declare -f verify_target_pins
     declare -f render_recovery_configmap verify_captured_configmap
     declare -f verify_recovery_configmap verify_recovery_state write_recovery_state
   } >"$output"
@@ -599,7 +689,7 @@ test -f "$TARGET_VALUES" || {
 chmod 0600 "$TARGET_VALUES"
 test "$(stat -c '%a' "$TARGET_VALUES")" = 600
 for path in "$TARGET_VALUES_TMP" "$RECOVERY_STATE_FILE" "$RECOVERY_STATE_TMP" \
-  "$RECOVERY_CHART_DIR" "$COMPLETED_STATE"; do
+  "$COMPLETED_STATE"; do
   test ! -e "$path" || {
     echo "recovery artifact already exists: $path; use the Stage 1 retry block" >&2
     exit 2
@@ -610,10 +700,11 @@ TARGET_VALUES_SHA256=$(sha256_file "$TARGET_VALUES")
 TARGET_CHART_SHA256=$(sha256_chart "$CHART")
 validate_sha256 "$TARGET_VALUES_SHA256" "target values"
 validate_sha256 "$TARGET_CHART_SHA256" "target chart"
+TARGET_VALUES_SNAPSHOT=$(publish_values_snapshot "$TARGET_VALUES" "$TARGET_VALUES_SHA256")
 TARGET_CHART=$(publish_chart_snapshot "$CHART" "$TARGET_CHART_SHA256")
 test "$(sha256_chart "$TARGET_CHART")" = "$TARGET_CHART_SHA256"
 read -r TARGET_IMAGE TARGET_IMAGE_PULL_POLICY MIGRATION_SECRET MIGRATION_KEY < <(
-  helm template "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" \
+  helm template "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES_SNAPSHOT" \
     --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
     --set lifecycleWitness.enabled=false --show-only templates/job-migrate.yaml |
     kubectl create --dry-run=client -f - -o jsonpath='{.spec.template.spec.containers['\
@@ -762,7 +853,7 @@ verify_recovery_configmap
 If a target value, chart, image, pull policy, or migration Secret reference must change after live
 state was captured, keep all four workloads at zero and use this repin path. Set
 `TARGET_VALUES_NEXT` to a separately edited regular file. The path preserves the captured replica
-counts and queue value, atomically publishes a new restricted values file and chart snapshot,
+counts and queue value, atomically publishes new restricted values and chart snapshots,
 rerenders the migration tuple, clears the Stage 3 proof markers, and updates the one 12-key
 ConfigMap. It does not reread live replica specs or the queue:
 
@@ -774,7 +865,6 @@ umask 077
 RECOVERY_STATE_TMP="${RECOVERY_STATE_FILE}.tmp"
 bash -n "$RECOVERY_STATE_FILE"
 source "$RECOVERY_STATE_FILE"
-TARGET_VALUES_TMP="${TARGET_VALUES}.tmp"
 verify_captured_configmap
 
 assert_no_workload_pods() {
@@ -798,23 +888,18 @@ test "$TARGET_VALUES_NEXT" != "$TARGET_VALUES" || {
   echo "TARGET_VALUES_NEXT must be separate from the pinned target values" >&2
   exit 2
 }
-for path in "$RECOVERY_STATE_TMP" "$TARGET_VALUES_TMP"; do
-  test ! -e "$path" || {
-    echo "temporary recovery artifact exists: $path; inspect it before retrying" >&2
-    exit 2
-  }
-done
+test ! -e "$RECOVERY_STATE_TMP" || {
+  echo "temporary recovery state exists: $RECOVERY_STATE_TMP; inspect it before retrying" >&2
+  exit 2
+}
 
-NEXT_VALUES_SHA256=$(sha256_file "$TARGET_VALUES_NEXT")
-cp -- "$TARGET_VALUES_NEXT" "$TARGET_VALUES_TMP"
-chmod 0600 "$TARGET_VALUES_TMP"
-test "$(sha256_file "$TARGET_VALUES_TMP")" = "$NEXT_VALUES_SHA256"
-mv -- "$TARGET_VALUES_TMP" "$TARGET_VALUES"
+TARGET_VALUES="$TARGET_VALUES_NEXT"
 TARGET_VALUES_SHA256=$(sha256_file "$TARGET_VALUES")
+TARGET_VALUES_SNAPSHOT=$(publish_values_snapshot "$TARGET_VALUES" "$TARGET_VALUES_SHA256")
 TARGET_CHART_SHA256=$(sha256_chart "$CHART")
 TARGET_CHART=$(publish_chart_snapshot "$CHART" "$TARGET_CHART_SHA256")
 read -r TARGET_IMAGE TARGET_IMAGE_PULL_POLICY MIGRATION_SECRET MIGRATION_KEY < <(
-  helm template "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" \
+  helm template "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES_SNAPSHOT" \
     --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
     --set lifecycleWitness.enabled=false --show-only templates/job-migrate.yaml |
     kubectl create --dry-run=client -f - -o jsonpath='{.spec.template.spec.containers['\
@@ -836,8 +921,8 @@ render_recovery_configmap | kubectl apply -f -
 verify_recovery_configmap
 ```
 
-After any successful repin, rerun Stage 3 before Stage 4. A restart may reuse a matching chart
-snapshot; a leftover `.tmp` is never overwritten.
+After any successful repin, rerun Stage 3 before Stage 4. A restart reuses matching digest-addressed
+values and chart snapshots; unique temporary siblings are cleanup-only and are never selected.
 
 #### Stage 2 — Drain workers through the current witness
 
@@ -1036,7 +1121,7 @@ test "$STAGE3_VALUES_SHA256" = "$TARGET_VALUES_SHA256" &&
   }
 
 verify_target_pins
-if helm upgrade "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" \
+if helm upgrade "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES_SNAPSHOT" \
   --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
   --set lifecycleWitness.enabled=false; then
   verify_target_pins
@@ -1088,7 +1173,8 @@ source "$RECOVERY_STATE_FILE"
 verify_recovery_state
 
 verify_target_pins
-if helm upgrade "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
+if helm upgrade "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" \
+  -f "$TARGET_VALUES_SNAPSHOT" --no-hooks \
   --set server.replicas=0 --set worker.replicas=0 --set reconciler.replicas=0 \
   --set lifecycleWitness.enabled=true; then
   verify_target_pins
@@ -1180,7 +1266,8 @@ if test "$SERVER_REPLICAS" -eq 0; then
 fi
 
 verify_target_pins
-if helm upgrade "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
+if helm upgrade "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" \
+  -f "$TARGET_VALUES_SNAPSHOT" --no-hooks \
   --set server.replicas=${VERIFY_SERVER_REPLICAS} --set worker.replicas=${WORKER_REPLICAS} \
   --set reconciler.replicas=${RECONCILER_REPLICAS} --set lifecycleWitness.enabled=true; then
   verify_target_pins
@@ -1211,6 +1298,7 @@ set -euo pipefail
 : "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
 COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"
 COMPLETED_CHART_DIR="${COMPLETED_STATE}.charts"
+COMPLETED_VALUES_DIR="${COMPLETED_STATE}.values"
 if test -e "$COMPLETED_STATE"; then
   bash -n "$COMPLETED_STATE"
   source "$COMPLETED_STATE"
@@ -1220,6 +1308,13 @@ if test -e "$COMPLETED_STATE"; then
       exit 2
     }
     mv -- "$RECOVERY_CHART_DIR" "$COMPLETED_CHART_DIR"
+  fi
+  if test -d "$RECOVERY_VALUES_DIR"; then
+    test ! -e "$COMPLETED_VALUES_DIR" || {
+      echo "both active and completed values archives exist; inspect them before cleanup" >&2
+      exit 2
+    }
+    mv -- "$RECOVERY_VALUES_DIR" "$COMPLETED_VALUES_DIR"
   fi
   kubectl delete job "$QUEUE_STATE_JOB" -n "$NAMESPACE" \
     --ignore-not-found --wait=true --timeout=2m
@@ -1386,6 +1481,7 @@ set -euo pipefail
 : "${RECOVERY_STATE_FILE:=${RELEASE:-kdive}-fence-upgrade.state}"
 COMPLETED_STATE="${RECOVERY_STATE_FILE}.complete"
 COMPLETED_CHART_DIR="${COMPLETED_STATE}.charts"
+COMPLETED_VALUES_DIR="${COMPLETED_STATE}.values"
 bash -n "$RECOVERY_STATE_FILE"
 source "$RECOVERY_STATE_FILE"
 verify_recovery_state
@@ -1437,7 +1533,8 @@ esac
 
 if test "$SERVER_REPLICAS" -eq 0; then
   verify_target_pins
-  if helm upgrade "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" -f "$TARGET_VALUES" --no-hooks \
+  if helm upgrade "$RELEASE" "$TARGET_CHART" -n "$NAMESPACE" \
+    -f "$TARGET_VALUES_SNAPSHOT" --no-hooks \
     --set server.replicas=0 --set worker.replicas=${WORKER_REPLICAS} \
     --set reconciler.replicas=${RECONCILER_REPLICAS} --set lifecycleWitness.enabled=true; then
     verify_target_pins
@@ -1474,6 +1571,13 @@ if test -d "$RECOVERY_CHART_DIR"; then
   }
   mv -- "$RECOVERY_CHART_DIR" "$COMPLETED_CHART_DIR"
 fi
+if test -d "$RECOVERY_VALUES_DIR"; then
+  test ! -e "$COMPLETED_VALUES_DIR" || {
+    echo "completion values archive already exists: $COMPLETED_VALUES_DIR" >&2
+    exit 2
+  }
+  mv -- "$RECOVERY_VALUES_DIR" "$COMPLETED_VALUES_DIR"
+fi
 kubectl delete job "$QUEUE_STATE_JOB" -n "$NAMESPACE" \
   --ignore-not-found --wait=true --timeout=2m
 kubectl delete job "$DB_CLIENT_JOB" -n "$NAMESPACE" \
@@ -1491,7 +1595,8 @@ paused until both the incarnation and authenticated MCP proofs pass. The capture
 is restored before a temporary target server is removed. That removal has a five-minute API
 wall-clock limit; rerun Stage 8 after correcting the server endpoint if it times out.
 
-The local state is atomically renamed to its completion archive before cleanup begins. Each cleanup
+The local state is atomically renamed to its completion archive, and both private snapshot
+directories move beside it, before cleanup begins. Each cleanup
 delete names one exact object, ignores an already-absent object, waits for deletion, and has a
 two-minute Kubernetes API wall-clock limit. If cleanup is interrupted, rerun the Stage 8 block: the
 completion branch performs only those bounded exact deletions and does not require the deleted
