@@ -36,7 +36,7 @@ async def wait_until_any_backend_waiting(
     locktype: str | None = None,
     timeout_s: float = 5.0,
 ) -> None:
-    """Poll pg_locks until some backend is blocked on a database lock."""
+    """Poll pg_locks until a backend in the observer's database is blocked on a lock."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if await _has_waiting_lock(observer, waiter_pid=None, locktype=locktype):
@@ -114,9 +114,13 @@ async def _has_waiting_lock(
         )
     elif locktype is not None:
         cur = await observer.execute(
-            "SELECT 1 FROM pg_locks WHERE NOT granted AND locktype = %s LIMIT 1",
+            "SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+            "WHERE NOT l.granted AND a.datname = current_database() AND l.locktype = %s LIMIT 1",
             (locktype,),
         )
     else:
-        cur = await observer.execute("SELECT 1 FROM pg_locks WHERE NOT granted LIMIT 1")
+        cur = await observer.execute(
+            "SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+            "WHERE NOT l.granted AND a.datname = current_database() LIMIT 1"
+        )
     return await cur.fetchone() is not None
