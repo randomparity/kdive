@@ -106,19 +106,22 @@ one scoped by label or pull request and accept the cost, under its own ADR.
   time range spanning concurrent platform work does not separate them, which is the same
   reason it is being retired. What ends is a measurement of the wrong window.
 - **#1820 shrinks.** It planned a BYO baseline tag alongside `BASELINE_TAG` plus a set of
-  R9 allowlist entries; with the gate gone it needs only the `byo-host` capture-coverage row
-  against the surviving drift guard. Epic #1814's criterion 8 loses its automated check and
+  R9 allowlist entries; with the gate gone it needs the `byo-host` capture-coverage row and
+  the registered-kinds completeness assertion that makes a missing row detectable at all. Epic #1814's criterion 8 loses its automated check and
   is satisfied by review plus that guard.
 - **#1838 is moot.** It tracks a dead-entry shape in an allowlist that no longer exists.
 - **A later provider could leak into core without an automated signal.** This is the real
   cost, accepted deliberately: the gate has not provided that signal since 2026-06-12 in any
   case, so nothing operative is lost — only the appearance of one.
-- **Three recent records keep citing the deleted script**, and this decision is what makes
-  those citations historical: [ADR-0538](0538-byo-host-provider-package.md) §BYO portability,
+- **Four recent records keep reasoning from the gate**, and this decision is what makes that
+  reasoning historical: [ADR-0538](0538-byo-host-provider-package.md) §BYO portability,
   [ADR-0540](0540-adopt-only-provisioning.md) and
-  [ADR-0542](0542-kgdb-over-leased-serial-channel.md) each reason from `CORE_PREFIXES` or
-  `CAPTURE_COVERAGE` living in `scripts/m2_portability_gate.py`, and ADR-0538 assigns entry-17
-  work on that basis. They are not amended: three amendments would add more text than the
+  [ADR-0542](0542-kgdb-over-leased-serial-channel.md) each cite `CORE_PREFIXES` or
+  `CAPTURE_COVERAGE` in `scripts/m2_portability_gate.py`, and ADR-0538 assigns entry-17 work
+  on that basis. [ADR-0541](0541-baseline-restore-or-cordon-teardown.md) reaches it without
+  naming the path: it accepts a `jobs/handlers/systems.py` write as "a declared core
+  touch-point … recorded in the milestone design doc's gate table", and that table is one of
+  the things this change removes, so the cost it priced no longer exists. They are not amended: three amendments would add more text than the
   risk removes, and a reader arriving from any of them lands here. Four older records —
   ADR-0086, ADR-0087, ADR-0114 and ADR-0122 — cite the script as context for work already
   completed; they are historical for the same reason and are likewise not amended.

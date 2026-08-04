@@ -6,8 +6,7 @@ to import. Providers are opt-in and lazily imported, so "whatever happened to im
 not a complete set; this manifest is.
 
 A new provider adds **one line per setting-bearing module** (not per variable); its
-``SETTINGS`` live co-located in the provider package. ``kdive/config/`` is outside the
-M2 portability gate's ``CORE_PREFIXES``, so adding a line here is not a gated core touch.
+``SETTINGS`` live co-located in the provider package.
 """
 
 from __future__ import annotations
