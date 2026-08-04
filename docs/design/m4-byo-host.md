@@ -128,8 +128,11 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
   (`services/allocation/release.py:229`, `admission/core.py:586`), minutes before the teardown
   job runs — so without it the next tenant can be granted the machine mid-restore. Any failure
   leaves the cordon in place with a reason persisted on the Resource, surfaced as
-  `restore_incomplete`; the clear is keyed on that reason so it cannot lift an operator's
-  maintenance cordon. The reconciler gains a BYO drift arm that never retries the restore.
+  `restore_incomplete`; the clear requires that this teardown set the cordon **and** re-reads the
+  reason at the moment it clears, so it cannot lift an operator's maintenance cordon taken either
+  before or during the window. The reconciler gains a BYO drift arm keyed on that cordon reason —
+  not on a System state, since `torn_down` is terminal and there is no teardown-in-progress
+  member — which never retries the restore.
 
 ## Non-goals (scoped out)
 
@@ -332,10 +335,11 @@ gate never inspects. `CORE_PREFIXES` (`scripts/m2_portability_gate.py:44-53`) is
 | `src/kdive/jobs/handlers/systems.py` | cordon-on-teardown-failure with a reason (ADR-0541) — the provider port cannot do it: `Provisioner.teardown(domain_name)` (`src/kdive/providers/ports/lifecycle.py:130-138`) takes a domain name, gets no connection, and documents only `INFRASTRUCTURE_FAILURE` / `TRANSPORT_FAILURE`. The caller is `teardown_handler` (`src/kdive/jobs/handlers/systems.py:751`, provider call at `:783`). | 16 | **no — new entry** |
 | `src/kdive/mcp/tools/debug/sessions/lifecycle.py` and `.../sessions/registrar.py` | the `kgdb` transport arm: `lifecycle.py` carries the per-transport branching (`_GDBSTUB` / `_DRGN_LIVE` at `:80-81`, the `DEBUG_TRANSPORT_KINDS` check at `:305`, the arms at `:409` and `:427`); `registrar.py` carries the agent-facing `Field` text | 14 | **no — new entry** (see below) |
 | `src/kdive/mcp/tools/ops/resources/host_ops.py` | surfacing the cordon reason and clearing it on uncordon (ADR-0541) — `_apply_cordon` is at `:141`, `resources.set_scheduling` at `:47` | 16 | **no — new entry** (see below) |
-| `src/kdive/jobs/handlers/control/diagnostic_sysrq.py` and `.../control/watch_for_crash.py` | propagating the console-lease `transport_conflict` (ADR-0542). Core decides what a `pumped=False` window means before the provider is consulted: `diagnostic_sysrq.py:164-169` raises `configuration_error` / `console_not_pumped`, naming no holder, on the read that precedes injection; `watch_for_crash.py:191-193` discards `pumped` deliberately and would poll to its deadline. These two are `read_window`'s only consumers in the tree. | 12, 14 | **no — new entry** |
+| `src/kdive/jobs/handlers/control/diagnostic_sysrq.py` and `.../control/watch_for_crash.py` | **holding a console-lease scope** and propagating its `transport_conflict` (ADR-0542) — two changes, not one. Each handler brackets its whole multi-read console interaction in a lease scope, because a per-read lease would let KGDB take the channel between SysRq's mark read (`diagnostic_sysrq.py:111`) and its injection. Each also surfaces the conflict instead of core's current handling: `diagnostic_sysrq.py:164-169` raises `configuration_error` / `console_not_pumped` naming no holder, and `watch_for_crash.py:191-193` discards `pumped` deliberately. These two are `read_window`'s only consumers in the tree. | 12, 14 | **no — new entry** |
+| `src/kdive/mcp/tools/catalog/resources.py` (or `.../tools/_resource_envelopes.py`) | surfacing the cordon reason on `resources.describe` (ADR-0541). `describe_resource` is at `catalog/resources.py:185` and its envelope body comes from `resource_capability_data` (`_resource_envelopes.py:25-53`), which projects a **fixed** key set — kind, arch, the three int ceilings, transports, host_cpu, selectable_cpus — so a new namespaced key is silently dropped. The allowlist's `src/kdive/domain/catalog/resources.py` is a different file. | 16 | **no — new entry** |
 | `src/kdive/reconciler/loop.py` | the BYO mid-teardown drift arm and the stranded-console-lease reclaim | 16 | yes (entered for ADR-0086; BYO reuses it) |
 
-**Eight new entries across five issues, not three** — and two of them look like reuse until you
+**Nine new entries across five issues, not three** — and two of them look like reuse until you
 check. `ALLOWED_FILES` is matched by exact path (`violations()`,
 `scripts/m2_portability_gate.py:229-231`); there is no prefix or directory matching. The
 entries ADR-0085 and ADR-0541's surface would have reused —
@@ -400,7 +404,7 @@ and 20 are the operator-run proofs on real hardware.
 | 2 | **#1817 — `ResourceKind.BYO_HOST`, migration, inventory schema, package skeleton.** `ByoHostInstance` + `InventoryDoc` field + the host-coordinate uniqueness check (ADR-0540) + the reconcile arm, which is the sole writer of BYO's *declared host-fact* capability keys (the
 teardown cordon reason is written by entry 16 and cleared through `resources.set_scheduling`) **including `guest_arches` and `pseries_fadump`**; `systems.toml.example`; and `providers/byo_host/` with a buildable runtime whose ports are fail-closed stubs. Inseparable: the CHECK widen and the registered runtime must land together. A second inseparability, alongside the CHECK/runtime one: entry 2 makes `byo-host` composable, and `src/kdive/mcp/tools/lifecycle/systems/profile_examples.py:120` indexes `PROVIDER_SECTIONS[kind]` for every composed kind **unguarded** (its sibling `src/kdive/profiles/provider_sections.py:58` guards the same lookup). So entry 2 adds the `PROVIDER_SECTIONS` row too — a placeholder until entry 3 supplies the real model — or an operator who opts in between the two merges gets a `KeyError` from the profile-examples tool rather than a fail-closed stub refusal. Test work is larger than a rename: `build_provider_resolver` gains an `enable_byo_host` parameter and the two resolver-constructing parity tests that enable the opt-ins (`tests/db/test_resource_kind_parity.py:40`, `:55`) pass it; a third, `test_default_production_registry_registers_only_local_libvirt` (`:70`), deliberately builds with the opt-ins off and is what pins BYO's default to unregistered, or `assert allowed <= buildable` (`:44`) fails the moment the CHECK admits the kind; `test_check_admits_all_three_kinds` (`:25`, asserting at `:30`) is renamed and widened, and `test_every_registered_kind_is_check_allowed` (`:49`) is the third test in the set. | 1 | providers + db |
 | 3 | **#1819 — provisioning profile section and policy.** `ByoHostProfile`, `ProviderSection.byo_host_section`, `ByoHostProfilePolicy`, and the `adopted-host` boot method with the generalized pairing map. | 2 | provisioning |
-| 4 | **#1818 — the OOB control port seam and the Redfish driver.** The typed protocol under `providers/byo_host/oob/`, the console lease, and Redfish. Depends on entry 2 as well as entry 1: the lease writes `byo_console_leases`, which entry 2's migration creates, and it lives in the `providers/byo_host/` package entry 2 skeletons. | 1, 2 | providers + security |
+| 4 | **#1818 — the OOB control port seam and the Redfish driver.** The typed protocol under `providers/byo_host/oob/`, the console lease **and its stranded-lease reconciler reclaim**, and Redfish. The reclaim lands here rather than with teardown: ADR-0539 rejects expiry-alone outright, so shipping the lease without it would run the epic in a configuration that record refuses — for four waves, from the first real holder (entry 11) until entry 16. It is a `reconciler/loop.py` arm, an already-allowlisted file, so it costs no extra touch-point here. Depends on entry 2 as well as entry 1: the lease writes `byo_console_leases`, which entry 2's migration creates, and it lives in the `providers/byo_host/` package entry 2 skeletons. | 1, 2 | providers + security |
 | 5 | **#1821 — the IPMI driver.** Additive behind the entry-4 seam. | 4 | providers |
 | 6 | **#1822 — the HMC driver for PowerVM LPARs.** Power, partition identity, vterm. Sequenced early: it is the driver most likely to force a port revision. | 4 | providers |
 | 7 | **#1816 — survey the OOB surface beyond power and console.** Read-only spike; produces findings and follow-on issues, not code. | — | providers |
@@ -412,8 +416,8 @@ teardown cordon reason is written by entry 16 and cleared through `resources.set
 | 13 | **#1829 — crash capture and retrieve.** kdump on both arches, fadump on POWER; owns replacing the QEMU-version-floor fadump probe (open question 5). | 10, 12 | capture |
 | 14 | **#1828 — the KGDB transport.** The third `DebugTransportKind`, the debug-session registrar arm, the allowlist entry, and the console-to-loopback bridge. | 11 | debug |
 | 15 | **#1831 — in-target drgn and vmcore postmortem.** | 13 | debug |
-| 16 | **#1830 — teardown: baseline restore, OOB power-cycle, cordon, reconciler drift arm.** Also owns the **stranded-console-lease reclaim** (ADR-0539), which shares the dead-worker shape and the same `reconciler/loop.py` allowlist entry as the mid-teardown arm. | 12 | lifecycle |
-| 17 | **#1820 — extend the portability gate.** The `pre-M4` baseline tag, the `byo-host` `CAPTURE_COVERAGE` row, the **registered-kinds completeness assertion** that makes a missing row detectable at all, the eight new allowlist entries, **re-pointing the 14 stale `ALLOWED_FILES` paths** plus a guard failing the gate on a member absent from disk, and the CI-wiring decision above. | 2 | tooling |
+| 16 | **#1830 — teardown: baseline restore, OOB power-cycle, cordon-and-clear, reconciler drift arm.** The drift arm keys on a Resource cordoned with a restore-in-progress reason and no live worker, **not** on a System state: `torn_down` is terminal (`domain/capacity/state.py:249`) and there is no teardown-in-progress member (ADR-0541). Shares the dead-worker shape and the `reconciler/loop.py` entry with the lease reclaim entry 4 lands. | 12 | lifecycle |
+| 17 | **#1820 — extend the portability gate.** The `pre-M4` baseline tag, the `byo-host` `CAPTURE_COVERAGE` row, the **registered-kinds completeness assertion** that makes a missing row detectable at all, the nine new allowlist entries, **re-pointing the 14 stale `ALLOWED_FILES` paths** plus a guard failing the gate on a member absent from disk, and the CI-wiring decision above. | 2 | tooling |
 | 18 | **#1832 — operator runbook and agent-facing documentation.** | 13, 16 | docs |
 | 19 | **#1833 — live proof: the full spine on an x86 host with a BMC.** | 14, 15, 16 | proof |
 | 20 | **#1834 — live proof: the full spine on a PowerVM LPAR via HMC**, including fadump. | 6, 14, 15, 16 | proof |
@@ -461,10 +465,11 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
 
 1. **The provider seam is unchanged** (ADR-0063) — `byo_host` satisfies the same
    `ProviderRuntime` ports and registers into a resolver that already exists. The portability
-   hypothesis is measured a third time rather than abandoned, and all eight genuinely new core
+   hypothesis is measured a third time rather than abandoned, and all nine genuinely new core
    touches — the migration, the `arch_traits` docstring, `jobs/handlers/systems.py`, the two
-   debug-session modules, `ops/resources/host_ops.py`, and the two control handlers that must
-   propagate a console-lease conflict — are declared up front rather than
+   debug-session modules, `ops/resources/host_ops.py`, the two control handlers that must hold a
+   console-lease scope, and the `resources.describe` projection — are declared up front rather
+   than
    discovered.
 2. **Secrets never leak** (ADR-0012, ADR-0073) — OOB credentials resolve at the worker
    boundary, register for redaction before first use, and release only after

@@ -98,6 +98,17 @@ the lease is held:
   handlers that propagate the lease conflict instead of re-categorizing or swallowing it. Both
   files are under `src/kdive/jobs/`, a portability-gate core prefix, and neither is allowlisted
   today; the milestone design document carries them in its gate table.
+- **Each of those two consumers holds the lease across its whole scope, not per console read.**
+  Neither makes a single call: the SysRq capture reads a pre-injection mark
+  (`diagnostic_sysrq.py:111`), injects through the Controller, then polls until the console stops
+  growing (`:121`); crash watch reads a mark and polls to its deadline
+  (`watch_for_crash.py:154-155`). Acquiring per `read_window` call would let a KGDB session take
+  the channel *between* the mark read and the injection — and the injection is a **write**, so
+  the one consumer whose interleaving is most expensive is exactly the one a per-call lease
+  fails to protect, making the milestone's "two consumers never interleave on one line" contract
+  false as written. Each handler therefore opens a lease scope around its whole console
+  interaction and releases it at the end. That is a larger change to those two files than
+  propagating a category, and it is the size their gate-table row is written against.
 - In-band readiness and health probes are suspended for the session's duration, because a
   stopped machine cannot answer them and a timeout would otherwise be read as a dead host.
 

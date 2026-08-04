@@ -103,9 +103,19 @@ an operator rather than a retry. No new `ErrorCategory` is invented. A worker th
 mid-restore therefore leaves an **already-cordoned** host, which is the fail-closed outcome the
 reconciler arm below would otherwise have to produce.
 
-**Clearing requires that this teardown set the cordon, not merely that it stamped a reason.**
-Step 4 clears only when the reason is this teardown's own **and** records that step 0 flipped the
-boolean. The weaker rule — clear when the reason matches — protects nothing, because step 0 would
+**Clearing requires that this teardown set the cordon, and re-checks at the moment it clears.**
+Step 4 clears only when the reason is *still* this teardown's own — re-read immediately before
+the write, not carried from step 0 — **and** step 0 recorded that it flipped the boolean. Both
+halves are needed because the guard has two directions and step 0 alone covers one. Step 0's
+read-before-write catches an operator cordon taken *before* teardown ran. The re-read at step 4
+catches one taken *during* it, which is the longer exposure: the window spans a bootloader
+write, a firmware power-cycle, and a full precondition re-check on a host that has just been
+force-crashed, which is exactly when an operator is most likely to pull it from rotation. For
+the re-read to see anything, `resources.set_scheduling` must stamp an operator-origin reason on
+the cordon path — today `_apply_cordon`
+(`src/kdive/mcp/tools/ops/resources/host_ops.py:141-149`) writes the boolean unconditionally and
+records nothing — so that write lands in the same already-declared touch-point as the surfacing
+work. The weaker rule — clear when the reason matches — protects nothing, because step 0 would
 have written that reason itself moments earlier: an operator who cordoned the host for
 maintenance while a Run was live would have their cordon silently lifted by the ordinary release
 that follows. No existing producer persists a reason at all (`_apply_cordon`,
@@ -129,14 +139,25 @@ one outcome this decision exists to prevent. Cordoning leaves the declaration in
 row unschedulable until a human looks.
 
 **Teardown is idempotent and re-runnable.** Each step is keyed so a re-run resumes rather than
-repeats, following the existing per-System idempotency rule. A worker that dies mid-teardown
-leaves a System in a teardown state with no live job, which is a drift the reconciler already
-has a shape for.
+repeats, following the existing per-System idempotency rule.
 
-**The reconciler drives a mid-teardown host to cordoned, never to available.** The BYO drift
-arm added to ADR-0021's loop fails closed: a host whose teardown cannot be attributed to a
-live worker is cordoned with `RESTORE_INCOMPLETE` and the System is failed. It does not retry
-the restore. A restore is a write to a machine whose state is unknown, and an unattended retry
+**The drift signal is the Resource, not the System — because the System has already finished.**
+There is no teardown-in-progress `SystemState`: the members are `provisioning`, `ready`,
+`reprovisioning`, `restoring`, `paused`, `crashing`, `crashed`, `torn_down`, `failed`
+(`src/kdive/domain/capacity/state.py:81-89`), and `teardown_handler` commits `TORN_DOWN` at
+`src/kdive/jobs/handlers/systems.py:770` before it calls the provider at `:783` — the same
+ordering step 0 above depends on. A worker that dies mid-restore therefore leaves a System in
+`torn_down`, which is terminal: `_TRANSITIONS` maps `SystemState.TORN_DOWN` to `frozenset()`
+(`state.py:249`), so there is no legal edge out of it and no state for the reconciler to key on.
+
+**The reconciler's BYO arm therefore keys on the cordon reason.** The durable marker of a
+restore in flight is the one step 0 writes: a Resource cordoned with a restore-in-progress
+reason. The arm added to ADR-0021's loop fails closed over exactly that — a Resource carrying
+that reason with no live worker attributable to it has its reason replaced with
+`RESTORE_INCOMPLETE` and **stays cordoned**. The System is left in `torn_down` and is not driven
+to `failed`; that transition does not exist, and adding it would be a `state.py` widen in gated
+core that this milestone has not declared and does not need. It does not retry the restore
+either: a restore is a write to a machine whose state is unknown, and an unattended retry
 against an unknown state is how a host in a bad state becomes a host in a worse one.
 
 **The power-cycle and re-verify windows carry the full limit contract** — unit, reference
