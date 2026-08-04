@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -279,6 +280,39 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
         "image_store": store,
         "upload_store": store,
     }
+
+
+def test_reports_registration_uses_app_owned_store_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = FastMCP("probe")
+    store = object()
+    registry = SecretRegistry()
+    captured: dict[str, object] = {}
+
+    def _register(
+        registered_app: FastMCP,
+        registered_pool: AsyncConnectionPool,
+        *,
+        secret_registry: SecretRegistry,
+        store_factory: object,
+    ) -> None:
+        captured["app"] = registered_app
+        captured["pool"] = registered_pool
+        captured["secret_registry"] = secret_registry
+        captured["store_factory"] = store_factory
+
+    monkeypatch.setattr(tool_module.reports_generate, "register", _register)
+    object_stores = ObjectStoreAssembly(store=cast(Any, store))
+
+    tool_module._report_tools_registrar(registry, object_stores)(app, pool)
+
+    assert captured["app"] is app
+    assert captured["pool"] is pool
+    assert captured["secret_registry"] is registry
+    factory = cast(Callable[[], object], captured["store_factory"])
+    assert factory() is store
 
 
 def test_debug_tools_registrar_wires_enabled_telemetry(
