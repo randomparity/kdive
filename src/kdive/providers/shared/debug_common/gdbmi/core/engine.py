@@ -36,6 +36,7 @@ from kdive.providers.ports.debug import (
     GdbMiAttachment,
     GdbStopRecord,
 )
+from kdive.providers.shared.debug_common.gdbmi._errors import config_error
 from kdive.providers.shared.debug_common.gdbmi.commands.breakpoints import GdbMiBreakpointCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.disassembly import GdbMiDisassemblyCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.modules import GdbMiModuleCommands
@@ -100,13 +101,6 @@ _CONNECT_RETRY_BACKOFF_SEC = 0.5
 
 # gdb stop reasons meaning the inferior is gone (not a debuggable HALT).
 _TERMINAL_STOP_REASONS = frozenset({"exited", "exited-normally", "exited-signalled"})
-
-
-def _config_error(
-    message: str, *, code: str, details: dict[str, object] | None = None
-) -> CategorizedError:
-    merged: dict[str, object] = {"code": code, **(details or {})}
-    return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR, details=merged)
 
 
 class GdbMiEngine(
@@ -179,7 +173,7 @@ class GdbMiEngine(
         self._host_policy(host)
         resolved_vmlinux = vmlinux_path.expanduser().resolve()
         if not resolved_vmlinux.is_file():
-            raise _config_error(
+            raise config_error(
                 "vmlinux symbol file does not exist",
                 code="bad_vmlinux_path",
                 details={"vmlinux_path": str(vmlinux_path)},
@@ -266,13 +260,13 @@ class GdbMiEngine(
         line for the command is still redacted (it is text).
         """
         if not isinstance(address, int) or not isinstance(byte_count, int):
-            raise _config_error("address and byte_count must be integers", code="bad_read_range")
+            raise config_error("address and byte_count must be integers", code="bad_read_range")
         if address < 0 or address > 0xFFFFFFFFFFFFFFFF:
-            raise _config_error(
+            raise config_error(
                 "address out of range", code="bad_read_range", details={"address": address}
             )
         if byte_count < 1 or byte_count > MAX_MEMORY_READ_BYTES:
-            raise _config_error(
+            raise config_error(
                 f"byte_count must be between 1 and {MAX_MEMORY_READ_BYTES}",
                 code="bad_read_range",
                 details={"byte_count": byte_count},
@@ -387,7 +381,7 @@ class GdbMiEngine(
     def _mi_path(self, path: Path) -> str:  # pragma: no cover - live_vm
         text = str(path)
         if any(char in text for char in "\t\r\n"):
-            raise _config_error(
+            raise config_error(
                 "vmlinux path must not contain control whitespace", code="bad_vmlinux_path"
             )
         return text.replace("\\", "\\\\").replace(" ", "\\ ")

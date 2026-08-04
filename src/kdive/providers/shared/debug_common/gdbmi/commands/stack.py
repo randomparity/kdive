@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbBacktrace, GdbFrame, GdbMiAttachment
+from kdive.providers.shared.debug_common.gdbmi._errors import config_error
 from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     MiRecord,
     mi_int,
@@ -33,13 +34,6 @@ class _StackHost(Protocol):
     def _redact_frame(self, frame: GdbFrame) -> GdbFrame: ...
 
 
-def _config_error(
-    message: str, *, code: str, details: dict[str, object] | None = None
-) -> CategorizedError:
-    merged: dict[str, object] = {"code": code, **(details or {})}
-    return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR, details=merged)
-
-
 class GdbMiStackCommands:
     """Stack/read-frame GDB/MI commands."""
 
@@ -51,7 +45,7 @@ class GdbMiStackCommands:
     ) -> GdbBacktrace:
         """Walk the stopped inferior's stack, bounded to ``max_frames`` (ADR-0275)."""
         if not isinstance(max_frames, int) or max_frames < 1 or max_frames > MAX_BACKTRACE_FRAMES:
-            raise _config_error(
+            raise config_error(
                 f"max_frames must be between 1 and {MAX_BACKTRACE_FRAMES}",
                 code="bad_frame_count",
                 details={"max_frames": max_frames},
@@ -74,7 +68,7 @@ class GdbMiStackCommands:
     def read_frame(self: _StackHost, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
         """Inspect one selected stack frame by ``level`` (ADR-0275)."""
         if not isinstance(level, int) or level < 0:
-            raise _config_error(
+            raise config_error(
                 f"frame level must be a non-negative integer, got {level!r}",
                 code="bad_frame_level",
                 details={"level": level},

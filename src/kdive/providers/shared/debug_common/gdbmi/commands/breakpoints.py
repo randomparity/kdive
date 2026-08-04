@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbBreakpointRef, GdbMiAttachment
+from kdive.providers.shared.debug_common.gdbmi._errors import config_error
 from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     MiRecord,
     breakpoint_rows,
@@ -28,13 +29,6 @@ class _BreakpointHost(Protocol):
     def _breakpoint_ref_from(self, entry: dict[str, Any]) -> GdbBreakpointRef: ...
 
 
-def _config_error(
-    message: str, *, code: str, details: dict[str, object] | None = None
-) -> CategorizedError:
-    merged: dict[str, object] = {"code": code, **(details or {})}
-    return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR, details=merged)
-
-
 class GdbMiBreakpointCommands:
     """Software breakpoint GDB/MI commands."""
 
@@ -42,7 +36,7 @@ class GdbMiBreakpointCommands:
         self: _BreakpointHost, attachment: GdbMiAttachment, location: str
     ) -> GdbBreakpointRef:
         if not _BREAK_LOCATION_RE.match(location):
-            raise _config_error(
+            raise config_error(
                 f"breakpoint location must be a bare C identifier, got {location!r}",
                 code="bad_location",
                 details={"location": location},
@@ -56,7 +50,7 @@ class GdbMiBreakpointCommands:
 
     def clear_breakpoint(self: _BreakpointHost, attachment: GdbMiAttachment, number: str) -> None:
         if not _BREAK_ID_RE.match(number):
-            raise _config_error(
+            raise config_error(
                 f"breakpoint id must be numeric, got {number!r}",
                 code="bad_breakpoint_id",
                 details={"number": number},

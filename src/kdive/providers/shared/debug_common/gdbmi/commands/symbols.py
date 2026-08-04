@@ -7,6 +7,7 @@ from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment
+from kdive.providers.shared.debug_common.gdbmi._errors import config_error
 from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import MiRecord, evaluate_value
 from kdive.security.secrets.redaction import Redactor
 
@@ -24,13 +25,6 @@ class _SymbolHost(Protocol):
     def _redactor(self) -> Redactor: ...
 
     def _evaluate_symbol(self, attachment: GdbMiAttachment, name: str) -> list[MiRecord]: ...
-
-
-def _config_error(
-    message: str, *, code: str, details: dict[str, object] | None = None
-) -> CategorizedError:
-    merged: dict[str, object] = {"code": code, **(details or {})}
-    return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR, details=merged)
 
 
 class GdbMiSymbolCommands:
@@ -56,7 +50,7 @@ class GdbMiSymbolCommands:
                 present-but-unparseable address value (``bad_symbol_value``, value redacted).
         """
         if not _SYMBOL_NAME_RE.match(name):
-            raise _config_error(
+            raise config_error(
                 f"symbol name must be a bare C identifier, got {name!r}",
                 code="bad_symbol_name",
                 details={"name": name},
