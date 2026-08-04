@@ -41,14 +41,17 @@ reason are each bounded to 512 UTF-8 bytes in the API and database. Repeat listi
 the holder may have changed. Recovery outside the caller's viewer-granted projects has the same
 refusal shape as a missing use and leaves the pin unchanged.
 
-For a worker-fence upgrade, migrate the roles and fence protocol, then use the deployment-specific
-authority sequence:
+For a worker-fence upgrade, use the deployment-specific authority sequence:
 
-- **Kubernetes:** rotate the distinct server, worker, reconciler, and lifecycle-witness credentials;
-  start and verify the dedicated lifecycle-witness before starting current workers.
-- **Compose:** rotate the distinct server, worker, reconciler, and lifecycle-witness credentials
-  used by the lifecycle recipes. Use the operator-side lifecycle wrapper to gate current workers;
-  Compose has no persistent lifecycle-witness service.
+- **Kubernetes:** operators rotate the distinct server, worker, reconciler, and lifecycle-witness
+  credentials. Kubernetes uses a dedicated lifecycle-witness. Scale workers to zero while the
+  lifecycle-witness remains healthy. Wait until worker Pods and their finalizers are gone, then stop
+  the lifecycle-witness. Migrate the roles and fence protocol. Start and verify the
+  lifecycle-witness before starting workers.
+- **Compose:** stop old workers through the supported operator-side lifecycle wrapper's `down`
+  action before migrating the roles and fence protocol. Rotate the distinct server, worker,
+  reconciler, and lifecycle-witness credentials used by the lifecycle recipes. Use the wrapper to
+  gate current workers; Compose has no persistent lifecycle-witness service.
 
 Verify registered current incarnations and recovery-tool exposure before resuming queue processing.
 Rollback cannot restore old-worker claiming after the protocol migration, so recover forward with a

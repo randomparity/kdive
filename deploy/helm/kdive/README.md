@@ -311,7 +311,7 @@ aux `/metrics` is never re-exposed off the cluster (keep it that way; do not Nod
         path: /metrics
   ```
 
-  (Each endpoint targets every selected pod, so the two ports a given pod does not listen on
+  (Each endpoint targets every selected pod, so the three ports a given pod does not listen on
   show as down — harmless. To avoid that, reuse the bundled chart's annotation-relabeling job
   from `templates/demo/prometheus-config.yaml` as an Operator `additionalScrapeConfigs` instead.)
 

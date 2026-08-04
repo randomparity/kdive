@@ -11,7 +11,7 @@ image:
 bundledBackends: false
 demoAcknowledged: false
 
-# bundledObservability deploys an in-cluster Prometheus that scrapes all three components'
+# bundledObservability deploys an in-cluster Prometheus that scrapes all four components'
 # aux /metrics (ADR-0090 §5) via the prometheus.io/scrape annotations the chart already emits.
 # Independent of bundledBackends (the scrape targets are the app pods, present on both paths)
 # and off by default (production installs are BYO — see the chart README). It runs on emptyDir

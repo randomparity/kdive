@@ -161,12 +161,14 @@ A `helm upgrade` runs single-responsibility Jobs, so each failure names exactly 
 The validate Job renders only when `systems.configMapName` is set. Migrations are forward-only and
 must be backward-compatible (ADR-0015), so a rollback is image-only.
 
-When upgrading the worker-fence protocol, stop old workers before the migration. Migrate the roles
-and protocol, rotate the separate server, worker, reconciler, and lifecycle-witness credentials,
-start the lifecycle witness, then start current workers. Verify their registered incarnations and the
-server recovery tools before resuming queue processing. Rollback cannot restore old-worker claiming;
-recover forward with a current image. Force-deleting Pods, manually removing finalizers, or using
-database-owner credentials bypasses the authority path and retains pins.
+When upgrading the worker-fence protocol, rotate the separate server, worker, reconciler, and
+lifecycle-witness credentials. Scale workers to zero while the lifecycle-witness remains healthy.
+Wait until worker Pods and their finalizers are gone, then stop the lifecycle-witness. Migrate the
+roles and protocol. Start and verify the lifecycle-witness before starting workers. Verify their
+registered incarnations and the server recovery tools before resuming queue processing. Rollback
+cannot restore old-worker claiming; recover forward with a current image. Force-deleting Pods,
+manually removing finalizers, or using database-owner credentials bypasses the authority path and
+retains pins.
 
 **Validate `systems.toml` against the running image (no DB/S3 needed):**
 

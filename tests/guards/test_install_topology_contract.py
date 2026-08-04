@@ -78,17 +78,35 @@ def test_kubernetes_monitoring_documents_the_witness_target() -> None:
         assert "all four" in text, path
 
 
+def test_bundled_observability_counts_all_four_components() -> None:
+    text = _normalized(_HELM_VALUES)
+
+    assert "scrapes all four components" in text
+
+
+def test_helm_podmonitor_explains_three_non_listening_ports() -> None:
+    text = _normalized(_HELM_REFERENCE)
+
+    assert "three ports a given pod does not listen on" in text
+
+
 def test_build_use_recovery_distinguishes_kubernetes_witness_from_compose_wrapper() -> None:
     text = _normalized(_BUILD_USE_RECOVERY)
+    compose_guidance = text.split("**Compose:**", maxsplit=1)[1].split(
+        "Verify registered current incarnations", maxsplit=1
+    )[0]
 
     assert "**Kubernetes:**" in text
     assert "dedicated lifecycle-witness" in text
     assert "**Compose:**" in text
     assert "operator-side lifecycle wrapper" in text
+    assert compose_guidance.lower().index("stop old workers") < compose_guidance.lower().index(
+        "migrating the roles"
+    )
 
 
 def test_kubernetes_migrations_keep_the_witness_alive_until_workers_terminate() -> None:
-    for path in (_INSTALL, _HELM_REFERENCE):
+    for path in (_INSTALL, _HELM_REFERENCE, _BUILD_USE_RECOVERY, _KUBERNETES_RUNBOOK):
         text = _normalized(path).lower()
         assert "scale workers to zero while the lifecycle-witness remains healthy" in text, path
         assert "wait until worker pods and their finalizers are gone" in text, path
