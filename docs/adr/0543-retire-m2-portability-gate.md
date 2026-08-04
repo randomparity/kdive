@@ -91,9 +91,10 @@ one scoped by label or pull request and accept the cost, under its own ADR.
 - **The M2 portability claim becomes a record rather than a check.** Anyone asking whether
   the provider seam held reads this ADR or `AGENTS.md`; there is no command that recomputes
   it. That is the honest state — there has not been a trustworthy recomputation since June.
-- **The 514-violation number disappears rather than being resolved.** It was never evidence
-  of provider leakage, so nothing is being suppressed. What ends is a measurement of the
-  wrong window.
+- **The 514-violation number disappears rather than being resolved.** Nothing in the cohort
+  examined was provider leakage, and the instrument could not have distinguished the rest — a
+  time range spanning concurrent platform work does not separate them, which is the same
+  reason it is being retired. What ends is a measurement of the wrong window.
 - **#1820 shrinks.** It planned a BYO baseline tag alongside `BASELINE_TAG` plus a set of
   R9 allowlist entries; with the gate gone it needs only the `byo-host` capture-coverage row
   against the surviving drift guard. Epic #1814's criterion 8 loses its automated check and
@@ -108,7 +109,9 @@ one scoped by label or pull request and accept the cost, under its own ADR.
   [ADR-0542](0542-kgdb-over-leased-serial-channel.md) each reason from `CORE_PREFIXES` or
   `CAPTURE_COVERAGE` living in `scripts/m2_portability_gate.py`, and ADR-0538 assigns entry-17
   work on that basis. They are not amended: three amendments would add more text than the
-  risk removes, and a reader arriving from any of them lands here.
+  risk removes, and a reader arriving from any of them lands here. Four older records —
+  ADR-0086, ADR-0087, ADR-0114 and ADR-0122 — cite the script as context for work already
+  completed; they are historical for the same reason and are likewise not amended.
 - **`docs/design/m2-remote-libvirt.md` gets a pointer, not a rewrite.** M2's design doc
   describes the gate as a per-PR CI check in six places. It is the record of a completed
   Milestone, so this change adds one note naming ADR-0543 rather than restating the document

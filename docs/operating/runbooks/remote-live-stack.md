@@ -203,8 +203,8 @@ is reframed from "deprecate local" to the narrower **production default vs. opt-
 dev/CI/reference provider** distinction. Local stays the in-tree default; remote is the opt-in
 production provider (gated on a declared `[[remote_libvirt]]` instance). The two providers' advertised capture
 sets are such that **neither contains the other**: remote adds `console` and `gdbstub`, while
-ADR-0208 narrowed local to the core-producing methods it can actually fetch a vmcore for and
-gave it `fadump`, which remote does not advertise. That two-way asymmetry — pinned by the
+ADR-0208 narrowed local to the core-producing methods it can actually fetch a vmcore for, and
+ADR-0349 added `fadump`, which remote does not advertise. That two-way asymmetry — pinned by the
 `tests/scripts/test_provider_capture_coverage.py` drift guard against the real `build_*_runtime`
 sets — is the structural reason the two providers stay complementary rather than one
 superseding the other. `#198` stays **open**; its final disposition (keep-default vs. reclassify-as-opt-in) is
