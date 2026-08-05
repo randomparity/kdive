@@ -862,6 +862,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Strip ANSI from chart-version-check's uv read
 - Remediate with a prompted DWARF symbol, not the bare bool
 - Correct chart-version-check's ANSI root-cause comment
+- Strip ANSI colour from help-text assertions in cli/config tests
 
 ### Build
 
