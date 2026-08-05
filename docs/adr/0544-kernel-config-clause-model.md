@@ -76,7 +76,7 @@ added. It qualifies the claim that the removed clauses "can only fire on an inte
 inconsistent upload — a truncated or hand-edited file".
 
 That claim is narrower than the truth, and understated the defect being fixed. `VMCORE_INFO` did
-not exist before Linux 6.9; it was split out of `CRASH_CORE` by `443cbaf9e2fd`. A complete,
+not exist before Linux 6.9, where it was split out of `CRASH_CORE`. A complete,
 coherent, working pre-6.9 config therefore could not satisfy the `{VMCORE_INFO}` clause at any
 setting, and no rebuild could make it — the gate refused crash capture over a symbol absent from
 that kernel's Kconfig entirely. This was not hypothetical: the `rocky-kdive-ready-8` (4.18) and
@@ -89,7 +89,8 @@ of the two reasons to drop these clauses. Filed as #1869 and closed by the chang
 rule 1; the pre-6.9 kernel is that change's headline regression test, and reverting `{VMCORE_INFO}`
 into `gate_required` reddens it. Verified against upstream `v4.18` and `v5.14` Kconfig, symbol by
 symbol; the check is against upstream rather than Rocky's patched kernels, and those images carry
-no in-tree `.config`, so the verified claim is the symbol-level one.
+no in-tree `.config`, so the verified claim is the symbol-level one. The 6.9 split is the
+reading of that Kconfig difference, not a commit this repository can check.
 
 ### 2. A clause carries a built-in requirement; the initrd carve-out is evaluated at the seam
 
