@@ -597,11 +597,9 @@ def test_fetch_vmcore_kdump_admitted_on_local(migrated_url: str) -> None:
 
 _CRASH_GATE_FULL = frozenset(
     {
-        "KEXEC_CORE",
         "KEXEC",
         "CRASH_DUMP",
         "PROC_VMCORE",
-        "VMCORE_INFO",
         "FW_CFG_SYSFS",
         "RELOCATABLE",
     }
@@ -611,11 +609,17 @@ _CRASH_GATE_FULL = frozenset(
 def test_fetch_vmcore_kdump_refused_when_config_lacks_crash_symbols(migrated_url: str) -> None:
     # ADR-0318: a KDUMP vmcore on a kernel whose uploaded config provably lacks a crash symbol is
     # refused with a categorized, symbol-naming reason and enqueues no job.
+    #
+    # #1854 changed which symbol this scenario removes. It used to drop KEXEC_CORE, which the
+    # kernel selects for itself and no config fragment can set; #1854 took that clause
+    # out of the refusal set, so the same config is now armed rather than refused. RELOCATABLE is
+    # a real prompt the agent can turn on, so removing it produces a refusal naming advice the
+    # agent can act on - which is the whole point of the change.
     from unittest.mock import patch
 
     from kdive.kernel_config.parse import KernelConfig
 
-    missing = KernelConfig(_CRASH_GATE_FULL - {"KEXEC_CORE"})
+    missing = KernelConfig(_CRASH_GATE_FULL - {"RELOCATABLE"})
 
     async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> KernelConfig:
         return missing
@@ -629,7 +633,7 @@ def test_fetch_vmcore_kdump_refused_when_config_lacks_crash_symbols(migrated_url
             jobs = await _job_count(pool)
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "kernel_missing_crash_config"
-        assert "KEXEC_CORE" in cast(list[str], resp.data["missing"])
+        assert "RELOCATABLE" in cast(list[str], resp.data["missing"])
         assert jobs == 0  # refused before enqueue
 
     asyncio.run(_run())

@@ -5,6 +5,8 @@ from kdive.kernel_config.requirements import (
     FEATURE_REQUIREMENTS,
     ROOTFS_MOUNT,
     SYSRQ,
+    Clause,
+    FeatureRequirement,
     feature_manifest,
     feature_requirement,
 )
@@ -13,14 +15,15 @@ from kdive.kernel_config.support import (
     unmet_advertised_clauses,
     unmet_clauses,
 )
+from tests.kernel_config.unsettable_symbols import I1_SEED, UNSETTABLE_SYMBOLS
 
 
 def test_crash_capture_gate_excludes_kaslr_and_or_groups_kexec():
     feat = feature_requirement(CRASH_CAPTURE)
-    gate_symbols = {s for clause in feat.gate_required for s in clause}
+    gate_symbols = {s for clause in feat.gate_required for s in clause.symbols}
     assert "RANDOMIZE_BASE" not in gate_symbols  # KASLR advertised-only
-    assert "RANDOMIZE_BASE" in {s for clause in feat.advertised for s in clause}
-    assert frozenset({"KEXEC", "KEXEC_FILE"}) in feat.gate_required  # either load syscall
+    assert "RANDOMIZE_BASE" in {s for clause in feat.advertised for s in clause.symbols}
+    assert Clause(frozenset({"KEXEC", "KEXEC_FILE"})) in feat.gate_required  # either load syscall
     assert feat.gated is True
 
 
@@ -51,7 +54,7 @@ def test_sysrq_advertises_magic_sysrq_and_carries_no_refusal_set():
     # path checked nothing. ADR-0318 decided sysrq is advertised and enforced by the runtime
     # detection in diagnostic_sysrq, so the refusal set is empty and the manifest says so.
     feat = feature_requirement(SYSRQ)
-    assert feat.advertised == (frozenset({"MAGIC_SYSRQ"}),)
+    assert feat.advertised == (Clause(frozenset({"MAGIC_SYSRQ"})),)
     assert feat.gate_required == ()
     assert feat.gated is False
     entry = next(m for m in feature_manifest() if m["feature"] == SYSRQ)
@@ -59,7 +62,7 @@ def test_sysrq_advertises_magic_sysrq_and_carries_no_refusal_set():
     # non-vacuity: the entry a reader gets must really advertise the symbol, otherwise a
     # gated: false entry with an empty requirements list would pass the assert above while
     # telling an agent nothing about what to build
-    assert entry["requirements"] == [["MAGIC_SYSRQ"]]
+    assert entry["requirements"] == [{"symbols": ["MAGIC_SYSRQ"]}]
 
 
 def test_manifest_covers_every_feature_and_exposes_advertised_not_gate_required():
@@ -245,7 +248,7 @@ def test_rootfs_mount_matches_the_real_direct_kernel_boot():
     # #1626 refines the filesystem half only: a remote or agent-uploaded rootfs (ADR-0183/0440/
     # 0441) is commonly XFS, so the root-fs requirement is EXT4_FS-or-XFS_FS, not EXT4_FS alone.
     feat = feature_requirement("rootfs_mount")
-    symbols = {s for clause in feat.advertised for s in clause}
+    symbols = {s for clause in feat.advertised for s in clause.symbols}
     assert symbols == {"EXT4_FS", "XFS_FS", "VIRTIO_BLK"}
     for stale in ("SQUASHFS", "SQUASHFS_ZSTD", "OVERLAY_FS", "BLK_DEV_LOOP"):
         assert stale not in symbols
@@ -258,9 +261,9 @@ def test_rootfs_mount_root_filesystem_is_an_or_group_not_two_and_clauses():
     # missing XFS_FS (and vice versa). One OR-group keeps the advisory at "mounts nothing kdive
     # boots", which is the only claim kdive can make without a guest-family axis.
     feat = feature_requirement("rootfs_mount")
-    assert frozenset({"EXT4_FS", "XFS_FS"}) in feat.advertised
-    assert frozenset({"EXT4_FS"}) not in feat.advertised
-    assert frozenset({"XFS_FS"}) not in feat.advertised
+    assert Clause(frozenset({"EXT4_FS", "XFS_FS"})) in feat.advertised
+    assert Clause(frozenset({"EXT4_FS"})) not in feat.advertised
+    assert Clause(frozenset({"XFS_FS"})) not in feat.advertised
 
 
 def test_rhel_guest_kdump_feature_carries_the_symbols_lost_with_the_build_fragment():
@@ -269,7 +272,7 @@ def test_rhel_guest_kdump_feature_carries_the_symbols_lost_with_the_build_fragme
     # every symbol but KEXEC_FILE went with it, unnoticed, until #1610's Rocky 10 live run needed
     # five rebuilds to rediscover them. They now live here.
     feat = feature_requirement(CRASH_CAPTURE_RHEL_GUEST)
-    symbols = {s for clause in feat.advertised for s in clause}
+    symbols = {s for clause in feat.advertised for s in clause.symbols}
     assert symbols == {
         "XFS_FS",
         "SQUASHFS",
@@ -351,8 +354,8 @@ def test_virtio_blk_is_filed_under_rootfs_mount_not_serial_console():
     # The root-disk driver requirement was previously misfiled under serial_console.
     rootfs = feature_requirement("rootfs_mount")
     serial = feature_requirement("serial_console")
-    rootfs_symbols = {s for clause in rootfs.advertised for s in clause}
-    serial_symbols = {s for clause in serial.advertised for s in clause}
+    rootfs_symbols = {s for clause in rootfs.advertised for s in clause.symbols}
+    serial_symbols = {s for clause in serial.advertised for s in clause.symbols}
     assert "VIRTIO_BLK" in rootfs_symbols
     assert "VIRTIO_BLK" not in serial_symbols
 
@@ -390,27 +393,27 @@ def test_advisory_debug_feature_clause_sets_are_the_reviewed_kconfig_sourced_one
     # kernel's own Kconfig at v7.0; the file:line citations are in the comments below.
     expected = {
         # lib/Kconfig.kcsan:16 "depends on DEBUG_KERNEL && !KASAN"
-        "kcsan": (frozenset({"DEBUG_KERNEL"}), frozenset({"KCSAN"})),
+        "kcsan": (Clause(frozenset({"DEBUG_KERNEL"})), Clause(frozenset({"KCSAN"}))),
         # lib/Kconfig.kfence:8 has no DEBUG_KERNEL dependency; the knobs are ints, not booleans,
         # and parse_kernel_config only counts =y/=m as enabled
-        "kfence": (frozenset({"KFENCE"}),),
+        "kfence": (Clause(frozenset({"KFENCE"})),),
         # mm/Kconfig.debug:242 "depends on DEBUG_KERNEL && HAVE_DEBUG_KMEMLEAK"; :243 select-s
         # DEBUG_FS, so advertising DEBUG_FS could never warn
-        "kmemleak": (frozenset({"DEBUG_KERNEL"}), frozenset({"DEBUG_KMEMLEAK"})),
+        "kmemleak": (Clause(frozenset({"DEBUG_KERNEL"})), Clause(frozenset({"DEBUG_KMEMLEAK"}))),
         # lib/Kconfig.debug:1452-1458 PROVE_LOCKING select-s LOCKDEP and the DEBUG_* lock set,
         # so none of those is advertised; :1650 DEBUG_ATOMIC_SLEEP is separate and prompted
         "lockdep": (
-            frozenset({"DEBUG_KERNEL"}),
-            frozenset({"PROVE_LOCKING"}),
-            frozenset({"DEBUG_ATOMIC_SLEEP"}),
+            Clause(frozenset({"DEBUG_KERNEL"})),
+            Clause(frozenset({"PROVE_LOCKING"})),
+            Clause(frozenset({"DEBUG_ATOMIC_SLEEP"})),
         ),
         # kernel/trace/Kconfig:179 TRACING and :301 DYNAMIC_FTRACE are prompt-less bools the
         # kernel turns on itself, so they are prose, not requirements. arch/Kconfig:117 KPROBES.
         "ftrace": (
-            frozenset({"FTRACE"}),
-            frozenset({"FUNCTION_TRACER"}),
-            frozenset({"KPROBES"}),
-            frozenset({"KPROBE_EVENTS"}),
+            Clause(frozenset({"FTRACE"})),
+            Clause(frozenset({"FUNCTION_TRACER"})),
+            Clause(frozenset({"KPROBES"})),
+            Clause(frozenset({"KPROBE_EVENTS"})),
         ),
         # kernel/trace/Kconfig:853-856 BPF_EVENTS is a prompt-less default-y bool that "depends
         # on BPF_SYSCALL" and "(KPROBE_EVENTS || UPROBE_EVENTS) && PERF_EVENTS" - so that OR is
@@ -418,10 +421,10 @@ def test_advisory_debug_feature_clause_sets_are_the_reviewed_kconfig_sourced_one
         # kernel/bpf/Kconfig:4 bare BPF is select-ed by BPF_SYSCALL; :42 BPF_JIT is a codegen
         # speedup, not a prerequisite - programs attach and run under the interpreter without it.
         "bpf_tracing": (
-            frozenset({"BPF_SYSCALL"}),
-            frozenset({"PERF_EVENTS"}),
-            frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"}),
-            frozenset({"DEBUG_INFO_BTF"}),
+            Clause(frozenset({"BPF_SYSCALL"})),
+            Clause(frozenset({"PERF_EVENTS"})),
+            Clause(frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"})),
+            Clause(frozenset({"DEBUG_INFO_BTF"})),
         ),
         # lib/Kconfig.debug:2085 FAULT_INJECTION "depends on DEBUG_KERNEL" and injects nothing
         # alone; :2137 FAULT_INJECTION_DEBUG_FS "depends on FAULT_INJECTION && SYSFS && DEBUG_FS".
@@ -430,25 +433,27 @@ def test_advisory_debug_feature_clause_sets_are_the_reviewed_kconfig_sourced_one
         # NOT an alternative: all five sites register through fault_create_debugfs_attr(), which
         # lib/fault-inject.c:188 compiles only under CONFIG_FAULT_INJECTION_DEBUG_FS.
         "fault_injection": (
-            frozenset({"DEBUG_KERNEL"}),
-            frozenset({"FAULT_INJECTION"}),
-            frozenset(
-                {
-                    "FAILSLAB",
-                    "FAIL_PAGE_ALLOC",
-                    "FAIL_MAKE_REQUEST",
-                    "FAIL_IO_TIMEOUT",
-                    "FAIL_FUTEX",
-                }
+            Clause(frozenset({"DEBUG_KERNEL"})),
+            Clause(frozenset({"FAULT_INJECTION"})),
+            Clause(
+                frozenset(
+                    {
+                        "FAILSLAB",
+                        "FAIL_PAGE_ALLOC",
+                        "FAIL_MAKE_REQUEST",
+                        "FAIL_IO_TIMEOUT",
+                        "FAIL_FUTEX",
+                    }
+                )
             ),
-            frozenset({"FAULT_INJECTION_DEBUG_FS"}),
-            frozenset({"DEBUG_FS"}),
-            frozenset({"SYSFS"}),
+            Clause(frozenset({"FAULT_INJECTION_DEBUG_FS"})),
+            Clause(frozenset({"DEBUG_FS"})),
+            Clause(frozenset({"SYSFS"})),
         ),
         # lib/Kconfig.debug:2210 KCOV select-s DEBUG_FS itself; :2228 KCOV_INSTRUMENT_ALL is a
         # prompted default-y knob whose help tells targeted fuzzing to turn it off, so requiring
         # it would contradict the summary's own advice
-        "kcov": (frozenset({"KCOV"}),),
+        "kcov": (Clause(frozenset({"KCOV"})),),
     }
     for fid, clauses in expected.items():
         assert feature_requirement(fid).advertised == clauses, fid
@@ -507,32 +512,60 @@ def test_either_probe_event_source_satisfies_the_bpf_tracing_dependency():
     assert unmet_advertised_clauses(cfg, feature_requirement("bpf_tracing")) == ()
 
 
-def test_no_kernel_derived_symbol_is_advertised_as_something_the_agent_must_set():
-    # A prompt-less or auto-select-ed symbol cannot be set from a config fragment - olddefconfig
-    # discards it - so reporting one as missing sends the agent after the one thing it cannot do.
-    # The list is curated because this check has no kernel tree to read; every entry was verified
-    # against v7.0 at the file:line given.
-    derived = {
-        "TRACING": "kernel/trace/Kconfig:179",
-        "DYNAMIC_FTRACE": "kernel/trace/Kconfig:301",
-        "BPF_EVENTS": "kernel/trace/Kconfig:853",
-        "LOCKDEP": "lib/Kconfig.debug:1591",
-        "BPF": "kernel/bpf/Kconfig:4",
-        "UPROBES": "arch/Kconfig:182",
-        "DEBUG_INFO": "lib/Kconfig.debug:249",
-        "KEXEC_CORE": "kernel/Kconfig.kexec:11",
-        "VMCORE_INFO": "kernel/Kconfig.kexec:8",
+def test_no_clause_of_any_feature_names_a_symbol_the_agent_cannot_set():
+    # Invariant I1 of the clause model #1854 settles. A prompt-less or auto-select-ed symbol
+    # cannot be set from a config fragment - olddefconfig discards it - so reporting one as
+    # missing sends the agent after the one thing it cannot do. #1850 held this over `advertised`
+    # only, which let crash_capture keep KEXEC_CORE and VMCORE_INFO in `gate_required`, where the
+    # same symbols reach the agent through a *refusal* - the louder channel. The rule bars them
+    # from every clause, so this walks both fields.
+    #
+    # THIS IS A REGRESSION GUARD, NOT A PROOF. It catches the return of a symbol already known to
+    # be unsettable and cannot catch a tenth: nothing in a .config distinguishes a prompt-less
+    # symbol from a prompted one, so the only real check is a human reading Kconfig, and the list
+    # grows as symbols are verified. It is not a claim that every clause has been audited.
+    #
+    # It also says nothing about a symbol that is settable *behind a prerequisite*:
+    # SERIAL_8250_CONSOLE and DEBUG_INFO_BTF are clause members by design, with the prerequisite
+    # carried as its own clause, and are not candidates for the list.
+    #
+    # The seed must stay listed: without this, deleting a row as "not named anywhere anyway"
+    # would defang the guard against re-adding it, silently.
+    assert set(UNSETTABLE_SYMBOLS) >= I1_SEED, sorted(I1_SEED - set(UNSETTABLE_SYMBOLS))
+    named = _every_clause_symbol(FEATURE_REQUIREMENTS)
+    assert named  # non-vacuity: the walk must actually see the roster
+    # The failure message names the Kconfig file:line of every offender so a new entry can be
+    # checked against the kernel directly.
+    leaked = named & set(UNSETTABLE_SYMBOLS)
+    assert not leaked, {symbol: UNSETTABLE_SYMBOLS[symbol] for symbol in sorted(leaked)}
+
+
+def _every_clause_symbol(features: tuple[FeatureRequirement, ...]) -> set[str]:
+    return {
+        symbol
+        for f in features
+        for clauses in (f.advertised, f.gate_required)
+        for clause in clauses
+        for symbol in clause.symbols
     }
-    # #1850 unadvertised the last three, so the grandfathered exemption is gone: no entry may
-    # advertise a symbol olddefconfig would discard. The failure message names the Kconfig
-    # file:line of every offender so a new entry can be checked against the kernel directly.
-    # The three #1850 removed must stay listed above: without this, deleting their rows as
-    # "no longer advertised anyway" would defang the guard against re-adding them, silently.
-    assert {"DEBUG_INFO", "KEXEC_CORE", "VMCORE_INFO"} <= set(derived)
-    advertised = {s for f in FEATURE_REQUIREMENTS for clause in f.advertised for s in clause}
-    assert advertised  # non-vacuity: the walk must actually see the roster
-    leaked = advertised & set(derived)
-    assert not leaked, {symbol: derived[symbol] for symbol in sorted(leaked)}
+
+
+def test_the_i1_walk_reaches_the_refusal_set_and_not_only_the_advertised_one():
+    # The half #1850's version could not have caught, and the half nothing else here proves.
+    # Every symbol crash_capture gates is also advertised, so a walk that silently dropped
+    # gate_required would leave the invariant above green against the live roster while the
+    # refusal set is exactly where #1854's defect lived. Feed the walk a feature that names an
+    # unsettable symbol in gate_required ONLY, and require it to be seen.
+    smuggled = FeatureRequirement(
+        "not_a_real_feature",
+        "synthetic fixture for the walk above",
+        advertised=(Clause(frozenset({"KEXEC"})),),
+        gate_required=(Clause(frozenset({"KEXEC_CORE"})),),
+    )
+    named = _every_clause_symbol((smuggled,))
+    assert named & set(UNSETTABLE_SYMBOLS) == {"KEXEC_CORE"}
+    # and the advertised half is still walked, so neither field can be dropped unnoticed
+    assert "KEXEC" in named
 
 
 def test_debuginfo_advertises_the_settable_debug_info_producers_not_the_symbol_they_imply():
@@ -544,8 +577,8 @@ def test_debuginfo_advertises_the_settable_debug_info_producers_not_the_symbol_t
     # the agent cannot set.
     feat = feature_requirement("debuginfo")
     assert feat.advertised == (
-        frozenset({"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_BTF"}),
-        frozenset({"DEBUG_KERNEL"}),
+        Clause(frozenset({"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_BTF"})),
+        Clause(frozenset({"DEBUG_KERNEL"})),
     )
 
 
@@ -564,28 +597,65 @@ def test_crash_capture_advertises_the_kexec_prompts_not_the_symbols_they_select(
     # entry could name is already advertised, so each derived symbol is off only when a selector
     # the same entry reports is off - the two clauses added unsettable names and no signal.
     feat = feature_requirement(CRASH_CAPTURE)
-    advertised = {s for clause in feat.advertised for s in clause}
+    advertised = {s for clause in feat.advertised for s in clause.symbols}
     assert "KEXEC_CORE" not in advertised
     assert "VMCORE_INFO" not in advertised
     for selector in ("KEXEC", "KEXEC_FILE", "CRASH_DUMP"):
         assert selector in advertised, selector
 
 
-def test_unadvertising_the_derived_symbols_leaves_the_crash_capture_refusal_set_untouched():
-    # The refusal half is a separate question (#1850 scopes to the advertised half): a derived
-    # symbol is still *provably absent* in a parsed .config, so the gate keeps refusing on it.
-    # This holds the two fields apart on the same pair of symbols - gated but not advertised - so
-    # neither "unadvertise it everywhere" nor "re-advertise what the gate needs" passes silently.
+def test_the_crash_capture_refusal_set_no_longer_names_the_derived_symbols():
+    # #1854, replacing #1850's
+    # test_unadvertising_the_derived_symbols_leaves_the_crash_capture_refusal_set_untouched.
+    # That test pinned the derived pair *into* gate_required on the reasoning that a derived
+    # symbol is still provably absent in a parsed .config. True, but the refusal it produced put
+    # KEXEC_CORE and VMCORE_INFO into `missing` beside a remediation reading "rebuild the kernel
+    # with the missing CONFIG_*" - advice olddefconfig discards, on the channel that blocks the
+    # arm rather than merely warning.
+    #
+    # The pair carries no signal that the surviving clauses do not: KEXEC/KEXEC_FILE select
+    # KEXEC_CORE and CRASH_DUMP selects VMCORE_INFO, and each of those selectors is itself a
+    # clause here, so no config olddefconfig can produce lacks a derived symbol while its
+    # selector is present. Removing them narrows the refusal only on an internally inconsistent
+    # upload, which is the false refusal ADR-0318's fail-open boundary exists to avoid.
     feat = feature_requirement(CRASH_CAPTURE)
     derived = {"KEXEC_CORE", "VMCORE_INFO"}
-    assert derived <= {s for clause in feat.gate_required for s in clause}
-    assert derived.isdisjoint({s for clause in feat.advertised for s in clause})
+    gate_symbols = {s for clause in feat.gate_required for s in clause.symbols}
+    assert derived.isdisjoint(gate_symbols)
+    assert derived.isdisjoint({s for clause in feat.advertised for s in clause.symbols})
+    # non-vacuity: the refusal set must still be the crash set, not emptied on the way past
+    assert gate_symbols == {
+        "KEXEC",
+        "KEXEC_FILE",
+        "CRASH_DUMP",
+        "PROC_VMCORE",
+        "FW_CFG_SYSFS",
+        "RELOCATABLE",
+    }
+
+
+def test_a_kernel_that_lacks_only_the_derived_symbols_is_armed_rather_than_refused():
+    # The payload assertion #1854 asks for, stated as the behaviour change: the config below is
+    # what `make olddefconfig` produces for an agent that set every selector this entry names.
+    # It carries neither KEXEC_CORE nor VMCORE_INFO because the kernel writes those itself, and
+    # before #1854 it drew a refusal listing exactly the two symbols the agent could not add.
     cfg = KernelConfig(
         frozenset(
             {"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "PROC_VMCORE", "FW_CFG_SYSFS", "RELOCATABLE"}
         )
     )
-    assert missing_symbols(unmet_clauses(cfg, feat)) == ["KEXEC_CORE", "VMCORE_INFO"]
+    assert unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE)) == ()
+
+
+def test_a_kernel_that_genuinely_cannot_kexec_is_still_refused_and_named():
+    # The other direction, so the removal above cannot be read as "the gate got quieter". Drop a
+    # settable symbol and the refusal is unchanged - and every symbol it names is one a config
+    # fragment can set, which is what makes the gate's "rebuild with the missing CONFIG_*"
+    # remediation followable.
+    cfg = KernelConfig(frozenset({"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "RELOCATABLE"}))
+    missing = missing_symbols(unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE)))
+    assert missing == ["FW_CFG_SYSFS", "PROC_VMCORE"]
+    assert set(missing).isdisjoint(UNSETTABLE_SYMBOLS)
 
 
 def test_a_kernel_with_no_kexec_at_all_is_still_told_which_settable_symbols_to_build_in():
@@ -661,8 +731,8 @@ def test_kasan_advertises_the_mode_choice_as_an_or_group_and_leaves_instrumentat
     # under hardware tag-based mode; advertising that pair as a clause would fault a working
     # HW_TAGS kernel for a symbol it cannot set. The summary carries the choice instead.
     feat = feature_requirement("kasan")
-    assert frozenset({"KASAN_GENERIC", "KASAN_SW_TAGS", "KASAN_HW_TAGS"}) in feat.advertised
-    advertised = {s for clause in feat.advertised for s in clause}
+    assert Clause(frozenset({"KASAN_GENERIC", "KASAN_SW_TAGS", "KASAN_HW_TAGS"})) in feat.advertised
+    advertised = {s for clause in feat.advertised for s in clause.symbols}
     assert "KASAN_INLINE" not in advertised
     assert "KASAN_OUTLINE" not in advertised
     summary = feat.summary

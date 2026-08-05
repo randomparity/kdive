@@ -26,7 +26,9 @@ from kdive.serialization import JsonValue
 EXTERNAL_BUILD_CONTRACT_URI = "resource://kdive/contracts/external-build"
 EXTERNAL_BUILD_UPLOAD_DOC = "resource://kdive/docs/operating/external-build-upload.md"
 
-_SCHEMA_VERSION = 1
+# 2 since #1854: a `feature_config_requirements` clause is an object keyed by `symbols` rather
+# than a bare list of symbol names, so a later per-clause key (#1860, #1859) is additive.
+_SCHEMA_VERSION = 2
 
 _INVESTIGATION_CONTRACTS: Mapping[str, ArtifactContract] = {
     "rootfs": ArtifactContract(

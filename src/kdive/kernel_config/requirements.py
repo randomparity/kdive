@@ -5,6 +5,13 @@ carries an ``advertised`` superset (guidance shown to the agent) and a deliberat
 ``gate_required`` subset (what the gate refuses on). Each clause is an OR-group: satisfied
 when any member symbol is enabled. Symbol names are bare (no ``CONFIG_`` prefix), matching
 :func:`kdive.kernel_config.parse.parse_kernel_config`.
+
+One rule bounds what a clause may name (#1854): a symbol that is unsettable **in principle** -
+prompt-less, or existing only because something else ``select``s it - is never a clause member,
+because ``make olddefconfig`` discards it out of a config fragment and naming it sends the agent
+after the one thing it cannot do. The clause naming its settable selector stands in its place. A
+symbol that is settable once a prerequisite holds stays a clause member, and the prerequisite
+becomes its own clause AND-ed alongside it.
 """
 
 from __future__ import annotations
@@ -13,7 +20,18 @@ from dataclasses import dataclass
 
 from kdive.serialization import JsonValue
 
-Clause = frozenset[str]
+
+@dataclass(frozen=True, slots=True)
+class Clause:
+    """One OR-group of kernel symbols: satisfied when any member is enabled.
+
+    A record rather than a bare ``frozenset`` so that the two per-clause axes still to land - a
+    built-in requirement (#1860) and an arch scope (#1859) - arrive as fields beside ``symbols``
+    rather than as incompatible extensions to one type. This change carries ``symbols`` only.
+    """
+
+    symbols: frozenset[str]
+
 
 CRASH_CAPTURE = "crash_capture"
 CRASH_CAPTURE_RHEL_GUEST = "crash_capture_rhel_guest"
@@ -41,7 +59,7 @@ class FeatureRequirement:
 
 
 def _plain(*symbols: str) -> tuple[Clause, ...]:
-    return tuple(frozenset({s}) for s in symbols)
+    return tuple(Clause(frozenset({s})) for s in symbols)
 
 
 FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
@@ -53,8 +71,8 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "uses, so it asks only that the kernel can mount at least one of them plus the virtio-blk "
         "root device - build in the one your rootfs actually uses.",
         (
-            frozenset({"EXT4_FS", "XFS_FS"}),
-            frozenset({"VIRTIO_BLK"}),
+            Clause(frozenset({"EXT4_FS", "XFS_FS"})),
+            Clause(frozenset({"VIRTIO_BLK"})),
         ),
     ),
     FeatureRequirement(
@@ -62,12 +80,15 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "Reserve a crashkernel and capture a vmcore via kdump. Guest-family-independent only: "
         "these symbols get the capture kernel loaded, not the vmcore written. A RHEL-family guest "
         "needs the crash_capture_rhel_guest set as well.",
-        # KEXEC_CORE and VMCORE_INFO are advertised nowhere: both are bare prompt-less bools
-        # (kernel/Kconfig.kexec:11 and :8) no fragment can set - olddefconfig discards them. They
-        # also carry no signal here: KEXEC (:20) and KEXEC_FILE (:38) select KEXEC_CORE, and
-        # CRASH_DUMP (:97) selects VMCORE_INFO (so does PROC_KCORE, fs/proc/Kconfig:32), so each
-        # is off only when a selector this same entry already advertises is off. Both stay in
-        # gate_required below - a derived symbol is still provably absent in a parsed .config.
+        # KEXEC_CORE and VMCORE_INFO appear in neither field: both are bare prompt-less bools
+        # (kernel/Kconfig.kexec:11 and :8) no fragment can set - olddefconfig discards them, so
+        # naming one sends the agent after the one thing it cannot do. Nor do they carry signal
+        # here: KEXEC (:20) and KEXEC_FILE (:38) select KEXEC_CORE, and CRASH_DUMP (:97) selects
+        # VMCORE_INFO (so does PROC_KCORE, fs/proc/Kconfig:32), and every one of those selectors
+        # is a clause of the refusal set below - so no config olddefconfig can produce lacks a
+        # derived symbol while its selector is present. The only config the dropped clauses could
+        # still refuse is an internally inconsistent one (truncated or hand-edited), where
+        # refusing is the false refusal ADR-0318's fail-open boundary exists to avoid.
         _plain(
             "KEXEC",
             "KEXEC_FILE",
@@ -78,13 +99,11 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
             "RANDOMIZE_BASE",
         ),
         gate_required=(
-            frozenset({"KEXEC_CORE"}),
-            frozenset({"KEXEC", "KEXEC_FILE"}),  # either load syscall suffices
-            frozenset({"CRASH_DUMP"}),
-            frozenset({"PROC_VMCORE"}),
-            frozenset({"VMCORE_INFO"}),
-            frozenset({"FW_CFG_SYSFS"}),
-            frozenset({"RELOCATABLE"}),
+            Clause(frozenset({"KEXEC", "KEXEC_FILE"})),  # either load syscall suffices
+            Clause(frozenset({"CRASH_DUMP"})),
+            Clause(frozenset({"PROC_VMCORE"})),
+            Clause(frozenset({"FW_CFG_SYSFS"})),
+            Clause(frozenset({"RELOCATABLE"})),
         ),
     ),
     FeatureRequirement(
@@ -139,8 +158,8 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         # (:325-455), so DEBUG_INFO=n forces every member of the clause below off and that clause
         # reports the same kernel one symbol sooner.
         (
-            frozenset({"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_BTF"}),
-            frozenset({"DEBUG_KERNEL"}),
+            Clause(frozenset({"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_BTF"})),
+            Clause(frozenset({"DEBUG_KERNEL"})),
         ),
     ),
     FeatureRequirement(
@@ -185,9 +204,9 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "upload tarball much larger. Do not combine with kcsan: the kernel builds KCSAN only "
         "when KASAN is off, so a config with both gives you KASAN and silently drops KCSAN.",
         (
-            frozenset({"KASAN"}),
-            frozenset({"KASAN_GENERIC", "KASAN_SW_TAGS", "KASAN_HW_TAGS"}),
-            frozenset({"STACKTRACE"}),
+            Clause(frozenset({"KASAN"})),
+            Clause(frozenset({"KASAN_GENERIC", "KASAN_SW_TAGS", "KASAN_HW_TAGS"})),
+            Clause(frozenset({"STACKTRACE"})),
         ),
     ),
     FeatureRequirement(
@@ -268,10 +287,10 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "without it programs still attach and run, under the interpreter. Runtime cost is close "
         "to nothing until a program is attached, then it is whatever that program does.",
         (
-            frozenset({"BPF_SYSCALL"}),
-            frozenset({"PERF_EVENTS"}),
-            frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"}),
-            frozenset({"DEBUG_INFO_BTF"}),
+            Clause(frozenset({"BPF_SYSCALL"})),
+            Clause(frozenset({"PERF_EVENTS"})),
+            Clause(frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"})),
+            Clause(frozenset({"DEBUG_INFO_BTF"})),
         ),
     ),
     FeatureRequirement(
@@ -287,20 +306,22 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "sites and is close to nothing while the configured failure rate is zero, so this suits "
         "a long-running guest. Composes with debuginfo.",
         (
-            frozenset({"DEBUG_KERNEL"}),
-            frozenset({"FAULT_INJECTION"}),
-            frozenset(
-                {
-                    "FAILSLAB",
-                    "FAIL_PAGE_ALLOC",
-                    "FAIL_MAKE_REQUEST",
-                    "FAIL_IO_TIMEOUT",
-                    "FAIL_FUTEX",
-                }
+            Clause(frozenset({"DEBUG_KERNEL"})),
+            Clause(frozenset({"FAULT_INJECTION"})),
+            Clause(
+                frozenset(
+                    {
+                        "FAILSLAB",
+                        "FAIL_PAGE_ALLOC",
+                        "FAIL_MAKE_REQUEST",
+                        "FAIL_IO_TIMEOUT",
+                        "FAIL_FUTEX",
+                    }
+                )
             ),
-            frozenset({"FAULT_INJECTION_DEBUG_FS"}),
-            frozenset({"DEBUG_FS"}),
-            frozenset({"SYSFS"}),
+            Clause(frozenset({"FAULT_INJECTION_DEBUG_FS"})),
+            Clause(frozenset({"DEBUG_FS"})),
+            Clause(frozenset({"SYSFS"})),
         ),
     ),
     FeatureRequirement(
@@ -358,9 +379,13 @@ def feature_requirement(feature_id: str) -> FeatureRequirement:
 def feature_manifest() -> list[dict[str, JsonValue]]:
     manifest: list[dict[str, JsonValue]] = []
     for f in FEATURE_REQUIREMENTS:
+        # A clause renders as an object, not a bare list (#1854), so the built-in
+        # requirement (#1860) and the arch scope (#1859) land as keys beside `symbols` without a
+        # second element-shape change. Both are omitted at their defaults, so an unconstrained
+        # clause stays as small as it was.
         # Inner comprehension (not bare sorted()) widens list[str] -> list[JsonValue].
         requirements: list[JsonValue] = [
-            [symbol for symbol in sorted(clause)] for clause in f.advertised
+            {"symbols": [symbol for symbol in sorted(clause.symbols)]} for clause in f.advertised
         ]
         entry: dict[str, JsonValue] = {
             "feature": f.feature,
