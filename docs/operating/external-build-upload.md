@@ -41,6 +41,7 @@ only when `CONFIG_KASAN` is off, so a config carrying both gives you KASAN and s
 KCSAN.
 
 ```
+CONFIG_DEBUG_KERNEL=y     # gates fault injection, lockdep and the debug-info choice
 CONFIG_KASAN=y            # slab/stack out-of-bounds and use-after-free detector
 CONFIG_KASAN_GENERIC=y    # mode: one of GENERIC / SW_TAGS / HW_TAGS, not several
 CONFIG_KASAN_INLINE=y     # generic and SW_TAGS only; HW_TAGS has no instrumentation choice

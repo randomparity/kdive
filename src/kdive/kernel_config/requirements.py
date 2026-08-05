@@ -217,8 +217,13 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "bpftrace and BCC need in the guest. BPF_EVENTS is the symbol that permits the attach, "
         "and the kernel turns it on only when BPF_SYSCALL, PERF_EVENTS and a probe-event source "
         "(KPROBE_EVENTS or UPROBE_EVENTS) are all present, so build the whole set or the attach "
-        "fails with nothing to point at. DEBUG_INFO_BTF is what lets a tool resolve struct "
-        "layouts without kernel headers; pahole 1.22+ derives it from DWARF, so it needs a full "
+        "fails with nothing to point at - BPF_EVENTS itself has no Kconfig prompt and cannot be "
+        "set from a fragment, so it is not listed below. Either probe-event source satisfies it, "
+        "but they are not equivalent at attach time: KPROBE_EVENTS additionally needs KPROBES "
+        "(see the ftrace set, and note a stock arm64 defconfig omits it), while UPROBE_EVENTS "
+        "gives you userspace probes only. DEBUG_INFO_BTF is what lets a tool "
+        "resolve struct layouts without kernel headers; pahole 1.22+ derives it from DWARF, so "
+        "it needs a full "
         "debuginfo build (not reduced, not split) and lengthens the build. BPF_JIT is optional: "
         "without it programs still attach and run, under the interpreter. Runtime cost is close "
         "to nothing until a program is attached, then it is whatever that program does.",
@@ -226,7 +231,6 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
             frozenset({"BPF_SYSCALL"}),
             frozenset({"PERF_EVENTS"}),
             frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"}),
-            frozenset({"BPF_EVENTS"}),
             frozenset({"DEBUG_INFO_BTF"}),
         ),
     ),
