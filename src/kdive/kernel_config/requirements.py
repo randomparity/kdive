@@ -92,8 +92,10 @@ ENFORCEMENT_LEGEND: Final[dict[Enforcement, str]] = {
     Enforcement.UPLOAD_REFUSAL: (
         "kdive reads the effective_config you uploaded with the build and refuses the action "
         "that arms this feature, with a configuration error naming the symbols you are missing. "
-        "The entry's refuses_on lists exactly the clauses it refuses on; every other clause in "
-        "requirements is advice and can never produce a refusal."
+        "The entry's refuses_on lists the clauses it can refuse on, subject to each clause's "
+        "arch scope - a clause carrying an arch you are not building for is skipped and cannot "
+        "refuse. Every clause in requirements that is absent from refuses_on is advice and can "
+        "never produce a refusal on any arch."
     ),
     Enforcement.UPLOAD_ADVISORY: (
         "kdive reads the effective_config you uploaded with the build and returns a warning in "
@@ -109,8 +111,8 @@ ENFORCEMENT_LEGEND: Final[dict[Enforcement, str]] = {
     Enforcement.UNCHECKED: (
         "No kdive check reads this entry's requirements at any point, so nothing here is "
         "verified before your build or after it. That is not the same as optional: what "
-        "omitting these symbols costs varies by feature and is stated in the summary, which "
-        "ranges from losing only the feature to a guest that never boots. Read it."
+        "omitting these symbols costs varies by feature and ranges from losing only the feature "
+        "to a guest that never boots. The summary is where that cost is stated. Read it."
     ),
 }
 

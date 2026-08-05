@@ -64,8 +64,20 @@ The vocabulary is grounded in code, not in intent: `upload_refusal` and `upload_
 exactly the two features `kernel_config/gate.py` imports by id and turns into a payload
 (`CRASH_CAPTURE` through `unmet_clauses`, `ROOTFS_MOUNT` through `unmet_advertised_clauses`), and
 `runtime_refusal` is exactly ADR-0318's "enforced by the mechanism that can actually observe the
-condition". A test derives the `unchecked` set from the roster rather than listing it, so a new
-entry is covered without editing the test and a newly-enforced entry fails on purpose.
+condition".
+
+The grounding is only as strong as what a test can derive, and that is **the two `upload_*` values
+only**. A test scrapes `gate.py`'s `feature_requirement(...)` call sites and requires the entries
+claiming an `upload_*` value to be exactly that set, in both directions — so an entry cannot claim
+a config check it does not get, and a feature wired into `gate.py` cannot stay `unchecked`.
+
+`runtime_refusal` has no such derivation and cannot have one: nothing distinguishes a handler that
+refuses on a missing symbol from any other handler, so the value is authored and guarded only by
+the assertions naming `sysrq`. `unchecked` is also the field's default. **A future feature enforced
+by its own handler will therefore ship `unchecked` with nothing failing**, and ADR-0318's boundary
+paragraph already names a second such mechanism — the provision-time QEMU gdbstub — so this is a
+live gap and not a hypothetical one. Whoever adds that entry sets the value by hand or reproduces
+#1867 on a new row.
 
 `enforcement` replaces `gated` rather than joining it. `gated` is exactly
 `enforcement == "upload_refusal"`, so keeping both would be two spellings of one fact — and the

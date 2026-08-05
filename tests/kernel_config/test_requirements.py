@@ -210,6 +210,23 @@ def test_the_refusing_entry_publishes_which_of_its_advertised_clauses_can_refuse
     assert "RANDOMIZE_BASE" not in refusing
     assert refusing < advertised  # a strict subset: advice is a superset of what can refuse
 
+    # `refuses_on` is not a promise that every clause in it refuses on every arch: FW_CFG_SYSFS is
+    # x86_64-scoped, so on ppc64le the gate refuses on four of these five. ppc64le is this ADR's
+    # own motivating arch, so the legend has to carry that caveat rather than say "exactly".
+    upload = ENFORCEMENT_LEGEND[Enforcement.UPLOAD_REFUSAL].lower()
+    assert "subject to each clause's arch scope" in upload
+    assert "cannot refuse" in upload
+    assert "exactly the clauses" not in upload
+    # Non-vacuity for the negative above: a scoped clause really is in the refusal array, and it
+    # is the one the caveat is about. Without this the three string asserts would hold against a
+    # refusal set no arch scope ever touches, which is the case that needs no caveat at all.
+    scoped = [
+        clause
+        for clause in cast(list[dict[str, JsonValue]], entry["refuses_on"])
+        if "arch" in clause
+    ]
+    assert [clause["symbols"] for clause in scoped] == [["FW_CFG_SYSFS"]]
+
     # It is the only entry with one, and every entry that lacks one says why in `enforcement`.
     for other in feature_manifest():
         if other["feature"] == CRASH_CAPTURE:
@@ -353,12 +370,18 @@ def test_the_upload_enforcement_values_name_the_features_the_gate_module_really_
 
     from kdive.kernel_config import gate, requirements
 
-    read = {
-        getattr(requirements, name)
-        for name in re.findall(r"feature_requirement\((\w+)\)", inspect.getsource(gate))
-    }
-    # Non-vacuity: an empty set would make the equality below hold against an all-`unchecked`
-    # registry, and a renamed helper would empty it silently.
+    source = inspect.getsource(gate)
+    names = re.findall(r"feature_requirement\((\w+)\)", source)
+    read = {getattr(requirements, name) for name in names}
+    # Non-vacuity, and the stronger half: the regex must match *every* call site, not merely one.
+    # `\w+` only matches a bare identifier, so `feature_requirement("sysrq")` or a variable
+    # resolved elsewhere would be skipped silently - the two constant call sites would keep this
+    # green while a third seam stayed invisible, which is the failure mode this whole test exists
+    # to catch. Count the calls independently of what the capture accepts.
+    assert len(names) == source.count("feature_requirement("), (
+        "gate.py has a feature_requirement() call the regex cannot read - a seam this guard "
+        "cannot see is a seam whose feature may claim any enforcement value"
+    )
     assert read, "no feature_requirement() call site found in gate.py - the regex went stale"
 
     checked = {
