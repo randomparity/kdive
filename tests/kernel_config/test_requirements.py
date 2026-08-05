@@ -142,13 +142,15 @@ def test_no_upload_seam_reads_the_sysrq_refusal_set():
 
     from kdive.kernel_config import gate
 
-    # the whole module text, not just its import surface: gating sysrq via a string literal,
-    # a module-qualified requirements.SYSRQ, or a loop over FEATURE_REQUIREMENTS would all
-    # leave an attribute check green while making the summary's disclaimer false
+    # the whole module text, not just its import surface: gating sysrq by a string literal or a
+    # module-qualified requirements.SYSRQ would leave an attribute check green while making the
+    # summary's disclaimer false
     source = inspect.getsource(gate).lower()
     assert "sysrq" not in source
     # non-vacuity, both halves: the module this reads must really be the refusal seam, and the
-    # search must really be able to find a feature id in it
+    # search must really be able to find a feature id in it. The attribute pair also covers the
+    # one shape the text search cannot see - a rewrite that drops the named consumers for a loop
+    # over FEATURE_REQUIREMENTS would gate sysrq without ever spelling it.
     assert hasattr(gate, "CRASH_CAPTURE")
     assert hasattr(gate, "ROOTFS_MOUNT")
     assert CRASH_CAPTURE in source
