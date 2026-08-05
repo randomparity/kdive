@@ -101,9 +101,9 @@ def test_feature_config_manifest_is_included_without_internal_gate_set() -> None
 
 
 def test_every_requirements_element_is_a_clause_object_keyed_by_symbols() -> None:
-    # #1854: a requirements element stopped being a bare list of symbol names and became an
-    # object, so that #1860 and #1859 can add `built_in` and `arch` keys beside `symbols`
-    # without a second shape change. Every other assertion in this module reads
+    # #1854 (ADR-0544 §6): a requirements element stopped being a bare list of symbol names and
+    # became an object, which is how #1860 and #1859 added `built_in` and `arch` keys beside
+    # `symbols` without a second shape change. Every other assertion in this module reads
     # json.dumps(entry["requirements"]) and matches a substring, which passes identically against
     # ["KEXEC"] and against {"symbols": ["KEXEC"]} - so without this the shape change would land
     # with nothing holding it. Assert the shape structurally, on every clause of every feature.
@@ -114,15 +114,23 @@ def test_every_requirements_element_is_a_clause_object_keyed_by_symbols() -> Non
     assert clauses, "no feature advertises a clause, so the walk below would pass vacuously"
     for clause in clauses:
         assert isinstance(clause, dict), clause
-        # Keys are bounded, not just present: `built_in` joined the vocabulary with #1860, and an
-        # element carrying `arch` before #1859 lands would still be a shape lie about a value the
-        # registry does not yet hold.
-        assert set(clause) <= {"symbols", "built_in"}, clause
+        # Keys are bounded, not just present: `built_in` joined the vocabulary with #1860 and
+        # `arch` with #1859, and those three are the whole of it - ADR-0544's closing consequence
+        # is that a fourth axis should arrive as an AND-ed prerequisite clause, not a fourth key,
+        # so an element carrying one is a shape change an agent has to be told about.
+        assert set(clause) <= {"symbols", "built_in", "arch"}, clause
         assert clause.get("built_in") in (None, "required", "unless_initrd"), clause
         symbols = clause["symbols"]
         assert isinstance(symbols, list) and symbols, clause
         assert all(isinstance(s, str) and s for s in symbols), clause
         assert symbols == sorted(symbols), clause  # stable order for a diffable document
+        arch = clause.get("arch")
+        if arch is not None:
+            # Same three properties as `symbols`: a non-empty list of non-empty strings in a
+            # stable order. An empty list would say "no arch", which is not what None says.
+            assert isinstance(arch, list) and arch, clause
+            assert all(isinstance(a, str) and a for a in arch), clause
+            assert arch == sorted(arch), clause
 
     kexec = next(
         c
@@ -146,6 +154,32 @@ def test_the_served_document_carries_the_built_in_requirement_on_the_boot_clause
     assert {"symbols": ["VIRTIO_PCI"], "built_in": "unless_initrd"} in console["requirements"]
     ikconfig = next(f for f in features if f["feature"] == "ikconfig")
     assert {"symbols": ["IKCONFIG"], "built_in": "required"} in ikconfig["requirements"]
+
+
+def test_the_served_document_carries_the_arch_scope_on_the_console_clauses() -> None:
+    # #1859 (ADR-0544 §3, §6). The clause-level tag is metadata the agent - who knows its own
+    # target arch - filters on, and this is the surface it reads it from, so pin it on the served
+    # document rather than on feature_manifest(). Before this, a ppc64le agent diffing its config
+    # against the array was told to set SERIAL_8250_CONSOLE, which does nothing on pseries, and
+    # was never told about HVC_CONSOLE at all - both halves of the issue, on one entry.
+    features = _doc()["feature_config_requirements"]["features"]
+    console = next(f for f in features if f["feature"] == "serial_console")
+    assert console["requirements"] == [
+        {"symbols": ["SERIAL_8250"], "built_in": "required", "arch": ["x86_64"]},
+        {"symbols": ["SERIAL_8250_CONSOLE"], "arch": ["x86_64"]},
+        {"symbols": ["HVC_CONSOLE"], "arch": ["ppc64le"]},
+        {"symbols": ["VIRTIO_PCI"], "built_in": "unless_initrd"},
+    ]
+
+
+def test_no_other_served_feature_carries_an_arch_scope() -> None:
+    # The key is omitted at its default, so the dozens of unscoped clauses stay as small as they
+    # were and an agent filtering on `arch` sees only the one entry that really varies. Also the
+    # served half of ADR-0544 §7's residual: crash_capture's arch-specific gated pair carries no
+    # tag, deferred to #1875, so it must not appear here either.
+    features = _doc()["feature_config_requirements"]["features"]
+    tagged = {f["feature"] for f in features for clause in f["requirements"] if "arch" in clause}
+    assert tagged == {"serial_console"}
 
 
 def test_schema_version_is_two_for_the_clause_object_element() -> None:

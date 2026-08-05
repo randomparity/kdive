@@ -1,10 +1,10 @@
 """Kernel symbols no config fragment can set, with the Kconfig line each was verified at.
 
-The data behind invariant I1 of the clause model #1854 settles. A symbol here is unsettable **in
-principle** - prompt-less, or existing only because something else ``select``s it - so ``make
-olddefconfig`` drops the line out of a config fragment, and any surface that names it hands the
-reader an instruction it cannot follow. Two test modules read this list, which is why it lives in
-a support module rather than inside either of them:
+The data behind invariant I1 of the clause model ADR-0544 sets out and #1854 settles (§1, §7).
+A symbol here is unsettable **in principle** - prompt-less, or existing only because something
+else ``select``s it - so ``make olddefconfig`` drops the line out of a config fragment, and any
+surface that names it hands the reader an instruction it cannot follow. Two test modules read
+this list, which is why it lives in a support module rather than inside either of them:
 
 - ``tests/kernel_config/test_requirements.py`` holds it out of every clause of every feature -
   ``advertised`` and ``gate_required`` alike.
