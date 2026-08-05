@@ -1245,9 +1245,9 @@ def test_the_same_modular_kernel_is_silent_once_the_build_uploaded_an_initrd(
 def test_the_disk_image_lane_is_silent_on_the_modular_kernel_it_boots_fine(
     migrated_url: str,
 ) -> None:
-    # #1881: the disk-image lane installs through the in-guest helper, which runs dracut and
-    # boots through the guest's own bootloader, and remote-libvirt accepts no `initrd` component
-    # at all - so before this the advisory fired on every such Run with no way to silence it.
+    # #1881: the disk-image lane installs through the in-guest helper, which runs dracut and boots
+    # through the guest's own bootloader. Before this the advisory fired on every such Run, and
+    # the only way to quiet it was to upload an initrd the remote install plane never reads.
     # The Run differs from the warning case below only in `target_kind`, which is what pins the
     # seam to the boot model rather than to some incidental difference in the fixture.
     async def _run() -> None:
@@ -1285,21 +1285,50 @@ def test_the_direct_kernel_lanes_still_warn_on_the_same_modular_kernel(
     asyncio.run(_run())
 
 
+async def _complete_with_config(
+    pool: AsyncConnectionPool, config: bytes, *, target_kind: ResourceKind
+) -> ToolResponse:
+    """Finalize one Run of the given target kind against an arbitrary effective config."""
+    run_id = await _seed_external_run_with_manifest(pool, target_kind=target_kind)
+    validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", "abcd"))
+    with _patched_config_load(config):
+        return await _build_handlers(validator).complete_build(
+            pool, _ctx(), str(run_id), build_id="abcd", cmdline="x"
+        )
+
+
+def test_the_disk_image_lane_is_still_checked_and_warns_on_a_driver_it_does_not_have(
+    migrated_url: str,
+) -> None:
+    # Non-vacuity for the silence above, and the arm that stops the fix from being implemented as
+    # "skip the check entirely for remote-libvirt" - which every other test in this file would
+    # pass. The relief is about *when* a module can load, not about whether the kernel has the
+    # driver: dracut can package nothing if the config carries no virtio-blk at all.
+    no_virtio_blk = b"CONFIG_EXT4_FS=y\n"
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _complete_with_config(
+                pool, no_virtio_blk, target_kind=ResourceKind.REMOTE_LIBVIRT
+            )
+        assert resp.status == "succeeded", resp
+        warning = cast(dict[str, Any], resp.data["missing_boot_config"])
+        assert warning["missing"] == ["VIRTIO_BLK"]
+        # absent outright, not modular, so the =m subset key is omitted rather than empty
+        assert "built_in_required" not in warning
+
+    asyncio.run(_run())
+
+
 def test_a_built_in_kernel_is_silent_on_every_lane(migrated_url: str) -> None:
-    # Non-vacuity for the pair above: the lane axis only moves the verdict for a *modular*
-    # config. A kernel that builds its boot symbols in warns on neither, so a reader cannot take
-    # the disk-image silence above as "this lane is never checked".
+    # The other half of the pair: the lane axis moves the verdict only for a *modular* config. A
+    # kernel that builds its boot symbols in warns on neither lane.
     built_in = b"CONFIG_EXT4_FS=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_VIRTIO_PCI=y\n"
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             for kind in (ResourceKind.LOCAL_LIBVIRT, ResourceKind.REMOTE_LIBVIRT):
-                run_id = await _seed_external_run_with_manifest(pool, target_kind=kind)
-                validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", "abcd"))
-                with _patched_config_load(built_in):
-                    resp = await _build_handlers(validator).complete_build(
-                        pool, _ctx(), str(run_id), build_id="abcd", cmdline="x"
-                    )
+                resp = await _complete_with_config(pool, built_in, target_kind=kind)
                 assert resp.status == "succeeded", resp
                 assert "missing_boot_config" not in resp.data, kind
 

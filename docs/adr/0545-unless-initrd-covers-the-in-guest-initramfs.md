@@ -25,12 +25,16 @@ deterministic one on every Run:
   (`deploy/remote-libvirt-guest-helpers/kdive-install-kernel`) runs `depmod`, then
   `dracut --force /boot/initramfs-$ver.img "$ver"`, then points `grubby` at it; the guest boots
   through its own bootloader off that initramfs.
-- It could not do otherwise. `providers/remote_libvirt/composition.py` accepts no `initrd`
-  component at all ("initrd is future work in the parity epic (#1423)"), so an agent cannot
-  upload one to silence the advisory even if it wanted to.
+- The escape the payload offered was a no-op there. An `initrd` upload is accepted on any Run —
+  `RUN_ARTIFACT_NAMES` is not gated by target kind — so an agent *could* silence the advisory by
+  uploading one, but the remote-libvirt install plane never reads it: `composition.py` accepts no
+  `initrd` component ("initrd is future work in the parity epic (#1423)") and nothing else under
+  `providers/remote_libvirt/` references one. The only way out was to upload a file that changes
+  nothing about the boot, purely to quiet a check.
 
 So every disk-image Run whose config carries a modular `EXT4_FS`/`XFS_FS`/`VIRTIO_BLK` drew
-`kernel_missing_boot_config` on a kernel that boots — with no available way to silence it. That is
+`kernel_missing_boot_config` on a kernel that boots, with no way to silence it that means anything.
+That is
 the shape a distro `.config` ships, and `docs/operating/external-build-upload.md` steers an agent
 towards exactly such a config ("start from the catalog image's own config, not a bare
 `defconfig`"). The registry already stated the exemption in prose and no seam applied it: the
