@@ -30,7 +30,6 @@ def test_only_the_named_gate_consumers_are_gated_and_the_rest_advertise_only():
     assert gated == {CRASH_CAPTURE, SYSRQ}
 
     advertise_only = [f for f in FEATURE_REQUIREMENTS if f.feature not in gated]
-    assert len(advertise_only) == len(FEATURE_REQUIREMENTS) - 2
     for feat in advertise_only:
         assert feat.gate_required == (), feat.feature
         assert feat.gated is False, feat.feature
@@ -226,88 +225,99 @@ def test_advisory_debug_features_reach_the_manifest_ungated():
         assert entry["summary"], fid
 
 
-def test_advisory_debug_feature_symbol_sets_match_the_kernel_kconfig():
+def test_advisory_debug_feature_clause_sets_are_the_reviewed_kconfig_sourced_ones():
+    # Asserts the clause *tuple*, not the flattened symbol union: regrouping an OR-group into
+    # separate AND clauses (the exact regression #1848 fixes in kasan) leaves the union
+    # unchanged and would slip past a set comparison. Symbols and grouping are read from the
+    # kernel's own Kconfig at v7.0; the file:line citations are in the comments below.
     expected = {
-        # lib/Kconfig.kcsan: "depends on DEBUG_KERNEL && !KASAN"
-        "kcsan": {"DEBUG_KERNEL", "KCSAN"},
-        # lib/Kconfig.kfence: no DEBUG_KERNEL dependency; the knobs are ints, not booleans
-        "kfence": {"KFENCE"},
-        # mm/Kconfig.debug: "depends on DEBUG_KERNEL && HAVE_DEBUG_KMEMLEAK"; DEBUG_FS is
-        # select-ed, so advertising it could never warn
-        "kmemleak": {"DEBUG_KERNEL", "DEBUG_KMEMLEAK"},
-        # lib/Kconfig.debug: PROVE_LOCKING selects LOCKDEP (so LOCKDEP is not advertised);
-        # DEBUG_ATOMIC_SLEEP is a separate user-selectable symbol PROVE_LOCKING does not select
-        "lockdep": {"DEBUG_KERNEL", "PROVE_LOCKING", "DEBUG_ATOMIC_SLEEP"},
-        # kernel/trace/Kconfig: TRACING is what builds fs/tracefs; arch/Kconfig: KPROBES
-        "ftrace": {
-            "FTRACE",
-            "TRACING",
-            "FUNCTION_TRACER",
-            "DYNAMIC_FTRACE",
-            "KPROBES",
-            "KPROBE_EVENTS",
-            "UPROBE_EVENTS",
-        },
-        # kernel/trace/Kconfig: BPF_EVENTS "depends on BPF_SYSCALL" and
-        # "(KPROBE_EVENTS || UPROBE_EVENTS) && PERF_EVENTS"; bare BPF is select-ed by BPF_SYSCALL
-        "bpf_tracing": {
-            "BPF_SYSCALL",
-            "BPF_JIT",
-            "PERF_EVENTS",
-            "KPROBE_EVENTS",
-            "UPROBE_EVENTS",
-            "BPF_EVENTS",
-            "DEBUG_INFO_BTF",
-        },
-        # lib/Kconfig.debug: FAULT_INJECTION "depends on DEBUG_KERNEL" and injects nothing alone
-        "fault_injection": {
-            "DEBUG_KERNEL",
-            "FAULT_INJECTION",
-            "FAILSLAB",
-            "FAIL_PAGE_ALLOC",
-            "FAIL_MAKE_REQUEST",
-            "FAIL_IO_TIMEOUT",
-            "FAIL_FUTEX",
-            "FAULT_INJECTION_DEBUG_FS",
-            "FAULT_INJECTION_CONFIGFS",
-        },
-        # lib/Kconfig.debug: KCOV select-s DEBUG_FS itself, so DEBUG_FS is not advertised
-        "kcov": {"KCOV", "KCOV_INSTRUMENT_ALL"},
+        # lib/Kconfig.kcsan:16 "depends on DEBUG_KERNEL && !KASAN"
+        "kcsan": (frozenset({"DEBUG_KERNEL"}), frozenset({"KCSAN"})),
+        # lib/Kconfig.kfence:8 has no DEBUG_KERNEL dependency; the knobs are ints, not booleans,
+        # and parse_kernel_config only counts =y/=m as enabled
+        "kfence": (frozenset({"KFENCE"}),),
+        # mm/Kconfig.debug:242 "depends on DEBUG_KERNEL && HAVE_DEBUG_KMEMLEAK"; :243 select-s
+        # DEBUG_FS, so advertising DEBUG_FS could never warn
+        "kmemleak": (frozenset({"DEBUG_KERNEL"}), frozenset({"DEBUG_KMEMLEAK"})),
+        # lib/Kconfig.debug:1452-1458 PROVE_LOCKING select-s LOCKDEP and the DEBUG_* lock set,
+        # so none of those is advertised; :1650 DEBUG_ATOMIC_SLEEP is separate and prompted
+        "lockdep": (
+            frozenset({"DEBUG_KERNEL"}),
+            frozenset({"PROVE_LOCKING"}),
+            frozenset({"DEBUG_ATOMIC_SLEEP"}),
+        ),
+        # kernel/trace/Kconfig:179 TRACING and :301 DYNAMIC_FTRACE are prompt-less bools the
+        # kernel turns on itself, so they are prose, not requirements. arch/Kconfig:117 KPROBES.
+        "ftrace": (
+            frozenset({"FTRACE"}),
+            frozenset({"FUNCTION_TRACER"}),
+            frozenset({"KPROBES"}),
+            frozenset({"KPROBE_EVENTS"}),
+        ),
+        # kernel/trace/Kconfig:853-855 BPF_EVENTS "depends on BPF_SYSCALL" and
+        # "(KPROBE_EVENTS || UPROBE_EVENTS) && PERF_EVENTS" - that OR is the real either/or.
+        # kernel/bpf/Kconfig:4 bare BPF is select-ed by BPF_SYSCALL; :42 BPF_JIT is a codegen
+        # speedup, not a prerequisite - programs attach and run under the interpreter without it.
+        "bpf_tracing": (
+            frozenset({"BPF_SYSCALL"}),
+            frozenset({"PERF_EVENTS"}),
+            frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"}),
+            frozenset({"BPF_EVENTS"}),
+            frozenset({"DEBUG_INFO_BTF"}),
+        ),
+        # lib/Kconfig.debug:2085 FAULT_INJECTION "depends on DEBUG_KERNEL" and injects nothing
+        # alone; :2137 FAULT_INJECTION_DEBUG_FS "depends on FAULT_INJECTION && SYSFS && DEBUG_FS"
+        # and nothing select-s those two, so they are requirements. FAULT_INJECTION_CONFIGFS is
+        # NOT an alternative: all five sites register through fault_create_debugfs_attr(), which
+        # lib/fault-inject.c:188 compiles only under CONFIG_FAULT_INJECTION_DEBUG_FS.
+        "fault_injection": (
+            frozenset({"DEBUG_KERNEL"}),
+            frozenset({"FAULT_INJECTION"}),
+            frozenset(
+                {
+                    "FAILSLAB",
+                    "FAIL_PAGE_ALLOC",
+                    "FAIL_MAKE_REQUEST",
+                    "FAIL_IO_TIMEOUT",
+                    "FAIL_FUTEX",
+                }
+            ),
+            frozenset({"FAULT_INJECTION_DEBUG_FS"}),
+            frozenset({"DEBUG_FS"}),
+            frozenset({"SYSFS"}),
+        ),
+        # lib/Kconfig.debug:2210 KCOV select-s DEBUG_FS itself; :2228 KCOV_INSTRUMENT_ALL is a
+        # prompted default-y knob whose help tells targeted fuzzing to turn it off, so requiring
+        # it would contradict the summary's own advice
+        "kcov": (frozenset({"KCOV"}),),
     }
-    for fid, symbols in expected.items():
-        feat = feature_requirement(fid)
-        assert {s for clause in feat.advertised for s in clause} == symbols, fid
+    for fid, clauses in expected.items():
+        assert feature_requirement(fid).advertised == clauses, fid
 
 
-def test_interchangeable_kernel_variants_are_or_groups_not_separate_and_clauses():
-    # An AND clause per variant would warn on a kernel that legitimately picked the other one.
-    # Each pair below is a genuine either/or in the kernel's Kconfig.
-    assert frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"}) in feature_requirement("ftrace").advertised
-    assert (
-        frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"})
-        in feature_requirement("bpf_tracing").advertised
-    )
-    fault = feature_requirement("fault_injection")
-    # the two userspace drive interfaces: debugfs or configfs, never both required
-    assert frozenset({"FAULT_INJECTION_DEBUG_FS", "FAULT_INJECTION_CONFIGFS"}) in fault.advertised
-    # at least one injection site, not all five
-    assert (
+def test_a_kernel_that_picked_one_injection_site_is_not_told_it_needs_the_other_four():
+    # The bite for the fault_injection OR-group: five separate AND clauses would report four
+    # false missing symbols against a complete failslab-only kernel.
+    cfg = KernelConfig(
         frozenset(
             {
+                "DEBUG_KERNEL",
+                "FAULT_INJECTION",
                 "FAILSLAB",
-                "FAIL_PAGE_ALLOC",
-                "FAIL_MAKE_REQUEST",
-                "FAIL_IO_TIMEOUT",
-                "FAIL_FUTEX",
+                "FAULT_INJECTION_DEBUG_FS",
+                "DEBUG_FS",
+                "SYSFS",
             }
         )
-        in fault.advertised
     )
+    assert unmet_advertised_clauses(cfg, feature_requirement("fault_injection")) == ()
 
 
-def test_a_configfs_driven_fault_injection_kernel_is_not_told_it_needs_debugfs():
-    # The bite for the OR-groups above: a kernel that picked configfs and one injection site is
-    # complete, and separate AND clauses would have reported four false missing symbols.
+def test_a_configfs_only_fault_injection_kernel_is_told_it_still_needs_the_debugfs_interface():
+    # FAULT_INJECTION_CONFIGFS looks like an alternative and is not: lib/fault-inject.c:188 gates
+    # fault_create_debugfs_attr() - the only registration path FAILSLAB and friends use - on
+    # CONFIG_FAULT_INJECTION_DEBUG_FS. Advertising the two as an OR-group would have called this
+    # kernel complete while it exposes no knob to set a failure rate with.
     cfg = KernelConfig(
         frozenset(
             {
@@ -318,7 +328,40 @@ def test_a_configfs_driven_fault_injection_kernel_is_not_told_it_needs_debugfs()
             }
         )
     )
-    assert unmet_advertised_clauses(cfg, feature_requirement("fault_injection")) == ()
+    missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement("fault_injection")))
+    assert missing == ["DEBUG_FS", "FAULT_INJECTION_DEBUG_FS", "SYSFS"]
+
+
+def test_either_probe_event_source_satisfies_the_bpf_tracing_dependency():
+    # kernel/trace/Kconfig:855: BPF_EVENTS needs KPROBE_EVENTS *or* UPROBE_EVENTS, so a
+    # uprobe-only kernel is complete and two AND clauses would falsely fault it.
+    cfg = KernelConfig(
+        frozenset(
+            {
+                "BPF_SYSCALL",
+                "PERF_EVENTS",
+                "UPROBE_EVENTS",
+                "BPF_EVENTS",
+                "DEBUG_INFO_BTF",
+            }
+        )
+    )
+    assert unmet_advertised_clauses(cfg, feature_requirement("bpf_tracing")) == ()
+
+
+def test_no_advertised_symbol_is_one_the_kernel_turns_on_by_itself():
+    # A prompt-less or auto-select-ed symbol can never be the thing an agent forgot, so listing
+    # it is noise the agent cannot act on. These are the ones reviewed out of the sets above.
+    never_advertise = {
+        "TRACING",  # kernel/trace/Kconfig:179, prompt-less, select-ed by FUNCTION_TRACER
+        "DYNAMIC_FTRACE",  # kernel/trace/Kconfig:301, prompt-less, default y
+        "LOCKDEP",  # lib/Kconfig.debug:1591, prompt-less, select-ed by PROVE_LOCKING
+        "BPF",  # kernel/bpf/Kconfig:4, prompt-less, select-ed by BPF_SYSCALL
+        "UPROBES",  # arch/Kconfig:182, def_bool
+    }
+    advertised = {s for f in FEATURE_REQUIREMENTS for clause in f.advertised for s in clause}
+    assert advertised  # non-vacuity: the walk must actually see the roster
+    assert advertised & never_advertise == set()
 
 
 def test_advisory_debug_feature_summaries_name_the_bug_class_and_the_runtime_cost():
@@ -329,9 +372,9 @@ def test_advisory_debug_feature_summaries_name_the_bug_class_and_the_runtime_cos
         "kfence": (("use-after-free", "out-of-bounds"), ("sample", "guard page")),
         "kmemleak": (("leak",), ("scan", "stack trace")),
         "lockdep": (("deadlock", "lock-ordering"), ("every lock", "bookkeeping")),
-        "ftrace": (("which code path", "tracepoint"), ("nop", "cost")),
+        "ftrace": (("which code path", "tracepoint"), ("nop",)),
         "bpf_tracing": (("kprobe", "tracepoint"), ("pahole", "attached")),
-        "fault_injection": (("error path", "returns null"), ("probability", "cost")),
+        "fault_injection": (("error path", "returns null"), ("probability",)),
         "kcov": (("coverage", "fuzz"), ("expensive", "slow")),
     }
     for fid, (bug_class_terms, cost_terms) in expected.items():
@@ -371,28 +414,32 @@ def test_kasan_summary_names_the_bug_class_the_memory_cost_and_the_debuginfo_tra
     assert "debuginfo" in summary
 
 
-def test_kasan_mode_and_instrumentation_choices_are_or_groups():
-    # lib/Kconfig.kasan has two `choice` blocks: mode (GENERIC / SW_TAGS / HW_TAGS) and
-    # instrumentation (INLINE / OUTLINE). Choice members are mutually exclusive, so the old
-    # _plain("KASAN", "KASAN_INLINE") reported a missing KASAN_INLINE on every outline kernel.
+def test_kasan_advertises_the_mode_choice_as_an_or_group_and_leaves_instrumentation_to_prose():
+    # lib/Kconfig.kasan:73 is a `choice` over GENERIC / SW_TAGS / HW_TAGS - mutually exclusive,
+    # so one OR-group, not three AND clauses. The instrumentation `choice` at :141 is
+    # "depends on KASAN_GENERIC || KASAN_SW_TAGS", so neither INLINE nor OUTLINE is settable
+    # under hardware tag-based mode; advertising that pair as a clause would fault a working
+    # HW_TAGS kernel for a symbol it cannot set. The summary carries the choice instead.
     feat = feature_requirement("kasan")
     assert frozenset({"KASAN_GENERIC", "KASAN_SW_TAGS", "KASAN_HW_TAGS"}) in feat.advertised
-    assert frozenset({"KASAN_INLINE", "KASAN_OUTLINE"}) in feat.advertised
-    assert frozenset({"KASAN_INLINE"}) not in feat.advertised
+    advertised = {s for clause in feat.advertised for s in clause}
+    assert "KASAN_INLINE" not in advertised
+    assert "KASAN_OUTLINE" not in advertised
+    summary = feat.summary
+    assert "KASAN_INLINE" in summary
+    assert "KASAN_OUTLINE" in summary
 
 
-def test_an_outline_instrumented_kasan_kernel_is_advertised_as_complete():
-    # The bite: this kernel is a working KASAN kernel and used to come back missing KASAN_INLINE.
-    cfg = KernelConfig(
-        frozenset({"KASAN", "KASAN_GENERIC", "KASAN_OUTLINE", "STACKTRACE"}),
-    )
-    assert unmet_advertised_clauses(cfg, feature_requirement("kasan")) == ()
+def test_every_kasan_mode_is_advertised_as_complete_including_hardware_tag_based():
+    # The bite: the old _plain("KASAN", "KASAN_INLINE") told an outline kernel it was missing
+    # KASAN_INLINE, and an INLINE/OUTLINE OR-group would tell an arm64 MTE kernel the same.
+    for mode in ("KASAN_GENERIC", "KASAN_SW_TAGS", "KASAN_HW_TAGS"):
+        cfg = KernelConfig(frozenset({"KASAN", mode, "STACKTRACE"}))
+        assert unmet_advertised_clauses(cfg, feature_requirement("kasan")) == (), mode
 
 
 def test_a_kernel_with_no_sanitizer_at_all_is_told_what_kasan_needs():
     # Non-vacuity guard for the test above: the same check must still report on a bare kernel.
     cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}))
     missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement("kasan")))
-    assert "KASAN" in missing
-    assert "KASAN_GENERIC" in missing
-    assert "KASAN_OUTLINE" in missing
+    assert missing == ["KASAN", "KASAN_GENERIC", "KASAN_HW_TAGS", "KASAN_SW_TAGS", "STACKTRACE"]

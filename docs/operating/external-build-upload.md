@@ -36,19 +36,31 @@ starting point: a stock `defconfig` commonly builds `VIRTIO_BLK` and `EXT4_FS` a
 than built-in, so the resulting kernel cannot mount the `/dev/vda` ext4 rootfs and never boots the
 direct-kernel guest. Begin from the image's config, then layer on the debug symbols below.
 
-A useful debug set to start from:
+A useful debug set to start from. Pick **one** memory-safety detector: `CONFIG_KCSAN` is built
+only when `CONFIG_KASAN` is off, so a config carrying both gives you KASAN and silently drops
+KCSAN.
 
 ```
 CONFIG_KASAN=y            # slab/stack out-of-bounds and use-after-free detector
-CONFIG_KASAN_INLINE=y
-CONFIG_KCSAN=y            # data-race detector
-CONFIG_FAULT_INJECTION=y  # failslab / fail_page_alloc via debugfs
-CONFIG_FAILSLAB=y
+CONFIG_KASAN_GENERIC=y    # mode: one of GENERIC / SW_TAGS / HW_TAGS, not several
+CONFIG_KASAN_INLINE=y     # generic and SW_TAGS only; HW_TAGS has no instrumentation choice
+CONFIG_STACKTRACE=y       # turns a KASAN report into allocation and free backtraces
+# CONFIG_KCSAN=y          # data-race detector - alternative to KASAN above, never alongside it
+CONFIG_FAULT_INJECTION=y          # framework only; it injects nothing on its own
+CONFIG_FAILSLAB=y                 # pick at least one injection site
 CONFIG_FAIL_PAGE_ALLOC=y
+CONFIG_FAULT_INJECTION_DEBUG_FS=y # the interface every site above registers through
+CONFIG_DEBUG_FS=y                 # ... which in turn needs debugfs and sysfs
+CONFIG_SYSFS=y
 CONFIG_DEBUG_INFO_DWARF5=y  # DWARF/BTF: required for drgn to resolve any symbol (see below)
 CONFIG_DEBUG_INFO_BTF=y     # BTF: what in-guest drgn-live reads
-CONFIG_PROVE_LOCKING=y    # lockdep
+CONFIG_PROVE_LOCKING=y      # lockdep
+CONFIG_DEBUG_ATOMIC_SLEEP=y # separate from lockdep: catches sleeping in atomic context
 ```
+
+This is a starting point, not the whole menu. `resource://kdive/contracts/external-build` carries
+the per-feature `CONFIG_*` manifest — sanitizers, lock debugging, ftrace, BPF tracing, fault
+injection and coverage — each with what it finds and what it costs.
 
 **`drgn` needs debuginfo to resolve any symbol.** For `drgn-live` introspection
 (`introspect.run` / `introspect.script`), build with `CONFIG_DEBUG_INFO_BTF=y`: in-guest drgn reads
