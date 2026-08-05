@@ -17,6 +17,7 @@ becomes its own clause AND-ed alongside it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final
 
 from kdive.serialization import JsonValue
 
@@ -60,6 +61,18 @@ class FeatureRequirement:
 
 def _plain(*symbols: str) -> tuple[Clause, ...]:
     return tuple(Clause(frozenset({s})) for s in symbols)
+
+
+# lib/Kconfig.debug:262-323 is the "Debug information" `choice`. Three of its four members produce
+# real DWARF and select DEBUG_INFO - DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT (:281, selects at :283),
+# DEBUG_INFO_DWARF4 (:293, :295) and DEBUG_INFO_DWARF5 (:305, :307); the fourth, DEBUG_INFO_NONE
+# (:275), is the off setting. Named once because two features need the same three symbols for
+# different reasons (#1855): `debuginfo` advertises them as the feature itself, and `bpf_tracing`
+# AND-s them in as the prerequisite DEBUG_INFO_BTF is only settable behind. Two copies would let a
+# later choice member reach one entry and not the other.
+_DWARF_CHOICE_MEMBERS: Final[frozenset[str]] = frozenset(
+    {"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT"}
+)
 
 
 FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
@@ -158,13 +171,25 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "DWARF tables in every .ko - can grow the module tree 10-50x and slow upload and "
         "install. Omit for boot-time crash reproducers and console-log investigations where no "
         "post-boot introspection is needed.",
-        # DEBUG_INFO itself is not advertised: lib/Kconfig.debug:249 is a bare prompt-less bool no
-        # fragment can set - olddefconfig discards it. It also carries no signal here: DWARF4 and
-        # DWARF5 select it (:295, :307) and DEBUG_INFO_BTF (:398) sits inside `if DEBUG_INFO`
-        # (:325-455), so DEBUG_INFO=n forces every member of the clause below off and that clause
-        # reports the same kernel one symbol sooner.
+        # The clause is exactly the DWARF `choice` members, and each of the two edits that made it
+        # so is load-bearing (#1855).
+        #
+        # DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT belongs because it is a choice member like the other
+        # two and yields real DWARF. Omitting it faulted a kernel built on the toolchain default
+        # for all three symbols at once, which is the one direction of error this advisory cannot
+        # afford: it tells a complete debuginfo build to spend a rebuild.
+        #
+        # DEBUG_INFO_BTF does not belong. It is not a choice member (lib/Kconfig.debug:398, inside
+        # `if DEBUG_INFO` at :325-455) and selects nothing, so offering it as a third alternative
+        # named a path a bare config cannot take - olddefconfig drops the line. It is also not this
+        # feature: an offline vmcore and gdb want DWARF, and BTF keeps its home under bpf_tracing,
+        # where the same prerequisite is now stated as its own clause.
+        #
+        # DEBUG_INFO itself stays unadvertised: :249 is a bare prompt-less bool no fragment can
+        # set, and it carries no signal here either, because all three members below select it -
+        # DEBUG_INFO=n forces every one of them off and this clause reports the same kernel.
         (
-            Clause(frozenset({"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_BTF"})),
+            Clause(_DWARF_CHOICE_MEMBERS),
             Clause(frozenset({"DEBUG_KERNEL"})),
         ),
     ),
@@ -292,10 +317,17 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "debuginfo build (not reduced, not split) and lengthens the build. BPF_JIT is optional: "
         "without it programs still attach and run, under the interpreter. Runtime cost is close "
         "to nothing until a program is attached, then it is whatever that program does.",
+        # The DWARF clause is BTF's prerequisite, not a second feature (#1855). DEBUG_INFO_BTF
+        # (lib/Kconfig.debug:398) is a real prompt, so it stays the symbol this entry names - but
+        # it sits inside `if DEBUG_INFO` (:325-455) and selects nothing, so a fragment that sets it
+        # over a bare config is dropped by olddefconfig and the agent gets a kernel with no BTF and
+        # no error. Stating the prerequisite as its own AND-ed OR-group is what makes the advertised
+        # set say "pick a DWARF member, then BTF" in the order the two have to be done.
         (
             Clause(frozenset({"BPF_SYSCALL"})),
             Clause(frozenset({"PERF_EVENTS"})),
             Clause(frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"})),
+            Clause(_DWARF_CHOICE_MEMBERS),
             Clause(frozenset({"DEBUG_INFO_BTF"})),
         ),
     ),

@@ -90,6 +90,43 @@ def test_config_lacking_btf_warns_and_names_btf():
     assert "vmlinux" in warning["remediation"]
 
 
+def test_the_missing_debuginfo_remediation_names_a_dwarf_member_and_not_btf_alone():
+    # #1855. The warning keys on BTF, and that stays: it asks whether in-guest drgn can read
+    # /sys/kernel/btf, which is a different question from whether the kernel carries DWARF. But
+    # "enable CONFIG_DEBUG_INFO_BTF" on its own is advice a DEBUG_INFO=n kernel cannot follow -
+    # lib/Kconfig.debug:398 puts BTF inside `if DEBUG_INFO` (:325-455) and it selects nothing, so
+    # a fragment setting it alone is discarded by olddefconfig and the rebuild changes nothing.
+    # The remediation has to name the DWARF choice member that has to be picked first.
+    cfg = KernelConfig(frozenset({"DEBUG_KERNEL"}))  # DEBUG_INFO=n: the unfollowable case
+    warning = _call(config=cfg, has_uploaded_vmlinux=False)
+    assert warning is not None
+    remediation = cast(str, warning["remediation"])
+    # the prerequisite, by at least one settable choice member the agent can put in a fragment
+    assert "CONFIG_DEBUG_INFO_DWARF5" in remediation
+    # and the symbol the warning is actually keyed on, so the advice stays a two-step instruction
+    # rather than being replaced by the prerequisite
+    assert "CONFIG_DEBUG_INFO_BTF" in remediation
+    # the reason the order matters, so an agent that already has BTF in its fragment understands
+    # why the rebuild dropped it rather than reading the two names as interchangeable
+    assert "olddefconfig" in remediation
+    # unchanged escape hatch: a host vmlinux resolves symbols without touching the kernel config
+    assert "vmlinux" in remediation
+
+
+def test_the_debuginfo_warning_still_keys_on_btf_alone_not_on_the_dwarf_prerequisite():
+    # The coupling #1855 must NOT "fix". A kernel carrying DWARF but no BTF is a complete debuginfo
+    # build for an offline vmcore and gdb, and in-guest drgn-live is still blind on it, so this
+    # seam must keep firing there - naming DWARF in the remediation may not turn into keying on it.
+    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"}))
+    warning = _call(config=cfg, has_uploaded_vmlinux=False)
+    assert warning is not None
+    assert warning["missing"] == ["DEBUG_INFO_BTF"]
+    # and the inverse: BTF present with no DWARF member named at all is silent, which is what
+    # proves the DWARF symbols are remediation prose here and not a second condition
+    btf_only = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_BTF"}))
+    assert _call(config=btf_only, has_uploaded_vmlinux=False) is None
+
+
 def test_unloadable_warning_is_distinct_reason_naming_btf():
     # The runtime-probe payload (ADR-0329) is a distinct reason from the static gate, but shares the
     # {reason, missing, remediation} shape and keys on the same BTF symbol.

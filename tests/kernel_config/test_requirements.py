@@ -17,6 +17,14 @@ from kdive.kernel_config.support import (
 )
 from tests.kernel_config.unsettable_symbols import UNSETTABLE_SYMBOLS
 
+# lib/Kconfig.debug:262-323 is the "Debug information" `choice`; these are its three non-`NONE`
+# members, each of which selects DEBUG_INFO and yields real DWARF. Spelled out here rather than
+# imported from the registry, so this file stays an independent pin on what the registry says -
+# importing the constant the code builds its clauses from would make those assertions circular.
+_DWARF_CHOICE = frozenset(
+    {"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT"}
+)
+
 
 def test_crash_capture_gate_excludes_kaslr_and_or_groups_kexec():
     feat = feature_requirement(CRASH_CAPTURE)
@@ -450,10 +458,14 @@ def test_advisory_debug_feature_clause_sets_are_the_reviewed_kconfig_sourced_one
         # the real either/or, and BPF_EVENTS itself is derived from the other three, not set.
         # kernel/bpf/Kconfig:4 bare BPF is select-ed by BPF_SYSCALL; :42 BPF_JIT is a codegen
         # speedup, not a prerequisite - programs attach and run under the interpreter without it.
+        # lib/Kconfig.debug:398 DEBUG_INFO_BTF sits inside `if DEBUG_INFO` (:325-455) and selects
+        # nothing, so it is settable only once a DWARF choice member is picked; #1855 keeps BTF as
+        # the symbol named and AND-s that prerequisite in as its own OR-group.
         "bpf_tracing": (
             Clause(frozenset({"BPF_SYSCALL"})),
             Clause(frozenset({"PERF_EVENTS"})),
             Clause(frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"})),
+            Clause(_DWARF_CHOICE),
             Clause(frozenset({"DEBUG_INFO_BTF"})),
         ),
         # lib/Kconfig.debug:2085 FAULT_INJECTION "depends on DEBUG_KERNEL" and injects nothing
@@ -528,13 +540,17 @@ def test_a_configfs_only_fault_injection_kernel_is_told_it_still_needs_the_debug
 
 def test_either_probe_event_source_satisfies_the_bpf_tracing_dependency():
     # kernel/trace/Kconfig:855: BPF_EVENTS needs KPROBE_EVENTS *or* UPROBE_EVENTS, so a
-    # uprobe-only kernel is complete and two AND clauses would falsely fault it.
+    # uprobe-only kernel is complete and two AND clauses would falsely fault it. The config also
+    # carries a DWARF choice member because #1855 AND-ed that prerequisite in beside BTF; without
+    # it this kernel is incomplete for a reason that has nothing to do with probe-event sources.
     cfg = KernelConfig(
         frozenset(
             {
                 "BPF_SYSCALL",
                 "PERF_EVENTS",
                 "UPROBE_EVENTS",
+                "DEBUG_INFO",
+                "DEBUG_INFO_DWARF5",
                 "DEBUG_INFO_BTF",
             }
         )
@@ -622,26 +638,119 @@ def test_the_invariant_above_reaches_the_refusal_set_and_not_only_the_advertised
     assert _every_clause_symbol((smuggled,)) == {"KEXEC", "KEXEC_CORE"}
 
 
-def test_debuginfo_advertises_the_settable_debug_info_producers_not_the_symbol_they_imply():
-    # #1850. lib/Kconfig.debug:249 DEBUG_INFO is a bare prompt-less bool. Both routes to the clause
-    # below imply it: DEBUG_INFO_DWARF4 (:293) and DEBUG_INFO_DWARF5 (:305) select it (:295, :307),
-    # and DEBUG_INFO_BTF (:398) is not a choice member at all - it sits inside `if DEBUG_INFO`
-    # (:325-455), so it cannot be y while DEBUG_INFO is n. DEBUG_INFO=n therefore forces every
-    # member of the clause off, and that clause reports the same kernel without naming a symbol
-    # the agent cannot set.
+def test_debuginfo_advertises_the_dwarf_choice_members_and_only_those():
+    # #1855, narrowing #1850. lib/Kconfig.debug:249 DEBUG_INFO is a bare prompt-less bool, so it
+    # stays unadvertised; what advertises it is the `choice` at :262-323, whose three non-`NONE`
+    # members - DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT (:281), DEBUG_INFO_DWARF4 (:293),
+    # DEBUG_INFO_DWARF5 (:305) - each select DEBUG_INFO (:283, :295, :307) and yield real DWARF.
+    # The toolchain-default member was missing, so a kernel built on it carried full debug info and
+    # was still reported as missing all three advertised symbols.
+    #
+    # DEBUG_INFO_BTF (:398) leaves this group. It is not a choice member at all - it sits inside
+    # `if DEBUG_INFO` (:325-455) and selects nothing - so it was an alternative the agent could not
+    # take from a bare config, and it is not what this feature is for either: an offline vmcore and
+    # gdb need DWARF, which is why it keeps its home under bpf_tracing instead.
     feat = feature_requirement("debuginfo")
     assert feat.advertised == (
-        Clause(frozenset({"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_BTF"})),
+        Clause(_DWARF_CHOICE),
         Clause(frozenset({"DEBUG_KERNEL"})),
     )
 
 
+def test_a_toolchain_default_kernel_is_no_longer_reported_as_missing_every_debuginfo_symbol():
+    # The false positive #1855 reports, stated as the config that exposes it. A kernel that took
+    # the choice's default carries DWARF that drgn and gdb read, and it advertised none of the
+    # three symbols the old group named - so the advisory told a complete debuginfo kernel to
+    # rebuild.
+    cfg = KernelConfig(
+        frozenset({"DEBUG_INFO", "DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT", "DEBUG_KERNEL"})
+    )
+    assert unmet_advertised_clauses(cfg, feature_requirement("debuginfo")) == ()
+
+
+def test_a_btf_only_kernel_is_told_to_pick_a_dwarf_member_rather_than_called_complete():
+    # The other half of #1855: BTF was offered as a third alternative to DWARF4/DWARF5, so a config
+    # carrying BTF alone read as a complete debuginfo build. It is not one - BTF is a compressed
+    # type description, not the line and location tables an offline vmcore or gdb session needs -
+    # and the path to it is not reachable from a bare config either. Naming the three DWARF members
+    # is the advice that works in both directions.
+    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"}))
+    missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement("debuginfo")))
+    assert missing == [
+        "DEBUG_INFO_DWARF4",
+        "DEBUG_INFO_DWARF5",
+        "DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT",
+    ]
+
+
 def test_a_kernel_with_no_debug_info_is_still_told_which_settable_symbols_to_build_in():
-    # Non-vacuity guard for the removal above: dropping the DEBUG_INFO clause must not make the
-    # advisory quieter on the kernel it exists to catch, only shorter by the unsettable symbol.
+    # Non-vacuity guard for the two tests above: neither the #1850 removal of DEBUG_INFO nor the
+    # #1855 removal of DEBUG_INFO_BTF may make the advisory quieter on the kernel it exists to
+    # catch. It stays the same length, naming one more DWARF member and one fewer BTF.
     cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}))
     missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement("debuginfo")))
-    assert missing == ["DEBUG_INFO_BTF", "DEBUG_INFO_DWARF4", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"]
+    assert missing == [
+        "DEBUG_INFO_DWARF4",
+        "DEBUG_INFO_DWARF5",
+        "DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT",
+        "DEBUG_KERNEL",
+    ]
+
+
+def test_bpf_tracing_names_the_same_dwarf_choice_debuginfo_advertises():
+    # #1855 puts the same three symbols in two features for two different reasons - debuginfo
+    # advertises them as the feature itself, bpf_tracing carries them as the prerequisite BTF is
+    # settable behind - and a reader of either has to be given the same three names. Pinned as an
+    # equality between the two live clauses so that adding a fourth choice member to one entry and
+    # not the other fails here rather than in whichever seam reads the stale copy.
+    dwarf_clause = Clause(_DWARF_CHOICE)
+    assert dwarf_clause in feature_requirement("debuginfo").advertised
+    assert dwarf_clause in feature_requirement("bpf_tracing").advertised
+
+
+def test_bpf_tracing_orders_the_dwarf_prerequisite_before_the_btf_symbol_it_gates():
+    # The advertised tuple is ordered, and an agent reads it top to bottom: "pick a DWARF member,
+    # then BTF" is followable, the reverse is the ordering that made #1855's BTF-only advice a dead
+    # end in the first place.
+    advertised = feature_requirement("bpf_tracing").advertised
+    assert advertised.index(Clause(_DWARF_CHOICE)) < advertised.index(
+        Clause(frozenset({"DEBUG_INFO_BTF"}))
+    )
+
+
+def test_a_bpf_kernel_with_no_debug_info_is_told_to_pick_a_dwarf_member_as_well_as_btf():
+    # The bite for the AND-ed prerequisite. kernel/trace/Kconfig BTF sits inside `if DEBUG_INFO`
+    # and selects nothing, so CONFIG_DEBUG_INFO_BTF=y in a fragment over a bare config is dropped
+    # by olddefconfig and the agent gets a kernel with no BTF and no error. The advisory now names
+    # the DWARF member that has to come first, instead of only the symbol that will be discarded.
+    cfg = KernelConfig(frozenset({"BPF_SYSCALL", "PERF_EVENTS", "UPROBE_EVENTS"}))
+    missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement("bpf_tracing")))
+    assert missing == [
+        "DEBUG_INFO_BTF",
+        "DEBUG_INFO_DWARF4",
+        "DEBUG_INFO_DWARF5",
+        "DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT",
+    ]
+
+
+def test_a_complete_bpf_tracing_kernel_on_any_dwarf_member_draws_no_advisory():
+    # The inverse, over each member in turn: the prerequisite clause is an OR-group, so a kernel
+    # that picked any one of the three is complete. Three AND clauses here would fault every real
+    # BPF kernel for the two DWARF members it did not pick.
+    for member in sorted(_DWARF_CHOICE):
+        cfg = KernelConfig(
+            frozenset(
+                {
+                    "BPF_SYSCALL",
+                    "PERF_EVENTS",
+                    "UPROBE_EVENTS",
+                    "DEBUG_INFO_BTF",
+                    "DEBUG_INFO",
+                    member,
+                }
+            )
+        )
+        assert unmet_advertised_clauses(cfg, feature_requirement("bpf_tracing")) == (), member
 
 
 def test_crash_capture_advertises_the_kexec_prompts_not_the_symbols_they_select():
