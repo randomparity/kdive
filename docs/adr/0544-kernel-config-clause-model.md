@@ -73,10 +73,18 @@ DWARF member, then BTF" rather than offering a symbol that will be dropped.
 `KernelConfig` starts recording the value it parsed: `enabled` keeps its present meaning (`=y` or
 `=m`) so no existing reader changes, and a `builtin` set holds the `=y` subset, with
 `builtin <= enabled` asserted at construction. `parse.py` populates both from the one regex it
-already has. Every fixture that builds a `KernelConfig` by hand sets both sets through a helper:
-a `builtin` field that defaults to empty silently reinterprets each existing positional fixture
-(`KernelConfig(frozenset({...}))`) as a wholly modular kernel, which would fail an `UNLESS_INITRD`
-clause for a reason the test never intended.
+already has. **`builtin` does not default.** A default of empty silently reinterprets every
+existing positional fixture (`KernelConfig(frozenset({...}))`) as a wholly modular kernel, which
+fails an `UNLESS_INITRD` clause for a reason the test never intended, and a helper does not stop
+the next fixture from being written positionally. A non-defaulting field makes `ty` name every
+site, which is the only thing that actually forces the migration.
+
+The cost is real and belongs here rather than in the surprise: roughly **45 construction sites**,
+concentrated in `tests/kernel_config/` and in the MCP debug and lifecycle tool tests, plus the one
+real construction in `parse.py`. Most take the same value twice (a fixture that means "all built
+in"), so the migration is mechanical — but it is dozens of sites, not the two the payload tests
+make visible. (A count, not a census: this record is immutable once merged and the four changes it
+governs all add fixtures, so read the magnitude and re-count at the time.)
 
 A clause carries a three-valued built-in requirement, because the two reasons a symbol must be
 `=y` are not the same reason and do not relax under the same condition:
@@ -146,22 +154,56 @@ defaults so an unconstrained clause stays as small as it is today. The element-s
 the contract document's `schema_version` to `2`, once, in the first change to land. Adding an
 optional key later does not bump it again.
 
-### 7. Two invariants, pinned by tests
+Two notes for whoever lands it. The shape change needs a test that pins the **element shape** —
+the existing assertions are substring matches over `json.dumps(entry["requirements"])`, which pass
+identically against a list of strings and against an object, so the change would otherwise land
+with nothing holding it. And between #1854 and #1860 the v2 document carries no `built_in` on any
+clause, which reads as "every boot clause accepts `=m`" — the defect #1860 fixes. No shape lie
+exists in that window (the bump and the object both land in #1854); the content is simply not
+there yet, and the interval is however long the two changes are apart.
+
+### 7. Two invariants, pinned by tests — and what they do not catch
+
+Both are regression guards, not proofs. Say so at the test, because a guard mistaken for a proof
+is worse than no guard.
 
 - **I1** — no clause member is unsettable in principle, the first half of rule 1. It says nothing
   about a symbol that is settable behind a prerequisite: `SERIAL_8250_CONSOLE` and
   `DEBUG_INFO_BTF` are clause members by design and are not deny-list candidates. Enforced by a
-  deny-list test
-  over every clause of every feature, seeded with the symbols the registry's own comments already
-  name as unsettable: `KEXEC_CORE`, `VMCORE_INFO`, `DEBUG_INFO`, `BPF_EVENTS`, `TRACING`,
-  `DYNAMIC_FTRACE`. The list grows as symbols are verified against Kconfig; it is not a claim that
-  every clause has been audited.
-- **I2** — no `gate_required` clause is arch-scoped or `UNLESS_INITRD`. Both depend on a fact the
-  refusal seams do not supply, and a skipped or defaulted clause in a refusal set fails in the
-  wrong direction. A future gated clause needing either must first make its seam pass the fact.
+  **deny-list** over every clause of every feature, seeded with the symbols the registry's own
+  comments already name as unsettable: `KEXEC_CORE`, `VMCORE_INFO`, `DEBUG_INFO`, `BPF_EVENTS`,
+  `TRACING`, `DYNAMIC_FTRACE`. **It catches the return of a symbol already known to be
+  unsettable. It cannot catch a seventh**: nothing in a `.config` distinguishes a prompt-less
+  symbol from a prompted one, so the only real check is a human reading Kconfig, and the list
+  grows as symbols are verified. It is not a claim that every clause has been audited.
+- **I2** — a clause is arch-scoped only where **every seam that evaluates its feature supplies an
+  arch**. That is the rule; `gate_required` is not the boundary. `rootfs_mount` has
+  `gate_required=()` and is read live by `rootfs_mount_warning` through
+  `unmet_advertised_clauses`, so it is seam-evaluated on its *advertised* clauses, and rule 3
+  would silently skip an arch-scoped clause there because `complete_build` has no arch —
+  a warning that vanishes rather than fires. Today the seam-evaluated features are `crash_capture`
+  (gated) and `rootfs_mount` (advertised), neither of which supplies an arch, so neither may carry
+  an arch-scoped clause; `serial_console` is read by no seam and may. The same rule covers
+  `UNLESS_INITRD`, whose one supplying seam is `rootfs_mount_warning`. **I2 checks declared field
+  values against a hand-maintained list of seam-evaluated features. A clause that is arch-specific
+  in fact while carrying `arches=None` passes it vacuously** — see the residual below, which is
+  exactly that case.
 
 A third test asserts every `arches` value is a subset of `SUPPORTED_ARCHES`, from the test tree
 only — `kernel_config` takes no runtime import on `domain.platform`.
+
+**The residual I2 does not close.** The gated pair is `{FW_CFG_SYSFS}` and `{RELOCATABLE}` in
+`crash_capture.gate_required`; `RANDOMIZE_BASE` is in the same entry's *advertised* set only —
+ADR-0318's worked example of a symbol deliberately advertised and not gated, because KASLR-off
+debug kernels are routine — so its arch-conditionality is an advisory-quality question and can
+never produce a refusal. At least `FW_CFG_SYSFS` is plausibly unavailable on the `pseries` machine
+type kdive boots for `ppc64le` — this is **unverified against Kconfig** and is recorded as a
+question, not a finding. If it holds, a ppc64le kernel is refused crash capture over a symbol it
+cannot set, which is #1854's defect on a second feature. This ADR does **not** resolve it and #1859 does **not** tag `crash_capture`: doing so
+would need the refusal seams (`install` crashkernel reservation, kdump vmcore fetch) to resolve
+the Run's System's profile arch, which is real work outside all four issues. The residual is
+deferred to **#1875** rather than left implicit, and I2 keeps `crash_capture` untagged in the
+meantime — the honest state is "unhandled and recorded", not "guarded".
 
 ### 8. Landing order
 
@@ -169,7 +211,13 @@ The four issues share one file and land serially. #1854 introduces the `Clause` 
 only), the manifest object element and the `schema_version` bump alongside its own content fix and
 I1, so the later three write against the settled shape. #1855 is then content only. #1860 adds the
 built-in value, `KernelConfig.builtin`, the seam carve-out and the payload key. #1859 adds `arches`
-and I2 last.
+last.
+
+**I2 lands in two halves, each with the field it guards.** It covers two axes, and they arrive one
+PR apart: #1860 lands the `UNLESS_INITRD` half alongside the value, and #1859 lands the arch half
+alongside `arches`. Deferring the whole invariant to #1859 would leave #1860 — the change that
+marks `rootfs_mount` and `serial_console` `UNLESS_INITRD` — free to mark a seam-evaluated feature
+whose seam supplies nothing, with nothing to stop it.
 
 ## Consequences
 
@@ -189,13 +237,30 @@ and I2 last.
 - **`rootfs_mount_warning` gains a parameter, not a query.** The initrd fact reaches it from the
   `BuildStepResult` its caller already holds, so the carve-out costs no extra read and no new
   visibility assumption. A seam that ever calls it without that value gets the strict default.
-- **A modular boot symbol starts warning where it was silent.** An agent who uploaded
-  `CONFIG_VIRTIO_BLK=m` with no initrd and completed a build cleanly will now get
-  `kernel_missing_boot_config`. That is the point of #1860; it is a warning, and the completion
-  still succeeds.
+- **A modular boot symbol starts warning where it was silent — including on kernels that boot
+  fine.** An agent who uploaded `CONFIG_VIRTIO_BLK=m` with no initrd and completed a build cleanly
+  will now get `kernel_missing_boot_config`. That is the point of #1860. But
+  `result.initrd_ref is not None` means "this build uploaded an initrd artifact", **not** "this
+  kernel can load a module before root is mounted": a kernel with an embedded initramfs
+  (`CONFIG_INITRAMFS_SOURCE`) has `initrd_ref is None` — the class
+  `providers/local_libvirt/lifecycle/install.py` documents — and will draw a spurious warning.
+  Accepted rather than modelled: kdive cannot see inside the kernel image, the signal is a warning
+  the completion survives, and over-warning is the direction ADR-0330 chose. It is a false
+  positive on a working kernel, not only a true one on a broken kernel.
+- **#1854 leaves a served doc contradicting the payload it fixes.** After it lands, `missing`
+  names only settable symbols while `docs/operating/external-build-upload.md` — served as
+  `resource://kdive/docs/operating/external-build-upload.md`, the doc the remediation strings link
+  to — still tells the agent to set `CONFIG_VMCORE_INFO`. **#1853 owns that file set and is fixing
+  it in the same campaign**, so this record deliberately does not touch it and #1854 must not
+  either. #1854 is not complete as a user-visible fix until #1853 lands beside it.
 - **`serial_console` stays advertise-only.** No seam reads it, so the arch scope and the built-in
   values on it are manifest metadata today. That is also why arch-scoped clauses can be skipped on
   an unknown arch without an operative consequence.
+- **Every Kconfig line reference in this record is unverified and will drift.** The citations
+  (`kernel/Kconfig.kexec:11` and `:8`, `lib/Kconfig.debug`, `drivers/tty/serial/8250/Kconfig:70-72`)
+  were taken from the issues and the registry's own comments, which name Linux v7.0 but are not
+  pinned here to a tag this repository can check. Line numbers move between releases; treat them as
+  pointers to a symbol, and re-read the symbol before acting on a number.
 - **The clause is now three-part and can grow a fourth.** The rule that keeps it from doing so is
   rule 1: anything expressible as a prerequisite clause stays a clause rather than becoming a
   field.
