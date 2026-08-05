@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -40,6 +41,7 @@ from kdive.providers.ports.retrieve import (
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.capture_store import WrittenObjects
+from tests.mcp._seed import _PROFILE as _SEED_PROFILE
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.json_data import data_str
 from tests.mcp.systems_support import provider_resolver
@@ -65,13 +67,27 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
         await pool.close()
 
 
-async def _crashed_run(pool: AsyncConnectionPool, *, project: str = "proj") -> tuple[str, str]:
+async def _crashed_run(
+    pool: AsyncConnectionPool, *, project: str = "proj", profile: dict[str, Any] | None = None
+) -> tuple[str, str]:
     """Seed a crashed System with a bound Run; return ``(system_id, run_id)`` (ADR-0244)."""
-    sys_id = await seed_crashed_system(pool, project=project)
+    sys_id = await seed_crashed_system(pool, project=project, profile=profile)
     run_id = await seed_run_on_system(
         pool, sys_id, debuginfo_ref=None, build_id=None, project=project
     )
     return sys_id, run_id
+
+
+def _ppc64le_profile() -> dict[str, Any]:
+    """The seed's default provisioning profile moved to ppc64le/pseries (#1875).
+
+    Built off `_SEED_PROFILE` rather than spelled out, so a later required profile field reaches
+    this fixture too instead of leaving it the one seed that silently stops validating.
+    """
+    profile = deepcopy(_SEED_PROFILE)
+    profile["arch"] = "ppc64le"
+    profile["provider"]["local-libvirt"]["domain_xml_params"] = {"machine": "pseries"}
+    return profile
 
 
 async def _fetch_vmcore(
@@ -638,6 +654,46 @@ def test_fetch_vmcore_kdump_refused_when_config_lacks_crash_symbols(migrated_url
         assert resp.data["reason"] == "kernel_missing_crash_config"
         assert "RELOCATABLE" in cast(list[str], resp.data["missing"])
         assert jobs == 0  # refused before enqueue
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_kdump_admits_a_ppc64le_kernel_lacking_the_x86_only_symbol(
+    migrated_url: str,
+) -> None:
+    # #1875 at the seam that has to supply the arch. FW_CFG_SYSFS is settable on no ppc64le kernel
+    # (its only powerpc dependency arm, PPC_PMAC, depends on CPU_BIG_ENDIAN), so refusing a vmcore
+    # over it handed the agent a symbol no rebuild produces. The clause is now scoped x86-only and
+    # this handler reads the arch off the System it already loaded to authorize the call.
+    #
+    # Seeded as a real ppc64le System rather than by calling crash_capture_refusal directly: the
+    # value under test is the WIRING - that this seam passes system_arch(system) and not some
+    # default - and a helper-level call would pass just as well with the argument hard-coded.
+    from unittest.mock import patch
+
+    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
+
+    no_fw_cfg = all_builtin(_CRASH_GATE_FULL - {"FW_CFG_SYSFS"})
+
+    async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> KernelConfig:
+        return no_fw_cfg
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, ppc_run = await _crashed_run(pool, profile=_ppc64le_profile())
+            _, x86_run = await _crashed_run(pool)
+            handlers = _real_local_handlers()
+            with patch("kdive.kernel_config.gate.load_effective_config", _fake_load):
+                admitted = await handlers.fetch_vmcore(pool, _ctx(), run_id=ppc_run, method="kdump")
+                refused = await handlers.fetch_vmcore(pool, _ctx(), run_id=x86_run, method="kdump")
+        # the relief: the ppc64le Run is no longer refused over a symbol it cannot set
+        assert admitted.error_category is None
+        assert admitted.status == "queued"
+        # and the other direction, on the identical config: x86_64 still refuses, still by name
+        assert refused.error_category == "configuration_error"
+        assert refused.data["reason"] == "kernel_missing_crash_config"
+        assert refused.data["missing"] == ["FW_CFG_SYSFS"]
 
     asyncio.run(_run())
 

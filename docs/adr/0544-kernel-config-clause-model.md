@@ -229,6 +229,47 @@ the Run's System's profile arch, which is real work outside all four issues. The
 deferred to **#1875** rather than left implicit, and I2 keeps `crash_capture` untagged in the
 meantime — the honest state is "unhandled and recorded", not "guarded".
 
+### Amendment (2026-08-05): the residual is closed, and I2's seam list gains `crash_capture` (#1875)
+
+This is an amendment rather than a new decision because it *applies* rule 3 and satisfies I2's
+precondition rather than changing either. No field is added, no rule is restated, and the clause
+model is untouched. It qualifies two claims above: that the residual is open ("This ADR does
+**not** resolve it"), and I2's seam list ("Today the seam-evaluated features are `crash_capture`
+(gated) and `rootfs_mount` (advertised), neither of which supplies an arch").
+
+**The unverified question is now answered, against a pinned tree.** §7 recorded "at least
+`FW_CFG_SYSFS` is plausibly unavailable on the `pseries` machine type" as a question. Checked
+against upstream Linux `v7.0` (`3131ff5a117498bb4b9db3a238bb311cbf8383ce`), the answer is
+stronger than the question: `FW_CFG_SYSFS` (`drivers/firmware/Kconfig`) offers `PPC_PMAC` as its
+only powerpc dependency arm, and `PPC_PMAC` (`arch/powerpc/platforms/powermac/Kconfig`) itself
+`depends on PPC_BOOK3S && CPU_BIG_ENDIAN`. So it is unreachable on **all** of `ppc64le`, not only
+on `pseries` — the machine type never enters it. `RANDOMIZE_BASE` (`arch/powerpc/Kconfig`) is the
+same shape, `depends on PPC_85xx && FLATMEM`, a 32-bit e500 platform. `RELOCATABLE` is not:
+`depends on PPC64 || (FLATMEM && (44x || PPC_85xx))` is a real prompt on `ppc64le`, so it stays
+unscoped and keeps refusing on both arches. The line-number caveat under Consequences applies here
+too — the symbol and its dependency expression are the claim, and the file paths are pointers.
+
+**I2's seam-evaluated list is now `crash_capture` (arch supplied) and `rootfs_mount` (not).**
+Both refusal seams already held the Run's `System` — `install`'s `_validate_crashkernel` sits a
+frame below one and the kdump vmcore fetch loads one to authorize the call — so each now reads
+`system_arch(system)` off its provisioning profile and passes it in. `rootfs_mount` is unchanged
+and still may not be tagged: `complete_build` runs against a Run and nothing on that path resolves
+the System profile it will install to.
+
+**One consequence the rule-3 text does not spell out.** Rule 3 has the support checks *skip* a
+clause scoped to an unknown arch, which under-reports; §7 notes that a silent skip inside a
+refusal set fails the wrong way. Now that a gated clause is scoped, that stops being hypothetical,
+so `unmet_clauses` and `crash_capture_refusal` take `arch` **without a default** — an omitted arch
+is a type error at the call site rather than a refusal that quietly became a pass.
+`unmet_advertised_clauses` keeps the default, because it produces advisories, never refusals.
+
+`crash_capture`'s *advertised* clauses carry the tag too, not only the gated one. §7 scoped the
+residual to the gated pair because only a gate can refuse, but the advertised set is what
+`feature_manifest()` renders into the served contract document, and §3's own reasoning against
+prose — "the machine-readable array is what an agent diffs its config against" — applies to a
+symbol a `ppc64le` agent cannot set whichever field names it. `RANDOMIZE_BASE` is therefore
+tagged although it can never produce a refusal.
+
 ### 8. Landing order
 
 The four issues share one file and land serially. #1854 introduces the `Clause` record (symbols

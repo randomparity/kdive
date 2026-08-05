@@ -44,9 +44,10 @@ def _applies_to(clause: Clause, *, arch: str | None) -> bool:
     requirement it cannot establish - reporting SERIAL_8250 missing against a config it cannot
     tell is ppc64le, where that symbol does not apply at all.
 
-    Skipping is the safe direction only because no seam that evaluates an arch-scoped feature
-    exists; the invariant in ``tests/kernel_config/test_requirements.py`` is what keeps it that
-    way, since a silent skip inside a refusal set would fail the wrong way (ADR-0544 §3, §7).
+    Skipping under-reports, which is the wrong direction for a refusal set: an omitted arch would
+    turn a refusal into a pass silently. That is why :func:`unmet_clauses` takes ``arch`` without a
+    default, and why the invariant in ``tests/kernel_config/test_requirements.py`` allows a scoped
+    clause only where every seam evaluating its feature supplies one (ADR-0544 §3, §7, #1875).
     """
     if clause.arches is None:
         return True
@@ -75,9 +76,9 @@ def unmet_clauses(
     config: KernelConfig,
     feature: FeatureRequirement,
     *,
+    arch: str | None,
     has_initrd: bool = False,
     guest_builds_initramfs: bool = False,
-    arch: str | None = None,
 ) -> tuple[Clause, ...]:
     """Clauses of ``feature.gate_required`` the config fails to enable (the refusal set).
 
@@ -86,9 +87,11 @@ def unmet_clauses(
     ``UNLESS_INITRD`` clause of needing ``=y`` (ADR-0545). Both default to the strict reading, so a
     seam that does not supply one over-reports rather than falling silent.
 
-    ``arch`` is the same shape for the clause's arch scope, and defaults to unknown - which skips
-    every scoped clause rather than guessing. That default is safe here only while no gated clause
-    is arch-scoped, which the invariant pins.
+    ``arch`` carries the clause's arch scope and **has no default**, unlike its two neighbours
+    (#1875). Their strict default over-reports; an omitted arch under-reports, because
+    :func:`_applies_to` skips a scoped clause it cannot place - and a skipped clause inside a
+    refusal set is a refusal that silently became a pass. ``None`` still means unknown and still
+    skips, but it has to be written down.
     """
     return _unmet(
         config,
@@ -109,10 +112,11 @@ def unmet_advertised_clauses(
 ) -> tuple[Clause, ...]:
     """Clauses of ``feature.advertised`` the config fails to enable (the advisory set).
 
-    The three keywords carry the same meaning and the same defaults as in :func:`unmet_clauses`.
-    Spelled out here too because this is the variant the live seam calls: omitting any of them
-    changes the verdict - on an ``UNLESS_INITRD`` clause in the over-reporting direction, and on an
-    arch-scoped clause in the under-reporting one.
+    The three keywords carry the same meaning as in :func:`unmet_clauses`. ``arch`` keeps its
+    unknown default here, where :func:`unmet_clauses` dropped it: this variant produces advisories,
+    never refusals, so an omitted arch costs a warning that stays quiet rather than a gate that
+    stops holding. Omitting any of them still changes the verdict - on an ``UNLESS_INITRD`` clause
+    in the over-reporting direction, and on an arch-scoped clause in the under-reporting one.
     """
     return _unmet(
         config,

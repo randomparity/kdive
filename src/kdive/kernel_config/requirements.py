@@ -165,20 +165,36 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         # symbol whose name is absent from that kernel's Kconfig. Past that, the only config left
         # to refuse on is an internally inconsistent one (truncated or hand-edited). Both are the
         # false refusal ADR-0318's fail-open boundary exists to avoid.
-        _plain(
-            "KEXEC",
-            "KEXEC_FILE",
-            "CRASH_DUMP",
-            "PROC_VMCORE",
-            "FW_CFG_SYSFS",
-            "RELOCATABLE",
-            "RANDOMIZE_BASE",
+        #
+        # Two symbols are x86-only across the arches kdive provisions, verified against upstream
+        # Linux v7.0 (3131ff5a117498bb4b9db3a238bb311cbf8383ce) - #1875:
+        #
+        #   FW_CFG_SYSFS (drivers/firmware/Kconfig:122) `depends on SYSFS && (ARM || ARM64 ||
+        #   PARISC || PPC_PMAC || RISCV || SPARC || X86)`. PPC_PMAC is the only powerpc arm, and
+        #   PPC_PMAC (arch/powerpc/platforms/powermac/Kconfig:2) itself `depends on PPC_BOOK3S &&
+        #   CPU_BIG_ENDIAN` - so no *little-endian* powerpc kernel can set it at any machine type,
+        #   which is stronger than "not on the pseries kdive boots" and holds for all of ppc64le.
+        #
+        #   RANDOMIZE_BASE exists under arch/powerpc (:688) but `depends on PPC_85xx && FLATMEM`,
+        #   a 32-bit e500 platform, so it is likewise unreachable on ppc64le. Advertised only, so
+        #   it can never refuse - the tag keeps the manifest from advising a symbol no ppc64le
+        #   agent can act on, which is the same defect one field over.
+        #
+        # RELOCATABLE stays unscoped: arch/powerpc/Kconfig:665 offers it under `depends on PPC64
+        # || (FLATMEM && (44x || PPC_85xx))`, and PPC64 holds for ppc64le, so it is a real prompt
+        # on both arches. Line numbers move between releases (ADR-0544); the symbol and its
+        # dependency expression are the claim, the numbers are pointers.
+        _plain("KEXEC", "KEXEC_FILE", "CRASH_DUMP", "PROC_VMCORE")
+        + (
+            Clause(frozenset({"FW_CFG_SYSFS"}), arches=_X86_ONLY),
+            Clause(frozenset({"RELOCATABLE"})),
+            Clause(frozenset({"RANDOMIZE_BASE"}), arches=_X86_ONLY),
         ),
         gate_required=(
             Clause(frozenset({"KEXEC", "KEXEC_FILE"})),  # either load syscall suffices
             Clause(frozenset({"CRASH_DUMP"})),
             Clause(frozenset({"PROC_VMCORE"})),
-            Clause(frozenset({"FW_CFG_SYSFS"})),
+            Clause(frozenset({"FW_CFG_SYSFS"}), arches=_X86_ONLY),
             Clause(frozenset({"RELOCATABLE"})),
         ),
     ),

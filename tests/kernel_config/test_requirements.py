@@ -845,7 +845,7 @@ def test_a_pre_6_9_kernel_that_has_no_vmcore_info_symbol_at_all_is_armed_rather_
             "RELOCATABLE",
         }
     )
-    assert unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE)) == ()
+    assert unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE), arch=_X86) == ()
 
 
 def test_a_hand_truncated_config_missing_a_derived_symbol_is_armed_rather_than_refused():
@@ -856,7 +856,7 @@ def test_a_hand_truncated_config_missing_a_derived_symbol_is_armed_rather_than_r
     cfg = all_builtin(
         {"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "PROC_VMCORE", "FW_CFG_SYSFS", "RELOCATABLE"}
     )
-    assert unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE)) == ()
+    assert unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE), arch=_X86) == ()
 
 
 def test_a_kernel_that_genuinely_cannot_kexec_is_still_refused_and_named():
@@ -865,7 +865,7 @@ def test_a_kernel_that_genuinely_cannot_kexec_is_still_refused_and_named():
     # ones a config fragment can set - which is what makes the gate's "rebuild with the missing
     # CONFIG_*" remediation followable rather than a dead end.
     cfg = all_builtin({"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "RELOCATABLE"})
-    missing = missing_symbols(unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE)))
+    missing = missing_symbols(unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE), arch=_X86))
     assert missing == ["FW_CFG_SYSFS", "PROC_VMCORE"]
 
 
@@ -873,7 +873,8 @@ def test_a_kernel_with_no_kexec_at_all_is_still_told_which_settable_symbols_to_b
     # Non-vacuity guard for the crash_capture removal: the advisory on a bare kernel must still
     # name every symbol the agent can act on, minus the two it cannot.
     cfg = all_builtin({"EXT4_FS", "VIRTIO_BLK"})
-    missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement(CRASH_CAPTURE)))
+    feature = feature_requirement(CRASH_CAPTURE)
+    missing = missing_symbols(unmet_advertised_clauses(cfg, feature, arch=_X86))
     assert missing == [
         "CRASH_DUMP",
         "FW_CFG_SYSFS",
@@ -881,6 +882,16 @@ def test_a_kernel_with_no_kexec_at_all_is_still_told_which_settable_symbols_to_b
         "KEXEC_FILE",
         "PROC_VMCORE",
         "RANDOMIZE_BASE",
+        "RELOCATABLE",
+    ]
+    # and the ppc64le agent is told the subset it can actually act on, rather than two symbols
+    # its Kconfig does not offer at any setting (#1875) - the advice half of the same defect the
+    # gated clause carries. The list shrinks by exactly the two x86-only symbols and no more.
+    assert missing_symbols(unmet_advertised_clauses(cfg, feature, arch=_PPC)) == [
+        "CRASH_DUMP",
+        "KEXEC",
+        "KEXEC_FILE",
+        "PROC_VMCORE",
         "RELOCATABLE",
     ]
 
@@ -1123,8 +1134,8 @@ def test_a_bare_kernel_is_still_told_every_symbol_it_can_act_on_for_its_own_arch
 
 
 def test_no_other_feature_gained_an_arch_scope():
-    # The sweep is exactly one entry, and it has to stay that way while the seams supply no arch:
-    # invariant I2 below is what forbids tagging crash_capture or rootfs_mount, and this is what
+    # The sweep is exactly two entries, and it has to stay that way: invariant I2 below is what
+    # forbids tagging rootfs_mount (complete_build still resolves no arch), and this is what
     # notices a third feature being tagged for a reason neither check covers.
     scoped = {
         f.feature
@@ -1133,20 +1144,37 @@ def test_no_other_feature_gained_an_arch_scope():
         for clause in clauses
         if clause.arches is not None
     }
-    assert scoped == {"serial_console"}
+    assert scoped == {"serial_console", CRASH_CAPTURE}
 
 
-def test_crash_capture_carries_no_arch_scope_and_that_is_a_recorded_residual():
-    # ADR-0544 §7's deferred residual, pinned so it cannot be "fixed" by accident. FW_CFG_SYSFS
-    # and RELOCATABLE are arch-specific in fact - FW_CFG_SYSFS is plausibly unavailable on the
-    # pseries machine type kdive boots for ppc64le - but tagging them would need the refusal seams
-    # (install crashkernel reservation, kdump vmcore fetch) to resolve the Run's System profile
-    # arch, which is real work tracked as #1875. Until then the honest state is untagged: I2 above
-    # passes vacuously here, and this is where that is said out loud rather than inferred.
+def test_crash_capture_scopes_the_two_symbols_no_ppc64le_kernel_can_set_and_no_others():
+    # ADR-0544 §7's residual, closed by #1875 and inverted into the positive assertion. Verified
+    # against upstream Linux v7.0 (3131ff5a117498bb4b9db3a238bb311cbf8383ce), symbol by symbol:
+    #
+    #   FW_CFG_SYSFS  drivers/firmware/Kconfig:122 - its only powerpc dependency arm is PPC_PMAC,
+    #                 and PPC_PMAC itself depends on CPU_BIG_ENDIAN, so no ppc64le kernel offers
+    #                 it at any machine type. Gated AND advertised.
+    #   RANDOMIZE_BASE  arch/powerpc/Kconfig:688 - `depends on PPC_85xx && FLATMEM`, 32-bit e500.
+    #                 Advertised only (ADR-0318's deliberately-ungated KASLR symbol).
+    #   RELOCATABLE   arch/powerpc/Kconfig:665 - `depends on PPC64 || ...`, a real prompt on
+    #                 ppc64le, so it stays unscoped and keeps refusing on both arches.
+    #
+    # Pinned as an exact per-symbol map rather than a set of scoped names, so widening the scope
+    # to RELOCATABLE - which would silently stop refusing a ppc64le kernel that cannot relocate -
+    # reddens here rather than passing as "still two symbols tagged".
+    x86_only = frozenset({_X86})  # spelled independently of the registry's own constant
     feat = feature_requirement(CRASH_CAPTURE)
-    assert {clause.arches for clause in feat.gate_required} == {None}
-    assert {clause.arches for clause in feat.advertised} == {None}
-    assert {"FW_CFG_SYSFS", "RELOCATABLE"} <= {s for c in feat.gate_required for s in c.symbols}
+    gated = {symbol: clause.arches for clause in feat.gate_required for symbol in clause.symbols}
+    assert gated == {
+        "KEXEC": None,
+        "KEXEC_FILE": None,
+        "CRASH_DUMP": None,
+        "PROC_VMCORE": None,
+        "FW_CFG_SYSFS": x86_only,
+        "RELOCATABLE": None,
+    }
+    advertised = {symbol: clause.arches for clause in feat.advertised for symbol in clause.symbols}
+    assert advertised == {**gated, "RANDOMIZE_BASE": x86_only}
 
 
 def test_every_arch_scope_names_an_arch_kdive_can_provision():
@@ -1252,11 +1280,23 @@ def test_the_manifest_clause_object_carries_the_arch_scope_and_omits_it_at_the_d
         {"symbols": ["HVC_CONSOLE"], "arch": [_PPC]},
         {"symbols": ["VIRTIO_PCI"], "built_in": "unless_initrd"},
     ]
+    # crash_capture is the second scoped entry (#1875): the two symbols no ppc64le kernel can set
+    # carry the key, the five that are settable on both arches do not, so a ppc64le agent
+    # filtering this array is told exactly what it can act on.
+    assert by_feature[CRASH_CAPTURE] == [
+        {"symbols": ["KEXEC"]},
+        {"symbols": ["KEXEC_FILE"]},
+        {"symbols": ["CRASH_DUMP"]},
+        {"symbols": ["PROC_VMCORE"]},
+        {"symbols": ["FW_CFG_SYSFS"], "arch": [_X86]},
+        {"symbols": ["RELOCATABLE"]},
+        {"symbols": ["RANDOMIZE_BASE"], "arch": [_X86]},
+    ]
     # the default renders as an object with no `arch` key at all, on every other feature
     others = [
         clause
         for feature, clauses in by_feature.items()
-        if feature != "serial_console" and isinstance(clauses, list)
+        if feature not in {"serial_console", CRASH_CAPTURE} and isinstance(clauses, list)
         for clause in clauses
     ]
     assert others  # non-vacuity: the rest of the roster is really walked
@@ -1291,10 +1331,13 @@ _SEAM_SUPPLIES: Final[MappingProxyType[str, SeamFacts]] = MappingProxyType(
         # False - both call sites do have a Run in scope (vmcore/handlers.py loads one to
         # authorize before calling; install.py's _validate_crashkernel sits a frame below one), so
         # that axis is unwired rather than unreachable. This row records what the seam PASSES,
-        # which is nothing on either axis. Nor do they resolve the Run's System's profile arch,
-        # which is why crash_capture stays untagged and its arch-specific gated pair is #1875's
-        # deferred residual rather than this campaign's work (ADR-0544 §7, ADR-0545).
-        CRASH_CAPTURE: SeamFacts(initrd=False, guest_initramfs=False, arch=False),
+        # which is nothing on either initrd axis.
+        #
+        # The arch axis is True as of #1875: both seams already hold the Run's System and now read
+        # `system_arch(system)` off its provisioning profile, and crash_capture_refusal takes the
+        # keyword WITHOUT a default, so a third seam that cannot resolve one is a type error
+        # rather than a refusal that silently skips its scoped clause (ADR-0544 §7, ADR-0545).
+        CRASH_CAPTURE: SeamFacts(initrd=False, guest_initramfs=False, arch=True),
         # rootfs_mount_warning takes both reliefs, and its one caller (_success_envelope in
         # mcp/tools/lifecycle/runs/complete_build.py) supplies both off values it already holds:
         # `result.initrd_ref is not None` from the finalized BuildStepResult, and the boot model
@@ -1476,19 +1519,26 @@ def test_a_clause_is_arch_scoped_only_where_every_seam_reading_it_supplies_the_a
     # an arch they were not given, so tagging a feature a seam reads without an arch would turn a
     # live check into silence rather than a fault - a warning that vanishes.
     #
-    # The two seam-evaluated features are crash_capture and rootfs_mount, and neither seam
-    # resolves the Run's System profile arch, so neither may be tagged. serial_console is read by
+    # The two seam-evaluated features are crash_capture and rootfs_mount. crash_capture's seams
+    # resolve the Run's System profile arch as of #1875, so it may be tagged and is;
+    # rootfs_mount's does not - complete_build runs against a Run and nothing on that path
+    # resolves the System profile it will install to - so it may not. serial_console is read by
     # no seam and may.
     #
-    # THIS IS A REGRESSION GUARD, NOT A PROOF, and the arch half is the weaker of the two.
-    # crash_capture's gated {FW_CFG_SYSFS}/{RELOCATABLE} are arch-specific IN FACT while carrying
-    # arches=None, and they pass this vacuously - ADR-0544 §7 records that openly and defers it to
-    # #1875, because tagging them needs the refusal seams to resolve an arch first. "Unhandled and
-    # recorded" is the honest state here, not "guarded".
+    # THIS IS A REGRESSION GUARD, NOT A PROOF, and the arch half is still the weaker of the two: a
+    # clause that is arch-specific IN FACT while carrying arches=None passes it vacuously. What
+    # changed with #1875 is that crash_capture is no longer an instance of that - the residual
+    # ADR-0544 §7 recorded is closed, not still passing here silently.
     assert _every_clause_symbol(FEATURE_REQUIREMENTS)  # non-vacuity: the roster is really walked
     assert _arch_scoped_without_the_fact(FEATURE_REQUIREMENTS, _SEAM_SUPPLIES) == {}
     # and the field is really in use on the live roster, so the empty result above is not the
-    # answer to a question nothing asks: pretend a seam reads serial_console and it is reported
+    # answer to a question nothing asks: withdraw crash_capture's arch answer and its two scoped
+    # symbols are reported
+    assert _arch_scoped_without_the_fact(
+        FEATURE_REQUIREMENTS,
+        {CRASH_CAPTURE: SeamFacts(initrd=False, guest_initramfs=False, arch=False)},
+    ) == {CRASH_CAPTURE: ["FW_CFG_SYSFS", "FW_CFG_SYSFS", "RANDOMIZE_BASE"]}
+    # and a feature no seam reads is still allowed to carry one, which is serial_console's place
     assert _arch_scoped_without_the_fact(
         FEATURE_REQUIREMENTS,
         {"serial_console": SeamFacts(initrd=True, guest_initramfs=True, arch=False)},

@@ -121,18 +121,27 @@ def _clause_payload(
     return payload
 
 
-async def crash_capture_refusal(conn: AsyncConnection, run_id: UUID) -> dict[str, JsonValue] | None:
+async def crash_capture_refusal(
+    conn: AsyncConnection, run_id: UUID, *, arch: str
+) -> dict[str, JsonValue] | None:
     """Refusal ``details`` if the Run's uploaded config lacks crash-capture symbols, else ``None``.
 
     Returns ``None`` (arm as today) when no config was uploaded or it cannot be read/trusted
     (:func:`load_effective_config` fails open), and when the config fully supports crash capture.
     Otherwise returns ``{reason, missing, remediation}`` — the shared payload both crash seams
     spread into their own refusal envelope, so the reason code and remediation cannot drift.
+
+    ``arch`` is the Run's System's provisioning-profile architecture (``services.runs.steps``'s
+    ``system_arch``), and both seams hold a ``System`` to read it off. It is required and typed
+    ``str`` rather than ``str | None`` (#1875): ``crash_capture`` now carries an arch-scoped gated
+    clause, and a scoped clause the checks cannot place is *skipped*, so a call that omitted the
+    arch would turn this refusal into a silent pass. A type error at the call site is the intended
+    outcome for a seam that cannot resolve one.
     """
     config = await load_effective_config(conn, run_id)
     if config is None:
         return None
-    unmet = unmet_clauses(config, feature_requirement(CRASH_CAPTURE))
+    unmet = unmet_clauses(config, feature_requirement(CRASH_CAPTURE), arch=arch)
     if not unmet:
         return None
     return _clause_payload(config, unmet, reason=CRASH_CONFIG_REASON, remediation=_REMEDIATION)
