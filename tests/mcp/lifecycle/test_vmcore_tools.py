@@ -698,6 +698,31 @@ def test_fetch_vmcore_kdump_admits_a_ppc64le_kernel_lacking_the_x86_only_symbol(
     asyncio.run(_run())
 
 
+def test_fetch_vmcore_kdump_returns_a_typed_failure_when_the_profile_will_not_parse(
+    migrated_url: str,
+) -> None:
+    # The path #1875 newly reaches. An explicit `method` short-circuits _resolve_capture_method
+    # before it parses the provisioning profile, so reading the arch for the crash gate is the
+    # first parse on that path - and it must produce the same typed configuration_error the
+    # implicit-method path already produces, not an exception escaping the tool handler.
+    #
+    # ADR-0361's neighbouring image-capability gate three lines below fails OPEN on an unparsable
+    # profile, so without this the two gates in one branch would disagree silently.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            broken = deepcopy(_SEED_PROFILE)
+            del broken["boot_method"]  # a required field: model_validate rejects the document
+            _, run_id = await _crashed_run(pool, profile=broken)
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="kdump")
+            jobs = await _job_count(pool)
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert jobs == 0  # rejected before enqueue
+
+    asyncio.run(_run())
+
+
 def test_fetch_vmcore_host_dump_ungated_even_with_unsupported_config(migrated_url: str) -> None:
     # host_dump is host-side (QEMU dump-guest-memory), so it needs no guest kernel config: the gate
     # never fires for it even when the uploaded config would fail the kdump gate.
