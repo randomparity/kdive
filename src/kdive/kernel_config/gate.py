@@ -22,12 +22,15 @@ from psycopg import AsyncConnection
 
 from kdive.artifacts.read_model import effective_config_key
 from kdive.kernel_config.fetch import load_effective_config
+from kdive.kernel_config.parse import KernelConfig
 from kdive.kernel_config.requirements import (
     CRASH_CAPTURE,
     ROOTFS_MOUNT,
+    Clause,
     feature_requirement,
 )
 from kdive.kernel_config.support import (
+    built_in_required_symbols,
     missing_symbols,
     unmet_advertised_clauses,
     unmet_clauses,
@@ -90,6 +93,28 @@ _DEBUGINFO_UNLOADABLE_REMEDIATION = (
 )
 
 
+def _clause_payload(
+    config: KernelConfig, unmet: tuple[Clause, ...], *, reason: str, remediation: str
+) -> dict[str, JsonValue]:
+    """The shared ``{reason, missing, remediation}`` payload, plus one optional key (#1860).
+
+    ``missing`` stays the flat sorted union of every unmet clause's symbols — the ADR-0330 shape
+    three seams and their clients share. ``built_in_required`` is the subset of it the config
+    enables as ``=m``, and is **absent** when that subset is empty, so a client keying on the
+    ADR-0330 shape is unaffected. Built here rather than at each seam so the key cannot appear on
+    one payload and not the other.
+    """
+    payload: dict[str, JsonValue] = {
+        "reason": reason,
+        "missing": list(missing_symbols(unmet)),
+        "remediation": remediation,
+    }
+    modular = built_in_required_symbols(config, unmet)
+    if modular:
+        payload["built_in_required"] = list(modular)
+    return payload
+
+
 async def crash_capture_refusal(conn: AsyncConnection, run_id: UUID) -> dict[str, JsonValue] | None:
     """Refusal ``details`` if the Run's uploaded config lacks crash-capture symbols, else ``None``.
 
@@ -104,11 +129,12 @@ async def crash_capture_refusal(conn: AsyncConnection, run_id: UUID) -> dict[str
     unmet = unmet_clauses(config, feature_requirement(CRASH_CAPTURE))
     if not unmet:
         return None
-    missing: list[JsonValue] = list(missing_symbols(unmet))
-    return {"reason": CRASH_CONFIG_REASON, "missing": missing, "remediation": _REMEDIATION}
+    return _clause_payload(config, unmet, reason=CRASH_CONFIG_REASON, remediation=_REMEDIATION)
 
 
-async def rootfs_mount_warning(conn: AsyncConnection, run_id: UUID) -> dict[str, JsonValue] | None:
+async def rootfs_mount_warning(
+    conn: AsyncConnection, run_id: UUID, *, has_initrd: bool = False
+) -> dict[str, JsonValue] | None:
     """Non-fatal ``kernel_missing_boot_config`` warning for ``runs.complete_build``, or ``None``.
 
     Returns ``None`` (complete as today) when no ``effective_config`` was uploaded or it cannot be
@@ -123,19 +149,23 @@ async def rootfs_mount_warning(conn: AsyncConnection, run_id: UUID) -> dict[str,
     XFS rootfs. The warning therefore means "this kernel can mount *no* root filesystem kdive
     boots", not "this kernel does not match your guest" — a deliberately weak predicate that never
     fires on a kernel carrying either filesystem.
+
+    Both ``rootfs_mount`` clauses require ``=y`` unless the build uploaded an initrd artifact
+    (#1860): the direct-kernel boot mounts root before any module can be loaded. ``has_initrd``
+    carries that fact from the caller's finalized ``BuildStepResult`` rather than being re-read
+    here, and defaults to the strict reading so a caller that forgets it over-warns.
     """
     config = await load_effective_config(conn, run_id)
     if config is None:
         return None
-    unmet = unmet_advertised_clauses(config, feature_requirement(ROOTFS_MOUNT))
+    unmet = unmet_advertised_clauses(
+        config, feature_requirement(ROOTFS_MOUNT), has_initrd=has_initrd
+    )
     if not unmet:
         return None
-    missing: list[JsonValue] = list(missing_symbols(unmet))
-    return {
-        "reason": MISSING_BOOT_CONFIG_REASON,
-        "missing": missing,
-        "remediation": _ROOTFS_REMEDIATION,
-    }
+    return _clause_payload(
+        config, unmet, reason=MISSING_BOOT_CONFIG_REASON, remediation=_ROOTFS_REMEDIATION
+    )
 
 
 async def missing_effective_config_nudge(

@@ -8,7 +8,7 @@ import tarfile
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 from psycopg.rows import dict_row
@@ -1149,5 +1149,73 @@ def test_chunked_finalize_chunk_delete_failure_keeps_manifest(migrated_url: str)
         assert resp.status == "succeeded"  # finalize never fails on a cleanup error
         assert run is not None and run.state is RunState.SUCCEEDED
         assert present is True  # manifest lingers so the reaper reclaims the leftover chunk
+
+    asyncio.run(_run())
+
+
+# A kernel that mounts its root through modules only: enabled, so it parsed as satisfying the
+# boot clauses before #1860, and unbootable by a direct-kernel boot with no initramfs to load
+# them from. This is the exact upload the issue reports completing cleanly and then panicking.
+_MODULAR_BOOT_CONFIG = b"CONFIG_EXT4_FS=m\nCONFIG_VIRTIO_BLK=m\nCONFIG_VIRTIO_PCI=m\n"
+
+
+def _patched_config_load(data: bytes) -> Any:
+    from unittest.mock import patch
+
+    from kdive.kernel_config.parse import parse_kernel_config
+
+    parsed = parse_kernel_config(data)
+
+    async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> Any:
+        return parsed
+
+    return patch("kdive.kernel_config.gate.load_effective_config", _fake_load)
+
+
+async def _complete_with_modular_boot_config(
+    pool: AsyncConnectionPool, *, with_initrd: bool
+) -> ToolResponse:
+    entries = [ManifestEntry("kernel", "c", 1)]
+    if with_initrd:
+        entries.append(ManifestEntry("initrd", "c", 1))
+    run_id = await _seed_external_run_with_manifest(pool, entries=entries)
+    validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", "abcd"))
+    with _patched_config_load(_MODULAR_BOOT_CONFIG):
+        return await _build_handlers(validator).complete_build(
+            pool, _ctx(), str(run_id), build_id="abcd", cmdline="x"
+        )
+
+
+def test_a_modular_boot_kernel_with_no_initrd_completes_with_the_boot_config_warning(
+    migrated_url: str,
+) -> None:
+    # #1860 end to end. The completion still succeeds - this warns, never refuses - but the
+    # envelope now carries the advisory that was silent, and `built_in_required` tells the agent
+    # its config does contain these symbols, in a form nothing can load before root is mounted.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _complete_with_modular_boot_config(pool, with_initrd=False)
+        assert resp.status == "succeeded", resp
+        warning = cast(dict[str, Any], resp.data["missing_boot_config"])
+        assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
+        assert warning["built_in_required"] == ["EXT4_FS", "VIRTIO_BLK"]
+        assert resp.refs["external_build_contract"] == EXTERNAL_BUILD_CONTRACT_URI
+
+    asyncio.run(_run())
+
+
+def test_the_same_modular_kernel_is_silent_once_the_build_uploaded_an_initrd(
+    migrated_url: str,
+) -> None:
+    # The seam supplies the carve-out from the finalized BuildStepResult it already holds, so the
+    # identical config draws nothing once there is an initrd for the modules to come from. The two
+    # tests differ only in the manifest entry, which is what pins the wiring rather than the flag.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _complete_with_modular_boot_config(pool, with_initrd=True)
+        assert resp.status == "succeeded", resp
+        assert "missing_boot_config" not in resp.data
+        # non-vacuity: the initrd really reached the build result the warning reads
+        assert resp.refs["initrd"]
 
     asyncio.run(_run())

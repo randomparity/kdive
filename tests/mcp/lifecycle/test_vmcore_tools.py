@@ -620,8 +620,9 @@ def test_fetch_vmcore_kdump_refused_when_config_lacks_crash_symbols(migrated_url
     from unittest.mock import patch
 
     from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
-    missing = KernelConfig(_CRASH_GATE_FULL - {"RELOCATABLE"})
+    missing = all_builtin(_CRASH_GATE_FULL - {"RELOCATABLE"})
 
     async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> KernelConfig:
         return missing
@@ -647,8 +648,9 @@ def test_fetch_vmcore_host_dump_ungated_even_with_unsupported_config(migrated_ur
     from unittest.mock import patch
 
     from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
-    empty = KernelConfig(frozenset())
+    empty = all_builtin(frozenset())
 
     async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> KernelConfig:
         return empty

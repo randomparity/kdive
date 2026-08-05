@@ -1076,9 +1076,9 @@ def _patch_effective_config(config: Any) -> Any:
 def test_run_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: str) -> None:
     # ADR-0322: introspect.run over a debuginfo-less kernel (no uploaded vmlinux) still reports
     # `succeeded` (non-fatal) but carries a symbol-naming warning so the agent knows it was blind.
-    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
-    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_KERNEL"}))  # no DWARF/BTF
+    cfg = all_builtin({"DEBUG_INFO", "DEBUG_KERNEL"})  # no DWARF/BTF
 
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
@@ -1102,9 +1102,9 @@ def test_run_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: str) 
 
 
 def test_script_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: str) -> None:
-    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
-    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_KERNEL"}))
+    cfg = all_builtin({"DEBUG_INFO", "DEBUG_KERNEL"})
 
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
@@ -1129,13 +1129,13 @@ def test_script_live_warns_missing_debuginfo_but_still_succeeds(migrated_url: st
 def test_run_live_uploaded_vmlinux_suppresses_warning(migrated_url: str) -> None:
     # An uploaded host vmlinux (default debuginfo_ref) suppresses the warning even when the config
     # lacks in-kernel debuginfo — DWARF-via-vmlinux must keep working (ADR-0322).
-    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool)  # default debuginfo_ref set
             port = _FakeLiveIntrospector()
-            with _patch_effective_config(KernelConfig(frozenset())):
+            with _patch_effective_config(all_builtin(frozenset())):
                 return await introspect_live.introspect_run(
                     pool,
                     _live_ctx(),
@@ -1155,9 +1155,9 @@ def test_run_live_uploaded_vmlinux_suppresses_warning(migrated_url: str) -> None
 
 def _btf_config() -> Any:
     """A config that advertises BTF, so the static gate is silent and the runtime probe decides."""
-    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
-    return KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"}))
+    return all_builtin({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"})
 
 
 def _attach_failure(message: str = "guest drgn could not resolve symbols") -> CategorizedError:
@@ -1277,13 +1277,13 @@ def test_run_live_probe_warning_rides_error_response(migrated_url: str) -> None:
 def test_run_live_static_warning_skips_runtime_probe(migrated_url: str) -> None:
     # When the static config check already warns (no BTF advertised, no vmlinux), the probe is not
     # run: the cheap signal wins and no extra round-trip is paid.
-    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
     async def _run() -> tuple[ToolResponse, _ProbeIntrospector]:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_drgn_session(pool, debuginfo_ref=None)
             port = _ProbeIntrospector(probe_raises=_attach_failure())
-            with _patch_effective_config(KernelConfig(frozenset({"DEBUG_INFO"}))):  # no BTF
+            with _patch_effective_config(all_builtin({"DEBUG_INFO"})):  # no BTF
                 resp = await _run_introspect(pool, session_id, port)
             return resp, port
 

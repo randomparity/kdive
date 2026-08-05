@@ -156,8 +156,13 @@ class CompleteBuildHandlers:
         The two advisories are mutually exclusive: the warning keys on a *present* config missing
         boot symbols, the nudge on a config *absent* entirely (so the warning could never fire).
         Compute the nudge only when the warning is silent to avoid a second config read.
+
+        The boot clauses need ``=y`` unless an initrd was uploaded (#1860), and ``result`` is the
+        finalized ``BuildStepResult`` that already answers that — so the fact is passed, not
+        re-read. A second read through the build-step row would make the warning depend on that
+        row being visible on this connection at this moment.
         """
-        warning = await rootfs_mount_warning(conn, uid)
+        warning = await rootfs_mount_warning(conn, uid, has_initrd=result.initrd_ref is not None)
         nudge = None if warning is not None else await missing_effective_config_nudge(conn, uid)
         async with conn.cursor() as cur:
             await cur.execute("SELECT clock_timestamp()")

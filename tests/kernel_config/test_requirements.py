@@ -1,10 +1,14 @@
-from kdive.kernel_config.parse import KernelConfig
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Final
+
 from kdive.kernel_config.requirements import (
     CRASH_CAPTURE,
     CRASH_CAPTURE_RHEL_GUEST,
     FEATURE_REQUIREMENTS,
     ROOTFS_MOUNT,
     SYSRQ,
+    BuiltIn,
     Clause,
     FeatureRequirement,
     feature_manifest,
@@ -15,6 +19,7 @@ from kdive.kernel_config.support import (
     unmet_advertised_clauses,
     unmet_clauses,
 )
+from tests.kernel_config.config_fixtures import all_builtin
 from tests.kernel_config.unsettable_symbols import UNSETTABLE_SYMBOLS
 
 # lib/Kconfig.debug:262-323 is the "Debug information" `choice`; these are its three non-`NONE`
@@ -123,7 +128,7 @@ def test_debuginfo_summary_sends_the_in_guest_drgn_reader_to_btf_rather_than_sto
     # ...without the entry claiming BTF is required for what this feature IS for: the clause must
     # stay satisfiable by DWARF alone, which is the half #1855 settled and this prose may not
     # quietly undo.
-    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"}))
+    cfg = all_builtin({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"})
     assert unmet_advertised_clauses(cfg, feature_requirement("debuginfo")) == ()
 
 
@@ -323,10 +328,13 @@ def test_rootfs_mount_root_filesystem_is_an_or_group_not_two_and_clauses():
     # AND-of-OR: two _plain clauses would make every ext4-only local-libvirt kernel warn for a
     # missing XFS_FS (and vice versa). One OR-group keeps the advisory at "mounts nothing kdive
     # boots", which is the only claim kdive can make without a guest-family axis.
+    # Read the symbol sets rather than whole clauses: the grouping is what this pins, and the
+    # built-in value each clause also carries (#1860) is pinned by its own test below.
     feat = feature_requirement("rootfs_mount")
-    assert Clause(frozenset({"EXT4_FS", "XFS_FS"})) in feat.advertised
-    assert Clause(frozenset({"EXT4_FS"})) not in feat.advertised
-    assert Clause(frozenset({"XFS_FS"})) not in feat.advertised
+    grouping = [clause.symbols for clause in feat.advertised]
+    assert frozenset({"EXT4_FS", "XFS_FS"}) in grouping
+    assert frozenset({"EXT4_FS"}) not in grouping
+    assert frozenset({"XFS_FS"}) not in grouping
 
 
 def test_rhel_guest_kdump_feature_carries_the_symbols_lost_with_the_build_fragment():
@@ -362,20 +370,18 @@ def test_rhel_guest_kdump_names_every_missing_symbol_for_a_bare_defconfig_captur
     # The bite: the kernel the #1610 run first uploaded — crash_capture-complete and gate-passing,
     # but with none of the RHEL-family extras — must now come back naming all seven at once,
     # instead of surfacing one per rebuild.
-    cfg = KernelConfig(
-        frozenset(
-            {
-                "KEXEC",
-                "KEXEC_CORE",
-                "CRASH_DUMP",
-                "PROC_VMCORE",
-                "VMCORE_INFO",
-                "FW_CFG_SYSFS",
-                "RELOCATABLE",
-                "EXT4_FS",
-                "VIRTIO_BLK",
-            }
-        )
+    cfg = all_builtin(
+        {
+            "KEXEC",
+            "KEXEC_CORE",
+            "CRASH_DUMP",
+            "PROC_VMCORE",
+            "VMCORE_INFO",
+            "FW_CFG_SYSFS",
+            "RELOCATABLE",
+            "EXT4_FS",
+            "VIRTIO_BLK",
+        }
     )
     unmet = unmet_advertised_clauses(cfg, feature_requirement(CRASH_CAPTURE_RHEL_GUEST))
     assert missing_symbols(unmet) == [
@@ -390,18 +396,16 @@ def test_rhel_guest_kdump_names_every_missing_symbol_for_a_bare_defconfig_captur
 
 
 def test_rhel_guest_kdump_is_silent_for_a_kernel_that_carries_the_whole_set():
-    cfg = KernelConfig(
-        frozenset(
-            {
-                "XFS_FS",
-                "SQUASHFS",
-                "SQUASHFS_ZSTD",
-                "EROFS_FS",
-                "OVERLAY_FS",
-                "BLK_DEV_LOOP",
-                "KEXEC_FILE",
-            }
-        )
+    cfg = all_builtin(
+        {
+            "XFS_FS",
+            "SQUASHFS",
+            "SQUASHFS_ZSTD",
+            "EROFS_FS",
+            "OVERLAY_FS",
+            "BLK_DEV_LOOP",
+            "KEXEC_FILE",
+        }
     )
     assert unmet_advertised_clauses(cfg, feature_requirement(CRASH_CAPTURE_RHEL_GUEST)) == ()
 
@@ -529,17 +533,15 @@ def test_advisory_debug_feature_clause_sets_are_the_reviewed_kconfig_sourced_one
 def test_a_kernel_that_picked_one_injection_site_is_not_told_it_needs_the_other_four():
     # The bite for the fault_injection OR-group: five separate AND clauses would report four
     # false missing symbols against a complete failslab-only kernel.
-    cfg = KernelConfig(
-        frozenset(
-            {
-                "DEBUG_KERNEL",
-                "FAULT_INJECTION",
-                "FAILSLAB",
-                "FAULT_INJECTION_DEBUG_FS",
-                "DEBUG_FS",
-                "SYSFS",
-            }
-        )
+    cfg = all_builtin(
+        {
+            "DEBUG_KERNEL",
+            "FAULT_INJECTION",
+            "FAILSLAB",
+            "FAULT_INJECTION_DEBUG_FS",
+            "DEBUG_FS",
+            "SYSFS",
+        }
     )
     assert unmet_advertised_clauses(cfg, feature_requirement("fault_injection")) == ()
 
@@ -549,15 +551,13 @@ def test_a_configfs_only_fault_injection_kernel_is_told_it_still_needs_the_debug
     # fault_create_debugfs_attr() - the only registration path FAILSLAB and friends use - on
     # CONFIG_FAULT_INJECTION_DEBUG_FS. Advertising the two as an OR-group would have called this
     # kernel complete while it exposes no knob to set a failure rate with.
-    cfg = KernelConfig(
-        frozenset(
-            {
-                "DEBUG_KERNEL",
-                "FAULT_INJECTION",
-                "FAILSLAB",
-                "FAULT_INJECTION_CONFIGFS",
-            }
-        )
+    cfg = all_builtin(
+        {
+            "DEBUG_KERNEL",
+            "FAULT_INJECTION",
+            "FAILSLAB",
+            "FAULT_INJECTION_CONFIGFS",
+        }
     )
     missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement("fault_injection")))
     assert missing == ["DEBUG_FS", "FAULT_INJECTION_DEBUG_FS", "SYSFS"]
@@ -568,17 +568,15 @@ def test_either_probe_event_source_satisfies_the_bpf_tracing_dependency():
     # uprobe-only kernel is complete and two AND clauses would falsely fault it. The config also
     # carries a DWARF choice member because #1855 AND-ed that prerequisite in beside BTF; without
     # it this kernel is incomplete for a reason that has nothing to do with probe-event sources.
-    cfg = KernelConfig(
-        frozenset(
-            {
-                "BPF_SYSCALL",
-                "PERF_EVENTS",
-                "UPROBE_EVENTS",
-                "DEBUG_INFO",
-                "DEBUG_INFO_DWARF5",
-                "DEBUG_INFO_BTF",
-            }
-        )
+    cfg = all_builtin(
+        {
+            "BPF_SYSCALL",
+            "PERF_EVENTS",
+            "UPROBE_EVENTS",
+            "DEBUG_INFO",
+            "DEBUG_INFO_DWARF5",
+            "DEBUG_INFO_BTF",
+        }
     )
     assert unmet_advertised_clauses(cfg, feature_requirement("bpf_tracing")) == ()
 
@@ -687,9 +685,7 @@ def test_a_toolchain_default_kernel_is_no_longer_reported_as_missing_every_debug
     # the choice's default carries DWARF that drgn and gdb read, and it advertised none of the
     # three symbols the old group named - so the advisory told a complete debuginfo kernel to
     # rebuild.
-    cfg = KernelConfig(
-        frozenset({"DEBUG_INFO", "DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT", "DEBUG_KERNEL"})
-    )
+    cfg = all_builtin({"DEBUG_INFO", "DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT", "DEBUG_KERNEL"})
     assert unmet_advertised_clauses(cfg, feature_requirement("debuginfo")) == ()
 
 
@@ -699,7 +695,7 @@ def test_a_btf_only_kernel_is_told_to_pick_a_dwarf_member_rather_than_called_com
     # type description, not the line and location tables an offline vmcore or gdb session needs -
     # and the path to it is not reachable from a bare config either. Naming the three DWARF members
     # is the advice that works in both directions.
-    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"}))
+    cfg = all_builtin({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"})
     missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement("debuginfo")))
     assert missing == [
         "DEBUG_INFO_DWARF4",
@@ -712,7 +708,7 @@ def test_a_kernel_with_no_debug_info_is_still_told_which_settable_symbols_to_bui
     # Non-vacuity guard for the two tests above: neither the #1850 removal of DEBUG_INFO nor the
     # #1855 removal of DEBUG_INFO_BTF may make the advisory quieter on the kernel it exists to
     # catch. It stays the same length, naming one more DWARF member and one fewer BTF.
-    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}))
+    cfg = all_builtin({"EXT4_FS", "VIRTIO_BLK"})
     missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement("debuginfo")))
     assert missing == [
         "DEBUG_INFO_DWARF4",
@@ -748,7 +744,7 @@ def test_a_bpf_kernel_with_no_debug_info_is_told_to_pick_a_dwarf_member_as_well_
     # and selects nothing, so CONFIG_DEBUG_INFO_BTF=y in a fragment over a bare config is dropped
     # by olddefconfig and the agent gets a kernel with no BTF and no error. The advisory now names
     # the DWARF member that has to come first, instead of only the symbol that will be discarded.
-    cfg = KernelConfig(frozenset({"BPF_SYSCALL", "PERF_EVENTS", "UPROBE_EVENTS"}))
+    cfg = all_builtin({"BPF_SYSCALL", "PERF_EVENTS", "UPROBE_EVENTS"})
     missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement("bpf_tracing")))
     assert missing == [
         "DEBUG_INFO_BTF",
@@ -763,17 +759,15 @@ def test_a_complete_bpf_tracing_kernel_on_any_dwarf_member_draws_no_advisory():
     # that picked any one of the three is complete. Three AND clauses here would fault every real
     # BPF kernel for the two DWARF members it did not pick.
     for member in sorted(_DWARF_CHOICE):
-        cfg = KernelConfig(
-            frozenset(
-                {
-                    "BPF_SYSCALL",
-                    "PERF_EVENTS",
-                    "UPROBE_EVENTS",
-                    "DEBUG_INFO_BTF",
-                    "DEBUG_INFO",
-                    member,
-                }
-            )
+        cfg = all_builtin(
+            {
+                "BPF_SYSCALL",
+                "PERF_EVENTS",
+                "UPROBE_EVENTS",
+                "DEBUG_INFO_BTF",
+                "DEBUG_INFO",
+                member,
+            }
         )
         assert unmet_advertised_clauses(cfg, feature_requirement("bpf_tracing")) == (), member
 
@@ -827,18 +821,16 @@ def test_a_pre_6_9_kernel_that_has_no_vmcore_info_symbol_at_all_is_armed_rather_
     # pre-6.9 kernel's .config can carry at any setting. That kernel captures a vmcore perfectly
     # well, and its complete, coherent config drew a refusal naming a symbol absent from its own
     # Kconfig - unfixable by any rebuild, which is what made the remediation a dead end.
-    cfg = KernelConfig(
-        frozenset(
-            {
-                "KEXEC",
-                "KEXEC_CORE",
-                "KEXEC_FILE",
-                "CRASH_DUMP",
-                "PROC_VMCORE",
-                "FW_CFG_SYSFS",
-                "RELOCATABLE",
-            }
-        )
+    cfg = all_builtin(
+        {
+            "KEXEC",
+            "KEXEC_CORE",
+            "KEXEC_FILE",
+            "CRASH_DUMP",
+            "PROC_VMCORE",
+            "FW_CFG_SYSFS",
+            "RELOCATABLE",
+        }
     )
     assert unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE)) == ()
 
@@ -848,10 +840,8 @@ def test_a_hand_truncated_config_missing_a_derived_symbol_is_armed_rather_than_r
     # truncated so a selector is present without the symbol it selects. Arming it is the
     # fail-open direction ADR-0318 already chose for a config kdive cannot correlate with a
     # kernel, and it is asserted here so the trade is visible rather than incidental.
-    cfg = KernelConfig(
-        frozenset(
-            {"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "PROC_VMCORE", "FW_CFG_SYSFS", "RELOCATABLE"}
-        )
+    cfg = all_builtin(
+        {"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "PROC_VMCORE", "FW_CFG_SYSFS", "RELOCATABLE"}
     )
     assert unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE)) == ()
 
@@ -861,7 +851,7 @@ def test_a_kernel_that_genuinely_cannot_kexec_is_still_refused_and_named():
     # kernel that really cannot kexec is refused exactly as before, and both symbols it names are
     # ones a config fragment can set - which is what makes the gate's "rebuild with the missing
     # CONFIG_*" remediation followable rather than a dead end.
-    cfg = KernelConfig(frozenset({"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "RELOCATABLE"}))
+    cfg = all_builtin({"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "RELOCATABLE"})
     missing = missing_symbols(unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE)))
     assert missing == ["FW_CFG_SYSFS", "PROC_VMCORE"]
 
@@ -869,7 +859,7 @@ def test_a_kernel_that_genuinely_cannot_kexec_is_still_refused_and_named():
 def test_a_kernel_with_no_kexec_at_all_is_still_told_which_settable_symbols_to_build_in():
     # Non-vacuity guard for the crash_capture removal: the advisory on a bare kernel must still
     # name every symbol the agent can act on, minus the two it cannot.
-    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}))
+    cfg = all_builtin({"EXT4_FS", "VIRTIO_BLK"})
     missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement(CRASH_CAPTURE)))
     assert missing == [
         "CRASH_DUMP",
@@ -952,12 +942,200 @@ def test_every_kasan_mode_is_advertised_as_complete_including_hardware_tag_based
     # The bite: the old _plain("KASAN", "KASAN_INLINE") told an outline kernel it was missing
     # KASAN_INLINE, and an INLINE/OUTLINE OR-group would tell an arm64 MTE kernel the same.
     for mode in ("KASAN_GENERIC", "KASAN_SW_TAGS", "KASAN_HW_TAGS"):
-        cfg = KernelConfig(frozenset({"KASAN", mode, "STACKTRACE"}))
+        cfg = all_builtin({"KASAN", mode, "STACKTRACE"})
         assert unmet_advertised_clauses(cfg, feature_requirement("kasan")) == (), mode
 
 
 def test_a_kernel_with_no_sanitizer_at_all_is_told_what_kasan_needs():
     # Non-vacuity guard for the test above: the same check must still report on a bare kernel.
-    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}))
+    cfg = all_builtin({"EXT4_FS", "VIRTIO_BLK"})
     missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement("kasan")))
     assert missing == ["KASAN", "KASAN_GENERIC", "KASAN_HW_TAGS", "KASAN_SW_TAGS", "STACKTRACE"]
+
+
+def test_the_boot_clauses_require_a_built_in_unless_the_build_uploaded_an_initrd():
+    # #1860. Both rootfs_mount clauses: the direct-kernel boot mounts root before any module can
+    # load, so EXT4_FS=m / XFS_FS=m / VIRTIO_BLK=m is a kernel that panics on an unmountable root.
+    # UNLESS_INITRD and not REQUIRED because an uploaded initrd is exactly what supplies the
+    # modules - the relaxation SERIAL_8250's and IKCONFIG's Kconfig-level =y does not get.
+    feat = feature_requirement(ROOTFS_MOUNT)
+    assert {clause.built_in for clause in feat.advertised} == {BuiltIn.UNLESS_INITRD}
+    assert len(feat.advertised) == 2  # non-vacuity: an empty tuple would satisfy the set above
+
+
+def test_the_virtio_transport_is_boot_critical_and_the_console_symbol_is_not():
+    # The other half of #1860's subject. VIRTIO_PCI is a tristate whose own Kconfig help says "If
+    # unsure, say M", and it is the transport the rootfs_mount virtio-blk disk binds through - so a
+    # modular one loses the root disk for the same reason. SERIAL_8250_CONSOLE is a bool with no
+    # module form and takes no value here; the SERIAL_8250 prerequisite it depends on is #1859's.
+    by_symbols = {
+        clause.symbols: clause.built_in
+        for clause in feature_requirement("serial_console").advertised
+    }
+    assert by_symbols[frozenset({"VIRTIO_PCI"})] is BuiltIn.UNLESS_INITRD
+    assert by_symbols[frozenset({"SERIAL_8250_CONSOLE"})] is BuiltIn.NOT_REQUIRED
+
+
+def test_ikconfig_needs_a_built_in_that_no_initrd_relieves():
+    # Beyond #1860's literal text and the same defect class: /proc/config.gz is created by the
+    # IKCONFIG module's own init and disappears with it, so CONFIG_IKCONFIG=m does not deliver the
+    # readback at any point - there is no boot-ordering window an initrd could widen. REQUIRED is
+    # what says that; UNLESS_INITRD would wrongly call a modular ikconfig fine on an initrd build.
+    by_symbols = {
+        clause.symbols: clause.built_in for clause in feature_requirement("ikconfig").advertised
+    }
+    assert by_symbols[frozenset({"IKCONFIG"})] is BuiltIn.REQUIRED
+    # IKCONFIG_PROC is a bool with no module form, so it needs no value and must not gain one by
+    # a blanket sweep over the entry.
+    assert by_symbols[frozenset({"IKCONFIG_PROC"})] is BuiltIn.NOT_REQUIRED
+
+
+def test_no_other_feature_gained_a_built_in_requirement():
+    # The sweep is exactly three entries. A blanket application would break the reason #1860 did
+    # not narrow the parse regex: KASAN, ftrace, kcov and the BPF symbols are the feature the agent
+    # asked for at =m, and marking them would fault every modular sanitizer build.
+    marked = {
+        f.feature
+        for f in FEATURE_REQUIREMENTS
+        for clauses in (f.advertised, f.gate_required)
+        for clause in clauses
+        if clause.built_in is not BuiltIn.NOT_REQUIRED
+    }
+    assert marked == {ROOTFS_MOUNT, "serial_console", "ikconfig"}
+    for feature_id in ("kasan", "ftrace", "kcov", "bpf_tracing"):
+        feat = feature_requirement(feature_id)
+        assert {clause.built_in for clause in feat.advertised} == {BuiltIn.NOT_REQUIRED}, feature_id
+
+
+def test_the_manifest_clause_object_carries_the_built_in_value_and_omits_it_at_the_default():
+    # The element is an object (#1854), so the value lands as a key beside `symbols`. It is omitted
+    # at NOT_REQUIRED so an unconstrained clause stays as small as it was and the document does not
+    # grow a key on every one of the dozens of clauses that do not need it.
+    by_feature = {entry["feature"]: entry["requirements"] for entry in feature_manifest()}
+    rootfs = by_feature[ROOTFS_MOUNT]
+    assert isinstance(rootfs, list)
+    assert {"symbols": ["EXT4_FS", "XFS_FS"], "built_in": "unless_initrd"} in rootfs
+    assert {"symbols": ["VIRTIO_BLK"], "built_in": "unless_initrd"} in rootfs
+    ikconfig = by_feature["ikconfig"]
+    assert isinstance(ikconfig, list)
+    assert {"symbols": ["IKCONFIG"], "built_in": "required"} in ikconfig
+    # the default renders as a bare `symbols` object, with no key at all
+    assert {"symbols": ["IKCONFIG_PROC"]} in ikconfig
+    kcov = by_feature["kcov"]
+    assert kcov == [{"symbols": ["KCOV"]}]
+
+
+# Features a seam resolves and evaluates clauses of, mapped to whether EVERY such seam supplies
+# the `has_initrd` fact. HAND-MAINTAINED, and pinned to gate.py by the test below so a feature
+# wired into a seam cannot be left off it silently.
+_SEAM_SUPPLIES_INITRD: Final[MappingProxyType[str, bool]] = MappingProxyType(
+    {
+        # crash_capture_refusal holds no BuildStepResult: the install and vmcore seams reach it
+        # with a Run id and nothing about the build's artifacts.
+        CRASH_CAPTURE: False,
+        # rootfs_mount_warning takes has_initrd, and its one caller (_success_envelope in
+        # mcp/tools/lifecycle/runs/complete_build.py) passes `result.initrd_ref is not None` off
+        # the finalized BuildStepResult it already holds.
+        ROOTFS_MOUNT: True,
+    }
+)
+
+
+def _features_a_seam_resolves() -> set[str]:
+    """Feature ids gate.py turns into a FeatureRequirement, read off its AST rather than its text.
+
+    A text search would report `debuginfo`, whose name appears all over gate.py in
+    `debuginfo_warning` and its reason codes - but that seam keys on a module-level BTF literal
+    and evaluates no clause of the feature entry, so it supplies nothing and constrains nothing.
+    """
+    import ast
+    import inspect
+
+    from kdive.kernel_config import gate
+
+    resolved: set[str] = set()
+    for node in ast.walk(ast.parse(inspect.getsource(gate))):
+        if not isinstance(node, ast.Call) or len(node.args) != 1:
+            continue
+        if not (isinstance(node.func, ast.Name) and node.func.id == "feature_requirement"):
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant):
+            resolved.add(str(arg.value))
+        elif isinstance(arg, ast.Name):
+            resolved.add(str(getattr(gate, arg.id)))
+    return resolved
+
+
+def test_the_seam_evaluated_feature_list_matches_the_features_the_gate_actually_resolves():
+    # What keeps the hand-maintained map above from going stale: wiring a new feature into gate.py
+    # fails here until its row - and its answer about the initrd fact - is written down.
+    resolved = _features_a_seam_resolves()
+    assert resolved  # non-vacuity: the AST walk must really find the calls
+    assert resolved == set(_SEAM_SUPPLIES_INITRD)
+
+
+def _unless_initrd_without_the_fact(
+    features: tuple[FeatureRequirement, ...], seam_supplies: Mapping[str, bool]
+) -> dict[str, list[str]]:
+    """Features carrying UNLESS_INITRD that a seam evaluates without supplying the initrd fact.
+
+    A feature absent from ``seam_supplies`` is read by no seam at all, so its clause values are
+    manifest metadata and constrain nothing - that is `serial_console`'s real position.
+    """
+    offenders: dict[str, list[str]] = {}
+    for feature in features:
+        if seam_supplies.get(feature.feature, True):
+            continue
+        symbols = sorted(
+            symbol
+            for clauses in (feature.advertised, feature.gate_required)
+            for clause in clauses
+            if clause.built_in is BuiltIn.UNLESS_INITRD
+            for symbol in clause.symbols
+        )
+        if symbols:
+            offenders[feature.feature] = symbols
+    return offenders
+
+
+def test_a_clause_is_unless_initrd_only_where_every_seam_reading_it_supplies_the_initrd_fact():
+    # Invariant I2's UNLESS_INITRD half, landing with the field it guards (#1860). The rule: a
+    # clause carries a conditional requirement only where every seam that evaluates its feature
+    # supplies the condition. `gate_required` is NOT the boundary - rootfs_mount has an empty
+    # refusal set and is still read live, through unmet_advertised_clauses.
+    #
+    # Without it, marking crash_capture UNLESS_INITRD would make its refusal quietly depend on a
+    # fact crash_capture_refusal cannot supply: the strict default would fault every modular
+    # kexec symbol on an initrd build that is in fact fine.
+    #
+    # THIS IS A REGRESSION GUARD, NOT A PROOF. It checks DECLARED field values against the
+    # hand-maintained list above. A clause that is initrd-conditional *in fact* while carrying
+    # NOT_REQUIRED passes it vacuously, and a seam wired up outside gate.py is invisible to it.
+    assert _every_clause_symbol(FEATURE_REQUIREMENTS)  # non-vacuity: the roster is really walked
+    assert _unless_initrd_without_the_fact(FEATURE_REQUIREMENTS, _SEAM_SUPPLIES_INITRD) == {}
+    # and the value is really in use on the live roster, so the empty result above is not the
+    # answer to a question nothing asks
+    assert _unless_initrd_without_the_fact(FEATURE_REQUIREMENTS, {ROOTFS_MOUNT: False}) == {
+        ROOTFS_MOUNT: ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
+    }
+
+
+def test_the_invariant_above_reports_a_seam_evaluated_feature_and_spares_the_other_two_cases():
+    # The three dispositions the check has to tell apart, on one synthetic feature so the arms
+    # differ only in what the seam supplies.
+    smuggled = FeatureRequirement(
+        "not_a_real_feature",
+        "synthetic fixture for the invariant above",
+        advertised=(Clause(frozenset({"VIRTIO_PCI"}), BuiltIn.UNLESS_INITRD),),
+        gate_required=(Clause(frozenset({"VIRTIO_BLK"}), BuiltIn.UNLESS_INITRD),),
+    )
+    # evaluated by a seam that supplies nothing -> reported, from both fields
+    assert _unless_initrd_without_the_fact((smuggled,), {"not_a_real_feature": False}) == {
+        "not_a_real_feature": ["VIRTIO_BLK", "VIRTIO_PCI"]
+    }
+    # evaluated by a seam that does supply the fact -> allowed
+    assert _unless_initrd_without_the_fact((smuggled,), {"not_a_real_feature": True}) == {}
+    # read by no seam at all -> allowed, and this is serial_console's position today
+    assert _unless_initrd_without_the_fact((smuggled,), {}) == {}
+    assert "serial_console" not in _SEAM_SUPPLIES_INITRD
