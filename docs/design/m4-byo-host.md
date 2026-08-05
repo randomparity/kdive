@@ -49,7 +49,9 @@ neither control plane can issue an NMI, which a provider whose central operation
   [ADR-0541](../adr/0541-baseline-restore-or-cordon-teardown.md) (restore-verify-or-cordon
   teardown and the reconciler drift arm),
   [ADR-0542](../adr/0542-kgdb-over-leased-serial-channel.md) (the `kgdb` debug transport over
-  the leased serial channel). All build on
+  the leased serial channel), and
+  [ADR-0547](../adr/0547-host-interface-in-band-bmc-path.md) (the host-OS-to-service-processor
+  direction: read, report, and record it; do not gate adoption on it). All build on
   [ADR-0063](../adr/0063-typed-provider-runtime.md) (the typed port seam),
   [ADR-0071](../adr/0071-per-kind-provider-runtime-registry.md) (the per-kind runtime
   registry), [ADR-0076](../adr/0076-remote-libvirt-provider-package.md) (the provider
@@ -148,7 +150,10 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
 - **No LPAR lifecycle management.** KDIVE does not create, delete, or DLPAR-resize an LPAR. It
   adopts one and uses the HMC for power and vterm only.
 - **No firmware management** — no BIOS/UEFI settings, firmware updates, or boot-order changes
-  as a normal operation.
+  as a normal operation. This covers the service processor's own configuration: KDIVE does not
+  disable, authenticate, or otherwise change a host's Redfish **Host Interface** or its in-band
+  IPMI channel. Both are the operator's to set, once, against their own BMC
+  ([ADR-0547](../adr/0547-host-interface-in-band-bmc-path.md), #1847).
 - **No snapshot or restore** (`supports_snapshots` stays `False`) and **no host-side traffic
   capture** (`supports_traffic_capture` stays `False`) — both need a hypervisor vantage that
   does not exist here.
@@ -160,9 +165,13 @@ confirmed rather than decided here — so the scope claim of "open questions 1�
   decision. BYO touches no libvirt code.
 - **No new dispatch architecture.** This rides the ADR-0063 typed seam, as AGENTS.md directs.
 - **No new agent-facing tool** beyond the `kgdb` transport value on `debug.start_session`.
-- **No widening of the OOB port beyond power and console.** Sensors, boot-device override,
-  virtual media, firmware inventory, and HMC dump management are surveyed by entry 7 (#1816)
-  and added only against a named caller.
+- **No widening of the OOB port beyond power and console**, with one named-caller exception.
+  Sensors, boot-device override, virtual media, firmware inventory, and HMC dump management are
+  surveyed by entry 7 (#1816) and added only against a named caller. One such caller is named:
+  [ADR-0547](../adr/0547-host-interface-in-band-bmc-path.md) admits a read-only `GET` of the
+  Manager's `HostInterfaces` collection and its members on the Redfish driver, for the `doctor`
+  report (entry 9) and the adopt fact (entry 8). No write, no other member, and no analogue on
+  the IPMI or HMC drivers.
 
 ## Postgres schema (M4 delta)
 
@@ -298,11 +307,23 @@ an agent given a bare relative number treats it as a wall to route around.
 
 ## Auth / RBAC delta
 
-**None.** A BYO resource registers under the service identity at discovery, the same path every
-other provider uses. No new role, claim, or gate. The destructive-op gate
-(`src/kdive/security/authz/gate.py`) applies unchanged: `force_crash` requires the allocation
-project's RBAC role and an explicit profile opt-in, and power and teardown use their existing
-lifecycle paths (ADR-0130).
+**None**, and it is worth saying what that is a statement about. A BYO resource registers under
+the service identity at discovery, the same path every other provider uses. No new role, claim,
+or gate. The destructive-op gate (`src/kdive/security/authz/gate.py`) applies unchanged:
+`force_crash` requires the allocation project's RBAC role and an explicit profile opt-in, and
+power and teardown use their existing lifecycle paths (ADR-0130).
+
+KDIVE's authorization model ends at the machine boundary. The adopted host's service processor
+has an authorization model of its own that KDIVE neither owns nor configures, and the
+**host-OS-to-service-processor** direction sits inside it: a Redfish Host Interface enabled with
+`AuthNone` — observed on one AMI MegaRAC / AST2600 (#1847) — lets code on the host reach its own
+BMC with no credentials, which puts the kernel under test on the trusted side of the plane that
+is supposed to recover it. That is not an RBAC delta, because no KDIVE role governs it.
+[ADR-0547](../adr/0547-host-interface-in-band-bmc-path.md) decides how it is handled: the state
+is read, reported by `doctor` at warning severity, and recorded in `systems.byo_adopt_facts` at
+adopt, and it does not gate adoption. The interface's authentication mode is **read**, never
+assumed — `AuthNone` is a vendor and configuration choice, not a universal one — and a BMC that
+reports no Host Interface is recorded as having reported nothing, not as safe.
 
 ## Error taxonomy (M4 delta)
 
@@ -459,7 +480,9 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
    line.
 3. **The out-of-band path never falls back in-band** (ADR-0539) — the plane exists to work when
    in-band access is gone, so a fallback would make an OOB failure invisible until the moment
-   it mattered. `doctor` reports OOB reachability before allocation instead.
+   it mattered. `doctor` reports OOB reachability before allocation instead. This governs
+   KDIVE's own code path and says nothing about a path the target opens for itself; that
+   direction is invariant 7.
 4. **One console, one preemptor** (ADR-0539, ADR-0542) — collection is the channel's default
    state; reading holds share it and exclude preemption; only KGDB preempts, and it excludes
    everything. A preempted collector reports `pumped=False` to a live reader rather than empty
@@ -476,3 +499,13 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
 6. **`byo_host` is opt-in** — the runtime and its discovery registrar compose only when an
    operator declares a `[[byo_host]]` entry, so a deployment without one has no bookable BYO
    resource. Registration is bind-only; `reconcile_resources` is the sole creator.
+7. **The out-of-band plane sits outside the target's reach only as far as the host's own
+   firmware makes it so** (ADR-0547) — and KDIVE records how far that is rather than assuming
+   it. A Redfish Host Interface enabled with `AuthNone` puts the kernel under test on the
+   trusted side of the plane that is supposed to recover it, and the reach extends past power to
+   virtual media and firmware on many implementations — persistent out-of-band state the
+   ADR-0541 restore does not return to baseline, because that restore's subject is the
+   bootloader and the baseline kernel. KDIVE does not change the setting (adopt-only, and no
+   firmware management) and does not refuse a host for it. It **reads** the mode, reports it
+   before allocation, and records the observation in `systems.byo_adopt_facts` at adopt, so the
+   operator's acceptance is made against the value and an incident has the answer.
