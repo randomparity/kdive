@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -67,6 +67,29 @@ The second half applies to `bpf_tracing`, whose `{DEBUG_INFO_BTF}` clause is unr
 bare config for the reason #1855 gives: BTF is inside `if DEBUG_INFO` and selects nothing. It gains
 an AND-ed prerequisite clause naming the DWARF choice members, so the advertised set says "pick a
 DWARF member, then BTF" rather than offering a symbol that will be dropped.
+
+### Amendment (2026-08-05): the dropped clauses also fired on a whole class of working kernel (#1869)
+
+This is an amendment rather than a new decision because it qualifies the reasoning above without
+changing what was decided: the two clauses are still dropped, for the same rule, and no field is
+added. It qualifies the claim that the removed clauses "can only fire on an internally
+inconsistent upload — a truncated or hand-edited file".
+
+That claim is narrower than the truth, and understated the defect being fixed. `VMCORE_INFO` did
+not exist before Linux 6.9; it was split out of `CRASH_CORE` by `443cbaf9e2fd`. A complete,
+coherent, working pre-6.9 config therefore could not satisfy the `{VMCORE_INFO}` clause at any
+setting, and no rebuild could make it — the gate refused crash capture over a symbol absent from
+that kernel's Kconfig entirely. This was not hypothetical: the `rocky-kdive-ready-8` (4.18) and
+`rocky-kdive-ready-9` (5.14) images in `fixtures/local-libvirt/rootfs_catalog.toml` were
+permanently unable to arm crash capture, reported against an unactionable symbol name.
+
+So the removal fixes a live defect on a supported image class, not only a corner case on a
+malformed upload. It strengthens the decision: the fail-open trade recorded above is the *lesser*
+of the two reasons to drop these clauses. Filed as #1869 and closed by the change that implements
+rule 1; the pre-6.9 kernel is that change's headline regression test, and reverting `{VMCORE_INFO}`
+into `gate_required` reddens it. Verified against upstream `v4.18` and `v5.14` Kconfig, symbol by
+symbol; the check is against upstream rather than Rocky's patched kernels, and those images carry
+no in-tree `.config`, so the verified claim is the symbol-level one.
 
 ### 2. A clause carries a built-in requirement; the initrd carve-out is evaluated at the seam
 

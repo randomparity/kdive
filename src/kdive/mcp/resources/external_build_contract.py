@@ -26,8 +26,9 @@ from kdive.serialization import JsonValue
 EXTERNAL_BUILD_CONTRACT_URI = "resource://kdive/contracts/external-build"
 EXTERNAL_BUILD_UPLOAD_DOC = "resource://kdive/docs/operating/external-build-upload.md"
 
-# 2 since #1854: a `feature_config_requirements` clause is an object keyed by `symbols` rather
-# than a bare list of symbol names, so a later per-clause key (#1860, #1859) is additive.
+# 2 since #1854 (ADR-0544 §6): a `feature_config_requirements` clause is an object keyed by
+# `symbols` rather than a bare list of symbol names. That one shape change is what let the
+# per-clause `built_in` (#1860) and `arch` (#1859) keys arrive additively, without bumping again.
 _SCHEMA_VERSION = 2
 
 _INVESTIGATION_CONTRACTS: Mapping[str, ArtifactContract] = {

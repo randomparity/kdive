@@ -1,7 +1,12 @@
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from types import MappingProxyType
-from typing import Final
+from typing import Final, NamedTuple
 
+# The one import of the provisioning platform in this package's tests, and it is deliberately
+# here and not in `src/`: ADR-0544 §3 checks every `Clause.arches` value against the arches kdive
+# can actually provision, from the test tree only, so `kernel_config` keeps taking no runtime
+# dependency on `domain.platform` (pinned by tests/kernel_config/test_layering.py).
+from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 from kdive.kernel_config.requirements import (
     CRASH_CAPTURE,
     CRASH_CAPTURE_RHEL_GUEST,
@@ -1025,18 +1030,191 @@ def test_the_manifest_clause_object_carries_the_built_in_value_and_omits_it_at_t
     assert kcov == [{"symbols": ["KCOV"]}]
 
 
-# Features a seam resolves and evaluates clauses of, mapped to whether EVERY such seam supplies
-# the `has_initrd` fact. HAND-MAINTAINED, and pinned to gate.py by the test below so a feature
-# wired into a seam cannot be left off it silently.
-_SEAM_SUPPLIES_INITRD: Final[MappingProxyType[str, bool]] = MappingProxyType(
+_X86 = "x86_64"
+_PPC = "ppc64le"
+
+
+def test_serial_console_advertises_a_console_for_each_arch_and_the_8250_prerequisite():
+    # #1859, the clause content ADR-0544 §3 settles. The old set was two clauses,
+    # {SERIAL_8250_CONSOLE} and {VIRTIO_PCI}, and both of the issue's defects lived in the first:
+    #
+    #   - SERIAL_8250_CONSOLE alone is not settable. drivers/tty/serial/8250/Kconfig:70-72 makes
+    #     it a bool "depends on SERIAL_8250=y", so a fragment setting only it is dropped by
+    #     olddefconfig. Under rule 1 the prerequisite becomes its own clause rather than replacing
+    #     the symbol - and it is REQUIRED, the Kconfig-level =y no initrd relieves.
+    #   - a ppc64le guest was advertised the wrong symbol and never told the right one. Its
+    #     console is hvc0, driven by HVC_CONSOLE (drivers/tty/hvc/Kconfig:14, "depends on
+    #     PPC_PSERIES"), on which SERIAL_8250_CONSOLE does nothing.
+    #
+    # Asserts the clause *tuple*, not the flattened union: an OR-group
+    # {SERIAL_8250_CONSOLE, HVC_CONSOLE} - the shape the issue names as fitting the model without
+    # an arch axis, and ADR-0544 rejects - has the same union and would slip past a set compare.
+    assert feature_requirement("serial_console").advertised == (
+        Clause(frozenset({"SERIAL_8250"}), BuiltIn.REQUIRED, arches=frozenset({_X86})),
+        Clause(frozenset({"SERIAL_8250_CONSOLE"}), arches=frozenset({_X86})),
+        Clause(frozenset({"HVC_CONSOLE"}), arches=frozenset({_PPC})),
+        Clause(frozenset({"VIRTIO_PCI"}), BuiltIn.UNLESS_INITRD),
+    )
+
+
+def test_the_8250_prerequisite_is_ordered_before_the_console_symbol_it_gates():
+    # Same ordering rule bpf_tracing's DWARF-before-BTF clause follows: the advertised tuple is
+    # rendered in order into the contract document, so "set SERIAL_8250, then
+    # SERIAL_8250_CONSOLE" has to read in the order the two have to be done.
+    symbols = [
+        sorted(clause.symbols) for clause in feature_requirement("serial_console").advertised
+    ]
+    assert symbols.index(["SERIAL_8250"]) < symbols.index(["SERIAL_8250_CONSOLE"])
+
+
+def test_the_two_console_symbols_are_separate_arch_scoped_clauses_not_one_or_group():
+    # The direction of error ADR-0544 rejects the OR-group on: an x86 kernel carrying only
+    # HVC_CONSOLE would read as satisfied, and a ppc64le kernel carrying only SERIAL_8250_CONSOLE
+    # likewise. Stated as the configs rather than the shape, so it holds whatever the clauses look
+    # like. The union is identical either way, which is why a set comparison could not see this.
+    feature = feature_requirement("serial_console")
+    hvc_only_on_x86 = all_builtin({"HVC_CONSOLE", "VIRTIO_PCI"})
+    assert missing_symbols(unmet_advertised_clauses(hvc_only_on_x86, feature, arch=_X86)) == [
+        "SERIAL_8250",
+        "SERIAL_8250_CONSOLE",
+    ]
+    eight250_only_on_ppc = all_builtin({"SERIAL_8250", "SERIAL_8250_CONSOLE", "VIRTIO_PCI"})
+    assert missing_symbols(unmet_advertised_clauses(eight250_only_on_ppc, feature, arch=_PPC)) == [
+        "HVC_CONSOLE"
+    ]
+
+
+def test_a_complete_kernel_of_each_arch_shape_draws_no_serial_console_advisory():
+    # The both-directions non-vacuity guard the issue asks for, first direction: a kernel that is
+    # complete for its own arch is silent, and is not faulted for the other arch's console.
+    feature = feature_requirement("serial_console")
+    x86 = all_builtin({"SERIAL_8250", "SERIAL_8250_CONSOLE", "VIRTIO_PCI"})
+    assert unmet_advertised_clauses(x86, feature, arch=_X86) == ()
+    ppc = all_builtin({"HVC_CONSOLE", "VIRTIO_PCI"})
+    assert unmet_advertised_clauses(ppc, feature, arch=_PPC) == ()
+
+
+def test_a_bare_kernel_is_still_told_every_symbol_it_can_act_on_for_its_own_arch():
+    # Second direction of the same guard: the skip must not make the advisory silent on a kernel
+    # that really is missing its console. A ppc64le kernel with no console at all was reported
+    # nothing before #1859 - that is the issue's second defect, stated as the payload.
+    feature = feature_requirement("serial_console")
+    bare = all_builtin({"EXT4_FS"})
+    assert missing_symbols(unmet_advertised_clauses(bare, feature, arch=_PPC)) == [
+        "HVC_CONSOLE",
+        "VIRTIO_PCI",
+    ]
+    assert missing_symbols(unmet_advertised_clauses(bare, feature, arch=_X86)) == [
+        "SERIAL_8250",
+        "SERIAL_8250_CONSOLE",
+        "VIRTIO_PCI",
+    ]
+    # and with no arch in hand, only the unscoped clause is answerable - kdive never invents a
+    # requirement it cannot establish (ADR-0544 §3)
+    assert missing_symbols(unmet_advertised_clauses(bare, feature)) == ["VIRTIO_PCI"]
+
+
+def test_no_other_feature_gained_an_arch_scope():
+    # The sweep is exactly one entry, and it has to stay that way while the seams supply no arch:
+    # invariant I2 below is what forbids tagging crash_capture or rootfs_mount, and this is what
+    # notices a third feature being tagged for a reason neither check covers.
+    scoped = {
+        f.feature
+        for f in FEATURE_REQUIREMENTS
+        for clauses in (f.advertised, f.gate_required)
+        for clause in clauses
+        if clause.arches is not None
+    }
+    assert scoped == {"serial_console"}
+
+
+def test_crash_capture_carries_no_arch_scope_and_that_is_a_recorded_residual():
+    # ADR-0544 §7's deferred residual, pinned so it cannot be "fixed" by accident. FW_CFG_SYSFS
+    # and RELOCATABLE are arch-specific in fact - FW_CFG_SYSFS is plausibly unavailable on the
+    # pseries machine type kdive boots for ppc64le - but tagging them would need the refusal seams
+    # (install crashkernel reservation, kdump vmcore fetch) to resolve the Run's System profile
+    # arch, which is real work tracked as #1875. Until then the honest state is untagged: I2 above
+    # passes vacuously here, and this is where that is said out loud rather than inferred.
+    feat = feature_requirement(CRASH_CAPTURE)
+    assert {clause.arches for clause in feat.gate_required} == {None}
+    assert {clause.arches for clause in feat.advertised} == {None}
+    assert {"FW_CFG_SYSFS", "RELOCATABLE"} <= {s for c in feat.gate_required for s in c.symbols}
+
+
+def test_every_arch_scope_names_an_arch_kdive_can_provision():
+    # ADR-0544 §3's third test. A clause scoped to an arch kdive cannot boot is a requirement no
+    # kernel is ever checked against - it would sit in the contract document advertising a symbol
+    # to nobody, and the support checks would skip it forever. Read from the test tree only, so
+    # `kernel_config` keeps taking no runtime import on `domain.platform`.
+    scopes = [
+        clause.arches
+        for f in FEATURE_REQUIREMENTS
+        for clauses in (f.advertised, f.gate_required)
+        for clause in clauses
+        if clause.arches is not None
+    ]
+    assert scopes  # non-vacuity: an empty list is a subset of anything
+    for arches in scopes:
+        assert arches  # an empty frozenset would mean "no arch", which None does not say
+        assert arches <= SUPPORTED_ARCHES, sorted(arches)
+    # and the check is really discriminating, not a subset test against a set of everything
+    assert not frozenset({"riscv64"}) <= SUPPORTED_ARCHES
+
+
+def test_the_manifest_clause_object_carries_the_arch_scope_and_omits_it_at_the_default():
+    # ADR-0544 §6: the arch lands as a key beside `symbols`, sorted for a diffable document, and
+    # omitted at the None default so the dozens of unscoped clauses stay as small as they were.
+    # The machine-readable array is what an agent diffs its config against, so a ppc64le agent
+    # filtering on `arch` is the whole point of the field.
+    by_feature = {entry["feature"]: entry["requirements"] for entry in feature_manifest()}
+    console = by_feature["serial_console"]
+    assert console == [
+        {"symbols": ["SERIAL_8250"], "built_in": "required", "arch": [_X86]},
+        {"symbols": ["SERIAL_8250_CONSOLE"], "arch": [_X86]},
+        {"symbols": ["HVC_CONSOLE"], "arch": [_PPC]},
+        {"symbols": ["VIRTIO_PCI"], "built_in": "unless_initrd"},
+    ]
+    # the default renders as an object with no `arch` key at all, on every other feature
+    others = [
+        clause
+        for feature, clauses in by_feature.items()
+        if feature != "serial_console" and isinstance(clauses, list)
+        for clause in clauses
+    ]
+    assert others  # non-vacuity: the rest of the roster is really walked
+    assert all(isinstance(clause, dict) and "arch" not in clause for clause in others)
+
+
+class SeamFacts(NamedTuple):
+    """Which conditional facts EVERY seam evaluating a feature passes to the support checks.
+
+    One row per axis rather than one map per axis: I2 is a single invariant over two axes
+    (ADR-0544 §7), and two hand-maintained maps keyed by the same feature ids would be two things
+    to keep in step with gate.py instead of one.
+    """
+
+    initrd: bool
+    """Whether every such seam passes ``has_initrd``, which an ``UNLESS_INITRD`` clause needs."""
+
+    arch: bool
+    """Whether every such seam passes ``arch``, which an arch-scoped clause needs."""
+
+
+# Features a seam resolves and evaluates clauses of, mapped to the facts EVERY such seam supplies.
+# HAND-MAINTAINED, and pinned to gate.py by the test below so a feature wired into a seam cannot
+# be left off it silently.
+_SEAM_SUPPLIES: Final[MappingProxyType[str, SeamFacts]] = MappingProxyType(
     {
         # crash_capture_refusal holds no BuildStepResult: the install and vmcore seams reach it
-        # with a Run id and nothing about the build's artifacts.
-        CRASH_CAPTURE: False,
+        # with a Run id and nothing about the build's artifacts. Nor do they resolve the Run's
+        # System's profile arch, which is why crash_capture stays untagged and its arch-specific
+        # gated pair is #1875's deferred residual rather than this campaign's work (ADR-0544 §7).
+        CRASH_CAPTURE: SeamFacts(initrd=False, arch=False),
         # rootfs_mount_warning takes has_initrd, and its one caller (_success_envelope in
         # mcp/tools/lifecycle/runs/complete_build.py) passes `result.initrd_ref is not None` off
-        # the finalized BuildStepResult it already holds.
-        ROOTFS_MOUNT: True,
+        # the finalized BuildStepResult it already holds. It holds no arch: complete_build runs
+        # against a Run, and nothing on that path resolves the System profile it will install to.
+        ROOTFS_MOUNT: SeamFacts(initrd=True, arch=False),
     }
 )
 
@@ -1087,34 +1265,66 @@ def _features_a_seam_resolves() -> set[str]:
 
 def test_the_seam_evaluated_feature_list_matches_the_features_the_gate_actually_resolves():
     # What keeps the hand-maintained map above from going stale: wiring a new feature into gate.py
-    # fails here until its row - and its answer about the initrd fact - is written down.
+    # fails here until its row - and its answers about the initrd and arch facts - are written
+    # down.
     resolved = _features_a_seam_resolves()
     assert resolved  # non-vacuity: the AST walk must really find the calls
-    assert resolved == set(_SEAM_SUPPLIES_INITRD)
+    assert resolved == set(_SEAM_SUPPLIES)
 
 
-def _unless_initrd_without_the_fact(
-    features: tuple[FeatureRequirement, ...], seam_supplies: Mapping[str, bool]
+def _conditional_without_the_fact(
+    features: tuple[FeatureRequirement, ...],
+    seam_supplies: Mapping[str, SeamFacts],
+    *,
+    supplies: Callable[[SeamFacts], bool],
+    declares: Callable[[Clause], bool],
 ) -> dict[str, list[str]]:
-    """Features carrying UNLESS_INITRD that a seam evaluates without supplying the initrd fact.
+    """Features declaring a conditional clause a seam evaluates without supplying the condition.
 
-    A feature absent from ``seam_supplies`` is read by no seam at all, so its clause values are
-    manifest metadata and constrain nothing - that is `serial_console`'s real position.
+    One walk for both axes of I2 (ADR-0544 §7), because the rule is the same one: ``declares``
+    picks the clauses carrying the condition and ``supplies`` reads the seam's answer for that
+    axis. A feature absent from ``seam_supplies`` is read by no seam at all, so its clause values
+    are manifest metadata and constrain nothing - that is `serial_console`'s real position.
     """
     offenders: dict[str, list[str]] = {}
     for feature in features:
-        if seam_supplies.get(feature.feature, True):
+        facts = seam_supplies.get(feature.feature)
+        if facts is None or supplies(facts):
             continue
         symbols = sorted(
             symbol
             for clauses in (feature.advertised, feature.gate_required)
             for clause in clauses
-            if clause.built_in is BuiltIn.UNLESS_INITRD
+            if declares(clause)
             for symbol in clause.symbols
         )
         if symbols:
             offenders[feature.feature] = symbols
     return offenders
+
+
+def _unless_initrd_without_the_fact(
+    features: tuple[FeatureRequirement, ...], seam_supplies: Mapping[str, SeamFacts]
+) -> dict[str, list[str]]:
+    """Features carrying UNLESS_INITRD that a seam evaluates without supplying the initrd fact."""
+    return _conditional_without_the_fact(
+        features,
+        seam_supplies,
+        supplies=lambda facts: facts.initrd,
+        declares=lambda clause: clause.built_in is BuiltIn.UNLESS_INITRD,
+    )
+
+
+def _arch_scoped_without_the_fact(
+    features: tuple[FeatureRequirement, ...], seam_supplies: Mapping[str, SeamFacts]
+) -> dict[str, list[str]]:
+    """Features carrying an arch scope that a seam evaluates without supplying the arch."""
+    return _conditional_without_the_fact(
+        features,
+        seam_supplies,
+        supplies=lambda facts: facts.arch,
+        declares=lambda clause: clause.arches is not None,
+    )
 
 
 def test_a_clause_is_unless_initrd_only_where_every_seam_reading_it_supplies_the_initrd_fact():
@@ -1131,29 +1341,72 @@ def test_a_clause_is_unless_initrd_only_where_every_seam_reading_it_supplies_the
     # hand-maintained list above. A clause that is initrd-conditional *in fact* while carrying
     # NOT_REQUIRED passes it vacuously, and a seam wired up outside gate.py is invisible to it.
     assert _every_clause_symbol(FEATURE_REQUIREMENTS)  # non-vacuity: the roster is really walked
-    assert _unless_initrd_without_the_fact(FEATURE_REQUIREMENTS, _SEAM_SUPPLIES_INITRD) == {}
+    assert _unless_initrd_without_the_fact(FEATURE_REQUIREMENTS, _SEAM_SUPPLIES) == {}
     # and the value is really in use on the live roster, so the empty result above is not the
     # answer to a question nothing asks
-    assert _unless_initrd_without_the_fact(FEATURE_REQUIREMENTS, {ROOTFS_MOUNT: False}) == {
-        ROOTFS_MOUNT: ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
-    }
+    assert _unless_initrd_without_the_fact(
+        FEATURE_REQUIREMENTS, {ROOTFS_MOUNT: SeamFacts(initrd=False, arch=False)}
+    ) == {ROOTFS_MOUNT: ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]}
 
 
-def test_the_invariant_above_reports_a_seam_evaluated_feature_and_spares_the_other_two_cases():
-    # The three dispositions the check has to tell apart, on one synthetic feature so the arms
-    # differ only in what the seam supplies.
+def test_a_clause_is_arch_scoped_only_where_every_seam_reading_it_supplies_the_arch():
+    # Invariant I2's arch half, landing with the field it guards (ADR-0544 §7-§8, #1859). Same
+    # rule as the initrd half above, second axis: rule 3's support checks skip a clause scoped to
+    # an arch they were not given, so tagging a feature a seam reads without an arch would turn a
+    # live check into silence rather than a fault - a warning that vanishes.
+    #
+    # The two seam-evaluated features are crash_capture and rootfs_mount, and neither seam
+    # resolves the Run's System profile arch, so neither may be tagged. serial_console is read by
+    # no seam and may.
+    #
+    # THIS IS A REGRESSION GUARD, NOT A PROOF, and the arch half is the weaker of the two.
+    # crash_capture's gated {FW_CFG_SYSFS}/{RELOCATABLE} are arch-specific IN FACT while carrying
+    # arches=None, and they pass this vacuously - ADR-0544 §7 records that openly and defers it to
+    # #1875, because tagging them needs the refusal seams to resolve an arch first. "Unhandled and
+    # recorded" is the honest state here, not "guarded".
+    assert _every_clause_symbol(FEATURE_REQUIREMENTS)  # non-vacuity: the roster is really walked
+    assert _arch_scoped_without_the_fact(FEATURE_REQUIREMENTS, _SEAM_SUPPLIES) == {}
+    # and the field is really in use on the live roster, so the empty result above is not the
+    # answer to a question nothing asks: pretend a seam reads serial_console and it is reported
+    assert _arch_scoped_without_the_fact(
+        FEATURE_REQUIREMENTS, {"serial_console": SeamFacts(initrd=True, arch=False)}
+    ) == {"serial_console": ["HVC_CONSOLE", "SERIAL_8250", "SERIAL_8250_CONSOLE"]}
+
+
+def test_the_two_invariants_report_a_seam_evaluated_feature_and_spare_the_other_two_cases():
+    # The three dispositions each check has to tell apart, on one synthetic feature so the arms
+    # differ only in what the seam supplies. Both axes on the same fixture, because they are one
+    # invariant and a fixture that exercised only one would let the other's wiring rot.
     smuggled = FeatureRequirement(
         "not_a_real_feature",
-        "synthetic fixture for the invariant above",
-        advertised=(Clause(frozenset({"VIRTIO_PCI"}), BuiltIn.UNLESS_INITRD),),
-        gate_required=(Clause(frozenset({"VIRTIO_BLK"}), BuiltIn.UNLESS_INITRD),),
+        "synthetic fixture for the invariants above",
+        advertised=(
+            Clause(frozenset({"VIRTIO_PCI"}), BuiltIn.UNLESS_INITRD, arches=frozenset({"x86_64"})),
+        ),
+        gate_required=(
+            Clause(frozenset({"VIRTIO_BLK"}), BuiltIn.UNLESS_INITRD, arches=frozenset({"x86_64"})),
+        ),
     )
-    # evaluated by a seam that supplies nothing -> reported, from both fields
-    assert _unless_initrd_without_the_fact((smuggled,), {"not_a_real_feature": False}) == {
-        "not_a_real_feature": ["VIRTIO_BLK", "VIRTIO_PCI"]
+    both = ["VIRTIO_BLK", "VIRTIO_PCI"]
+    supplies_neither = {"not_a_real_feature": SeamFacts(initrd=False, arch=False)}
+    supplies_both = {"not_a_real_feature": SeamFacts(initrd=True, arch=True)}
+    # evaluated by a seam that supplies nothing -> reported by both checks, from both fields
+    assert _unless_initrd_without_the_fact((smuggled,), supplies_neither) == {
+        "not_a_real_feature": both
+    }
+    assert _arch_scoped_without_the_fact((smuggled,), supplies_neither) == {
+        "not_a_real_feature": both
     }
     # evaluated by a seam that does supply the fact -> allowed
-    assert _unless_initrd_without_the_fact((smuggled,), {"not_a_real_feature": True}) == {}
+    assert _unless_initrd_without_the_fact((smuggled,), supplies_both) == {}
+    assert _arch_scoped_without_the_fact((smuggled,), supplies_both) == {}
+    # the axes are independent: supplying one fact does not excuse the other
+    supplies_initrd_only = {"not_a_real_feature": SeamFacts(initrd=True, arch=False)}
+    assert _unless_initrd_without_the_fact((smuggled,), supplies_initrd_only) == {}
+    assert _arch_scoped_without_the_fact((smuggled,), supplies_initrd_only) == {
+        "not_a_real_feature": both
+    }
     # read by no seam at all -> allowed, and this is serial_console's position today
     assert _unless_initrd_without_the_fact((smuggled,), {}) == {}
-    assert "serial_console" not in _SEAM_SUPPLIES_INITRD
+    assert _arch_scoped_without_the_fact((smuggled,), {}) == {}
+    assert "serial_console" not in _SEAM_SUPPLIES

@@ -1,4 +1,10 @@
-"""Check a parsed kernel config against a feature's required clauses (ADR-0318, ADR-0330)."""
+"""Check a parsed kernel config against a feature's required clauses (ADR-0318, ADR-0330).
+
+The clause model these checks read - which symbols a clause may name, when ``=m`` fails it, and
+which arch it applies to - is ADR-0544. Both conditional axes are supplied by the caller
+(``has_initrd``, ``arch``) rather than read here, and both default to the reading that
+over-reports rather than the one that falls silent.
+"""
 
 from __future__ import annotations
 
@@ -20,37 +26,68 @@ def _satisfied(config: KernelConfig, clause: Clause, *, has_initrd: bool) -> boo
     return any(check(symbol) for symbol in clause.symbols)
 
 
+def _applies_to(clause: Clause, *, arch: str | None) -> bool:
+    """Whether ``clause`` is in scope for ``arch`` (#1859).
+
+    An unscoped clause (``arches is None``) applies everywhere. A scoped clause applies only on a
+    listed arch, and is skipped entirely when the arch is unknown: kdive would otherwise invent a
+    requirement it cannot establish - reporting SERIAL_8250 missing against a config it cannot
+    tell is ppc64le, where that symbol does not apply at all.
+
+    Skipping is the safe direction only because no seam that evaluates an arch-scoped feature
+    exists; the invariant in ``tests/kernel_config/test_requirements.py`` is what keeps it that
+    way, since a silent skip inside a refusal set would fail the wrong way (ADR-0544 §3, §7).
+    """
+    if clause.arches is None:
+        return True
+    return arch is not None and arch in clause.arches
+
+
 def _unmet(
-    config: KernelConfig, clauses: tuple[Clause, ...], *, has_initrd: bool
+    config: KernelConfig, clauses: tuple[Clause, ...], *, has_initrd: bool, arch: str | None
 ) -> tuple[Clause, ...]:
     return tuple(
-        clause for clause in clauses if not _satisfied(config, clause, has_initrd=has_initrd)
+        clause
+        for clause in clauses
+        if _applies_to(clause, arch=arch) and not _satisfied(config, clause, has_initrd=has_initrd)
     )
 
 
 def unmet_clauses(
-    config: KernelConfig, feature: FeatureRequirement, *, has_initrd: bool = False
+    config: KernelConfig,
+    feature: FeatureRequirement,
+    *,
+    has_initrd: bool = False,
+    arch: str | None = None,
 ) -> tuple[Clause, ...]:
     """Clauses of ``feature.gate_required`` the config fails to enable (the refusal set).
 
     ``has_initrd`` says whether the build uploaded an initrd artifact, which is what relieves an
     ``UNLESS_INITRD`` clause of needing ``=y``. It defaults to the strict reading, so a seam that
     does not supply it over-reports rather than falling silent.
+
+    ``arch`` is the same shape for the clause's arch scope, and defaults to unknown - which skips
+    every scoped clause rather than guessing. That default is safe here only while no gated clause
+    is arch-scoped, which the invariant pins.
     """
-    return _unmet(config, feature.gate_required, has_initrd=has_initrd)
+    return _unmet(config, feature.gate_required, has_initrd=has_initrd, arch=arch)
 
 
 def unmet_advertised_clauses(
-    config: KernelConfig, feature: FeatureRequirement, *, has_initrd: bool = False
+    config: KernelConfig,
+    feature: FeatureRequirement,
+    *,
+    has_initrd: bool = False,
+    arch: str | None = None,
 ) -> tuple[Clause, ...]:
     """Clauses of ``feature.advertised`` the config fails to enable (the advisory set).
 
-    ``has_initrd`` carries the same meaning and the same strict default as in
+    ``has_initrd`` and ``arch`` carry the same meaning and the same defaults as in
     :func:`unmet_clauses`. Spelled out here too because this is the variant the live seam calls:
-    omitting the keyword changes the verdict on an ``UNLESS_INITRD`` clause, in the over-reporting
-    direction.
+    omitting either keyword changes the verdict - on an ``UNLESS_INITRD`` clause in the
+    over-reporting direction, and on an arch-scoped clause in the under-reporting one.
     """
-    return _unmet(config, feature.advertised, has_initrd=has_initrd)
+    return _unmet(config, feature.advertised, has_initrd=has_initrd, arch=arch)
 
 
 def missing_symbols(unmet: tuple[Clause, ...]) -> list[str]:

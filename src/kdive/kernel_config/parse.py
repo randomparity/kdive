@@ -1,5 +1,7 @@
 """Parse a Linux kernel ``.config`` into the enabled symbols and the built-in subset (ADR-0318).
 
+The built-in subset, and why ``enabled`` goes on counting ``=m``, are ADR-0544 §2.
+
 Pure and tolerant: a malformed / truncated / non-config upload yields a degenerate (empty)
 result rather than raising, so the gate can fail open on it.
 """

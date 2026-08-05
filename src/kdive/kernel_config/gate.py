@@ -1,4 +1,4 @@
-"""Config checks over a Run's uploaded kernel config (ADR-0318, ADR-0322, ADR-0330).
+"""Config checks over a Run's uploaded kernel config (ADR-0318, ADR-0322, ADR-0330, ADR-0544).
 
 Three consumers share :func:`load_effective_config` here:
 

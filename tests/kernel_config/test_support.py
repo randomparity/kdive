@@ -179,3 +179,102 @@ def test_built_in_required_is_empty_when_every_missing_symbol_is_absent_outright
     unmet = unmet_advertised_clauses(cfg, feature)
     assert missing_symbols(unmet) == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
     assert built_in_required_symbols(cfg, unmet) == []
+
+
+# The arch scope of ADR-0544 §3, exercised on synthetic features for the same reason the built-in
+# values above are: these stay pinned to the *semantics* of skipping, while the registry-content
+# assertions in test_requirements.py stay pinned to which real clause carries which arch.
+_X86 = "x86_64"
+_PPC = "ppc64le"
+
+
+def _arch_scoped(arches: frozenset[str] | None) -> FeatureRequirement:
+    return FeatureRequirement(
+        "not_a_real_feature",
+        "synthetic fixture for the arch scope",
+        advertised=(Clause(frozenset({"HVC_CONSOLE"}), arches=arches),),
+    )
+
+
+def test_a_clause_scoped_to_another_arch_is_skipped():
+    # ADR-0544 §3. HVC_CONSOLE is the pseries console and does not exist as a requirement on x86,
+    # so an x86 kernel without it must not be reported as missing anything.
+    feature = _arch_scoped(frozenset({_PPC}))
+    assert unmet_advertised_clauses(_all_builtin({"EXT4_FS"}), feature, arch=_X86) == ()
+
+
+def test_a_clause_scoped_to_the_supplied_arch_is_evaluated_in_both_directions():
+    # Non-vacuity for the skip above: on the arch it IS scoped to, the same clause still decides.
+    feature = _arch_scoped(frozenset({_PPC}))
+    bare = _all_builtin({"EXT4_FS"})
+    assert missing_symbols(unmet_advertised_clauses(bare, feature, arch=_PPC)) == ["HVC_CONSOLE"]
+    complete = _all_builtin({"HVC_CONSOLE"})
+    assert unmet_advertised_clauses(complete, feature, arch=_PPC) == ()
+
+
+def test_a_scoped_clause_is_skipped_when_the_arch_is_unknown():
+    # ADR-0544 §3: "skip a clause scoped ... at all when the arch is unknown - never inventing a
+    # requirement kdive cannot establish". The default is the unknown arch, so a seam that holds
+    # no arch cannot fault a kernel for a symbol that may not apply to it. This is the OPPOSITE
+    # direction from has_initrd's strict default, and deliberately so: an omitted initrd fact
+    # over-warns about a symbol that is certainly required, while an omitted arch would invent a
+    # requirement that may not exist at all.
+    feature = _arch_scoped(frozenset({_PPC}))
+    bare = _all_builtin({"EXT4_FS"})
+    assert unmet_advertised_clauses(bare, feature, arch=None) == ()
+    assert unmet_advertised_clauses(bare, feature) == ()
+
+
+def test_an_unscoped_clause_is_evaluated_on_every_arch_and_on_no_arch():
+    # None means every arch, so the skip must never reach a clause that did not opt in - which is
+    # every clause in the registry but the three serial_console ones.
+    feature = _arch_scoped(None)
+    bare = _all_builtin({"EXT4_FS"})
+    for arch in (_X86, _PPC, None):
+        assert missing_symbols(unmet_advertised_clauses(bare, feature, arch=arch)) == [
+            "HVC_CONSOLE"
+        ], arch
+
+
+def test_a_multi_arch_scope_is_evaluated_on_each_member():
+    # `arches` is a set, not a single value: a clause naming two arches applies on both.
+    feature = _arch_scoped(frozenset({_X86, _PPC}))
+    bare = _all_builtin({"EXT4_FS"})
+    assert missing_symbols(unmet_advertised_clauses(bare, feature, arch=_X86)) == ["HVC_CONSOLE"]
+    assert missing_symbols(unmet_advertised_clauses(bare, feature, arch=_PPC)) == ["HVC_CONSOLE"]
+    assert unmet_advertised_clauses(bare, feature, arch="s390x") == ()
+
+
+def test_the_arch_scope_reaches_the_refusal_set_and_not_only_the_advertised_one():
+    # unmet_clauses and unmet_advertised_clauses read different fields; both must apply the scope,
+    # or a future arch-scoped gate clause would refuse a kernel of the wrong arch. No registry
+    # entry is in that position today (invariant I2 forbids it while the seams supply no arch),
+    # so this is what keeps the two functions from diverging before one is.
+    gated = FeatureRequirement(
+        "not_a_real_feature",
+        "synthetic fixture for the arch scope",
+        advertised=(Clause(frozenset({"HVC_CONSOLE"}), arches=frozenset({_PPC})),),
+        gate_required=(Clause(frozenset({"HVC_CONSOLE"}), arches=frozenset({_PPC})),),
+    )
+    bare = _all_builtin({"EXT4_FS"})
+    assert missing_symbols(unmet_clauses(bare, gated, arch=_PPC)) == ["HVC_CONSOLE"]
+    assert unmet_clauses(bare, gated, arch=_X86) == ()
+    assert unmet_clauses(bare, gated) == ()
+
+
+def test_the_arch_scope_and_the_built_in_requirement_compose():
+    # The two axes are independent: an in-scope clause still applies its built-in requirement, and
+    # an out-of-scope one is skipped whatever that requirement says. Without this, adding the
+    # second axis could have made either one shadow the other.
+    feature = FeatureRequirement(
+        "not_a_real_feature",
+        "synthetic fixture for the arch scope",
+        advertised=(
+            Clause(frozenset({"SERIAL_8250"}), BuiltIn.REQUIRED, arches=frozenset({_X86})),
+        ),
+    )
+    modular = KernelConfig(frozenset({"SERIAL_8250"}), frozenset())
+    assert missing_symbols(unmet_advertised_clauses(modular, feature, arch=_X86)) == ["SERIAL_8250"]
+    assert unmet_advertised_clauses(modular, feature, arch=_PPC) == ()
+    built_in = _all_builtin({"SERIAL_8250"})
+    assert unmet_advertised_clauses(built_in, feature, arch=_X86) == ()

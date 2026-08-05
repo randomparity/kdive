@@ -1,4 +1,4 @@
-"""Feature -> required CONFIG_* registry (ADR-0318).
+"""Feature -> required CONFIG_* registry (ADR-0318, ADR-0544).
 
 Single source of truth for both the advertised manifest and the arming gate. Each feature
 carries an ``advertised`` superset (guidance shown to the agent) and a deliberately narrower
@@ -6,12 +6,16 @@ carries an ``advertised`` superset (guidance shown to the agent) and a deliberat
 when any member symbol is enabled. Symbol names are bare (no ``CONFIG_`` prefix), matching
 :func:`kdive.kernel_config.parse.parse_kernel_config`.
 
-One rule bounds what a clause may name (#1854): a symbol that is unsettable **in principle** -
-prompt-less, or existing only because something else ``select``s it - is never a clause member,
-because ``make olddefconfig`` discards it out of a config fragment and naming it sends the agent
-after the one thing it cannot do. The clause naming its settable selector stands in its place. A
-symbol that is settable once a prerequisite holds stays a clause member, and the prerequisite
-becomes its own clause AND-ed alongside it.
+One rule bounds what a clause may name (ADR-0544 §1, #1854): a symbol that is unsettable **in
+principle** - prompt-less, or existing only because something else ``select``s it - is never a
+clause member, because ``make olddefconfig`` discards it out of a config fragment and naming it
+sends the agent after the one thing it cannot do. The clause naming its settable selector stands
+in its place. A symbol that is settable once a prerequisite holds stays a clause member, and the
+prerequisite becomes its own clause AND-ed alongside it.
+
+Beyond the symbols, a clause carries two per-clause axes and no more: a built-in requirement
+(ADR-0544 §2) and an arch scope (§3). Anything else expressible as an AND-ed prerequisite clause
+stays a clause rather than becoming a fourth field.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from kdive.serialization import JsonValue
 
 
 class BuiltIn(StrEnum):
-    """Whether a clause is satisfied by a module, and if not, under what condition (#1860).
+    """Whether a clause is satisfied by a module, and if not, under what condition (§2, #1860).
 
     Three values rather than a bool, because the two reasons a symbol must be ``=y`` are not the
     same reason and do not relax under the same condition: an uploaded initrd gives the boot
@@ -47,18 +51,28 @@ class Clause:
     """One OR-group of kernel symbols: satisfied when any member is enabled.
 
     A record rather than a bare ``frozenset`` so that the per-clause axes arrive as fields beside
-    ``symbols`` rather than as incompatible extensions to one type; the arch scope (#1859) is the
-    one still to land. ``built_in`` is per clause and not per symbol because no clause in the
-    registry mixes symbols that differ on it.
+    ``symbols`` rather than as incompatible extensions to one type. Both ``built_in`` and
+    ``arches`` are per clause and not per symbol because no clause in the registry mixes symbols
+    that differ on either (ADR-0544).
 
     ``UNLESS_INITRD`` states a condition; the *answer* is a fact about the build, so the seam
-    supplies it (``has_initrd``). A clause may only carry it where every seam that evaluates its
-    feature passes that fact - see the invariant in ``tests/kernel_config/test_requirements.py``.
+    supplies it (``has_initrd``). ``arches`` is the same shape: the clause names the arches it
+    applies to and the seam supplies which one is in play (``arch``). ``None`` means every arch.
+    A clause may only carry either where every seam that evaluates its feature passes the matching
+    fact - see the invariant in ``tests/kernel_config/test_requirements.py``.
     """
 
     symbols: frozenset[str]
     built_in: BuiltIn = BuiltIn.NOT_REQUIRED
+    arches: frozenset[str] | None = None
 
+
+# Arch scopes for clause tags. Spelled here rather than imported from domain.platform: this
+# registry parses a `.config` and answers questions about symbols, and making a static data table
+# depend on the provisioning layer to name two strings would invert that. A test asserts every
+# value stays a subset of SUPPORTED_ARCHES (ADR-0544 §3).
+_X86_ONLY: Final = frozenset({"x86_64"})
+_PPC64LE_ONLY: Final = frozenset({"ppc64le"})
 
 CRASH_CAPTURE = "crash_capture"
 CRASH_CAPTURE_RHEL_GUEST = "crash_capture_rhel_guest"
@@ -431,8 +445,8 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "artifact, the direct-kernel boot has no initramfs to load that module from before root "
         "is mounted (a guest that boots through its own bootloader and builds an initramfs with "
         "dracut is not affected either way). Nothing below is checked on your behalf - kdive's "
-        "config checks cover crash capture, the root filesystem and debuginfo, so neither of "
-        "these two symbols draws a warning at any value, and this summary is the whole of the "
+        "config checks cover crash capture, the root filesystem and debuginfo, so no symbol "
+        "below draws a warning at any value, and this summary is the whole of the "
         "notice you get. There is no reason to skip the console for your arch or the transport, "
         "and nothing to weigh against them: both cost kernel text and no measurable runtime. "
         "SERIAL_8250_CONSOLE additionally needs SERIAL_8250 itself built in - it is not offered "
@@ -448,7 +462,12 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         # note that this is why VIRTIO_PCI's UNLESS_INITRD below is manifest metadata today rather
         # than a warning: the value renders into the contract document and nothing evaluates it.
         (
-            Clause(frozenset({"SERIAL_8250_CONSOLE"})),
+            # SERIAL_8250_CONSOLE is settable only once SERIAL_8250 is built in, so the
+            # prerequisite is its own AND-ed clause rather than a note in the prose: a clause can
+            # report that SERIAL_8250 is missing, where prose can only advise it (ADR-0544 rule 1).
+            Clause(frozenset({"SERIAL_8250"}), BuiltIn.REQUIRED, _X86_ONLY),
+            Clause(frozenset({"SERIAL_8250_CONSOLE"}), arches=_X86_ONLY),
+            Clause(frozenset({"HVC_CONSOLE"}), arches=_PPC64LE_ONLY),
             Clause(frozenset({"VIRTIO_PCI"}), BuiltIn.UNLESS_INITRD),
         ),
     ),
@@ -467,16 +486,18 @@ def _manifest_clause(clause: Clause) -> dict[str, JsonValue]:
     element: dict[str, JsonValue] = {"symbols": [symbol for symbol in sorted(clause.symbols)]}
     if clause.built_in is not BuiltIn.NOT_REQUIRED:
         element["built_in"] = clause.built_in.value
+    if clause.arches is not None:
+        element["arch"] = [arch for arch in sorted(clause.arches)]
     return element
 
 
 def feature_manifest() -> list[dict[str, JsonValue]]:
     manifest: list[dict[str, JsonValue]] = []
     for f in FEATURE_REQUIREMENTS:
-        # A clause renders as an object, not a bare list (#1854), so the built-in
-        # requirement (#1860) and the arch scope (#1859) land as keys beside `symbols` without a
-        # second element-shape change. Both are omitted at their defaults, so an unconstrained
-        # clause stays as small as it was.
+        # A clause renders as an object, not a bare list (ADR-0544 §6, #1854), which is what let
+        # the built-in requirement (#1860) and then the arch scope (#1859) land as keys beside
+        # `symbols` with one element-shape change between them. Both are omitted at their
+        # defaults, so an unconstrained clause stays as small as it was.
         requirements: list[JsonValue] = [_manifest_clause(clause) for clause in f.advertised]
         entry: dict[str, JsonValue] = {
             "feature": f.feature,
