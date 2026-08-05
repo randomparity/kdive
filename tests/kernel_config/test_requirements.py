@@ -241,7 +241,8 @@ def test_unknown_feature_raises():
 def test_rootfs_mount_matches_the_real_direct_kernel_boot():
     # #1094: rootfs_mount used to advertise a squashfs+overlay boot path that does not exist
     # anywhere in the tree. Those stay out — the kdive-provisioned boot (ADR-0030) is a whole-disk
-    # qcow2 mounted direct-kernel via root=/dev/vda (a virtio-blk device) with no initramfs.
+    # qcow2 mounted direct-kernel via root=/dev/vda (a virtio-blk device), with no initramfs
+    # unless the Run's build uploaded an initrd artifact (#1863).
     # #1626 refines the filesystem half only: a remote or agent-uploaded rootfs (ADR-0183/0440/
     # 0441) is commonly XFS, so the root-fs requirement is EXT4_FS-or-XFS_FS, not EXT4_FS alone.
     feat = feature_requirement("rootfs_mount")
@@ -251,6 +252,24 @@ def test_rootfs_mount_matches_the_real_direct_kernel_boot():
         assert stale not in symbols
     assert "squashfs" not in feat.summary.lower()
     assert "overlay" not in feat.summary.lower()
+
+
+def test_rootfs_mount_summary_qualifies_the_no_initramfs_claim():
+    # #1863: the parenthetical read "(root=/dev/vda, no initramfs)" unconditionally, which is
+    # true of the provisioning boot and false of any Run whose build_result carries an
+    # initrd_ref - that gets staged and emitted as an <initrd> element on the domain. #1851
+    # had already qualified the same claim in serial_console, so one payload shipped both
+    # forms. The unqualified form is the load-bearing half: it is the premise behind "build
+    # the driver in, there is nothing to load a module from", so an agent reading it as
+    # absolute draws a stronger conclusion than the boot path supports.
+    summary = feature_requirement("rootfs_mount").summary.lower()
+    # the claim survives, but only as the default case
+    assert "no initramfs" in summary
+    # ... and the exception is named where the claim is made, not somewhere else in the payload
+    assert "unless your build uploads an initrd artifact" in summary
+    initramfs_at = summary.index("no initramfs")
+    unless_at = summary.index("unless your build uploads an initrd artifact")
+    assert 0 < unless_at - initramfs_at < 40
 
 
 def test_rootfs_mount_root_filesystem_is_an_or_group_not_two_and_clauses():
