@@ -28,15 +28,22 @@ whole-disk ext4 qcow2, while a remote base image or an agent-uploaded rootfs is 
 Build in the one your rootfs actually uses — the advisory only fires when the kernel carries
 neither.
 
-`=m` does not satisfy these three. The direct-kernel boot mounts root before any module can be
-loaded, so a modular `VIRTIO_BLK` or `EXT4_FS` panics the guest on an unmountable root — the
-advisory fires and lists the symbol under `data.missing_boot_config.built_in_required` as well as
-in `missing`, which is how you tell "you do not have this" from "you have this in a form that
-cannot load in time". That key is omitted entirely when no missing symbol is modular. The one
-case where `=m` is fine is a build that uploads an `initrd` artifact: there is then an initramfs
-to load the modules from, and the advisory does not fire. Elsewhere in the registry `=m` is
-accepted — a modular KASAN, ftrace, kcov or BPF symbol is the feature you asked for. The
-machine-readable form of this is the `built_in` key on a clause in
+`=m` does not satisfy these three. A local-libvirt direct-kernel boot mounts root before any
+module can be loaded, so a modular `VIRTIO_BLK` or `EXT4_FS` panics the guest on an unmountable
+root — the advisory fires and lists the symbol under
+`data.missing_boot_config.built_in_required` as well as in `missing`, which is how you tell "you
+do not have this" from "you have this in a form that cannot load in time". That key is omitted
+entirely when no missing symbol is modular. Uploading an `initrd` artifact with the build
+silences it: there is then an initramfs to load the modules from.
+
+The check reads that one fact — whether the build uploaded an `initrd` — and nothing about how
+your target boots, so a `disk-image` target that boots through its own bootloader and builds its
+initramfs in the guest with dracut still draws the advisory on a modular config it in fact boots
+fine. Treat it as advisory there; the completion succeeds either way, and building the three in
+is correct on both targets.
+
+Elsewhere in the registry `=m` is accepted — a modular KASAN, ftrace, kcov or BPF symbol is the
+feature you asked for. The machine-readable form of this is the `built_in` key on a clause in
 `resource://kdive/contracts/external-build`.
 
 **Start from the catalog image's own config, not a bare `defconfig`.** When you build against a
@@ -268,7 +275,7 @@ tar -tzf kernel.tar.gz | head    # boot/vmlinuz must be first; lib/modules/<rele
 |---|---|---|
 | `vmlinux` | to enable kernel-debugging / DWARF introspection | the uncompressed kernel ELF with debug info. If you upload it you **must** declare a `build_id` in `runs.complete_build`, and it must match the ELF's GNU build-id note, or the upload is rejected. |
 | `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it does not build in the boot-required symbols (`EXT4_FS` or `XFS_FS`, and `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. `=m` counts as missing unless you also upload an `initrd`. |
-| `initrd` | when booting needs a specific initramfs | the initial ramdisk image. Uploading one also relieves the built-in requirement above, since the modules then have somewhere to load from. |
+| `initrd` | when booting needs a specific initramfs | the initial ramdisk image. Uploading one also silences the built-in requirement above, since the modules then have somewhere to load from. |
 
 ## The upload flow
 

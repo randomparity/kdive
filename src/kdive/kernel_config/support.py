@@ -43,7 +43,13 @@ def unmet_clauses(
 def unmet_advertised_clauses(
     config: KernelConfig, feature: FeatureRequirement, *, has_initrd: bool = False
 ) -> tuple[Clause, ...]:
-    """Clauses of ``feature.advertised`` the config fails to enable (the advisory set)."""
+    """Clauses of ``feature.advertised`` the config fails to enable (the advisory set).
+
+    ``has_initrd`` carries the same meaning and the same strict default as in
+    :func:`unmet_clauses`. Spelled out here too because this is the variant the live seam calls:
+    omitting the keyword changes the verdict on an ``UNLESS_INITRD`` clause, in the over-reporting
+    direction.
+    """
     return _unmet(config, feature.advertised, has_initrd=has_initrd)
 
 

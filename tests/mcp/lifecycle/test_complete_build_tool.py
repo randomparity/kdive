@@ -1173,17 +1173,21 @@ def _patched_config_load(data: bytes) -> Any:
 
 
 async def _complete_with_modular_boot_config(
-    pool: AsyncConnectionPool, *, with_initrd: bool
-) -> ToolResponse:
+    pool: AsyncConnectionPool, *, with_initrd: bool, times: int = 1
+) -> list[ToolResponse]:
+    """Finalize once (or replay) against a modular boot config, returning each envelope."""
     entries = [ManifestEntry("kernel", "c", 1)]
     if with_initrd:
         entries.append(ManifestEntry("initrd", "c", 1))
     run_id = await _seed_external_run_with_manifest(pool, entries=entries)
     validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", "abcd"))
     with _patched_config_load(_MODULAR_BOOT_CONFIG):
-        return await _build_handlers(validator).complete_build(
-            pool, _ctx(), str(run_id), build_id="abcd", cmdline="x"
-        )
+        return [
+            await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id="abcd", cmdline="x"
+            )
+            for _ in range(times)
+        ]
 
 
 def test_a_modular_boot_kernel_with_no_initrd_completes_with_the_boot_config_warning(
@@ -1194,12 +1198,18 @@ def test_a_modular_boot_kernel_with_no_initrd_completes_with_the_boot_config_war
     # its config does contain these symbols, in a form nothing can load before root is mounted.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await _complete_with_modular_boot_config(pool, with_initrd=False)
-        assert resp.status == "succeeded", resp
-        warning = cast(dict[str, Any], resp.data["missing_boot_config"])
+            first, replay = await _complete_with_modular_boot_config(
+                pool, with_initrd=False, times=2
+            )
+        assert first.status == "succeeded", first
+        warning = cast(dict[str, Any], first.data["missing_boot_config"])
         assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
         assert warning["built_in_required"] == ["EXT4_FS", "VIRTIO_BLK"]
-        assert resp.refs["external_build_contract"] == EXTERNAL_BUILD_CONTRACT_URI
+        assert "=y" in cast(str, warning["remediation"])
+        assert first.refs["external_build_contract"] == EXTERNAL_BUILD_CONTRACT_URI
+        # The idempotent replay reaches the same envelope through _existing_build_result, so the
+        # advisory is recomputed off the *persisted* BuildStepResult rather than the in-memory one.
+        assert replay.data["missing_boot_config"] == warning
 
     asyncio.run(_run())
 
@@ -1212,10 +1222,16 @@ def test_the_same_modular_kernel_is_silent_once_the_build_uploaded_an_initrd(
     # tests differ only in the manifest entry, which is what pins the wiring rather than the flag.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await _complete_with_modular_boot_config(pool, with_initrd=True)
-        assert resp.status == "succeeded", resp
-        assert "missing_boot_config" not in resp.data
+            first, replay = await _complete_with_modular_boot_config(
+                pool, with_initrd=True, times=2
+            )
+        assert first.status == "succeeded", first
+        assert "missing_boot_config" not in first.data
         # non-vacuity: the initrd really reached the build result the warning reads
-        assert resp.refs["initrd"]
+        assert first.refs["initrd"]
+        # The replay path re-reads the build step from the row, so `initrd_ref` has to survive the
+        # dump/load round trip or a second finalize would start warning where the first did not.
+        assert "missing_boot_config" not in replay.data
+        assert replay.refs["initrd"] == first.refs["initrd"]
 
     asyncio.run(_run())
