@@ -3,6 +3,7 @@ from kdive.kernel_config.requirements import (
     CRASH_CAPTURE,
     CRASH_CAPTURE_RHEL_GUEST,
     FEATURE_REQUIREMENTS,
+    ROOTFS_MOUNT,
     SYSRQ,
     feature_manifest,
     feature_requirement,
@@ -137,13 +138,21 @@ def test_no_upload_seam_reads_the_sysrq_refusal_set():
     # already thought of. gate.py is the only module that turns a FeatureRequirement into a
     # refusal, and it names the features it refuses on by importing their ids. If sysrq is ever
     # wired in there, this fails and forces the summary to be rewritten in the same change.
+    import inspect
+
     from kdive.kernel_config import gate
 
-    assert not hasattr(gate, "SYSRQ")
-    # non-vacuity: the import surface this reads must actually carry the two it does gate on,
-    # or the assert above would pass against any module at all
+    # the whole module text, not just its import surface: gating sysrq via a string literal,
+    # a module-qualified requirements.SYSRQ, or a loop over FEATURE_REQUIREMENTS would all
+    # leave an attribute check green while making the summary's disclaimer false
+    source = inspect.getsource(gate).lower()
+    assert "sysrq" not in source
+    # non-vacuity, both halves: the module this reads must really be the refusal seam, and the
+    # search must really be able to find a feature id in it
     assert hasattr(gate, "CRASH_CAPTURE")
     assert hasattr(gate, "ROOTFS_MOUNT")
+    assert CRASH_CAPTURE in source
+    assert ROOTFS_MOUNT in source
 
 
 def test_sysrq_summary_does_not_promise_a_config_time_gate_the_upload_path_never_performs():
