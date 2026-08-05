@@ -372,18 +372,22 @@ def test_no_kernel_derived_symbol_is_advertised_as_something_the_agent_must_set(
     # #1850 unadvertised the last three, so the grandfathered exemption is gone: no entry may
     # advertise a symbol olddefconfig would discard. The failure message names the Kconfig
     # file:line of every offender so a new entry can be checked against the kernel directly.
+    # The three #1850 removed must stay listed above: without this, deleting their rows as
+    # "no longer advertised anyway" would defang the guard against re-adding them, silently.
+    assert {"DEBUG_INFO", "KEXEC_CORE", "VMCORE_INFO"} <= set(derived)
     advertised = {s for f in FEATURE_REQUIREMENTS for clause in f.advertised for s in clause}
     assert advertised  # non-vacuity: the walk must actually see the roster
     leaked = advertised & set(derived)
     assert not leaked, {symbol: derived[symbol] for symbol in sorted(leaked)}
 
 
-def test_debuginfo_advertises_the_dwarf_choice_members_not_the_symbol_they_select():
-    # #1850. lib/Kconfig.debug:249 DEBUG_INFO is a bare prompt-less bool; the "Debug information"
-    # choice at :262-323 sets it, its DWARF members select-ing it (:281, :293, :305). So DEBUG_INFO
-    # is off only when every member is off - which the DWARF clause already reports - and the
-    # DEBUG_INFO clause could never be the sole unmet one. It named an unsettable symbol and
-    # reported nothing the next clause did not.
+def test_debuginfo_advertises_the_settable_debug_info_producers_not_the_symbol_they_imply():
+    # #1850. lib/Kconfig.debug:249 DEBUG_INFO is a bare prompt-less bool. Both routes to the clause
+    # below imply it: DEBUG_INFO_DWARF4 (:293) and DEBUG_INFO_DWARF5 (:305) select it (:295, :307),
+    # and DEBUG_INFO_BTF (:398) is not a choice member at all - it sits inside `if DEBUG_INFO`
+    # (:325-455), so it cannot be y while DEBUG_INFO is n. DEBUG_INFO=n therefore forces every
+    # member of the clause off, and that clause reports the same kernel without naming a symbol
+    # the agent cannot set.
     feat = feature_requirement("debuginfo")
     assert feat.advertised == (
         frozenset({"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_BTF"}),
@@ -401,9 +405,10 @@ def test_a_kernel_with_no_debug_info_is_still_told_which_settable_symbols_to_bui
 
 def test_crash_capture_advertises_the_kexec_prompts_not_the_symbols_they_select():
     # #1850. kernel/Kconfig.kexec:11 KEXEC_CORE and :8 VMCORE_INFO are bare prompt-less bools.
-    # KEXEC (:23) and KEXEC_FILE (:42) select KEXEC_CORE; CRASH_DUMP (:102) selects VMCORE_INFO.
-    # All three selectors are advertised, so each derived symbol is off only when a selector this
-    # same entry already reports is off - the clauses added two unsettable names and no signal.
+    # KEXEC (:20) and KEXEC_FILE (:38) select KEXEC_CORE at :23 and :42; CRASH_DUMP (:97) selects
+    # VMCORE_INFO at :102, as does PROC_KCORE (fs/proc/Kconfig:32) at :35. Every selector this
+    # entry could name is already advertised, so each derived symbol is off only when a selector
+    # the same entry reports is off - the two clauses added unsettable names and no signal.
     feat = feature_requirement(CRASH_CAPTURE)
     advertised = {s for clause in feat.advertised for s in clause}
     assert "KEXEC_CORE" not in advertised
@@ -415,10 +420,12 @@ def test_crash_capture_advertises_the_kexec_prompts_not_the_symbols_they_select(
 def test_unadvertising_the_derived_symbols_leaves_the_crash_capture_refusal_set_untouched():
     # The refusal half is a separate question (#1850 scopes to the advertised half): a derived
     # symbol is still *provably absent* in a parsed .config, so the gate keeps refusing on it.
-    # This pins the two apart, so an advertised-side edit cannot quietly widen what kdive arms.
+    # This holds the two fields apart on the same pair of symbols - gated but not advertised - so
+    # neither "unadvertise it everywhere" nor "re-advertise what the gate needs" passes silently.
     feat = feature_requirement(CRASH_CAPTURE)
-    assert frozenset({"KEXEC_CORE"}) in feat.gate_required
-    assert frozenset({"VMCORE_INFO"}) in feat.gate_required
+    derived = {"KEXEC_CORE", "VMCORE_INFO"}
+    assert derived <= {s for clause in feat.gate_required for s in clause}
+    assert derived.isdisjoint({s for clause in feat.advertised for s in clause})
     cfg = KernelConfig(
         frozenset(
             {"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "PROC_VMCORE", "FW_CFG_SYSFS", "RELOCATABLE"}

@@ -63,8 +63,10 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "these symbols get the capture kernel loaded, not the vmcore written. A RHEL-family guest "
         "needs the crash_capture_rhel_guest set as well.",
         # KEXEC_CORE and VMCORE_INFO are advertised nowhere: both are bare prompt-less bools
-        # (kernel/Kconfig.kexec:11 and :8) that KEXEC/KEXEC_FILE and CRASH_DUMP respectively
-        # select, so olddefconfig discards an agent's attempt to set either. They stay in
+        # (kernel/Kconfig.kexec:11 and :8) no fragment can set - olddefconfig discards them. They
+        # also carry no signal here: KEXEC (:20) and KEXEC_FILE (:38) select KEXEC_CORE, and
+        # CRASH_DUMP (:97) selects VMCORE_INFO (so does PROC_KCORE, fs/proc/Kconfig:32), so each
+        # is off only when a selector this same entry already advertises is off. Both stay in
         # gate_required below - a derived symbol is still provably absent in a parsed .config.
         _plain(
             "KEXEC",
@@ -118,9 +120,11 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "DWARF tables in every .ko - can grow the module tree 10-50x and slow upload and "
         "install. Omit for boot-time crash reproducers and console-log investigations where no "
         "post-boot introspection is needed.",
-        # DEBUG_INFO itself is not advertised: lib/Kconfig.debug:249 is a bare prompt-less bool the
-        # "Debug information" choice sets, so olddefconfig discards an agent's attempt to set it.
-        # It is off only when every choice member is off, which the clause below already reports.
+        # DEBUG_INFO itself is not advertised: lib/Kconfig.debug:249 is a bare prompt-less bool no
+        # fragment can set - olddefconfig discards it. It also carries no signal here: DWARF4 and
+        # DWARF5 select it (:295, :307) and DEBUG_INFO_BTF (:398) sits inside `if DEBUG_INFO`
+        # (:325-455), so DEBUG_INFO=n forces every member of the clause below off and that clause
+        # reports the same kernel one symbol sooner.
         (
             frozenset({"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_BTF"}),
             frozenset({"DEBUG_KERNEL"}),
