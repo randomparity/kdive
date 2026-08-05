@@ -11,14 +11,14 @@
 # The unselected provider stages are pruned by BuildKit and never resolved, so the amd64/arm64
 # builds never touch the ppc64le path and the ppc64le build never resolves the astral image.
 ARG TARGETARCH
-FROM ghcr.io/astral-sh/uv:0.11.31@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437 AS uv-amd64
-FROM ghcr.io/astral-sh/uv:0.11.31@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437 AS uv-arm64
-FROM python:3.14.6-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30 AS uv-ppc64le
+FROM ghcr.io/astral-sh/uv:0.12.0@sha256:606e70c71c852d03f611b1e56a195d08648507018a7057fab82c4974c4eae105 AS uv-amd64
+FROM ghcr.io/astral-sh/uv:0.12.0@sha256:606e70c71c852d03f611b1e56a195d08648507018a7057fab82c4974c4eae105 AS uv-arm64
+FROM python:3.15.0b3-slim-bookworm@sha256:e4408792d58d928261ed76a21a28daaf3339111e0f8cefb8f8c70b139ad94c39 AS uv-ppc64le
 RUN pip install --no-cache-dir uv==0.11.31 && cp "$(command -v uv)" /uv
 FROM uv-${TARGETARCH} AS uv
 
 # Builder: resolve the uv environment (deps first for layer caching, then project).
-FROM python:3.14.6-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30 AS builder
+FROM python:3.15.0b3-slim-bookworm@sha256:e4408792d58d928261ed76a21a28daaf3339111e0f8cefb8f8c70b139ad94c39 AS builder
 COPY --from=uv /uv /usr/local/bin/uv
 # libvirt-python ships no wheels; it compiles against the libvirt headers via
 # pkg-config (AGENTS.md). These build-only deps stay in the builder stage and never
@@ -72,7 +72,7 @@ RUN if [ -n "$KDIVE_COMMIT" ]; then \
     fi
 
 # Final: slim base + worker toolchain (drives remote-libvirt over the network).
-FROM python:3.14.6-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30
+FROM python:3.15.0b3-slim-bookworm@sha256:e4408792d58d928261ed76a21a28daaf3339111e0f8cefb8f8c70b139ad94c39
 # All real bookworm packages. drgn is installed from the locked `live`
 # dependency group, not apt: bookworm ships only the python3-drgn library,
 # whose CLI/version is unproven for the `drgn --version` build check. libelf1,
