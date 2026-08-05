@@ -498,6 +498,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give ikconfig, sysrq and serial_console a real summary
 - Note where the revision-key dedup property stops
 - Keep the #1812 filing on the right side of the caveat
+- Settle one clause model for kernel-config requirements
+- Tighten the settable-symbol rule and the initrd seam
+- Scope the invariants honestly and record the residuals
 
 ### Fixed
 
