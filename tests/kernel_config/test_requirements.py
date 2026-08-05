@@ -229,6 +229,11 @@ def test_serial_console_summary_names_what_breaks_without_it_and_that_it_is_chea
     # against a modular 8250, and a modular VIRTIO_PCI cannot be loaded before root is mounted
     assert "rather than as a module" in summary
     assert "=y" in raw
+    # #1863: the "no initramfs" premise under that build-it-in advice is conditional, and this
+    # carve-out has regressed once already - 6d0a61891 deleted it while scoping the claim to the
+    # local-libvirt boot, and 2d03f3c51 had to restore it. It was unpinned through both, so pin
+    # it here rather than only on the rootfs_mount copy that has never regressed.
+    assert "unless your build uploads an initrd artifact" in summary
 
 
 def test_unknown_feature_raises():
@@ -240,9 +245,11 @@ def test_unknown_feature_raises():
 
 def test_rootfs_mount_matches_the_real_direct_kernel_boot():
     # #1094: rootfs_mount used to advertise a squashfs+overlay boot path that does not exist
-    # anywhere in the tree. Those stay out — the kdive-provisioned boot (ADR-0030) is a whole-disk
-    # qcow2 mounted direct-kernel via root=/dev/vda (a virtio-blk device), with no initramfs
-    # unless the Run's build uploaded an initrd artifact (#1863).
+    # anywhere in the tree. Those stay out — the boot kdive stages at install (ADR-0030) is a
+    # whole-disk qcow2 mounted direct-kernel via root=/dev/vda (a virtio-blk device), with no
+    # initramfs unless the Run's build uploaded an initrd artifact (#1863). The provisioning
+    # baseline boot is a different boot and not what this entry describes: it stages the base
+    # image's own initramfs (ADR-0272, select_kernel_and_initrd).
     # #1626 refines the filesystem half only: a remote or agent-uploaded rootfs (ADR-0183/0440/
     # 0441) is commonly XFS, so the root-fs requirement is EXT4_FS-or-XFS_FS, not EXT4_FS alone.
     feat = feature_requirement("rootfs_mount")
@@ -256,20 +263,24 @@ def test_rootfs_mount_matches_the_real_direct_kernel_boot():
 
 def test_rootfs_mount_summary_qualifies_the_no_initramfs_claim():
     # #1863: the parenthetical read "(root=/dev/vda, no initramfs)" unconditionally, which is
-    # true of the provisioning boot and false of any Run whose build_result carries an
-    # initrd_ref - that gets staged and emitted as an <initrd> element on the domain. #1851
-    # had already qualified the same claim in serial_console, so one payload shipped both
-    # forms. The unqualified form is the load-bearing half: it is the premise behind "build
-    # the driver in, there is nothing to load a module from", so an agent reading it as
-    # absolute draws a stronger conclusion than the boot path supports.
+    # false for any Run whose build_result carries an initrd_ref - lifecycle/install.py:430-436
+    # stages it and :539-540 emits the <initrd> element onto the already-defined domain. (Not
+    # lifecycle/xml.py: that renderer serves the provisioning and customization boots, which is
+    # a different boot from the one this entry describes.) #1851 had already qualified the same
+    # claim in serial_console, so one feature_config_requirements payload shipped both forms.
+    # The unqualified form is the load-bearing half: it is the premise behind "build the driver
+    # in, there is nothing to load a module from", so an agent reading it as absolute draws a
+    # stronger conclusion than the boot path supports.
     summary = feature_requirement("rootfs_mount").summary.lower()
-    # the claim survives, but only as the default case
-    assert "no initramfs" in summary
-    # ... and the exception is named where the claim is made, not somewhere else in the payload
-    assert "unless your build uploads an initrd artifact" in summary
-    initramfs_at = summary.index("no initramfs")
-    unless_at = summary.index("unless your build uploads an initrd artifact")
-    assert 0 < unless_at - initramfs_at < 40
+    # Both the claim and its exception are asserted inside the parenthetical, so they are proven
+    # co-located: an agent that stops reading at the claim cannot take it as absolute. Slicing
+    # the parenthetical rather than measuring a character distance keeps this indifferent to
+    # word order, and unlike splitting on punctuation it cannot silently widen to the whole
+    # summary. A summary with no such parenthetical raises here, which fails closed.
+    start = summary.index("(root=/dev/vda")
+    paren = summary[start : summary.index(")", start) + 1]
+    assert "no initramfs" in paren
+    assert "unless your build uploads an initrd artifact" in paren
 
 
 def test_rootfs_mount_root_filesystem_is_an_or_group_not_two_and_clauses():

@@ -47,12 +47,12 @@ def _plain(*symbols: str) -> tuple[Clause, ...]:
 FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
     FeatureRequirement(
         ROOTFS_MOUNT,
-        "Mount the root filesystem the guest boots from. Local-libvirt direct-kernel-boots a "
-        "whole-disk ext4 qcow2 (root=/dev/vda, and no initramfs unless your build uploads an "
-        "initrd artifact); a remote or agent-uploaded rootfs is commonly XFS (RHEL-family base "
-        "images). kdive does not know which family your guest uses, so it asks only that the "
-        "kernel can mount at least one of them plus the virtio-blk root device - build in the "
-        "one your rootfs actually uses.",
+        "Mount the root filesystem the guest boots from. Local-libvirt direct-kernel-boots the "
+        "kernel you install, with a whole-disk ext4 qcow2 as root (root=/dev/vda, and no "
+        "initramfs unless your build uploads an initrd artifact); a remote or agent-uploaded "
+        "rootfs is commonly XFS (RHEL-family base images). kdive does not know which family "
+        "your guest uses, so it asks only that the kernel can mount at least one of them plus "
+        "the virtio-blk root device - build in the one your rootfs actually uses.",
         (
             frozenset({"EXT4_FS", "XFS_FS"}),
             frozenset({"VIRTIO_BLK"}),
