@@ -16,6 +16,12 @@ implementation"; those ADRs live here.
   once the architecture it governs has landed.) Update the ADR's `Status` in that
   same PR, so status never drifts from reality. An ADR that ships only partially
   stays **Proposed** until its decision is fully realized.
+- When a decision's implementation is staged across several PRs, cite the
+  tracking issue number(s) in `src/` and `tests/` for the intermediate PRs
+  instead of the ADR number — the `adr-status-check` guard rejects a
+  **Proposed** ADR cited from either tree, since a citation there asserts the
+  decision is implemented. The PR that flips `Status` to **Accepted** adds the
+  ADR's citations across `src/` and `tests/` in that same change.
 - Move an ADR to **Superseded by NNNN** when a later ADR fully replaces it.
   Do not rewrite the accepted decision — write a new ADR that supersedes it.
   Record the supersession in the superseded record as a one-line banner beneath
