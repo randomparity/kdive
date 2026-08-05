@@ -4660,8 +4660,9 @@ def test_install_handler_refuses_crashkernel_when_config_lacks_crash_symbols(
     from unittest.mock import patch
 
     from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
-    missing = KernelConfig(_CRASH_GATE_SUPPORTED - {"PROC_VMCORE"})
+    missing = all_builtin(_CRASH_GATE_SUPPORTED - {"PROC_VMCORE"})
 
     async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> KernelConfig:
         return missing
@@ -4701,8 +4702,9 @@ def test_install_handler_arms_crashkernel_when_config_supports_it(migrated_url: 
     from unittest.mock import patch
 
     from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
-    supported = KernelConfig(_CRASH_GATE_SUPPORTED)  # no RANDOMIZE_BASE — still supported
+    supported = all_builtin(_CRASH_GATE_SUPPORTED)  # no RANDOMIZE_BASE — still supported
 
     async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> KernelConfig:
         return supported

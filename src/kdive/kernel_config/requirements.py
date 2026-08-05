@@ -17,21 +17,47 @@ becomes its own clause AND-ed alongside it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Final
 
 from kdive.serialization import JsonValue
+
+
+class BuiltIn(StrEnum):
+    """Whether a clause is satisfied by a module, and if not, under what condition (#1860).
+
+    Three values rather than a bool, because the two reasons a symbol must be ``=y`` are not the
+    same reason and do not relax under the same condition: an uploaded initrd gives the boot
+    ordering something to load a module from, and does nothing at all for a Kconfig dependency
+    written ``depends on FOO=y``.
+    """
+
+    NOT_REQUIRED = "not_required"
+    """``=m`` satisfies the clause - KASAN, ftrace, kcov, the BPF symbols. The default."""
+
+    REQUIRED = "required"
+    """``=y`` always: a module form does not deliver the feature at any point in the boot."""
+
+    UNLESS_INITRD = "unless_initrd"
+    """``=y`` unless the build uploaded an initrd artifact to load the module from."""
 
 
 @dataclass(frozen=True, slots=True)
 class Clause:
     """One OR-group of kernel symbols: satisfied when any member is enabled.
 
-    A record rather than a bare ``frozenset`` so that the two per-clause axes still to land - a
-    built-in requirement (#1860) and an arch scope (#1859) - arrive as fields beside ``symbols``
-    rather than as incompatible extensions to one type. This change carries ``symbols`` only.
+    A record rather than a bare ``frozenset`` so that the per-clause axes arrive as fields beside
+    ``symbols`` rather than as incompatible extensions to one type; the arch scope (#1859) is the
+    one still to land. ``built_in`` is per clause and not per symbol because no clause in the
+    registry mixes symbols that differ on it.
+
+    ``UNLESS_INITRD`` states a condition; the *answer* is a fact about the build, so the seam
+    supplies it (``has_initrd``). A clause may only carry it where every seam that evaluates its
+    feature passes that fact - see the invariant in ``tests/kernel_config/test_requirements.py``.
     """
 
     symbols: frozenset[str]
+    built_in: BuiltIn = BuiltIn.NOT_REQUIRED
 
 
 CRASH_CAPTURE = "crash_capture"
@@ -84,9 +110,13 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "rootfs is commonly XFS (RHEL-family base images). kdive does not know which family "
         "your guest uses, so it asks only that the kernel can mount at least one of them plus "
         "the virtio-blk root device - build in the one your rootfs actually uses.",
+        # Both clauses are UNLESS_INITRD (#1860). The direct-kernel boot mounts root before any
+        # module can be loaded, so EXT4_FS=m / XFS_FS=m / VIRTIO_BLK=m are a kernel that panics on
+        # an unmountable root - unless the build uploaded an initrd artifact, which is where the
+        # modules would come from. `rootfs_mount_warning` is the seam that supplies that fact.
         (
-            Clause(frozenset({"EXT4_FS", "XFS_FS"})),
-            Clause(frozenset({"VIRTIO_BLK"})),
+            Clause(frozenset({"EXT4_FS", "XFS_FS"}), BuiltIn.UNLESS_INITRD),
+            Clause(frozenset({"VIRTIO_BLK"}), BuiltIn.UNLESS_INITRD),
         ),
     ),
     FeatureRequirement(
@@ -163,7 +193,15 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         # init/Kconfig:767 IKCONFIG is a tristate (:768) whose data is .incbin-ed as
         # kernel/config_data.gz into .rodata (kernel/configs.c:23-32); :779 IKCONFIG_PROC is the
         # half that creates /proc/config.gz, "depends on IKCONFIG && PROC_FS" at :781.
-        _plain("IKCONFIG", "IKCONFIG_PROC"),
+        #
+        # IKCONFIG is REQUIRED, not UNLESS_INITRD (#1860): /proc/config.gz exists only while the
+        # module is loaded, so =m does not deliver the readback at all and no initrd relieves it -
+        # the same defect class as the boot clauses, on the feature whose own summary already says
+        # to build it in. IKCONFIG_PROC is a bool with no module form, so it needs no value.
+        (
+            Clause(frozenset({"IKCONFIG"}), BuiltIn.REQUIRED),
+            Clause(frozenset({"IKCONFIG_PROC"})),
+        ),
     ),
     FeatureRequirement(
         "debuginfo",
@@ -406,8 +444,13 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         # whose own help says "If unsure, say M" (:61) - wrong for a direct-kernel boot with no
         # initramfs. It is the transport the rootfs_mount VIRTIO_BLK disk binds through on every
         # PCI machine type kdive boots (q35 and pseries here, i440fx on a remote-libvirt host).
-        # No seam reads this feature at all, at any symbol value - see gate.py's import list.
-        _plain("SERIAL_8250_CONSOLE", "VIRTIO_PCI"),
+        # No seam reads this feature at all, at any symbol value - see gate.py's import list, and
+        # note that this is why VIRTIO_PCI's UNLESS_INITRD below is manifest metadata today rather
+        # than a warning: the value renders into the contract document and nothing evaluates it.
+        (
+            Clause(frozenset({"SERIAL_8250_CONSOLE"})),
+            Clause(frozenset({"VIRTIO_PCI"}), BuiltIn.UNLESS_INITRD),
+        ),
     ),
 )
 
@@ -418,6 +461,15 @@ def feature_requirement(feature_id: str) -> FeatureRequirement:
     return _BY_ID[feature_id]
 
 
+def _manifest_clause(clause: Clause) -> dict[str, JsonValue]:
+    """Render one clause as the manifest's object element, omitting keys at their defaults."""
+    # Inner comprehension (not bare sorted()) widens list[str] -> list[JsonValue].
+    element: dict[str, JsonValue] = {"symbols": [symbol for symbol in sorted(clause.symbols)]}
+    if clause.built_in is not BuiltIn.NOT_REQUIRED:
+        element["built_in"] = clause.built_in.value
+    return element
+
+
 def feature_manifest() -> list[dict[str, JsonValue]]:
     manifest: list[dict[str, JsonValue]] = []
     for f in FEATURE_REQUIREMENTS:
@@ -425,10 +477,7 @@ def feature_manifest() -> list[dict[str, JsonValue]]:
         # requirement (#1860) and the arch scope (#1859) land as keys beside `symbols` without a
         # second element-shape change. Both are omitted at their defaults, so an unconstrained
         # clause stays as small as it was.
-        # Inner comprehension (not bare sorted()) widens list[str] -> list[JsonValue].
-        requirements: list[JsonValue] = [
-            {"symbols": [symbol for symbol in sorted(clause.symbols)]} for clause in f.advertised
-        ]
+        requirements: list[JsonValue] = [_manifest_clause(clause) for clause in f.advertised]
         entry: dict[str, JsonValue] = {
             "feature": f.feature,
             "summary": f.summary,

@@ -881,9 +881,9 @@ def _patch_effective_config(config: Any) -> Any:
 def test_start_session_drgn_live_warns_when_config_lacks_debuginfo(migrated_url: str) -> None:
     # ADR-0322: a drgn-live attach over a kernel whose uploaded config provably lacks DWARF/BTF and
     # with no uploaded vmlinux stays `live` (non-fatal) but carries a symbol-naming warning.
-    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
-    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_KERNEL"}))  # no DWARF/BTF
+    cfg = all_builtin({"DEBUG_INFO", "DEBUG_KERNEL"})  # no DWARF/BTF
 
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
@@ -913,9 +913,9 @@ def test_start_session_drgn_live_warns_when_config_lacks_debuginfo(migrated_url:
 
 
 def test_start_session_drgn_live_no_warning_when_config_has_debuginfo(migrated_url: str) -> None:
-    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
-    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"}))
+    cfg = all_builtin({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"})
 
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
@@ -944,7 +944,7 @@ def test_start_session_drgn_live_no_warning_when_config_has_debuginfo(migrated_u
 def test_start_session_drgn_live_uploaded_vmlinux_suppresses_warning(migrated_url: str) -> None:
     # An uploaded host vmlinux (debuginfo_ref set) suppresses the warning even when the config
     # lacks in-kernel debuginfo — the DWARF-via-vmlinux path must keep working (ADR-0322).
-    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
@@ -956,7 +956,7 @@ def test_start_session_drgn_live_uploaded_vmlinux_suppresses_warning(migrated_ur
                     "UPDATE runs SET debuginfo_ref = %s WHERE id = %s",
                     ("k/runs/r/vmlinux", UUID(run_id)),
                 )
-            with _patch_effective_config(KernelConfig(frozenset())):
+            with _patch_effective_config(all_builtin(frozenset())):
                 resp = await _start_session(
                     pool,
                     request_context(),
@@ -973,14 +973,14 @@ def test_start_session_drgn_live_uploaded_vmlinux_suppresses_warning(migrated_ur
 def test_start_session_gdbstub_never_warns_missing_debuginfo(migrated_url: str) -> None:
     # gdbstub symbolizes from the host-side uploaded vmlinux, not in-guest debuginfo: the drgn-live
     # warning never fires for it, regardless of the uploaded config (ADR-0322).
-    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
             alloc_id = await granted_allocation(pool)
             sys_id = await seed_system(pool, alloc_id, SystemState.READY)
             run_id = await seed_run(pool, sys_id)
-            with _patch_effective_config(KernelConfig(frozenset())):
+            with _patch_effective_config(all_builtin(frozenset())):
                 resp = await _start_session(
                     pool,
                     request_context(),
@@ -999,9 +999,9 @@ def test_start_session_gdbstub_never_warns_missing_debuginfo(migrated_url: str) 
 
 def _btf_config() -> Any:
     """A config that advertises BTF, so the static gate is silent and the runtime probe decides."""
-    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
-    return KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"}))
+    return all_builtin({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"})
 
 
 def _attach_failure(message: str = "guest drgn could not resolve symbols") -> CategorizedError:
@@ -1120,7 +1120,7 @@ def test_start_session_drgn_live_indeterminate_probe_adds_no_warning(migrated_ur
 def test_start_session_drgn_live_static_warning_skips_runtime_probe(migrated_url: str) -> None:
     # When the static config check already warns (no BTF advertised, no vmlinux), the runtime probe
     # is not run: the cheap signal wins and no attach-time round-trip is paid.
-    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
     async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
         async with open_pool(migrated_url) as pool:
@@ -1128,7 +1128,7 @@ def test_start_session_drgn_live_static_warning_skips_runtime_probe(migrated_url
             sys_id = await _seed_drgn_system(pool, alloc_id)
             run_id = await seed_run(pool, sys_id)
             port = _AttachProbeIntrospector(probe_raises=_attach_failure())
-            with _patch_effective_config(KernelConfig(frozenset({"DEBUG_INFO"}))):  # no BTF
+            with _patch_effective_config(all_builtin({"DEBUG_INFO"})):  # no BTF
                 resp = await _start_session(
                     pool,
                     request_context(),
@@ -1147,7 +1147,7 @@ def test_start_session_drgn_live_static_warning_skips_runtime_probe(migrated_url
 
 def test_start_session_drgn_live_uploaded_vmlinux_skips_runtime_probe(migrated_url: str) -> None:
     # An uploaded vmlinux suppresses both signals: drgn resolves from it, so the probe never runs.
-    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
 
     async def _run() -> tuple[ToolResponse, _AttachProbeIntrospector]:
         async with open_pool(migrated_url) as pool:
@@ -1160,7 +1160,7 @@ def test_start_session_drgn_live_uploaded_vmlinux_skips_runtime_probe(migrated_u
                     ("k/runs/r/vmlinux", UUID(run_id)),
                 )
             port = _AttachProbeIntrospector(probe_raises=_attach_failure())
-            with _patch_effective_config(KernelConfig(frozenset())):
+            with _patch_effective_config(all_builtin(frozenset())):
                 resp = await _start_session(
                     pool,
                     request_context(),

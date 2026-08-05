@@ -114,9 +114,11 @@ def test_every_requirements_element_is_a_clause_object_keyed_by_symbols() -> Non
     assert clauses, "no feature advertises a clause, so the walk below would pass vacuously"
     for clause in clauses:
         assert isinstance(clause, dict), clause
-        # keys are bounded, not just present: an element carrying `built_in` or `arch` before
-        # #1860/#1859 land would be a shape lie about a value the registry does not yet hold
-        assert set(clause) == {"symbols"}, clause
+        # Keys are bounded, not just present: `built_in` joined the vocabulary with #1860, and an
+        # element carrying `arch` before #1859 lands would still be a shape lie about a value the
+        # registry does not yet hold.
+        assert set(clause) <= {"symbols", "built_in"}, clause
+        assert clause.get("built_in") in (None, "required", "unless_initrd"), clause
         symbols = clause["symbols"]
         assert isinstance(symbols, list) and symbols, clause
         assert all(isinstance(s, str) and s for s in symbols), clause
@@ -129,7 +131,21 @@ def test_every_requirements_element_is_a_clause_object_keyed_by_symbols() -> Non
         for c in f["requirements"]
         if "KEXEC" in c["symbols"]
     )
-    assert kexec == {"symbols": ["KEXEC"]}
+    assert kexec == {"symbols": ["KEXEC"]}  # and the key is omitted at its default
+
+
+def test_the_served_document_carries_the_built_in_requirement_on_the_boot_clauses() -> None:
+    # #1860. The whole point of the machine-readable array is that an agent diffs its config
+    # against it, so a boot clause that needs =y has to say so *here* and not only in the summary
+    # prose - that is the defect the issue reports on VIRTIO_PCI. Read the served document rather
+    # than feature_manifest() so the value is pinned where the agent actually reads it.
+    features = _doc()["feature_config_requirements"]["features"]
+    rootfs = next(f for f in features if f["feature"] == "rootfs_mount")
+    assert {"symbols": ["VIRTIO_BLK"], "built_in": "unless_initrd"} in rootfs["requirements"]
+    console = next(f for f in features if f["feature"] == "serial_console")
+    assert {"symbols": ["VIRTIO_PCI"], "built_in": "unless_initrd"} in console["requirements"]
+    ikconfig = next(f for f in features if f["feature"] == "ikconfig")
+    assert {"symbols": ["IKCONFIG"], "built_in": "required"} in ikconfig["requirements"]
 
 
 def test_schema_version_is_two_for_the_clause_object_element() -> None:

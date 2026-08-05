@@ -27,6 +27,7 @@ from kdive.kernel_config.gate import (
     rootfs_mount_warning,
 )
 from kdive.kernel_config.parse import KernelConfig
+from tests.kernel_config.config_fixtures import all_builtin
 
 _RUN_ID = uuid4()
 _CONN = cast(AsyncConnection, object())  # the loader is patched, so conn is never used
@@ -68,21 +69,21 @@ def test_absent_config_fails_open_to_no_warning():
 
 
 def test_config_with_btf_produces_no_warning():
-    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"}))
+    cfg = all_builtin({"DEBUG_INFO", "DEBUG_INFO_BTF", "DEBUG_KERNEL"})
     assert _call(config=cfg, has_uploaded_vmlinux=False) is None
 
 
 def test_config_with_dwarf_but_no_btf_still_warns():
     # In-guest drgn-live reads BTF, not the kernel .config's DWARF (the DWARF vmlinux is not on the
     # guest rootfs). A DWARF-only config with no uploaded vmlinux is still blind, so it must warn.
-    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"}))
+    cfg = all_builtin({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"})
     warning = _call(config=cfg, has_uploaded_vmlinux=False)
     assert warning is not None
     assert warning["missing"] == ["DEBUG_INFO_BTF"]
 
 
 def test_config_lacking_btf_warns_and_names_btf():
-    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_KERNEL"}))  # no BTF
+    cfg = all_builtin({"DEBUG_INFO", "DEBUG_KERNEL"})  # no BTF
     warning = _call(config=cfg, has_uploaded_vmlinux=False)
     assert warning is not None
     assert warning["reason"] == MISSING_DEBUGINFO_REASON
@@ -97,7 +98,7 @@ def test_the_missing_debuginfo_remediation_names_a_dwarf_member_and_not_btf_alon
     # lib/Kconfig.debug:398 puts BTF inside `if DEBUG_INFO` (:325-455) and it selects nothing, so
     # a fragment setting it alone is discarded by olddefconfig and the rebuild changes nothing.
     # The remediation has to name the DWARF choice member that has to be picked first.
-    cfg = KernelConfig(frozenset({"DEBUG_KERNEL"}))  # DEBUG_INFO=n: the unfollowable case
+    cfg = all_builtin({"DEBUG_KERNEL"})  # DEBUG_INFO=n: the unfollowable case
     warning = _call(config=cfg, has_uploaded_vmlinux=False)
     assert warning is not None
     remediation = cast(str, warning["remediation"])
@@ -117,13 +118,13 @@ def test_the_debuginfo_warning_still_keys_on_btf_alone_not_on_the_dwarf_prerequi
     # The coupling #1855 must NOT "fix". A kernel carrying DWARF but no BTF is a complete debuginfo
     # build for an offline vmcore and gdb, and in-guest drgn-live is still blind on it, so this
     # seam must keep firing there - naming DWARF in the remediation may not turn into keying on it.
-    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"}))
+    cfg = all_builtin({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"})
     warning = _call(config=cfg, has_uploaded_vmlinux=False)
     assert warning is not None
     assert warning["missing"] == ["DEBUG_INFO_BTF"]
     # and the inverse: BTF present with no DWARF member named at all is silent, which is what
     # proves the DWARF symbols are remediation prose here and not a second condition
-    btf_only = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_BTF"}))
+    btf_only = all_builtin({"DEBUG_INFO", "DEBUG_INFO_BTF"})
     assert _call(config=btf_only, has_uploaded_vmlinux=False) is None
 
 
@@ -137,10 +138,10 @@ def test_unloadable_warning_is_distinct_reason_naming_btf():
     assert "vmlinux" in cast(str, warning["remediation"])
 
 
-def _rootfs_call(config: KernelConfig | None) -> dict[str, Any] | None:
+def _rootfs_call(config: KernelConfig | None, *, has_initrd: bool = False) -> dict[str, Any] | None:
     async def _run() -> dict[str, Any] | None:
         with _patched_load(config):
-            return await rootfs_mount_warning(_CONN, _RUN_ID)
+            return await rootfs_mount_warning(_CONN, _RUN_ID, has_initrd=has_initrd)
 
     return asyncio.run(_run())
 
@@ -150,7 +151,7 @@ def test_rootfs_absent_config_fails_open_to_no_warning():
 
 
 def test_rootfs_full_boot_set_produces_no_warning():
-    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}))
+    cfg = all_builtin({"EXT4_FS", "VIRTIO_BLK"})
     assert _rootfs_call(cfg) is None
 
 
@@ -158,21 +159,21 @@ def test_rootfs_ext4_local_libvirt_kernel_stays_silent_after_adding_xfs():
     # #1626 regression guard: XFS_FS joined rootfs_mount as an OR-group member, not as a second
     # required clause. Appending it with _plain would have made every ext4-root local-libvirt
     # kernel — the overwhelmingly common case — start emitting a spurious missing_boot_config.
-    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK", "KEXEC", "MAGIC_SYSRQ"}))
+    cfg = all_builtin({"EXT4_FS", "VIRTIO_BLK", "KEXEC", "MAGIC_SYSRQ"})
     assert _rootfs_call(cfg) is None
 
 
 def test_rootfs_xfs_only_kernel_is_no_longer_told_to_add_ext4():
     # A RHEL-family / remote base image roots on XFS (ADR-0183). Before #1626 such a kernel was
     # told to build in EXT4_FS, which its guest never mounts.
-    cfg = KernelConfig(frozenset({"XFS_FS", "VIRTIO_BLK"}))
+    cfg = all_builtin({"XFS_FS", "VIRTIO_BLK"})
     assert _rootfs_call(cfg) is None
 
 
 def test_rootfs_missing_one_symbol_warns_and_names_it():
     # VIRTIO_BLK is its own clause (the root *device*, not the filesystem), so a config carrying a
     # root filesystem but no virtio-blk driver still warns.
-    cfg = KernelConfig(frozenset({"EXT4_FS"}))
+    cfg = all_builtin({"EXT4_FS"})
     warning = _rootfs_call(cfg)
     assert warning is not None
     assert warning["reason"] == MISSING_BOOT_CONFIG_REASON
@@ -182,11 +183,68 @@ def test_rootfs_missing_one_symbol_warns_and_names_it():
 def test_rootfs_no_supported_filesystem_names_both_alternatives():
     # BTRFS is a real filesystem kdive never boots from: neither OR-group member is enabled, so
     # the advisory fires and offers both alternatives rather than only ext4.
-    cfg = KernelConfig(frozenset({"BTRFS_FS"}))
+    cfg = all_builtin({"BTRFS_FS"})
     warning = _rootfs_call(cfg)
     assert warning is not None
     assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
     assert "mount" in warning["remediation"]
+
+
+def test_a_modular_boot_kernel_with_no_initrd_now_warns_and_says_the_symbols_are_modular():
+    # #1860's failure: CONFIG_VIRTIO_BLK=m parsed as enabled, the advisory stayed silent, install
+    # succeeded and the guest panicked on an unmountable root. `missing` names VIRTIO_BLK because
+    # its clause is unmet, and `built_in_required` is what stops that reading as a kdive bug to
+    # the agent holding a config that visibly contains the symbol.
+    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}), frozenset({"EXT4_FS"}))
+    warning = _rootfs_call(cfg)
+    assert warning is not None
+    assert warning["reason"] == MISSING_BOOT_CONFIG_REASON
+    assert warning["missing"] == ["VIRTIO_BLK"]
+    assert warning["built_in_required"] == ["VIRTIO_BLK"]
+
+
+def test_an_uploaded_initrd_relieves_the_same_modular_kernel():
+    # The carve-out, evaluated at the seam: an initrd artifact is where the module comes from, so
+    # the identical config draws no warning once the build uploaded one.
+    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}), frozenset({"EXT4_FS"}))
+    assert _rootfs_call(cfg, has_initrd=True) is None
+
+
+def test_the_seam_defaults_to_the_strict_reading_when_the_initrd_fact_is_not_supplied():
+    # ADR-0330's direction for this warning: over-warn rather than fall silent. The two calls
+    # differ only in the keyword, which is what proves the default is the strict one.
+    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}), frozenset({"EXT4_FS"}))
+    assert _rootfs_call(cfg) is not None
+    assert _rootfs_call(cfg, has_initrd=False) is not None
+
+
+def test_built_in_required_is_absent_when_every_missing_symbol_is_absent_outright():
+    # The key is optional so a client keying on the ADR-0330 {reason, missing, remediation} shape
+    # is unaffected. A kernel with no virtio-blk at all gets no key, not an empty list.
+    warning = _rootfs_call(all_builtin({"EXT4_FS"}))
+    assert warning is not None
+    assert warning["missing"] == ["VIRTIO_BLK"]
+    assert "built_in_required" not in warning
+
+
+def test_a_built_in_boot_kernel_is_silent_whether_or_not_an_initrd_was_uploaded():
+    cfg = all_builtin({"EXT4_FS", "VIRTIO_BLK"})
+    assert _rootfs_call(cfg) is None
+    assert _rootfs_call(cfg, has_initrd=True) is None
+
+
+def test_the_crash_refusal_payload_gains_no_key_from_a_modular_kexec_kernel():
+    # crash_capture carries no built-in requirement - its seam supplies no initrd fact, so it may
+    # not (invariant I2) - which means a modular KEXEC still satisfies its clause and never
+    # reaches `missing`. The key is therefore absent here by construction, not by omission.
+    modular = KernelConfig(_KEXEC_LOAD_ONLY, _KEXEC_LOAD_ONLY - {"KEXEC"})
+    assert _crash_call(modular) is None
+    refusal = _crash_call(
+        KernelConfig(_KEXEC_LOAD_ONLY - {"FW_CFG_SYSFS"}, _KEXEC_LOAD_ONLY - {"FW_CFG_SYSFS"})
+    )
+    assert refusal is not None
+    assert refusal["missing"] == ["FW_CFG_SYSFS"]
+    assert "built_in_required" not in refusal
 
 
 def test_missing_effective_config_nudge_lookup_error_fails_open_with_traceback(
@@ -249,13 +307,13 @@ def test_crash_capture_still_admits_a_legacy_kexec_load_only_kernel():
     # Tightening the {KEXEC, KEXEC_FILE} OR-group into a hard KEXEC_FILE requirement would refuse
     # installs that capture fine on a non-RHEL guest, and kdive has no guest-family axis to
     # discriminate. The gate deliberately stays an OR; the RHEL gap is advisory instead.
-    assert _crash_call(KernelConfig(_KEXEC_LOAD_ONLY)) is None
+    assert _crash_call(all_builtin(_KEXEC_LOAD_ONLY)) is None
 
 
 def test_crash_capture_refusal_remediation_points_at_the_rhel_guest_feature():
     # When the gate does refuse, the remediation must not imply the gated set is sufficient on a
     # RHEL guest — that is exactly the trap #1626 reports.
-    refusal = _crash_call(KernelConfig(_KEXEC_LOAD_ONLY - {"FW_CFG_SYSFS"}))
+    refusal = _crash_call(all_builtin(_KEXEC_LOAD_ONLY - {"FW_CFG_SYSFS"}))
     assert refusal is not None
     assert refusal["reason"] == CRASH_CONFIG_REASON
     assert refusal["missing"] == ["FW_CFG_SYSFS"]
