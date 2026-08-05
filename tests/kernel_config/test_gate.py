@@ -186,13 +186,14 @@ def test_missing_effective_config_nudge_cancellation_propagates_without_fail_ope
     assert not caplog.records
 
 
+# The legacy-kexec_load config as olddefconfig would leave it: the derived KEXEC_CORE and
+# VMCORE_INFO the kernel selects for itself are absent, and since #1854 the gate does not ask
+# for them.
 _KEXEC_LOAD_ONLY = frozenset(
     {
         "KEXEC",
-        "KEXEC_CORE",
         "CRASH_DUMP",
         "PROC_VMCORE",
-        "VMCORE_INFO",
         "FW_CFG_SYSFS",
         "RELOCATABLE",
     }

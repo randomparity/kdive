@@ -8,7 +8,9 @@ from kdive.kernel_config.requirements import Clause, FeatureRequirement
 
 def _unmet(config: KernelConfig, clauses: tuple[Clause, ...]) -> tuple[Clause, ...]:
     return tuple(
-        clause for clause in clauses if not any(config.is_enabled(symbol) for symbol in clause)
+        clause
+        for clause in clauses
+        if not any(config.is_enabled(symbol) for symbol in clause.symbols)
     )
 
 
@@ -25,4 +27,4 @@ def unmet_advertised_clauses(
 
 
 def missing_symbols(unmet: tuple[Clause, ...]) -> list[str]:
-    return sorted({symbol for clause in unmet for symbol in clause})
+    return sorted({symbol for clause in unmet for symbol in clause.symbols})

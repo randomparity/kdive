@@ -31,6 +31,7 @@ import pytest
 
 from kdive.kernel_config.requirements import FEATURE_REQUIREMENTS
 from kdive.mcp.resources.registrar import DOC_RESOURCES
+from tests.kernel_config.unsettable_symbols import I1_SEED, UNSETTABLE_SYMBOLS
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONTENT_DIR = _REPO_ROOT / "src/kdive/mcp/resources/_content"
@@ -38,17 +39,18 @@ _CONTENT_DIR = _REPO_ROOT / "src/kdive/mcp/resources/_content"
 _CONFIG_SYMBOL = re.compile(r"CONFIG_([A-Z0-9_]+)")
 
 _ADVERTISED: frozenset[str] = frozenset(
-    symbol for f in FEATURE_REQUIREMENTS for clause in f.advertised for symbol in clause
+    symbol for f in FEATURE_REQUIREMENTS for clause in f.advertised for symbol in clause.symbols
 )
 
-# The symbols the gate refuses on but the manifest will not advertise: exactly the prompt-less,
-# auto-selected class no fragment can set. These are what the docs must never spell CONFIG_*.
-_DERIVED_ONLY: frozenset[str] = (
-    frozenset(
-        symbol for f in FEATURE_REQUIREMENTS for clause in f.gate_required for symbol in clause
-    )
-    - _ADVERTISED
-)
+# The prompt-less, auto-selected class no fragment can set: what the docs must never spell
+# CONFIG_*. Read from the curated list rather than computed as "gated but not advertised", which
+# is how #1853 wrote it. That subtraction stopped describing anything once #1854's rule
+# barred an unsettable symbol from *every* clause: #1854 dropped the last two members
+# (KEXEC_CORE, VMCORE_INFO) out of `gate_required`, so the computed set is now empty by
+# construction and the bound below would hold vacuously. The curated list is also strictly wider
+# than the subtraction ever was - DEBUG_INFO is unsettable and was never gated, so it could
+# always have been allowlisted freely.
+_UNSETTABLE: frozenset[str] = frozenset(UNSETTABLE_SYMBOLS)
 
 # Prompted symbols the prose names as an optional refinement rather than a manifest requirement.
 # KASAN_INLINE is a prompted member of lib/Kconfig.kasan's "Instrumentation type" choice, so a
@@ -121,12 +123,12 @@ def test_prompt_less_symbols_cannot_be_allowlisted_into_the_docs() -> None:
     Without this, the cheapest way out of a #1853 failure is to add the offending symbol to
     ``_PROMPTED_BUT_UNREQUIRED`` and ship a green suite with the defect intact.
     """
-    assert _DERIVED_ONLY, (
-        "no gated symbol is unadvertised any more, so the allowlist bound below is vacuous - "
-        "check whether this guard still describes FEATURE_REQUIREMENTS"
-    )
-    smuggled = sorted(_PROMPTED_BUT_UNREQUIRED & _DERIVED_ONLY)
+    # Non-vacuity, restated for the same reason #1853 wrote it: the bound must be over a set that
+    # really holds symbols, and thinning the curated list is the way to defeat it. Anchor to the
+    # six names #1854 seeds it with, so deleting a row to get green fails here instead.
+    assert _UNSETTABLE >= I1_SEED, sorted(I1_SEED - _UNSETTABLE)
+    smuggled = sorted(_PROMPTED_BUT_UNREQUIRED & _UNSETTABLE)
     assert not smuggled, (
-        f"{smuggled} are gated but deliberately unadvertised because no config fragment can set "
-        f"them; allowlisting them would let the docs demand them again (#1853)"
+        f"{smuggled} are prompt-less or auto-selected, so no config fragment can set them; "
+        f"allowlisting them would let the docs demand them again (#1853, #1854)"
     )

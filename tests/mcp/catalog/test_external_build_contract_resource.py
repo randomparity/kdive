@@ -100,6 +100,45 @@ def test_feature_config_manifest_is_included_without_internal_gate_set() -> None
     assert "gate_required" not in crash
 
 
+def test_every_requirements_element_is_a_clause_object_keyed_by_symbols() -> None:
+    # #1854: a requirements element stopped being a bare list of symbol names and became an
+    # object, so that #1860 and #1859 can add `built_in` and `arch` keys beside `symbols`
+    # without a second shape change. Every other assertion in this module reads
+    # json.dumps(entry["requirements"]) and matches a substring, which passes identically against
+    # ["KEXEC"] and against {"symbols": ["KEXEC"]} - so without this the shape change would land
+    # with nothing holding it. Assert the shape structurally, on every clause of every feature.
+    features = _doc()["feature_config_requirements"]["features"]
+    assert features, "no features in the manifest, so the walk below would pass vacuously"
+
+    clauses = [clause for f in features for clause in f["requirements"]]
+    assert clauses, "no feature advertises a clause, so the walk below would pass vacuously"
+    for clause in clauses:
+        assert isinstance(clause, dict), clause
+        # keys are bounded, not just present: an element carrying `built_in` or `arch` before
+        # #1860/#1859 land would be a shape lie about a value the registry does not yet hold
+        assert set(clause) == {"symbols"}, clause
+        symbols = clause["symbols"]
+        assert isinstance(symbols, list) and symbols, clause
+        assert all(isinstance(s, str) and s for s in symbols), clause
+        assert symbols == sorted(symbols), clause  # stable order for a diffable document
+
+    kexec = next(
+        c
+        for f in features
+        if f["feature"] == CRASH_CAPTURE
+        for c in f["requirements"]
+        if "KEXEC" in c["symbols"]
+    )
+    assert kexec == {"symbols": ["KEXEC"]}
+
+
+def test_schema_version_is_two_for_the_clause_object_element() -> None:
+    # The element-shape change bumps the contract document's schema_version once, in the first
+    # change to land (#1854). Adding an optional key later does not bump it again, so a further
+    # bump means the shape changed again and an agent has to be told.
+    assert _doc()["schema_version"] == 2
+
+
 def test_served_contract_advertises_the_rhel_guest_kdump_symbols_ungated() -> None:
     # #1626: the symbols ADR-0213/ADR-0183 had put in the deleted kdump build-config fragment must
     # reach the agent through the one surface that replaced it. Advertised, never gated — kdive
