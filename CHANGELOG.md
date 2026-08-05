@@ -504,6 +504,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scope the invariants honestly and record the residuals
 - Say =m does not satisfy the boot-config check
 - Document the staged-landing citation convention
+- Decide the host-OS-to-BMC in-band path for BYO hosts
+- Sharpen 0547's answers to questions 1 and 2
+- Fix four review findings in 0547
+- Put 0547's doctor posture in the field doctor renders
 
 ### Fixed
 
