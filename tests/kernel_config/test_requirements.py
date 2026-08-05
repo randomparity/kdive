@@ -131,14 +131,42 @@ def test_sysrq_summary_names_the_use_case_the_late_refusal_and_that_it_is_build_
     assert "skip" in summary
 
 
+def test_no_upload_seam_reads_the_sysrq_refusal_set():
+    # The reality the summary's "nothing checks this at upload time" rests on, anchored to code
+    # rather than to wording - a blocklist of bad phrasings only catches wordings someone
+    # already thought of. gate.py is the only module that turns a FeatureRequirement into a
+    # refusal, and it names the features it refuses on by importing their ids. If sysrq is ever
+    # wired in there, this fails and forces the summary to be rewritten in the same change.
+    from kdive.kernel_config import gate
+
+    assert not hasattr(gate, "SYSRQ")
+    # non-vacuity: the import surface this reads must actually carry the two it does gate on,
+    # or the assert above would pass against any module at all
+    assert hasattr(gate, "CRASH_CAPTURE")
+    assert hasattr(gate, "ROOTFS_MOUNT")
+
+
 def test_sysrq_summary_does_not_promise_a_config_time_gate_the_upload_path_never_performs():
-    # The inverse of the assertion above, because the two fail on different edits: dropping the
-    # disclaimer trips the test above, while *adding* a "kdive gates this" claim beside it would
-    # leave that one green. gate.py reads CRASH_CAPTURE and ROOTFS_MOUNT only, so no wording
-    # here may tell an agent the upload path checks MAGIC_SYSRQ.
+    # The inverse of the disclaimer assertion above, because the two fail on different edits:
+    # dropping the disclaimer trips that test, while *adding* a "kdive gates this" claim beside
+    # it would leave it green. The entry does carry gate_required (so the manifest ships
+    # gated: true), which is exactly why a reader can be told the upload path checks MAGIC_SYSRQ
+    # without anyone noticing - the summary is the only place that contradiction gets settled.
     summary = feature_requirement(SYSRQ).summary.lower()
-    for claim in ("kdive gates this", "gated at upload", "refuses the upload", "the gate refuses"):
+    for claim in (
+        "kdive gates this",
+        "gated at upload",
+        "refuses the upload",
+        "the gate refuses",
+        "kdive checks this at upload",
+        "the config gate covers this feature",
+        "without magic_sysrq",
+    ):
         assert claim not in summary, claim
+    # the entry's own gated flag is the contradiction a structured reader hits first, so the
+    # summary has to name it rather than leave the JSON to speak for itself
+    assert "gated flag" in summary
+    assert feature_requirement(SYSRQ).gated is True  # the flag being explained is really set
 
 
 def test_serial_console_summary_names_what_breaks_without_it_and_that_it_is_cheap():
@@ -162,6 +190,9 @@ def test_serial_console_summary_names_what_breaks_without_it_and_that_it_is_chea
     assert "virtio_pci" in summary
     assert "rootfs_mount" in summary
     assert "boot-fatal" in summary
+    # kdive checks neither of these symbols at any value, so the summary must not imply that
+    # omitting one would be caught - it is the only notice an agent gets
+    assert "nothing below is checked" in summary
     # when to skip: never, on a guest kdive boots - and the summary must say so outright
     assert "no reason to skip" in summary
     # what it costs, and that the cost is close to nothing

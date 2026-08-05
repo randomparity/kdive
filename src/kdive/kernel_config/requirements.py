@@ -152,7 +152,10 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "a plain bool with no module form that cannot be turned on after the build, and the "
         "refusal lands at the far end - diagnostic_sysrq fails with a configuration error naming "
         "the symbol rather than returning an empty capture, and recovering costs a rebuild, a "
-        "reinstall and a reboot. kdive injects the Alt+SysRq chord through the guest's input "
+        "reinstall and a reboot. The gated flag on this entry marks that late refusal, not an "
+        "upload-time check: kdive's config gate covers crash capture and the root filesystem "
+        "only, so a clean build upload tells you nothing about SysRq. kdive injects the "
+        "Alt+SysRq chord through the guest's input "
         "layer, so an x86 guest also needs a PS/2 keyboard driver (i8042/atkbd) for the keystroke "
         "to arrive, and the guest's kernel.sysrq sysctl decides separately which of these "
         "commands it permits once the kernel carries the feature at all. Cost is the SysRq "
@@ -326,19 +329,23 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "VIRTIO_PCI is the transport half and the boot-fatal one: the root disk and NIC are PCI "
         "virtio devices, so without it the VIRTIO_BLK driver from the rootfs_mount set never binds "
         "and the guest panics on an unmountable root before any console setting matters. Build it "
-        "in (=y) rather than as a module - unless your build also uploads an initrd there is "
-        "nothing to load that module from before root is mounted, and kdive reads a =m config as "
-        "carrying the symbol, so it will not warn you. There is no reason to skip either half on a "
-        "guest kdive boots, and nothing to weigh against them: both cost kernel text and no "
-        "measurable runtime. SERIAL_8250_CONSOLE additionally needs SERIAL_8250 itself built in - "
-        "it is not offered against a modular 8250.",
+        "in (=y) rather than as a module: a direct-kernel boot has no initramfs to load that "
+        "module from before root is mounted (a guest that boots through its own bootloader and "
+        "builds an initramfs with dracut is not affected). Nothing below is checked on your "
+        "behalf - kdive's config advisories cover crash capture, the root filesystem and "
+        "debuginfo, so neither of these two symbols draws a warning at any value, and this "
+        "summary is the whole of the notice you get. There is no reason to skip the console for "
+        "your arch or the transport, and nothing to weigh against them: both cost kernel text and "
+        "no measurable runtime. SERIAL_8250_CONSOLE additionally needs SERIAL_8250 itself built "
+        "in - it is not offered against a modular 8250.",
         # drivers/tty/serial/8250/Kconfig:70 SERIAL_8250_CONSOLE is a bool whose :72 "depends on
         # SERIAL_8250=y" is why the modular 8250 note is a real constraint; drivers/tty/hvc/
-        # Kconfig:14 HVC_CONSOLE is the pseries console and "depends on PPC_PSERIES".
-        # drivers/virtio/Kconfig:50-51 VIRTIO_PCI is a *tristate* "depends on PCI" (its own help
-        # says "If unsure, say M", which is wrong for a no-initramfs direct-kernel boot), and it is
-        # the transport the rootfs_mount VIRTIO_BLK disk binds through on q35 and pseries alike.
-        # parse.py counts =m as enabled, so nothing here catches a modular transport.
+        # Kconfig:14 HVC_CONSOLE is the pseries console, "depends on PPC_PSERIES" at :16.
+        # drivers/virtio/Kconfig:50-62 VIRTIO_PCI is a *tristate* (:51), "depends on PCI" (:52),
+        # whose own help says "If unsure, say M" (:61) - wrong for a direct-kernel boot with no
+        # initramfs. It is the transport the rootfs_mount VIRTIO_BLK disk binds through on every
+        # PCI machine type kdive boots (q35 and pseries here, i440fx on a remote-libvirt host).
+        # No seam reads this feature at all, at any symbol value - see gate.py's import list.
         _plain("SERIAL_8250_CONSOLE", "VIRTIO_PCI"),
     ),
 )
