@@ -18,10 +18,11 @@ from kdive.db.locks import (
 DEFAULT_WAIT_TIMEOUT_S = 5.0
 """How long every probe here waits for a backend to reach the expected wait state.
 
-Nothing bounds how long a Postgres backend takes to *register* a lock wait in `pg_locks`,
-so a probe's budget only has to be far longer than the observation is slow — under a
-saturated parallel suite against a shared container, a multi-second scheduling stall is
-permitted. Callers scale off this one number instead of picking a private literal.
+Nothing bounds how long a Postgres backend takes to *register* a lock wait in `pg_locks`.
+The lock ordering under test is deterministic; only the moment the wait becomes observable
+is not, and under a saturated parallel suite against a shared container a multi-second
+scheduling stall is permitted. So the budget is set once, generously, here — a caller that
+picks its own tighter literal turns that latency into a spurious failure.
 """
 
 _POLL_INTERVAL_S = 0.02

@@ -24,7 +24,7 @@ from kdive.mcp.tools.ops import build_uses
 from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifacts
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
-from tests.db_waits import wait_until_blocked_by
+from tests.db_waits import DEFAULT_WAIT_TIMEOUT_S, wait_until_blocked_by
 
 _LOGIN_AUTHENTICATION = "worker-fence-test-authentication"
 _BINDING_MAX_BYTES = 4096
@@ -1353,7 +1353,7 @@ def test_worker_claim_lease_clock_starts_after_incarnation_lock_contention(
         )
         future = executor.submit(claim)
         try:
-            assert connected.wait(timeout=2)
+            assert connected.wait(timeout=DEFAULT_WAIT_TIMEOUT_S)
             wait_until_blocked_by(
                 pg_conn,
                 waiter_pid=claimant_pid[0],
@@ -1367,7 +1367,7 @@ def test_worker_claim_lease_clock_starts_after_incarnation_lock_contention(
             assert held_until is not None
         finally:
             blocker.commit()
-        claimed = future.result(timeout=2)
+        claimed = future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
 
     assert claimed is not None
     assert claimed[0] == job_id
@@ -1414,7 +1414,7 @@ def test_worker_heartbeat_lease_clock_starts_after_incarnation_and_job_lock_cont
         )
         future = executor.submit(heartbeat)
         try:
-            assert connected.wait(timeout=2)
+            assert connected.wait(timeout=DEFAULT_WAIT_TIMEOUT_S)
             wait_until_blocked_by(
                 pg_conn,
                 waiter_pid=heartbeat_pid[0],
@@ -1440,7 +1440,7 @@ def test_worker_heartbeat_lease_clock_starts_after_incarnation_and_job_lock_cont
         finally:
             incarnation_blocker.commit()
             job_blocker.commit()
-        renewed = future.result(timeout=2)
+        renewed = future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
 
     assert renewed is True
     assert pg_conn.execute(
@@ -1633,7 +1633,7 @@ def test_concurrent_exact_runtime_role_creation_is_idempotent(
         )
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(apply_role_migration)
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=DEFAULT_WAIT_TIMEOUT_S)
             wait_until_blocked_by(
                 pg_conn,
                 waiter_pid=contender.info.backend_pid,
@@ -1644,7 +1644,7 @@ def test_concurrent_exact_runtime_role_creation_is_idempotent(
             with pytest.raises(TimeoutError):
                 future.result(timeout=0.5)
             creator.commit()
-            future.result(timeout=2)
+            future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
     finally:
         creator.rollback()
         contender.close()
@@ -1698,7 +1698,7 @@ def test_runtime_role_grant_closes_validation_to_drop_window(
         blocker.execute("SELECT pg_advisory_xact_lock(%s)", (pause_key,))
         with ThreadPoolExecutor(max_workers=2) as executor:
             future = executor.submit(apply_role_migration)
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=DEFAULT_WAIT_TIMEOUT_S)
             wait_until_blocked_by(
                 pg_conn,
                 waiter_pid=contender.info.backend_pid,
@@ -1721,9 +1721,9 @@ def test_runtime_role_grant_closes_validation_to_drop_window(
             finally:
                 blocker.commit()
             if drop_was_blocked:
-                future.result(timeout=2)
+                future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
                 with pytest.raises(psycopg.errors.DependentObjectsStillExist):
-                    drop_future.result(timeout=2)
+                    drop_future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
             assert drop_was_blocked
     finally:
         blocker.rollback()
@@ -1863,7 +1863,7 @@ def test_reclaiming_generation_serializes_before_acquisition(
             (investigation_id, generation),
         )
         future = executor.submit(acquire)
-        assert connected.wait(timeout=2)
+        assert connected.wait(timeout=DEFAULT_WAIT_TIMEOUT_S)
         wait_until_blocked_by(
             pg_conn,
             waiter_pid=worker_pid[0],
@@ -1874,7 +1874,7 @@ def test_reclaiming_generation_serializes_before_acquisition(
         with pytest.raises(TimeoutError):
             future.result(timeout=0.5)
         reclaim.commit()
-        assert future.result(timeout=2) is False
+        assert future.result(timeout=DEFAULT_WAIT_TIMEOUT_S) is False
 
     assert pg_conn.execute(
         "SELECT count(*) FROM investigation_build_uses WHERE use_id = %s", (use_id,)
@@ -1956,11 +1956,11 @@ def test_termination_serializes_before_acquisition(
             (holder, Jsonb({"container_id": "a" * 64})),
         ).fetchone() == (True,)
         future = executor.submit(acquire)
-        assert started.wait(timeout=2)
+        assert started.wait(timeout=DEFAULT_WAIT_TIMEOUT_S)
         with pytest.raises(TimeoutError):
             future.result(timeout=0.5)
         witness.commit()
-        assert future.result(timeout=2) is False
+        assert future.result(timeout=DEFAULT_WAIT_TIMEOUT_S) is False
 
     assert pg_conn.execute(
         "SELECT count(*) FROM investigation_build_uses WHERE use_id = %s", (use_id,)
