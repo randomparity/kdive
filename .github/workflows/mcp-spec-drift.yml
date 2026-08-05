@@ -118,26 +118,26 @@ jobs:
             exit 1
           fi
 
-          # Dedup on the revision string inside the title, not on the whole title. That is
-          # what matches a human-filed issue which never carried this workflow's labels, so
-          # do NOT add a --label conjunct: `gh` ANDs it into the query. Issue #1485 carries
-          # no area:mcp-api, and on this workflow's first run it was open and titled
-          # "Investigate MCP 2026-07-28 Spec Update Requirements" — since closed, then
+          # Dedup on the revision string and nothing else. No --label conjunct: `gh` ANDs it
+          # into the query, and a human-filed issue need not carry this workflow's labels.
+          # #1485 carries no area:mcp-api, and on this workflow's first run it was open and
+          # titled "Investigate MCP 2026-07-28 Spec Update Requirements" — since closed, then
           # corrected to 2026-06-18 — so the title-only search matched it and the run stayed
           # quiet, where a label-filtered search would have matched nothing and filed.
           #
-          # That key still lives in the title, so the match is only as stable as the title
-          # is. A retitle that keeps the revision string — folding the issue under an `mcp`
-          # 2.0.0 epic, say — still matches; a retitle that edits the string out de-matches,
-          # and the next run files for that revision as if nobody had seen it. #1485 was
-          # renamed 2026-07-28 -> 2026-06-18 on 2026-08-04 and the next run filed #1812.
+          # The revision string is matched inside the title rather than as a whole title, so
+          # a retitle that keeps the string — folding the issue under an `mcp` 2.0.0 epic,
+          # say — still matches. A retitle that edits the string out does not, and the next
+          # run files for that revision as if nobody had seen it. #1485 was renamed
+          # 2026-07-28 -> 2026-06-18 on 2026-08-04 and the next run filed #1812.
           #
           # A body marker or a dedicated label would key more stably, but only alongside this
           # search and never instead of it — a marker exists only on issues this workflow
           # filed, so the human-filed case above stays title-keyed regardless. That is a
-          # second `gh` call per run against a failure mode not yet seen: the one rename on
-          # record corrected which revision #1485 tracks, so #1812 was the right outcome and
-          # not a duplicate. Not done (#1849); ADR-0537 rejects a dedicated label separately.
+          # second `gh` call per run to prevent a spurious duplicate, which has not happened:
+          # the rename on record corrected which revision #1485 tracks, so #1812 names a
+          # revision no other issue did. Weighed and declined in #1849; ADR-0537 rejects a
+          # dedicated label on separate grounds.
           #
           # --state all, because a closed issue is a human acknowledgement; re-filing over it
           # would produce a duplicate every week. GitHub issue search ANDs its terms, so this
