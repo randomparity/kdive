@@ -261,23 +261,38 @@ def test_complete_build_returns_reusable_build_deadline_contract(migrated_url: s
 def test_complete_build_response_server_time_is_current_after_validation(
     migrated_url: str,
 ) -> None:
-    """The completion response clock and generation deadline begin after validation work."""
+    """The completion response clock and generation deadline begin after validation work.
+
+    Bracketed by two Postgres clock reads taken around the call, never by a wall-clock budget
+    measured after it. The harness can be descheduled for any length of time between the call
+    returning and a trailing read — acquiring a second pool connection under 24-way parallelism
+    against one Postgres is itself unbounded — so a budget assertion narrows as the suite gets
+    busier and measures scheduling latency rather than ordering (#1862). Every bound below only
+    widens under load. Both reads stay in Postgres: comparing against Python's clock would make
+    the result depend on the database session's time zone.
+    """
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_external_run_with_manifest(pool)
+            async with pool.connection() as conn:
+                before_row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+            assert before_row is not None
             response = await _build_handlers(
                 _DelayedValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
             ).complete_build(pool, _ctx(), str(run_id), build_id=None)
             async with pool.connection() as conn:
-                row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
-            assert row is not None
+                after_row = await (await conn.execute("SELECT clock_timestamp()")).fetchone()
+            assert after_row is not None
 
+        before, after = before_row[0], after_row[0]
         expires_at = datetime.fromisoformat(str(response.data["expires_at"]))
         server_time = datetime.fromisoformat(str(response.data["server_time"]))
         retention = timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS))
-        assert row[0] - server_time < timedelta(milliseconds=250)
-        assert expires_at - row[0] >= retention - timedelta(milliseconds=250)
+        validation = timedelta(milliseconds=450)  # _DelayedValidator sleeps 0.5 s
+        assert before < server_time <= after
+        assert server_time - before >= validation
+        assert expires_at - before >= retention + validation
 
     asyncio.run(_run())
 
