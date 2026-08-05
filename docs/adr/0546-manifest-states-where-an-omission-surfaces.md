@@ -52,7 +52,13 @@ symbols, when and how do I find out?*
 | `upload_refusal` | kdive reads the Run's uploaded `effective_config` and **refuses** the config-dependent action with `CONFIGURATION_ERROR` naming the missing symbols. The clauses it refuses on are the entry's `refuses_on` (rule 2). | `crash_capture` |
 | `upload_advisory` | kdive reads the config and returns a **warning** in the response `data`; the action succeeds. | `rootfs_mount` |
 | `runtime_refusal` | kdive does **not** read the config for this feature. The feature's own handler refuses when the agent invokes it, after the kernel has been built, installed and booted. | `sysrq` |
-| `unchecked` | no kdive check reads this entry's requirements at any seam. Omitting it costs the feature itself; the summary says what that means. | every other entry |
+| `unchecked` | no kdive check reads this entry's requirements at any seam. | every other entry |
+
+`unchecked` is deliberately worded as a statement about kdive and not about the feature's
+importance, and its legend entry says so outright. `serial_console` is `unchecked` and its
+`VIRTIO_PCI` clause is boot-fatal — a value that read as "safe to skip" would move #1867's
+misreading one row down the table rather than closing it. What an omission costs varies per
+feature and stays in the summary, which is the only field that can carry it.
 
 The vocabulary is grounded in code, not in intent: `upload_refusal` and `upload_advisory` are
 exactly the two features `kernel_config/gate.py` imports by id and turns into a payload

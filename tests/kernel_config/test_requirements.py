@@ -140,9 +140,13 @@ def test_sysrq_is_machine_readably_distinct_from_the_features_that_are_really_op
     assert "does not read your config" in runtime
     assert "refusal arrives when you invoke" in runtime
     assert "build, install and boot" in runtime
-    # And "unchecked" must not be worded as a licence to skip, which is the misreading one value
-    # over: it says what kdive does, not that the feature is optional.
-    assert "optional" not in ENFORCEMENT_LEGEND[Enforcement.UNCHECKED].lower()
+    # And "unchecked" must not be worded as a licence to skip, which would move the misreading one
+    # value over rather than closing it: serial_console is unchecked and its VIRTIO_PCI clause is
+    # boot-fatal, so the definition has to say what kdive does and send the reader to the summary
+    # for what the omission costs.
+    unchecked = ENFORCEMENT_LEGEND[Enforcement.UNCHECKED].lower()
+    assert "not the same as optional" in unchecked
+    assert "summary" in unchecked
 
 
 def test_a_refusal_set_and_upload_refusal_cannot_drift_apart():

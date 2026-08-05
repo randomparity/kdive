@@ -76,7 +76,12 @@ class Enforcement(StrEnum):
     """No config check at all; the feature's own handler refuses on a booted kernel - ``sysrq``."""
 
     UNCHECKED = "unchecked"
-    """No kdive check reads this entry's requirements. The default, and most of the registry."""
+    """No kdive check reads this entry's requirements. The default, and most of the registry.
+
+    Not a synonym for optional, and the legend says so: ``serial_console`` is unchecked and its
+    ``VIRTIO_PCI`` clause is boot-fatal. It states what kdive does, not what the omission costs -
+    that varies per feature and lives in the summary.
+    """
 
 
 # The served legend. Sentences, not labels: the defect ADR-0546 closes is a flag with no
@@ -102,8 +107,10 @@ ENFORCEMENT_LEGEND: Final[dict[Enforcement, str]] = {
         "decision to make before you build, not one you can revisit afterwards."
     ),
     Enforcement.UNCHECKED: (
-        "No kdive check reads this entry's requirements at any point. Omitting it costs you the "
-        "feature itself and nothing else kdive can observe; the summary says what that is."
+        "No kdive check reads this entry's requirements at any point, so nothing here is "
+        "verified before your build or after it. That is not the same as optional: what "
+        "omitting these symbols costs varies by feature and is stated in the summary, which "
+        "ranges from losing only the feature to a guest that never boots. Read it."
     ),
 }
 
