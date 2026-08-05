@@ -174,6 +174,14 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         #   PPC_PMAC (arch/powerpc/platforms/powermac/Kconfig:2) itself `depends on PPC_BOOK3S &&
         #   CPU_BIG_ENDIAN` - so no *little-endian* powerpc kernel can set it at any machine type,
         #   which is stronger than "not on the pseries kdive boots" and holds for all of ppc64le.
+        #   That PPC_PMAC line is unchanged back to v4.18, the oldest kernel in the rootfs catalog
+        #   (rocky-kdive-ready-8), so this relief does not drift across the supported range - which
+        #   matters more than usual because it is a relief: were it wrong, a ppc64le kernel that
+        #   could set the symbol would be armed and capture nothing.
+        #
+        #   Note this arm is NOT x86-specific in the kernel - ARM64, RISCV and SPARC all offer the
+        #   symbol. `_X86_ONLY` is correct only because kdive provisions exactly {x86_64, ppc64le};
+        #   a third arch must re-read this, which the guard in tests/kernel_config/ forces.
         #
         #   RANDOMIZE_BASE exists under arch/powerpc (:688) but `depends on PPC_85xx && FLATMEM`,
         #   a 32-bit e500 platform, so it is likewise unreachable on ppc64le. Advertised only, so

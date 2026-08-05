@@ -137,6 +137,17 @@ async def crash_capture_refusal(
     clause, and a scoped clause the checks cannot place is *skipped*, so a call that omitted the
     arch would turn this refusal into a silent pass. A type error at the call site is the intended
     outcome for a seam that cannot resolve one.
+
+    **The System's arch, not the build's, and the two can differ.** The config being checked came
+    from the *build*, whose own arch is ``run.build_profile["arch"]`` (ADR-0343) — and ``runs.bind``
+    enforces a resource-kind match, not an arch match, so nothing forbids binding a ppc64le build
+    to an x86_64 System. The System's arch is still the better source: ADR-0343 makes
+    ``build_profile.arch`` optional with a **default of x86_64**, so a ppc64le Run created from a
+    v1 build document would silently claim x86_64 and be refused over ``FW_CFG_SYSFS`` — the very
+    defect #1875 fixes — whereas a System's profile arch is always explicit and is validated at
+    admission against the arches its bound Resource advertises. The residual cost is that a
+    *mismatched* build/System pair gets the wrong arch's verdict here; such a pair cannot boot at
+    all, so its gate verdict is not its real problem.
     """
     config = await load_effective_config(conn, run_id)
     if config is None:
