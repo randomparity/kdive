@@ -116,15 +116,15 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "dependencies are unmet, so the config you wrote and the config you got can differ, and "
         "this readback settles that from inside a booted guest without depending on the installer "
         "having left a /boot/config-<version> behind. Skip it when you kept the .config and "
-        "uploaded it as the build's effective_config - kdive checks that "
-        "uploaded copy, never this one, so the readback serves you and your in-guest tools rather "
-        "than kdive's own advisories. The cost is close to nothing: a gzipped copy of the .config "
-        "in the kernel's read-only data (tens of kilobytes) and no runtime cost at all. Build "
-        "IKCONFIG in rather than as a module, or /proc/config.gz appears only while that module "
-        "is loaded; IKCONFIG_PROC is what creates the file.",
-        # init/Kconfig:767 IKCONFIG is a tristate whose data is .incbin-ed as kernel/config_data.gz
-        # into .rodata (kernel/configs.c:23-32); :779 IKCONFIG_PROC "depends on IKCONFIG && PROC_FS"
-        # and is the half that creates /proc/config.gz.
+        "uploaded it as the build's effective_config - kdive checks that uploaded copy, never "
+        "this one, so the readback serves you and your in-guest tools rather than kdive's own "
+        "advisories. The cost is close to nothing: a gzipped copy of the .config in the kernel's "
+        "read-only data (tens of kilobytes) and no runtime cost at all. Build IKCONFIG in rather "
+        "than as a module, or /proc/config.gz appears only while that module is loaded; "
+        "IKCONFIG_PROC is what creates the file.",
+        # init/Kconfig:767 IKCONFIG is a tristate (:768) whose data is .incbin-ed as
+        # kernel/config_data.gz into .rodata (kernel/configs.c:23-32); :779 IKCONFIG_PROC is the
+        # half that creates /proc/config.gz, "depends on IKCONFIG && PROC_FS" at :781.
         _plain("IKCONFIG", "IKCONFIG_PROC"),
     ),
     FeatureRequirement(
@@ -153,16 +153,16 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "refusal lands at the far end - diagnostic_sysrq fails with a configuration error naming "
         "the symbol rather than returning an empty capture, and recovering costs a rebuild, a "
         "reinstall and a reboot. The gated flag on this entry marks that late refusal, not an "
-        "upload-time check: kdive's config gate covers crash capture and the root filesystem "
-        "only, so a clean build upload tells you nothing about SysRq. kdive injects the "
-        "Alt+SysRq chord through the guest's input "
-        "layer, so an x86 guest also needs a PS/2 keyboard driver (i8042/atkbd) for the keystroke "
-        "to arrive, and the guest's kernel.sysrq sysctl decides separately which of these "
-        "commands it permits once the kernel carries the feature at all. Cost is the SysRq "
-        "handler code in kernel text and nothing at runtime until a key is sent, so skip it only "
-        "if you are certain you will never need to question a wedged guest.",
-        # lib/Kconfig.debug:665 MAGIC_SYSRQ is a bool "depends on !UML" - no module form, so it is
-        # settable only at build time; :679 MAGIC_SYSRQ_DEFAULT_ENABLE (hex, default 0x1) and the
+        "upload-time check: kdive's config checks cover crash capture, the root filesystem and "
+        "debuginfo only, so a clean build upload tells you nothing about SysRq. kdive injects the "
+        "Alt+SysRq chord through the guest's input layer, so an x86 guest also needs a PS/2 "
+        "keyboard driver (i8042/atkbd) for the keystroke to arrive, and the guest's kernel.sysrq "
+        "sysctl decides separately which of these commands it permits once the kernel carries the "
+        "feature at all. Cost is the SysRq handler code in kernel text and nothing at runtime "
+        "until a key is sent, so skip it only if you are certain you will never need to question "
+        "a wedged guest.",
+        # lib/Kconfig.debug:665 MAGIC_SYSRQ is a bool (:666), "depends on !UML" (:667) - no module
+        # form, so it is settable only at build time; :679 MAGIC_SYSRQ_DEFAULT_ENABLE and the
         # guest's kernel.sysrq sysctl are the separate runtime mask, which is why a MAGIC_SYSRQ=y
         # kernel can still refuse an individual command. gate_required below is *not* read by
         # gate.py (it loads CRASH_CAPTURE and ROOTFS_MOUNT only) - sysrq is enforced by the
@@ -323,21 +323,22 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "serial_console",
         "The serial console is the only channel kdive has for kernel output from a guest with no "
         "working SSH: boot progress, the readiness marker, oops and panic output, and every SysRq "
-        "capture arrive on it. Build the one your arch uses - kdive boots its libvirt domains with "
-        "console=ttyS0 on x86, which SERIAL_8250_CONSOLE drives, while a ppc64le pseries guest "
-        "consoles on hvc0 and needs HVC_CONSOLE instead, where SERIAL_8250_CONSOLE does nothing. "
-        "VIRTIO_PCI is the transport half and the boot-fatal one: the root disk and NIC are PCI "
-        "virtio devices, so without it the VIRTIO_BLK driver from the rootfs_mount set never binds "
-        "and the guest panics on an unmountable root before any console setting matters. Build it "
-        "in (=y) rather than as a module: a direct-kernel boot has no initramfs to load that "
-        "module from before root is mounted (a guest that boots through its own bootloader and "
-        "builds an initramfs with dracut is not affected). Nothing below is checked on your "
-        "behalf - kdive's config advisories cover crash capture, the root filesystem and "
-        "debuginfo, so neither of these two symbols draws a warning at any value, and this "
-        "summary is the whole of the notice you get. There is no reason to skip the console for "
-        "your arch or the transport, and nothing to weigh against them: both cost kernel text and "
-        "no measurable runtime. SERIAL_8250_CONSOLE additionally needs SERIAL_8250 itself built "
-        "in - it is not offered against a modular 8250.",
+        "capture arrive on it. Build the one your arch uses - kdive boots its libvirt domains "
+        "with console=ttyS0 on x86, which SERIAL_8250_CONSOLE drives, while a ppc64le pseries "
+        "guest consoles on hvc0 and needs HVC_CONSOLE instead, where SERIAL_8250_CONSOLE does "
+        "nothing. VIRTIO_PCI is the transport half and the boot-fatal one: the root disk and NIC "
+        "are PCI virtio devices, so without it the VIRTIO_BLK driver from the rootfs_mount set "
+        "never binds and the guest panics on an unmountable root before any console setting "
+        "matters. Build it in (=y) rather than as a module: unless your build uploads an initrd "
+        "artifact, the direct-kernel boot has no initramfs to load that module from before root "
+        "is mounted (a guest that boots through its own bootloader and builds an initramfs with "
+        "dracut is not affected either way). Nothing below is checked on your behalf - kdive's "
+        "config checks cover crash capture, the root filesystem and debuginfo, so neither of "
+        "these two symbols draws a warning at any value, and this summary is the whole of the "
+        "notice you get. There is no reason to skip the console for your arch or the transport, "
+        "and nothing to weigh against them: both cost kernel text and no measurable runtime. "
+        "SERIAL_8250_CONSOLE additionally needs SERIAL_8250 itself built in - it is not offered "
+        "against a modular 8250.",
         # drivers/tty/serial/8250/Kconfig:70 SERIAL_8250_CONSOLE is a bool whose :72 "depends on
         # SERIAL_8250=y" is why the modular 8250 note is a real constraint; drivers/tty/hvc/
         # Kconfig:14 HVC_CONSOLE is the pseries console, "depends on PPC_PSERIES" at :16.
