@@ -503,6 +503,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tighten the settable-symbol rule and the initrd seam
 - Scope the invariants honestly and record the residuals
 - Say =m does not satisfy the boot-config check
+- Document the staged-landing citation convention
 
 ### Fixed
 
