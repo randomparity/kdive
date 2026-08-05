@@ -849,6 +849,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the install boot, pin the sibling carve-out
 - Stop telling agents to build CONFIG_VMCORE_INFO
 - Qualify the selected-symbol note and bound the guard's allowlist
+- Stop refusing crash capture on derived symbols
+- Name the pre-6.9 kernel the old refusal got wrong
 
 ### Build
 
