@@ -41,10 +41,17 @@ and only two of them need the type to carry anything new.
 
 ### 1. Every clause member is a settable symbol; the prerequisite gets its own clause
 
-A clause may name only symbols an agent can write into a fragment and see survive
-`olddefconfig`. A prompt-less or auto-`select`ed symbol is never a clause member, in `advertised`
-or in `gate_required`. Where such a symbol is the real requirement, the clause that names its
-settable selector or dependency stands in its place, AND-ed alongside the others.
+The rule has two halves, because "the agent cannot set this" has two causes:
+
+- A symbol that is unsettable **in principle** — prompt-less, or existing only because something
+  else `select`s it — is never a clause member, in `advertised` or in `gate_required`. The clause
+  naming its settable selector stands in its place.
+- A symbol that is settable **once a prerequisite holds** stays a clause member, and the
+  prerequisite becomes its own clause, AND-ed alongside it in the same feature.
+
+The second half is what keeps `SERIAL_8250_CONSOLE` and `DEBUG_INFO_BTF` — both real prompts that
+`olddefconfig` drops on an unprepared config — as the symbols the registry names, rather than
+hiding them behind whatever satisfies them.
 
 This settles #1854 without adding a field. `crash_capture.gate_required` drops `{KEXEC_CORE}` and
 `{VMCORE_INFO}`; the sibling clauses `{KEXEC, KEXEC_FILE}` and `{CRASH_DUMP}` already sit in the
@@ -56,9 +63,9 @@ boundary exists to avoid. The refusal for a kernel that genuinely cannot kexec i
 now names only symbols a fragment can set, which makes ADR-0330's existing remediation sentence
 true rather than requiring a new one.
 
-The same rule applies to `bpf_tracing`, whose `{DEBUG_INFO_BTF}` clause is unreachable from a bare
-config for the reason #1855 gives: BTF is inside `if DEBUG_INFO` and selects nothing. It gains an
-AND-ed prerequisite clause naming the DWARF choice members, so the advertised set says "pick a
+The second half applies to `bpf_tracing`, whose `{DEBUG_INFO_BTF}` clause is unreachable from a
+bare config for the reason #1855 gives: BTF is inside `if DEBUG_INFO` and selects nothing. It gains
+an AND-ed prerequisite clause naming the DWARF choice members, so the advertised set says "pick a
 DWARF member, then BTF" rather than offering a symbol that will be dropped.
 
 ### 2. A clause carries a built-in requirement; the initrd carve-out is evaluated at the seam
@@ -66,7 +73,10 @@ DWARF member, then BTF" rather than offering a symbol that will be dropped.
 `KernelConfig` starts recording the value it parsed: `enabled` keeps its present meaning (`=y` or
 `=m`) so no existing reader changes, and a `builtin` set holds the `=y` subset, with
 `builtin <= enabled` asserted at construction. `parse.py` populates both from the one regex it
-already has.
+already has. Every fixture that builds a `KernelConfig` by hand sets both sets through a helper:
+a `builtin` field that defaults to empty silently reinterprets each existing positional fixture
+(`KernelConfig(frozenset({...}))`) as a wholly modular kernel, which would fail an `UNLESS_INITRD`
+clause for a reason the test never intended.
 
 A clause carries a three-valued built-in requirement, because the two reasons a symbol must be
 `=y` are not the same reason and do not relax under the same condition:
@@ -78,10 +88,14 @@ A clause carries a three-valued built-in requirement, because the two reasons a 
 | `UNLESS_INITRD` | `=y` unless the build uploaded an initrd artifact | `EXT4_FS`/`XFS_FS`, `VIRTIO_BLK`, `VIRTIO_PCI` — nothing loads a module before root is mounted |
 
 The carve-out is a fact about the build, not about the clause, so the clause states the condition
-and the seam supplies the answer. The support checks take a keyword `has_initrd: bool = False`;
-`rootfs_mount_warning` passes `installed_initrd_ref(conn, run_id) is not None`
-(`services/runs/steps.py`). The default is the strict reading, so a caller that forgets over-warns
-rather than falling silent — the direction ADR-0330 already chose for this warning.
+and the seam supplies the answer. The support checks take a keyword `has_initrd: bool = False`, and
+so does `rootfs_mount_warning`: its caller `_success_envelope`
+(`mcp/tools/lifecycle/runs/complete_build.py`) already holds the finalized `BuildStepResult` and
+passes `result.initrd_ref is not None`. It does not re-read the row through
+`installed_initrd_ref` — the value is in hand, and a second read would make the warning depend on
+the build-step row being visible on that connection at that moment. The default is the strict
+reading, so a caller that forgets over-warns rather than falling silent — the direction ADR-0330
+already chose for this warning.
 
 ### 3. A clause carries an arch scope; `FeatureRequirement` gains no arch axis
 
@@ -116,9 +130,11 @@ advice on a `DEBUG_INFO=n` kernel, so it must name a DWARF choice member too.
 ### 5. The refusal/warning payload keeps its shape and gains one optional key
 
 `{reason, missing, remediation}` stands. `missing` remains the flat sorted union of the symbols of
-every unmet clause, which under rule 1 is now always actionable. When a clause is unmet because its
-member is present but modular, the payload adds `built_in_required: [symbols]`; the key is absent
-when empty, so a client keying on the ADR-0330 shape is unaffected. This amends ADR-0330 rather
+every unmet clause, which under rule 1 is now always actionable — a symbol that is enabled but
+modular is in it, because its clause is unmet. `built_in_required` is the subset of `missing` that
+the config enables as `=m`, so the agent can tell "you do not have this" from "you have this in a
+form that cannot load in time". The key is absent when that subset is empty, so a client keying on
+the ADR-0330 shape is unaffected. This amends ADR-0330 rather
 than superseding it: without the key, `missing` naming `VIRTIO_BLK` against a config containing
 `CONFIG_VIRTIO_BLK=m` reads as a kdive bug to the agent holding that config.
 
@@ -132,7 +148,10 @@ optional key later does not bump it again.
 
 ### 7. Two invariants, pinned by tests
 
-- **I1** — no clause member is a prompt-less or auto-selected symbol. Enforced by a deny-list test
+- **I1** — no clause member is unsettable in principle, the first half of rule 1. It says nothing
+  about a symbol that is settable behind a prerequisite: `SERIAL_8250_CONSOLE` and
+  `DEBUG_INFO_BTF` are clause members by design and are not deny-list candidates. Enforced by a
+  deny-list test
   over every clause of every feature, seeded with the symbols the registry's own comments already
   name as unsettable: `KEXEC_CORE`, `VMCORE_INFO`, `DEBUG_INFO`, `BPF_EVENTS`, `TRACING`,
   `DYNAMIC_FTRACE`. The list grows as symbols are verified against Kconfig; it is not a claim that
@@ -167,9 +186,9 @@ and I2 last.
   and `tests/mcp/lifecycle/test_vmcore_tools.py` builds its refusal scenario by removing exactly
   `KEXEC_CORE` from an otherwise complete config — under this decision that config is satisfied and
   the scenario has to drop a settable symbol instead.
-- **`rootfs_mount_warning` gains a second DB read** for the Run's `initrd_ref`, on the path that
-  already reads the config object. A Run with no initrd is the common case and the strict default
-  is what it gets.
+- **`rootfs_mount_warning` gains a parameter, not a query.** The initrd fact reaches it from the
+  `BuildStepResult` its caller already holds, so the carve-out costs no extra read and no new
+  visibility assumption. A seam that ever calls it without that value gets the strict default.
 - **A modular boot symbol starts warning where it was silent.** An agent who uploaded
   `CONFIG_VIRTIO_BLK=m` with no initrd and completed a build cleanly will now get
   `kernel_missing_boot_config`. That is the point of #1860; it is a warning, and the completion
@@ -196,6 +215,12 @@ and I2 last.
   fitting the existing model. Rejected on both directions of error: an x86 kernel carrying only
   `HVC_CONSOLE` reads as satisfied, and the `SERIAL_8250` prerequisite cannot be added at all
   without handing ppc64le a requirement that does not exist there.
+- **No arch representation at all** — correct `serial_console`'s clause content and leave the arch
+  split to the summary prose, which #1851 already wrote. The cheapest option, and tempting because
+  the field's only user is advertise-only: no seam reads `serial_console`, so `arches` changes no
+  behaviour today. Rejected because it reproduces the defect #1859 files — the machine-readable
+  array is what an agent diffs its config against, and prose it does not parse is not a fix — and
+  because a clause tag is what stops a later seam faulting a ppc64le kernel for `SERIAL_8250`.
 - **An arch axis on `FeatureRequirement`.** Rejected: one clause of one feature varies, and the
   manifest is a static document with no request context, so a feature-level axis doubles what every
   agent reads in order to vary one line.
