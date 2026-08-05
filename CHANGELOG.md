@@ -859,6 +859,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fault a boot symbol the kernel only has as a module
 - Name =y in the boot remediation, scope the doc claim
 - Date 0544's Accepted status for the records gate
+- Strip ANSI from chart-version-check's uv read
 
 ### Build
 
