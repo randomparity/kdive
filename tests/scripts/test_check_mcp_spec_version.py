@@ -242,12 +242,12 @@ def test_mcp_spec_drift_workflow_dedups_on_the_revision_not_the_title() -> None:
 def test_mcp_spec_drift_dedup_search_carries_no_label_conjunct() -> None:
     """`gh` ANDs `--label` into the query, which hides human-filed issues.
 
-    Issue #1485 carries no `area:mcp-api` label, and on this workflow's first run it was open
-    and titled "Investigate MCP 2026-07-28 Spec Update Requirements" — exactly the revision
-    the workflow reported. A label-filtered search returns nothing for it, so the first run
-    would have duplicated it. It has since been retitled to 2026-06-18 and closed, which does
-    not change what the first run would have done. The labels still go on `gh issue create`;
-    they must not go on the search.
+    Issue #1485 carries no `area:mcp-api` label, and on this workflow's first run its title
+    still carried the revision the workflow reported. The title-only search matched it and
+    the run stayed quiet; a label-filtered search would have matched nothing and filed. #1485
+    has since been closed, then corrected to a different revision, which does not change what
+    the first run's search did. The labels still go on `gh issue create`; they must not go on
+    the search.
     """
     filing = next(step for step in _drift_steps() if "gh issue create" in step.get("run", ""))
     search = filing["run"].split("gh issue list", 1)[1].split("--jq", 1)[0]
