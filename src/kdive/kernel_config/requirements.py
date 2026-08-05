@@ -152,10 +152,9 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "a plain bool with no module form that cannot be turned on after the build, and the "
         "refusal lands at the far end - diagnostic_sysrq fails with a configuration error naming "
         "the symbol rather than returning an empty capture, and recovering costs a rebuild, a "
-        "reinstall and a reboot. The gated flag on this entry marks that late refusal, not an "
-        "upload-time check: kdive's config checks cover crash capture, the root filesystem and "
-        "debuginfo only, so a clean build upload tells you nothing about SysRq. kdive injects the "
-        "Alt+SysRq chord through the guest's input layer, so an x86 guest also needs a PS/2 "
+        "reinstall and a reboot. kdive's config checks cover crash capture, the root filesystem "
+        "and debuginfo only, so a clean build upload tells you nothing about SysRq. kdive injects "
+        "the Alt+SysRq chord through the guest's input layer, so an x86 guest also needs a PS/2 "
         "keyboard driver (i8042/atkbd) for the keystroke to arrive, and the guest's kernel.sysrq "
         "sysctl decides separately which of these commands it permits once the kernel carries the "
         "feature at all. Cost is the SysRq handler code in kernel text and nothing at runtime "
@@ -164,12 +163,10 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         # lib/Kconfig.debug:665 MAGIC_SYSRQ is a bool (:666), "depends on !UML" (:667) - no module
         # form, so it is settable only at build time; :679 MAGIC_SYSRQ_DEFAULT_ENABLE and the
         # guest's kernel.sysrq sysctl are the separate runtime mask, which is why a MAGIC_SYSRQ=y
-        # kernel can still refuse an individual command. gate_required below is *not* read by
-        # gate.py (it loads CRASH_CAPTURE and ROOTFS_MOUNT only) - sysrq is enforced by the
-        # runtime detection in the diagnostic_sysrq handler, so the summary must not promise a
-        # config-time refusal the upload path never performs.
+        # kernel can still refuse an individual command. Advertise-only per ADR-0318: sysrq is
+        # enforced by the runtime detection in the diagnostic_sysrq handler, so a refusal set
+        # here would be read by nothing while shipping gated: true in the manifest (#1861).
         _plain("MAGIC_SYSRQ"),
-        gate_required=(frozenset({"MAGIC_SYSRQ"}),),
     ),
     FeatureRequirement(
         "kasan",
