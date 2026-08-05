@@ -111,7 +111,19 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
     ),
     FeatureRequirement(
         "ikconfig",
-        "Read the running kernel's own config back via /proc/config.gz.",
+        "Recover the .config a running guest kernel was built from, by reading /proc/config.gz "
+        "inside the guest. The reason to want it: olddefconfig silently drops any symbol whose "
+        "dependencies are unmet, so the config you wrote and the config you got can differ, and "
+        "this readback is the only way to settle that from inside a booted guest. Skip it when "
+        "you kept the .config and uploaded it as the build's effective_config - kdive checks that "
+        "uploaded copy, never this one, so the readback serves you and your in-guest tools rather "
+        "than kdive's own advisories. The cost is close to nothing: a gzipped copy of the .config "
+        "in the kernel's read-only data (tens of kilobytes) and no runtime cost at all. Build "
+        "IKCONFIG in rather than as a module, or /proc/config.gz appears only while that module "
+        "is loaded; IKCONFIG_PROC is what creates the file.",
+        # init/Kconfig:767 IKCONFIG is a tristate whose data is .incbin-ed as kernel/config_data.gz
+        # into .rodata (kernel/configs.c:23-32); :779 IKCONFIG_PROC "depends on IKCONFIG && PROC_FS"
+        # and is the half that creates /proc/config.gz.
         _plain("IKCONFIG", "IKCONFIG_PROC"),
     ),
     FeatureRequirement(
@@ -132,7 +144,22 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
     ),
     FeatureRequirement(
         SYSRQ,
-        "Inject magic SysRq diagnostics from the host.",
+        "Trigger magic SysRq diagnostics in the guest from the host - a task dump (t), the "
+        "blocked-task list (w), a memory report (m), per-CPU backtraces (l) - which is how you "
+        "get state out of a guest that has wedged and no longer answers over SSH. kdive gates "
+        "this feature: MAGIC_SYSRQ is a plain bool with no module form and no runtime switch, so "
+        "a kernel built without it cannot gain SysRq later, and diagnostic_sysrq fails with a "
+        "configuration error naming the symbol instead of returning an empty capture - recovering "
+        "costs a rebuild and a reinstall, which is why this is a decision to make now. kdive "
+        "injects the Alt+SysRq chord through the guest's input layer, so the guest also needs a "
+        "PS/2 keyboard driver (i8042/atkbd) for the keystroke to arrive, and the guest's "
+        "kernel.sysrq sysctl still decides at runtime which commands it permits. Cost is the "
+        "SysRq handler code in kernel text and nothing at runtime until a key is sent, so skip it "
+        "only if you are certain you will never need to question a wedged guest.",
+        # lib/Kconfig.debug:665 MAGIC_SYSRQ is a bool "depends on !UML" - no module form, so it is
+        # settable only at build time; :679 MAGIC_SYSRQ_DEFAULT_ENABLE (hex, default 0x1) and the
+        # guest's kernel.sysrq sysctl are the separate runtime mask, which is why a MAGIC_SYSRQ=y
+        # kernel can still refuse an individual command.
         _plain("MAGIC_SYSRQ"),
         gate_required=(frozenset({"MAGIC_SYSRQ"}),),
     ),
@@ -286,7 +313,20 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
     ),
     FeatureRequirement(
         "serial_console",
-        "Serial console + virtio devices the local-libvirt profile expects.",
+        "The serial console is the only channel kdive has to a guest with no working SSH: boot "
+        "progress, the readiness marker, oops and panic output, and every SysRq capture arrive on "
+        "it. kdive boots its libvirt domains with console=ttyS0 on x86, which SERIAL_8250_CONSOLE "
+        "drives; a ppc64le pseries guest consoles on hvc0 instead and needs HVC_CONSOLE, where "
+        "SERIAL_8250_CONSOLE does nothing. VIRTIO_PCI is the transport half: the root disk and NIC "
+        "are PCI virtio devices, so without it the VIRTIO_BLK driver from the rootfs_mount set "
+        "never binds and the guest panics on an unmountable root before any console setting "
+        "matters. There is no reason to skip this on a guest kdive boots, and nothing to weigh "
+        "against it: both symbols cost kernel text and no measurable runtime. SERIAL_8250_CONSOLE "
+        "additionally needs SERIAL_8250 built in (=y) - it is not offered against a modular 8250.",
+        # drivers/tty/serial/8250/Kconfig:70 SERIAL_8250_CONSOLE is a bool "depends on
+        # SERIAL_8250=y"; drivers/tty/hvc/Kconfig:14 HVC_CONSOLE is the pseries console and
+        # "depends on PPC_PSERIES". drivers/virtio/Kconfig:50 VIRTIO_PCI "depends on PCI" and is
+        # the transport the rootfs_mount VIRTIO_BLK disk binds through on q35 and pseries alike.
         _plain("SERIAL_8250_CONSOLE", "VIRTIO_PCI"),
     ),
 )

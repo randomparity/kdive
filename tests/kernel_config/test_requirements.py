@@ -77,6 +77,79 @@ def test_debuginfo_summary_names_use_case_and_cost():
     assert "omit" in summary
 
 
+def test_ikconfig_summary_names_the_readback_use_case_the_skip_case_and_that_it_is_cheap():
+    # #1851: the entry read "Read the running kernel's own config back via /proc/config.gz." -
+    # the mechanism and nothing else. An agent had no basis to include or omit it, so the
+    # summary must name why you would want the readback (olddefconfig silently drops a symbol
+    # whose dependencies are unmet, so what you set and what you got can differ), when it is
+    # redundant (you kept the .config and uploaded it as effective_config), and that the price
+    # is a gzipped blob in .rodata rather than anything at runtime. init/Kconfig:767 IKCONFIG is
+    # a tristate, so the built-in-versus-module note is a real choice the agent has to make.
+    summary = feature_requirement("ikconfig").summary.lower()
+    # what it enables
+    assert "/proc/config.gz" in summary
+    assert "olddefconfig" in summary
+    # when to skip
+    assert "effective_config" in summary
+    assert "skip" in summary
+    # what it costs, and that the cost is close to nothing
+    assert "no runtime cost" in summary
+    assert "kilobytes" in summary
+    # tristate: a module gives you the file only while it is loaded
+    assert "module" in summary
+
+
+def test_sysrq_summary_names_the_use_case_the_refusal_and_that_it_is_build_time_only():
+    # #1851: the entry read "Inject magic SysRq diagnostics from the host." - it never said the
+    # feature is gated, so an agent that omitted MAGIC_SYSRQ met the refusal at the diagnostic
+    # instead of at config time. lib/Kconfig.debug:665 makes MAGIC_SYSRQ a plain bool (no module
+    # form, no runtime switch), which is exactly why omitting it is unrecoverable without a
+    # rebuild - the summary has to say so before the agent commits to a config.
+    summary = feature_requirement(SYSRQ).summary.lower()
+    # what it enables: the diagnostics kdive actually exposes, on a guest that stopped answering
+    assert "wedged" in summary or "no longer answer" in summary
+    assert "task dump" in summary
+    # the refusal, named at the seam that raises it
+    assert "magic_sysrq" in summary
+    assert "diagnostic_sysrq" in summary
+    assert "configuration error" in summary
+    # unrecoverable without a rebuild: a bool, so there is no module and no runtime switch
+    assert "rebuild" in summary
+    # the second, runtime half an agent otherwise rediscovers the hard way
+    assert "kernel.sysrq" in summary
+    # what it costs, and that the cost is close to nothing
+    assert "kernel text" in summary
+    assert "nothing at runtime" in summary
+    # when to skip
+    assert "skip" in summary
+
+
+def test_serial_console_summary_names_what_breaks_without_it_and_that_it_is_cheap():
+    # #1851: the entry read "Serial console + virtio devices the local-libvirt profile expects."
+    # - it named a profile, not a consequence. The console is the only channel kdive has to a
+    # guest with no working SSH, and VIRTIO_PCI is the transport the rootfs_mount virtio-blk
+    # disk binds through, so omitting these does not degrade an investigation, it ends one
+    # before boot. drivers/tty/serial/8250/Kconfig:72 "depends on SERIAL_8250=y" makes the
+    # built-in requirement real, and drivers/tty/hvc/Kconfig:14 HVC_CONSOLE is the ppc64le
+    # answer - SERIAL_8250_CONSOLE does nothing on a pseries guest, whose console is hvc0.
+    summary = feature_requirement("serial_console").summary.lower()
+    # what it enables
+    assert "panic" in summary
+    assert "ttys0" in summary
+    # the arch split: the advertised 8250 symbol is the x86 answer only
+    assert "hvc0" in summary
+    assert "hvc_console" in summary
+    # the boot-fatal half: VIRTIO_PCI is how the virtio-blk root disk is reached
+    assert "virtio_pci" in summary
+    assert "rootfs_mount" in summary
+    # when to skip: never, on a guest kdive boots - and the summary must say so outright
+    assert "no reason to skip" in summary
+    # what it costs, and that the cost is close to nothing
+    assert "kernel text" in summary
+    # SERIAL_8250 must be built in, not a module
+    assert "=y" in feature_requirement("serial_console").summary
+
+
 def test_unknown_feature_raises():
     import pytest
 
