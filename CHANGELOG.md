@@ -874,6 +874,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Relieve UNLESS_INITRD on the in-guest initramfs lane
 - Sweep colour-safe pyproject-version reads (#1886)
 - Correct the stale doc and record claims found in review
+- Scope crash_capture to the arch its symbols exist on
+- Keep an unparsable profile a typed failure at the crash gate
 
 ### Build
 
