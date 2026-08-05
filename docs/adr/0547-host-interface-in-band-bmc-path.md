@@ -104,14 +104,24 @@ does not decide it.
 [ADR-0091](0091-doctor-diagnostics-model.md)'s vocabulary deliberately, because that record is
 Accepted and its verdict is three-state — `pass`, `fail`, `error` (`CheckStatus`,
 `src/kdive/diagnostics/checks.py:36-41`) — with no warning member, and `CheckResult.__post_init__`
-raises `ValueError` when a non-`fail` result carries a `fix` (`checks.py:88-92`). A clause here
+raises `ValueError` when a non-`fail` result carries a `fix` (`checks.py:89-93`). A clause here
 asking for a warning that names a remedy would ask for something that cannot be constructed, and
 would amend an Accepted sibling from inside an unrelated record. `error` is not the substitute
 either: it means the check could not reach a verdict, and it drives a nonzero exit, so it gates
 the CI-style caller this decision declines to gate.
 
-So: verdict `pass`, the posture in `CheckResult.data` (a `Mapping[str, str]`, so the mode list is
-rendered as a string), and the remedy in `detail` rather than in `fix`. The posture is one of five
+So: verdict `pass`, with the posture and its remedy stated in `detail` — which is what an operator
+actually sees, because `kdivectl doctor` renders a fixed column set that does not include `data`
+(`_COLUMNS`, `src/kdive/cli/commands/doctor.py:29`, applied at `:80`) — and repeated in
+`CheckResult.data` for machine readers, which `ops.diagnostics` serializes into the envelope
+(`src/kdive/mcp/tools/ops/diagnostics.py:202`). `data` is a `Mapping[str, str]`, so the mode list
+is rendered there as a string. Putting the posture only in `data` would satisfy this record's
+letter and defeat its premise: the acceptance is the operator's to make against a value KDIVE
+read, and a value absent from the operator's own surface is not one they can make it against.
+`detail` on `pass` is documented as "a short confirmation" (`checks.py:58-59`), so it is phrased
+as a confirmation naming what was read, not as a bare remedy string.
+
+The posture is one of five
 values. Four come from reading `InterfaceEnabled` and `AuthenticationModes` on each Host
 Interface, never assuming either: `disabled`, `authenticated`, `unauthenticated`, and
 `not_reported` when the resource is absent or unreadable. **`not_reported` is recorded as itself,
@@ -161,11 +171,13 @@ nothing from a `CredentialBootstrapping` object is read into it.
 
 - The BYO environment contract gains a term an operator has to answer, and `doctor` gains a check
   that reports which answer the machine reflects. Neither refuses a host.
-- #1824 owes the `doctor` check: read-only, an ADR-0091 `pass` verdict carrying the five values
-  above in `data` and the remedy in `detail`, `not_reported` never flattened into `disabled` or
-  `authenticated`, `AuthenticationModes` read rather than assumed, and `not_applicable` on the HMC
-  driver. It is already `status:blocked` behind #1823's precondition module, and this adds to its
-  scope rather than unblocking it. ADR-0091's `CheckStatus` is unchanged by this record.
+- #1824 owes the `doctor` check: read-only, an ADR-0091 `pass` verdict stating the posture and its
+  remedy in `detail` and repeating the posture in `data`, `not_reported` never flattened into
+  `disabled` or `authenticated`, `AuthenticationModes` read rather than assumed, and
+  `not_applicable` on the HMC driver. It is already `status:blocked` behind #1823's precondition
+  module, and this adds to its scope rather than unblocking it. ADR-0091's `CheckStatus` is
+  unchanged by this record, and `doctor`'s `_COLUMNS` needs no change either — `detail` is already
+  rendered.
 - #1823 owes the `byo_adopt_facts` key, written by the same read at adopt.
 - ADR-0539's port carries one more operation on the Redfish driver, and the IPMI and HMC drivers
   carry none. A driver that cannot answer the question reports that it cannot; it is not a
