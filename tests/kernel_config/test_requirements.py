@@ -99,21 +99,28 @@ def test_ikconfig_summary_names_the_readback_use_case_the_skip_case_and_that_it_
     assert "module" in summary
 
 
-def test_sysrq_summary_names_the_use_case_the_refusal_and_that_it_is_build_time_only():
-    # #1851: the entry read "Inject magic SysRq diagnostics from the host." - it never said the
-    # feature is gated, so an agent that omitted MAGIC_SYSRQ met the refusal at the diagnostic
-    # instead of at config time. lib/Kconfig.debug:665 makes MAGIC_SYSRQ a plain bool (no module
-    # form, no runtime switch), which is exactly why omitting it is unrecoverable without a
-    # rebuild - the summary has to say so before the agent commits to a config.
+def test_sysrq_summary_names_the_use_case_the_late_refusal_and_that_it_is_build_time_only():
+    # #1851: the entry read "Inject magic SysRq diagnostics from the host." - it never said that
+    # omitting MAGIC_SYSRQ is unrecoverable, so an agent met the refusal at the diagnostic with
+    # no warning. lib/Kconfig.debug:665 makes MAGIC_SYSRQ a plain bool (no module form, nothing
+    # to turn on afterwards), which is why the summary has to say so before the agent commits.
+    #
+    # Where the refusal lands is the load-bearing half and the easiest thing to get wrong.
+    # Despite carrying gate_required, sysrq is *not* pre-gated: gate.py loads CRASH_CAPTURE and
+    # ROOTFS_MOUNT only, and ADR-0318 chose runtime detection on purpose so kdive never refuses
+    # a working sysrq off a stale Run's config. A summary that claimed a config-time gate would
+    # tell an agent a clean upload had cleared it, which is the wasted rebuild #1851 exists to
+    # stop - so the upload-time disclaimer is asserted, not just the seam name.
     summary = feature_requirement(SYSRQ).summary.lower()
     # what it enables: the diagnostics kdive actually exposes, on a guest that stopped answering
     assert "wedged" in summary or "no longer answer" in summary
-    assert "task dump" in summary
-    # the refusal, named at the seam that raises it
+    assert "task states" in summary
+    # the refusal is late, and the summary must say so rather than imply an upload-time check
+    assert "nothing checks this at upload" in summary
     assert "magic_sysrq" in summary
     assert "diagnostic_sysrq" in summary
     assert "configuration error" in summary
-    # unrecoverable without a rebuild: a bool, so there is no module and no runtime switch
+    # unrecoverable in place: a bool, so recovering means another build/install/boot round
     assert "rebuild" in summary
     # the second, runtime half an agent otherwise rediscovers the hard way
     assert "kernel.sysrq" in summary
@@ -124,15 +131,27 @@ def test_sysrq_summary_names_the_use_case_the_refusal_and_that_it_is_build_time_
     assert "skip" in summary
 
 
+def test_sysrq_summary_does_not_promise_a_config_time_gate_the_upload_path_never_performs():
+    # The inverse of the assertion above, because the two fail on different edits: dropping the
+    # disclaimer trips the test above, while *adding* a "kdive gates this" claim beside it would
+    # leave that one green. gate.py reads CRASH_CAPTURE and ROOTFS_MOUNT only, so no wording
+    # here may tell an agent the upload path checks MAGIC_SYSRQ.
+    summary = feature_requirement(SYSRQ).summary.lower()
+    for claim in ("kdive gates this", "gated at upload", "refuses the upload", "the gate refuses"):
+        assert claim not in summary, claim
+
+
 def test_serial_console_summary_names_what_breaks_without_it_and_that_it_is_cheap():
     # #1851: the entry read "Serial console + virtio devices the local-libvirt profile expects."
-    # - it named a profile, not a consequence. The console is the only channel kdive has to a
-    # guest with no working SSH, and VIRTIO_PCI is the transport the rootfs_mount virtio-blk
-    # disk binds through, so omitting these does not degrade an investigation, it ends one
-    # before boot. drivers/tty/serial/8250/Kconfig:72 "depends on SERIAL_8250=y" makes the
-    # built-in requirement real, and drivers/tty/hvc/Kconfig:14 HVC_CONSOLE is the ppc64le
-    # answer - SERIAL_8250_CONSOLE does nothing on a pseries guest, whose console is hvc0.
-    summary = feature_requirement("serial_console").summary.lower()
+    # - it named a profile, not a consequence. The console is the only channel kdive has for
+    # kernel output from a guest with no working SSH, and VIRTIO_PCI is the transport the
+    # rootfs_mount virtio-blk disk binds through, so omitting these does not degrade an
+    # investigation, it ends one before boot. drivers/tty/serial/8250/Kconfig:72 "depends on
+    # SERIAL_8250=y" makes the built-in requirement real, and drivers/tty/hvc/Kconfig:14
+    # HVC_CONSOLE is the ppc64le answer - SERIAL_8250_CONSOLE does nothing on a pseries guest,
+    # whose console is hvc0, so the summary may not present the 8250 symbol as universal.
+    raw = feature_requirement("serial_console").summary
+    summary = raw.lower()
     # what it enables
     assert "panic" in summary
     assert "ttys0" in summary
@@ -142,12 +161,15 @@ def test_serial_console_summary_names_what_breaks_without_it_and_that_it_is_chea
     # the boot-fatal half: VIRTIO_PCI is how the virtio-blk root disk is reached
     assert "virtio_pci" in summary
     assert "rootfs_mount" in summary
+    assert "boot-fatal" in summary
     # when to skip: never, on a guest kdive boots - and the summary must say so outright
     assert "no reason to skip" in summary
     # what it costs, and that the cost is close to nothing
     assert "kernel text" in summary
-    # SERIAL_8250 must be built in, not a module
-    assert "=y" in feature_requirement("serial_console").summary
+    # both symbols are modular-capable in the wrong way: SERIAL_8250_CONSOLE is not offered
+    # against a modular 8250, and a modular VIRTIO_PCI cannot be loaded before root is mounted
+    assert "rather than as a module" in summary
+    assert "=y" in raw
 
 
 def test_unknown_feature_raises():
