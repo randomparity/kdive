@@ -112,11 +112,14 @@ so kdive advertises it and never refuses on it. Missing any one of these fails o
 time, after the crash, when the guest and the evidence are gone; each omission masks the next, so
 build the whole set in at once.
 
-A crash-config refusal can also name `KEXEC_CORE` and `VMCORE_INFO`, bare and without a
-`CONFIG_` prefix. Those two are missing from the list above and from the manifest on purpose:
-both are prompt-less bools that `olddefconfig` drops back out of a fragment. `CONFIG_KEXEC` and
-`CONFIG_KEXEC_FILE` select the first, `CONFIG_CRASH_DUMP` the second, so a config that satisfies
-the symbols above satisfies those two as well — there is nothing separate to add.
+**Whatever the guest family**, a crash-config refusal can also name `KEXEC_CORE` and
+`VMCORE_INFO`, bare and without a `CONFIG_` prefix. Those two are missing from the lists above
+and from the manifest on purpose: both are prompt-less bools that `olddefconfig` drops back out
+of a fragment. On Linux 6.9 and newer, `CONFIG_KEXEC` and `CONFIG_KEXEC_FILE` select the first
+and `CONFIG_CRASH_DUMP` selects the second, so a config that satisfies the crash-capture symbols
+satisfies those two as well and there is nothing separate to add. `VMCORE_INFO` does not exist
+before 6.9 (it was split out of `CRASH_CORE`), so an older kernel cannot satisfy that clause at
+all.
 
 See `resource://kdive/contracts/external-build` for the per-feature `CONFIG_*` manifest.
 
