@@ -166,8 +166,8 @@ def test_blocked_wait_timeout_names_the_waiter_pid_and_its_lock_state(postgres_u
     message = str(raised.value)
     assert "acquisition did not block on the reclaiming generation row" in message
     assert f"waiter pid {waiter_pid}" in message
-    assert "idle in transaction" in message
-    assert "advisory" in message
+    assert "idle in transaction" in message  # only pg_stat_activity reports a backend state
+    assert "ExclusiveLock" in message  # only pg_locks reports a lock mode
 
 
 def test_any_backend_wait_detects_waiter_blocked_by_observer(migrated_url: str) -> None:
