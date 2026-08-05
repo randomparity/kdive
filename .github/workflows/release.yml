@@ -36,7 +36,9 @@ jobs:
 
       - name: Verify tag matches pyproject version
         run: |
-          expected="v$(uv version --short)"
+          # scripts/pyproject-version.sh reads a colour-free version regardless of the caller's
+          # environment (#1883, #1886) — see its header for why.
+          expected="v$(scripts/pyproject-version.sh)"
           if [[ "${GITHUB_REF_NAME}" != "$expected" ]]; then
             echo "::error::tag ${GITHUB_REF_NAME} != pyproject $expected"
             exit 1

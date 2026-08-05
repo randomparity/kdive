@@ -17,7 +17,9 @@ commit="${KDIVE_BUILDINFO_COMMIT:-$(git -C "$repo_root" rev-parse --short=12 HEA
 
 release="${1:-}"
 if [[ -z "$release" ]]; then
-  version="$(cd "$repo_root" && uv version --short)"
+  # scripts/pyproject-version.sh reads a colour-free version regardless of the caller's
+  # environment (#1883, #1886) — see its header for why.
+  version="$("$repo_root/scripts/pyproject-version.sh")"
   exact="$(git -C "$repo_root" describe --tags --exact-match HEAD 2>/dev/null || true)"
   if [[ "$exact" == "v$version" && -z "$(git -C "$repo_root" status --porcelain)" ]]; then
     release="true"
