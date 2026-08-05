@@ -494,6 +494,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve #1485's first-run state in the dedup comment
 - Fix the event order and the stable-key rationale
 - Name the unobserved failure the stable key would cover
+- Give ikconfig, sysrq and serial_console a real summary
 
 ### Fixed
 
@@ -834,6 +835,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drop BPF_EVENTS, widen the derived-symbol guard
 - Stop advertising kernel-derived CONFIG symbols
 - Correct the Kconfig citations and harden the guard
+- Correct where the sysrq refusal lands, and VIRTIO_PCI=m
+- Settle the gated-flag contradiction and the unchecked symbols
+- Name debuginfo in the checked set, restore the initrd carve-out
 
 ### Build
 
