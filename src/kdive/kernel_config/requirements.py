@@ -463,8 +463,15 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         # than a warning: the value renders into the contract document and nothing evaluates it.
         (
             # SERIAL_8250_CONSOLE is settable only once SERIAL_8250 is built in, so the
-            # prerequisite is its own AND-ed clause rather than a note in the prose: a clause can
-            # report that SERIAL_8250 is missing, where prose can only advise it (ADR-0544 rule 1).
+            # prerequisite is its own AND-ed clause (ADR-0544 rule 1): a clause can report that
+            # SERIAL_8250 is missing, where the summary's closing sentence can only advise it.
+            # That sentence stays - it explains *why* to a reader, and the clause is what a
+            # config diff acts on.
+            #
+            # HVC_CONSOLE's own `depends on PPC_PSERIES` gets no such clause, deliberately:
+            # kdive boots ppc64le only as machine="pseries", so the arch tag below already
+            # says everything a second clause would, against a dependency no kdive guest can
+            # fail. A prerequisite clause earns its place when the agent can get it wrong.
             Clause(frozenset({"SERIAL_8250"}), BuiltIn.REQUIRED, _X86_ONLY),
             Clause(frozenset({"SERIAL_8250_CONSOLE"}), arches=_X86_ONLY),
             Clause(frozenset({"HVC_CONSOLE"}), arches=_PPC64LE_ONLY),

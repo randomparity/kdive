@@ -6,7 +6,7 @@ from typing import Final, NamedTuple
 # here and not in `src/`: ADR-0544 §3 checks every `Clause.arches` value against the arches kdive
 # can actually provision, from the test tree only, so `kernel_config` keeps taking no runtime
 # dependency on `domain.platform` (pinned by tests/kernel_config/test_layering.py).
-from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
+from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.kernel_config.requirements import (
     CRASH_CAPTURE,
     CRASH_CAPTURE_RHEL_GUEST,
@@ -1159,6 +1159,76 @@ def test_every_arch_scope_names_an_arch_kdive_can_provision():
         assert arches <= SUPPORTED_ARCHES, sorted(arches)
     # and the check is really discriminating, not a subset test against a set of everything
     assert not frozenset({"riscv64"}) <= SUPPORTED_ARCHES
+
+
+def _importers_of_support() -> set[str]:
+    """Files under ``src/kdive`` importing ``kernel_config.support``, as repo-relative paths.
+
+    Kept here rather than in test_layering.py because the premise it protects is I2's, and I2
+    lives in this module.
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "src"
+    target = "kdive.kernel_config.support"
+    importers: set[str] = set()
+    scanned = sorted(src.rglob("*.py"))
+    assert scanned, f"no modules found under {src}; the walk below would pass vacuously"
+    for path in scanned:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            if any(name == target or name.startswith(f"{target}.") for name in names):
+                importers.add(path.relative_to(src).as_posix())
+    return importers
+
+
+def test_every_arch_kdive_can_provision_is_advertised_a_console():
+    # The converse of the test above, and the one that guards #1859's actual defect. That test
+    # stops a clause naming an arch kdive cannot boot; this one stops an arch kdive CAN boot from
+    # being advertised nothing - which is the half #1859 reported ("advertises nothing at all for
+    # ppc64le"). Without it, adding a third arch to `_TRAITS` reintroduces the defect with the
+    # whole suite green, because a subset assertion is satisfied by advertising fewer arches, not
+    # more.
+    #
+    # `console_device` is the source of truth these tags duplicate by hand: a guest consoles on
+    # whatever the trait names, so an arch with a console device and no clause offering a driver
+    # for it is an agent told nothing about the one symbol its boot depends on.
+    consoles = [
+        clause
+        for clause in feature_requirement("serial_console").advertised
+        if clause.arches is not None
+    ]
+    assert consoles  # non-vacuity: no scoped clause at all would pass the loop below
+    covered = {arch for clause in consoles for arch in clause.arches or frozenset()}
+    assert covered == SUPPORTED_ARCHES, (
+        "serial_console advertises a console driver for "
+        f"{sorted(covered)} but kdive provisions {sorted(SUPPORTED_ARCHES)}; an arch with a "
+        "console_device and no clause is the defect #1859 reported"
+    )
+    # and every one of those arches really does have a console device to drive - the tag is not
+    # covering an arch that consoles some other way
+    assert all(arch_traits(arch).console_device for arch in covered)
+
+
+def test_only_the_gate_reads_the_support_checks():
+    # I2 discovers seams by AST-walking gate.py alone, so a seam calling unmet_clauses from
+    # anywhere else is invisible to it. That matters more for the arch axis than the initrd one:
+    # an unsupplied `has_initrd` defaults strict and over-reports, but an unsupplied `arch` SKIPS
+    # the clause, so an arch-scoped gated clause read from an undiscovered seam would vanish out
+    # of a refusal set silently. This keeps the AST walk's premise true rather than assumed.
+    importers = _importers_of_support()
+    assert importers, "nothing imports kernel_config.support, so this guard proves nothing"
+    assert importers == {"kdive/kernel_config/gate.py"}, (
+        f"kernel_config.support is imported outside gate.py by {sorted(importers)}; I2's seam "
+        "discovery only walks gate.py, so teach it that seam before adding this import"
+    )
 
 
 def test_the_manifest_clause_object_carries_the_arch_scope_and_omits_it_at_the_default():
