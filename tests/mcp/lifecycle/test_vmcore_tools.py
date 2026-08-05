@@ -597,9 +597,11 @@ def test_fetch_vmcore_kdump_admitted_on_local(migrated_url: str) -> None:
 
 _CRASH_GATE_FULL = frozenset(
     {
+        "KEXEC_CORE",
         "KEXEC",
         "CRASH_DUMP",
         "PROC_VMCORE",
+        "VMCORE_INFO",
         "FW_CFG_SYSFS",
         "RELOCATABLE",
     }

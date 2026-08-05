@@ -31,7 +31,7 @@ import pytest
 
 from kdive.kernel_config.requirements import FEATURE_REQUIREMENTS
 from kdive.mcp.resources.registrar import DOC_RESOURCES
-from tests.kernel_config.unsettable_symbols import I1_SEED, UNSETTABLE_SYMBOLS
+from tests.kernel_config.unsettable_symbols import UNSETTABLE_SYMBOLS
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONTENT_DIR = _REPO_ROOT / "src/kdive/mcp/resources/_content"
@@ -123,10 +123,21 @@ def test_prompt_less_symbols_cannot_be_allowlisted_into_the_docs() -> None:
     Without this, the cheapest way out of a #1853 failure is to add the offending symbol to
     ``_PROMPTED_BUT_UNREQUIRED`` and ship a green suite with the defect intact.
     """
-    # Non-vacuity, restated for the same reason #1853 wrote it: the bound must be over a set that
-    # really holds symbols, and thinning the curated list is the way to defeat it. Anchor to the
-    # six names #1854 seeds it with, so deleting a row to get green fails here instead.
-    assert _UNSETTABLE >= I1_SEED, sorted(I1_SEED - _UNSETTABLE)
+    # Non-vacuity, restated for the same reason #1853 wrote it: the bound must be over a set
+    # that really holds symbols, and thinning the curated list is the way to defeat it. The six
+    # are spelled here rather than imported beside the list, so deleting a row costs an edit in
+    # this file too and cannot pass as one hunk.
+    named_unsettable_by_the_registry = {
+        "KEXEC_CORE",
+        "VMCORE_INFO",
+        "DEBUG_INFO",
+        "BPF_EVENTS",
+        "TRACING",
+        "DYNAMIC_FTRACE",
+    }
+    assert named_unsettable_by_the_registry <= _UNSETTABLE, sorted(
+        named_unsettable_by_the_registry - _UNSETTABLE
+    )
     smuggled = sorted(_PROMPTED_BUT_UNREQUIRED & _UNSETTABLE)
     assert not smuggled, (
         f"{smuggled} are prompt-less or auto-selected, so no config fragment can set them; "
