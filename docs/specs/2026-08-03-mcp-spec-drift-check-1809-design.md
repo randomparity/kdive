@@ -290,6 +290,16 @@ stronger evidence of attention than a close, and the design already honours a cl
 `--state all`. What bounds a false match is the `contains` select on the revision plus the
 AND semantics measured above — not a label filter, which the section below rules out.
 
+That property stops where a retitle edits the revision string itself. The string is matched
+inside the title rather than as a whole title, so a retitle that keeps it — the epic fold above —
+still matches; a retitle that edits it out de-matches both halves at once, the `in:title` term and
+the `contains` select, and the next run files for that revision as if nobody had seen it. That is
+on record: #1485 was renamed `2026-07-28` -> `2026-06-18` on 2026-08-04, and the next run filed
+#1812. A body marker or a dedicated label would key more stably, but only alongside this search and
+never instead of it — a marker exists only on issues this workflow filed, so the human-filed case
+above stays title-keyed regardless. Weighed and declined in #1849; ADR-0537 rejects a dedicated
+label on separate grounds.
+
 For the same reason the title carries the revision alone and not the version pair: with the
 `2026-07-28` issue open against declared `2025-11-25`, a partial bump to an intermediate
 revision edits the declared constant — the whole point of the offline gate — and a pair-keyed
