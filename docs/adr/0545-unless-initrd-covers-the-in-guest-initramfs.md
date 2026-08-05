@@ -33,13 +33,17 @@ deterministic one on every Run:
   nothing about the boot, purely to quiet a check.
 
 So every disk-image Run whose config carries a modular `EXT4_FS`/`XFS_FS`/`VIRTIO_BLK` drew
-`kernel_missing_boot_config` on a kernel that boots, with no way to silence it that means anything.
-That is
-the shape a distro `.config` ships, and `docs/operating/external-build-upload.md` steers an agent
-towards exactly such a config ("start from the catalog image's own config, not a bare
-`defconfig`"). The registry already stated the exemption in prose and no seam applied it: the
-`VIRTIO_PCI` comment in `requirements.py` reads "(a guest that boots through its own bootloader
-and builds an initramfs with dracut is not affected either way)".
+`kernel_missing_boot_config` on a kernel that boots, with no way to silence it that means
+anything. That is the shape a distro `.config` ships, and
+`docs/operating/external-build-upload.md` steers an agent towards exactly such a config ("start
+from the catalog image's own config, not a bare `defconfig`").
+
+kdive was in fact already *telling agents* the exemption held while no seam applied it. The text
+is not an internal comment: `serial_console`'s `VIRTIO_PCI` prose in `requirements.py` — a
+`summary` string, serialized into the agent-facing feature manifest — reads "(a guest that boots
+through its own bootloader and builds an initramfs with dracut is not affected either way)". So
+an agent could read the manifest, conclude correctly that its disk-image target was exempt, and
+then be handed a payload asserting the opposite by the seam.
 
 The signal is advisory — the completion succeeds and the Run still reaches `succeeded` — so this
 is a wrong signal rather than a broken lane. But an advisory that fires on every Run of a whole
@@ -114,9 +118,15 @@ kind, and the summary and served doc are corrected to say which lane it survives
 - **Invariant I2 gains a third axis.** `tests/kernel_config/test_requirements.py` pins that a
   clause carries a conditional requirement only where every seam evaluating its feature supplies
   the condition. `UNLESS_INITRD` now has two conditions, so `SeamFacts` carries three fields and
-  the boot-model half gets its own check. `crash_capture` answers `False` on the new axis for the
-  same reason it answers `False` on the initrd one — its refusal seams hold neither a
-  `BuildStepResult` nor a `Run` — which keeps it correctly untaggable.
+  the boot-model half gets its own check. `crash_capture` answers `False` on the new axis, which
+  keeps it correctly untaggable — but for a weaker reason than on the initrd axis, and the
+  difference matters to whoever wires it next. Its refusal seams genuinely hold no
+  `BuildStepResult`. They *do* have a `Run` in scope — `mcp/tools/lifecycle/vmcore/handlers.py`
+  loads one to authorize the call before reaching `crash_capture_refusal`, and the install
+  handler's `_validate_crashkernel` is called a frame below one — so the boot-model axis there is
+  unwired, not unreachable. The map records what each seam *passes*, which is nothing on either
+  axis today; anyone tagging `crash_capture` needs to thread the fact down, not to establish that
+  it can be known.
 - **The interim paragraph #1860 added to `docs/operating/external-build-upload.md` is removed**,
   and the served twin regenerated with `just resources-docs`. It documented the gap honestly while
   it existed; leaving it would be a doc that fails when followed.

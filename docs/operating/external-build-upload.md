@@ -278,8 +278,8 @@ tar -tzf kernel.tar.gz | head    # boot/vmlinuz must be first; lib/modules/<rele
 | Name | When to upload | Notes |
 |---|---|---|
 | `vmlinux` | to enable kernel-debugging / DWARF introspection | the uncompressed kernel ELF with debug info. If you upload it you **must** declare a `build_id` in `runs.complete_build`, and it must match the ELF's GNU build-id note, or the upload is rejected. |
-| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it does not build in the boot-required symbols (`EXT4_FS` or `XFS_FS`, and `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. `=m` counts as missing unless you also upload an `initrd`. |
-| `initrd` | when booting needs a specific initramfs | the initial ramdisk image. Uploading one also silences the built-in requirement above, since the modules then have somewhere to load from. |
+| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it does not build in the boot-required symbols (`EXT4_FS` or `XFS_FS`, and `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. On a direct-kernel target `=m` counts as missing unless you also upload an `initrd`; on a `disk-image` target it does not, because the guest builds its own initramfs. |
+| `initrd` | when booting needs a specific initramfs | the initial ramdisk image. On a direct-kernel target, uploading one also silences the built-in requirement above, since the modules then have somewhere to load from. A `disk-image` target never reads it — that lane installs through its own bootloader — so upload one there only to record it. |
 
 ## The upload flow
 

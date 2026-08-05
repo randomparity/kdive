@@ -1287,10 +1287,13 @@ class SeamFacts(NamedTuple):
 _SEAM_SUPPLIES: Final[MappingProxyType[str, SeamFacts]] = MappingProxyType(
     {
         # crash_capture_refusal holds no BuildStepResult: the install and vmcore seams reach it
-        # with a Run id and nothing about the build's artifacts. It holds no Run either, so it
-        # cannot answer the boot-model half of the initrd condition. Nor do they resolve the Run's
-        # System's profile arch, which is why crash_capture stays untagged and its arch-specific
-        # gated pair is #1875's deferred residual rather than this campaign's work (ADR-0544 §7).
+        # with a Run id and nothing about the build's artifacts. The boot-model half is a weaker
+        # False - both call sites do have a Run in scope (vmcore/handlers.py loads one to
+        # authorize before calling; install.py's _validate_crashkernel sits a frame below one), so
+        # that axis is unwired rather than unreachable. This row records what the seam PASSES,
+        # which is nothing on either axis. Nor do they resolve the Run's System's profile arch,
+        # which is why crash_capture stays untagged and its arch-specific gated pair is #1875's
+        # deferred residual rather than this campaign's work (ADR-0544 §7, ADR-0545).
         CRASH_CAPTURE: SeamFacts(initrd=False, guest_initramfs=False, arch=False),
         # rootfs_mount_warning takes both reliefs, and its one caller (_success_envelope in
         # mcp/tools/lifecycle/runs/complete_build.py) supplies both off values it already holds:
