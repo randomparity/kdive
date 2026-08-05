@@ -865,6 +865,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Strip ANSI colour from help-text assertions in cli/config tests
 - Qualify the no-initramfs claim for embedded initramfs
 - Caveat the embedded-initramfs advisory blind spot
+- Sweep colour-safe pyproject-version reads (#1886)
 
 ### Build
 
