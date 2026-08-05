@@ -387,7 +387,9 @@ def _elf_build_id(vmlinux: Path) -> str:
     for line in out.splitlines():
         if "Build ID:" in line:
             return line.split("Build ID:", 1)[1].strip()
-    raise RuntimeError(f"no GNU build-id note in {vmlinux}; rebuild with CONFIG_DEBUG_INFO=y")
+    raise RuntimeError(
+        f"no GNU build-id note in {vmlinux}; rebuild with CONFIG_DEBUG_INFO_DWARF5=y"
+    )
 
 
 async def _upload_kernel(
@@ -528,7 +530,7 @@ async def _provision_boot_run(
         if not vmlinux.is_file():
             raise RuntimeError(
                 f"no vmlinux at {vmlinux}; the debug tier needs the uncompressed ELF with DWARF "
-                "(build the tree with CONFIG_DEBUG_INFO=y)"
+                "(build the tree with CONFIG_DEBUG_INFO_DWARF5=y)"
             )
         print(
             f"  uploading {kernel_tar.name} ({kernel_tar.stat().st_size} bytes) "

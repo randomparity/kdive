@@ -188,7 +188,7 @@ class ModuleDebuginfoResolver:
     def _missing(self, run_id: str, module: str) -> CategorizedError:
         return CategorizedError(
             "no matching module debuginfo (.ko) for the Run; build the kernel with "
-            "CONFIG_DEBUG_INFO=y and ensure the module is built and published",
+            "CONFIG_DEBUG_INFO_DWARF5=y and ensure the module is built and published",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"run_id": run_id, "module": module, "reason": "no_module_debuginfo"},
         )
