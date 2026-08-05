@@ -851,6 +851,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Qualify the selected-symbol note and bound the guard's allowlist
 - Stop refusing crash capture on derived symbols
 - Name the pre-6.9 kernel the old refusal got wrong
+- Advertise the DWARF choice, move BTF behind it
+- Point the in-guest drgn reader at BTF
 
 ### Build
 
