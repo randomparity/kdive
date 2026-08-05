@@ -320,10 +320,19 @@ has an authorization model of its own that KDIVE neither owns nor configures, an
 BMC with no credentials, which puts the kernel under test on the trusted side of the plane that
 is supposed to recover it. That is not an RBAC delta, because no KDIVE role governs it.
 [ADR-0547](../adr/0547-host-interface-in-band-bmc-path.md) decides how it is handled: the state
-is read, reported by `doctor` at warning severity, and recorded in `systems.byo_adopt_facts` at
-adopt, and it does not gate adoption. The interface's authentication mode is **read**, never
-assumed — `AuthNone` is a vendor and configuration choice, not a universal one — and a BMC that
-reports no Host Interface is recorded as having reported nothing, not as safe.
+is read, surfaced by `doctor` as an ADR-0091 `pass` result carrying the posture in `data` and the
+remedy in `detail` (that record's verdict is three-state and gains no member here), and recorded
+in `systems.byo_adopt_facts` at adopt. It does not gate adoption. The interface's authentication
+mode is **read**, never assumed — `AuthNone` is a vendor and configuration choice, not a universal
+one — and a BMC that reports no Host Interface is recorded as having reported nothing, not as safe.
+
+One consequence of that does belong to KDIVE rather than to the operator's BMC, and the "None"
+above should not be read as denying it: `concurrent_allocation_cap = 1` gives one lease exclusive
+use of a host, but **successive** leases of that host go to different projects under KDIVE's own
+placement, and ADR-0541's restore compares the declared baseline kernel only — so service-processor
+state a kernel left behind can persist from one project's lease into the next. It is an accepted
+residual, not a covered one. The operator's lever is the maintenance cordon (ADR-0541), taken by
+hand on a host whose out-of-band state is in doubt; nothing detects the case automatically.
 
 ## Error taxonomy (M4 delta)
 
@@ -503,7 +512,7 @@ implementation plan. The cross-entry concerns no single entry owns are pinned he
    firmware makes it so** (ADR-0547) — and KDIVE records how far that is rather than assuming
    it. A Redfish Host Interface enabled with `AuthNone` puts the kernel under test on the
    trusted side of the plane that is supposed to recover it, and the reach extends past power to
-   virtual media and firmware on many implementations — persistent out-of-band state the
+   virtual media and firmware where the service exposes them — persistent out-of-band state the
    ADR-0541 restore does not return to baseline, because that restore's subject is the
    bootloader and the baseline kernel. KDIVE does not change the setting (adopt-only, and no
    firmware management) and does not refuse a host for it. It **reads** the mode, reports it
