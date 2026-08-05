@@ -110,6 +110,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support staged witness shutdown
 - Advertise eight more debug feature config sets
 - Scope a clause to the arches it applies to
+- State where omitting a feature's symbols surfaces
 
 ### Changed
 
@@ -876,6 +877,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct the stale doc and record claims found in review
 - Scope crash_capture to the arch its symbols exist on
 - Keep an unparsable profile a typed failure at the crash gate
+- Keep 'unchecked' from reading as a licence to skip
+- Scope ADR-0546's grounding claim to the values it derives
 
 ### Build
 
