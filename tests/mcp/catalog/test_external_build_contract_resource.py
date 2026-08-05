@@ -133,7 +133,7 @@ def test_served_contract_advertises_the_sanitizer_tracing_and_coverage_features_
         "kmemleak": "DEBUG_KMEMLEAK",
         "lockdep": "PROVE_LOCKING",
         "ftrace": "FUNCTION_TRACER",
-        "bpf_tracing": "BPF_EVENTS",
+        "bpf_tracing": "DEBUG_INFO_BTF",
         "fault_injection": "FAULT_INJECTION",
         "kcov": "KCOV",
     }

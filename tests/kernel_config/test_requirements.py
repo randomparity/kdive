@@ -254,20 +254,21 @@ def test_advisory_debug_feature_clause_sets_are_the_reviewed_kconfig_sourced_one
             frozenset({"KPROBES"}),
             frozenset({"KPROBE_EVENTS"}),
         ),
-        # kernel/trace/Kconfig:853-855 BPF_EVENTS "depends on BPF_SYSCALL" and
-        # "(KPROBE_EVENTS || UPROBE_EVENTS) && PERF_EVENTS" - that OR is the real either/or.
+        # kernel/trace/Kconfig:853-856 BPF_EVENTS is a prompt-less default-y bool that "depends
+        # on BPF_SYSCALL" and "(KPROBE_EVENTS || UPROBE_EVENTS) && PERF_EVENTS" - so that OR is
+        # the real either/or, and BPF_EVENTS itself is derived from the other three, not set.
         # kernel/bpf/Kconfig:4 bare BPF is select-ed by BPF_SYSCALL; :42 BPF_JIT is a codegen
         # speedup, not a prerequisite - programs attach and run under the interpreter without it.
         "bpf_tracing": (
             frozenset({"BPF_SYSCALL"}),
             frozenset({"PERF_EVENTS"}),
             frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"}),
-            frozenset({"BPF_EVENTS"}),
             frozenset({"DEBUG_INFO_BTF"}),
         ),
         # lib/Kconfig.debug:2085 FAULT_INJECTION "depends on DEBUG_KERNEL" and injects nothing
-        # alone; :2137 FAULT_INJECTION_DEBUG_FS "depends on FAULT_INJECTION && SYSFS && DEBUG_FS"
-        # and nothing select-s those two, so they are requirements. FAULT_INJECTION_CONFIGFS is
+        # alone; :2137 FAULT_INJECTION_DEBUG_FS "depends on FAULT_INJECTION && SYSFS && DEBUG_FS".
+        # Only FAIL_FUTEX select-s DEBUG_FS (:2130); the other four sites do not, so the clause
+        # is a real requirement for any of them. FAULT_INJECTION_CONFIGFS is
         # NOT an alternative: all five sites register through fault_create_debugfs_attr(), which
         # lib/fault-inject.c:188 compiles only under CONFIG_FAULT_INJECTION_DEBUG_FS.
         "fault_injection": (
@@ -341,7 +342,6 @@ def test_either_probe_event_source_satisfies_the_bpf_tracing_dependency():
                 "BPF_SYSCALL",
                 "PERF_EVENTS",
                 "UPROBE_EVENTS",
-                "BPF_EVENTS",
                 "DEBUG_INFO_BTF",
             }
         )
@@ -349,19 +349,30 @@ def test_either_probe_event_source_satisfies_the_bpf_tracing_dependency():
     assert unmet_advertised_clauses(cfg, feature_requirement("bpf_tracing")) == ()
 
 
-def test_no_advertised_symbol_is_one_the_kernel_turns_on_by_itself():
-    # A prompt-less or auto-select-ed symbol can never be the thing an agent forgot, so listing
-    # it is noise the agent cannot act on. These are the ones reviewed out of the sets above.
-    never_advertise = {
-        "TRACING",  # kernel/trace/Kconfig:179, prompt-less, select-ed by FUNCTION_TRACER
-        "DYNAMIC_FTRACE",  # kernel/trace/Kconfig:301, prompt-less, default y
-        "LOCKDEP",  # lib/Kconfig.debug:1591, prompt-less, select-ed by PROVE_LOCKING
-        "BPF",  # kernel/bpf/Kconfig:4, prompt-less, select-ed by BPF_SYSCALL
-        "UPROBES",  # arch/Kconfig:182, def_bool
+def test_no_kernel_derived_symbol_is_advertised_as_something_the_agent_must_set():
+    # A prompt-less or auto-select-ed symbol cannot be set from a config fragment - olddefconfig
+    # discards it - so reporting one as missing sends the agent after the one thing it cannot do.
+    # The list is curated because this check has no kernel tree to read; every entry was verified
+    # against v7.0 at the file:line given.
+    derived = {
+        "TRACING": "kernel/trace/Kconfig:179",
+        "DYNAMIC_FTRACE": "kernel/trace/Kconfig:301",
+        "BPF_EVENTS": "kernel/trace/Kconfig:853",
+        "LOCKDEP": "lib/Kconfig.debug:1591",
+        "BPF": "kernel/bpf/Kconfig:4",
+        "UPROBES": "arch/Kconfig:182",
+        "DEBUG_INFO": "lib/Kconfig.debug:249",
+        "KEXEC_CORE": "kernel/Kconfig.kexec:11",
+        "VMCORE_INFO": "kernel/Kconfig.kexec:8",
     }
+    # The last three predate #1848 and are left alone here: KEXEC_CORE and VMCORE_INFO sit in
+    # crash_capture, the one *gated* feature, so touching its sets is a refusal-adjacent change
+    # this issue does not own. Tracked in #1850. Exact-set equality, so removing one later fails
+    # here until this list is updated too.
+    grandfathered = {"DEBUG_INFO", "KEXEC_CORE", "VMCORE_INFO"}
     advertised = {s for f in FEATURE_REQUIREMENTS for clause in f.advertised for s in clause}
     assert advertised  # non-vacuity: the walk must actually see the roster
-    assert advertised & never_advertise == set()
+    assert advertised & set(derived) == grandfathered
 
 
 def test_advisory_debug_feature_summaries_name_the_bug_class_and_the_runtime_cost():
