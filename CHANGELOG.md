@@ -172,6 +172,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Group deployment lifecycle modules
 - Point manifests at lifecycle modules
 - Stop mirroring the re-point mapping in the test
+- Name both doc readers in the settable-symbol guard
 
 ### Documentation
 
@@ -841,6 +842,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settle the gated-flag contradiction and the unchecked symbols
 - Name debuginfo in the checked set, restore the initrd carve-out
 - Drop the sysrq refusal set no seam reads
+- Stop telling agents to build CONFIG_VMCORE_INFO
+- Qualify the selected-symbol note and bound the guard's allowlist
 
 ### Build
 
