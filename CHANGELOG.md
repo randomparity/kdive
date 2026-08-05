@@ -845,6 +845,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settle the gated-flag contradiction and the unchecked symbols
 - Name debuginfo in the checked set, restore the initrd carve-out
 - Drop the sysrq refusal set no seam reads
+- Qualify the rootfs_mount no-initramfs claim
+- Name the install boot, pin the sibling carve-out
 - Stop telling agents to build CONFIG_VMCORE_INFO
 - Qualify the selected-symbol note and bound the guard's allowlist
 
