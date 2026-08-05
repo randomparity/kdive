@@ -490,6 +490,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retire the M2 portability diff gate (ADR-0543)
 - Correct four accuracy defects found in review
 - Drop an unsupported ADR cite, scope the dangling-reference census
+- State the spec-drift dedup is title-keyed
+- Preserve #1485's first-run state in the dedup comment
+- Fix the event order and the stable-key rationale
+- Name the unobserved failure the stable key would cover
 
 ### Fixed
 
