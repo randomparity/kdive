@@ -62,12 +62,14 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "Reserve a crashkernel and capture a vmcore via kdump. Guest-family-independent only: "
         "these symbols get the capture kernel loaded, not the vmcore written. A RHEL-family guest "
         "needs the crash_capture_rhel_guest set as well.",
+        # KEXEC_CORE and VMCORE_INFO are advertised nowhere: both are bare prompt-less bools
+        # (kernel/Kconfig.kexec:11 and :8) that KEXEC/KEXEC_FILE and CRASH_DUMP respectively
+        # select, so olddefconfig discards an agent's attempt to set either. They stay in
+        # gate_required below - a derived symbol is still provably absent in a parsed .config.
         _plain(
             "KEXEC",
-            "KEXEC_CORE",
             "KEXEC_FILE",
             "CRASH_DUMP",
-            "VMCORE_INFO",
             "PROC_VMCORE",
             "FW_CFG_SYSFS",
             "RELOCATABLE",
@@ -116,8 +118,10 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "DWARF tables in every .ko - can grow the module tree 10-50x and slow upload and "
         "install. Omit for boot-time crash reproducers and console-log investigations where no "
         "post-boot introspection is needed.",
+        # DEBUG_INFO itself is not advertised: lib/Kconfig.debug:249 is a bare prompt-less bool the
+        # "Debug information" choice sets, so olddefconfig discards an agent's attempt to set it.
+        # It is off only when every choice member is off, which the clause below already reports.
         (
-            frozenset({"DEBUG_INFO"}),
             frozenset({"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_BTF"}),
             frozenset({"DEBUG_KERNEL"}),
         ),
