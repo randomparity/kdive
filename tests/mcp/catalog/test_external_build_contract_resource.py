@@ -132,10 +132,10 @@ def test_served_contract_advertises_the_sanitizer_tracing_and_coverage_features_
         "kfence": "KFENCE",
         "kmemleak": "DEBUG_KMEMLEAK",
         "lockdep": "PROVE_LOCKING",
-        "ftrace": "DYNAMIC_FTRACE",
+        "ftrace": "FUNCTION_TRACER",
         "bpf_tracing": "BPF_EVENTS",
         "fault_injection": "FAULT_INJECTION",
-        "kcov": "KCOV_INSTRUMENT_ALL",
+        "kcov": "KCOV",
     }
     for feature_id, symbol in expected_symbols.items():
         assert feature_id in features, feature_id
@@ -156,8 +156,12 @@ def test_served_kasan_entry_states_what_it_finds_and_what_it_costs() -> None:
     assert "use-after-free" in summary
     assert "1/8" in summary
     advertised = json.dumps(kasan["requirements"])
-    assert "KASAN_OUTLINE" in advertised
     assert "KASAN_GENERIC" in advertised
+    assert "KASAN_HW_TAGS" in advertised
+    # the instrumentation choice is unsettable under hardware tag-based mode, so it
+    # is stated in prose rather than demanded as a requirement
+    assert "KASAN_OUTLINE" not in advertised
+    assert "KASAN_OUTLINE" in kasan["summary"]
 
 
 def test_resource_reads_back_generated_json() -> None:

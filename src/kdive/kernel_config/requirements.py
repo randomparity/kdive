@@ -134,18 +134,19 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "at the instruction that commits them rather than at the later corruption. Generic mode "
         "spends about 1/8 of memory on shadow tables, adds roughly 50% to every allocation and "
         "runs about 3x slower, so give a KASAN guest more RAM than the same workload needs "
-        "without it. The two Kconfig choices are alternatives, not additions: pick one mode "
-        "(KASAN_GENERIC, or KASAN_SW_TAGS/KASAN_HW_TAGS on arm64) and one instrumentation form "
-        "(KASAN_INLINE is about twice as fast and grows kernel text; KASAN_OUTLINE is smaller "
-        "and slower). STACKTRACE turns a report into allocation and free backtraces. Omit for "
-        "console-log-only reproducers, where the report adds nothing. Pair with debuginfo only "
-        "when you will run drgn or gdb on the result - KASAN's text growth plus DWARF in every "
-        ".ko makes the upload tarball much larger. Cannot be combined with kcsan: the kernel "
-        "builds KCSAN only when KASAN is off, so a config with both silently yields neither.",
+        "without it. The modes are alternatives, not additions: pick exactly one of "
+        "KASAN_GENERIC, or KASAN_SW_TAGS/KASAN_HW_TAGS on arm64. Generic and software tag-based "
+        "additionally take one instrumentation form - KASAN_INLINE (about an x2 speedup on some "
+        "workloads, at a much larger kernel .text) or KASAN_OUTLINE (smaller and slower); "
+        "hardware tag-based has no such choice, so do not set either symbol with it. STACKTRACE "
+        "turns a report into allocation and free backtraces. Omit for console-log-only "
+        "reproducers, where the report adds nothing. Pair with debuginfo only when you will run "
+        "drgn or gdb on the result - KASAN's text growth plus DWARF in every .ko makes the "
+        "upload tarball much larger. Do not combine with kcsan: the kernel builds KCSAN only "
+        "when KASAN is off, so a config with both gives you KASAN and silently drops KCSAN.",
         (
             frozenset({"KASAN"}),
             frozenset({"KASAN_GENERIC", "KASAN_SW_TAGS", "KASAN_HW_TAGS"}),
-            frozenset({"KASAN_INLINE", "KASAN_OUTLINE"}),
             frozenset({"STACKTRACE"}),
         ),
     ),
@@ -163,7 +164,8 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
     ),
     FeatureRequirement(
         "kfence",
-        "Kernel Electric-Fence: catches slab out-of-bounds writes, use-after-free and "
+        "Kernel Electric-Fence: catches slab out-of-bounds accesses (reads and writes), "
+        "use-after-free and "
         "invalid-free on a sampled fraction of allocations by putting them between guard pages. "
         "Cost is bounded by the sample interval (KFENCE_SAMPLE_INTERVAL, milliseconds between "
         "sampled allocations, default 100) and the pool size (KFENCE_NUM_OBJECTS, two pages "
@@ -200,19 +202,14 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "Function and event tracing through tracefs (/sys/kernel/tracing): function and "
         "function-graph tracers, static tracepoints, and kprobe/uprobe dynamic events. This "
         "answers which code path the kernel took before it failed; it finds no memory "
-        "corruption. TRACING is the symbol that builds tracefs. DYNAMIC_FTRACE patches every "
-        "instrumented call site to a nop until a tracer is enabled, so an idle ftrace kernel "
-        "costs kernel text and close to nothing at runtime, and the cost arrives with the "
-        "events you actually record. Composes with debuginfo; BTF from the bpf_tracing set "
-        "additionally gives typed probe arguments.",
-        (
-            frozenset({"FTRACE"}),
-            frozenset({"TRACING"}),
-            frozenset({"FUNCTION_TRACER"}),
-            frozenset({"DYNAMIC_FTRACE"}),
-            frozenset({"KPROBES"}),
-            frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"}),
-        ),
+        "corruption. Two symbols matter but are not listed below because the kernel turns them "
+        "on for you and neither has a Kconfig prompt: TRACING is what builds tracefs, and "
+        "DYNAMIC_FTRACE patches every instrumented call site to a nop until a tracer is enabled. "
+        "That nop patching is why an idle ftrace kernel costs kernel text and close to nothing "
+        "at runtime, and why the cost arrives with the events you actually record. Add "
+        "UPROBE_EVENTS to probe userspace as well. Composes with debuginfo; BTF from the "
+        "bpf_tracing set additionally gives typed probe arguments.",
+        _plain("FTRACE", "FUNCTION_TRACER", "KPROBES", "KPROBE_EVENTS"),
     ),
     FeatureRequirement(
         "bpf_tracing",
@@ -222,11 +219,11 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "(KPROBE_EVENTS or UPROBE_EVENTS) are all present, so build the whole set or the attach "
         "fails with nothing to point at. DEBUG_INFO_BTF is what lets a tool resolve struct "
         "layouts without kernel headers; pahole 1.22+ derives it from DWARF, so it needs a full "
-        "debuginfo build (not reduced, not split) and lengthens the build. Runtime cost is close "
+        "debuginfo build (not reduced, not split) and lengthens the build. BPF_JIT is optional: "
+        "without it programs still attach and run, under the interpreter. Runtime cost is close "
         "to nothing until a program is attached, then it is whatever that program does.",
         (
             frozenset({"BPF_SYSCALL"}),
-            frozenset({"BPF_JIT"}),
             frozenset({"PERF_EVENTS"}),
             frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"}),
             frozenset({"BPF_EVENTS"}),
@@ -239,11 +236,12 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "path a stress test never does - the class of bug that only shows up when kmalloc "
         "returns NULL. FAULT_INJECTION alone builds the framework and injects nothing: pick at "
         "least one site (FAILSLAB, FAIL_PAGE_ALLOC, FAIL_MAKE_REQUEST, FAIL_IO_TIMEOUT, "
-        "FAIL_FUTEX) and one way to drive it from userspace - FAULT_INJECTION_DEBUG_FS, which "
-        "also needs DEBUG_FS and SYSFS, or FAULT_INJECTION_CONFIGFS. Needs DEBUG_KERNEL. "
-        "Runtime cost is a probability check at the instrumented call sites and is close to "
-        "nothing while the configured failure rate is zero, so this composes well with a "
-        "long-running guest. Composes with debuginfo.",
+        "FAIL_FUTEX). All five register their knobs only under FAULT_INJECTION_DEBUG_FS, which "
+        "in turn needs DEBUG_FS and SYSFS, so debugfs is the interface - FAULT_INJECTION_CONFIGFS "
+        "is a separate path only a driver that opted into it exposes, and it drives none of the "
+        "five. Needs DEBUG_KERNEL. Runtime cost is a probability check at the instrumented call "
+        "sites and is close to nothing while the configured failure rate is zero, so this suits "
+        "a long-running guest. Composes with debuginfo.",
         (
             frozenset({"DEBUG_KERNEL"}),
             frozenset({"FAULT_INJECTION"}),
@@ -256,20 +254,23 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
                     "FAIL_FUTEX",
                 }
             ),
-            frozenset({"FAULT_INJECTION_DEBUG_FS", "FAULT_INJECTION_CONFIGFS"}),
+            frozenset({"FAULT_INJECTION_DEBUG_FS"}),
+            frozenset({"DEBUG_FS"}),
+            frozenset({"SYSFS"}),
         ),
     ),
     FeatureRequirement(
         "kcov",
         "Per-task code-coverage feedback through /sys/kernel/debug/kcov, which is what a "
         "coverage-guided fuzzer such as syzkaller steers on. It finds no bug by itself; it tells "
-        "the fuzzer which inputs reached new code. KCOV_INSTRUMENT_ALL is the expensive part - "
-        "it compiles a coverage callback into every kernel function, which is what a whole-kernel "
-        "fuzzing run wants and is why such a kernel is slow; turn it off and mark only the "
-        "subsystem under test to keep the cost local. KCOV_ENABLE_COMPARISONS additionally "
-        "records comparison operands, which gets a fuzzer past magic-value checks at further "
-        "cost. KCOV builds debugfs in for you. Composes with debuginfo.",
-        _plain("KCOV", "KCOV_INSTRUMENT_ALL"),
+        "the fuzzer which inputs reached new code. Two knobs are yours to choose and so are not "
+        "listed below. KCOV_INSTRUMENT_ALL (default y) is the expensive one - it compiles a "
+        "coverage callback into every kernel function, which is what a whole-kernel fuzzing run "
+        "wants and is why such a kernel is slow; set it to n and mark only the subsystem under "
+        "test to keep the cost local. KCOV_ENABLE_COMPARISONS additionally records comparison "
+        "operands, which gets a fuzzer past magic-value checks at further cost. KCOV builds "
+        "debugfs in for you. Composes with debuginfo.",
+        _plain("KCOV"),
     ),
     FeatureRequirement(
         "serial_console",
