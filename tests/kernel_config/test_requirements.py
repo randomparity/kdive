@@ -28,11 +28,12 @@ def test_only_the_named_gate_consumers_are_gated_and_the_rest_advertise_only():
     # #1848: this used to iterate six literal ids, so an advertise-only feature added later was
     # silently uncovered. Deriving both sets from the roster fixes that in both directions - a
     # new advertise-only feature is checked without editing the test, and a new *gated* feature
-    # fails here on purpose. gate.py imports exactly CRASH_CAPTURE and ROOTFS_MOUNT and the only
-    # refusal seams are crash-capture arming and sysrq, so growing the gated set is a decision,
-    # not a data addition.
+    # fails here on purpose. #1861 narrowed the set to crash_capture alone: gate.py imports
+    # CRASH_CAPTURE and ROOTFS_MOUNT, and only crash-capture arming turns a refusal set into a
+    # refusal (rootfs_mount is advertise-only and warns off the advertised clauses), so growing
+    # the gated set is a decision, not a data addition.
     gated = {f.feature for f in FEATURE_REQUIREMENTS if f.gated}
-    assert gated == {CRASH_CAPTURE, SYSRQ}
+    assert gated == {CRASH_CAPTURE}
 
     advertise_only = [f for f in FEATURE_REQUIREMENTS if f.feature not in gated]
     for feat in advertise_only:
@@ -44,9 +45,21 @@ def test_only_the_named_gate_consumers_are_gated_and_the_rest_advertise_only():
         assert feat.summary.strip(), feat.feature
 
 
-def test_sysrq_is_advertised_and_gate_required_magic_sysrq():
+def test_sysrq_advertises_magic_sysrq_and_carries_no_refusal_set():
+    # #1861: the entry used to carry gate_required=MAGIC_SYSRQ that no seam read, and `gated` is
+    # derived from it, so feature_manifest() shipped `"gated": true` to an agent while the upload
+    # path checked nothing. ADR-0318 decided sysrq is advertised and enforced by the runtime
+    # detection in diagnostic_sysrq, so the refusal set is empty and the manifest says so.
     feat = feature_requirement(SYSRQ)
-    assert feat.gate_required == (frozenset({"MAGIC_SYSRQ"}),)
+    assert feat.advertised == (frozenset({"MAGIC_SYSRQ"}),)
+    assert feat.gate_required == ()
+    assert feat.gated is False
+    entry = next(m for m in feature_manifest() if m["feature"] == SYSRQ)
+    assert entry["gated"] is False
+    # non-vacuity: the entry a reader gets must really advertise the symbol, otherwise a
+    # gated: false entry with an empty requirements list would pass the assert above while
+    # telling an agent nothing about what to build
+    assert entry["requirements"] == [["MAGIC_SYSRQ"]]
 
 
 def test_manifest_covers_every_feature_and_exposes_advertised_not_gate_required():
@@ -107,9 +120,9 @@ def test_sysrq_summary_names_the_use_case_the_late_refusal_and_that_it_is_build_
     # to turn on afterwards), which is why the summary has to say so before the agent commits.
     #
     # Where the refusal lands is the load-bearing half and the easiest thing to get wrong.
-    # Despite carrying gate_required, sysrq is *not* pre-gated: gate.py loads CRASH_CAPTURE and
-    # ROOTFS_MOUNT only, and ADR-0318 chose runtime detection on purpose so kdive never refuses
-    # a working sysrq off a stale Run's config. A summary that claimed a config-time gate would
+    # sysrq is not pre-gated: gate.py loads CRASH_CAPTURE and ROOTFS_MOUNT only, and ADR-0318
+    # chose runtime detection on purpose so kdive never refuses a working sysrq off a stale
+    # Run's config. A summary that claimed a config-time gate would
     # tell an agent a clean upload had cleared it, which is the wasted rebuild #1851 exists to
     # stop - so the upload-time disclaimer is asserted, not just the seam name.
     summary = feature_requirement(SYSRQ).summary.lower()
@@ -160,9 +173,7 @@ def test_no_upload_seam_reads_the_sysrq_refusal_set():
 def test_sysrq_summary_does_not_promise_a_config_time_gate_the_upload_path_never_performs():
     # The inverse of the disclaimer assertion above, because the two fail on different edits:
     # dropping the disclaimer trips that test, while *adding* a "kdive gates this" claim beside
-    # it would leave it green. The entry does carry gate_required (so the manifest ships
-    # gated: true), which is exactly why a reader can be told the upload path checks MAGIC_SYSRQ
-    # without anyone noticing - the summary is the only place that contradiction gets settled.
+    # it would leave it green.
     summary = feature_requirement(SYSRQ).summary.lower()
     for claim in (
         "kdive gates this",
@@ -174,10 +185,16 @@ def test_sysrq_summary_does_not_promise_a_config_time_gate_the_upload_path_never
         "without magic_sysrq",
     ):
         assert claim not in summary, claim
-    # the entry's own gated flag is the contradiction a structured reader hits first, so the
-    # summary has to name it rather than leave the JSON to speak for itself
-    assert "gated flag" in summary
-    assert feature_requirement(SYSRQ).gated is True  # the flag being explained is really set
+    # Non-vacuity: every assert above is a negative, so an empty or truncated summary would pass
+    # the whole loop. Anchor it to text the entry really carries, and to the substring search
+    # really being able to find that text.
+    assert "magic_sysrq" in summary
+    assert "nothing checks this at upload time" in summary
+    # #1851 had to spend a sentence explaining that the entry's gated: true meant the late
+    # refusal rather than an upload check. #1861 removed the refusal set instead, so the flag
+    # now agrees with the upload path and the summary must not reintroduce the explanation.
+    assert "gated flag" not in summary
+    assert feature_requirement(SYSRQ).gated is False
 
 
 def test_serial_console_summary_names_what_breaks_without_it_and_that_it_is_cheap():
