@@ -263,13 +263,12 @@ def test_complete_build_response_server_time_is_current_after_validation(
 ) -> None:
     """The completion response clock and generation deadline begin after validation work.
 
-    Bracketed by two Postgres clock reads taken around the call, never by a wall-clock budget
-    measured after it. The harness can be descheduled for any length of time between the call
-    returning and a trailing read — acquiring a second pool connection under 24-way parallelism
-    against one Postgres is itself unbounded — so a budget assertion narrows as the suite gets
-    busier and measures scheduling latency rather than ordering (#1862). Every bound below only
-    widens under load. Both reads stay in Postgres: comparing against Python's clock would make
-    the result depend on the database session's time zone.
+    Two Postgres clock reads bracket the call rather than a wall-clock budget measured after
+    it: acquiring a second pool connection under `pytest -n auto` against one Postgres is
+    itself unbounded, so a budget narrows exactly when the suite is busiest and ends up
+    measuring scheduling latency instead of ordering (#1862). Every bound below widens under
+    load. Both reads stay in Postgres — comparing against Python's clock would make the result
+    depend on the database session's time zone.
     """
 
     async def _run() -> None:
