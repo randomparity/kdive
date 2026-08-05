@@ -108,6 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add the weekly MCP spec drift workflow
 - Add non-destructive stack stop
 - Support staged witness shutdown
+- Advertise eight more debug feature config sets
 
 ### Changed
 
@@ -825,6 +826,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep ADR-0543 inside docs-paths, and state the guard's real contract
 - Record that the gate was a CI check, and was switched off
 - Drop the gate reference from the settings manifest docstring
+- Correct the advertised sets against Kconfig
+- Drop BPF_EVENTS, widen the derived-symbol guard
 
 ### Build
 
