@@ -16,10 +16,10 @@ All prerequisites from the [local live-stack runbook](live-stack.md), plus:
 
 - A locally-built kernel to upload: a combined `kernel` tar (`boot/vmlinuz` + `lib/modules/`)
   with the kdump/debug symbols armed (`CONFIG_KEXEC`, `CONFIG_CRASH_DUMP`, `CONFIG_PROC_VMCORE`,
-  `CONFIG_FW_CFG_SYSFS`, `CONFIG_RELOCATABLE`). Those load the capture
-  kernel; they do not write a vmcore on their own. **On a RHEL-family guest** (RHEL, Rocky,
-  AlmaLinux, CentOS Stream, Fedora) also build in `CONFIG_XFS_FS` (the XFS root the capture kernel
-  must mount), `CONFIG_KEXEC_FILE` (RHEL kdump uses `kexec_file_load`, not `kexec_load`), and
+  `CONFIG_FW_CFG_SYSFS`, `CONFIG_RELOCATABLE`). Those load the capture kernel; they do not write
+  a vmcore on their own. **On a RHEL-family guest** (RHEL, Rocky, AlmaLinux, CentOS Stream,
+  Fedora) also build in `CONFIG_XFS_FS` (the XFS root the capture kernel must mount),
+  `CONFIG_KEXEC_FILE` (RHEL kdump uses `kexec_file_load`, not `kexec_load`), and
   `CONFIG_SQUASHFS` + `CONFIG_SQUASHFS_ZSTD` + `CONFIG_EROFS_FS` + `CONFIG_OVERLAY_FS` +
   `CONFIG_BLK_DEV_LOOP` (dracut's squash/erofs kdump initramfs). This second set is
   filesystem- and initramfs-dependent, not universal — a non-RHEL guest may need a different one.

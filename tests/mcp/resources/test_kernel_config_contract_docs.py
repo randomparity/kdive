@@ -51,7 +51,11 @@ def _served(name: str) -> str:
     return (_CONTENT_DIR / entry.content_file).read_text(encoding="utf-8")
 
 
-def _runbook() -> str:
+def _served_external_build() -> str:
+    return _served("external-build-upload")
+
+
+def _four_method_runbook() -> str:
     return (_REPO_ROOT / "docs/operating/runbooks/four-method-live-run.md").read_text(
         encoding="utf-8"
     )
@@ -75,8 +79,8 @@ def test_external_build_doc_states_config_is_yours_to_choose() -> None:
 @pytest.mark.parametrize(
     ("label", "read"),
     [
-        ("served external-build doc", lambda: _served("external-build-upload")),
-        ("four-method live-run runbook", _runbook),
+        ("served external-build doc", _served_external_build),
+        ("four-method live-run runbook", _four_method_runbook),
     ],
 )
 def test_crash_capture_docs_name_only_settable_symbols(label: str, read: Callable[[], str]) -> None:
