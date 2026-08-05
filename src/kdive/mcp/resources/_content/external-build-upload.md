@@ -144,7 +144,11 @@ crash-capture symbols above gets you both and there is nothing separate to add. 
 does not exist before 6.9 at all (it was split out of `CRASH_CORE`); a pre-6.9 kernel captures a
 vmcore perfectly well and is no longer refused over a symbol its Kconfig does not have.
 
-See `resource://kdive/contracts/external-build` for the per-feature `CONFIG_*` manifest.
+See `resource://kdive/contracts/external-build` for the per-feature `CONFIG_*` manifest. Every
+entry there carries an `enforcement` value saying where omitting its symbols surfaces — refused at
+upload, warned at upload, refused later on a booted kernel, or never checked — and
+`enforcement_legend` in the same payload defines each value. Read it before deciding what to skip:
+several features kdive never checks are still unrecoverable without a rebuild.
 
 ## The `kernel` artifact: one combined gzip tar
 

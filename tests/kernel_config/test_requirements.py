@@ -1,6 +1,8 @@
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
-from typing import Final, NamedTuple
+from typing import Final, NamedTuple, cast
+
+import pytest
 
 # The one import of the provisioning platform in this package's tests, and it is deliberately
 # here and not in `src/`: ADR-0544 §3 checks every `Clause.arches` value against the arches kdive
@@ -10,12 +12,15 @@ from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.kernel_config.requirements import (
     CRASH_CAPTURE,
     CRASH_CAPTURE_RHEL_GUEST,
+    ENFORCEMENT_LEGEND,
     FEATURE_REQUIREMENTS,
     ROOTFS_MOUNT,
     SYSRQ,
     BuiltIn,
     Clause,
+    Enforcement,
     FeatureRequirement,
+    enforcement_legend,
     feature_manifest,
     feature_requirement,
 )
@@ -24,6 +29,7 @@ from kdive.kernel_config.support import (
     unmet_advertised_clauses,
     unmet_clauses,
 )
+from kdive.serialization import JsonValue
 from tests.kernel_config.config_fixtures import all_builtin
 from tests.kernel_config.unsettable_symbols import UNSETTABLE_SYMBOLS
 
@@ -35,6 +41,21 @@ _DWARF_CHOICE = frozenset(
     {"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT"}
 )
 
+# A throwaway non-empty clause tuple, for constructing FeatureRequirements that exist only to
+# exercise the construction-time guard. Non-empty because an entry advertising nothing is its own
+# defect and is asserted against elsewhere.
+_CLAUSE: Final[tuple[Clause, ...]] = (Clause(frozenset({"A_SYMBOL"})),)
+
+
+def _clause_symbols(clauses: JsonValue) -> set[str]:
+    """Flatten a rendered clause array's symbols. The cast is the JsonValue union, not a claim -
+    the element shape it assumes is itself asserted structurally in the served-document tests."""
+    return {
+        symbol
+        for clause in cast(list[dict[str, list[str]]], clauses)
+        for symbol in clause["symbols"]
+    }
+
 
 def test_crash_capture_gate_excludes_kaslr_and_or_groups_kexec():
     feat = feature_requirement(CRASH_CAPTURE)
@@ -42,7 +63,7 @@ def test_crash_capture_gate_excludes_kaslr_and_or_groups_kexec():
     assert "RANDOMIZE_BASE" not in gate_symbols  # KASLR advertised-only
     assert "RANDOMIZE_BASE" in {s for clause in feat.advertised for s in clause.symbols}
     assert Clause(frozenset({"KEXEC", "KEXEC_FILE"})) in feat.gate_required  # either load syscall
-    assert feat.gated is True
+    assert feat.enforcement is Enforcement.UPLOAD_REFUSAL
 
 
 def test_only_the_named_gate_consumers_are_gated_and_the_rest_advertise_only():
@@ -53,13 +74,13 @@ def test_only_the_named_gate_consumers_are_gated_and_the_rest_advertise_only():
     # CRASH_CAPTURE and ROOTFS_MOUNT, and only crash-capture arming turns a refusal set into a
     # refusal (rootfs_mount is advertise-only and warns off the advertised clauses), so growing
     # the gated set is a decision, not a data addition.
-    gated = {f.feature for f in FEATURE_REQUIREMENTS if f.gated}
+    gated = {f.feature for f in FEATURE_REQUIREMENTS if f.gate_required}
     assert gated == {CRASH_CAPTURE}
 
     advertise_only = [f for f in FEATURE_REQUIREMENTS if f.feature not in gated]
     for feat in advertise_only:
         assert feat.gate_required == (), feat.feature
-        assert feat.gated is False, feat.feature
+        assert feat.enforcement is not Enforcement.UPLOAD_REFUSAL, feat.feature
         # an advertise-only feature that advertises nothing would pass the two asserts above
         # while telling the agent nothing at all
         assert feat.advertised, feat.feature
@@ -67,20 +88,85 @@ def test_only_the_named_gate_consumers_are_gated_and_the_rest_advertise_only():
 
 
 def test_sysrq_advertises_magic_sysrq_and_carries_no_refusal_set():
-    # #1861: the entry used to carry gate_required=MAGIC_SYSRQ that no seam read, and `gated` is
+    # #1861: the entry used to carry gate_required=MAGIC_SYSRQ that no seam read, and `gated` was
     # derived from it, so feature_manifest() shipped `"gated": true` to an agent while the upload
     # path checked nothing. ADR-0318 decided sysrq is advertised and enforced by the runtime
     # detection in diagnostic_sysrq, so the refusal set is empty and the manifest says so.
     feat = feature_requirement(SYSRQ)
     assert feat.advertised == (Clause(frozenset({"MAGIC_SYSRQ"})),)
     assert feat.gate_required == ()
-    assert feat.gated is False
     entry = next(m for m in feature_manifest() if m["feature"] == SYSRQ)
-    assert entry["gated"] is False
-    # non-vacuity: the entry a reader gets must really advertise the symbol, otherwise a
-    # gated: false entry with an empty requirements list would pass the assert above while
-    # telling an agent nothing about what to build
+    assert "refuses_on" not in entry
+    # non-vacuity: the entry a reader gets must really advertise the symbol, otherwise an entry
+    # with an empty requirements list would pass the asserts above while telling an agent
+    # nothing about what to build
     assert entry["requirements"] == [{"symbols": ["MAGIC_SYSRQ"]}]
+
+
+def test_sysrq_is_machine_readably_distinct_from_the_features_that_are_really_optional():
+    # #1867, and the whole of it. #1861 dropped sysrq's unread refusal set, which was the honest
+    # edit - but with a bare `gated` bool the entry then became *structurally identical* to kasan,
+    # kcsan, kfence, kmemleak, lockdep, ftrace and kcov, which genuinely cost nothing to omit. An
+    # agent that skips every `"gated": false` feature skipped MAGIC_SYSRQ and then paid a build,
+    # install and boot before diagnostic_sysrq refused. That is the misreading, and this asserts
+    # it is closed rather than asserting a new key exists: the two kinds of entry must differ on
+    # a machine-readable value, and sysrq's must be the one that says a refusal is coming.
+    manifest = {m["feature"]: m for m in feature_manifest()}
+    sysrq = manifest[SYSRQ]
+    assert sysrq["enforcement"] == Enforcement.RUNTIME_REFUSAL.value
+
+    # The seven entries whose summaries really do say "omit this and you lose only the feature".
+    # Spelled out rather than derived: the claim is that sysrq differs from *these*, and deriving
+    # the comparison set from the same field under test would make it circular.
+    for cheap in ("kasan", "kcsan", "kfence", "kmemleak", "lockdep", "ftrace", "kcov"):
+        assert manifest[cheap]["enforcement"] == Enforcement.UNCHECKED.value, cheap
+        assert manifest[cheap]["enforcement"] != sysrq["enforcement"], cheap
+
+    # And the key that carried the misreading is gone, not merely joined. Leaving `gated` beside
+    # `enforcement` would keep the cheaper-to-read field the one that groups sysrq with kasan.
+    for entry in manifest.values():
+        assert "gated" not in entry, entry["feature"]
+
+    # A value an agent cannot look up is the same defect one layer along, so the vocabulary it
+    # uses has to be defined in the payload the agent reads.
+    legend = enforcement_legend()
+    assert set(legend) == {e.value for e in Enforcement}
+    assert sysrq["enforcement"] in legend
+    # The served legend is the authored table verbatim - no renderer between them to drop a
+    # definition or invent one.
+    assert legend == {value.value: text for value, text in ENFORCEMENT_LEGEND.items()}
+    # sysrq's definition must say the refusal is real and late, or the value is just a label.
+    runtime = ENFORCEMENT_LEGEND[Enforcement.RUNTIME_REFUSAL].lower()
+    assert "does not read your config" in runtime
+    assert "refusal arrives when you invoke" in runtime
+    assert "build, install and boot" in runtime
+    # And "unchecked" must not be worded as a licence to skip, which is the misreading one value
+    # over: it says what kdive does, not that the feature is optional.
+    assert "optional" not in ENFORCEMENT_LEGEND[Enforcement.UNCHECKED].lower()
+
+
+def test_a_refusal_set_and_upload_refusal_cannot_drift_apart():
+    # The #1861 defect class, made unrepresentable. `enforcement` is authored (the runtime_refusal
+    # vs unchecked split is not derivable from any field), so nothing but this stops an entry from
+    # claiming a refusal it has no set for, or carrying a set it does not admit to.
+    for feat in FEATURE_REQUIREMENTS:
+        refuses = feat.enforcement is Enforcement.UPLOAD_REFUSAL
+        assert bool(feat.gate_required) is refuses, feat.feature
+
+    # Both directions of the construction-time guard, so the check cannot be half-removed.
+    with pytest.raises(ValueError, match="imply each other"):
+        FeatureRequirement("x", "s", _CLAUSE, enforcement=Enforcement.UPLOAD_REFUSAL)
+    with pytest.raises(ValueError, match="imply each other"):
+        FeatureRequirement("x", "s", _CLAUSE, gate_required=_CLAUSE)
+    # Non-vacuity: the two legal shapes really do construct, so the guard is not simply rejecting
+    # every FeatureRequirement and passing both raises above by accident.
+    assert FeatureRequirement("x", "s", _CLAUSE).enforcement is Enforcement.UNCHECKED
+    assert (
+        FeatureRequirement(
+            "x", "s", _CLAUSE, gate_required=_CLAUSE, enforcement=Enforcement.UPLOAD_REFUSAL
+        ).gate_required
+        == _CLAUSE
+    )
 
 
 def test_manifest_covers_every_feature_and_exposes_advertised_not_gate_required():
@@ -89,12 +175,43 @@ def test_manifest_covers_every_feature_and_exposes_advertised_not_gate_required(
     manifest = feature_manifest()
     assert {m["feature"] for m in manifest} == {f.feature for f in FEATURE_REQUIREMENTS}
     entry = next(m for m in manifest if m["feature"] == CRASH_CAPTURE)
-    assert entry["gated"] is True
+    assert entry["enforcement"] == Enforcement.UPLOAD_REFUSAL.value
     assert entry["summary"]
     assert isinstance(entry["requirements"], list)
     # advertised superset carries KASLR (advertise-only); the gate-set exclusion is asserted above
     assert "RANDOMIZE_BASE" in json.dumps(entry["requirements"])
-    assert "gate_required" not in entry  # internal, not advertised
+    assert "gate_required" not in entry  # the internal field name never reaches the document
+
+
+def test_the_refusing_entry_publishes_which_of_its_advertised_clauses_can_refuse():
+    # #1867's finer-grained half. `crash_capture` advertises seven clauses and refuses on five of
+    # them; RANDOMIZE_BASE is ADR-0318's worked example of a symbol deliberately advertised and
+    # never gated, so a ppc64le agent reading only `requirements` cannot tell the symbol it will
+    # be refused over from the one that can never refuse. `refuses_on` is the answer, and it has
+    # to be its own array rather than a flag on `requirements`: the advertised set splits {KEXEC}
+    # and {KEXEC_FILE} where the gate joins them, so a per-clause flag would claim that omitting
+    # KEXEC alone produces a refusal, which is false - either load syscall satisfies the gate.
+    entry = next(m for m in feature_manifest() if m["feature"] == CRASH_CAPTURE)
+    assert entry["refuses_on"] == [
+        {"symbols": ["KEXEC", "KEXEC_FILE"]},  # one OR-group, not the two advertised clauses
+        {"symbols": ["CRASH_DUMP"]},
+        {"symbols": ["PROC_VMCORE"]},
+        {"symbols": ["FW_CFG_SYSFS"], "arch": ["x86_64"]},
+        {"symbols": ["RELOCATABLE"]},
+    ]
+    # The distinction the array exists to draw, asserted as a difference and not just a listing.
+    refusing = _clause_symbols(entry["refuses_on"])
+    advertised = _clause_symbols(entry["requirements"])
+    assert "RANDOMIZE_BASE" in advertised
+    assert "RANDOMIZE_BASE" not in refusing
+    assert refusing < advertised  # a strict subset: advice is a superset of what can refuse
+
+    # It is the only entry with one, and every entry that lacks one says why in `enforcement`.
+    for other in feature_manifest():
+        if other["feature"] == CRASH_CAPTURE:
+            continue
+        assert "refuses_on" not in other, other["feature"]
+        assert other["enforcement"] != Enforcement.UPLOAD_REFUSAL.value, other["feature"]
 
 
 def test_debuginfo_summary_names_use_case_and_cost():
@@ -216,6 +333,42 @@ def test_no_upload_seam_reads_the_sysrq_refusal_set():
     assert ROOTFS_MOUNT in source
 
 
+def test_the_upload_enforcement_values_name_the_features_the_gate_module_really_reads():
+    # ADR-0546 rule 1 claims the vocabulary is grounded in code rather than intent, and an
+    # authored field can drift from the code it claims to describe - that is #1861 in one
+    # sentence. gate.py is the only module that turns a FeatureRequirement into a payload, and it
+    # reaches each one through feature_requirement(), so its call sites are the ground truth for
+    # which entries may claim an upload_* value.
+    #
+    # Match the call sites, not the feature id anywhere in the text: "debuginfo" appears all over
+    # gate.py (debuginfo_warning, MISSING_DEBUGINFO_REASON) while the `debuginfo` *entry* is read
+    # by nothing - that seam keys on a module-level DEBUG_INFO_BTF literal on purpose (ADR-0544
+    # §4). A substring search would fault a correct registry over it.
+    import inspect
+    import re
+
+    from kdive.kernel_config import gate, requirements
+
+    read = {
+        getattr(requirements, name)
+        for name in re.findall(r"feature_requirement\((\w+)\)", inspect.getsource(gate))
+    }
+    # Non-vacuity: an empty set would make the equality below hold against an all-`unchecked`
+    # registry, and a renamed helper would empty it silently.
+    assert read, "no feature_requirement() call site found in gate.py - the regex went stale"
+
+    checked = {
+        f.feature
+        for f in FEATURE_REQUIREMENTS
+        if f.enforcement in (Enforcement.UPLOAD_REFUSAL, Enforcement.UPLOAD_ADVISORY)
+    }
+    assert checked == read
+    assert checked == {CRASH_CAPTURE, ROOTFS_MOUNT}
+    # And the two are not interchangeable: only crash_capture turns its unmet set into a refusal.
+    assert feature_requirement(CRASH_CAPTURE).enforcement is Enforcement.UPLOAD_REFUSAL
+    assert feature_requirement(ROOTFS_MOUNT).enforcement is Enforcement.UPLOAD_ADVISORY
+
+
 def test_sysrq_summary_does_not_promise_a_config_time_gate_the_upload_path_never_performs():
     # The inverse of the disclaimer assertion above, because the two fail on different edits:
     # dropping the disclaimer trips that test, while *adding* a "kdive gates this" claim beside
@@ -237,10 +390,11 @@ def test_sysrq_summary_does_not_promise_a_config_time_gate_the_upload_path_never
     assert "magic_sysrq" in summary
     assert "nothing checks this at upload time" in summary
     # #1851 had to spend a sentence explaining that the entry's gated: true meant the late
-    # refusal rather than an upload check. #1861 removed the refusal set instead, so the flag
-    # now agrees with the upload path and the summary must not reintroduce the explanation.
+    # refusal rather than an upload check. #1861 removed the refusal set instead, and #1867
+    # replaced the flag with one that states the late refusal itself, so the summary must not
+    # reintroduce the explanation.
     assert "gated flag" not in summary
-    assert feature_requirement(SYSRQ).gated is False
+    assert feature_requirement(SYSRQ).gate_required == ()
 
 
 def test_serial_console_summary_names_what_breaks_without_it_and_that_it_is_cheap():
@@ -461,7 +615,8 @@ def test_advisory_debug_features_reach_the_manifest_ungated():
     for fid in _ADVISORY_DEBUG_FEATURES:
         assert fid in manifest, fid
         entry = manifest[fid]
-        assert entry["gated"] is False, fid
+        assert entry["enforcement"] == Enforcement.UNCHECKED.value, fid
+        assert "refuses_on" not in entry, fid
         assert entry["requirements"], fid
         assert entry["summary"], fid
 
@@ -668,6 +823,7 @@ def test_the_invariant_above_reaches_the_refusal_set_and_not_only_the_advertised
         "synthetic fixture for the invariant above",
         advertised=(Clause(frozenset({"KEXEC"})),),
         gate_required=(Clause(frozenset({"KEXEC_CORE"})),),
+        enforcement=Enforcement.UPLOAD_REFUSAL,
     )
     assert _unsettable_symbols_named((smuggled,)) == {"KEXEC_CORE": "kernel/Kconfig.kexec:11"}
     # and the advertised half is still read, so neither field can be dropped unnoticed
@@ -1593,6 +1749,7 @@ def test_the_three_invariants_report_a_seam_evaluated_feature_and_spare_the_othe
         gate_required=(
             Clause(frozenset({"VIRTIO_BLK"}), BuiltIn.UNLESS_INITRD, arches=frozenset({"x86_64"})),
         ),
+        enforcement=Enforcement.UPLOAD_REFUSAL,
     )
     both = ["VIRTIO_BLK", "VIRTIO_PCI"]
     all_supplied = SeamFacts(initrd=True, guest_initramfs=True, arch=True)

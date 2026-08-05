@@ -1,10 +1,14 @@
-"""Feature -> required CONFIG_* registry (ADR-0318, ADR-0544).
+"""Feature -> required CONFIG_* registry (ADR-0318, ADR-0544, ADR-0546).
 
 Single source of truth for both the advertised manifest and the arming gate. Each feature
 carries an ``advertised`` superset (guidance shown to the agent) and a deliberately narrower
 ``gate_required`` subset (what the gate refuses on). Each clause is an OR-group: satisfied
 when any member symbol is enabled. Symbol names are bare (no ``CONFIG_`` prefix), matching
 :func:`kdive.kernel_config.parse.parse_kernel_config`.
+
+Beside those two clause tuples each feature states its :class:`Enforcement` - where an omission
+surfaces (ADR-0546). That is the one fact about *kdive* the manifest carries; everything else in
+an entry is a fact about the kernel.
 
 One rule bounds what a clause may name (ADR-0544 §1, #1854): a symbol that is unsettable **in
 principle** - prompt-less, or existing only because something else ``select``s it - is never a
@@ -50,6 +54,60 @@ class BuiltIn(StrEnum):
     """
 
 
+class Enforcement(StrEnum):
+    """Where an omission of this feature's symbols surfaces (ADR-0546, #1867).
+
+    Replaces the bare ``gated`` bool the manifest used to ship. That bool answered "does kdive
+    refuse?", which an agent read as "must I build this?" - and the two differ on ``sysrq``, whose
+    refusal is real but arrives from the feature's own handler rather than from the upload lane.
+
+    Each value is defined for the agent in :data:`ENFORCEMENT_LEGEND`, which the served contract
+    document carries beside the entries, so the flag can no longer reach a reader without its
+    meaning.
+    """
+
+    UPLOAD_REFUSAL = "upload_refusal"
+    """kdive reads the uploaded config and refuses the arming action - ``crash_capture``."""
+
+    UPLOAD_ADVISORY = "upload_advisory"
+    """kdive reads the uploaded config and warns; the action succeeds - ``rootfs_mount``."""
+
+    RUNTIME_REFUSAL = "runtime_refusal"
+    """No config check at all; the feature's own handler refuses on a booted kernel - ``sysrq``."""
+
+    UNCHECKED = "unchecked"
+    """No kdive check reads this entry's requirements. The default, and most of the registry."""
+
+
+# The served legend. Sentences, not labels: the defect ADR-0546 closes is a flag with no
+# definition, so the definition ships in the same payload as the value. Keyed by the enum so a
+# value cannot exist without a definition or a definition without a value (asserted in
+# tests/kernel_config/test_requirements.py). Agent-facing prose - no record references here.
+ENFORCEMENT_LEGEND: Final[dict[Enforcement, str]] = {
+    Enforcement.UPLOAD_REFUSAL: (
+        "kdive reads the effective_config you uploaded with the build and refuses the action "
+        "that arms this feature, with a configuration error naming the symbols you are missing. "
+        "The entry's refuses_on lists exactly the clauses it refuses on; every other clause in "
+        "requirements is advice and can never produce a refusal."
+    ),
+    Enforcement.UPLOAD_ADVISORY: (
+        "kdive reads the effective_config you uploaded with the build and returns a warning in "
+        "the response data. The action still succeeds, so a symbol missing here costs you a "
+        "notice rather than a refusal."
+    ),
+    Enforcement.RUNTIME_REFUSAL: (
+        "kdive does not read your config for this feature, so a clean upload tells you nothing "
+        "about it. The refusal arrives when you invoke the feature, on a kernel already built, "
+        "installed and booted, and recovering costs another build, install and boot. This is a "
+        "decision to make before you build, not one you can revisit afterwards."
+    ),
+    Enforcement.UNCHECKED: (
+        "No kdive check reads this entry's requirements at any point. Omitting it costs you the "
+        "feature itself and nothing else kdive can observe; the summary says what that is."
+    ),
+}
+
+
 @dataclass(frozen=True, slots=True)
 class Clause:
     """One OR-group of kernel symbols: satisfied when any member is enabled.
@@ -92,16 +150,27 @@ class FeatureRequirement:
     ``advertised`` is the full recommended set (manifest guidance); ``gate_required`` is the
     minimal subset the gate refuses on (``()`` = advertise-only, never gated). Both are ordered
     tuples of OR-group clauses.
+
+    ``enforcement`` is authored rather than derived, because the distinction that matters is not
+    derivable: ``sysrq`` and ``kasan`` both carry ``gate_required=()`` and are not the same kind of
+    optional (ADR-0546). Its one derivable half *is* checked, at construction - a refusal set and
+    ``UPLOAD_REFUSAL`` imply each other, and #1861 is what a registry that let them drift ships.
     """
 
     feature: str
     summary: str
     advertised: tuple[Clause, ...]
     gate_required: tuple[Clause, ...] = ()
+    enforcement: Enforcement = Enforcement.UNCHECKED
 
-    @property
-    def gated(self) -> bool:
-        return bool(self.gate_required)
+    def __post_init__(self) -> None:
+        refuses = self.enforcement is Enforcement.UPLOAD_REFUSAL
+        if bool(self.gate_required) is not refuses:
+            raise ValueError(
+                f"{self.feature}: enforcement={self.enforcement.value} disagrees with a "
+                f"{'non-empty' if self.gate_required else 'empty'} gate_required - a refusal set "
+                "and upload_refusal imply each other"
+            )
 
 
 def _plain(*symbols: str) -> tuple[Clause, ...]:
@@ -145,6 +214,10 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
             Clause(frozenset({"EXT4_FS", "XFS_FS"}), BuiltIn.UNLESS_INITRD),
             Clause(frozenset({"VIRTIO_BLK"}), BuiltIn.UNLESS_INITRD),
         ),
+        # Advisory, not gated: `rootfs_mount_warning` reads these advertised clauses at
+        # runs.complete_build and returns `kernel_missing_boot_config` in the success data, so the
+        # completion succeeds either way (ADR-0330). `gate_required` stays empty.
+        enforcement=Enforcement.UPLOAD_ADVISORY,
     ),
     FeatureRequirement(
         CRASH_CAPTURE,
@@ -205,6 +278,10 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
             Clause(frozenset({"FW_CFG_SYSFS"}), arches=_X86_ONLY),
             Clause(frozenset({"RELOCATABLE"})),
         ),
+        # The only refusing entry: both crash seams turn `unmet_clauses` into a
+        # CONFIGURATION_ERROR. The manifest publishes the five clauses above as `refuses_on`, so
+        # an agent can see that RANDOMIZE_BASE - advertised, never gated - cannot refuse (#1867).
+        enforcement=Enforcement.UPLOAD_REFUSAL,
     ),
     FeatureRequirement(
         CRASH_CAPTURE_RHEL_GUEST,
@@ -309,7 +386,13 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         # kernel can still refuse an individual command. Advertise-only per ADR-0318: sysrq is
         # enforced by the runtime detection in the diagnostic_sysrq handler, so a refusal set
         # here would be read by nothing while shipping gated: true in the manifest (#1861).
+        #
+        # RUNTIME_REFUSAL is the value #1867 exists for. With a bare `gated` bool this entry was
+        # indistinguishable from kasan and the six other cheap-to-omit entries, which is the
+        # opposite of the truth: MAGIC_SYSRQ has no module form, so the refusal at diagnostic_sysrq
+        # costs another build, install and boot. Empty refusal set, real refusal.
         _plain("MAGIC_SYSRQ"),
+        enforcement=Enforcement.RUNTIME_REFUSAL,
     ),
     FeatureRequirement(
         "kasan",
@@ -536,6 +619,16 @@ def _manifest_clause(clause: Clause) -> dict[str, JsonValue]:
     return element
 
 
+def enforcement_legend() -> dict[str, JsonValue]:
+    """The served definition of every :class:`Enforcement` value (ADR-0546 §3).
+
+    Rendered from the enum rather than written out beside the document, so a value cannot reach an
+    agent without its definition. Shipped inside ``feature_config_requirements`` for the same
+    reason the definition exists at all: a reader who has the flag has the legend.
+    """
+    return {value.value: ENFORCEMENT_LEGEND[value] for value in Enforcement}
+
+
 def feature_manifest() -> list[dict[str, JsonValue]]:
     manifest: list[dict[str, JsonValue]] = []
     for f in FEATURE_REQUIREMENTS:
@@ -547,8 +640,16 @@ def feature_manifest() -> list[dict[str, JsonValue]]:
         entry: dict[str, JsonValue] = {
             "feature": f.feature,
             "summary": f.summary,
-            "gated": f.gated,
+            # Replaces the `gated` bool at schema_version 3 (ADR-0546 §1, #1867): the bool said
+            # whether kdive refuses, and an agent read it as whether the feature is optional.
+            "enforcement": f.enforcement.value,
             "requirements": requirements,
         }
+        # The refusal set, rendered in the same clause shape and present only when there is one.
+        # It is not a flag on `requirements`, because the two do not correspond one-to-one:
+        # crash_capture advertises {KEXEC} and {KEXEC_FILE} separately and gates them as one
+        # OR-group, so a per-clause flag would claim omitting KEXEC alone refuses (ADR-0546 §2).
+        if f.gate_required:
+            entry["refuses_on"] = [_manifest_clause(clause) for clause in f.gate_required]
         manifest.append(entry)
     return manifest

@@ -16,7 +16,7 @@ from kdive.build_artifacts.validation import (
     ArtifactContract,
     FormatContract,
 )
-from kdive.kernel_config.requirements import feature_manifest
+from kdive.kernel_config.requirements import enforcement_legend, feature_manifest
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     CREATE_INVESTIGATION_UPLOAD_TOOL,
     CREATE_RUN_UPLOAD_TOOL,
@@ -26,10 +26,12 @@ from kdive.serialization import JsonValue
 EXTERNAL_BUILD_CONTRACT_URI = "resource://kdive/contracts/external-build"
 EXTERNAL_BUILD_UPLOAD_DOC = "resource://kdive/docs/operating/external-build-upload.md"
 
-# 2 since #1854 (ADR-0544 §6): a `feature_config_requirements` clause is an object keyed by
-# `symbols` rather than a bare list of symbol names. That one shape change is what let the
-# per-clause `built_in` (#1860) and `arch` (#1859) keys arrive additively, without bumping again.
-_SCHEMA_VERSION = 2
+# 3 since #1867 (ADR-0546 §4): a `feature_config_requirements` entry's `gated` bool is replaced by
+# `enforcement`, which names where an omission surfaces, and a refusing entry publishes the clauses
+# it refuses on as `refuses_on`. Removing a key every entry carried is the case ADR-0544 §6 left
+# open when it bumped to 2 for the clause-object element and recorded that an *added* optional key
+# does not bump again - `built_in` (#1860) and `arch` (#1859) arrived under that rule.
+_SCHEMA_VERSION = 3
 
 _INVESTIGATION_CONTRACTS: Mapping[str, ArtifactContract] = {
     "rootfs": ArtifactContract(
@@ -95,7 +97,12 @@ def external_build_contract_document() -> dict[str, JsonValue]:
         "schema_version": _SCHEMA_VERSION,
         "kind": "external-build-requirements",
         "upload_contracts": upload_contracts_by_owner(),
-        "feature_config_requirements": {"features": list(feature_manifest())},
+        "feature_config_requirements": {
+            # The legend rides with the entries rather than living in a doc (ADR-0546 §3): an
+            # `enforcement` value with no served definition is the defect #1867 filed.
+            "enforcement_legend": enforcement_legend(),
+            "features": list(feature_manifest()),
+        },
         "docs": {"upload_recipe": EXTERNAL_BUILD_UPLOAD_DOC},
         "next_tools": {
             "create_run_upload": CREATE_RUN_UPLOAD_TOOL,
