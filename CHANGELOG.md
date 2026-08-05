@@ -495,6 +495,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix the event order and the stable-key rationale
 - Name the unobserved failure the stable key would cover
 - Give ikconfig, sysrq and serial_console a real summary
+- Note where the revision-key dedup property stops
+- Keep the #1812 filing on the right side of the caveat
 
 ### Fixed
 
