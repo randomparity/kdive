@@ -508,6 +508,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sharpen 0547's answers to questions 1 and 2
 - Fix four review findings in 0547
 - Put 0547's doctor posture in the field doctor renders
+- Correct the last stale initrd claims and the I2 rationale
+- Qualify the =y claim in the advisory's opening paragraph
 
 ### Fixed
 
@@ -869,7 +871,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Strip ANSI colour from help-text assertions in cli/config tests
 - Qualify the no-initramfs claim for embedded initramfs
 - Caveat the embedded-initramfs advisory blind spot
+- Relieve UNLESS_INITRD on the in-guest initramfs lane
 - Sweep colour-safe pyproject-version reads (#1886)
+- Correct the stale doc and record claims found in review
 
 ### Build
 
