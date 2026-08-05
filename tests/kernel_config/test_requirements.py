@@ -121,7 +121,7 @@ def test_debuginfo_summary_sends_the_in_guest_drgn_reader_to_btf_rather_than_sto
     # the escape hatch the seam itself offers, so the two surfaces agree
     assert "vmlinux" in summary
     # ...without the entry claiming BTF is required for what this feature IS for: the clause must
-    # stay satisfiable by DWARF alone, which is the half ADR-0544 settled and this prose may not
+    # stay satisfiable by DWARF alone, which is the half #1855 settled and this prose may not
     # quietly undo.
     cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"}))
     assert unmet_advertised_clauses(cfg, feature_requirement("debuginfo")) == ()
