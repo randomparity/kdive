@@ -501,6 +501,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settle one clause model for kernel-config requirements
 - Tighten the settable-symbol rule and the initrd seam
 - Scope the invariants honestly and record the residuals
+- Say =m does not satisfy the boot-config check
 
 ### Fixed
 
@@ -853,6 +854,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the pre-6.9 kernel the old refusal got wrong
 - Advertise the DWARF choice, move BTF behind it
 - Point the in-guest drgn reader at BTF
+- Fault a boot symbol the kernel only has as a module
+- Name =y in the boot remediation, scope the doc claim
 
 ### Build
 
