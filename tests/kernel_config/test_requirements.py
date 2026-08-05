@@ -122,9 +122,9 @@ def test_sysrq_summary_names_the_use_case_the_late_refusal_and_that_it_is_build_
     # Where the refusal lands is the load-bearing half and the easiest thing to get wrong.
     # sysrq is not pre-gated: gate.py loads CRASH_CAPTURE and ROOTFS_MOUNT only, and ADR-0318
     # chose runtime detection on purpose so kdive never refuses a working sysrq off a stale
-    # Run's config. A summary that claimed a config-time gate would
-    # tell an agent a clean upload had cleared it, which is the wasted rebuild #1851 exists to
-    # stop - so the upload-time disclaimer is asserted, not just the seam name.
+    # Run's config. A summary that claimed a config-time gate would tell an agent a clean upload
+    # had cleared it, which is the wasted rebuild #1851 exists to stop - so the upload-time
+    # disclaimer is asserted, not just the seam name.
     summary = feature_requirement(SYSRQ).summary.lower()
     # what it enables: the diagnostics kdive actually exposes, on a guest that stopped answering
     assert "wedged" in summary or "no longer answer" in summary
