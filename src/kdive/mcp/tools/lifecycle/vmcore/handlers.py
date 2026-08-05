@@ -46,6 +46,7 @@ from kdive.security.artifacts.crash_commands import validate_crash_commands
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.runs.steps import system_arch
 
 # The standard first-pass crash(8) batch `postmortem.crash` runs when the caller omits
 # `commands` — the panic reason and the faulting context, and nothing else.
@@ -249,7 +250,9 @@ async def _fetch_vmcore(
                 # kdump-symbol-only — the fadump-active runtime signal, not a static config check,
                 # distinguishes fadump from a silent kdump fallback). host_dump is host-side (QEMU)
                 # and never gates. crash_capture_refusal fails open (None) on no upload / error.
-                refusal = await crash_capture_refusal(conn, uid)
+                # `arch` comes off the System already loaded above, and scopes the clauses that
+                # only exist on one arch (FW_CFG_SYSFS, #1875).
+                refusal = await crash_capture_refusal(conn, uid, arch=system_arch(system))
                 if refusal is not None:
                     return _config_error(
                         run_id,

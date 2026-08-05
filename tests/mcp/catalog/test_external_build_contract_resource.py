@@ -172,14 +172,34 @@ def test_the_served_document_carries_the_arch_scope_on_the_console_clauses() -> 
     ]
 
 
+def test_the_served_crash_capture_entry_scopes_the_symbols_no_ppc64le_kernel_can_set() -> None:
+    # The served half of #1875, closing ADR-0544 §7's residual. Two of crash_capture's advertised
+    # symbols are unreachable on ppc64le at any setting - FW_CFG_SYSFS, whose only powerpc
+    # dependency arm PPC_PMAC itself depends on CPU_BIG_ENDIAN, and RANDOMIZE_BASE, which depends
+    # on the 32-bit PPC_85xx. This document is where the agent reads that, so pin it here and not
+    # only on feature_manifest(): a ppc64le agent diffing its config against the array was
+    # previously told to set both, and then refused over the first.
+    features = _doc()["feature_config_requirements"]["features"]
+    crash = next(f for f in features if f["feature"] == "crash_capture")
+    assert crash["requirements"] == [
+        {"symbols": ["KEXEC"]},
+        {"symbols": ["KEXEC_FILE"]},
+        {"symbols": ["CRASH_DUMP"]},
+        {"symbols": ["PROC_VMCORE"]},
+        {"symbols": ["FW_CFG_SYSFS"], "arch": ["x86_64"]},
+        {"symbols": ["RELOCATABLE"]},  # a real prompt on ppc64le, so it stays unscoped
+        {"symbols": ["RANDOMIZE_BASE"], "arch": ["x86_64"]},
+    ]
+
+
 def test_no_other_served_feature_carries_an_arch_scope() -> None:
     # The key is omitted at its default, so the dozens of unscoped clauses stay as small as they
-    # were and an agent filtering on `arch` sees only the one entry that really varies. Also the
-    # served half of ADR-0544 §7's residual: crash_capture's arch-specific gated pair carries no
-    # tag, deferred to #1875, so it must not appear here either.
+    # were and an agent filtering on `arch` sees only the entries that really vary. rootfs_mount
+    # in particular must not appear: complete_build resolves no arch, so a tag there would make
+    # its advisory vanish rather than fire (invariant I2, ADR-0544 §7).
     features = _doc()["feature_config_requirements"]["features"]
     tagged = {f["feature"] for f in features for clause in f["requirements"] if "arch" in clause}
-    assert tagged == {"serial_console"}
+    assert tagged == {"serial_console", "crash_capture"}
 
 
 def test_schema_version_is_two_for_the_clause_object_element() -> None:

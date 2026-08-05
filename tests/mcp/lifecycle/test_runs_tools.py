@@ -4733,6 +4733,61 @@ def test_install_handler_arms_crashkernel_when_config_supports_it(migrated_url: 
     asyncio.run(_run())
 
 
+def test_install_handler_arms_a_ppc64le_crashkernel_over_the_x86_only_symbol(
+    migrated_url: str,
+) -> None:
+    # #1875 at the install seam. The identical config drives both arms: on ppc64le it must arm,
+    # because FW_CFG_SYSFS is settable on no ppc64le kernel (its only powerpc dependency arm,
+    # PPC_PMAC, depends on CPU_BIG_ENDIAN) and refusing over it reserved nothing and advised
+    # nothing followable; on x86_64 it must still refuse and still name the symbol.
+    #
+    # Driven through a seeded ppc64le provisioning profile rather than a direct
+    # crash_capture_refusal call, because the value under test is that _validate_crashkernel
+    # passes system_arch(system) - a helper-level call would pass with the arch hard-coded.
+    from unittest.mock import patch
+
+    from kdive.kernel_config.parse import KernelConfig
+    from tests.kernel_config.config_fixtures import all_builtin
+
+    no_fw_cfg = all_builtin(_CRASH_GATE_SUPPORTED - {"FW_CFG_SYSFS"})
+
+    async def _fake_load(conn: Any, run_id: Any, *, store_factory: Any = None) -> KernelConfig:
+        return no_fw_cfg
+
+    async def _install(pool: AsyncConnectionPool, arch: str, installer: _FakeInstaller) -> None:
+        run_id = await _seed_succeeded_run(
+            pool,
+            build_profile={**_VALID_BUILD, "cmdline": "dhash_entries=1"},
+            provisioning_profile=profile_dump(crashkernel="256M", arch=arch),
+        )
+        job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install", crashkernel="512M")
+        with patch("kdive.kernel_config.gate.load_effective_config", _fake_load):
+            async with pool.connection() as conn:
+                await _install_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(
+                        installer=installer, profile_policy=LOCAL_PROFILE_POLICY
+                    ),
+                )
+
+    async def _run() -> None:
+        async with runs_support.pool(migrated_url) as pool:
+            ppc_installer = _FakeInstaller()
+            await _install(pool, "ppc64le", ppc_installer)
+            assert len(ppc_installer.calls) == 1  # armed, not refused
+            assert "crashkernel=512M" in ppc_installer.calls[0].cmdline
+
+            x86_installer = _FakeInstaller()
+            with pytest.raises(CategorizedError) as exc:
+                await _install(pool, "x86_64", x86_installer)
+            assert exc.value.details["reason"] == "kernel_missing_crash_config"
+            assert exc.value.details["missing"] == ["FW_CFG_SYSFS"]
+            assert len(x86_installer.calls) == 0  # never staged
+
+    asyncio.run(_run())
+
+
 def test_install_handler_records_step_run_stays_succeeded(migrated_url: str) -> None:
     async def _run() -> None:
         async with runs_support.pool(migrated_url) as pool:

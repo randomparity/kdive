@@ -44,14 +44,18 @@ def build_profile() -> dict[str, Any]:
     return copy.deepcopy(BUILD_PROFILE)
 
 
-def profile_dump(**local_libvirt: Any) -> dict[str, Any]:
-    """Return the canonical local-libvirt provisioning profile used by Run tests."""
+def profile_dump(*, arch: str = "x86_64", **local_libvirt: Any) -> dict[str, Any]:
+    """Return the canonical local-libvirt provisioning profile used by Run tests.
+
+    ``arch`` is the profile's own top-level field; every other keyword lands in the
+    ``local-libvirt`` provider section, which is where this helper's callers put their overrides.
+    """
     section: dict[str, Any] = {"rootfs": {"kind": "local", "path": "/img"}}
     section.update(local_libvirt)
     return ProvisioningProfile.model_validate(
         {
             "schema_version": 1,
-            "arch": "x86_64",
+            "arch": arch,
             "vcpu": 2,
             "memory_mb": 2048,
             "disk_gb": 10,

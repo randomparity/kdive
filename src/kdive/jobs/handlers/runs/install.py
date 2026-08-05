@@ -124,7 +124,7 @@ async def _resolve_install_plan(
     set_provider_kind(binding.kind.value)
     runtime = binding.runtime
     method = install_method_for(system, runtime.profile_policy)
-    await _validate_crashkernel(conn, run_id, method, payload.crashkernel)
+    await _validate_crashkernel(conn, run_id, method, payload.crashkernel, arch=system_arch(system))
     return await _build_install_plan(
         conn,
         run,
@@ -142,6 +142,8 @@ async def _validate_crashkernel(
     run_id: UUID,
     method: CaptureMethod,
     crashkernel: str | None,
+    *,
+    arch: str,
 ) -> None:
     if crashkernel is None:
         return
@@ -158,7 +160,9 @@ async def _validate_crashkernel(
     # Kernel-config gate (ADR-0318): a crashkernel reservation is useless if the uploaded
     # kernel cannot kdump. Refuse loudly rather than reserve memory for a dump that can never
     # happen; the helper fails open (None) on no upload / read error / degenerate config.
-    refusal = await crash_capture_refusal(conn, run_id)
+    # `arch` is the System's provisioning-profile arch, which scopes the clauses that only
+    # exist on one of them (FW_CFG_SYSFS, #1875).
+    refusal = await crash_capture_refusal(conn, run_id, arch=arch)
     if refusal is not None:
         raise CategorizedError(
             "uploaded kernel config lacks symbols required for kdump crash capture",

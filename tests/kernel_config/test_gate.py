@@ -337,6 +337,12 @@ def test_missing_effective_config_nudge_cancellation_propagates_without_fail_ope
     assert not caplog.records
 
 
+# The two arches kdive provisions (domain/platform/arch_traits.SUPPORTED_ARCHES), spelled as
+# literals here for the same reason requirements.py spells its scopes: these tests read a parsed
+# `.config` and must not take an import on the provisioning layer to name two strings.
+_X86 = "x86_64"
+_PPC = "ppc64le"
+
 _KEXEC_LOAD_ONLY = frozenset(
     {
         "KEXEC",
@@ -350,10 +356,10 @@ _KEXEC_LOAD_ONLY = frozenset(
 )
 
 
-def _crash_call(config: KernelConfig | None) -> dict[str, Any] | None:
+def _crash_call(config: KernelConfig | None, *, arch: str = _X86) -> dict[str, Any] | None:
     async def _run() -> dict[str, Any] | None:
         with _patched_load(config):
-            return await crash_capture_refusal(_CONN, _RUN_ID)
+            return await crash_capture_refusal(_CONN, _RUN_ID, arch=arch)
 
     return asyncio.run(_run())
 
@@ -374,3 +380,33 @@ def test_crash_capture_refusal_remediation_points_at_the_rhel_guest_feature():
     assert refusal["reason"] == CRASH_CONFIG_REASON
     assert refusal["missing"] == ["FW_CFG_SYSFS"]
     assert "crash_capture_rhel_guest" in cast(str, refusal["remediation"])
+
+
+def test_a_ppc64le_kernel_is_not_refused_over_a_symbol_it_cannot_set():
+    # #1875, the defect: FW_CFG_SYSFS's powerpc dependency arm is PPC_PMAC, which itself
+    # `depends on ... CPU_BIG_ENDIAN`, so no ppc64le kernel can set it at any machine type. The
+    # gate refused crash capture over it anyway, and the remediation ("rebuild with the missing
+    # CONFIG_*") was a dead end - ADR-0544 rule 1's defect on a second feature.
+    complete_for_ppc = all_builtin(_KEXEC_LOAD_ONLY - {"FW_CFG_SYSFS"})
+    assert _crash_call(complete_for_ppc, arch=_PPC) is None
+
+
+def test_the_same_config_still_refuses_on_x86_64_and_still_names_the_symbol():
+    # The other direction of the relief above, and the one that proves the scope narrowed the
+    # clause rather than removing it. x86_64 is where FW_CFG_SYSFS is both settable and needed,
+    # so the refusal - and the symbol it names - is unchanged there.
+    complete_for_ppc = all_builtin(_KEXEC_LOAD_ONLY - {"FW_CFG_SYSFS"})
+    refusal = _crash_call(complete_for_ppc, arch=_X86)
+    assert refusal is not None
+    assert refusal["missing"] == ["FW_CFG_SYSFS"]
+
+
+def test_a_ppc64le_kernel_missing_an_unscoped_symbol_is_still_refused():
+    # The relief is scoped to the one arch-specific clause, not to ppc64le as a whole. RELOCATABLE
+    # is a real prompt on ppc64le (`arch/powerpc/Kconfig`, `depends on PPC64 || ...`), so it stays
+    # unscoped and a ppc64le kernel lacking it is refused exactly as an x86 one is. Without this,
+    # scoping the whole entry - or handing the seam the wrong arch - would read as a pass.
+    no_relocatable = all_builtin(_KEXEC_LOAD_ONLY - {"FW_CFG_SYSFS", "RELOCATABLE"})
+    refusal = _crash_call(no_relocatable, arch=_PPC)
+    assert refusal is not None
+    assert refusal["missing"] == ["RELOCATABLE"]

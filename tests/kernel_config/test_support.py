@@ -31,24 +31,25 @@ _FULL = frozenset(
 
 def test_kaslr_off_full_gate_set_is_supported():
     # RANDOMIZE_BASE absent but every gate_required clause met -> no unmet clauses (supported).
-    assert unmet_clauses(KernelConfig(_FULL, _FULL), _CRASH) == ()
+    assert unmet_clauses(KernelConfig(_FULL, _FULL), _CRASH, arch=_X86) == ()
 
 
 def test_kexec_or_group_satisfied_by_either_syscall():
     only_file = (_FULL - {"KEXEC"}) | {"KEXEC_FILE"}
-    assert unmet_clauses(KernelConfig(frozenset(only_file), frozenset(only_file)), _CRASH) == ()
+    cfg = KernelConfig(frozenset(only_file), frozenset(only_file))
+    assert unmet_clauses(cfg, _CRASH, arch=_X86) == ()
 
 
 def test_missing_one_clause_is_unsupported_and_named():
     cfg = _all_builtin(_FULL - {"PROC_VMCORE"})
-    unmet = unmet_clauses(cfg, _CRASH)
+    unmet = unmet_clauses(cfg, _CRASH, arch=_X86)
     assert unmet != ()
     assert missing_symbols(unmet) == ["PROC_VMCORE"]
 
 
 def test_missing_both_kexec_syscalls_names_both():
     cfg = _all_builtin(_FULL - {"KEXEC"})  # neither KEXEC nor KEXEC_FILE
-    unmet = unmet_clauses(cfg, _CRASH)
+    unmet = unmet_clauses(cfg, _CRASH, arch=_X86)
     assert missing_symbols(unmet) == ["KEXEC", "KEXEC_FILE"]
 
 
@@ -60,7 +61,7 @@ def test_advertised_clauses_read_the_advertise_set_not_the_empty_gate():
     # read the advertised set instead. BTRFS_FS keeps the config non-degenerate while enabling no
     # root filesystem kdive boots (#1626 made XFS_FS one, so it no longer serves that role here).
     cfg = _all_builtin({"BTRFS_FS"})
-    assert unmet_clauses(cfg, _ROOTFS) == ()
+    assert unmet_clauses(cfg, _ROOTFS, arch=None) == ()
     assert missing_symbols(unmet_advertised_clauses(cfg, _ROOTFS)) == [
         "EXT4_FS",
         "VIRTIO_BLK",
@@ -151,8 +152,8 @@ def test_the_built_in_requirement_reaches_the_refusal_set_and_not_only_the_adver
         advertised=(Clause(frozenset({"EXT4_FS"}), BuiltIn.UNLESS_INITRD),),
         gate_required=(Clause(frozenset({"EXT4_FS"}), BuiltIn.UNLESS_INITRD),),
     )
-    assert missing_symbols(unmet_clauses(_MODULAR, gated)) == ["EXT4_FS"]
-    assert unmet_clauses(_MODULAR, gated, has_initrd=True) == ()
+    assert missing_symbols(unmet_clauses(_MODULAR, gated, arch=None)) == ["EXT4_FS"]
+    assert unmet_clauses(_MODULAR, gated, arch=None, has_initrd=True) == ()
 
 
 def test_an_or_group_is_satisfied_by_whichever_member_is_built_in():
@@ -257,9 +258,10 @@ def test_a_multi_arch_scope_is_evaluated_on_each_member():
 
 def test_the_arch_scope_reaches_the_refusal_set_and_not_only_the_advertised_one():
     # unmet_clauses and unmet_advertised_clauses read different fields; both must apply the scope,
-    # or a future arch-scoped gate clause would refuse a kernel of the wrong arch. No registry
-    # entry is in that position today (invariant I2 forbids it while the seams supply no arch),
-    # so this is what keeps the two functions from diverging before one is.
+    # or an arch-scoped gate clause would refuse a kernel of the wrong arch. crash_capture's
+    # {FW_CFG_SYSFS} is now exactly that (#1875), so this synthetic fixture is no longer the only
+    # thing holding the pair together - it is what keeps them from diverging on a feature the
+    # registry does not happen to carry.
     gated = FeatureRequirement(
         "not_a_real_feature",
         "synthetic fixture for the arch scope",
@@ -269,7 +271,7 @@ def test_the_arch_scope_reaches_the_refusal_set_and_not_only_the_advertised_one(
     bare = _all_builtin({"EXT4_FS"})
     assert missing_symbols(unmet_clauses(bare, gated, arch=_PPC)) == ["HVC_CONSOLE"]
     assert unmet_clauses(bare, gated, arch=_X86) == ()
-    assert unmet_clauses(bare, gated) == ()
+    assert unmet_clauses(bare, gated, arch=None) == ()
 
 
 def test_the_arch_scope_and_the_built_in_requirement_compose():
