@@ -102,6 +102,31 @@ def test_debuginfo_summary_names_use_case_and_cost():
     assert "omit" in summary
 
 
+def test_debuginfo_summary_sends_the_in_guest_drgn_reader_to_btf_rather_than_stopping_at_dwarf():
+    # #1855 took DEBUG_INFO_BTF out of this entry's clause, which is right - a DWARF build is what
+    # gdb and an offline vmcore need, and AND-ing BTF in would tell those readers otherwise. But
+    # the summary's first sentence sells "live drgn" too, and in-guest drgn-live resolves from
+    # /sys/kernel/btf, not from the .config's DWARF (the DWARF vmlinux is not on the guest rootfs -
+    # gate.py says exactly this, and is why debuginfo_warning keys on BTF). With BTF gone from the
+    # clause, the entry named it nowhere at all: an agent enabling DWARF5 for a live drgn session
+    # satisfied every clause here and found out at debug.start_session, one build/install/boot
+    # later. The clause stays DWARF-only; the summary carries the pointer.
+    summary = feature_requirement("debuginfo").summary.lower()
+    assert "debug_info_btf" in summary
+    assert "/sys/kernel/btf" in summary
+    # named as the other entry's, so the reader can find it rather than being left to search
+    assert "bpf_tracing" in summary
+    # and the consequence of stopping at DWARF, or the pointer reads as an optional extra
+    assert "resolve a symbol" in summary
+    # the escape hatch the seam itself offers, so the two surfaces agree
+    assert "vmlinux" in summary
+    # ...without the entry claiming BTF is required for what this feature IS for: the clause must
+    # stay satisfiable by DWARF alone, which is the half ADR-0544 settled and this prose may not
+    # quietly undo.
+    cfg = KernelConfig(frozenset({"DEBUG_INFO", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"}))
+    assert unmet_advertised_clauses(cfg, feature_requirement("debuginfo")) == ()
+
+
 def test_ikconfig_summary_names_the_readback_use_case_the_skip_case_and_that_it_is_cheap():
     # #1851: the entry read "Read the running kernel's own config back via /proc/config.gz." -
     # the mechanism and nothing else. An agent had no basis to include or omit it, so the

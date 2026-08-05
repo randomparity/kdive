@@ -170,7 +170,11 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "Enable only for live drgn/gdb symbol resolution or offline vmcore analysis. Embeds "
         "DWARF tables in every .ko - can grow the module tree 10-50x and slow upload and "
         "install. Omit for boot-time crash reproducers and console-log investigations where no "
-        "post-boot introspection is needed.",
+        "post-boot introspection is needed. What is below is the DWARF half, which is what gdb "
+        "and an offline vmcore read. In-guest drgn-live reads BTF from /sys/kernel/btf instead - "
+        "the DWARF vmlinux is not on the guest rootfs - so if you are going to run drgn inside "
+        "the guest, add DEBUG_INFO_BTF from the bpf_tracing set on top of a DWARF member here, or "
+        "upload a matching vmlinux; DWARF alone leaves that session unable to resolve a symbol.",
         # The clause is exactly the DWARF `choice` members, and each of the two edits that made it
         # so is load-bearing (#1855).
         #
