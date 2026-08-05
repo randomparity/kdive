@@ -12,7 +12,8 @@ provenance** into the :class:`RootfsBuildOutput`. The pipeline is:
    authorized key (ADR-0289, #963); the per-System bootstrap key is injected at provision time;
 4. ``virt-tar-out`` + ``virt-make-fs --type=ext4 --format=qcow2`` repack the root tree into a
    **no-partition-table whole-disk ext4 qcow2** — the only layout the direct-kernel boot provider
-   mounts (``root=/dev/vda``, no initramfs, ADR-0030);
+   mounts (``root=/dev/vda``, no initramfs unless the build uploaded an initrd artifact or the
+   kernel embeds its own initramfs, ADR-0030);
 5. ``family.normalize`` rewrites fstab to a lone ``/``, removes crypttab, and sets the family's
    SELinux policy (rhel: permissive + first-boot relabel) via guestfish;
 6. ``verify_cloud_init`` runs an offline guestfish self-check on the staged image, asserting the

@@ -52,7 +52,9 @@ returns — `refs.download_uri` presigns a short-lived GET of that image's known
 `/boot/config-<ver>` (the version is in `data.default_kernel_version`). This is the recommended
 starting point: a stock `defconfig` commonly builds `VIRTIO_BLK` and `EXT4_FS` as modules rather
 than built-in, so the resulting kernel cannot mount the `/dev/vda` ext4 rootfs and never boots the
-direct-kernel guest. Begin from the image's config, then layer on the debug symbols below.
+direct-kernel guest — unless the build uploads an `initrd` artifact or the kernel embeds its own
+initramfs, either of which supplies the modules missing at root-mount time. Begin from the
+image's config, then layer on the debug symbols below.
 
 A useful debug set to start from. Pick **one** memory-safety detector: `CONFIG_KCSAN` is built
 only when `CONFIG_KASAN` is off, so a config carrying both gives you KASAN and silently drops
