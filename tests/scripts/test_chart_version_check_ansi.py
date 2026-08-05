@@ -1,19 +1,26 @@
 # tests/scripts/test_chart_version_check_ansi.py
 """Behavioral test for the `chart-version-check` recipe's ANSI handling (#1883).
 
-`uv version --short` emits ANSI colour escapes around the version string unconditionally on
-some `uv` versions — not just under a TTY or `FORCE_COLOR`. The Chart.yaml-side read is plain
+`uv version --short` colours its output when `FORCE_COLOR` is set in the environment (#1883
+reproduced this with a dev shell exporting `FORCE_COLOR=3`). The Chart.yaml-side read is plain
 text, so the comparison `[[ "$chart" != "$pyproject" ]]` never matched even when the versions
 were equal, false-failing `just chart-version-check` (and, transitively, `just ci`, which stops
 at the first failing recipe).
 
-This drives the real recipe with a stub `uv` that always emits a coloured version string —
-forcing the exact condition that broke the comparison — and a throwaway `Chart.yaml` so the
-test controls both sides of the compare without touching the real repo files.
+Two complementary drives:
+
+- A stub `uv` that always emits a coloured version string, isolating the strip logic from any
+  particular colour source and from the repo's current version.
+- The real `uv` against the real repo with `FORCE_COLOR=3` set, reproducing the actual reported
+  trigger end to end.
+
+Both are paired with a genuine-mismatch control, so a fix that merely stops failing (rather than
+comparing correctly) cannot pass silently.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -23,6 +30,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[2]
 _JUSTFILE = _ROOT / "justfile"
 _JUST = shutil.which("just")
+_UV = shutil.which("uv")
 
 # The whole repo is driven through `just` (CI runs `just lint` / `just type` / `just test`), so
 # this gate does not fire in CI; it keeps a `just`-less direct-pytest invocation from erroring.
@@ -87,3 +95,69 @@ def test_genuinely_different_versions_still_fail(tmp_path: Path) -> None:
     )
     assert "0.4.1" in result.stderr
     assert "0.9.9" in result.stderr
+
+
+@pytest.mark.skipif(_UV is None, reason="uv is required to reproduce the real trigger")
+def test_force_color_env_reproduces_the_real_bug_and_still_passes() -> None:
+    """Drives the real `uv` against the real repo with the actual reported trigger.
+
+    The stub-based tests above isolate the strip logic; this one proves the trigger reported in
+    #1883 is actually handled end to end — `FORCE_COLOR` set in the caller's environment, the
+    real `uv version --short`, and the real Chart.yaml/pyproject.toml.
+    """
+    assert _JUST is not None
+    result = subprocess.run(
+        [
+            _JUST,
+            "--justfile",
+            str(_JUSTFILE),
+            "--working-directory",
+            str(_ROOT),
+            "chart-version-check",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "FORCE_COLOR": "3"},
+    )
+    assert result.returncode == 0, (
+        "the real recipe must pass under FORCE_COLOR=3 "
+        f"(stdout={result.stdout!r} stderr={result.stderr!r})"
+    )
+
+
+@pytest.mark.skipif(_UV is None, reason="uv is required to reproduce the real trigger")
+def test_force_color_env_still_fails_on_a_real_mismatch(tmp_path: Path) -> None:
+    """Same real-`uv`/`FORCE_COLOR=3` drive as above, but against a throwaway Chart.yaml that
+    genuinely disagrees with the real pyproject version — the control for the test above: a fix
+    that merely silences the recipe (rather than comparing correctly) must not pass this one.
+
+    `uv version --short` needs a `pyproject.toml` findable from the working directory (it walks
+    up and errors otherwise), so the real one is copied in standalone rather than pointed at the
+    real repo root, which would also pick up the real (matching) Chart.yaml.
+    """
+    shutil.copy(_ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
+    chart_dir = tmp_path / "deploy" / "helm" / "kdive"
+    chart_dir.mkdir(parents=True)
+    (chart_dir / "Chart.yaml").write_text('appVersion: "0.0.0-does-not-exist"\n', encoding="utf-8")
+
+    assert _JUST is not None
+    result = subprocess.run(
+        [
+            _JUST,
+            "--justfile",
+            str(_JUSTFILE),
+            "--working-directory",
+            str(tmp_path),
+            "chart-version-check",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "FORCE_COLOR": "3"},
+    )
+    assert result.returncode == 1, (
+        "a real mismatch must still fail under FORCE_COLOR=3 "
+        f"(stdout={result.stdout!r} stderr={result.stderr!r})"
+    )
+    assert "0.0.0-does-not-exist" in result.stderr

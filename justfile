@@ -528,10 +528,11 @@ container-arch-check:
 chart-version-check:
     #!/usr/bin/env bash
     set -euo pipefail
-    # `uv version --short` emits ANSI colour codes unconditionally on this uv version (not just
-    # under a TTY or FORCE_COLOR), which broke the string compare below even when the versions
-    # matched. Strip escape sequences so the comparison is colour-free regardless of the caller's
-    # environment or uv's default.
+    # `uv version --short` colours its output when FORCE_COLOR is set in the environment (#1883
+    # reproduced with a dev shell exporting FORCE_COLOR=3), which broke the string compare below
+    # even when the versions matched. Strip escape sequences unconditionally rather than
+    # special-casing FORCE_COLOR: the comparison then stays colour-free regardless of the
+    # caller's environment, TTY, or a future uv default that colours by default.
     pyproject="$(uv version --short | sed -E $'s/\x1b\\[[0-9;]*m//g')"
     chart="$(grep -E '^appVersion:' deploy/helm/kdive/Chart.yaml | sed -E 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/')"
     if [[ "$chart" != "$pyproject" ]]; then
