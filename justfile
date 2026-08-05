@@ -409,7 +409,9 @@ release VERSION:
     [[ -z "$(git status --porcelain)" ]] || { echo "working tree not clean" >&2; exit 1; }
     git fetch --quiet origin main
     [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || { echo "HEAD is not at origin/main (behind, ahead, or diverged) — sync first" >&2; exit 1; }
-    current="$(uv version --short)"
+    # scripts/pyproject-version.sh reads a colour-free version regardless of the caller's
+    # environment (#1883, #1886) — see its header for why.
+    current="$({{justfile_directory()}}/scripts/pyproject-version.sh)"
     [[ "$current" == "{{VERSION}}" ]] || { echo "pyproject version $current != {{VERSION}}" >&2; exit 1; }
     git tag -a "v{{VERSION}}" -m "Release v{{VERSION}}"
     git push origin "v{{VERSION}}"
@@ -528,12 +530,9 @@ container-arch-check:
 chart-version-check:
     #!/usr/bin/env bash
     set -euo pipefail
-    # `uv version --short` colours its output when FORCE_COLOR is set in the environment (#1883
-    # reproduced with a dev shell exporting FORCE_COLOR=3), which broke the string compare below
-    # even when the versions matched. Strip escape sequences unconditionally rather than
-    # special-casing FORCE_COLOR: the comparison then stays colour-free regardless of the
-    # caller's environment, TTY, or a future uv default that colours by default.
-    pyproject="$(uv version --short | sed -E $'s/\x1b\\[[0-9;]*m//g')"
+    # scripts/pyproject-version.sh reads a colour-free version regardless of the caller's
+    # environment (#1883, #1886) — see its header for why.
+    pyproject="$({{justfile_directory()}}/scripts/pyproject-version.sh)"
     chart="$(grep -E '^appVersion:' deploy/helm/kdive/Chart.yaml | sed -E 's/^appVersion:[[:space:]]*"?([^"]+)"?[[:space:]]*$/\1/')"
     if [[ "$chart" != "$pyproject" ]]; then
         echo "::error::Chart.yaml appVersion ($chart) != pyproject version ($pyproject)." >&2
