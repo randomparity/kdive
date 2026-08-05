@@ -1177,6 +1177,41 @@ def test_crash_capture_scopes_the_two_symbols_no_ppc64le_kernel_can_set_and_no_o
     assert advertised == {**gated, "RANDOMIZE_BASE": x86_only}
 
 
+def test_a_third_provisionable_arch_forces_the_crash_capture_scope_to_be_re_verified():
+    # The converse guard for crash_capture, and the one a subset assertion cannot give. An
+    # `arches` value is an ALLOW-list and the support checks SKIP a clause outside it, so a scope
+    # that names fewer arches than kdive provisions is always accepted by
+    # test_every_arch_scope_names_an_arch_kdive_can_provision - `{x86_64} <= {x86_64, ppc64le,
+    # aarch64}` holds. That is the same hole
+    # test_every_arch_kdive_can_provision_is_advertised_a_console closes for serial_console.
+    #
+    # It matters here because FW_CFG_SYSFS is not x86-specific in the kernel: its dependency arm
+    # is `ARM || ARM64 || PARISC || PPC_PMAC || RISCV || SPARC || X86`, so it is settable - and
+    # needed for a QEMU guest's crash capture - on nearly every arch kdive might add next.
+    # Adding one to `_TRAITS` would silently drop it out of that arch's refusal set with the whole
+    # suite green. Reddening here forces whoever adds the arch to re-read the Kconfig and either
+    # widen the scope or state why the arch stays out.
+    scoped = {
+        symbol: clause.arches
+        for f in FEATURE_REQUIREMENTS
+        if f.feature == CRASH_CAPTURE
+        for clauses in (f.advertised, f.gate_required)
+        for clause in clauses
+        if clause.arches is not None
+        for symbol in clause.symbols
+    }
+    assert scoped  # non-vacuity: an empty map would make every loop below pass
+    for symbol, arches in scoped.items():
+        assert SUPPORTED_ARCHES - (arches or frozenset()) == {_PPC}, (
+            f"crash_capture scopes {symbol} to {sorted(arches or ())}, leaving "
+            f"{sorted(SUPPORTED_ARCHES - (arches or frozenset()))} out of its checks. Only "
+            "ppc64le was verified against upstream Kconfig as unable to set it (#1875); re-read "
+            "the symbol's `depends on` for the new arch before leaving it out."
+        )
+    # and the check discriminates: a scope that omitted a second arch would be reported
+    assert SUPPORTED_ARCHES - frozenset({_X86, _PPC}) != {_PPC}
+
+
 def test_every_arch_scope_names_an_arch_kdive_can_provision():
     # ADR-0544 §3's third test. A clause scoped to an arch kdive cannot boot is a requirement no
     # kernel is ever checked against - it would sit in the contract document advertising a symbol
