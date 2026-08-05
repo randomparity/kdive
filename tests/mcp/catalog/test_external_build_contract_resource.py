@@ -121,6 +121,45 @@ def test_served_contract_advertises_the_rhel_guest_kdump_symbols_ungated() -> No
         assert symbol in advertised
 
 
+def test_served_contract_advertises_the_sanitizer_tracing_and_coverage_features_ungated() -> None:
+    # #1848: replaces #916/#917, which named the build-config catalog ADR-0316 deleted. The served
+    # contract is the only surface an agent building its own kernel reads, so a feature that is
+    # not here does not exist as far as that agent is concerned. All advertise-only: none of these
+    # has an arming seam, so kdive never refuses a build on them.
+    features = {f["feature"]: f for f in _doc()["feature_config_requirements"]["features"]}
+    expected_symbols = {
+        "kcsan": "KCSAN",
+        "kfence": "KFENCE",
+        "kmemleak": "DEBUG_KMEMLEAK",
+        "lockdep": "PROVE_LOCKING",
+        "ftrace": "DYNAMIC_FTRACE",
+        "bpf_tracing": "BPF_EVENTS",
+        "fault_injection": "FAULT_INJECTION",
+        "kcov": "KCOV_INSTRUMENT_ALL",
+    }
+    for feature_id, symbol in expected_symbols.items():
+        assert feature_id in features, feature_id
+        entry = features[feature_id]
+        assert entry["gated"] is False, feature_id
+        assert symbol in json.dumps(entry["requirements"]), feature_id
+        # the manifest never leaks the internal refusal set
+        assert "gate_required" not in entry, feature_id
+
+
+def test_served_kasan_entry_states_what_it_finds_and_what_it_costs() -> None:
+    # The whole point of #1848's kasan half: "Kernel Address Sanitizer instrumentation." gave an
+    # agent no basis to size the guest or to choose inline over outline.
+    kasan = next(
+        f for f in _doc()["feature_config_requirements"]["features"] if f["feature"] == "kasan"
+    )
+    summary = kasan["summary"].lower()
+    assert "use-after-free" in summary
+    assert "1/8" in summary
+    advertised = json.dumps(kasan["requirements"])
+    assert "KASAN_OUTLINE" in advertised
+    assert "KASAN_GENERIC" in advertised
+
+
 def test_resource_reads_back_generated_json() -> None:
     app = FastMCP("external-build-contract-test")
     register(app, resolver=cast(ProviderResolver, _Resolver()))

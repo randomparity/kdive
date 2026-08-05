@@ -130,8 +130,146 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
     ),
     FeatureRequirement(
         "kasan",
-        "Kernel Address Sanitizer instrumentation.",
-        _plain("KASAN", "KASAN_INLINE"),
+        "Enable to catch slab and stack out-of-bounds accesses, use-after-free and double-free "
+        "at the instruction that commits them rather than at the later corruption. Generic mode "
+        "spends about 1/8 of memory on shadow tables, adds roughly 50% to every allocation and "
+        "runs about 3x slower, so give a KASAN guest more RAM than the same workload needs "
+        "without it. The two Kconfig choices are alternatives, not additions: pick one mode "
+        "(KASAN_GENERIC, or KASAN_SW_TAGS/KASAN_HW_TAGS on arm64) and one instrumentation form "
+        "(KASAN_INLINE is about twice as fast and grows kernel text; KASAN_OUTLINE is smaller "
+        "and slower). STACKTRACE turns a report into allocation and free backtraces. Omit for "
+        "console-log-only reproducers, where the report adds nothing. Pair with debuginfo only "
+        "when you will run drgn or gdb on the result - KASAN's text growth plus DWARF in every "
+        ".ko makes the upload tarball much larger. Cannot be combined with kcsan: the kernel "
+        "builds KCSAN only when KASAN is off, so a config with both silently yields neither.",
+        (
+            frozenset({"KASAN"}),
+            frozenset({"KASAN_GENERIC", "KASAN_SW_TAGS", "KASAN_HW_TAGS"}),
+            frozenset({"KASAN_INLINE", "KASAN_OUTLINE"}),
+            frozenset({"STACKTRACE"}),
+        ),
+    ),
+    FeatureRequirement(
+        "kcsan",
+        "Kernel Concurrency Sanitizer: finds a data race - two tasks touching the same memory "
+        "with at least one write and no lock or atomic ordering between them - before it "
+        "corrupts anything. It instruments every memory access and then stalls the accessing "
+        "task for tens of microseconds watching for a racing access, so the kernel is slow and "
+        "its timing is not representative: use it to find a race, not to reproduce a "
+        "timing-sensitive one. Needs DEBUG_KERNEL. Cannot be combined with kasan - the kernel "
+        "builds KCSAN only when KASAN is off. Composes with debuginfo; the reports name "
+        "functions either way.",
+        _plain("DEBUG_KERNEL", "KCSAN"),
+    ),
+    FeatureRequirement(
+        "kfence",
+        "Kernel Electric-Fence: catches slab out-of-bounds writes, use-after-free and "
+        "invalid-free on a sampled fraction of allocations by putting them between guard pages. "
+        "Cost is bounded by the sample interval (KFENCE_SAMPLE_INTERVAL, milliseconds between "
+        "sampled allocations, default 100) and the pool size (KFENCE_NUM_OBJECTS, two pages "
+        "each, default 255), so it is cheap enough to leave on for a long soak - but it only "
+        "sees a bug that lands on a sampled object, which is why it is the wrong tool for a "
+        "reproducer you can trigger on demand. Use kasan for that. Composes with debuginfo.",
+        _plain("KFENCE"),
+    ),
+    FeatureRequirement(
+        "kmemleak",
+        "Kernel memory leak detector: reports kmalloc/vmalloc allocations no longer reachable "
+        "from any pointer, which is the class of bug behind a slow-growth out-of-memory. It "
+        "records a stack trace for every allocation and periodically scans all of kernel "
+        "memory, so throughput and memory both suffer - a soak kernel, not a reproduction "
+        "kernel. Needs DEBUG_KERNEL, and reports through /sys/kernel/debug/kmemleak, so debugfs "
+        "must be mounted in the guest. Composes with debuginfo.",
+        _plain("DEBUG_KERNEL", "DEBUG_KMEMLEAK"),
+    ),
+    FeatureRequirement(
+        "lockdep",
+        "Lock-correctness validator: reports lock-ordering inversions (the ABBA pattern behind a "
+        "deadlock) and irq-unsafe locking the first time the kernel takes the path, without the "
+        "deadlock having to happen. PROVE_LOCKING pulls in LOCKDEP and the "
+        "DEBUG_SPINLOCK/DEBUG_MUTEXES/DEBUG_LOCK_ALLOC set, so those need no separate entry; it "
+        "adds bookkeeping to every lock operation and a fixed static table sized by the "
+        "LOCKDEP_*_BITS knobs, and it reports only the first violation before switching itself "
+        "off. DEBUG_ATOMIC_SLEEP is separate and catches sleeping in atomic context. Needs "
+        "DEBUG_KERNEL. Add LOCK_STAT for contention counts at further cost. Composes with "
+        "debuginfo.",
+        _plain("DEBUG_KERNEL", "PROVE_LOCKING", "DEBUG_ATOMIC_SLEEP"),
+    ),
+    FeatureRequirement(
+        "ftrace",
+        "Function and event tracing through tracefs (/sys/kernel/tracing): function and "
+        "function-graph tracers, static tracepoints, and kprobe/uprobe dynamic events. This "
+        "answers which code path the kernel took before it failed; it finds no memory "
+        "corruption. TRACING is the symbol that builds tracefs. DYNAMIC_FTRACE patches every "
+        "instrumented call site to a nop until a tracer is enabled, so an idle ftrace kernel "
+        "costs kernel text and close to nothing at runtime, and the cost arrives with the "
+        "events you actually record. Composes with debuginfo; BTF from the bpf_tracing set "
+        "additionally gives typed probe arguments.",
+        (
+            frozenset({"FTRACE"}),
+            frozenset({"TRACING"}),
+            frozenset({"FUNCTION_TRACER"}),
+            frozenset({"DYNAMIC_FTRACE"}),
+            frozenset({"KPROBES"}),
+            frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"}),
+        ),
+    ),
+    FeatureRequirement(
+        "bpf_tracing",
+        "Prerequisites for attaching BPF programs to kprobes, tracepoints and perf events - what "
+        "bpftrace and BCC need in the guest. BPF_EVENTS is the symbol that permits the attach, "
+        "and the kernel turns it on only when BPF_SYSCALL, PERF_EVENTS and a probe-event source "
+        "(KPROBE_EVENTS or UPROBE_EVENTS) are all present, so build the whole set or the attach "
+        "fails with nothing to point at. DEBUG_INFO_BTF is what lets a tool resolve struct "
+        "layouts without kernel headers; pahole 1.22+ derives it from DWARF, so it needs a full "
+        "debuginfo build (not reduced, not split) and lengthens the build. Runtime cost is close "
+        "to nothing until a program is attached, then it is whatever that program does.",
+        (
+            frozenset({"BPF_SYSCALL"}),
+            frozenset({"BPF_JIT"}),
+            frozenset({"PERF_EVENTS"}),
+            frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"}),
+            frozenset({"BPF_EVENTS"}),
+            frozenset({"DEBUG_INFO_BTF"}),
+        ),
+    ),
+    FeatureRequirement(
+        "fault_injection",
+        "Make chosen kernel allocations and I/O submissions fail on demand, to reach the error "
+        "path a stress test never does - the class of bug that only shows up when kmalloc "
+        "returns NULL. FAULT_INJECTION alone builds the framework and injects nothing: pick at "
+        "least one site (FAILSLAB, FAIL_PAGE_ALLOC, FAIL_MAKE_REQUEST, FAIL_IO_TIMEOUT, "
+        "FAIL_FUTEX) and one way to drive it from userspace - FAULT_INJECTION_DEBUG_FS, which "
+        "also needs DEBUG_FS and SYSFS, or FAULT_INJECTION_CONFIGFS. Needs DEBUG_KERNEL. "
+        "Runtime cost is a probability check at the instrumented call sites and is close to "
+        "nothing while the configured failure rate is zero, so this composes well with a "
+        "long-running guest. Composes with debuginfo.",
+        (
+            frozenset({"DEBUG_KERNEL"}),
+            frozenset({"FAULT_INJECTION"}),
+            frozenset(
+                {
+                    "FAILSLAB",
+                    "FAIL_PAGE_ALLOC",
+                    "FAIL_MAKE_REQUEST",
+                    "FAIL_IO_TIMEOUT",
+                    "FAIL_FUTEX",
+                }
+            ),
+            frozenset({"FAULT_INJECTION_DEBUG_FS", "FAULT_INJECTION_CONFIGFS"}),
+        ),
+    ),
+    FeatureRequirement(
+        "kcov",
+        "Per-task code-coverage feedback through /sys/kernel/debug/kcov, which is what a "
+        "coverage-guided fuzzer such as syzkaller steers on. It finds no bug by itself; it tells "
+        "the fuzzer which inputs reached new code. KCOV_INSTRUMENT_ALL is the expensive part - "
+        "it compiles a coverage callback into every kernel function, which is what a whole-kernel "
+        "fuzzing run wants and is why such a kernel is slow; turn it off and mark only the "
+        "subsystem under test to keep the cost local. KCOV_ENABLE_COMPARISONS additionally "
+        "records comparison operands, which gets a fuzzer past magic-value checks at further "
+        "cost. KCOV builds debugfs in for you. Composes with debuginfo.",
+        _plain("KCOV", "KCOV_INSTRUMENT_ALL"),
     ),
     FeatureRequirement(
         "serial_console",
