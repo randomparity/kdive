@@ -11,8 +11,9 @@ import pytest
 
 from kdive.cli import dispatch
 from kdive.cli.__main__ import build_parser
-from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS, GeneratedVerb
 from kdive.cli.commands.registry import HANDLER_OVERRIDES
+from tests.ansi import strip_ansi
 from tests.cli.verb_argv import required_argv_for_generated
 
 
@@ -26,6 +27,23 @@ def test_record_verb_takes_its_positional() -> None:
     assert args.genarg_system_id == "sys-1"
 
 
+def _assert_operator_facing_help(help_text: str, verb: GeneratedVerb) -> None:
+    """Rendered help for ``verb`` never leaks its internal dest prefix, and for
+    ``images.extend`` uses the schema's field name and the flag's real metavar.
+
+    ``help_text`` is stripped of ANSI colour before either assertion: argparse colours a
+    flag and its metavar in different SGR spans, which splits ``"--reason REASON"`` apart
+    without stripping first (#1891). The `not in` check is stripped too, on the same terms
+    — colour can only make it spuriously pass, never spuriously fail, so leaving it
+    unstripped would go quietly vacuous rather than red.
+    """
+    help_text = strip_ansi(help_text)
+    assert "GENARG_" not in help_text, verb.tool
+    if verb.tool == "images.extend":
+        assert "image_id" in help_text
+        assert "--reason REASON" in help_text
+
+
 def test_descriptor_help_uses_operator_facing_metavars(capsys: pytest.CaptureFixture[str]) -> None:
     parser = build_parser()
     for verb in GENERATED_VERBS:
@@ -33,11 +51,28 @@ def test_descriptor_help_uses_operator_facing_metavars(capsys: pytest.CaptureFix
             parser.parse_args([verb.group, verb.sub, "--help"])
 
         assert excinfo.value.code == 0
-        help_text = capsys.readouterr().out
-        assert "GENARG_" not in help_text, verb.tool
-        if verb.tool == "images.extend":
-            assert "image_id" in help_text
-            assert "--reason REASON" in help_text
+        _assert_operator_facing_help(capsys.readouterr().out, verb)
+
+
+def test_descriptor_help_survives_forced_colour(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression guard for #1891, forcing the exact condition CI cannot see.
+
+    CI has no TTY and sets no ``FORCE_COLOR``, so a coloured-help regression is invisible
+    there; it only reddens `just test` on a developer's or agent's shell that exports
+    ``FORCE_COLOR``/``COLORTERM``. Forcing colour here makes the same regression red in CI.
+    """
+    monkeypatch.setenv("FORCE_COLOR", "3")
+    parser = build_parser()
+    for verb in GENERATED_VERBS:
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args([verb.group, verb.sub, "--help"])
+
+        assert excinfo.value.code == 0
+        raw_help_text = capsys.readouterr().out
+        assert "\x1b[" in raw_help_text, "expected FORCE_COLOR to actually colourise --help"
+        _assert_operator_facing_help(raw_help_text, verb)
 
 
 def test_generated_positional_uses_descriptor_and_routes_to_tool_handler(
@@ -294,7 +329,6 @@ def test_run_verb_routes_generic_handler_verb_to_the_seam(
 ) -> None:
     # A path with no handler override resolves to its tool and uses generic dispatch.
     from kdive.cli.commands import registry
-    from kdive.cli.commands.verb_spec import GeneratedVerb
 
     seen: dict[str, str] = {}
 

@@ -13,6 +13,7 @@ from kdive.config.core_settings import (
     WORKER_INCARNATION_KIND,
 )
 from kdive.domain.errors import CategorizedError
+from tests.ansi import strip_ansi
 
 
 def test_worker_death_settings_have_fail_closed_defaults() -> None:
@@ -71,8 +72,17 @@ def test_kubernetes_witness_ceiling_is_bounded_to_one_thousand_rows(ceiling: str
 
 
 def test_kubernetes_witness_ceiling_help_states_the_complete_pass_contract() -> None:
-    """The generated operator reference cannot omit this witness pass's limits or recovery."""
-    help_text = KUBERNETES_WITNESS_ORDINAL_CEILING.help.lower()
+    """The generated operator reference cannot omit this witness pass's limits or recovery.
+
+    ``.help`` is stripped of ANSI colour before either direction of the assertion, on the
+    same terms as the CLI's rendered ``--help`` output (#1891, ``tests/ansi.py``): this
+    particular string is a plain attribute that never actually flows through argparse's
+    colourising formatter, so the strip is a no-op today, but it keeps this guard correct
+    should that rendering path ever change. ``tests/test_ansi.py`` carries the mutation
+    proof that a colour-split "remaining finalized pods" still trips the `not in` check
+    below.
+    """
+    help_text = strip_ansi(KUBERNETES_WITNESS_ORDINAL_CEILING.help).lower()
 
     for fragment in (
         "pod",
