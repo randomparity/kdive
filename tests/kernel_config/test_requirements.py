@@ -7,7 +7,11 @@ from kdive.kernel_config.requirements import (
     feature_manifest,
     feature_requirement,
 )
-from kdive.kernel_config.support import missing_symbols, unmet_advertised_clauses
+from kdive.kernel_config.support import (
+    missing_symbols,
+    unmet_advertised_clauses,
+    unmet_clauses,
+)
 
 
 def test_crash_capture_gate_excludes_kaslr_and_or_groups_kexec():
@@ -365,14 +369,78 @@ def test_no_kernel_derived_symbol_is_advertised_as_something_the_agent_must_set(
         "KEXEC_CORE": "kernel/Kconfig.kexec:11",
         "VMCORE_INFO": "kernel/Kconfig.kexec:8",
     }
-    # The last three predate #1848 and are left alone here: KEXEC_CORE and VMCORE_INFO sit in
-    # crash_capture, the one *gated* feature, so touching its sets is a refusal-adjacent change
-    # this issue does not own. Tracked in #1850. Exact-set equality, so removing one later fails
-    # here until this list is updated too.
-    grandfathered = {"DEBUG_INFO", "KEXEC_CORE", "VMCORE_INFO"}
+    # #1850 unadvertised the last three, so the grandfathered exemption is gone: no entry may
+    # advertise a symbol olddefconfig would discard. The failure message names the Kconfig
+    # file:line of every offender so a new entry can be checked against the kernel directly.
     advertised = {s for f in FEATURE_REQUIREMENTS for clause in f.advertised for s in clause}
     assert advertised  # non-vacuity: the walk must actually see the roster
-    assert advertised & set(derived) == grandfathered
+    leaked = advertised & set(derived)
+    assert not leaked, {symbol: derived[symbol] for symbol in sorted(leaked)}
+
+
+def test_debuginfo_advertises_the_dwarf_choice_members_not_the_symbol_they_select():
+    # #1850. lib/Kconfig.debug:249 DEBUG_INFO is a bare prompt-less bool; the "Debug information"
+    # choice at :262-323 sets it, its DWARF members select-ing it (:281, :293, :305). So DEBUG_INFO
+    # is off only when every member is off - which the DWARF clause already reports - and the
+    # DEBUG_INFO clause could never be the sole unmet one. It named an unsettable symbol and
+    # reported nothing the next clause did not.
+    feat = feature_requirement("debuginfo")
+    assert feat.advertised == (
+        frozenset({"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_BTF"}),
+        frozenset({"DEBUG_KERNEL"}),
+    )
+
+
+def test_a_kernel_with_no_debug_info_is_still_told_which_settable_symbols_to_build_in():
+    # Non-vacuity guard for the removal above: dropping the DEBUG_INFO clause must not make the
+    # advisory quieter on the kernel it exists to catch, only shorter by the unsettable symbol.
+    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}))
+    missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement("debuginfo")))
+    assert missing == ["DEBUG_INFO_BTF", "DEBUG_INFO_DWARF4", "DEBUG_INFO_DWARF5", "DEBUG_KERNEL"]
+
+
+def test_crash_capture_advertises_the_kexec_prompts_not_the_symbols_they_select():
+    # #1850. kernel/Kconfig.kexec:11 KEXEC_CORE and :8 VMCORE_INFO are bare prompt-less bools.
+    # KEXEC (:23) and KEXEC_FILE (:42) select KEXEC_CORE; CRASH_DUMP (:102) selects VMCORE_INFO.
+    # All three selectors are advertised, so each derived symbol is off only when a selector this
+    # same entry already reports is off - the clauses added two unsettable names and no signal.
+    feat = feature_requirement(CRASH_CAPTURE)
+    advertised = {s for clause in feat.advertised for s in clause}
+    assert "KEXEC_CORE" not in advertised
+    assert "VMCORE_INFO" not in advertised
+    for selector in ("KEXEC", "KEXEC_FILE", "CRASH_DUMP"):
+        assert selector in advertised, selector
+
+
+def test_unadvertising_the_derived_symbols_leaves_the_crash_capture_refusal_set_untouched():
+    # The refusal half is a separate question (#1850 scopes to the advertised half): a derived
+    # symbol is still *provably absent* in a parsed .config, so the gate keeps refusing on it.
+    # This pins the two apart, so an advertised-side edit cannot quietly widen what kdive arms.
+    feat = feature_requirement(CRASH_CAPTURE)
+    assert frozenset({"KEXEC_CORE"}) in feat.gate_required
+    assert frozenset({"VMCORE_INFO"}) in feat.gate_required
+    cfg = KernelConfig(
+        frozenset(
+            {"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "PROC_VMCORE", "FW_CFG_SYSFS", "RELOCATABLE"}
+        )
+    )
+    assert missing_symbols(unmet_clauses(cfg, feat)) == ["KEXEC_CORE", "VMCORE_INFO"]
+
+
+def test_a_kernel_with_no_kexec_at_all_is_still_told_which_settable_symbols_to_build_in():
+    # Non-vacuity guard for the crash_capture removal: the advisory on a bare kernel must still
+    # name every symbol the agent can act on, minus the two it cannot.
+    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}))
+    missing = missing_symbols(unmet_advertised_clauses(cfg, feature_requirement(CRASH_CAPTURE)))
+    assert missing == [
+        "CRASH_DUMP",
+        "FW_CFG_SYSFS",
+        "KEXEC",
+        "KEXEC_FILE",
+        "PROC_VMCORE",
+        "RANDOMIZE_BASE",
+        "RELOCATABLE",
+    ]
 
 
 def test_advisory_debug_feature_summaries_name_the_bug_class_and_the_runtime_cost():
