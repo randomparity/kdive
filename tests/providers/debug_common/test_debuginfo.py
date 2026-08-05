@@ -294,7 +294,9 @@ def test_module_resolve_absent_ko_raises_no_module_debuginfo() -> None:
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["reason"] == "no_module_debuginfo"
     assert exc.value.details["module"] == "foo"
-    assert "CONFIG_DEBUG_INFO" in str(exc.value)
+    # Prompted symbol only - DEBUG_INFO itself is a bare bool olddefconfig discards (#1871).
+    assert "CONFIG_DEBUG_INFO_DWARF5=y" in str(exc.value)
+    assert "CONFIG_DEBUG_INFO=y" not in str(exc.value)
 
 
 def test_module_resolve_matches_dash_underscore_variant() -> None:

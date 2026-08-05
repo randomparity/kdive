@@ -599,9 +599,12 @@ def test_elf_build_id_fails_loud_without_a_note(
     )
 
     # Uploading a vmlinux without a build-id would be rejected by complete_build anyway; failing
-    # here names the real cause (a tree built without CONFIG_DEBUG_INFO).
-    with pytest.raises(RuntimeError, match="no GNU build-id note"):
+    # here names the real cause (a tree built without CONFIG_DEBUG_INFO_DWARF5). Prompted symbol
+    # only - bare DEBUG_INFO is a symbol olddefconfig discards (#1871).
+    with pytest.raises(RuntimeError, match="no GNU build-id note") as exc:
         live_debug._elf_build_id(vmlinux)
+    assert "CONFIG_DEBUG_INFO_DWARF5=y" in str(exc.value)
+    assert "CONFIG_DEBUG_INFO=y" not in str(exc.value)
 
 
 def test_transcript_renders_records(
