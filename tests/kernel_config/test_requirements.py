@@ -1266,13 +1266,16 @@ def test_the_manifest_clause_object_carries_the_arch_scope_and_omits_it_at_the_d
 class SeamFacts(NamedTuple):
     """Which conditional facts EVERY seam evaluating a feature passes to the support checks.
 
-    One row per axis rather than one map per axis: I2 is a single invariant over two axes
-    (ADR-0544 §7), and two hand-maintained maps keyed by the same feature ids would be two things
-    to keep in step with gate.py instead of one.
+    One row per axis rather than one map per axis: I2 is a single invariant over three axes
+    (ADR-0544 §7, ADR-0545), and three hand-maintained maps keyed by the same feature ids would be
+    three things to keep in step with gate.py instead of one.
     """
 
     initrd: bool
-    """Whether every such seam passes ``has_initrd``, which an ``UNLESS_INITRD`` clause needs."""
+    """Whether every such seam passes ``has_initrd``, one of the two ``UNLESS_INITRD`` reliefs."""
+
+    guest_initramfs: bool
+    """Whether every such seam passes ``guest_builds_initramfs``, the other one (ADR-0545)."""
 
     arch: bool
     """Whether every such seam passes ``arch``, which an arch-scoped clause needs."""
@@ -1284,15 +1287,17 @@ class SeamFacts(NamedTuple):
 _SEAM_SUPPLIES: Final[MappingProxyType[str, SeamFacts]] = MappingProxyType(
     {
         # crash_capture_refusal holds no BuildStepResult: the install and vmcore seams reach it
-        # with a Run id and nothing about the build's artifacts. Nor do they resolve the Run's
+        # with a Run id and nothing about the build's artifacts. It holds no Run either, so it
+        # cannot answer the boot-model half of the initrd condition. Nor do they resolve the Run's
         # System's profile arch, which is why crash_capture stays untagged and its arch-specific
         # gated pair is #1875's deferred residual rather than this campaign's work (ADR-0544 §7).
-        CRASH_CAPTURE: SeamFacts(initrd=False, arch=False),
-        # rootfs_mount_warning takes has_initrd, and its one caller (_success_envelope in
-        # mcp/tools/lifecycle/runs/complete_build.py) passes `result.initrd_ref is not None` off
-        # the finalized BuildStepResult it already holds. It holds no arch: complete_build runs
-        # against a Run, and nothing on that path resolves the System profile it will install to.
-        ROOTFS_MOUNT: SeamFacts(initrd=True, arch=False),
+        CRASH_CAPTURE: SeamFacts(initrd=False, guest_initramfs=False, arch=False),
+        # rootfs_mount_warning takes both reliefs, and its one caller (_success_envelope in
+        # mcp/tools/lifecycle/runs/complete_build.py) supplies both off values it already holds:
+        # `result.initrd_ref is not None` from the finalized BuildStepResult, and the boot model
+        # from the Run's own target_kind (ADR-0545). It holds no arch: complete_build runs against
+        # a Run, and nothing on that path resolves the System profile it will install to.
+        ROOTFS_MOUNT: SeamFacts(initrd=True, guest_initramfs=True, arch=False),
     }
 )
 
@@ -1393,6 +1398,18 @@ def _unless_initrd_without_the_fact(
     )
 
 
+def _guest_initramfs_without_the_fact(
+    features: tuple[FeatureRequirement, ...], seam_supplies: Mapping[str, SeamFacts]
+) -> dict[str, list[str]]:
+    """Features carrying UNLESS_INITRD that a seam evaluates without supplying the boot model."""
+    return _conditional_without_the_fact(
+        features,
+        seam_supplies,
+        supplies=lambda facts: facts.guest_initramfs,
+        declares=lambda clause: clause.built_in is BuiltIn.UNLESS_INITRD,
+    )
+
+
 def _arch_scoped_without_the_fact(
     features: tuple[FeatureRequirement, ...], seam_supplies: Mapping[str, SeamFacts]
 ) -> dict[str, list[str]]:
@@ -1423,7 +1440,30 @@ def test_a_clause_is_unless_initrd_only_where_every_seam_reading_it_supplies_the
     # and the value is really in use on the live roster, so the empty result above is not the
     # answer to a question nothing asks
     assert _unless_initrd_without_the_fact(
-        FEATURE_REQUIREMENTS, {ROOTFS_MOUNT: SeamFacts(initrd=False, arch=False)}
+        FEATURE_REQUIREMENTS,
+        {ROOTFS_MOUNT: SeamFacts(initrd=False, guest_initramfs=True, arch=False)},
+    ) == {ROOTFS_MOUNT: ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]}
+
+
+def test_a_clause_is_unless_initrd_only_where_every_seam_supplies_the_boot_model_fact_too():
+    # I2's UNLESS_INITRD half gained a second relief in ADR-0545: the condition is now "something
+    # can load a module before root is mounted", answered by an uploaded initrd artifact OR by a
+    # target lane whose guest builds its own initramfs. Both are seam-supplied facts with the same
+    # strict default, so both carry the same obligation - a seam that evaluates an UNLESS_INITRD
+    # clause while answering only one of them over-warns on the axis it cannot see. That is
+    # exactly #1881: rootfs_mount_warning read the artifact and nothing about the boot model, and
+    # every disk-image Run drew a deterministic false positive it had no way to silence.
+    #
+    # THIS IS A REGRESSION GUARD, NOT A PROOF, on the same terms as the initrd half above: it
+    # checks DECLARED field values against the hand-maintained map, so a clause that is
+    # boot-model-conditional in fact while carrying NOT_REQUIRED passes it vacuously.
+    assert _every_clause_symbol(FEATURE_REQUIREMENTS)  # non-vacuity: the roster is really walked
+    assert _guest_initramfs_without_the_fact(FEATURE_REQUIREMENTS, _SEAM_SUPPLIES) == {}
+    # and the axis is really in use on the live roster: withdraw only the boot-model answer and
+    # rootfs_mount is reported, which is what proves the empty result above is load-bearing
+    assert _guest_initramfs_without_the_fact(
+        FEATURE_REQUIREMENTS,
+        {ROOTFS_MOUNT: SeamFacts(initrd=True, guest_initramfs=False, arch=False)},
     ) == {ROOTFS_MOUNT: ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]}
 
 
@@ -1447,14 +1487,15 @@ def test_a_clause_is_arch_scoped_only_where_every_seam_reading_it_supplies_the_a
     # and the field is really in use on the live roster, so the empty result above is not the
     # answer to a question nothing asks: pretend a seam reads serial_console and it is reported
     assert _arch_scoped_without_the_fact(
-        FEATURE_REQUIREMENTS, {"serial_console": SeamFacts(initrd=True, arch=False)}
+        FEATURE_REQUIREMENTS,
+        {"serial_console": SeamFacts(initrd=True, guest_initramfs=True, arch=False)},
     ) == {"serial_console": ["HVC_CONSOLE", "SERIAL_8250", "SERIAL_8250_CONSOLE"]}
 
 
-def test_the_two_invariants_report_a_seam_evaluated_feature_and_spare_the_other_two_cases():
+def test_the_three_invariants_report_a_seam_evaluated_feature_and_spare_the_other_two_cases():
     # The three dispositions each check has to tell apart, on one synthetic feature so the arms
-    # differ only in what the seam supplies. Both axes on the same fixture, because they are one
-    # invariant and a fixture that exercised only one would let the other's wiring rot.
+    # differ only in what the seam supplies. All three axes on the same fixture, because they are
+    # one invariant and a fixture that exercised only some would let the others' wiring rot.
     smuggled = FeatureRequirement(
         "not_a_real_feature",
         "synthetic fixture for the invariants above",
@@ -1466,25 +1507,28 @@ def test_the_two_invariants_report_a_seam_evaluated_feature_and_spare_the_other_
         ),
     )
     both = ["VIRTIO_BLK", "VIRTIO_PCI"]
-    supplies_neither = {"not_a_real_feature": SeamFacts(initrd=False, arch=False)}
-    supplies_both = {"not_a_real_feature": SeamFacts(initrd=True, arch=True)}
-    # evaluated by a seam that supplies nothing -> reported by both checks, from both fields
-    assert _unless_initrd_without_the_fact((smuggled,), supplies_neither) == {
-        "not_a_real_feature": both
+    all_supplied = SeamFacts(initrd=True, guest_initramfs=True, arch=True)
+    # Each axis paired with the facts that withhold exactly that one, so a check wired to read a
+    # neighbour's field is reported here rather than passing on the neighbour's answer.
+    axes = (
+        (_unless_initrd_without_the_fact, all_supplied._replace(initrd=False)),
+        (_guest_initramfs_without_the_fact, all_supplied._replace(guest_initramfs=False)),
+        (_arch_scoped_without_the_fact, all_supplied._replace(arch=False)),
+    )
+    supplies_neither = {
+        "not_a_real_feature": SeamFacts(initrd=False, guest_initramfs=False, arch=False)
     }
-    assert _arch_scoped_without_the_fact((smuggled,), supplies_neither) == {
-        "not_a_real_feature": both
-    }
-    # evaluated by a seam that does supply the fact -> allowed
-    assert _unless_initrd_without_the_fact((smuggled,), supplies_both) == {}
-    assert _arch_scoped_without_the_fact((smuggled,), supplies_both) == {}
-    # the axes are independent: supplying one fact does not excuse the other
-    supplies_initrd_only = {"not_a_real_feature": SeamFacts(initrd=True, arch=False)}
-    assert _unless_initrd_without_the_fact((smuggled,), supplies_initrd_only) == {}
-    assert _arch_scoped_without_the_fact((smuggled,), supplies_initrd_only) == {
-        "not_a_real_feature": both
-    }
-    # read by no seam at all -> allowed, and this is serial_console's position today
-    assert _unless_initrd_without_the_fact((smuggled,), {}) == {}
-    assert _arch_scoped_without_the_fact((smuggled,), {}) == {}
+    for check, withholding in axes:
+        # evaluated by a seam that supplies nothing -> reported by every check, from both fields
+        assert check((smuggled,), supplies_neither) == {"not_a_real_feature": both}, check
+        # evaluated by a seam that does supply the fact -> allowed
+        assert check((smuggled,), {"not_a_real_feature": all_supplied}) == {}, check
+        # read by no seam at all -> allowed, and this is serial_console's position today
+        assert check((smuggled,), {}) == {}, check
+        # the axes are independent: withholding this one reports here and nowhere else
+        supplied = {"not_a_real_feature": withholding}
+        assert check((smuggled,), supplied) == {"not_a_real_feature": both}, check
+        for other, _ in axes:
+            if other is not check:
+                assert other((smuggled,), supplied) == {}, (check, other)
     assert "serial_console" not in _SEAM_SUPPLIES

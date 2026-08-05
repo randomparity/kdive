@@ -116,20 +116,30 @@ def test_required_rejects_a_modular_symbol_whatever_the_build_uploaded():
     assert unmet_advertised_clauses(_BUILT_IN, feature, has_initrd=False) == ()
 
 
-def test_unless_initrd_rejects_a_modular_symbol_only_when_no_initrd_was_uploaded():
-    # The boot-ordering =y: nothing loads a module before root is mounted, unless the build
-    # uploaded an initrd to load it from. This is the half REQUIRED must not be collapsed into.
+def test_unless_initrd_rejects_a_modular_symbol_only_when_nothing_can_load_it_in_time():
+    # The boot-ordering =y: nothing loads a module before root is mounted, unless something can.
+    # Two facts answer that and EITHER alone relieves the clause (ADR-0545) - an uploaded initrd
+    # artifact, or a target whose guest builds its own initramfs. This is the half REQUIRED must
+    # not be collapsed into. The last arm is what stops an AND from passing the three above.
     feature = _synthetic(BuiltIn.UNLESS_INITRD)
     assert missing_symbols(unmet_advertised_clauses(_MODULAR, feature)) == ["EXT4_FS"]
     assert unmet_advertised_clauses(_MODULAR, feature, has_initrd=True) == ()
+    assert unmet_advertised_clauses(_MODULAR, feature, guest_builds_initramfs=True) == ()
     assert unmet_advertised_clauses(_BUILT_IN, feature, has_initrd=False) == ()
+    assert (
+        unmet_advertised_clauses(_MODULAR, feature, has_initrd=True, guest_builds_initramfs=False)
+        == ()
+    )
 
 
-def test_the_strict_reading_is_the_default_so_a_forgetful_seam_over_warns():
-    # ADR-0330's direction for this advisory: a caller that omits the fact gets the answer that
-    # warns, not the one that falls silent.
+def test_the_strict_reading_is_the_default_on_both_axes_so_a_forgetful_seam_over_warns():
+    # ADR-0330's direction for this advisory: a caller that omits a fact gets the answer that
+    # warns, not the one that falls silent. One arm per keyword, each omitting exactly that one,
+    # so a default flipped on either axis alone is reported rather than masked by the other.
     feature = _synthetic(BuiltIn.UNLESS_INITRD)
     assert unmet_advertised_clauses(_MODULAR, feature) != ()
+    assert unmet_advertised_clauses(_MODULAR, feature, has_initrd=False) != ()
+    assert unmet_advertised_clauses(_MODULAR, feature, guest_builds_initramfs=False) != ()
 
 
 def test_the_built_in_requirement_reaches_the_refusal_set_and_not_only_the_advertised_one():

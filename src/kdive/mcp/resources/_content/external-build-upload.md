@@ -28,19 +28,19 @@ whole-disk ext4 qcow2, while a remote base image or an agent-uploaded rootfs is 
 Build in the one your rootfs actually uses — the advisory only fires when the kernel carries
 neither.
 
-`=m` does not satisfy these three. A local-libvirt direct-kernel boot mounts root before any
-module can be loaded, so a modular `VIRTIO_BLK` or `EXT4_FS` panics the guest on an unmountable
-root — the advisory fires and lists the symbol under
+`=m` does not satisfy these three on a direct-kernel target. A local-libvirt boot mounts root
+before any module can be loaded, so a modular `VIRTIO_BLK` or `EXT4_FS` panics the guest on an
+unmountable root — the advisory fires and lists the symbol under
 `data.missing_boot_config.built_in_required` as well as in `missing`, which is how you tell "you
 do not have this" from "you have this in a form that cannot load in time". That key is omitted
 entirely when no missing symbol is modular. Uploading an `initrd` artifact with the build
 silences it: there is then an initramfs to load the modules from.
 
-The check reads that one fact — whether the build uploaded an `initrd` — and nothing about how
-your target boots, so a `disk-image` target that boots through its own bootloader and builds its
-initramfs in the guest with dracut still draws the advisory on a modular config it in fact boots
-fine. Treat it as advisory there; the completion succeeds either way, and building the three in
-is correct on both targets.
+A `disk-image` target is the other way out, and needs nothing from you: it boots through the
+guest's own bootloader and builds its initramfs in the guest with dracut, so a modular config
+loads its root driver in time and the advisory does not fire. Building the three in is still
+correct on both targets — a `remote-libvirt` Run just is not told off for the config a distro
+`.config` ships.
 
 Elsewhere in the registry `=m` is accepted — a modular KASAN, ftrace, kcov or BPF symbol is the
 feature you asked for. The machine-readable form of this is the `built_in` key on a clause in

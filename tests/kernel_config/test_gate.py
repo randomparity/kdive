@@ -138,10 +138,20 @@ def test_unloadable_warning_is_distinct_reason_naming_btf():
     assert "vmlinux" in cast(str, warning["remediation"])
 
 
-def _rootfs_call(config: KernelConfig | None, *, has_initrd: bool = False) -> dict[str, Any] | None:
+def _rootfs_call(
+    config: KernelConfig | None,
+    *,
+    has_initrd: bool = False,
+    guest_builds_initramfs: bool = False,
+) -> dict[str, Any] | None:
     async def _run() -> dict[str, Any] | None:
         with _patched_load(config):
-            return await rootfs_mount_warning(_CONN, _RUN_ID, has_initrd=has_initrd)
+            return await rootfs_mount_warning(
+                _CONN,
+                _RUN_ID,
+                has_initrd=has_initrd,
+                guest_builds_initramfs=guest_builds_initramfs,
+            )
 
     return asyncio.run(_run())
 
@@ -210,12 +220,58 @@ def test_an_uploaded_initrd_relieves_the_same_modular_kernel():
     assert _rootfs_call(cfg, has_initrd=True) is None
 
 
-def test_the_seam_defaults_to_the_strict_reading_when_the_initrd_fact_is_not_supplied():
-    # ADR-0330's direction for this warning: over-warn rather than fall silent. The two calls
-    # differ only in the keyword, which is what proves the default is the strict one.
+def test_the_seam_defaults_to_the_strict_reading_when_neither_relief_fact_is_supplied():
+    # ADR-0330's direction for this warning: over-warn rather than fall silent, which ADR-0545
+    # extends to both reliefs. The keywords are OMITTED at the real call site rather than passed
+    # as False through `_rootfs_call`: the helper has defaults of its own, so routing through it
+    # would assert the helper's default and let a flipped default on the seam survive.
     cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}), frozenset({"EXT4_FS"}))
-    assert _rootfs_call(cfg) is not None
-    assert _rootfs_call(cfg, has_initrd=False) is not None
+
+    async def _omitting_both() -> dict[str, Any] | None:
+        with _patched_load(cfg):
+            return await rootfs_mount_warning(_CONN, _RUN_ID)
+
+    async def _omitting_only_the_boot_model() -> dict[str, Any] | None:
+        with _patched_load(cfg):
+            return await rootfs_mount_warning(_CONN, _RUN_ID, has_initrd=False)
+
+    async def _omitting_only_the_initrd() -> dict[str, Any] | None:
+        with _patched_load(cfg):
+            return await rootfs_mount_warning(_CONN, _RUN_ID, guest_builds_initramfs=False)
+
+    assert asyncio.run(_omitting_both()) is not None
+    # one arm per keyword, so a default flipped on either one alone is reported here
+    assert asyncio.run(_omitting_only_the_boot_model()) is not None
+    assert asyncio.run(_omitting_only_the_initrd()) is not None
+
+
+def test_a_guest_that_builds_its_own_initramfs_relieves_the_modular_kernel_without_an_upload():
+    # #1881 / ADR-0545: the disk-image lane never uploads an initrd - remote-libvirt rejects the
+    # component outright - and its in-guest installer runs dracut, so the module is loadable before
+    # root is mounted. The identical config that warns on the direct-kernel lane is silent here.
+    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}), frozenset({"EXT4_FS"}))
+    assert _rootfs_call(cfg, guest_builds_initramfs=True) is None
+
+
+def test_the_two_reliefs_are_independent_and_either_one_alone_silences_the_advisory():
+    # Neither fact is a proxy for the other: a direct-kernel Run that uploaded an initrd and a
+    # disk-image Run that did not are both relieved, and the strict verdict needs both to be
+    # false. Without this an implementation that ANDed them would still pass the two tests above.
+    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}), frozenset({"EXT4_FS"}))
+    assert _rootfs_call(cfg, has_initrd=True, guest_builds_initramfs=False) is None
+    assert _rootfs_call(cfg, has_initrd=False, guest_builds_initramfs=True) is None
+    assert _rootfs_call(cfg, has_initrd=True, guest_builds_initramfs=True) is None
+    assert _rootfs_call(cfg, has_initrd=False, guest_builds_initramfs=False) is not None
+
+
+def test_the_boot_model_relief_does_not_silence_a_symbol_the_config_lacks_outright():
+    # The relief is about *when* a module can load, not about whether the kernel has the driver.
+    # A disk-image guest whose kernel carries no virtio-blk at all still cannot mount its root, so
+    # dracut has nothing to package - the advisory must survive the widened carve-out.
+    warning = _rootfs_call(all_builtin({"EXT4_FS"}), guest_builds_initramfs=True)
+    assert warning is not None
+    assert warning["reason"] == MISSING_BOOT_CONFIG_REASON
+    assert warning["missing"] == ["VIRTIO_BLK"]
 
 
 def test_built_in_required_is_absent_when_every_missing_symbol_is_absent_outright():

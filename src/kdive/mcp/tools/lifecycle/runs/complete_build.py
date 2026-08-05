@@ -10,9 +10,11 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.upload_manifest import UPLOAD_WINDOW_EXPIRED
 from kdive.db.repositories import RUNS
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.cmdline import cmdline_extra_error
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_provenance import external_source_provenance
+from kdive.domain.lifecycle.records import Run
 from kdive.kernel_config.gate import missing_effective_config_nudge, rootfs_mount_warning
 from kdive.log import bind_context
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
@@ -107,7 +109,7 @@ class CompleteBuildHandlers:
 
         recorded = await _existing_build_result(conn, uid)
         if recorded is not None:
-            return await self._success_envelope(conn, uid, recorded)
+            return await self._success_envelope(conn, run, recorded)
 
         service = CompleteBuildFinalizer(
             validate_complete_build=self.validate_complete_build,
@@ -146,10 +148,10 @@ class CompleteBuildHandlers:
             return response
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(run_id, exc)
-        return await self._success_envelope(conn, uid, result)
+        return await self._success_envelope(conn, run, result)
 
     async def _success_envelope(
-        self, conn: AsyncConnection, uid: UUID, result: BuildStepResult
+        self, conn: AsyncConnection, run: Run, result: BuildStepResult
     ) -> ToolResponse:
         """Build the success envelope, attaching the boot-config warning or upload nudge.
 
@@ -157,12 +159,29 @@ class CompleteBuildHandlers:
         boot symbols, the nudge on a config *absent* entirely (so the warning could never fire).
         Compute the nudge only when the warning is silent to avoid a second config read.
 
-        The boot clauses need ``=y`` unless an initrd was uploaded (#1860), and ``result`` is the
-        finalized ``BuildStepResult`` that already answers that — so the fact is passed, not
-        re-read. A second read through the build-step row would make the warning depend on that
-        row being visible on this connection at this moment.
+        The boot clauses need ``=y`` unless something can load a module before root is mounted, and
+        both facts that answer that are already in hand (ADR-0545) — so both are passed, not
+        re-read. ``result`` is the finalized ``BuildStepResult`` carrying the uploaded-artifact
+        half; a second read through the build-step row would make the warning depend on that row
+        being visible on this connection at this moment.
+
+        The other half is the boot model, and ``run.target_kind`` settles it with no extra read.
+        ``disk-image`` is a ``BootMethod`` on the provisioning profile rather than a resource kind,
+        but the two are biconditional: ``_pair_boot_method_with_provider`` (``profiles``,
+        ADR-0080) rejects a profile that pairs them any other way, and a local-libvirt domain is
+        always direct-kernel (``providers/local_libvirt/lifecycle/xml.py``). Keying on the resource
+        kind rather than resolving the profile also keeps this working on the decoupled path, where
+        the Run has no bound System yet (#1881). ``fault-inject`` is direct-kernel too, so the test
+        is remote-libvirt specifically, not "not local-libvirt".
         """
-        warning = await rootfs_mount_warning(conn, uid, has_initrd=result.initrd_ref is not None)
+        guest_builds_initramfs = run.target_kind is ResourceKind.REMOTE_LIBVIRT
+        uid = run.id
+        warning = await rootfs_mount_warning(
+            conn,
+            uid,
+            has_initrd=result.initrd_ref is not None,
+            guest_builds_initramfs=guest_builds_initramfs,
+        )
         nudge = None if warning is not None else await missing_effective_config_nudge(conn, uid)
         async with conn.cursor() as cur:
             await cur.execute("SELECT clock_timestamp()")
