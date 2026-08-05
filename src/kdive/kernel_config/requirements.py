@@ -124,11 +124,16 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "initramfs); a remote or agent-uploaded rootfs is commonly XFS (RHEL-family base "
         "images). kdive does not know which family your guest uses, so it asks only that the "
         "kernel can mount at least one of them plus the virtio-blk root device - build in the "
-        "one your rootfs actually uses.",
+        "one your rootfs actually uses. kdive's upload-time advisory only recognizes the "
+        "uploaded-artifact exception, though - it cannot see an embedded initramfs, so a "
+        "modular config may still draw a harmless warning on a kernel that in fact boots fine.",
         # Both clauses are UNLESS_INITRD (#1860). The direct-kernel boot mounts root before any
         # module can be loaded, so EXT4_FS=m / XFS_FS=m / VIRTIO_BLK=m are a kernel that panics on
         # an unmountable root - unless the build uploaded an initrd artifact, which is where the
-        # modules would come from. `rootfs_mount_warning` is the seam that supplies that fact.
+        # modules would come from. `rootfs_mount_warning` is the seam that supplies that fact -
+        # has_initrd (support.py) reads only whether the build uploaded one, so it does not
+        # relieve this clause for an embedded-initramfs kernel (#1876), which is why the summary
+        # above carries a caveat that this clause's advisory does not.
         (
             Clause(frozenset({"EXT4_FS", "XFS_FS"}), BuiltIn.UNLESS_INITRD),
             Clause(frozenset({"VIRTIO_BLK"}), BuiltIn.UNLESS_INITRD),

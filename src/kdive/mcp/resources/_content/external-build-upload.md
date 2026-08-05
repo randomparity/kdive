@@ -53,8 +53,10 @@ returns — `refs.download_uri` presigns a short-lived GET of that image's known
 starting point: a stock `defconfig` commonly builds `VIRTIO_BLK` and `EXT4_FS` as modules rather
 than built-in, so the resulting kernel cannot mount the `/dev/vda` ext4 rootfs and never boots the
 direct-kernel guest — unless the build uploads an `initrd` artifact or the kernel embeds its own
-initramfs, either of which supplies the modules missing at root-mount time. Begin from the
-image's config, then layer on the debug symbols below.
+initramfs, either of which supplies the modules missing at root-mount time. The advisory check
+above only recognizes the uploaded-artifact case, though, so an embedded-initramfs kernel still
+draws it despite booting fine — treat it the same as the dracut example. Begin from the image's
+config, then layer on the debug symbols below.
 
 A useful debug set to start from. Pick **one** memory-safety detector: `CONFIG_KCSAN` is built
 only when `CONFIG_KASAN` is off, so a config carrying both gives you KASAN and silently drops
