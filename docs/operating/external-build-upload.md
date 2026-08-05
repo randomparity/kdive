@@ -18,11 +18,12 @@ which Kconfig symbols are enabled before you upload — a debug kernel is one yo
 debug options turned on. The validator constrains only the artifacts' **structure** (bzImage
 magic, gzip layout, a `lib/modules` member); it never rejects a build over your `.config`.
 There is no allowed-config allowlist and no required-symbol gate: enable what the
-investigation needs. One non-blocking exception: if you upload an `effective_config` that does
-not **build in** the symbols needed to mount the root filesystem and boot (`VIRTIO_BLK` for the
-`/dev/vda` root device, plus `EXT4_FS` **or** `XFS_FS` for the filesystem on it),
-`runs.complete_build` still succeeds but returns a `data.missing_boot_config` advisory naming the
-missing symbols, so a kernel that cannot boot is not silently accepted. The filesystem half is an
+investigation needs. One non-blocking exception: if you upload an `effective_config` that does not
+carry the symbols needed to mount the root filesystem and boot (`VIRTIO_BLK` for the `/dev/vda`
+root device, plus `EXT4_FS` **or** `XFS_FS` for the filesystem on it), `runs.complete_build` still
+succeeds but returns a `data.missing_boot_config` advisory naming the missing symbols, so a kernel
+that cannot boot is not silently accepted. Whether they must be **built in** (`=y`) or may be
+modules depends on how your target boots — see the next paragraph. The filesystem half is an
 either/or because kdive does not know your guest's root filesystem: local-libvirt provisions a
 whole-disk ext4 qcow2, while a remote base image or an agent-uploaded rootfs is commonly XFS.
 Build in the one your rootfs actually uses — the advisory only fires when the kernel carries
@@ -279,7 +280,7 @@ tar -tzf kernel.tar.gz | head    # boot/vmlinuz must be first; lib/modules/<rele
 |---|---|---|
 | `vmlinux` | to enable kernel-debugging / DWARF introspection | the uncompressed kernel ELF with debug info. If you upload it you **must** declare a `build_id` in `runs.complete_build`, and it must match the ELF's GNU build-id note, or the upload is rejected. |
 | `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it does not build in the boot-required symbols (`EXT4_FS` or `XFS_FS`, and `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. On a direct-kernel target `=m` counts as missing unless you also upload an `initrd`; on a `disk-image` target it does not, because the guest builds its own initramfs. |
-| `initrd` | when booting needs a specific initramfs | the initial ramdisk image. On a direct-kernel target, uploading one also silences the built-in requirement above, since the modules then have somewhere to load from. A `disk-image` target never reads it — that lane installs through its own bootloader — so upload one there only to record it. |
+| `initrd` | when booting needs a specific initramfs | the initial ramdisk image. On a direct-kernel target, uploading one also silences the built-in requirement above, since the modules then have somewhere to load from. A `disk-image` target never reads it — that lane boots through the guest's own bootloader and builds its initramfs in-guest — so upload one there only to record it. |
 
 ## The upload flow
 
