@@ -1055,15 +1055,33 @@ def _features_a_seam_resolves() -> set[str]:
 
     resolved: set[str] = set()
     for node in ast.walk(ast.parse(inspect.getsource(gate))):
-        if not isinstance(node, ast.Call) or len(node.args) != 1:
+        if not isinstance(node, ast.Call):
             continue
-        if not (isinstance(node.func, ast.Name) and node.func.id == "feature_requirement"):
+        # Match the callee however it is spelled - a bare name, or an attribute on an imported
+        # module. Keying on `ast.Name` alone let `requirements.feature_requirement(X)` pass
+        # unnoticed, and an unclassified call leaves the feature out of `resolved` entirely,
+        # which reads here as "no seam evaluates it" and silences both halves of I2.
+        func = node.func
+        called = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if called != "feature_requirement":
             continue
-        arg = node.args[0]
+        args = [*node.args, *(kw.value for kw in node.keywords)]
+        assert len(args) == 1, (
+            f"feature_requirement call at gate.py line {node.lineno} takes {len(args)} arguments; "
+            "this guard cannot tell which feature it resolves. Teach it that shape rather than "
+            "letting the call go unclassified (#1860)."
+        )
+        arg = args[0]
         if isinstance(arg, ast.Constant):
             resolved.add(str(arg.value))
         elif isinstance(arg, ast.Name):
             resolved.add(str(getattr(gate, arg.id)))
+        else:
+            raise AssertionError(
+                f"feature_requirement call at gate.py line {node.lineno} takes a "
+                f"{type(arg).__name__} this guard cannot resolve to a feature id. Skipping it "
+                "would drop the feature from the seam-evaluated set and silence I2 (#1860)."
+            )
     return resolved
 
 
