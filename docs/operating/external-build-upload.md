@@ -18,29 +18,30 @@ which Kconfig symbols are enabled before you upload — a debug kernel is one yo
 debug options turned on. The validator constrains only the artifacts' **structure** (bzImage
 magic, gzip layout, a `lib/modules` member); it never rejects a build over your `.config`.
 There is no allowed-config allowlist and no required-symbol gate: enable what the
-investigation needs. One non-blocking exception: if you upload an `effective_config` that does
-not **build in** the symbols needed to mount the root filesystem and boot (`VIRTIO_BLK` for the
-`/dev/vda` root device, plus `EXT4_FS` **or** `XFS_FS` for the filesystem on it),
-`runs.complete_build` still succeeds but returns a `data.missing_boot_config` advisory naming the
-missing symbols, so a kernel that cannot boot is not silently accepted. The filesystem half is an
+investigation needs. One non-blocking exception: if you upload an `effective_config` that does not
+carry the symbols needed to mount the root filesystem and boot (`VIRTIO_BLK` for the `/dev/vda`
+root device, plus `EXT4_FS` **or** `XFS_FS` for the filesystem on it), `runs.complete_build` still
+succeeds but returns a `data.missing_boot_config` advisory naming the missing symbols, so a kernel
+that cannot boot is not silently accepted. Whether they must be **built in** (`=y`) or may be
+modules depends on how your target boots — see the next paragraph. The filesystem half is an
 either/or because kdive does not know your guest's root filesystem: local-libvirt provisions a
 whole-disk ext4 qcow2, while a remote base image or an agent-uploaded rootfs is commonly XFS.
 Build in the one your rootfs actually uses — the advisory only fires when the kernel carries
 neither.
 
-`=m` does not satisfy these three. A local-libvirt direct-kernel boot mounts root before any
-module can be loaded, so a modular `VIRTIO_BLK` or `EXT4_FS` panics the guest on an unmountable
-root — the advisory fires and lists the symbol under
+`=m` does not satisfy these three on a direct-kernel target. A local-libvirt boot mounts root
+before any module can be loaded, so a modular `VIRTIO_BLK` or `EXT4_FS` panics the guest on an
+unmountable root — the advisory fires and lists the symbol under
 `data.missing_boot_config.built_in_required` as well as in `missing`, which is how you tell "you
 do not have this" from "you have this in a form that cannot load in time". That key is omitted
 entirely when no missing symbol is modular. Uploading an `initrd` artifact with the build
 silences it: there is then an initramfs to load the modules from.
 
-The check reads that one fact — whether the build uploaded an `initrd` — and nothing about how
-your target boots, so a `disk-image` target that boots through its own bootloader and builds its
-initramfs in the guest with dracut still draws the advisory on a modular config it in fact boots
-fine. Treat it as advisory there; the completion succeeds either way, and building the three in
-is correct on both targets.
+A `disk-image` target is the other way out, and needs nothing from you: it boots through the
+guest's own bootloader and builds its initramfs in the guest with dracut, so a modular config
+loads its root driver in time and the advisory does not fire. Building the three in is still
+correct on both targets — a `remote-libvirt` Run just is not told off for the config a distro
+`.config` ships.
 
 Elsewhere in the registry `=m` is accepted — a modular KASAN, ftrace, kcov or BPF symbol is the
 feature you asked for. The machine-readable form of this is the `built_in` key on a clause in
@@ -54,9 +55,9 @@ starting point: a stock `defconfig` commonly builds `VIRTIO_BLK` and `EXT4_FS` a
 than built-in, so the resulting kernel cannot mount the `/dev/vda` ext4 rootfs and never boots the
 direct-kernel guest — unless the build uploads an `initrd` artifact or the kernel embeds its own
 initramfs, either of which supplies the modules missing at root-mount time. The advisory check
-above only recognizes the uploaded-artifact case, though, so an embedded-initramfs kernel still
-draws it despite booting fine — treat it the same as the dracut example. Begin from the image's
-config, then layer on the debug symbols below.
+above recognizes an uploaded artifact and a `disk-image` target, but not an embedded initramfs, so
+on a direct-kernel target such a kernel still draws the advisory despite booting fine. Begin from
+the image's config, then layer on the debug symbols below.
 
 A useful debug set to start from. Pick **one** memory-safety detector: `CONFIG_KCSAN` is built
 only when `CONFIG_KASAN` is off, so a config carrying both gives you KASAN and silently drops
@@ -278,8 +279,8 @@ tar -tzf kernel.tar.gz | head    # boot/vmlinuz must be first; lib/modules/<rele
 | Name | When to upload | Notes |
 |---|---|---|
 | `vmlinux` | to enable kernel-debugging / DWARF introspection | the uncompressed kernel ELF with debug info. If you upload it you **must** declare a `build_id` in `runs.complete_build`, and it must match the ELF's GNU build-id note, or the upload is rejected. |
-| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it does not build in the boot-required symbols (`EXT4_FS` or `XFS_FS`, and `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. `=m` counts as missing unless you also upload an `initrd`. |
-| `initrd` | when booting needs a specific initramfs | the initial ramdisk image. Uploading one also silences the built-in requirement above, since the modules then have somewhere to load from. |
+| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it does not build in the boot-required symbols (`EXT4_FS` or `XFS_FS`, and `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. On a direct-kernel target `=m` counts as missing unless you also upload an `initrd`; on a `disk-image` target it does not, because the guest builds its own initramfs. |
+| `initrd` | when booting needs a specific initramfs | the initial ramdisk image. On a direct-kernel target, uploading one also silences the built-in requirement above, since the modules then have somewhere to load from. A `disk-image` target never reads it — that lane boots through the guest's own bootloader and builds its initramfs in-guest — so upload one there only to record it. |
 
 ## The upload flow
 

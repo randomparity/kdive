@@ -28,6 +28,7 @@ from kdive.config.core_settings import BUILD_ARTIFACT_RETENTION_DAYS
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
@@ -1173,13 +1174,17 @@ def _patched_config_load(data: bytes) -> Any:
 
 
 async def _complete_with_modular_boot_config(
-    pool: AsyncConnectionPool, *, with_initrd: bool, times: int = 1
+    pool: AsyncConnectionPool,
+    *,
+    with_initrd: bool,
+    times: int = 1,
+    target_kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT,
 ) -> list[ToolResponse]:
     """Finalize once (or replay) against a modular boot config, returning each envelope."""
     entries = [ManifestEntry("kernel", "c", 1)]
     if with_initrd:
         entries.append(ManifestEntry("initrd", "c", 1))
-    run_id = await _seed_external_run_with_manifest(pool, entries=entries)
+    run_id = await _seed_external_run_with_manifest(pool, entries=entries, target_kind=target_kind)
     validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", "abcd"))
     with _patched_config_load(_MODULAR_BOOT_CONFIG):
         return [
@@ -1233,5 +1238,98 @@ def test_the_same_modular_kernel_is_silent_once_the_build_uploaded_an_initrd(
         # dump/load round trip or a second finalize would start warning where the first did not.
         assert "missing_boot_config" not in replay.data
         assert replay.refs["initrd"] == first.refs["initrd"]
+
+    asyncio.run(_run())
+
+
+def test_the_disk_image_lane_is_silent_on_the_modular_kernel_it_boots_fine(
+    migrated_url: str,
+) -> None:
+    # #1881: the disk-image lane installs through the in-guest helper, which runs dracut and boots
+    # through the guest's own bootloader. Before this the advisory fired on every such Run, and
+    # the only way to quiet it was to upload an initrd the remote install plane never reads.
+    # The Run differs from the warning case below only in `target_kind`, which is what pins the
+    # seam to the boot model rather than to some incidental difference in the fixture.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            first, replay = await _complete_with_modular_boot_config(
+                pool, with_initrd=False, times=2, target_kind=ResourceKind.REMOTE_LIBVIRT
+            )
+        assert first.status == "succeeded", first
+        assert "missing_boot_config" not in first.data
+        # The idempotent replay reaches the envelope through _existing_build_result, which loads
+        # the Run again - so the boot-model fact has to be supplied on that path too.
+        assert "missing_boot_config" not in replay.data
+
+    asyncio.run(_run())
+
+
+def test_the_direct_kernel_lanes_still_warn_on_the_same_modular_kernel(
+    migrated_url: str,
+) -> None:
+    # The converse, which is what stops the fix above from being a blanket silencing: both
+    # direct-kernel target kinds keep the advisory, and keep naming the modular symbols under
+    # `built_in_required`. fault-inject is asserted explicitly because it is the kind a
+    # remote-libvirt-or-not test would silently misclassify.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for kind in (ResourceKind.LOCAL_LIBVIRT, ResourceKind.FAULT_INJECT):
+                (resp,) = await _complete_with_modular_boot_config(
+                    pool, with_initrd=False, target_kind=kind
+                )
+                assert resp.status == "succeeded", resp
+                warning = cast(dict[str, Any], resp.data["missing_boot_config"])
+                assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"], kind
+                assert warning["built_in_required"] == ["EXT4_FS", "VIRTIO_BLK"], kind
+
+    asyncio.run(_run())
+
+
+async def _complete_with_config(
+    pool: AsyncConnectionPool, config: bytes, *, target_kind: ResourceKind
+) -> ToolResponse:
+    """Finalize one Run of the given target kind against an arbitrary effective config."""
+    run_id = await _seed_external_run_with_manifest(pool, target_kind=target_kind)
+    validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", "abcd"))
+    with _patched_config_load(config):
+        return await _build_handlers(validator).complete_build(
+            pool, _ctx(), str(run_id), build_id="abcd", cmdline="x"
+        )
+
+
+def test_the_disk_image_lane_is_still_checked_and_warns_on_a_driver_it_does_not_have(
+    migrated_url: str,
+) -> None:
+    # Non-vacuity for the silence above, and the arm that stops the fix from being implemented as
+    # "skip the check entirely for remote-libvirt" - which every other test in this file would
+    # pass. The relief is about *when* a module can load, not about whether the kernel has the
+    # driver: dracut can package nothing if the config carries no virtio-blk at all.
+    no_virtio_blk = b"CONFIG_EXT4_FS=y\n"
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _complete_with_config(
+                pool, no_virtio_blk, target_kind=ResourceKind.REMOTE_LIBVIRT
+            )
+        assert resp.status == "succeeded", resp
+        warning = cast(dict[str, Any], resp.data["missing_boot_config"])
+        assert warning["missing"] == ["VIRTIO_BLK"]
+        # absent outright, not modular, so the =m subset key is omitted rather than empty
+        assert "built_in_required" not in warning
+
+    asyncio.run(_run())
+
+
+def test_a_built_in_kernel_is_silent_on_every_lane(migrated_url: str) -> None:
+    # The other half of the pair: the lane axis moves the verdict only for a *modular* config. A
+    # kernel that builds its boot symbols in warns on neither lane.
+    built_in = b"CONFIG_EXT4_FS=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_VIRTIO_PCI=y\n"
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for kind in (ResourceKind.LOCAL_LIBVIRT, ResourceKind.REMOTE_LIBVIRT):
+                resp = await _complete_with_config(pool, built_in, target_kind=kind)
+                assert resp.status == "succeeded", resp
+                assert "missing_boot_config" not in resp.data, kind
 
     asyncio.run(_run())

@@ -31,9 +31,9 @@ class BuiltIn(StrEnum):
     """Whether a clause is satisfied by a module, and if not, under what condition (§2, #1860).
 
     Three values rather than a bool, because the two reasons a symbol must be ``=y`` are not the
-    same reason and do not relax under the same condition: an uploaded initrd gives the boot
-    ordering something to load a module from, and does nothing at all for a Kconfig dependency
-    written ``depends on FOO=y``.
+    same reason and do not relax under the same condition: an initramfs gives the boot ordering
+    something to load a module from, and does nothing at all for a Kconfig dependency written
+    ``depends on FOO=y``.
     """
 
     NOT_REQUIRED = "not_required"
@@ -43,7 +43,11 @@ class BuiltIn(StrEnum):
     """``=y`` always: a module form does not deliver the feature at any point in the boot."""
 
     UNLESS_INITRD = "unless_initrd"
-    """``=y`` unless the build uploaded an initrd artifact to load the module from."""
+    """``=y`` unless something can load the module before root is mounted (ADR-0545).
+
+    Two facts answer that and either alone relieves the clause: the build uploaded an initrd
+    artifact, or the target boots through its own bootloader and builds its initramfs in-guest.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +59,12 @@ class Clause:
     ``arches`` are per clause and not per symbol because no clause in the registry mixes symbols
     that differ on either (ADR-0544).
 
-    ``UNLESS_INITRD`` states a condition; the *answer* is a fact about the build, so the seam
-    supplies it (``has_initrd``). ``arches`` is the same shape: the clause names the arches it
-    applies to and the seam supplies which one is in play (``arch``). ``None`` means every arch.
-    A clause may only carry either where every seam that evaluates its feature passes the matching
-    fact - see the invariant in ``tests/kernel_config/test_requirements.py``.
+    ``UNLESS_INITRD`` states a condition; the *answers* are facts about the build and the target,
+    so the seam supplies them (``has_initrd``, ``guest_builds_initramfs``). ``arches`` is the same
+    shape: the clause names the arches it applies to and the seam supplies which one is in play
+    (``arch``). ``None`` means every arch. A clause may only carry a conditional value where every
+    seam that evaluates its feature passes **every** fact that value needs - see the invariant in
+    ``tests/kernel_config/test_requirements.py``.
     """
 
     symbols: frozenset[str]
@@ -124,16 +129,18 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "initramfs); a remote or agent-uploaded rootfs is commonly XFS (RHEL-family base "
         "images). kdive does not know which family your guest uses, so it asks only that the "
         "kernel can mount at least one of them plus the virtio-blk root device - build in the "
-        "one your rootfs actually uses. kdive's upload-time advisory only recognizes the "
-        "uploaded-artifact exception, though - it cannot see an embedded initramfs, so a "
-        "modular config may still draw a harmless warning on a kernel that in fact boots fine.",
+        "one your rootfs actually uses. kdive's upload-time advisory recognizes an uploaded "
+        "artifact and a disk-image target, whose guest builds its own initramfs; it cannot see "
+        "an embedded initramfs, so a modular config may still draw a harmless warning on a "
+        "direct-kernel kernel that in fact boots fine.",
         # Both clauses are UNLESS_INITRD (#1860). The direct-kernel boot mounts root before any
         # module can be loaded, so EXT4_FS=m / XFS_FS=m / VIRTIO_BLK=m are a kernel that panics on
-        # an unmountable root - unless the build uploaded an initrd artifact, which is where the
-        # modules would come from. `rootfs_mount_warning` is the seam that supplies that fact -
-        # has_initrd (support.py) reads only whether the build uploaded one, so it does not
-        # relieve this clause for an embedded-initramfs kernel (#1876), which is why the summary
-        # above carries a caveat that this clause's advisory does not.
+        # an unmountable root - unless something can load a module first. Two facts answer that
+        # and `rootfs_mount_warning` supplies both (ADR-0545): the build uploaded an initrd
+        # artifact (has_initrd), or the target boots through its own bootloader and runs dracut
+        # in-guest (guest_builds_initramfs, #1881). Neither sees an embedded initramfs, so this
+        # clause is still not relieved for such a kernel (#1876) - which is why the summary above
+        # carries a caveat that this clause's advisory does not.
         (
             Clause(frozenset({"EXT4_FS", "XFS_FS"}), BuiltIn.UNLESS_INITRD),
             Clause(frozenset({"VIRTIO_BLK"}), BuiltIn.UNLESS_INITRD),

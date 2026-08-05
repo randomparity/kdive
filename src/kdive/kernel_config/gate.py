@@ -139,7 +139,11 @@ async def crash_capture_refusal(conn: AsyncConnection, run_id: UUID) -> dict[str
 
 
 async def rootfs_mount_warning(
-    conn: AsyncConnection, run_id: UUID, *, has_initrd: bool = False
+    conn: AsyncConnection,
+    run_id: UUID,
+    *,
+    has_initrd: bool = False,
+    guest_builds_initramfs: bool = False,
 ) -> dict[str, JsonValue] | None:
     """Non-fatal ``kernel_missing_boot_config`` warning for ``runs.complete_build``, or ``None``.
 
@@ -156,16 +160,21 @@ async def rootfs_mount_warning(
     boots", not "this kernel does not match your guest" — a deliberately weak predicate that never
     fires on a kernel carrying either filesystem.
 
-    Both ``rootfs_mount`` clauses require ``=y`` unless the build uploaded an initrd artifact
-    (#1860): the direct-kernel boot mounts root before any module can be loaded. ``has_initrd``
-    carries that fact from the caller's finalized ``BuildStepResult`` rather than being re-read
-    here, and defaults to the strict reading so a caller that forgets it over-warns.
+    Both ``rootfs_mount`` clauses require ``=y`` unless something can load a module before root is
+    mounted (#1860, #1881). Two facts answer that, and either alone relieves the clause (ADR-0545):
+    ``has_initrd``, the build's own uploaded initrd artifact, and ``guest_builds_initramfs``, a
+    target that boots through its own bootloader and runs dracut in-guest. Both are carried from
+    the caller - the finalized ``BuildStepResult`` and the ``Run`` it already holds - rather than
+    re-read here, and both default to the strict reading so a caller that forgets one over-warns.
     """
     config = await load_effective_config(conn, run_id)
     if config is None:
         return None
     unmet = unmet_advertised_clauses(
-        config, feature_requirement(ROOTFS_MOUNT), has_initrd=has_initrd
+        config,
+        feature_requirement(ROOTFS_MOUNT),
+        has_initrd=has_initrd,
+        guest_builds_initramfs=guest_builds_initramfs,
     )
     if not unmet:
         return None
