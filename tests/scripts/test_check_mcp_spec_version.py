@@ -224,10 +224,12 @@ def test_mcp_spec_drift_workflow_dedups_across_closed_issues() -> None:
 
 
 def test_mcp_spec_drift_workflow_dedups_on_the_revision_not_the_title() -> None:
-    """The revision is the identifying fact, and it survives a triage retitle.
+    """The revision is the identifying fact, and it survives a retitle that keeps it.
 
     Keying on the whole title breaks both halves of the dedup at once when a maintainer
     renames the issue — filing a duplicate for a revision someone demonstrably already saw.
+    Keying on the revision narrows that to a rename which edits the revision string itself,
+    which still de-matches (#1849).
     The mutation this catches is a bare `.[0].number // empty`, which selects any search hit.
     """
     filing = next(step for step in _drift_steps() if "gh issue create" in step.get("run", ""))
@@ -240,10 +242,12 @@ def test_mcp_spec_drift_workflow_dedups_on_the_revision_not_the_title() -> None:
 def test_mcp_spec_drift_dedup_search_carries_no_label_conjunct() -> None:
     """`gh` ANDs `--label` into the query, which hides human-filed issues.
 
-    Issue #1485 ("Investigate MCP 2026-07-28 Spec Update Requirements") is open and tracks
-    exactly the revision this workflow reports, but carries no `area:mcp-api` label. A
-    label-filtered search returns nothing for it, so the first run would have duplicated it.
-    The labels still go on `gh issue create`; they must not go on the search.
+    Issue #1485 carries no `area:mcp-api` label, and on this workflow's first run it was open
+    and titled "Investigate MCP 2026-07-28 Spec Update Requirements" — exactly the revision
+    the workflow reported. A label-filtered search returns nothing for it, so the first run
+    would have duplicated it. It has since been retitled to 2026-06-18 and closed, which does
+    not change what the first run would have done. The labels still go on `gh issue create`;
+    they must not go on the search.
     """
     filing = next(step for step in _drift_steps() if "gh issue create" in step.get("run", ""))
     search = filing["run"].split("gh issue list", 1)[1].split("--jq", 1)[0]
