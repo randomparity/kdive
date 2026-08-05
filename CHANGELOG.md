@@ -863,6 +863,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remediate with a prompted DWARF symbol, not the bare bool
 - Correct chart-version-check's ANSI root-cause comment
 - Strip ANSI colour from help-text assertions in cli/config tests
+- Qualify the no-initramfs claim for embedded initramfs
+- Caveat the embedded-initramfs advisory blind spot
 
 ### Build
 
