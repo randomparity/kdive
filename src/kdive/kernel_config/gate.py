@@ -50,9 +50,15 @@ _REMEDIATION = (
 )
 
 MISSING_BOOT_CONFIG_REASON = "kernel_missing_boot_config"
+# The prose half has to name =y, not just the symbols (#1860): a symbol listed under
+# built_in_required is one the agent can already see in its own .config, so "rebuild with the
+# missing CONFIG_*" alone reads as a kdive bug and is followed by re-adding a line that is
+# already there. It also names the alternative, because uploading an initrd is the other way out.
 _ROOTFS_REMEDIATION = (
     "rebuild the kernel with the missing CONFIG_* so the guest can mount its root filesystem and "
-    "boot - EXT4_FS or XFS_FS, whichever your rootfs uses "
+    "boot - EXT4_FS or XFS_FS, whichever your rootfs uses. Build them in (=y): any symbol listed "
+    "under built_in_required is set to =m in your config, and the direct-kernel boot mounts root "
+    "before a module can load. Uploading an initrd artifact with the build is the alternative "
     f"(see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
