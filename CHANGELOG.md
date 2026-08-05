@@ -840,6 +840,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct where the sysrq refusal lands, and VIRTIO_PCI=m
 - Settle the gated-flag contradiction and the unchecked symbols
 - Name debuginfo in the checked set, restore the initrd carve-out
+- Drop the sysrq refusal set no seam reads
 
 ### Build
 
