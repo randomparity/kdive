@@ -66,9 +66,17 @@ MISSING_DEBUGINFO_REASON = "missing_debuginfo"
 # rootfs. The only other in-guest source is a host vmlinux uploaded as the Run's debuginfo_ref, so
 # the warning keys on BTF specifically and is suppressed when a vmlinux was uploaded.
 _BTF_SYMBOL = "DEBUG_INFO_BTF"
+# BTF is settable only behind a DWARF choice member, so naming it alone is advice a DEBUG_INFO=n
+# kernel cannot follow: BTF has no Kconfig prompt outside `if DEBUG_INFO`, so olddefconfig drops
+# CONFIG_DEBUG_INFO_BTF=y out of a fragment over such a config and the rebuild produces the same
+# blind kernel (#1855). The symbol this warning *keys* on is unchanged - it asks whether in-guest
+# drgn can read /sys/kernel/btf, not whether the kernel carries DWARF - only the advice is.
 _DEBUGINFO_REMEDIATION = (
-    "enable CONFIG_DEBUG_INFO_BTF (in-guest drgn reads BTF from /sys/kernel/btf), or upload a "
-    f"matching vmlinux, so drgn can resolve symbols (see {_EXTERNAL_BUILD_CONTRACT_URI})"
+    "enable a DWARF choice member (CONFIG_DEBUG_INFO_DWARF5, CONFIG_DEBUG_INFO_DWARF4 or "
+    "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT) and then CONFIG_DEBUG_INFO_BTF - BTF is offered "
+    "only once one of those is set, so olddefconfig drops it from a config that sets none of them "
+    "(in-guest drgn reads BTF from /sys/kernel/btf); or upload a matching vmlinux, so drgn can "
+    f"resolve symbols (see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
 # The static config check above proves BTF is *advertised*, not that the running guest's drgn can
