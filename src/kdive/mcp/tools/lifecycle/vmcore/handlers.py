@@ -252,7 +252,15 @@ async def _fetch_vmcore(
                 # and never gates. crash_capture_refusal fails open (None) on no upload / error.
                 # `arch` comes off the System already loaded above, and scopes the clauses that
                 # only exist on one arch (FW_CFG_SYSFS, #1875).
-                refusal = await crash_capture_refusal(conn, uid, arch=system_arch(system))
+                try:
+                    arch = system_arch(system)
+                except CategorizedError as exc:
+                    # An explicit `method` short-circuits _resolve_capture_method before it parses
+                    # the profile, so this is the first parse on that path - and an unparsable
+                    # profile must stay the typed configuration_error the implicit path already
+                    # returns, never a 500 escaping the handler.
+                    return ToolResponse.failure_from_error(run_id, exc)
+                refusal = await crash_capture_refusal(conn, uid, arch=arch)
                 if refusal is not None:
                     return _config_error(
                         run_id,
