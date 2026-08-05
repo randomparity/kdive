@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import Event
-from time import monotonic, sleep
 from typing import LiteralString
 from uuid import UUID, uuid4
 
@@ -25,6 +24,7 @@ from kdive.mcp.tools.ops import build_uses
 from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifacts
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
+from tests.db_waits import wait_until_blocked_by
 
 _LOGIN_AUTHENTICATION = "worker-fence-test-authentication"
 _BINDING_MAX_BYTES = 4096
@@ -1354,17 +1354,13 @@ def test_worker_claim_lease_clock_starts_after_incarnation_lock_contention(
         future = executor.submit(claim)
         try:
             assert connected.wait(timeout=2)
-            deadline = monotonic() + 2
-            while monotonic() < deadline:
-                blocked = pg_conn.execute(
-                    "SELECT %s = ANY(pg_blocking_pids(%s))",
-                    (blocker.info.backend_pid, claimant_pid[0]),
-                ).fetchone()
-                if blocked == (True,):
-                    break
-                sleep(0.01)
-            else:
-                pytest.fail("claim did not block on the incarnation lock")
+            wait_until_blocked_by(
+                pg_conn,
+                waiter_pid=claimant_pid[0],
+                blocker_pid=blocker.info.backend_pid,
+                future=future,
+                expectation="claim did not block on the incarnation lock",
+            )
             with pytest.raises(TimeoutError):
                 future.result(timeout=0.4)
             held_until = pg_conn.execute("SELECT clock_timestamp()").fetchone()
@@ -1419,32 +1415,24 @@ def test_worker_heartbeat_lease_clock_starts_after_incarnation_and_job_lock_cont
         future = executor.submit(heartbeat)
         try:
             assert connected.wait(timeout=2)
-            deadline = monotonic() + 2
-            while monotonic() < deadline:
-                blocked = pg_conn.execute(
-                    "SELECT %s = ANY(pg_blocking_pids(%s))",
-                    (incarnation_blocker.info.backend_pid, heartbeat_pid[0]),
-                ).fetchone()
-                if blocked == (True,):
-                    break
-                sleep(0.01)
-            else:
-                pytest.fail("heartbeat did not block on the incarnation lock")
+            wait_until_blocked_by(
+                pg_conn,
+                waiter_pid=heartbeat_pid[0],
+                blocker_pid=incarnation_blocker.info.backend_pid,
+                future=future,
+                expectation="heartbeat did not block on the incarnation lock",
+            )
             with pytest.raises(TimeoutError):
                 future.result(timeout=0.4)
             incarnation_blocker.commit()
 
-            deadline = monotonic() + 2
-            while monotonic() < deadline:
-                blocked = pg_conn.execute(
-                    "SELECT %s = ANY(pg_blocking_pids(%s))",
-                    (job_blocker.info.backend_pid, heartbeat_pid[0]),
-                ).fetchone()
-                if blocked == (True,):
-                    break
-                sleep(0.01)
-            else:
-                pytest.fail("heartbeat did not block on its exact running job row")
+            wait_until_blocked_by(
+                pg_conn,
+                waiter_pid=heartbeat_pid[0],
+                blocker_pid=job_blocker.info.backend_pid,
+                future=future,
+                expectation="heartbeat did not block on its exact running job row",
+            )
             with pytest.raises(TimeoutError):
                 future.result(timeout=0.4)
             held_until = pg_conn.execute("SELECT clock_timestamp()").fetchone()
@@ -1646,17 +1634,13 @@ def test_concurrent_exact_runtime_role_creation_is_idempotent(
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(apply_role_migration)
             assert started.wait(timeout=2)
-            deadline = monotonic() + 2
-            while monotonic() < deadline:
-                blocked = pg_conn.execute(
-                    "SELECT %s = ANY(pg_blocking_pids(%s))",
-                    (creator.info.backend_pid, contender.info.backend_pid),
-                ).fetchone()
-                if blocked == (True,):
-                    break
-                sleep(0.01)
-            else:
-                pytest.fail("role migration did not block on concurrent exact role creation")
+            wait_until_blocked_by(
+                pg_conn,
+                waiter_pid=contender.info.backend_pid,
+                blocker_pid=creator.info.backend_pid,
+                future=future,
+                expectation="role migration did not block on concurrent exact role creation",
+            )
             with pytest.raises(TimeoutError):
                 future.result(timeout=0.5)
             creator.commit()
@@ -1715,17 +1699,13 @@ def test_runtime_role_grant_closes_validation_to_drop_window(
         with ThreadPoolExecutor(max_workers=2) as executor:
             future = executor.submit(apply_role_migration)
             assert started.wait(timeout=2)
-            deadline = monotonic() + 2
-            while monotonic() < deadline:
-                blocked = pg_conn.execute(
-                    "SELECT %s = ANY(pg_blocking_pids(%s))",
-                    (blocker.info.backend_pid, contender.info.backend_pid),
-                ).fetchone()
-                if blocked == (True,):
-                    break
-                sleep(0.01)
-            else:
-                pytest.fail("role migration did not reach the post-validation pause")
+            wait_until_blocked_by(
+                pg_conn,
+                waiter_pid=contender.info.backend_pid,
+                blocker_pid=blocker.info.backend_pid,
+                future=future,
+                expectation="role migration did not reach the post-validation pause",
+            )
             with pytest.raises(TimeoutError):
                 future.result(timeout=0.5)
             drop_future = executor.submit(
@@ -1884,17 +1864,13 @@ def test_reclaiming_generation_serializes_before_acquisition(
         )
         future = executor.submit(acquire)
         assert connected.wait(timeout=2)
-        deadline = monotonic() + 2
-        while monotonic() < deadline:
-            blocked = pg_conn.execute(
-                "SELECT %s = ANY(pg_blocking_pids(%s))",
-                (reclaim.info.backend_pid, worker_pid[0]),
-            ).fetchone()
-            if blocked == (True,):
-                break
-            sleep(0.01)
-        else:
-            pytest.fail("acquisition did not block on the reclaiming generation row")
+        wait_until_blocked_by(
+            pg_conn,
+            waiter_pid=worker_pid[0],
+            blocker_pid=reclaim.info.backend_pid,
+            future=future,
+            expectation="acquisition did not block on the reclaiming generation row",
+        )
         with pytest.raises(TimeoutError):
             future.result(timeout=0.5)
         reclaim.commit()
