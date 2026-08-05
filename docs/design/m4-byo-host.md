@@ -320,9 +320,11 @@ has an authorization model of its own that KDIVE neither owns nor configures, an
 BMC with no credentials, which puts the kernel under test on the trusted side of the plane that
 is supposed to recover it. That is not an RBAC delta, because no KDIVE role governs it.
 [ADR-0547](../adr/0547-host-interface-in-band-bmc-path.md) decides how it is handled: the state
-is read, surfaced by `doctor` as an ADR-0091 `pass` result carrying the posture in `data` and the
-remedy in `detail` (that record's verdict is three-state and gains no member here), and recorded
-in `systems.byo_adopt_facts` at adopt. It does not gate adoption. The interface's authentication
+is read, surfaced by `doctor` as an ADR-0091 `pass` result stating the posture and its remedy in
+`detail` — the field `kdivectl doctor` renders, since its fixed column set omits `data`
+(`src/kdive/cli/commands/doctor.py:29`) — and repeating the posture in `data` for machine readers
+(that record's verdict is three-state and gains no member here), and recorded in
+`systems.byo_adopt_facts` at adopt. It does not gate adoption. The interface's authentication
 mode is **read**, never assumed — `AuthNone` is a vendor and configuration choice, not a universal
 one — and a BMC that reports no Host Interface is recorded as having reported nothing, not as safe.
 
