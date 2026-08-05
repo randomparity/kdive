@@ -316,7 +316,8 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> int:
             title="External-build requirements",
             description=(
                 "Generated JSON contract for the external-build lane: accepted upload artifact "
-                "names and byte layouts, plus advisory feature CONFIG requirements."
+                "names and byte layouts, plus per-feature CONFIG requirements, each stating "
+                "where omitting its symbols surfaces."
             ),
             mime_type=_JSON,
             fn=external_build_contract_json,

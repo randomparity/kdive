@@ -4,6 +4,7 @@ from kdive.kernel_config.requirements import (
     ROOTFS_MOUNT,
     BuiltIn,
     Clause,
+    Enforcement,
     FeatureRequirement,
     feature_requirement,
 )
@@ -151,6 +152,7 @@ def test_the_built_in_requirement_reaches_the_refusal_set_and_not_only_the_adver
         "synthetic fixture for the built-in requirement",
         advertised=(Clause(frozenset({"EXT4_FS"}), BuiltIn.UNLESS_INITRD),),
         gate_required=(Clause(frozenset({"EXT4_FS"}), BuiltIn.UNLESS_INITRD),),
+        enforcement=Enforcement.UPLOAD_REFUSAL,
     )
     assert missing_symbols(unmet_clauses(_MODULAR, gated, arch=None)) == ["EXT4_FS"]
     assert unmet_clauses(_MODULAR, gated, arch=None, has_initrd=True) == ()
@@ -267,6 +269,7 @@ def test_the_arch_scope_reaches_the_refusal_set_and_not_only_the_advertised_one(
         "synthetic fixture for the arch scope",
         advertised=(Clause(frozenset({"HVC_CONSOLE"}), arches=frozenset({_PPC})),),
         gate_required=(Clause(frozenset({"HVC_CONSOLE"}), arches=frozenset({_PPC})),),
+        enforcement=Enforcement.UPLOAD_REFUSAL,
     )
     bare = _all_builtin({"EXT4_FS"})
     assert missing_symbols(unmet_clauses(bare, gated, arch=_PPC)) == ["HVC_CONSOLE"]

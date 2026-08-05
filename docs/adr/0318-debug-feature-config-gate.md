@@ -63,6 +63,22 @@ literal four-seam list.
 
 No schema change: the gate reads the existing `effective_config` artifact row + object.
 
+### Amendment (2026-08-05): the manifest's `gated` element is replaced by `enforcement` (#1867)
+
+This is an amendment rather than a silent edit because a later decision supersedes one element of
+the shape authorized above. It qualifies decision point 1's "returns the full manifest (feature,
+summary, `gated`, OR-group requirements)". Nothing else in this record changes: the gate still
+keys on `gate_required`, `crash_capture` is still the only refusing feature, and sysrq is still
+runtime-gated rather than pre-gated by the boundary rule four paragraphs down.
+
+[ADR-0546](0546-manifest-states-where-an-omission-surfaces.md) replaces the `gated` bool with
+`enforcement`, a closed vocabulary naming where an omission surfaces, and has a refusing entry
+publish its refusal clauses as `refuses_on`. The bool was read as "is this feature optional" when
+it answered "does kdive refuse", and the two diverge on sysrq: the runtime enforcement this record
+chose is a real refusal that a `gated: false` entry made look like no refusal at all. The
+`RANDOMIZE_BASE` example above — the symbol this record advertises and deliberately does not gate —
+is the same divergence at clause granularity, and is what `refuses_on` states.
+
 ## Consequences
 
 - The agent gets an advisory contract (build these symbols for these features) and, when it

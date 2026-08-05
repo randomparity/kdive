@@ -11,7 +11,7 @@ from fastmcp import FastMCP
 from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.build_artifacts.validation import EFFECTIVE_CONFIG_MAX_BYTES
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.kernel_config.requirements import CRASH_CAPTURE
+from kdive.kernel_config.requirements import CRASH_CAPTURE, Enforcement
 from kdive.mcp.resources.external_build_contract import (
     EXTERNAL_BUILD_CONTRACT_URI,
     EXTERNAL_BUILD_UPLOAD_DOC,
@@ -95,9 +95,44 @@ def test_feature_config_manifest_is_included_without_internal_gate_set() -> None
     assert CRASH_CAPTURE in ids and "sysrq" in ids and "debuginfo" in ids
 
     crash = next(f for f in features if f["feature"] == CRASH_CAPTURE)
-    assert crash["gated"] is True
+    assert crash["enforcement"] == Enforcement.UPLOAD_REFUSAL.value
     assert "RANDOMIZE_BASE" in json.dumps(crash["requirements"])
+    # The refusal set reaches the agent under a served name; the internal field name does not.
     assert "gate_required" not in crash
+    assert "RANDOMIZE_BASE" not in json.dumps(crash["refuses_on"])
+
+
+def test_the_served_document_defines_every_enforcement_value_it_uses() -> None:
+    # #1867. The defect was a served flag with no served definition: `gated` reached the agent
+    # bare, so `gated: false` on sysrq read as "optional" when it means "the refusal is coming
+    # later and costs a rebuild". A legend in a doc would be the same defect one fetch away, so
+    # it rides inside the payload the agent already reads.
+    manifest = _doc()["feature_config_requirements"]
+    legend = manifest["enforcement_legend"]
+    used = {f["enforcement"] for f in manifest["features"]}
+
+    assert used, "no entry carries an enforcement value, so the checks below would pass vacuously"
+    assert used <= set(legend)  # no value reaches an agent undefined
+    assert set(legend) == {e.value for e in Enforcement}  # and none is defined without existing
+    for value, definition in legend.items():
+        assert isinstance(definition, str) and definition.strip(), value
+
+
+def test_the_served_sysrq_entry_cannot_be_read_as_optional_beside_the_cheap_features() -> None:
+    # The served half of #1867, on the surface the agent actually reads. #1861 correctly dropped
+    # sysrq's unread refusal set, and with a bare bool that made the entry structurally identical
+    # to kasan and its six siblings - so an agent skipping every `"gated": false` feature skipped
+    # MAGIC_SYSRQ, a symbol with no module form, and paid a build, install and boot before
+    # diagnostic_sysrq refused. Assert the misreading is closed: the values must differ, and the
+    # key that grouped them must be gone rather than merely joined by a better one.
+    features = {f["feature"]: f for f in _doc()["feature_config_requirements"]["features"]}
+    sysrq = features["sysrq"]
+    assert sysrq["enforcement"] == Enforcement.RUNTIME_REFUSAL.value
+    for cheap in ("kasan", "kcsan", "kfence", "kmemleak", "lockdep", "ftrace", "kcov"):
+        assert features[cheap]["enforcement"] == Enforcement.UNCHECKED.value, cheap
+        assert features[cheap]["enforcement"] != sysrq["enforcement"], cheap
+    for entry in features.values():
+        assert "gated" not in entry, entry["feature"]
 
 
 def test_every_requirements_element_is_a_clause_object_keyed_by_symbols() -> None:
@@ -110,8 +145,27 @@ def test_every_requirements_element_is_a_clause_object_keyed_by_symbols() -> Non
     features = _doc()["feature_config_requirements"]["features"]
     assert features, "no features in the manifest, so the walk below would pass vacuously"
 
-    clauses = [clause for f in features for clause in f["requirements"]]
+    # `refuses_on` renders through the same helper (#1867), so it is walked here rather than left
+    # to grow a second element shape unobserved.
+    clauses = [
+        clause
+        for f in features
+        for key in ("requirements", "refuses_on")
+        for clause in f.get(key, ())
+    ]
     assert clauses, "no feature advertises a clause, so the walk below would pass vacuously"
+    assert any("refuses_on" in f for f in features), "no refusal set reached the walk above"
+
+    # The entry's own key vocabulary is bounded for the same reason a clause's is: a new key is a
+    # shape change an agent has to be told about, and `gated` must not come back (#1867).
+    for entry in features:
+        assert set(entry) <= {
+            "feature",
+            "summary",
+            "enforcement",
+            "requirements",
+            "refuses_on",
+        }, entry["feature"]
     for clause in clauses:
         assert isinstance(clause, dict), clause
         # Keys are bounded, not just present: `built_in` joined the vocabulary with #1860 and
@@ -202,11 +256,12 @@ def test_no_other_served_feature_carries_an_arch_scope() -> None:
     assert tagged == {"serial_console", "crash_capture"}
 
 
-def test_schema_version_is_two_for_the_clause_object_element() -> None:
-    # The element-shape change bumps the contract document's schema_version once, in the first
-    # change to land (#1854). Adding an optional key later does not bump it again, so a further
-    # bump means the shape changed again and an agent has to be told.
-    assert _doc()["schema_version"] == 2
+def test_schema_version_is_three_since_the_gated_bool_was_replaced() -> None:
+    # 2 was the clause-object element (#1854), under a rule that an *added* optional key does not
+    # bump again - which is how `built_in` (#1860) and `arch` (#1859) landed silently. #1867
+    # removes a key every entry carried, which is the other case, so 3 is the signal an agent
+    # keying on `gated` needs. A further bump means the shape changed again.
+    assert _doc()["schema_version"] == 3
 
 
 def test_served_contract_advertises_the_rhel_guest_kdump_symbols_ungated() -> None:
@@ -216,7 +271,7 @@ def test_served_contract_advertises_the_rhel_guest_kdump_symbols_ungated() -> No
     # capture fine elsewhere.
     features = _doc()["feature_config_requirements"]["features"]
     rhel = next(f for f in features if f["feature"] == "crash_capture_rhel_guest")
-    assert rhel["gated"] is False
+    assert rhel["enforcement"] == Enforcement.UNCHECKED.value
     advertised = json.dumps(rhel["requirements"])
     for symbol in (
         "XFS_FS",
@@ -249,10 +304,11 @@ def test_served_contract_advertises_the_sanitizer_tracing_and_coverage_features_
     for feature_id, symbol in expected_symbols.items():
         assert feature_id in features, feature_id
         entry = features[feature_id]
-        assert entry["gated"] is False, feature_id
+        assert entry["enforcement"] == Enforcement.UNCHECKED.value, feature_id
         assert symbol in json.dumps(entry["requirements"]), feature_id
-        # the manifest never leaks the internal refusal set
+        # the manifest never leaks the internal refusal set, and an unchecked entry has none
         assert "gate_required" not in entry, feature_id
+        assert "refuses_on" not in entry, feature_id
 
 
 def test_served_kasan_entry_states_what_it_finds_and_what_it_costs() -> None:
