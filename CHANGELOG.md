@@ -828,6 +828,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drop the gate reference from the settings manifest docstring
 - Correct the advertised sets against Kconfig
 - Drop BPF_EVENTS, widen the derived-symbol guard
+- Stop advertising kernel-derived CONFIG symbols
+- Correct the Kconfig citations and harden the guard
 
 ### Build
 
