@@ -88,8 +88,9 @@ introspection also depends on the guest image's drgn build being able to load th
 BTF but the in-guest drgn cannot actually resolve symbols, `introspect.run` / `introspect.script`
 return a non-fatal `debuginfo_unloadable` warning naming the likely cause; remediate by booting a
 BTF-capable guest image with a newer drgn, or by uploading a matching `vmlinux`.
-**kdump on a RHEL-family guest needs more than the crash-capture symbols.** `CONFIG_KEXEC`,
-`CONFIG_CRASH_DUMP`, `CONFIG_VMCORE_INFO`, `CONFIG_PROC_VMCORE`, `CONFIG_FW_CFG_SYSFS` and
+
+**kdump on a RHEL-family guest needs more than the crash-capture symbols.** `CONFIG_KEXEC` (or
+`CONFIG_KEXEC_FILE`), `CONFIG_CRASH_DUMP`, `CONFIG_PROC_VMCORE`, `CONFIG_FW_CFG_SYSFS` and
 `CONFIG_RELOCATABLE` get the capture kernel *loaded* — `/sys/kernel/kexec_crash_size` is non-zero
 and the boot looks healthy — but they do not get a vmcore *written*. On RHEL, Rocky, AlmaLinux,
 CentOS Stream or Fedora, also build in the `crash_capture_rhel_guest` set:
@@ -110,6 +111,15 @@ not universal — a guest with a different root filesystem or initramfs scheme n
 so kdive advertises it and never refuses on it. Missing any one of these fails only at capture
 time, after the crash, when the guest and the evidence are gone; each omission masks the next, so
 build the whole set in at once.
+
+**Whatever the guest family**, a crash-config refusal can also name `KEXEC_CORE` and
+`VMCORE_INFO`, bare and without a `CONFIG_` prefix. Those two are missing from the lists above
+and from the manifest on purpose: both are prompt-less bools that `olddefconfig` drops back out
+of a fragment. On Linux 6.9 and newer, `CONFIG_KEXEC` and `CONFIG_KEXEC_FILE` select the first
+and `CONFIG_CRASH_DUMP` selects the second, so a config that satisfies the crash-capture symbols
+satisfies those two as well and there is nothing separate to add. `VMCORE_INFO` does not exist
+before 6.9 (it was split out of `CRASH_CORE`), so an older kernel cannot satisfy that clause at
+all.
 
 See `resource://kdive/contracts/external-build` for the per-feature `CONFIG_*` manifest.
 

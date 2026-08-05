@@ -15,11 +15,11 @@ additionally needs the steps in [remote-live-stack.md](remote-live-stack.md) §1
 All prerequisites from the [local live-stack runbook](live-stack.md), plus:
 
 - A locally-built kernel to upload: a combined `kernel` tar (`boot/vmlinuz` + `lib/modules/`)
-  with the kdump/debug symbols armed (`CONFIG_KEXEC`, `CONFIG_CRASH_DUMP`, `CONFIG_VMCORE_INFO`,
-  `CONFIG_PROC_VMCORE`, `CONFIG_FW_CFG_SYSFS`, `CONFIG_RELOCATABLE`). Those load the capture
-  kernel; they do not write a vmcore on their own. **On a RHEL-family guest** (RHEL, Rocky,
-  AlmaLinux, CentOS Stream, Fedora) also build in `CONFIG_XFS_FS` (the XFS root the capture kernel
-  must mount), `CONFIG_KEXEC_FILE` (RHEL kdump uses `kexec_file_load`, not `kexec_load`), and
+  with the kdump/debug symbols armed (`CONFIG_KEXEC`, `CONFIG_CRASH_DUMP`, `CONFIG_PROC_VMCORE`,
+  `CONFIG_FW_CFG_SYSFS`, `CONFIG_RELOCATABLE`). Those load the capture kernel; they do not write
+  a vmcore on their own. **On a RHEL-family guest** (RHEL, Rocky, AlmaLinux, CentOS Stream,
+  Fedora) also build in `CONFIG_XFS_FS` (the XFS root the capture kernel must mount),
+  `CONFIG_KEXEC_FILE` (RHEL kdump uses `kexec_file_load`, not `kexec_load`), and
   `CONFIG_SQUASHFS` + `CONFIG_SQUASHFS_ZSTD` + `CONFIG_EROFS_FS` + `CONFIG_OVERLAY_FS` +
   `CONFIG_BLK_DEV_LOOP` (dracut's squash/erofs kdump initramfs). This second set is
   filesystem- and initramfs-dependent, not universal — a non-RHEL guest may need a different one.
@@ -52,7 +52,7 @@ Upload your locally-built artifacts, then finalize the Run:
 a `lib/modules` member, manifest `sha256`/`size_bytes`, and the optional `vmlinux` build-id). It
 never inspects your `.config` beyond the non-blocking boot advisory: arming kdump is your
 responsibility at build time — a kernel missing `CONFIG_KEXEC`/`CONFIG_CRASH_DUMP`/
-`CONFIG_VMCORE_INFO` simply captures no vmcore, and on a RHEL-family guest so does one missing the
+`CONFIG_PROC_VMCORE` simply captures no vmcore, and on a RHEL-family guest so does one missing the
 XFS/dracut-initramfs/`KEXEC_FILE` set above. That failure appears only *after* the crash, so verify
 the set before you crash the guest, not after.
 
