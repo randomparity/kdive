@@ -66,34 +66,41 @@ that answer nothing, which inverts the signal it is meant to carry.
 stops treating the out-of-band plane as being outside the kernel under test's reach by
 assumption, and starts carrying evidence about whether it is.
 
-**Question 1 — do we accept that a kernel under test can drive its own BMC?** We accept that it
-may, and we refuse to accept it silently. There is no blanket answer for every host, because the
-consequence is not the same on every host: on a machine an operator dedicates to KDIVE, a kernel
-that can power-cycle a host it already holds exclusively (`concurrent_allocation_cap = 1`,
-ADR-0540) gains little from reaching the BMC for power; on a shared or loaner machine, the same
-reach extends to virtual media and firmware, which is persistent out-of-band state that survives
-the run and that teardown cannot return to baseline. That distinction belongs to the operator who
-owns the machine, and this record does not take it away from them. What it removes is the option
-of the distinction going unstated: the run records what the service processor reported, so the
-question has an answer at incident time rather than a plausible reconstruction.
+**Question 1 — do we accept that a kernel under test can drive its own BMC?** Yes. KDIVE will run
+on such a host and will not refuse to adopt one. What it refuses is accepting it silently: the
+acceptance is the operator's to make, against a value KDIVE read and recorded, rather than one
+this project makes on their behalf by not looking.
+
+There is no blanket answer for every host, because the consequence is not the same on every host.
+On a machine an operator dedicates to KDIVE, a kernel that can power-cycle a host it already holds
+exclusively (`concurrent_allocation_cap = 1`, ADR-0540) gains little from reaching the BMC for
+power. On a shared or loaner machine, the same reach extends to virtual media and firmware, which
+is persistent out-of-band state that survives the run and that teardown cannot return to baseline.
+That distinction belongs to the operator who owns the machine, and this record does not take it
+away from them. What it removes is the option of the distinction going unstated: the run records
+what the service processor reported, so the question has an answer at incident time rather than a
+plausible reconstruction.
 
 **Question 2 — is disabling or authenticating the Host Interface an operator prerequisite?** It
 becomes a stated term of the BYO environment contract, in the form of a decision the operator has
 to have made rather than a check that has to pass. The contract reads: disable the host's in-band
 service-processor channels, or give them an authentication mode, or accept that a run can leave
 persistent out-of-band state on this machine. `doctor` (#1824) reports which of those holds; it
-does not decide it. The report has four outcomes — `disabled`, `authenticated`, `unauthenticated`,
-`not_reported` — read from `InterfaceEnabled` and `AuthenticationModes` on each Host Interface,
-never assumed. `not_reported` is reported as itself and never as a pass, because a BMC that
-exposes no Host Interface resource has told us nothing about its KCS channel. The check reports
-at warning severity, naming the specific interface and the remedy, and does not fail the host: a
-gate KDIVE cannot remediate has one reachable resolution, an operator bypass flag, and a
-suppressed report is worth less than an honest one.
+does not decide it. It reports one of five values. Four come from reading `InterfaceEnabled` and
+`AuthenticationModes` on each Host Interface, never assuming either: `disabled`, `authenticated`,
+`unauthenticated`, and `not_reported` when the resource is absent or unreadable. `not_reported` is
+reported as itself and never as a pass, because a BMC that exposes no Host Interface resource has
+told us nothing about its KCS channel. The check reports at warning severity, naming the specific
+interface and the remedy, and does not fail the host: a gate KDIVE cannot remediate has one
+reachable resolution, an operator bypass flag, and a suppressed report is worth less than an
+honest one.
 
-Only the Redfish driver has this surface. A PowerVM LPAR reached through an HMC has no
-per-host service processor and no analogue, so the check reports `not_applicable` there rather
-than inventing one; an IPMI-only host reports `not_reported`, because the in-band KCS channel has
-no Redfish-shaped read.
+The fifth value is `not_applicable`, and only the driver decides it. A PowerVM LPAR reached
+through an HMC has no per-host service processor, so the question does not arise there and the
+check does not invent a read for it. An IPMI-only x86 host is the opposite case: the question does
+arise, because the in-band KCS channel is real, but it has no Redfish-shaped read — so that host
+reports `not_reported`, not `not_applicable`. Keeping those two apart is what stops "we did not
+look" from being recorded as "there is nothing to look at".
 
 **Question 3 — does adopt record the state as a System fact?** Yes, unconditionally, whatever the
 operator decided about questions 1 and 2. Adopt writes the observation into
@@ -123,7 +130,7 @@ nothing from a `CredentialBootstrapping` object is read into it.
 
 - The BYO environment contract gains a term an operator has to answer, and `doctor` gains a check
   that reports which answer the machine reflects. Neither refuses a host.
-- #1824 owes the `doctor` check: read-only, warning severity, the four outcomes above,
+- #1824 owes the `doctor` check: read-only, warning severity, the five values above,
   `not_reported` never reported as a pass, `AuthenticationModes` read rather than assumed, and
   `not_applicable` on the HMC driver. It is already `status:blocked` behind #1823's precondition
   module, and this adds to its scope rather than unblocking it.
