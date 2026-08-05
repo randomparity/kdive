@@ -81,14 +81,19 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "these symbols get the capture kernel loaded, not the vmcore written. A RHEL-family guest "
         "needs the crash_capture_rhel_guest set as well.",
         # KEXEC_CORE and VMCORE_INFO appear in neither field: both are bare prompt-less bools
-        # (kernel/Kconfig.kexec:11 and :8) no fragment can set - olddefconfig discards them, so
+        # (kernel/Kconfig.kexec:11 and :8) no fragment can set - olddefconfig drops the line, so
         # naming one sends the agent after the one thing it cannot do. Nor do they carry signal
-        # here: KEXEC (:20) and KEXEC_FILE (:38) select KEXEC_CORE, and CRASH_DUMP (:97) selects
-        # VMCORE_INFO (so does PROC_KCORE, fs/proc/Kconfig:32), and every one of those selectors
-        # is a clause of the refusal set below - so no config olddefconfig can produce lacks a
-        # derived symbol while its selector is present. The only config the dropped clauses could
-        # still refuse is an internally inconsistent one (truncated or hand-edited), where
-        # refusing is the false refusal ADR-0318's fail-open boundary exists to avoid.
+        # on a modern kernel: KEXEC (:20) and KEXEC_FILE (:38) select KEXEC_CORE, and CRASH_DUMP
+        # (:97) selects VMCORE_INFO (so does PROC_KCORE, fs/proc/Kconfig:32), and every one of
+        # those selectors is a clause of the refusal set below - so a coherent .config carrying a
+        # selector carries the symbol it selects.
+        #
+        # Where they did carry signal, the signal was wrong. VMCORE_INFO does not exist before
+        # Linux 6.9 - it was split out of CRASH_CORE - so a complete, working pre-6.9 config
+        # could not satisfy that clause at any setting, and the gate refused crash capture over a
+        # symbol whose name is absent from that kernel's Kconfig. Past that, the only config left
+        # to refuse on is an internally inconsistent one (truncated or hand-edited). Both are the
+        # false refusal ADR-0318's fail-open boundary exists to avoid.
         _plain(
             "KEXEC",
             "KEXEC_FILE",

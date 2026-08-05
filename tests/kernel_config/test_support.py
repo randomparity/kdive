@@ -7,14 +7,13 @@ from kdive.kernel_config.support import (
 )
 
 _CRASH = feature_requirement(CRASH_CAPTURE)
-# Exactly the symbols crash_capture gates, and no others: #1854 dropped the derived KEXEC_CORE
-# and VMCORE_INFO out of the refusal set, so listing them here would leave a fixture claiming to
-# be the full gate set while naming two symbols the gate no longer reads.
 _FULL = frozenset(
     {
+        "KEXEC_CORE",
         "KEXEC",
         "CRASH_DUMP",
         "PROC_VMCORE",
+        "VMCORE_INFO",
         "FW_CFG_SYSFS",
         "RELOCATABLE",
     }

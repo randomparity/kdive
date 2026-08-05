@@ -1,11 +1,10 @@
 """Kernel symbols no config fragment can set, with the Kconfig line each was verified at.
 
-The seed for invariant I1 of the clause model #1854 settles. A symbol here is unsettable **in
+The data behind invariant I1 of the clause model #1854 settles. A symbol here is unsettable **in
 principle** - prompt-less, or existing only because something else ``select``s it - so ``make
-olddefconfig``
-discards it out of a fragment and any surface that names it hands the reader an instruction it
-cannot follow. Two tests read this list, which is why it lives in a support module rather than
-inside either of them:
+olddefconfig`` drops the line out of a config fragment, and any surface that names it hands the
+reader an instruction it cannot follow. Two test modules read this list, which is why it lives in
+a support module rather than inside either of them:
 
 - ``tests/kernel_config/test_requirements.py`` holds it out of every clause of every feature -
   ``advertised`` and ``gate_required`` alike.
@@ -18,10 +17,15 @@ be unsettable and cannot catch a tenth: nothing in a ``.config`` distinguishes a
 symbol from a prompted one, so the only real check is a human reading Kconfig. The list grows as
 symbols are verified; it is not a claim that every clause has been audited.
 
+Each reader separately asserts that the six symbols the registry's own comments already call
+unsettable are still listed. That assertion is spelled out in each of them rather than kept
+beside the list here, so thinning this list to silence a failure costs an edit in three files
+across two trees, where a reviewer sees it. Only those six are held that way: ``LOCKDEP``,
+``BPF`` and ``UPROBES`` can still be dropped from this list silently.
+
 A symbol that is settable **once a prerequisite holds** does not belong here.
 ``SERIAL_8250_CONSOLE`` and ``DEBUG_INFO_BTF`` are real prompts that ``olddefconfig`` drops on an
-unprepared config; #1854 keeps them as clause members and gives the prerequisite its own
-clause.
+unprepared config; #1854 keeps them as clause members and gives the prerequisite its own clause.
 """
 
 from __future__ import annotations
@@ -43,11 +47,4 @@ UNSETTABLE_SYMBOLS: Final[MappingProxyType[str, str]] = MappingProxyType(
         "KEXEC_CORE": "kernel/Kconfig.kexec:11",
         "VMCORE_INFO": "kernel/Kconfig.kexec:8",
     }
-)
-
-# The six symbols #1854 names explicitly, because the registry's own comments already called
-# them unsettable. Both readers assert this subset, so emptying or thinning the list to get a
-# green suite fails instead of passing quietly.
-I1_SEED: Final[frozenset[str]] = frozenset(
-    {"KEXEC_CORE", "VMCORE_INFO", "DEBUG_INFO", "BPF_EVENTS", "TRACING", "DYNAMIC_FTRACE"}
 )

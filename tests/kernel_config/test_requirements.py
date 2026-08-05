@@ -15,7 +15,7 @@ from kdive.kernel_config.support import (
     unmet_advertised_clauses,
     unmet_clauses,
 )
-from tests.kernel_config.unsettable_symbols import I1_SEED, UNSETTABLE_SYMBOLS
+from tests.kernel_config.unsettable_symbols import UNSETTABLE_SYMBOLS
 
 
 def test_crash_capture_gate_excludes_kaslr_and_or_groups_kexec():
@@ -512,13 +512,28 @@ def test_either_probe_event_source_satisfies_the_bpf_tracing_dependency():
     assert unmet_advertised_clauses(cfg, feature_requirement("bpf_tracing")) == ()
 
 
+def _unsettable_symbols_named(features: tuple[FeatureRequirement, ...]) -> dict[str, str]:
+    """Offending symbols in any clause of any feature, mapped to the Kconfig line each was read at.
+
+    Walks ``advertised`` and ``gate_required`` alike: the second is where #1854's defect lived,
+    and it is the half a symbol reaches the agent through a *refusal* rather than an advisory.
+    """
+    return {
+        symbol: UNSETTABLE_SYMBOLS[symbol]
+        for f in features
+        for clauses in (f.advertised, f.gate_required)
+        for clause in clauses
+        for symbol in clause.symbols
+        if symbol in UNSETTABLE_SYMBOLS
+    }
+
+
 def test_no_clause_of_any_feature_names_a_symbol_the_agent_cannot_set():
     # Invariant I1 of the clause model #1854 settles. A prompt-less or auto-select-ed symbol
-    # cannot be set from a config fragment - olddefconfig discards it - so reporting one as
+    # cannot be set from a config fragment - olddefconfig drops the line - so reporting one as
     # missing sends the agent after the one thing it cannot do. #1850 held this over `advertised`
-    # only, which let crash_capture keep KEXEC_CORE and VMCORE_INFO in `gate_required`, where the
-    # same symbols reach the agent through a *refusal* - the louder channel. The rule bars them
-    # from every clause, so this walks both fields.
+    # only, which let crash_capture keep KEXEC_CORE and VMCORE_INFO in `gate_required`. The rule
+    # bars them from every clause, so the walk above reads both fields.
     #
     # THIS IS A REGRESSION GUARD, NOT A PROOF. It catches the return of a symbol already known to
     # be unsettable and cannot catch a tenth: nothing in a .config distinguishes a prompt-less
@@ -529,15 +544,25 @@ def test_no_clause_of_any_feature_names_a_symbol_the_agent_cannot_set():
     # SERIAL_8250_CONSOLE and DEBUG_INFO_BTF are clause members by design, with the prerequisite
     # carried as its own clause, and are not candidates for the list.
     #
-    # The seed must stay listed: without this, deleting a row as "not named anywhere anyway"
-    # would defang the guard against re-adding it, silently.
-    assert set(UNSETTABLE_SYMBOLS) >= I1_SEED, sorted(I1_SEED - set(UNSETTABLE_SYMBOLS))
-    named = _every_clause_symbol(FEATURE_REQUIREMENTS)
-    assert named  # non-vacuity: the walk must actually see the roster
+    # The six are spelled here rather than imported beside the list they bound: a tripwire in the
+    # same file as the thing it guards is defeated by one hunk. Deleting a row as "not named
+    # anywhere anyway" has to be done in three files across two trees, where a reviewer sees it.
+    named_unsettable_by_the_registry = {
+        "KEXEC_CORE",
+        "VMCORE_INFO",
+        "DEBUG_INFO",
+        "BPF_EVENTS",
+        "TRACING",
+        "DYNAMIC_FTRACE",
+    }
+    assert set(UNSETTABLE_SYMBOLS) >= named_unsettable_by_the_registry, sorted(
+        named_unsettable_by_the_registry - set(UNSETTABLE_SYMBOLS)
+    )
+    # non-vacuity: the walk must actually see the roster
+    assert _every_clause_symbol(FEATURE_REQUIREMENTS)
     # The failure message names the Kconfig file:line of every offender so a new entry can be
     # checked against the kernel directly.
-    leaked = named & set(UNSETTABLE_SYMBOLS)
-    assert not leaked, {symbol: UNSETTABLE_SYMBOLS[symbol] for symbol in sorted(leaked)}
+    assert _unsettable_symbols_named(FEATURE_REQUIREMENTS) == {}
 
 
 def _every_clause_symbol(features: tuple[FeatureRequirement, ...]) -> set[str]:
@@ -550,22 +575,21 @@ def _every_clause_symbol(features: tuple[FeatureRequirement, ...]) -> set[str]:
     }
 
 
-def test_the_i1_walk_reaches_the_refusal_set_and_not_only_the_advertised_one():
+def test_the_invariant_above_reaches_the_refusal_set_and_not_only_the_advertised_one():
     # The half #1850's version could not have caught, and the half nothing else here proves.
-    # Every symbol crash_capture gates is also advertised, so a walk that silently dropped
-    # gate_required would leave the invariant above green against the live roster while the
-    # refusal set is exactly where #1854's defect lived. Feed the walk a feature that names an
-    # unsettable symbol in gate_required ONLY, and require it to be seen.
+    # Every symbol crash_capture gates is also advertised, so narrowing the check to `advertised`
+    # would leave the invariant above green against the live roster while the refusal set - where
+    # #1854's defect lived - went unwatched. Feed the same function a feature that names an
+    # unsettable symbol in gate_required ONLY, and require it to be reported.
     smuggled = FeatureRequirement(
         "not_a_real_feature",
-        "synthetic fixture for the walk above",
+        "synthetic fixture for the invariant above",
         advertised=(Clause(frozenset({"KEXEC"})),),
         gate_required=(Clause(frozenset({"KEXEC_CORE"})),),
     )
-    named = _every_clause_symbol((smuggled,))
-    assert named & set(UNSETTABLE_SYMBOLS) == {"KEXEC_CORE"}
-    # and the advertised half is still walked, so neither field can be dropped unnoticed
-    assert "KEXEC" in named
+    assert _unsettable_symbols_named((smuggled,)) == {"KEXEC_CORE": "kernel/Kconfig.kexec:11"}
+    # and the advertised half is still read, so neither field can be dropped unnoticed
+    assert _every_clause_symbol((smuggled,)) == {"KEXEC", "KEXEC_CORE"}
 
 
 def test_debuginfo_advertises_the_settable_debug_info_producers_not_the_symbol_they_imply():
@@ -613,11 +637,10 @@ def test_the_crash_capture_refusal_set_no_longer_names_the_derived_symbols():
     # with the missing CONFIG_*" - advice olddefconfig discards, on the channel that blocks the
     # arm rather than merely warning.
     #
-    # The pair carries no signal that the surviving clauses do not: KEXEC/KEXEC_FILE select
-    # KEXEC_CORE and CRASH_DUMP selects VMCORE_INFO, and each of those selectors is itself a
-    # clause here, so no config olddefconfig can produce lacks a derived symbol while its
-    # selector is present. Removing them narrows the refusal only on an internally inconsistent
-    # upload, which is the false refusal ADR-0318's fail-open boundary exists to avoid.
+    # On a modern kernel the pair carries no signal the surviving clauses do not: KEXEC and
+    # KEXEC_FILE select KEXEC_CORE, CRASH_DUMP selects VMCORE_INFO, and each of those selectors
+    # is itself a clause here, so a coherent .config carrying a selector carries what it selects.
+    # Where the pair did carry signal it was wrong - see the pre-6.9 kernel below.
     feat = feature_requirement(CRASH_CAPTURE)
     derived = {"KEXEC_CORE", "VMCORE_INFO"}
     gate_symbols = {s for clause in feat.gate_required for s in clause.symbols}
@@ -634,11 +657,33 @@ def test_the_crash_capture_refusal_set_no_longer_names_the_derived_symbols():
     }
 
 
-def test_a_kernel_that_lacks_only_the_derived_symbols_is_armed_rather_than_refused():
-    # The payload assertion #1854 asks for, stated as the behaviour change: the config below is
-    # what `make olddefconfig` produces for an agent that set every selector this entry names.
-    # It carries neither KEXEC_CORE nor VMCORE_INFO because the kernel writes those itself, and
-    # before #1854 it drew a refusal listing exactly the two symbols the agent could not add.
+def test_a_pre_6_9_kernel_that_has_no_vmcore_info_symbol_at_all_is_armed_rather_than_refused():
+    # The payload assertion #1854 asks for, stated as the case the old refusal got outright
+    # wrong. VMCORE_INFO was split out of CRASH_CORE in Linux 6.9, so it is not a symbol a
+    # pre-6.9 kernel's .config can carry at any setting. That kernel captures a vmcore perfectly
+    # well, and its complete, coherent config drew a refusal naming a symbol absent from its own
+    # Kconfig - unfixable by any rebuild, which is what made the remediation a dead end.
+    cfg = KernelConfig(
+        frozenset(
+            {
+                "KEXEC",
+                "KEXEC_CORE",
+                "KEXEC_FILE",
+                "CRASH_DUMP",
+                "PROC_VMCORE",
+                "FW_CFG_SYSFS",
+                "RELOCATABLE",
+            }
+        )
+    )
+    assert unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE)) == ()
+
+
+def test_a_hand_truncated_config_missing_a_derived_symbol_is_armed_rather_than_refused():
+    # The second class the removal newly arms, and the one it trades away: a .config edited or
+    # truncated so a selector is present without the symbol it selects. Arming it is the
+    # fail-open direction ADR-0318 already chose for a config kdive cannot correlate with a
+    # kernel, and it is asserted here so the trade is visible rather than incidental.
     cfg = KernelConfig(
         frozenset(
             {"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "PROC_VMCORE", "FW_CFG_SYSFS", "RELOCATABLE"}
@@ -648,14 +693,13 @@ def test_a_kernel_that_lacks_only_the_derived_symbols_is_armed_rather_than_refus
 
 
 def test_a_kernel_that_genuinely_cannot_kexec_is_still_refused_and_named():
-    # The other direction, so the removal above cannot be read as "the gate got quieter". Drop a
-    # settable symbol and the refusal is unchanged - and every symbol it names is one a config
-    # fragment can set, which is what makes the gate's "rebuild with the missing CONFIG_*"
-    # remediation followable.
+    # The other direction, so the removals above cannot be read as "the gate got quieter". A
+    # kernel that really cannot kexec is refused exactly as before, and both symbols it names are
+    # ones a config fragment can set - which is what makes the gate's "rebuild with the missing
+    # CONFIG_*" remediation followable rather than a dead end.
     cfg = KernelConfig(frozenset({"KEXEC", "KEXEC_FILE", "CRASH_DUMP", "RELOCATABLE"}))
     missing = missing_symbols(unmet_clauses(cfg, feature_requirement(CRASH_CAPTURE)))
     assert missing == ["FW_CFG_SYSFS", "PROC_VMCORE"]
-    assert set(missing).isdisjoint(UNSETTABLE_SYMBOLS)
 
 
 def test_a_kernel_with_no_kexec_at_all_is_still_told_which_settable_symbols_to_build_in():

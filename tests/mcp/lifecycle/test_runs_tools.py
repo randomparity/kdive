@@ -4641,9 +4641,11 @@ def test_install_handler_rejects_crashkernel_on_non_kdump_system(migrated_url: s
 
 _CRASH_GATE_SUPPORTED = frozenset(
     {
+        "KEXEC_CORE",
         "KEXEC",
         "CRASH_DUMP",
         "PROC_VMCORE",
+        "VMCORE_INFO",
         "FW_CFG_SYSFS",
         "RELOCATABLE",
     }
