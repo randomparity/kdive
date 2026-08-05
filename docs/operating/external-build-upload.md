@@ -18,8 +18,8 @@ which Kconfig symbols are enabled before you upload — a debug kernel is one yo
 debug options turned on. The validator constrains only the artifacts' **structure** (bzImage
 magic, gzip layout, a `lib/modules` member); it never rejects a build over your `.config`.
 There is no allowed-config allowlist and no required-symbol gate: enable what the
-investigation needs. One non-blocking exception: if you upload an `effective_config` that
-provably lacks the symbols needed to mount the root filesystem and boot (`VIRTIO_BLK` for the
+investigation needs. One non-blocking exception: if you upload an `effective_config` that does
+not **build in** the symbols needed to mount the root filesystem and boot (`VIRTIO_BLK` for the
 `/dev/vda` root device, plus `EXT4_FS` **or** `XFS_FS` for the filesystem on it),
 `runs.complete_build` still succeeds but returns a `data.missing_boot_config` advisory naming the
 missing symbols, so a kernel that cannot boot is not silently accepted. The filesystem half is an
@@ -27,6 +27,17 @@ either/or because kdive does not know your guest's root filesystem: local-libvir
 whole-disk ext4 qcow2, while a remote base image or an agent-uploaded rootfs is commonly XFS.
 Build in the one your rootfs actually uses — the advisory only fires when the kernel carries
 neither.
+
+`=m` does not satisfy these three. The direct-kernel boot mounts root before any module can be
+loaded, so a modular `VIRTIO_BLK` or `EXT4_FS` panics the guest on an unmountable root — the
+advisory fires and lists the symbol under `data.missing_boot_config.built_in_required` as well as
+in `missing`, which is how you tell "you do not have this" from "you have this in a form that
+cannot load in time". That key is omitted entirely when no missing symbol is modular. The one
+case where `=m` is fine is a build that uploads an `initrd` artifact: there is then an initramfs
+to load the modules from, and the advisory does not fire. Elsewhere in the registry `=m` is
+accepted — a modular KASAN, ftrace, kcov or BPF symbol is the feature you asked for. The
+machine-readable form of this is the `built_in` key on a clause in
+`resource://kdive/contracts/external-build`.
 
 **Start from the catalog image's own config, not a bare `defconfig`.** When you build against a
 catalog image, call `images.kernel_config(image_id)` (ADR-0317) and start from the `.config` it
@@ -256,8 +267,8 @@ tar -tzf kernel.tar.gz | head    # boot/vmlinuz must be first; lib/modules/<rele
 | Name | When to upload | Notes |
 |---|---|---|
 | `vmlinux` | to enable kernel-debugging / DWARF introspection | the uncompressed kernel ELF with debug info. If you upload it you **must** declare a `build_id` in `runs.complete_build`, and it must match the ELF's GNU build-id note, or the upload is rejected. |
-| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it provably lacks the boot-required symbols (`EXT4_FS`, `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. |
-| `initrd` | when booting needs a specific initramfs | the initial ramdisk image. |
+| `effective_config` | to record the `.config` you built with | the kernel `.config` used for the build, ≤ 1 MiB. Stored for provenance; never rejected, but if it does not build in the boot-required symbols (`EXT4_FS` or `XFS_FS`, and `VIRTIO_BLK`) `runs.complete_build` returns a non-blocking `missing_boot_config` advisory. `=m` counts as missing unless you also upload an `initrd`. |
+| `initrd` | when booting needs a specific initramfs | the initial ramdisk image. Uploading one also relieves the built-in requirement above, since the modules then have somewhere to load from. |
 
 ## The upload flow
 
