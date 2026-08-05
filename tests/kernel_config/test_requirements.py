@@ -280,6 +280,10 @@ def test_serial_console_summary_names_what_breaks_without_it_and_that_it_is_chea
     # local-libvirt boot, and 2d03f3c51 had to restore it. It was unpinned through both, so pin
     # it here rather than only on the rootfs_mount copy that has never regressed.
     assert "unless your build uploads an initrd artifact" in summary
+    # #1876: an embedded-initramfs kernel (install.py:10/:301 - initrd_ref is None, no <initrd>
+    # element) also has no <initrd> yet boots fine, the second case the uploaded-artifact
+    # exception alone does not cover.
+    assert "or the kernel embeds its own initramfs" in summary
 
 
 def test_unknown_feature_raises():
@@ -327,6 +331,10 @@ def test_rootfs_mount_summary_qualifies_the_no_initramfs_claim():
     paren = summary[start : summary.index(")", start) + 1]
     assert "no initramfs" in paren
     assert "unless your build uploads an initrd artifact" in paren
+    # #1876: an embedded-initramfs kernel (install.py:10/:301 - initrd_ref is None, no <initrd>
+    # element) also has no <initrd> yet boots fine, the second case the uploaded-artifact
+    # exception alone does not cover.
+    assert "or the kernel embeds its own initramfs" in paren
 
 
 def test_rootfs_mount_root_filesystem_is_an_or_group_not_two_and_clauses():

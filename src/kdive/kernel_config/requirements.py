@@ -120,10 +120,11 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         ROOTFS_MOUNT,
         "Mount the root filesystem the guest boots from. Local-libvirt direct-kernel-boots the "
         "kernel you install, with a whole-disk ext4 qcow2 as root (root=/dev/vda, and no "
-        "initramfs unless your build uploads an initrd artifact); a remote or agent-uploaded "
-        "rootfs is commonly XFS (RHEL-family base images). kdive does not know which family "
-        "your guest uses, so it asks only that the kernel can mount at least one of them plus "
-        "the virtio-blk root device - build in the one your rootfs actually uses.",
+        "initramfs unless your build uploads an initrd artifact or the kernel embeds its own "
+        "initramfs); a remote or agent-uploaded rootfs is commonly XFS (RHEL-family base "
+        "images). kdive does not know which family your guest uses, so it asks only that the "
+        "kernel can mount at least one of them plus the virtio-blk root device - build in the "
+        "one your rootfs actually uses.",
         # Both clauses are UNLESS_INITRD (#1860). The direct-kernel boot mounts root before any
         # module can be loaded, so EXT4_FS=m / XFS_FS=m / VIRTIO_BLK=m are a kernel that panics on
         # an unmountable root - unless the build uploaded an initrd artifact, which is where the
@@ -442,9 +443,10 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "are PCI virtio devices, so without it the VIRTIO_BLK driver from the rootfs_mount set "
         "never binds and the guest panics on an unmountable root before any console setting "
         "matters. Build it in (=y) rather than as a module: unless your build uploads an initrd "
-        "artifact, the direct-kernel boot has no initramfs to load that module from before root "
-        "is mounted (a guest that boots through its own bootloader and builds an initramfs with "
-        "dracut is not affected either way). Nothing below is checked on your behalf - kdive's "
+        "artifact or the kernel embeds its own initramfs, the direct-kernel boot has no "
+        "initramfs to load that module from before root is mounted (a guest that boots through "
+        "its own bootloader and builds an initramfs with dracut is not affected either way). "
+        "Nothing below is checked on your behalf - kdive's "
         "config checks cover crash capture, the root filesystem and debuginfo, so no symbol "
         "below draws a warning at any value, and this summary is the whole of the "
         "notice you get. There is no reason to skip the console for your arch or the transport, "
