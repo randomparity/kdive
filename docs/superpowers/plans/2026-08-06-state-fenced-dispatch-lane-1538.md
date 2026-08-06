@@ -30,6 +30,15 @@ Tasks 1→6 are sequential: each depends on the symbol the previous one introduc
 routing onto a lane no worker accepts (task 2 without task 4) is the starvation case, so **do not
 commit task 2 without tasks 3–6 in the same branch**.
 
+`just test` does stay green at every task boundary: `tests/jobs/test_queue.py` exercises the
+`accepted_lanes` boundary only with non-fenced kinds (`AUTHORIZE_SSH_KEY`, `CHECK_SSH_REACHABLE`,
+`INSTALL`, `PROVISION`), and no unit test runs a worker claim against a fenced kind. The
+**`live_stack` tier does not** — `tests/integration/test_live_stack.py` drives snapshot/restore
+against a real worker, so between tasks 2 and 4 those jobs route to a lane the worker does not
+accept. That tier is marker-excluded from `just test`, so nothing surfaces it mid-branch: run
+`just test-live-stack` after task 6, not before, and do not read a green `just test` at task 2 as
+evidence the branch is coherent.
+
 ---
 
 ## Task 1 — the membership rule and the lane constant
@@ -128,11 +137,14 @@ ADR-0550 rejects it explicitly, and the seam is what would let production routin
 - `name="KDIVE_WORKER_ACCEPTED_LANES"`, `processes=_WORKER`, `group=` the group the other worker
   queue/lease knobs use.
 - `parse` splits on `,`, strips each entry, and **rejects**: an empty result, any blank entry, and
-  any entry not in the known-lane set (`{DEFAULT_JOB_DISPATCH_LANE, STATE_FENCED_JOB_DISPATCH_LANE}`).
-  Rejecting an unknown lane is deliberate — a typo would otherwise produce a worker that accepts a
-  lane nothing routes to while starving one that is routed.
-- `default` is every lane any active kind derives to, written as a derived constant rather than a
-  hand-typed string so task 1's set stays the single source of truth.
+  any entry not in the known-lane set. Rejecting an unknown lane is deliberate — a typo would
+  otherwise produce a worker that accepts a lane nothing routes to while starving one that is routed.
+- `default` is every lane a kind routes to.
+- **Write the known-lane set and the default as plain literals in this module — do not import them
+  from `kdive.domain`.** `core_settings.py` imports only from `kdive.config.registry` today, and
+  `domain/operations/jobs.py` imports only from `kdive.domain`; adding a config→domain edge for a
+  default value is a layering change, and it buys nothing here because **S5 below is exactly the
+  drift guard the import would be for**. Keep the coupling at test time.
 - `help` states the consequence of narrowing it: jobs on an omitted lane are never claimed, and the
   object they fence stays fenced.
 
@@ -235,11 +247,16 @@ one lane.
 
 **Task.** In `src/kdive/processes/worker.py`:
 
-1. Read `KDIVE_WORKER_ACCEPTED_LANES` and pass it into `WorkerConfig(accepted_lanes=...)` beside the
-   existing `heartbeat`/`readiness`/`telemetry` arguments.
+**Read the setting once, at the top of `run_worker`,** and bind it to a local. Both consumers need
+it and they sit in different scopes: `create_pool(...)` is evaluated as an argument to
+`run_process_runtime`, *outside* `run_worker_body`, while `WorkerConfig` is built *inside* it. A
+read placed at the `WorkerConfig` site is not in scope for the pool. One read, one local, both uses.
+
+1. Pass the local into `WorkerConfig(accepted_lanes=...)` beside the existing
+   `heartbeat`/`readiness`/`telemetry` arguments.
 2. **Raise `create_pool(min_size=2, max_size=4)`.** This is the one that bites: with two lanes the
    new floor is `2 * 2 + 1 = 5`, so the current `max_size=4` makes the worker raise at construction
-   on every start. Size it from the configured lane count rather than a new literal, and give
+   on every start. Size it from the same local's lane count rather than a new literal, and give
    `min_size` matching headroom.
 
 **Files.** `src/kdive/processes/worker.py`, `tests/jobs/test_worker_main.py` (asserts the built
