@@ -101,7 +101,8 @@ def test_mismatched_profile_section_is_a_configuration_error(
 @pytest.mark.parametrize("kind", list(_POLICIES))
 def test_matching_profile_section_is_accepted(kind: ResourceKind) -> None:
     # The happy path keeps the mismatch guard from passing vacuously: a policy that declared the
-    # wrong kind would redden here rather than silently reject everything.
+    # wrong kind would redden here rather than silently reject everything. It pins the kind check
+    # only — for remote-libvirt and fault-inject the rest of the function short-circuits.
     validate_profile_for_provider(_profile(kind), _POLICIES[kind], _capabilities())
 
 

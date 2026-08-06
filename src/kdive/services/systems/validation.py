@@ -118,10 +118,10 @@ def _require_profile_matches_resource_kind(
     if declared is profile_policy.kind:
         return
     raise CategorizedError(
-        f"provisioning profile declares a {declared.value!r} provider section, but this System's "
+        f"provisioning profile declares a {declared.value!r} provider section, but the bound "
         f"Resource is kind {profile_policy.kind.value!r}; supply a "
-        f"{profile_policy.kind.value!r} provider section, or provision against a "
-        f"{declared.value!r} resource",
+        f"{profile_policy.kind.value!r} provider section (for a new System, request an allocation "
+        f"on a {declared.value!r} resource instead)",
         category=ErrorCategory.CONFIGURATION_ERROR,
         details={
             "profile_provider_section": declared.value,

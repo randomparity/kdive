@@ -16,14 +16,19 @@ from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 class ProfilePolicy(Protocol):
     """Provider-owned behavior derived from a parsed provisioning profile."""
 
-    kind: ResourceKind
-    """The ``ResourceKind`` whose profile section this policy reads (ADR-0549).
+    @property
+    def kind(self) -> ResourceKind:
+        """The ``ResourceKind`` whose profile section this policy reads (ADR-0549).
 
-    Every other member here dereferences that one section, so a policy applied to a profile
-    carrying a different section reads an absent attribute. The policy is resolved from the
-    Resource (``ProviderResolver.runtime_for_allocation``/``runtime_for_system``), so this is
-    what admission cross-checks ``ProviderSection.kind`` against.
-    """
+        Every other member here dereferences that one section, so a policy applied to a profile
+        carrying a different section reads an absent attribute. The policy is resolved from the
+        Resource (``ProviderResolver.runtime_for_allocation``/``runtime_for_system``), so this is
+        what admission cross-checks ``ProviderSection.kind`` against.
+
+        Read-only on purpose: it is the discriminant the admission guard trusts, and declaring it
+        as a mutable attribute would both make it assignable and reject the two idiomatic constant
+        spellings (``ClassVar`` and ``@property``) in an implementer.
+        """
 
     def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None: ...
 

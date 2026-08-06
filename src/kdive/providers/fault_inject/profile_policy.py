@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.operations.jobs import JobKind
@@ -11,7 +13,7 @@ from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 class FaultInjectProfilePolicy:
     """Behavior decisions owned by the fault-inject profile section."""
 
-    kind: ResourceKind = ResourceKind.FAULT_INJECT
+    kind: ClassVar[ResourceKind] = ResourceKind.FAULT_INJECT
 
     def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None:
         return None

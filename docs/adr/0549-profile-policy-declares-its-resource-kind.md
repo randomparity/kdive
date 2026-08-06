@@ -50,18 +50,22 @@ and ADR-0071 says nothing about profiles.
 
 ## Decision
 
-**`ProfilePolicy` declares the `ResourceKind` whose profile section it owns.** Add a `kind:
-ResourceKind` member to the protocol in `src/kdive/profiles/provider_policy.py` and to each of the
-three adapters. A policy is already a per-provider singleton constructed by that provider's
-composition, so the value is a class-level constant, not state.
+**`ProfilePolicy` declares the `ResourceKind` whose profile section it owns.** Add a read-only
+`kind` property to the protocol in `src/kdive/profiles/provider_policy.py` and a `ClassVar` to each
+of the three adapters. A policy is already a per-provider singleton constructed by that provider's
+composition, so the value is a class-level constant, not state — and a read-only protocol member is
+what keeps it one: a mutable `kind: ResourceKind` on the protocol would make the discriminant the
+guard trusts assignable, and would reject both idiomatic constant spellings (`ClassVar` and
+`@property`) in an implementer.
 
 **`validate_profile_for_provider` cross-checks the profile against that kind, first.** Before
 `_reject_unknown_destructive_ops` and before any provider dereference,
 `src/kdive/services/systems/validation.py` compares `profile.provider.kind` against
 `profile_policy.kind` and raises `CategorizedError(CONFIGURATION_ERROR)` naming **both** the
 profile's provider section and the Resource kind, with
-`details={"profile_provider_section": …, "resource_kind": …}` — the same message and details shape
-the remote provisioner already uses for a missing section.
+`details={"profile_provider_section": …, "resource_kind": …}`. That details payload is new — the
+remote provisioner's existing missing-section errors name one side and carry no details — and it is
+what lets an agent tell which of the two to change without parsing prose.
 
 That single call site covers both agent-facing lanes, because both already call it inside an
 `except CategorizedError` that produces a typed envelope:
@@ -84,16 +88,27 @@ rejected-at-create.
 - A kind-mismatched profile is rejected at `systems.provision` with an actionable message at the
   point of the mistake, instead of a traceback at boot or a persisted System that can never reach
   `ready`.
-- The fault-inject lane stops persisting a System it can never provision. Any such System created
-  before this change is unaffected — the check runs on the create and reprovision write paths only,
-  never on a stored-profile read, so `control._op_opt_in`'s unguarded read path cannot start
-  raising on stored data.
+- The fault-inject lane stops minting a System that survives provisioning and then dies at first
+  use. The fault-inject provisioner discards the profile entirely
+  (`providers/fault_inject/lifecycle/provisioning.py`), so a mismatched fault-inject System did
+  reach `ready`; what failed later was `destructive_opt_in` / `capture_method` on the control,
+  install, vmcore and debug-session lanes.
+- **This is a write-path fix only, and it repairs nothing already stored.** The check runs at
+  create and reprovision, never on a stored-profile read — which is why no previously-working read
+  path can start raising (`control._op_opt_in` parses a stored profile unguarded and still does).
+  A mismatched System persisted before this change stays `ready` and stays broken on those lanes.
+  Detecting that residue is separate work, tracked in issue #1907; nothing here sweeps for it.
 - `ProfilePolicy` gains a member, so a fourth provider must declare its kind. The protocol is
   structural and every implementer lives in `src/kdive/providers/<provider>/profile_policy.py`,
-  so a missing declaration is a type error, not a runtime surprise.
+  so a missing declaration is a type error, not a runtime surprise. The guarantee is weaker inside
+  the test suite, where several `ProfilePolicy` doubles are `cast()` past the checker.
 - `assert_kind_composed` stays exactly as it is. It answers "is this kind deployed here?" before
   any database round-trip; the new check answers "does this profile match this Resource?" and needs
-  the resolved runtime. Two questions, two gates, in that order.
+  the resolved runtime. Two questions, two gates, in that order — and the first **pre-empts** the
+  second: in a deployment that does not compose the profile's kind at all, the caller gets
+  `assert_kind_composed`'s "not configured in this deployment" error, which names the profile's
+  kind and the composed set but not the Resource's kind. The new message is what a caller sees when
+  the mismatched kind *is* composed, which is the case worth disambiguating.
 - The check reads `profile.provider.kind`, which is total: `_require_exactly_one_provider` already
   guarantees exactly one section, so the `AttributeError` branch of that property stays unreachable
   from this path.

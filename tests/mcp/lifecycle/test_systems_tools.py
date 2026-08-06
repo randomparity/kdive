@@ -36,6 +36,7 @@ from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardow
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.mcp.tools.lifecycle.systems.view import get_system
 from kdive.profiles.provisioning import RootfsSource
+from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     MaterializableRootfsRef,
     RootfsMaterializationContext,
@@ -722,6 +723,41 @@ def test_provision_kind_mismatched_profile_is_config_error_no_system_or_job(
         assert resp.data["resource_kind"] == "local-libvirt"
         assert sys_n is not None and sys_n["n"] == 0
         assert job_n is not None and job_n["n"] == 0
+        assert alloc_row is not None and alloc_row["state"] == "granted"
+
+    asyncio.run(_run())
+
+
+def test_provision_libvirt_profile_on_fault_inject_resource_writes_nothing(
+    migrated_url: str,
+) -> None:
+    # The inverse of the test above, and the severe half of #1899: a fault-inject Resource holding
+    # a local-libvirt profile was accepted OUTRIGHT — fault-inject's rootfs_source returns None and
+    # its validate_profile was a no-op — so the System was minted and the job enqueued, and the
+    # fault-inject provisioner discards the profile, so it even reached `ready` before dying at
+    # first use. The handlers carry the policy, which is what stands in for the Resource kind here.
+    async def _run() -> None:
+        handlers = SystemProvisionHandlers(
+            FaultInjectProfilePolicy(), TEST_COMPONENT_SOURCES, _noop_rootfs_validator
+        )
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            resp = await handlers.provision_system(
+                pool, ctx(), allocation_id=alloc_id, profile=provisioning_profile()
+            )
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM systems")
+                sys_n = await cur.fetchone()
+                await cur.execute("SELECT count(*) AS n FROM jobs")
+                job_n = await cur.fetchone()
+                await cur.execute("SELECT state FROM allocations WHERE id = %s", (alloc_id,))
+                alloc_row = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["profile_provider_section"] == "local-libvirt"
+        assert resp.data["resource_kind"] == "fault-inject"
+        assert sys_n is not None and sys_n["n"] == 0  # was 1 before ADR-0549
+        assert job_n is not None and job_n["n"] == 0  # was 1 before ADR-0549
         assert alloc_row is not None and alloc_row["state"] == "granted"
 
     asyncio.run(_run())
