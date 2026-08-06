@@ -213,12 +213,33 @@ a second fetch — the property #1867 was filed for the absence of.
   ADR-0544's closing consequence states first: a clause carries three axes and all three are facts
   about the kernel, while enforcement is a fact about kdive. It would also spend a key on every
   clause in the registry to carry one non-default value.
-- **Add a `suppressed_by` key naming the uploaded-`vmlinux` escape hatch** — the warning really is
-  suppressed when the Run carries a `debuginfo_ref`, so the contract over-claims slightly without
-  it. Rejected as surface for one entry's one condition, when ADR-0546 rule 1 already puts what an
-  omission *costs* in the summary, the emitted warning's own `remediation` names the vmlinux path,
-  and the suppressor is a property of the Run rather than of the kernel config the manifest
-  describes. The summary sentence carries it.
+- **Make `enforcement` itself the list, and drop the per-entry scalar** — one mechanism instead of
+  two, which is the strongest argument against rule 1: an entry would carry a list of scoped
+  statements and nothing else, and the mixed entry would need no exception. Rejected on cost
+  against benefit. Fifteen of sixteen entries have exactly one enforcement point, so fifteen
+  entries would trade a string for a one-element array to accommodate the sixteenth, and every
+  reader would have to iterate to answer "what does kdive do about this feature?". It is also the
+  breaking change rule 4 avoids: `enforcement` changes type on every entry, which is a
+  `schema_version` bump and a client rewrite, for an entry count of one. If a second and third
+  mixed entry arrive, this is the shape to revisit — the exception list will have stopped being
+  an exception.
+- **Add a `suppressed_by` key naming the conditions that silence the warning** — two of them
+  exist, and neither is in the payload: `debug.start_session` warns only for the drgn-live
+  transport, and every seam skips the check when the Run carries an uploaded `vmlinux` as its
+  `debuginfo_ref`. So `surfaces_at` over-claims slightly. Rejected because both conditions are
+  properties of the *session and the Run*, not of the kernel config this manifest describes — a
+  key here would state them at the one layer that cannot evaluate them. The error also runs the
+  safe way: an agent that builds BTF it did not strictly need has spent a pahole pass, where the
+  reverse costs a rebuild, an install and a boot. ADR-0546 rule 1 already puts what an omission
+  costs in the summary, and the emitted warning's own `remediation` names the vmlinux path, so
+  the summary carries both conditions and says outright that neither is machine-readable.
+- **Let a scoped statement carry `upload_refusal`** — the vocabulary is closed and reusing all of
+  it is the smaller rule. Rejected as the two-mechanisms defect this record otherwise avoids: the
+  clauses kdive refuses on are already published, as `refuses_on` with its own OR-grouping
+  (ADR-0546 §2), and a scoped `upload_refusal` would be a second spelling that can *disagree* —
+  it is not reachable from the `gate_required` invariant, so it could claim a refusal on an entry
+  that carries no refusal set and refuses nothing. Rejected at construction rather than by
+  convention, like entry-level `runtime_advisory`.
 - **Bump `schema_version` to 4** — a fifth vocabulary value in a vocabulary documented as closed
   is arguably a contract change, and the bump is free. Rejected against ADR-0544 §6's recorded
   rule: an added optional key does not bump, and the new value is unreachable except through that

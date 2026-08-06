@@ -1856,14 +1856,13 @@ def test_the_modules_wiring_the_debuginfo_seam_are_the_ones_surfaces_at_speaks_f
             or (isinstance(node.func, ast.Attribute) and node.func.attr == "debuginfo_warning")
         )
     }
+    # Equality against a non-empty literal, so a rename that emptied the walk fails here too -
+    # there is nothing left for a separate non-vacuity assert to add. `_debuginfo_warning` (the
+    # lifecycle helper) is a different identifier and is deliberately not matched.
     assert callers == {
         "mcp/tools/debug/sessions/lifecycle.py",
         "mcp/tools/debug/introspection/live.py",
     }
-    # Non-vacuity: the walk must really be able to see a call to this name, so a rename that
-    # emptied both sides cannot pass. `_debuginfo_warning` (the lifecycle helper) is a different
-    # identifier and is not matched.
-    assert callers, "no caller found - the AST walk went stale before it could catch drift"
     (scoped,) = feature_requirement("bpf_tracing").also_checked
     assert scoped.surfaces_at == ("debug.start_session", "introspect.run", "introspect.script")
 
@@ -1917,6 +1916,16 @@ def test_a_scoped_statement_cannot_be_vacuous():
         ScopedEnforcement(btf, Enforcement.RUNTIME_ADVISORY, "", ("debug.start_session",))
     with pytest.raises(ValueError, match="surfaces_at"):
         ScopedEnforcement(btf, Enforcement.RUNTIME_ADVISORY, "missing_debuginfo", ())
+    # A scoped upload_refusal would be a second spelling of `refuses_on` (ADR-0546 §2) and, unlike
+    # the entry-level value, is reachable without a gate_required - so it could publish a refusal
+    # on an entry that refuses nothing. The refusal set keeps one publisher.
+    with pytest.raises(ValueError, match="refuses_on"):
+        ScopedEnforcement(
+            btf, Enforcement.UPLOAD_REFUSAL, "missing_debuginfo", ("debug.start_session",)
+        )
+    # The two values that remain legal are not rejected by a constructor that rejects everything.
+    for allowed in (Enforcement.RUNTIME_ADVISORY, Enforcement.UPLOAD_ADVISORY):
+        assert ScopedEnforcement(btf, allowed, "r", ("debug.start_session",)).enforcement is allowed
 
 
 def test_the_manifest_renders_the_scoped_statement_only_where_there_is_one():

@@ -218,6 +218,15 @@ class ScopedEnforcement:
                 "a scoped statement cannot be unchecked - it would serve an exception list whose "
                 "exception is 'no exception', which the entry's own default already says"
             )
+        # A refusal already has a published clause list, and it is `refuses_on` (ADR-0546 §2). A
+        # scoped upload_refusal would be a second spelling of it, and one that can disagree: this
+        # record is not reachable from the gate_required invariant, so it could claim a refusal on
+        # an entry that carries no refusal set and refuses nothing.
+        if self.enforcement is Enforcement.UPLOAD_REFUSAL:
+            raise ValueError(
+                "a scoped statement cannot be upload_refusal - the clauses kdive refuses on are "
+                "published as the entry's refuses_on, which carries its own OR-grouping"
+            )
         if not self.reason:
             raise ValueError("a scoped statement needs the reason its seam's payload carries")
         if not self.surfaces_at:
@@ -602,8 +611,11 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "without it programs still attach and run, under the interpreter. Runtime cost is close "
         "to nothing until a program is attached, then it is whatever that program does. "
         "DEBUG_INFO_BTF is also the one symbol in this set kdive itself reads - see also_checked "
-        "below for where. That check is skipped entirely if you upload a matching vmlinux as the "
-        "Run's debuginfo_ref, because in-guest drgn can then resolve symbols from it instead.",
+        "below for where. Two conditions narrow that check and neither is machine-readable here: "
+        "debug.start_session warns only for the drgn-live transport (a gdbstub session symbolizes "
+        "from the host-side vmlinux and never warns), and the check is skipped at every seam if "
+        "you upload a matching vmlinux as the Run's debuginfo_ref, because in-guest drgn can then "
+        "resolve symbols from that instead.",
         # The DWARF clause is BTF's prerequisite, not a second feature (#1855). DEBUG_INFO_BTF
         # (lib/Kconfig.debug:398) is a real prompt, so it stays the symbol this entry names - but
         # it sits inside `if DEBUG_INFO` (:325-455) and selects nothing, so a fragment that sets it
