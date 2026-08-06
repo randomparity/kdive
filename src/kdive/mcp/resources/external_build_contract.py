@@ -16,7 +16,11 @@ from kdive.build_artifacts.validation import (
     ArtifactContract,
     FormatContract,
 )
-from kdive.kernel_config.requirements import enforcement_legend, feature_manifest
+from kdive.kernel_config.requirements import (
+    ALSO_CHECKED_LEGEND,
+    enforcement_legend,
+    feature_manifest,
+)
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     CREATE_INVESTIGATION_UPLOAD_TOOL,
     CREATE_RUN_UPLOAD_TOOL,
@@ -101,6 +105,8 @@ def external_build_contract_document() -> dict[str, JsonValue]:
             # The legend rides with the entries rather than living in a doc (ADR-0546 §3): an
             # `enforcement` value with no served definition is the defect #1867 filed.
             "enforcement_legend": enforcement_legend(),
+            # Same reason, for the key an enum-keyed legend cannot define (ADR-0548 rule 5).
+            "also_checked_legend": ALSO_CHECKED_LEGEND,
             "features": list(feature_manifest()),
         },
         "docs": {"upload_recipe": EXTERNAL_BUILD_UPLOAD_DOC},

@@ -122,6 +122,26 @@ is the signal, bumped once here for all of rules 1-3 together.
 The document is generated, has no committed golden, and its only in-repo consumer is the resource
 that serves it (ADR-0544, Consequences), so the cost of the bump is the signal itself.
 
+### Amendment (2026-08-05): the vocabulary is five values, and one of them is scoped-only (#1901)
+
+An amendment rather than a rewrite: rule 1's decision — that the entry states *where an omission
+surfaces*, from a closed vocabulary defined in a served legend — stands exactly as written, and so
+does its grounding guard. What is qualified is the claim that the vocabulary is the four values in
+rule 1's table, and the implicit claim that a value is always a property of the whole entry.
+
+[ADR-0548](0548-scoped-enforcement-for-a-mixed-feature-entry.md) adds a fifth value,
+`runtime_advisory` — kdive reads the uploaded config, but only when the agent invokes a seam that
+needs the symbols, and it warns rather than refusing. It is the fourth cell of the grid the other
+three occupy, and it is **rejected at construction as an entry-level value**: it may appear only
+inside an entry's `also_checked`, the scoped statement ADR-0548 rule 1 adds for an entry whose
+clauses are not all enforced at the same point. `enforcement` on the entry is unchanged in meaning
+and in every value the registry carries today.
+
+Rule 1's grounding guard is also unchanged, in both directions: no entry claims an `upload_*`
+value it did not claim before, and nothing new is wired into `gate.py`. `runtime_advisory` is not
+authored the way `runtime_refusal` is — it is pinned to the two `gate.py` module constants the
+seam it describes actually emits (ADR-0548 rule 3).
+
 ## Consequences
 
 - **An agent can tell `sysrq` from `kasan` without reading prose.** `sysrq` is
@@ -156,6 +176,28 @@ that serves it (ADR-0544, Consequences), so the cost of the bump is the signal i
   prose copy of a generated legend is the drift surface ADR-0504 removed the ADR index for, and
   the surface that let that doc keep telling agents to set `CONFIG_VMCORE_INFO` after the manifest
   stopped naming it.
+
+### Amendment (2026-08-05): both recorded gaps were one gap, and it is closed (#1901)
+
+An amendment rather than a rewrite: the two bullets above — that `bpf_tracing` reads `unchecked`
+while under-selling what the agent experiences, and that `enforcement` cannot express a mixed
+entry — are both accurate as written, and this record's diagnosis of each stands. What is
+qualified is that they were recorded as two separate open questions, and that the first was framed
+as a choice between the two options #1901 lists.
+
+They are one gap. `bpf_tracing` **is** the mixed entry the second bullet anticipated, and it
+already was one when this record landed: one of its five advertised clauses (`{DEBUG_INFO_BTF}`)
+is read by `debuginfo_warning` and the other four are read by nothing. That is why neither listed
+option closes it. Tying the seam to the entry makes the warning fire on a kernel that has BTF and
+is missing `BPF_SYSCALL`, which is false; a fifth entry-level value prices four clauses wrong to
+price one right.
+
+[ADR-0548](0548-scoped-enforcement-for-a-mixed-feature-entry.md) closes both by taking the second
+bullet's route — a decision, not a data edit. `enforcement` stays a per-entry summary and keeps
+`unchecked` on `bpf_tracing`; an optional `also_checked` key publishes the scoped enforcement of
+the one clause a seam reads, with the seam's own `reason` string and the tools that emit it. The
+`unchecked` legend keeps its wording and gains a pointer to that key. `schema_version` stays at 3
+under ADR-0544 §6's added-optional-key rule.
 
 ## Considered & rejected
 
