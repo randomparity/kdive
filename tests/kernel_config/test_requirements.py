@@ -10,6 +10,7 @@ import pytest
 # dependency on `domain.platform` (pinned by tests/kernel_config/test_layering.py).
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.kernel_config.requirements import (
+    ALSO_CHECKED_LEGEND,
     CRASH_CAPTURE,
     CRASH_CAPTURE_RHEL_GUEST,
     ENFORCEMENT_LEGEND,
@@ -20,6 +21,7 @@ from kdive.kernel_config.requirements import (
     Clause,
     Enforcement,
     FeatureRequirement,
+    ScopedEnforcement,
     enforcement_legend,
     feature_manifest,
     feature_requirement,
@@ -1804,3 +1806,149 @@ def test_the_three_invariants_report_a_seam_evaluated_feature_and_spare_the_othe
             if other is not check:
                 assert other((smuggled,), supplied) == {}, (check, other)
     assert "serial_console" not in _SEAM_SUPPLIES
+
+
+def test_bpf_tracing_publishes_the_one_clause_the_drgn_live_seam_really_checks():
+    # ADR-0548 rules 1 and 3, and the whole of #1901. `bpf_tracing` advertises five clauses and a
+    # seam reads exactly one of them, so the entry stays `unchecked` (true of the other four) and
+    # the exception rides in `also_checked`. The scoped statement is only worth serving if it is
+    # the seam's own values, so pin it to gate.py's two module constants rather than to a literal
+    # copied here - a registry that claims a symbol or a reason the seam does not emit is #1861 in
+    # a new key.
+    from kdive.kernel_config import gate
+
+    entry = feature_requirement("bpf_tracing")
+    assert entry.enforcement is Enforcement.UNCHECKED
+    (scoped,) = entry.also_checked
+    assert scoped.clause.symbols == {gate._BTF_SYMBOL}
+    assert scoped.reason == gate.MISSING_DEBUGINFO_REASON
+    assert scoped.enforcement is Enforcement.RUNTIME_ADVISORY
+    # Non-vacuity on both halves of the pin: the constants must be the real ones and not empty,
+    # and the clause must really be one of the five the entry advertises rather than a lookalike
+    # the agent never sees in `requirements`.
+    assert gate._BTF_SYMBOL == "DEBUG_INFO_BTF"
+    assert gate.MISSING_DEBUGINFO_REASON == "missing_debuginfo"
+    assert scoped.clause in entry.advertised
+    assert len(entry.advertised) == 5
+
+
+def test_the_modules_wiring_the_debuginfo_seam_are_the_ones_surfaces_at_speaks_for():
+    # `surfaces_at` names MCP tools, and no mechanical map goes from a Python call site to a tool
+    # name - so what a guard can pin is the set of modules that call the seam. A third module
+    # wiring `debuginfo_warning` in fails here and forces `surfaces_at` to be re-verified in that
+    # change, rather than letting the served list go quietly stale (ADR-0548 rule 3).
+    #
+    # Parse rather than grep: `debuginfo_warning` appears in a docstring cross-reference in
+    # introspection/gate.py, which a text search would report as a third seam.
+    import ast
+    from pathlib import Path
+
+    import kdive
+
+    src = Path(kdive.__file__).parent
+    callers = {
+        path.relative_to(src).as_posix()
+        for path in src.rglob("*.py")
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Call)
+        and (
+            (isinstance(node.func, ast.Name) and node.func.id == "debuginfo_warning")
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == "debuginfo_warning")
+        )
+    }
+    assert callers == {
+        "mcp/tools/debug/sessions/lifecycle.py",
+        "mcp/tools/debug/introspection/live.py",
+    }
+    # Non-vacuity: the walk must really be able to see a call to this name, so a rename that
+    # emptied both sides cannot pass. `_debuginfo_warning` (the lifecycle helper) is a different
+    # identifier and is not matched.
+    assert callers, "no caller found - the AST walk went stale before it could catch drift"
+    (scoped,) = feature_requirement("bpf_tracing").also_checked
+    assert scoped.surfaces_at == ("debug.start_session", "introspect.run", "introspect.script")
+
+
+def test_runtime_advisory_cannot_label_a_whole_entry():
+    # ADR-0548 rule 2 made entry-level `runtime_advisory` unrepeatable rather than merely
+    # rejected in prose: it is #1901's option 2, and it would tell an agent that omitting
+    # BPF_SYSCALL draws a missing_debuginfo warning, which is false - a kernel with BTF and no
+    # BPF_SYSCALL resolves symbols fine.
+    with pytest.raises(ValueError, match="runtime_advisory"):
+        FeatureRequirement(
+            "not_a_real_feature",
+            "summary",
+            (Clause(frozenset({"DEBUG_INFO_BTF"})),),
+            enforcement=Enforcement.RUNTIME_ADVISORY,
+        )
+    # and the registry really does hold to it
+    assert all(f.enforcement is not Enforcement.RUNTIME_ADVISORY for f in FEATURE_REQUIREMENTS)
+
+
+def test_a_scoped_statement_must_name_a_clause_the_entry_advertises():
+    # The scoped element's whole value to an agent is that it points at a clause already visible
+    # in `requirements`. A statement over symbols the entry does not advertise is advice about a
+    # kernel the agent cannot act on from this entry.
+    btf = Clause(frozenset({"DEBUG_INFO_BTF"}))
+    scoped = ScopedEnforcement(
+        btf, Enforcement.RUNTIME_ADVISORY, "missing_debuginfo", ("debug.start_session",)
+    )
+    with pytest.raises(ValueError, match="advertise"):
+        FeatureRequirement(
+            "not_a_real_feature",
+            "summary",
+            (Clause(frozenset({"BPF_SYSCALL"})),),
+            also_checked=(scoped,),
+        )
+    # the same statement over an entry that does advertise it is accepted, so the rejection above
+    # is the clause check and not a constructor that rejects `also_checked` outright
+    assert FeatureRequirement(
+        "not_a_real_feature", "summary", (btf,), also_checked=(scoped,)
+    ).also_checked == (scoped,)
+
+
+def test_a_scoped_statement_cannot_be_vacuous():
+    btf = Clause(frozenset({"DEBUG_INFO_BTF"}))
+    # `unchecked` scoped to a clause says nothing the entry's own default does not already say,
+    # and would serve an exception list whose exception is "no exception".
+    with pytest.raises(ValueError, match="unchecked"):
+        ScopedEnforcement(btf, Enforcement.UNCHECKED, "missing_debuginfo", ("debug.start_session",))
+    # a reason or a seam list the agent cannot correlate anything against is the same defect
+    with pytest.raises(ValueError, match="reason"):
+        ScopedEnforcement(btf, Enforcement.RUNTIME_ADVISORY, "", ("debug.start_session",))
+    with pytest.raises(ValueError, match="surfaces_at"):
+        ScopedEnforcement(btf, Enforcement.RUNTIME_ADVISORY, "missing_debuginfo", ())
+
+
+def test_the_manifest_renders_the_scoped_statement_only_where_there_is_one():
+    # The rendered half of ADR-0548 rule 1: the key is absent from every entry with nothing to
+    # qualify, so fifteen of sixteen entries render byte-identically to before (rule 4's reason
+    # for leaving schema_version alone).
+    entries = {e["feature"]: e for e in feature_manifest()}
+    assert [f for f, e in entries.items() if "also_checked" in e] == ["bpf_tracing"]
+    (element,) = cast(list[dict[str, JsonValue]], entries["bpf_tracing"]["also_checked"])
+    assert element == {
+        "symbols": ["DEBUG_INFO_BTF"],
+        "enforcement": "runtime_advisory",
+        "reason": "missing_debuginfo",
+        "surfaces_at": ["debug.start_session", "introspect.run", "introspect.script"],
+    }
+    # The element carries the same clause shape as `requirements` and `refuses_on`, so its
+    # optional keys are omitted at their defaults exactly as theirs are.
+    assert "built_in" not in element and "arch" not in element
+    # `debuginfo` is the entry #1901 explicitly leaves alone: its clauses are the DWARF choice
+    # members and no seam reads them, so `unchecked` is accurate for it under any reading.
+    assert entries["debuginfo"]["enforcement"] == Enforcement.UNCHECKED.value
+    assert "also_checked" not in entries["debuginfo"]
+
+
+def test_the_unchecked_legend_points_at_the_key_that_qualifies_it():
+    # ADR-0548's amendment to ADR-0546: `unchecked` keeps its wording, because it stays true - the
+    # seam reads a symbol, not the entry. What it gains is the pointer, so an agent that reads
+    # "nothing here is verified" is sent to the key that says otherwise for one clause.
+    unchecked = ENFORCEMENT_LEGEND[Enforcement.UNCHECKED]
+    assert "also_checked" in unchecked
+    # and the fifth value is defined like the other four, from the same enum-keyed mapping
+    advisory = ENFORCEMENT_LEGEND[Enforcement.RUNTIME_ADVISORY]
+    assert "also_checked" in advisory
+    assert set(enforcement_legend()) == {e.value for e in Enforcement}
+    assert ALSO_CHECKED_LEGEND.strip()
