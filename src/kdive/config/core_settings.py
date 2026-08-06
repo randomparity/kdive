@@ -808,6 +808,51 @@ MCP_TRACE = Setting(
     help="Presence (1/true/yes) enables opt-in ASGI transport-trace logging (default off).",
 )
 
+# The dispatch lanes a worker may be told to accept (ADR-0550). These are literals rather than an
+# import from `kdive.domain.operations.jobs`: `core_settings` depends only on `config.registry`, and
+# a config→domain edge for a default value would invert that. The coupling is enforced at test time
+# instead — `tests/config/test_worker_accepted_lanes.py` asserts every lane an active kind routes to
+# is in `_DEFAULT_ACCEPTED_LANES`, which is the drift the import would have prevented.
+_KNOWN_DISPATCH_LANES = ("default", "state-fenced")
+_DEFAULT_ACCEPTED_LANES = ",".join(_KNOWN_DISPATCH_LANES)
+
+
+def _dispatch_lanes(raw: str) -> tuple[str, ...]:
+    """Parse a comma-separated accepted-lane set, rejecting blanks and unknown lanes.
+
+    An unknown lane is rejected rather than accepted-and-ignored: a typo would otherwise leave the
+    worker accepting a lane nothing routes to while starving one that is routed, and that
+    starvation is invisible — the fenced object simply never recovers.
+    """
+    lanes = [entry.strip() for entry in raw.split(",")]
+    if any(not entry for entry in lanes):
+        raise ValueError("must be a comma-separated list of lanes with no blank entries")
+    unknown = sorted(set(lanes) - set(_KNOWN_DISPATCH_LANES))
+    if unknown:
+        raise ValueError(
+            f"unknown dispatch lane(s) {', '.join(unknown)}; known lanes are "
+            f"{', '.join(_KNOWN_DISPATCH_LANES)}"
+        )
+    # Order-preserving de-duplication: the worker starts one claim loop per accepted lane and
+    # derives its pool floor from the count, so a repeated entry must not buy a second loop.
+    return tuple(dict.fromkeys(lanes))
+
+
+WORKER_ACCEPTED_LANES = Setting(
+    name="KDIVE_WORKER_ACCEPTED_LANES",
+    parse=_dispatch_lanes,
+    default=_DEFAULT_ACCEPTED_LANES,
+    group="jobs",
+    processes=_WORKER,
+    help=(
+        "Comma-separated dispatch lanes this worker claims from; it runs one claim loop per "
+        "lane. Defaults to every lane a job kind routes to. Narrowing it starves the omitted "
+        "lane — those jobs are never claimed and the System or Snapshot they fence stays fenced, "
+        "with no sweep to surface it."
+    ),
+    suggest="a comma-separated subset of: default, state-fenced",
+)
+
 WORKER_INCARNATION_KIND = Setting(
     name="KDIVE_WORKER_INCARNATION_KIND",
     parse=_choice("local", "docker", "kubernetes"),
@@ -1031,6 +1076,7 @@ SETTINGS = [
     MCP_TOOL_GATEWAY,
     COMPACT_RESPONSES,
     MCP_TRACE,
+    WORKER_ACCEPTED_LANES,
     WORKER_INCARNATION_KIND,
     WORKER_INCARNATION_ID,
     WORKER_DEATH_VERIFIER,
