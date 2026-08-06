@@ -16,7 +16,6 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
-from pydantic import SecretStr
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import (
@@ -30,10 +29,9 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, InstallPayload, RestorePayload
 from kdive.jobs.worker import Worker, WorkerConfig
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
+from tests.support.worker_fence import incarnation_credential, register_worker
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
-_INCARNATION_CREDENTIAL = SecretStr("worker-lane-test-credential")
 _BOTH_LANES = (DEFAULT_JOB_DISPATCH_LANE, STATE_FENCED_JOB_DISPATCH_LANE)
 
 
@@ -44,7 +42,7 @@ def _unopened_pool(max_size: int = 8) -> AsyncConnectionPool:
 
 
 def _worker(pool: AsyncConnectionPool, registry: HandlerRegistry, **kwargs: Any) -> Worker:
-    kwargs.setdefault("incarnation_credential", _INCARNATION_CREDENTIAL)
+    kwargs.setdefault("incarnation_credential", incarnation_credential("unregistered"))
     kwargs.setdefault("secret_registry", SecretRegistry())
     return Worker(pool, registry, **kwargs)
 
@@ -52,15 +50,11 @@ def _worker(pool: AsyncConnectionPool, registry: HandlerRegistry, **kwargs: Any)
 async def _registered_worker(
     pool: AsyncConnectionPool, registry: HandlerRegistry, **kwargs: Any
 ) -> Worker:
+    """Register the incarnation the claim is fenced on, then build the worker over it."""
     worker_id = cast(str, kwargs["worker_id"])
     async with pool.connection() as conn:
-        await conn.execute(
-            "INSERT INTO worker_incarnations (incarnation, authority_kind, authority_binding, "
-            "fence_protocol, credential_hash) VALUES "
-            "(%s, 'local', '{}'::jsonb, %s, sha256(convert_to(%s, 'UTF8'))) "
-            "ON CONFLICT (incarnation) DO NOTHING",
-            (worker_id, CURRENT_WORKER_FENCE_PROTOCOL, _INCARNATION_CREDENTIAL.get_secret_value()),
-        )
+        credential = await register_worker(conn, worker_id)
+    kwargs.setdefault("incarnation_credential", credential)
     return _worker(pool, registry, **kwargs)
 
 
