@@ -69,6 +69,9 @@ reset would preserve whatever lane the row was first inserted with, so every fut
 System/snapshot pair restored before this change would stay on `default` — permanently, silently,
 for exactly the tool that motivated the change. The recycle `UPDATE` therefore sets `dispatch_lane`
 to the kind-derived lane alongside `created_at`, so a recycled attempt is routed like a fresh one.
+That `UPDATE` is [ADR-0447](0447-recycle-terminal-redates-created-at.md)'s decision, whose "a
+revived job takes its place at the back of its lane" was written when there was one lane; 0447
+carries an amendment pointing here.
 
 `delete_snapshot` stays on `default` even though a queued row of that kind makes
 `_active_snapshot_op` reject a restore. It writes no state, so the rule that selects it would be
@@ -118,13 +121,15 @@ start would make a deliberate single-lane fleet impossible, which is a shape thi
 
 - A System fenced by `restore` or `reprovision`, and a Snapshot fenced by `snapshot`, no longer
   waits on unrelated long work. The wait is now bounded by other `state-fenced` work only.
-- **Each worker replica runs up to two jobs concurrently instead of one.** CPU, memory, and
-  database connections per replica rise accordingly, without any operator action, on upgrade. An
-  operator sizing replicas against the old one-job-per-process behavior is now under-provisioned;
-  the chart's `worker.replicas` default is unchanged, so this is a capacity note, not a migration
-  step. `KDIVE_WORKER_ACCEPTED_LANES=default,state-fenced` is the shipped default and setting it to
-  a single lane restores the old footprint — at the cost of starving the omitted lane, which is why
-  the guard test bounds the default rather than the setting.
+- **Each worker replica runs one in-flight job per accepted lane — two by default, where it ran
+  one.** CPU, memory, and database connections per replica rise accordingly, without any operator
+  action, on upgrade. An operator sizing replicas against the old one-job-per-process behavior is
+  now under-provisioned; the chart's `worker.replicas` default is unchanged, so this is a capacity
+  note, not a migration step. Idle cost scales with lane count too, not just busy cost: each loop
+  polls independently every `poll_interval`, and the fenced lane is idle most of the time, so a
+  fleet pays an extra empty-queue poll per replica per interval. `KDIVE_WORKER_ACCEPTED_LANES` set
+  to a single lane restores the old footprint — at the cost of starving the omitted lane, which the
+  startup warning names; the guard test bounds only the default.
 - A pool whose `max_size` is below `2 * len(accepted_lanes) + 1` now fails at worker construction
   rather than stalling every dispatch on connection acquisition. That converts a silent hang into a
   startup error, and it is a **new** startup failure for a deployment that pinned `max_size` to 2.
