@@ -95,11 +95,48 @@ def require_fadump_supported(*, requested: bool, supported: bool) -> None:
     )
 
 
+def _require_profile_matches_resource_kind(
+    profile: ProvisioningProfile, profile_policy: ProfilePolicy
+) -> None:
+    """Reject a profile whose provider section is not the bound Resource's kind (ADR-0549).
+
+    The policy is resolved from the Resource — ``runtime_for_allocation`` on the create lane,
+    ``runtime_for_system`` on reprovision — so ``profile_policy.kind`` *is* that Resource's kind.
+    A profile carrying a different section makes the policy's section-reading members dereference
+    an absent ``ProviderSection`` attribute, which raises a bare ``AttributeError`` admission does
+    not catch — or, for fault-inject, whose admission-time members read no section at all, raises
+    nothing until long after the System is stored.
+
+    Runs before ``_reject_unknown_destructive_ops`` and before any provider dereference, so the
+    mismatch is what an agent is told rather than whatever the mismatched section trips over
+    first.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` naming both the profile's provider section and
+            the Resource kind, so the caller can tell which of the two to change.
+    """
+    declared = profile.provider.kind
+    if declared is profile_policy.kind:
+        return
+    raise CategorizedError(
+        f"provisioning profile declares a {declared.value!r} provider section, but the bound "
+        f"Resource is kind {profile_policy.kind.value!r}; supply a "
+        f"{profile_policy.kind.value!r} provider section (for a new System, request an allocation "
+        f"on a {declared.value!r} resource instead)",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "profile_provider_section": declared.value,
+            "resource_kind": profile_policy.kind.value,
+        },
+    )
+
+
 def validate_profile_for_provider(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
     capabilities: ComponentSourceCapabilities,
 ) -> None:
+    _require_profile_matches_resource_kind(profile, profile_policy)
     _reject_unknown_destructive_ops(profile)
     profile_policy.validate_profile(profile)
     rootfs = profile_policy.rootfs_source(profile)

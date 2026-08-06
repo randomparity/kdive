@@ -202,7 +202,9 @@ def _register_systems_provision(
 
         A profile whose `arch` the backing host cannot boot is rejected `configuration_error`
         at admission — before any capacity is committed — naming the arches the host supports;
-        pick one of those or an allocation on a host that offers the arch you need.
+        pick one of those or an allocation on a host that offers the arch you need. A profile
+        whose `provider` section names a different kind than this Allocation's resource is
+        rejected the same way, naming both; the section must match the resource you allocated.
         """
         ctx = current_context()
         try:
@@ -439,6 +441,10 @@ def _register_systems_reprovision(
         """Enqueue in-place reprovision for a ready System; not for creating a new System —
         use `systems.provision` instead. Requires contributor on the System's project (no
         destructive_ops opt-in).
+
+        The System's resource kind is fixed by its allocation, so a profile whose `provider`
+        section names a different kind is rejected `configuration_error` before the System
+        leaves `ready`, naming both; keep the section the System was provisioned with.
         """
         ctx = current_context()
         try:

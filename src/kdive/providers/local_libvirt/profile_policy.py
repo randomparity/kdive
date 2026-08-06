@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.profiles.provisioning import (
@@ -15,6 +18,8 @@ from kdive.profiles.provisioning import (
 
 class LocalLibvirtProfilePolicy:
     """Behavior decisions owned by the local-libvirt profile section."""
+
+    kind: ClassVar[ResourceKind] = ResourceKind.LOCAL_LIBVIRT
 
     def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource:
         return profile.provider.local_libvirt.rootfs

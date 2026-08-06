@@ -36,6 +36,7 @@ from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardow
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.mcp.tools.lifecycle.systems.view import get_system
 from kdive.profiles.provisioning import RootfsSource
+from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     MaterializableRootfsRef,
     RootfsMaterializationContext,
@@ -246,6 +247,19 @@ def _artifact_rootfs_profile() -> dict[str, Any]:
         "kind": "artifact",
         "artifact_id": str(uuid4()),
     }
+    return profile
+
+
+def _kind_mismatched_profile() -> dict[str, Any]:
+    """A fault-inject-section profile; the handlers under test carry the local-libvirt policy.
+
+    Pre-ADR-0549 this direction failed loudly: ``LocalLibvirtProfilePolicy.validate_profile``
+    dereferenced ``profile.provider.local_libvirt`` and raised a bare ``AttributeError`` that
+    admission (which catches only ``CategorizedError``) let escape as an untyped tool error. The
+    silently-persisted direction is the other one — see the fault-inject-policy test below.
+    """
+    profile = provisioning_profile()
+    profile["provider"] = {"fault-inject": {"capture_method": "console"}}
     return profile
 
 
@@ -681,6 +695,75 @@ def test_provision_unknown_domain_param_is_config_error_no_job(migrated_url: str
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert sys_n is not None and sys_n["n"] == 0  # validated before any write
+
+    asyncio.run(_run())
+
+
+def test_provision_kind_mismatched_profile_is_config_error_no_system_or_job(
+    migrated_url: str,
+) -> None:
+    # #1899, ADR-0549: a profile section that is not the allocated Resource's kind is rejected at
+    # create with a typed envelope naming both sides — not a bare AttributeError out of the
+    # policy, and not a persisted System that can never reach ready.
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            resp = await _provision(pool, ctx(), alloc_id, _kind_mismatched_profile())
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM systems")
+                sys_n = await cur.fetchone()
+                await cur.execute("SELECT count(*) AS n FROM jobs")
+                job_n = await cur.fetchone()
+                await cur.execute("SELECT state FROM allocations WHERE id = %s", (alloc_id,))
+                alloc_row = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.detail is not None
+        assert "fault-inject" in resp.detail and "local-libvirt" in resp.detail
+        assert resp.data["profile_provider_section"] == "fault-inject"
+        assert resp.data["resource_kind"] == "local-libvirt"
+        assert sys_n is not None and sys_n["n"] == 0
+        assert job_n is not None and job_n["n"] == 0
+        assert alloc_row is not None and alloc_row["state"] == "granted"
+
+    asyncio.run(_run())
+
+
+def test_provision_libvirt_profile_under_fault_inject_policy_writes_nothing(
+    migrated_url: str,
+) -> None:
+    # The inverse direction, and the severe half of #1899: a fault-inject Resource holding a
+    # local-libvirt profile was accepted OUTRIGHT — fault-inject's rootfs_source returns None and
+    # its validate_profile was a no-op — so the System was minted and the job enqueued, and the
+    # fault-inject provisioner discards the profile, so it even reached `ready` before dying at
+    # first use. The handlers carry the policy and nothing on this path reads the Resource kind
+    # again, so the policy is what stands in for it; granted_allocation still seeds a local
+    # resource row, hence "under fault-inject policy" rather than "on a fault-inject Resource".
+    async def _run() -> None:
+        handlers = SystemProvisionHandlers(
+            FaultInjectProfilePolicy(), TEST_COMPONENT_SOURCES, _noop_rootfs_validator
+        )
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            resp = await handlers.provision_system(
+                pool, ctx(), allocation_id=alloc_id, profile=provisioning_profile()
+            )
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM systems")
+                sys_n = await cur.fetchone()
+                await cur.execute("SELECT count(*) AS n FROM jobs")
+                job_n = await cur.fetchone()
+                await cur.execute("SELECT state FROM allocations WHERE id = %s", (alloc_id,))
+                alloc_row = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.detail is not None
+        assert "local-libvirt" in resp.detail and "fault-inject" in resp.detail
+        assert resp.data["profile_provider_section"] == "local-libvirt"
+        assert resp.data["resource_kind"] == "fault-inject"
+        assert sys_n is not None and sys_n["n"] == 0  # was 1 before ADR-0549
+        assert job_n is not None and job_n["n"] == 0  # was 1 before ADR-0549
+        assert alloc_row is not None and alloc_row["state"] == "granted"
 
     asyncio.run(_run())
 
@@ -1468,6 +1551,32 @@ def test_reprovision_transitions_ready_to_reprovisioning_and_enqueues_job(
         assert sys_n is not None and sys_n["n"] == 1  # no new System row
         assert alloc_n is not None and alloc_n["n"] == 1  # no new Allocation row
         assert job_row is not None and job_row["kind"] == "reprovision"
+
+    asyncio.run(_run())
+
+
+def test_reprovision_kind_mismatched_profile_leaves_system_ready(migrated_url: str) -> None:
+    # #1899, ADR-0549: the same cross-check guards the reprovision lane, and it runs before the
+    # ready->reprovisioning transition, so a mismatched profile never re-stages a working System.
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            resp = await _reprovision(pool, ctx(), sys_id, _kind_mismatched_profile())
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT state, provisioning_profile FROM systems WHERE id = %s", (sys_id,)
+                )
+                sys_row = await cur.fetchone()
+                await cur.execute("SELECT count(*) AS n FROM jobs")
+                job_n = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.detail is not None
+        assert "fault-inject" in resp.detail and "local-libvirt" in resp.detail
+        assert sys_row is not None and sys_row["state"] == "ready"  # not transitioned
+        assert "local-libvirt" in sys_row["provisioning_profile"]["provider"]  # profile untouched
+        assert job_n is not None and job_n["n"] == 0
 
     asyncio.run(_run())
 
