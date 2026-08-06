@@ -145,10 +145,12 @@ class Worker:
         Raises:
             ValueError: ``heartbeat_interval > lease / 3`` — too coarse to keep the
                 lease alive across a missed beat, which would let the job be reclaimed
-                and double-run; or ``pool.max_size < 2`` — a job in flight holds two
-                connections at once (its handler's dispatch connection and the
-                background heartbeat's), so a smaller pool would stall every dispatch
-                until the heartbeat acquisition timed out.
+                and double-run; ``accepted_lanes`` is empty, which would start no claim
+                loop at all; or ``pool.max_size`` is below :func:`worker_pool_floor` —
+                each accepted lane dispatches one job at a time holding its handler's
+                connection and its background heartbeat's, and the readiness probe
+                shares the pool, so a smaller pool would stall every dispatch until the
+                heartbeat acquisition timed out.
         """
         if config.heartbeat_interval > config.lease / 3:
             raise ValueError(
@@ -270,17 +272,21 @@ class Worker:
                     await ticker
 
     async def _run_lane_loops(self, stop: asyncio.Event) -> None:
-        """Run one claim loop per accepted lane, cancelling the rest if any dies early.
+        """Run one claim loop per accepted lane; drain on stop, cancel on an early death.
 
-        The supervision trigger is a loop task finishing while ``stop`` is **unset** — a loop
-        returning with ``stop`` set is the ordinary shutdown and needs no action. On that trigger
-        every sibling is cancelled and the exception (if any) propagates, so the process
-        supervisor restarts the worker.
+        The two exits are deliberately different, and conflating them aborts running work:
 
-        `asyncio.gather` alone is not enough: it propagates the first exception but leaves its
-        siblings *running*, which would orphan a live claim loop behind a ``run`` that has already
-        returned — a worker serving fewer lanes than it advertises, which is the starvation case
-        this decision exists to prevent, arriving by a different route.
+        - **``stop`` is set — the ordinary shutdown.** Every remaining loop is *awaited*, not
+          cancelled. A loop only re-reads ``stop`` at the top of an iteration, so one that is
+          inside a handler (a kernel build, a memory snapshot) has not noticed yet; cancelling it
+          would tear the handler down with its lease still held, leaving the row ``running`` until
+          the lease lapses and the job is reclaimed and re-run. The single-loop worker drained its
+          job on shutdown and this keeps that contract, per lane.
+        - **``stop`` is unset — a loop died early.** Every sibling is cancelled and the exception
+          propagates, so the process supervisor restarts the worker rather than leaving it serving
+          fewer lanes than it accepts, which is this decision's starvation case by another route.
+          `asyncio.gather` alone would not do this: it propagates the first exception but leaves
+          its siblings *running*, orphaned behind a ``run`` that has already returned.
         """
         loops = [
             asyncio.create_task(self._claim_loop(stop, lane), name=f"claim-loop:{lane}")
@@ -295,9 +301,11 @@ class Worker:
                     "serving fewer lanes than it accepts",
                     len(pending),
                 )
-            for task in pending:
-                task.cancel()
+                for task in pending:
+                    task.cancel()
             if pending:
+                # On the stop path this waits out each lane's in-flight job; on the death path
+                # the cancellations above have already landed.
                 await asyncio.gather(*pending, return_exceptions=True)
             # Re-raise whatever ended a loop, after the siblings are down.
             for task in done:

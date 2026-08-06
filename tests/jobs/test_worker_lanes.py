@@ -342,7 +342,7 @@ def test_a_loop_dying_while_stop_is_unset_ends_the_worker(migrated_url: str) -> 
 
 
 def test_both_loops_stop_on_the_shared_stop_event(migrated_url: str) -> None:
-    """The normal shutdown path: a loop returning with `stop` set is not a supervision event."""
+    """The normal shutdown path with every lane idle: `run` returns rather than hanging."""
 
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=3, max_size=12) as pool:
@@ -351,7 +351,7 @@ def test_both_loops_stop_on_the_shared_stop_event(migrated_url: str) -> None:
                 HandlerRegistry(),
                 worker_id="w-stop",
                 config=WorkerConfig(
-                    accepted_lanes=_BOTH_LANES, poll_interval=__import__("datetime").timedelta()
+                    accepted_lanes=_BOTH_LANES, poll_interval=timedelta(milliseconds=10)
                 ),
             )
             stop = asyncio.Event()
@@ -359,5 +359,59 @@ def test_both_loops_stop_on_the_shared_stop_event(migrated_url: str) -> None:
             await asyncio.sleep(0.2)
             stop.set()
             await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(_run())
+
+
+def test_shutdown_drains_a_job_still_running_on_another_lane(migrated_url: str) -> None:
+    """Shutdown must not abort work a lane has not yet had the chance to notice `stop` for.
+
+    A claim loop re-reads `stop` only at the top of an iteration, so a loop inside a handler —
+    a kernel build, a memory snapshot — is unaware of it for as long as that handler runs. The
+    idle lane exits at once; if the busy lane were cancelled with it, the handler would be torn
+    down with its lease still held, leaving the row `running` until the lease lapsed and the job
+    was reclaimed and re-run. The single-loop worker drained on shutdown; so must this.
+
+    The idle-lane version of this test cannot catch that: with nothing queued, every loop exits
+    promptly and no loop is ever pending-and-busy.
+    """
+
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=3, max_size=12) as pool:
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            async def slow_handler(conn: psycopg.AsyncConnection, job: Job) -> str:
+                entered.set()
+                await asyncio.wait_for(release.wait(), timeout=10)
+                return "s3://slow"
+
+            reg = HandlerRegistry()
+            reg.register(JobKind.RESTORE, slow_handler)
+            worker = await _registered_worker(
+                pool,
+                reg,
+                worker_id="w-drain",
+                config=WorkerConfig(
+                    accepted_lanes=_BOTH_LANES, poll_interval=timedelta(milliseconds=10)
+                ),
+            )
+            async with pool.connection() as conn:
+                restore = await queue.enqueue(
+                    conn, JobKind.RESTORE, _restore_payload(), _AUTHORIZING, "dk-lane-drain"
+                )
+
+            stop = asyncio.Event()
+            runner = asyncio.create_task(worker.run(stop))
+            await asyncio.wait_for(entered.wait(), timeout=10)  # fenced lane is mid-handler
+
+            stop.set()  # the idle `default` loop exits immediately
+            await asyncio.sleep(0.2)
+            assert not runner.done(), "run returned while a lane was still inside its handler"
+
+            release.set()
+            await asyncio.wait_for(runner, timeout=10)
+
+            assert await _job_state(migrated_url, restore.id) is JobState.SUCCEEDED
 
     asyncio.run(_run())
