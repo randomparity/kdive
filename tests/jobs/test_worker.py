@@ -964,21 +964,19 @@ def test_run_once_claims_only_configured_dispatch_lane(migrated_url: str) -> Non
                 config=WorkerConfig(accepted_lanes=("provider-b",)),
             )
             async with pool.connection() as conn:
+                # `enqueue` derives the lane from the kind (ADR-0550); an arbitrary lane goes
+                # on the column directly. The boundary under test is the worker's claim.
                 first = await queue.enqueue(
-                    conn,
-                    JobKind.INSTALL,
-                    _build_payload(),
-                    _AUTHORIZING,
-                    "dk-provider-a",
-                    dispatch_lane="provider-a",
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-provider-a"
                 )
                 second = await queue.enqueue(
-                    conn,
-                    JobKind.INSTALL,
-                    _build_payload(),
-                    _AUTHORIZING,
-                    "dk-provider-b",
-                    dispatch_lane="provider-b",
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-provider-b"
+                )
+                await conn.execute(
+                    "UPDATE jobs SET dispatch_lane = 'provider-a' WHERE id = %s", (first.id,)
+                )
+                await conn.execute(
+                    "UPDATE jobs SET dispatch_lane = 'provider-b' WHERE id = %s", (second.id,)
                 )
 
             processed = await worker.run_once()
