@@ -39,7 +39,7 @@ Each is falsifiable and has a test in the plan.
 | S2 | Every other active kind derives `dispatch_lane = 'default'` | Parametrized over `ACTIVE_JOB_KINDS - STATE_FENCED_JOB_KINDS` against the **derivation** alone — no payload needed. Reaching `enqueue` needs a valid `ActivePayloadModel` per kind, so the through-`enqueue` assertion covers one representative kind per lane, not all twenty |
 | S3 | A worker holding a running `default` job still claims a queued `state-fenced` job | Two-lane worker; block the `default` handler, assert the fenced job reaches `running` |
 | S4 | A single-lane worker claims nothing outside its lane | `accepted_lanes=("state-fenced",)`; a queued `default` job stays `queued` |
-| S5 | Every lane a kind routes to is in the default `accepted_lanes` | Guard test over `STATE_FENCED_JOB_KINDS ∪ {default}` vs. the setting's default |
+| S5 | Every lane a kind routes to is in the default `accepted_lanes` | Guard test: the set of lanes every kind in `ACTIVE_JOB_KINDS` derives to is a subset of the setting's default value |
 | S6 | `pool.max_size < 2 * len(accepted_lanes) + 1` raises at construction | `ValueError` naming both numbers |
 | S7 | Queue depth is reported per lane, not overwritten across lanes | Two loops observe; assert two labelled observations with their own counts |
 | S8 | `KDIVE_WORKER_ACCEPTED_LANES` rejects an unknown or blank lane | `config validate` surfaces the parse error |
