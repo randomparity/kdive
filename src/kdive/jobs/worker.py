@@ -1,4 +1,4 @@
-"""The worker tier: claim, heartbeat, dispatch, finalize (ADR-0018).
+"""The worker tier: claim, heartbeat, dispatch, finalize (ADR-0018, ADR-0550).
 
 A :class:`Worker` owns an ``AsyncConnectionPool`` and processes one job per
 :meth:`Worker.run_once`: ``dequeue`` claims and charges an attempt, a background
@@ -20,7 +20,7 @@ import asyncio
 import contextlib
 import logging
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -34,7 +34,7 @@ from pydantic import SecretStr
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
-from kdive.domain.operations.jobs import Job
+from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, Job, dispatch_lane_for_kind
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry, JobHandler
@@ -55,12 +55,57 @@ async def _sleep_until_stop(stop: asyncio.Event, timeout: float) -> None:
         await asyncio.wait_for(stop.wait(), timeout=timeout)
 
 
+def _routed_lanes() -> frozenset[str]:
+    """Every dispatch lane an active job kind is admitted onto (ADR-0550)."""
+    return frozenset(dispatch_lane_for_kind(kind) for kind in ACTIVE_JOB_KINDS)
+
+
+def _warn_on_unconsumed_lanes(accepted_lanes: Sequence[str]) -> None:
+    """Warn when this worker accepts a strict subset of the lanes kinds route to.
+
+    Narrowing is supported — it restores the pre-ADR-0550 single-job-per-process footprint, and a
+    deliberately split fleet is a shape the decision allows — so this warns rather than refusing
+    to start. But jobs on an omitted lane are never claimed by *this* worker, and if no deployed
+    worker accepts the lane they are never claimed at all: the System or Snapshot they fence stays
+    fenced, and nothing surfaces it, because ``repair_abandoned_jobs`` reaps only ``running`` rows.
+    This log line is the only signal that an operator chose that.
+    """
+    omitted = sorted(_routed_lanes() - set(accepted_lanes))
+    if omitted:
+        _log.warning(
+            "worker accepts %s but job kinds also route to %s; jobs on those lanes are not "
+            "claimed by this worker and stay queued unless another worker accepts them",
+            ", ".join(accepted_lanes),
+            ", ".join(omitted),
+        )
+
+
+DEFAULT_ACCEPTED_LANES: tuple[str, ...] = tuple(sorted(_routed_lanes()))
+"""Every lane a job kind routes to — the safe default, since a lane with no consumer starves."""
+
+
+def worker_pool_floor(accepted_lanes: Sequence[str]) -> int:
+    """The smallest ``pool.max_size`` a worker accepting ``accepted_lanes`` can run on.
+
+    Each lane dispatches one job at a time, and a dispatched job holds two connections at once —
+    its handler's and its background heartbeat's. The ``+ 1`` is the readiness probe, which shares
+    this pool: ``run_once`` skips ``dequeue`` while not ready, so a worker sized to exactly
+    ``2 * lanes`` would stop claiming precisely when every lane is busy.
+
+    A correctness floor, not a sizing recommendation — it leaves no headroom beyond that one
+    probe. Exported so the process composition sizes its pool from the same formula the
+    constructor enforces; two independent expressions of it would drift and the worker would
+    raise at startup.
+    """
+    return 2 * len(accepted_lanes) + 1
+
+
 @dataclass(frozen=True)
 class WorkerConfig:
     """Timing, health, and telemetry collaborators for :class:`Worker`."""
 
     lease: timedelta = queue.DEFAULT_LEASE
-    accepted_lanes: tuple[str, ...] = queue.DEFAULT_DISPATCH_LANES
+    accepted_lanes: tuple[str, ...] = DEFAULT_ACCEPTED_LANES
     heartbeat_interval: timedelta = timedelta(seconds=30)
     poll_interval: timedelta = timedelta(seconds=1)
     heartbeat: Heartbeat | None = None
@@ -110,11 +155,19 @@ class Worker:
                 f"heartbeat_interval ({config.heartbeat_interval}) must be <= lease/3 "
                 f"({config.lease / 3}); a coarser interval risks mid-job reclaim and double-run"
             )
-        if pool.max_size < 2:
+        if not config.accepted_lanes:
+            raise ValueError("accepted_lanes must name at least one dispatch lane")
+        lanes = len(config.accepted_lanes)
+        floor = worker_pool_floor(config.accepted_lanes)
+        if pool.max_size < floor:
             raise ValueError(
-                f"pool.max_size ({pool.max_size}) must be >= 2: a dispatched job holds "
-                "its handler connection and a concurrent heartbeat connection at once"
+                f"pool.max_size ({pool.max_size}) must be >= {floor} for {lanes} accepted "
+                f"lane(s): each lane dispatches one job at a time holding its handler "
+                "connection and a concurrent heartbeat connection, plus one for the readiness "
+                "probe that shares this pool — and run_once skips dequeue while not ready, so a "
+                "pool sized to exactly 2*lanes stops claiming under full dispatch"
             )
+        _warn_on_unconsumed_lanes(config.accepted_lanes)
         self._pool = pool
         self._registry = registry
         self._worker_id = worker_id
@@ -130,8 +183,12 @@ class Worker:
         self._readiness = config.readiness
         self._telemetry = config.telemetry or WorkerTelemetry.disabled()
 
-    async def run_once(self) -> Job | None:
-        """Claim and dispatch one job; return it, or ``None`` if idle.
+    async def run_once(self, lane: str) -> Job | None:
+        """Claim and dispatch one job **from ``lane``**; return it, or ``None`` if idle.
+
+        Scoped to a single lane because :meth:`run` gives each accepted lane its own loop
+        (ADR-0550): claiming across the whole accepted set from one loop is what let a queued
+        ``restore`` sit behind a running ``image_build`` with its System fenced.
 
         Skips ``dequeue`` and returns ``None`` (idle) when this process's backends are
         not reachable (ADR-0090 §5): a not-ready worker pauses dequeuing new jobs while a
@@ -146,16 +203,17 @@ class Worker:
         async with self._pool.connection() as conn:
             if await queue.is_queue_paused(conn):
                 return None
+            single_lane = (lane,)
             job = await queue.dequeue(
                 conn,
                 self._worker_id,
                 incarnation_credential=self._incarnation_credential,
                 lease=self._lease,
-                accepted_lanes=self._accepted_lanes,
+                accepted_lanes=single_lane,
             )
             if self._telemetry.enabled:
                 self._telemetry.observe_queue_depth(
-                    await queue.count_claimable(conn, accepted_lanes=self._accepted_lanes)
+                    await queue.count_claimable(conn, accepted_lanes=single_lane), lane=lane
                 )
         if job is None:
             return None
@@ -204,12 +262,50 @@ class Worker:
         """
         ticker = self._start_heartbeat_ticker(stop)
         try:
-            await self._claim_loop(stop)
+            await self._run_lane_loops(stop)
         finally:
             if ticker is not None:
                 ticker.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await ticker
+
+    async def _run_lane_loops(self, stop: asyncio.Event) -> None:
+        """Run one claim loop per accepted lane, cancelling the rest if any dies early.
+
+        The supervision trigger is a loop task finishing while ``stop`` is **unset** — a loop
+        returning with ``stop`` set is the ordinary shutdown and needs no action. On that trigger
+        every sibling is cancelled and the exception (if any) propagates, so the process
+        supervisor restarts the worker.
+
+        `asyncio.gather` alone is not enough: it propagates the first exception but leaves its
+        siblings *running*, which would orphan a live claim loop behind a ``run`` that has already
+        returned — a worker serving fewer lanes than it advertises, which is the starvation case
+        this decision exists to prevent, arriving by a different route.
+        """
+        loops = [
+            asyncio.create_task(self._claim_loop(stop, lane), name=f"claim-loop:{lane}")
+            for lane in self._accepted_lanes
+        ]
+        try:
+            done, pending = await asyncio.wait(loops, return_when=asyncio.FIRST_COMPLETED)
+            if pending and not stop.is_set():
+                _log.error(
+                    "claim loop ended while the worker was still running; stopping the "
+                    "remaining %d lane loop(s) so the process is restarted rather than "
+                    "serving fewer lanes than it accepts",
+                    len(pending),
+                )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            # Re-raise whatever ended a loop, after the siblings are down.
+            for task in done:
+                task.result()
+        finally:
+            for task in loops:
+                if not task.done():
+                    task.cancel()
 
     def _start_heartbeat_ticker(self, stop: asyncio.Event) -> asyncio.Task[None] | None:
         if self._heartbeat is None:
@@ -223,13 +319,13 @@ class Worker:
             )
         )
 
-    async def _claim_loop(self, stop: asyncio.Event) -> None:
+    async def _claim_loop(self, stop: asyncio.Event, lane: str) -> None:
         poll = self._poll_interval.total_seconds()
         while not stop.is_set():
             try:
-                job = await self.run_once()
+                job = await self.run_once(lane)
             except Exception:  # noqa: BLE001 - a durable worker survives a transient per-iteration error
-                _log.exception("run_once failed; continuing after %ss", poll)
+                _log.exception("run_once failed on lane %s; continuing after %ss", lane, poll)
                 await _sleep_until_stop(stop, poll)
                 continue
             if job is None:

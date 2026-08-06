@@ -54,6 +54,26 @@ Follow the logs:
 journalctl -u kdive-server -f
 ```
 
+### Worker capacity: one in-flight job per dispatch lane (ADR-0550)
+
+`kdive-worker` runs **one in-flight job per accepted dispatch lane — two by default**, where it
+previously ran one in total. `KDIVE_WORKER_ACCEPTED_LANES` defaults to `default,state-fenced`: the
+`state-fenced` lane carries `restore`, `reprovision`, and `snapshot`, whose jobs fence a System or
+Snapshot from the moment they are enqueued, so they get a claim loop that unrelated long work
+cannot block.
+
+Size the host accordingly — CPU, memory, and Postgres connections per worker rise on upgrade with
+no configuration change. Idle cost scales with the lane count too: each lane polls independently
+every poll interval whether or not work exists.
+
+Narrowing `KDIVE_WORKER_ACCEPTED_LANES` to one lane restores the old footprint and starves the
+omitted lane. Those jobs are never claimed, and the System or Snapshot they fence stays fenced with
+nothing to sweep it — the abandoned-job repair reaps only `running` rows. The worker logs a warning
+naming any routed lane it omits at startup. Before downgrading to a worker build that predates
+ADR-0550, drain the fenced lane first; the procedure is in the
+[Kubernetes runbook](runbooks/kubernetes-deploy.md#draining-the-state-fenced-lane-before-a-worker-downgrade-adr-0550)
+and the SQL applies unchanged here.
+
 ## User scope
 
 The `--user` variant runs the same processes without root, reading the environment from

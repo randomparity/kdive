@@ -20,7 +20,7 @@ from pydantic import SecretStr
 from kdive.db.repositories import JOBS
 from kdive.domain.capacity.state import JobState, RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, Job, JobKind
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
 from kdive.jobs import worker as worker_module
@@ -91,7 +91,7 @@ async def _run_failure_row(
     )
 
 
-def _unopened_pool(max_size: int = 4) -> AsyncConnectionPool:
+def _unopened_pool(max_size: int = 8) -> AsyncConnectionPool:
     """A type-correct pool that never connects — the construct guard runs before use."""
     return AsyncConnectionPool(
         "postgresql://localhost/unused", min_size=1, max_size=max_size, open=False
@@ -172,7 +172,7 @@ def test_run_once_happy_path(migrated_url: str) -> None:
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-happy"
                 )
 
-            processed = await worker.run_once()
+            processed = await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             assert processed is not None and processed.id == job.id
             assert len(calls) == 1
             assert autocommit_states == [True]
@@ -180,7 +180,7 @@ def test_run_once_happy_path(migrated_url: str) -> None:
             assert final.state is JobState.SUCCEEDED
             assert final.result_ref == "s3://out"
 
-            assert await worker.run_once() is None  # queue now empty
+            assert await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None  # queue now empty
 
     asyncio.run(_run())
 
@@ -195,7 +195,7 @@ def test_run_once_unknown_kind_dead_letters(migrated_url: str) -> None:
                 job = await queue.enqueue(
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-unk"
                 )
-            await worker.run_once()
+            await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.FAILED
             assert final.error_category is ErrorCategory.NOT_IMPLEMENTED
@@ -226,8 +226,10 @@ def test_run_once_dedup_runs_handler_once(migrated_url: str) -> None:
                 )
             assert second.id == first.id
 
-            await worker.run_once()
-            assert await worker.run_once() is None  # only one job ever existed
+            await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
+            assert (
+                await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None
+            )  # only one job ever existed
             assert calls == 1
 
     asyncio.run(_run())
@@ -260,12 +262,14 @@ def test_run_once_dead_letters_after_max_attempts(migrated_url: str) -> None:
                 )
 
             for _ in range(3):
-                await worker.run_once()
+                await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             assert calls == 3
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.FAILED
             assert final.error_category is ErrorCategory.INFRASTRUCTURE_FAILURE
-            assert await worker.run_once() is None  # dead-lettered: not re-dequeued
+            assert (
+                await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None
+            )  # dead-lettered: not re-dequeued
 
     asyncio.run(_run())
 
@@ -299,13 +303,15 @@ def test_run_once_terminal_error_dead_letters_at_once(migrated_url: str) -> None
                     max_attempts=3,
                 )
 
-            await worker.run_once()
+            await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             assert calls == 1
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.FAILED
             assert final.attempt == 1  # terminal: not requeued despite max_attempts=3
             assert final.error_category is ErrorCategory.INFRASTRUCTURE_FAILURE
-            assert await worker.run_once() is None  # dead-lettered: not re-dequeued
+            assert (
+                await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None
+            )  # dead-lettered: not re-dequeued
 
     asyncio.run(_run())
 
@@ -340,13 +346,15 @@ def test_run_once_non_retryable_category_dead_letters_at_once(migrated_url: str)
                     max_attempts=3,
                 )
 
-            await worker.run_once()
+            await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             assert calls == 1  # the handler ran ONCE, not DEFAULT_MAX_ATTEMPTS times
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.FAILED
             assert final.attempt == 1
             assert final.error_category is ErrorCategory.CONFIGURATION_ERROR
-            assert await worker.run_once() is None  # dead-lettered: not re-dequeued
+            assert (
+                await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None
+            )  # dead-lettered: not re-dequeued
             assert calls == 1
 
     asyncio.run(_run())
@@ -383,11 +391,11 @@ def test_run_once_libvirt_connect_failure_during_install_still_requeues(migrated
                     max_attempts=3,
                 )
 
-            await worker.run_once()
+            await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             assert calls == 1
             requeued = await _final_state(migrated_url, job.id)
             assert requeued.state is JobState.QUEUED  # NOT dead-lettered on a transient
-            assert await worker.run_once() is not None
+            assert await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is not None
             assert calls == 2  # re-dispatched, so a recovered libvirtd would succeed here
 
     asyncio.run(_run())
@@ -418,11 +426,11 @@ def test_run_once_retryable_category_still_requeues(migrated_url: str) -> None:
                     max_attempts=3,
                 )
 
-            await worker.run_once()
+            await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             assert calls == 1
             requeued = await _final_state(migrated_url, job.id)
             assert requeued.state is JobState.QUEUED  # retryable: another attempt remains
-            await worker.run_once()
+            await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             assert calls == 2
 
     asyncio.run(_run())
@@ -453,7 +461,7 @@ def test_terminal_run_job_failure_marks_owning_run_failed(migrated_url: str, kin
                     max_attempts=1,
                 )
 
-            await worker.run_once()
+            await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
 
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.FAILED
@@ -497,7 +505,7 @@ def test_failed_job_persists_redacted_failure_context(
                 )
 
             for _ in range(queue.DEFAULT_MAX_ATTEMPTS):
-                await worker.run_once()
+                await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.FAILED
             assert final.failure_context == {
@@ -539,7 +547,7 @@ def test_invalid_persisted_payload_fails_as_configuration_error(migrated_url: st
 
             assert row is not None
             job_id = row[0]
-            await worker.run_once()
+            await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
 
             final = await _final_state(migrated_url, job_id)
             assert final.state is JobState.FAILED
@@ -579,7 +587,7 @@ def test_run_once_reclaims_lapsed_lease(migrated_url: str) -> None:
                     "lease_expires_at = now() - interval '1 min' WHERE id = %s",
                     (job.id,),
                 )
-            processed = await worker.run_once()  # reclaims and runs it
+            processed = await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)  # reclaims and runs it
             assert processed is not None and processed.id == job.id
             assert calls == 1
             final = await _final_state(migrated_url, job.id)
@@ -645,7 +653,7 @@ def test_heartbeat_renews_live_lease(migrated_url: str, monkeypatch: pytest.Monk
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-hb-live"
                 )
 
-            task = asyncio.create_task(worker.run_once())
+            task = asyncio.create_task(worker.run_once(DEFAULT_JOB_DISPATCH_LANE))
             await asyncio.wait_for(started.wait(), timeout=5)
 
             await asyncio.wait_for(first_heartbeat.wait(), timeout=5)
@@ -702,7 +710,9 @@ def test_heartbeat_error_does_not_crash_dispatch(
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-hberr"
                 )
 
-            processed = await worker.run_once()  # a failing heartbeat must not raise here
+            processed = await worker.run_once(
+                DEFAULT_JOB_DISPATCH_LANE
+            )  # a failing heartbeat must not raise here
             assert processed is not None
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.SUCCEEDED  # finalized despite the bad heartbeat
@@ -734,7 +744,7 @@ def test_run_once_claims_nothing_while_paused(migrated_url: str) -> None:
                 )
                 await queue.set_queue_paused(conn, True)
 
-            assert await worker.run_once() is None  # paused: no claim
+            assert await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None  # paused: no claim
             assert calls == 0
             still_queued = await _final_state(migrated_url, job.id)
             assert still_queued.state is JobState.QUEUED
@@ -758,11 +768,11 @@ def test_resume_restores_claiming(migrated_url: str) -> None:
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-resume"
                 )
                 await queue.set_queue_paused(conn, True)
-            assert await worker.run_once() is None  # paused
+            assert await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None  # paused
 
             async with pool.connection() as conn:
                 await queue.set_queue_paused(conn, False)
-            processed = await worker.run_once()  # resume restores claiming
+            processed = await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)  # resume restores claiming
             assert processed is not None and processed.id == job.id
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.SUCCEEDED
@@ -800,7 +810,9 @@ def test_paused_worker_completes_job_already_in_flight(migrated_url: str) -> Non
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-later"
                 )
 
-            task = asyncio.create_task(worker.run_once())  # claims in_flight, blocks in handler
+            task = asyncio.create_task(
+                worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
+            )  # claims in_flight, blocks in handler
             await asyncio.wait_for(started.wait(), timeout=5)
 
             # Pause mid-flight, then let the in-flight handler finish.
@@ -813,7 +825,7 @@ def test_paused_worker_completes_job_already_in_flight(migrated_url: str) -> Non
             assert completed.state is JobState.SUCCEEDED  # in-flight job completed despite pause
 
             # The second, still-queued job is not claimed while paused.
-            assert await worker.run_once() is None
+            assert await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None
             assert (await _final_state(migrated_url, later.id)).state is JobState.QUEUED
 
     asyncio.run(_run())
@@ -831,7 +843,7 @@ def test_run_survives_run_once_error(migrated_url: str, monkeypatch: pytest.Monk
             stop = asyncio.Event()
             calls = 0
 
-            async def fake_run_once() -> Job | None:
+            async def fake_run_once(DEFAULT_JOB_DISPATCH_LANE) -> Job | None:
                 nonlocal calls
                 calls += 1
                 if calls == 1:
@@ -857,7 +869,7 @@ def test_run_stops_while_idle_sleep_is_pending(monkeypatch: pytest.MonkeyPatch) 
         stop = asyncio.Event()
         idle_reached = asyncio.Event()
 
-        async def fake_run_once() -> Job | None:
+        async def fake_run_once(DEFAULT_JOB_DISPATCH_LANE) -> Job | None:
             idle_reached.set()
             return None
 
@@ -881,7 +893,7 @@ def test_run_stops_while_error_sleep_is_pending(monkeypatch: pytest.MonkeyPatch)
         stop = asyncio.Event()
         error_reached = asyncio.Event()
 
-        async def fake_run_once() -> Job | None:
+        async def fake_run_once(DEFAULT_JOB_DISPATCH_LANE) -> Job | None:
             error_reached.set()
             raise RuntimeError("transient dequeue error")
 
@@ -907,7 +919,7 @@ def test_run_once_pauses_dequeue_when_not_ready(monkeypatch: pytest.MonkeyPatch)
             worker_id="w1",
             config=WorkerConfig(readiness=not_ready),
         )
-        assert await worker.run_once() is None
+        assert await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None
 
     asyncio.run(_run())
 
@@ -937,10 +949,10 @@ def test_run_once_dequeues_when_ready_again(migrated_url: str) -> None:
                 job = await queue.enqueue(
                     conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-notready"
                 )
-            assert await worker.run_once() is None  # not ready: no claim
+            assert await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None  # not ready: no claim
             assert (await _final_state(migrated_url, job.id)).attempt == 0
             ready["value"] = True
-            processed = await worker.run_once()  # recovered: claims
+            processed = await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)  # recovered: claims
             assert processed is not None and processed.id == job.id
 
     asyncio.run(_run())
@@ -979,7 +991,8 @@ def test_run_once_claims_only_configured_dispatch_lane(migrated_url: str) -> Non
                     "UPDATE jobs SET dispatch_lane = 'provider-b' WHERE id = %s", (second.id,)
                 )
 
-            processed = await worker.run_once()
+            # The worker accepts only "provider-b", so that is the lane its loop claims.
+            processed = await worker.run_once("provider-b")
             assert processed is not None and processed.id == second.id
             assert calls == ["dk-provider-b"]
             assert (await _final_state(migrated_url, first.id)).state is JobState.QUEUED
@@ -1071,7 +1084,7 @@ def test_run_schedules_ticker_concurrent_with_the_claim_loop(
             ),
         )
 
-        async def long_run_once() -> Job | None:
+        async def long_run_once(DEFAULT_JOB_DISPATCH_LANE) -> Job | None:
             await job_can_finish.wait()  # a job outlasting stale_after; ticker keeps us live
             stop.set()
             return None
@@ -1114,7 +1127,7 @@ def test_no_heartbeat_means_no_ticker_task(monkeypatch: pytest.MonkeyPatch) -> N
         stop = asyncio.Event()
         ran = asyncio.Event()
 
-        async def fake_run_once() -> Job | None:
+        async def fake_run_once(DEFAULT_JOB_DISPATCH_LANE) -> Job | None:
             ran.set()
             stop.set()
             return None
@@ -1181,7 +1194,9 @@ def test_non_terminal_handler_error_records_retry(migrated_url: str) -> None:
                     max_attempts=3,
                 )
 
-            await worker.run_once()  # first attempt: non-terminal → requeued
+            await worker.run_once(
+                DEFAULT_JOB_DISPATCH_LANE
+            )  # first attempt: non-terminal → requeued
             assert attempts == 1
 
             points = _retry_points(reader)
@@ -1218,7 +1233,9 @@ def test_terminal_handler_error_does_not_record_retry(migrated_url: str) -> None
                     max_attempts=3,
                 )
 
-            await worker.run_once()  # terminal: dead-lettered, no retry counted
+            await worker.run_once(
+                DEFAULT_JOB_DISPATCH_LANE
+            )  # terminal: dead-lettered, no retry counted
             assert _retry_points(reader) == []
 
     asyncio.run(_run())

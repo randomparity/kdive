@@ -11,6 +11,7 @@ from pydantic import SecretStr
 
 from kdive.domain.operations.jobs import Job
 from kdive.jobs import queue
+from kdive.jobs.worker import DEFAULT_ACCEPTED_LANES
 from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
 
 
@@ -42,9 +43,15 @@ async def dequeue_as_current_worker(
     worker_id: str,
     *,
     lease: timedelta = queue.DEFAULT_LEASE,
-    accepted_lanes: Sequence[str] = queue.DEFAULT_DISPATCH_LANES,
+    accepted_lanes: Sequence[str] = DEFAULT_ACCEPTED_LANES,
 ) -> Job | None:
-    """Register and claim as one active current-protocol test worker."""
+    """Register and claim as one active current-protocol test worker.
+
+    Accepts **every** routed lane by default, matching the production worker's default
+    (ADR-0550). A one-lane default would silently claim nothing for the state-fenced kinds,
+    which reads as "the job was never enqueued" rather than "this worker does not take that
+    lane". Tests exercising the lane boundary itself pass an explicit set.
+    """
     credential = await register_worker(conn, worker_id)
     return await queue.dequeue(
         conn,

@@ -58,6 +58,30 @@ It captures live replica counts, proves every KDIVE workload is stopped for migr
 workers only after the target-image witness is ready. Do not use a rolling upgrade or an old image
 after the migration.
 
+### Worker capacity: one in-flight job per dispatch lane (ADR-0550)
+
+A worker replica now runs **one in-flight job per accepted dispatch lane — two by default**, where
+it previously ran one in total. `KDIVE_WORKER_ACCEPTED_LANES` defaults to `default,state-fenced`:
+the `state-fenced` lane carries `restore`, `reprovision`, and `snapshot`, whose jobs fence a System
+or Snapshot from the moment they are enqueued, so they get a claim loop that unrelated long work
+cannot block.
+
+Two consequences for sizing, neither requiring operator action to take effect:
+
+- **CPU, memory, and database connections per replica rise on upgrade.** A replica sized against
+  the old one-job-per-process behavior is now under-provisioned. `worker.replicas` is unchanged, so
+  this is a capacity note rather than a migration step — but review requests and limits before a
+  busy upgrade.
+- **Idle cost scales with the lane count too.** Each lane polls independently every poll interval
+  whether or not work exists, and the `state-fenced` lane is idle most of the time, so a fleet pays
+  one extra empty-queue poll per replica per interval.
+
+Setting `KDIVE_WORKER_ACCEPTED_LANES` to a single lane restores the old footprint. It also starves
+every omitted lane: those jobs are never claimed by this worker, and if no deployed worker accepts
+the lane they are never claimed at all — the System or Snapshot they fence stays fenced, and
+nothing sweeps it, because the abandoned-job repair reaps only `running` rows. A worker that omits
+a routed lane logs a warning naming it at startup.
+
 **Do not upgrade with bare `helm upgrade --reuse-values`.** `--reuse-values` carries the
 previous release's merged values and *ignores the fresh `values.yaml` defaults*, so any
 config default added in a newer chart (e.g. `config.KDIVE_LOCAL_LIBVIRT_ENABLED: "false"`,

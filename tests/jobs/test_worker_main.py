@@ -10,7 +10,7 @@ from typing import cast
 import pytest
 from pydantic import SecretStr
 
-from kdive.jobs.worker import WorkerConfig
+from kdive.jobs.worker import DEFAULT_ACCEPTED_LANES, WorkerConfig, worker_pool_floor
 from kdive.observability.facade import Telemetry
 from kdive.processes.runtime import (
     POOL_CLOSE_TIMEOUT_SECONDS,
@@ -73,7 +73,13 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
         async def close(self, timeout: float = 5.0) -> None:
             events.append(f"close(timeout={timeout})")
 
-    monkeypatch.setattr("kdive.processes.worker.create_pool", lambda **kw: _FakePool())
+    pool_kwargs: dict[str, object] = {}
+
+    def _capture_pool(**kw: object) -> _FakePool:
+        pool_kwargs.update(kw)
+        return _FakePool()
+
+    monkeypatch.setattr("kdive.processes.worker.create_pool", _capture_pool)
 
     credential = SecretStr("authority-delivered-credential")
 
@@ -131,6 +137,11 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     # Not merely present: `WorkerTelemetry.disabled()` is a non-None inert stand-in,
     # so wiring one would satisfy the check above (#1695).
     assert config.telemetry.enabled
+    # ADR-0550: the process reads the accepted lanes and sizes its pool from the same
+    # value. Asserted together because a pool below the worker's own floor makes the
+    # worker raise at construction on every start — the two cannot be allowed to drift.
+    assert config.accepted_lanes == DEFAULT_ACCEPTED_LANES
+    assert cast(int, pool_kwargs["max_size"]) >= worker_pool_floor(config.accepted_lanes)
 
 
 def test_worker_startup_refuses_old_fence_protocol() -> None:

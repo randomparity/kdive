@@ -48,7 +48,7 @@ class WorkerTelemetry:
     def __init__(self, *, tracer: Tracer, meter: Meter) -> None:
         self._tracer = tracer
         self._enabled = True
-        self._last_depth = 0
+        self._last_depth_by_lane: dict[str, int] = {}
         self._duration: Histogram = meter.create_histogram(
             "kdive.job.duration",
             unit="s",
@@ -98,7 +98,13 @@ class WorkerTelemetry:
         )
 
     def _observe_depth(self, _options: CallbackOptions) -> Iterable[Observation]:
-        return [Observation(self._last_depth)]
+        # One observation per lane (ADR-0550). A single scalar was correct while the worker ran
+        # one claim loop; with a loop per lane each would overwrite the other's count and the
+        # gauge would report a depth belonging to neither.
+        return [
+            Observation(depth, {"dispatch_lane": lane})
+            for lane, depth in sorted(self._last_depth_by_lane.items())
+        ]
 
     @classmethod
     def disabled(cls) -> WorkerTelemetry:
@@ -148,10 +154,10 @@ class WorkerTelemetry:
         """Whether instruments are wired; callers skip costly samples when ``False``."""
         return self._enabled
 
-    def observe_queue_depth(self, claimable: int) -> None:
+    def observe_queue_depth(self, claimable: int, *, lane: str) -> None:
         """Cache the queue depth observed at a poll for the gauge to report on scrape."""
         if self._enabled:
-            self._last_depth = claimable
+            self._last_depth_by_lane[lane] = claimable
 
     def record_job_failure(self, job: Job, category: ErrorCategory) -> None:
         """Count one job→``FAILED`` transition by ``error_category`` (ADR-0190 E).
