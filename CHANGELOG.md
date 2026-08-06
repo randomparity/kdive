@@ -512,6 +512,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Put 0547's doctor posture in the field doctor renders
 - Correct the last stale initrd claims and the I2 rationale
 - Qualify the =y claim in the advisory's opening paragraph
+- Propose 0549 — profile policies declare their ResourceKind
 
 ### Fixed
 
@@ -880,6 +881,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep an unparsable profile a typed failure at the crash gate
 - Keep 'unchecked' from reading as a licence to skip
 - Scope ADR-0546's grounding claim to the values it derives
+- Reject a profile section that is not the Resource's kind
+- Make ProfilePolicy.kind read-only and correct ADR-0549
 - Keep the refusal set with one publisher, and name what narrows the seam
 
 ### Build
