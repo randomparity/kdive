@@ -11,6 +11,7 @@ from fastmcp import FastMCP
 from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.build_artifacts.validation import EFFECTIVE_CONFIG_MAX_BYTES
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.kernel_config.gate import MISSING_DEBUGINFO_REASON
 from kdive.kernel_config.requirements import CRASH_CAPTURE, Enforcement
 from kdive.mcp.resources.external_build_contract import (
     EXTERNAL_BUILD_CONTRACT_URI,
@@ -156,8 +157,21 @@ def test_every_requirements_element_is_a_clause_object_keyed_by_symbols() -> Non
     assert clauses, "no feature advertises a clause, so the walk below would pass vacuously"
     assert any("refuses_on" in f for f in features), "no refusal set reached the walk above"
 
+    # An `also_checked` element embeds a clause object and adds three keys scoping it (ADR-0548
+    # rule 1), so its clause half is walked with the other two rather than becoming the third
+    # element shape - the outcome this test exists to prevent. Projected onto the clause keys
+    # because the three scoped keys would otherwise fail the bounded-keys assertion below, which
+    # is the point: `enforcement` on an element is a fact about kdive and is not a clause axis.
+    scoped = [element for f in features for element in f.get("also_checked", ())]
+    assert scoped, "no scoped statement reached the walk above"
+    clauses += [
+        {k: v for k, v in element.items() if k in ("symbols", "built_in", "arch")}
+        for element in scoped
+    ]
+
     # The entry's own key vocabulary is bounded for the same reason a clause's is: a new key is a
     # shape change an agent has to be told about, and `gated` must not come back (#1867).
+    # `also_checked` joined with #1901, and is the whole of the addition.
     for entry in features:
         assert set(entry) <= {
             "feature",
@@ -165,7 +179,24 @@ def test_every_requirements_element_is_a_clause_object_keyed_by_symbols() -> Non
             "enforcement",
             "requirements",
             "refuses_on",
+            "also_checked",
         }, entry["feature"]
+
+    # The scoped keys are bounded too, and each carries the type an agent branches on.
+    for element in scoped:
+        assert set(element) <= {
+            "symbols",
+            "built_in",
+            "arch",
+            "enforcement",
+            "reason",
+            "surfaces_at",
+        }, element
+        assert element["enforcement"] in {e.value for e in Enforcement}, element
+        assert isinstance(element["reason"], str) and element["reason"], element
+        tools = element["surfaces_at"]
+        assert isinstance(tools, list) and tools, element
+        assert all(isinstance(tool, str) and tool for tool in tools), element
     for clause in clauses:
         assert isinstance(clause, dict), clause
         # Keys are bounded, not just present: `built_in` joined the vocabulary with #1860 and
@@ -340,3 +371,50 @@ def test_resource_reads_back_generated_json() -> None:
         return content
 
     assert asyncio.run(_read()) == external_build_contract_json()
+
+
+def test_the_served_bpf_tracing_entry_states_the_warning_omitting_btf_draws() -> None:
+    # #1901 on the surface the agent actually reads. The entry advertises five clauses and one of
+    # them - DEBUG_INFO_BTF - draws a missing_debuginfo warning at the drgn-live seams, on a
+    # kernel already built, installed and booted. Before ADR-0548 the served entry said only
+    # `enforcement: unchecked`, whose legend reads "nothing here is verified before your build or
+    # after it", so an agent skipping BTF to save a pahole pass had no served basis to know what
+    # it was buying. Assert it can now decide from this payload alone.
+    manifest = _doc()["feature_config_requirements"]
+    entry = next(f for f in manifest["features"] if f["feature"] == "bpf_tracing")
+    # The entry-level value is unchanged and still true of the four clauses no seam reads.
+    assert entry["enforcement"] == Enforcement.UNCHECKED.value
+    assert "refuses_on" not in entry
+    (scoped,) = entry["also_checked"]
+    assert scoped["symbols"] == ["DEBUG_INFO_BTF"]
+    assert scoped["enforcement"] == Enforcement.RUNTIME_ADVISORY.value
+    # the reason string is the one the warning payload carries, so the agent can correlate the
+    # contract entry with the response it gets rather than pattern-matching prose
+    assert scoped["reason"] == MISSING_DEBUGINFO_REASON
+    assert scoped["surfaces_at"] == [
+        "debug.start_session",
+        "introspect.run",
+        "introspect.script",
+    ]
+    # and the scoped value reaches the agent defined, which is the property #1867 was filed for
+    # the absence of - a served flag with no served definition.
+    assert Enforcement.RUNTIME_ADVISORY.value in manifest["enforcement_legend"]
+    assert manifest["also_checked_legend"].strip()
+    # non-vacuity: the served BTF clause must really be one of the five in `requirements`, not a
+    # statement about a symbol the entry never advertises
+    assert "DEBUG_INFO_BTF" in json.dumps(entry["requirements"])
+
+
+def test_only_the_mixed_entry_carries_a_scoped_statement() -> None:
+    # ADR-0548 rule 4's basis for leaving schema_version at 3: `also_checked` is absent from every
+    # entry that has nothing to qualify, so an existing reader sees those entries unchanged. If a
+    # second entry grows one, this fails and forces the version question to be asked again rather
+    # than answered by the absence of anyone noticing.
+    features = _doc()["feature_config_requirements"]["features"]
+    carriers = [f["feature"] for f in features if "also_checked" in f]
+    assert carriers == ["bpf_tracing"]
+    assert len(features) > 1, "one entry in the document would make the check above vacuous"
+    # the fifth vocabulary value is reachable only through that key, so a client that
+    # exhaustively matches the entry-level `enforcement` never meets it
+    assert Enforcement.RUNTIME_ADVISORY.value not in {f["enforcement"] for f in features}
+    assert _doc()["schema_version"] == 3

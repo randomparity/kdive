@@ -75,12 +75,24 @@ class Enforcement(StrEnum):
     RUNTIME_REFUSAL = "runtime_refusal"
     """No config check at all; the feature's own handler refuses on a booted kernel - ``sysrq``."""
 
+    RUNTIME_ADVISORY = "runtime_advisory"
+    """kdive reads the uploaded config at the seam that needs the symbols, and warns (ADR-0548).
+
+    The fourth cell of the grid the three above occupy (upload/runtime x refusal/advisory), and
+    the only value that is **scoped-only**: it is legal inside a :class:`ScopedEnforcement` and
+    rejected as an entry-level value, because the one seam it describes reads one clause of a
+    five-clause entry.
+    """
+
     UNCHECKED = "unchecked"
     """No kdive check reads this entry's requirements. The default, and most of the registry.
 
     Not a synonym for optional, and the legend says so: ``serial_console`` is unchecked and its
     ``VIRTIO_PCI`` clause is boot-fatal. It states what kdive does, not what the omission costs -
     that varies per feature and lives in the summary.
+
+    Still true of an entry carrying ``also_checked``: that seam reads a *symbol*, not the entry
+    (ADR-0548). The legend sends the reader to the key rather than weakening the sentence.
     """
 
 
@@ -108,13 +120,36 @@ ENFORCEMENT_LEGEND: Final[dict[Enforcement, str]] = {
         "installed and booted, and recovering costs another build, install and boot. This is a "
         "decision to make before you build, not one you can revisit afterwards."
     ),
+    Enforcement.RUNTIME_ADVISORY: (
+        "Appears in an entry's also_checked and applies to the symbols listed there rather than "
+        "to the whole entry. kdive does not read your config for it at upload time, so a clean "
+        "upload tells you nothing: it reads the effective_config you uploaded with the build "
+        "only when you invoke one of the tools under surfaces_at, and returns a warning in that "
+        "tool's response data under the name in reason. The action still succeeds, so omitting "
+        "these symbols costs you a notice - but it arrives on a kernel you have already built, "
+        "installed and booted, and acting on it costs another round trip."
+    ),
     Enforcement.UNCHECKED: (
         "No kdive check reads this entry's requirements at any point, so nothing here is "
         "verified before your build or after it. That is not the same as optional: what "
         "omitting these symbols costs varies by feature and ranges from losing only the feature "
-        "to a guest that never boots. The summary is where that cost is stated. Read it."
+        "to a guest that never boots. The summary is where that cost is stated. Read it. If the "
+        "entry also carries also_checked, that key names the one part of it kdive does read, and "
+        "this value covers the rest."
     ),
 }
+
+# The served definition of the key itself. `enforcement_legend` is keyed by the enum, so it can
+# carry a value's meaning and not a key's - and a key with no served definition is the defect
+# ADR-0546 closed for `gated` (rule 5). Agent-facing prose: no record references here.
+ALSO_CHECKED_LEGEND: Final[str] = (
+    "An entry's enforcement value describes the entry as a whole. also_checked is its exception "
+    "list, present only when kdive reads part of an entry and not the rest. Each element names "
+    "one of the clauses already in this entry's requirements, in the same shape, plus the "
+    "enforcement that applies to those symbols alone, the reason string the resulting payload "
+    "carries so you can match it to the response you get, and surfaces_at, the tools that emit "
+    "it. Every clause the list does not name is covered by the entry's own enforcement value."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +188,52 @@ ROOTFS_MOUNT = "rootfs_mount"
 
 
 @dataclass(frozen=True, slots=True)
+class ScopedEnforcement:
+    """One clause of an entry, enforced somewhere the entry-level ``enforcement`` does not describe.
+
+    ``enforcement`` is a per-entry summary, and ``bpf_tracing`` is the mixed entry ADR-0546's
+    Consequences anticipated: five advertised clauses, of which ``debuginfo_warning`` reads exactly
+    one. A single value cannot be right for both halves, so the entry keeps the value that is true
+    of the four (``unchecked``) and states the exception here (ADR-0548 rule 1).
+
+    A separate record rather than a fourth ``Clause`` field, for ADR-0544's reason: a clause
+    carries three axes and all three are facts about the kernel, while enforcement is a fact about
+    kdive. It also keeps every clause in the registry from spending a key on one non-default value.
+
+    ``reason`` is the literal ``reason`` the seam's payload carries, so the agent can correlate
+    this entry with the response it receives instead of parsing prose; ``surfaces_at`` names the
+    MCP tools that emit it. Both are pinned to the seam by tests in
+    ``tests/kernel_config/test_requirements.py`` - a claim the seam does not honour is #1861 in a
+    new key.
+    """
+
+    clause: Clause
+    enforcement: Enforcement
+    reason: str
+    surfaces_at: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.enforcement is Enforcement.UNCHECKED:
+            raise ValueError(
+                "a scoped statement cannot be unchecked - it would serve an exception list whose "
+                "exception is 'no exception', which the entry's own default already says"
+            )
+        # A refusal already has a published clause list, and it is `refuses_on` (ADR-0546 §2). A
+        # scoped upload_refusal would be a second spelling of it, and one that can disagree: this
+        # record is not reachable from the gate_required invariant, so it could claim a refusal on
+        # an entry that carries no refusal set and refuses nothing.
+        if self.enforcement is Enforcement.UPLOAD_REFUSAL:
+            raise ValueError(
+                "a scoped statement cannot be upload_refusal - the clauses kdive refuses on are "
+                "published as the entry's refuses_on, which carries its own OR-grouping"
+            )
+        if not self.reason:
+            raise ValueError("a scoped statement needs the reason its seam's payload carries")
+        if not self.surfaces_at:
+            raise ValueError("a scoped statement needs the surfaces_at tools that emit it")
+
+
+@dataclass(frozen=True, slots=True)
 class FeatureRequirement:
     """One debug/platform feature and the kernel symbols it wants.
 
@@ -164,6 +245,9 @@ class FeatureRequirement:
     derivable: ``sysrq`` and ``kasan`` both carry ``gate_required=()`` and are not the same kind of
     optional (ADR-0546). Its one derivable half *is* checked, at construction - a refusal set and
     ``UPLOAD_REFUSAL`` imply each other, and #1861 is what a registry that let them drift ships.
+
+    ``also_checked`` is the exception list for an entry whose clauses are not all enforced at the
+    same point (ADR-0548): ``enforcement`` covers every clause it does not name.
     """
 
     feature: str
@@ -171,6 +255,7 @@ class FeatureRequirement:
     advertised: tuple[Clause, ...]
     gate_required: tuple[Clause, ...] = ()
     enforcement: Enforcement = Enforcement.UNCHECKED
+    also_checked: tuple[ScopedEnforcement, ...] = ()
 
     def __post_init__(self) -> None:
         refuses = self.enforcement is Enforcement.UPLOAD_REFUSAL
@@ -180,6 +265,24 @@ class FeatureRequirement:
                 f"{'non-empty' if self.gate_required else 'empty'} gate_required - a refusal set "
                 "and upload_refusal imply each other"
             )
+        # Scoped-only, enforced here rather than argued for in the record (ADR-0548 rule 2): an
+        # entry-level runtime_advisory prices every clause for the behaviour of one, which on
+        # bpf_tracing claims omitting BPF_SYSCALL draws a missing_debuginfo warning. It does not -
+        # a kernel with BTF and no BPF_SYSCALL resolves symbols fine.
+        if self.enforcement is Enforcement.RUNTIME_ADVISORY:
+            raise ValueError(
+                f"{self.feature}: runtime_advisory is scoped-only - it names the symbols one seam "
+                "reads, so it belongs in an also_checked element and not on the whole entry"
+            )
+        for scoped in self.also_checked:
+            # The scoped statement's value to the agent is that it points at a clause already
+            # visible in `requirements`; over symbols the entry does not advertise it is advice
+            # about a kernel that cannot be acted on from this entry.
+            if scoped.clause not in self.advertised:
+                raise ValueError(
+                    f"{self.feature}: also_checked names {sorted(scoped.clause.symbols)}, which is "
+                    "not a clause this entry advertises"
+                )
 
 
 def _plain(*symbols: str) -> tuple[Clause, ...]:
@@ -196,6 +299,11 @@ def _plain(*symbols: str) -> tuple[Clause, ...]:
 _DWARF_CHOICE_MEMBERS: Final[frozenset[str]] = frozenset(
     {"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT"}
 )
+
+# Named once so the `bpf_tracing` entry advertises and scopes the *same* clause value rather than
+# two equal-looking copies: `also_checked` may only name a clause the entry advertises, and this is
+# what makes that structural instead of a check someone has to keep passing (ADR-0548 rule 1).
+_BTF_CLAUSE: Final = Clause(frozenset({"DEBUG_INFO_BTF"}))
 
 
 FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
@@ -501,7 +609,13 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "it needs a full "
         "debuginfo build (not reduced, not split) and lengthens the build. BPF_JIT is optional: "
         "without it programs still attach and run, under the interpreter. Runtime cost is close "
-        "to nothing until a program is attached, then it is whatever that program does.",
+        "to nothing until a program is attached, then it is whatever that program does. "
+        "DEBUG_INFO_BTF is also the one symbol in this set kdive itself reads - see also_checked "
+        "below for where. Two conditions narrow that check and neither is machine-readable here: "
+        "debug.start_session warns only for the drgn-live transport (a gdbstub session symbolizes "
+        "from the host-side vmlinux and never warns), and the check is skipped at every seam if "
+        "you upload a matching vmlinux as the Run's debuginfo_ref, because in-guest drgn can then "
+        "resolve symbols from that instead.",
         # The DWARF clause is BTF's prerequisite, not a second feature (#1855). DEBUG_INFO_BTF
         # (lib/Kconfig.debug:398) is a real prompt, so it stays the symbol this entry names - but
         # it sits inside `if DEBUG_INFO` (:325-455) and selects nothing, so a fragment that sets it
@@ -513,7 +627,22 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
             Clause(frozenset({"PERF_EVENTS"})),
             Clause(frozenset({"KPROBE_EVENTS", "UPROBE_EVENTS"})),
             Clause(_DWARF_CHOICE_MEMBERS),
-            Clause(frozenset({"DEBUG_INFO_BTF"})),
+            _BTF_CLAUSE,
+        ),
+        # The mixed entry ADR-0546's Consequences anticipated, closed by ADR-0548 (#1901). Four of
+        # the five clauses above are read by no seam, so the entry keeps `unchecked`; the fifth is
+        # what `debuginfo_warning` keys on, so the exception is stated rather than averaged into a
+        # per-entry value that would be wrong for the other four. The seam is *not* wired to this
+        # entry and must not be - it asks whether in-guest drgn can read /sys/kernel/btf, not
+        # whether the kernel carries this feature's advertised set (ADR-0544 §4). What is published
+        # here is what that seam does, pinned to its own two constants by a test.
+        also_checked=(
+            ScopedEnforcement(
+                _BTF_CLAUSE,
+                Enforcement.RUNTIME_ADVISORY,
+                "missing_debuginfo",
+                ("debug.start_session", "introspect.run", "introspect.script"),
+            ),
         ),
     ),
     FeatureRequirement(
@@ -628,6 +757,16 @@ def _manifest_clause(clause: Clause) -> dict[str, JsonValue]:
     return element
 
 
+def _manifest_scoped(scoped: ScopedEnforcement) -> dict[str, JsonValue]:
+    """Render one scoped statement: a clause object plus the three keys that scope it (ADR-0548)."""
+    element = _manifest_clause(scoped.clause)
+    element["enforcement"] = scoped.enforcement.value
+    element["reason"] = scoped.reason
+    # Inner comprehension (not the bare tuple) widens tuple[str, ...] -> list[JsonValue].
+    element["surfaces_at"] = [tool for tool in scoped.surfaces_at]
+    return element
+
+
 def enforcement_legend() -> dict[str, JsonValue]:
     """The served definition of every :class:`Enforcement` value (ADR-0546 §3).
 
@@ -660,5 +799,10 @@ def feature_manifest() -> list[dict[str, JsonValue]]:
         # OR-group, so a per-clause flag would claim omitting KEXEC alone refuses (ADR-0546 §2).
         if f.gate_required:
             entry["refuses_on"] = [_manifest_clause(clause) for clause in f.gate_required]
+        # The exception list, present only when there is one - so the fifteen entries with nothing
+        # to qualify render exactly as they did, which is why schema_version stays at 3 under
+        # ADR-0544 §6's added-optional-key rule (ADR-0548 rule 4).
+        if f.also_checked:
+            entry["also_checked"] = [_manifest_scoped(scoped) for scoped in f.also_checked]
         manifest.append(entry)
     return manifest

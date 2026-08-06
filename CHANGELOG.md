@@ -111,6 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Advertise eight more debug feature config sets
 - Scope a clause to the arches it applies to
 - State where omitting a feature's symbols surfaces
+- Publish the enforcement of the one bpf_tracing symbol kdive reads
 
 ### Changed
 
@@ -879,6 +880,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep an unparsable profile a typed failure at the crash gate
 - Keep 'unchecked' from reading as a licence to skip
 - Scope ADR-0546's grounding claim to the values it derives
+- Keep the refusal set with one publisher, and name what narrows the seam
 
 ### Build
 
