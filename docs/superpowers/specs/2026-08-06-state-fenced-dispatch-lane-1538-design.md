@@ -63,10 +63,15 @@ Each is falsifiable and has a test in the plan.
   restore, reprovision, and snapshot enqueued after the upgrade and still `queued` at rollback sits
   there indefinitely, with its System pinned in `RESTORING`/`REPROVISIONING` or its Snapshot in
   `CREATING`. Nothing detects it — `repair_abandoned_jobs` reaps only `running` rows, so there is no
-  sweep and no alert. **Procedure:** before rolling the worker back, drain the fenced lane, or move
-  its queued rows over with
-  `UPDATE jobs SET dispatch_lane = 'default' WHERE state = 'queued' AND dispatch_lane =
-  'state-fenced'`. This belongs in the operator documentation, not only here.
+  sweep and no alert. A `running` fenced row is stranded harder than a `queued` one: its lease
+  lapses with no claimant left, the old worker will not reclaim a lane it does not accept, and
+  `repair_abandoned_jobs` dead-letters only at `attempt >= max_attempts`, so at attempt 1 of 3 it is
+  neither reclaimed nor swept. **Procedure, in this order:** stop the new workers; move every
+  non-terminal fenced row with
+  `UPDATE jobs SET dispatch_lane = 'default' WHERE dispatch_lane = 'state-fenced' AND state IN
+  ('queued', 'running')`; start the old workers. The ordering matters — run the `UPDATE` while the
+  new workers are still claiming and it moves rows out from under them. This belongs in the operator
+  documentation, not only here.
 - **A lane with no consumer.** The failure is silent and unbounded: the rows sit `queued` forever
   and the fenced object never recovers. S5 makes it unreachable while the default accepts all lanes;
   an operator who narrows `KDIVE_WORKER_ACCEPTED_LANES` opts into it knowingly, the setting's help

@@ -141,10 +141,11 @@ start would make a deliberate single-lane fleet impossible, which is a shape thi
 - **Rolling the worker back is destructive until the fenced lane is drained.** The previous worker's
   `accepted_lanes` default is `("default",)`, so it never claims a `state-fenced` row: anything
   enqueued after the upgrade and still `queued` at rollback waits indefinitely with its object
-  fenced, and nothing sweeps it — `repair_abandoned_jobs` reaps only `running` rows. A downgrade
-  therefore drains the lane first, or moves its queued rows back to `default` with one `UPDATE`.
-  This is the cost of routing on a column an older reader filters on, and it is why the lane value
-  is a constant rather than something a deployment can rename.
+  fenced, and nothing sweeps it — `repair_abandoned_jobs` reaps only `running` rows, and at attempt
+  1 of 3 it does not dead-letter those either. A downgrade therefore stops the new workers, moves
+  every **non-terminal** fenced row back to `default` with one `UPDATE`, and only then starts the
+  old ones. This is the cost of routing on a column an older reader filters on, and it is why the
+  lane value is a constant rather than something a deployment can rename.
 - Rows already `queued` at upgrade stay on `default` and are drained once by the `default` loop; a
   restore enqueued before the upgrade keeps its old wait. That residue is bounded to those rows,
   because the recycle path re-derives the lane — without that, the residue would instead be
