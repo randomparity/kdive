@@ -58,7 +58,11 @@ Each is falsifiable and has a test in the plan.
   System/snapshot pair restored once before the upgrade would keep recycling its `default` row
   forever — the fix would silently not apply to exactly the systems that had used the feature.
 - **Rolling the worker back.** The upgrade is safe in both the queued and terminal directions; the
-  *downgrade* is not, and it is an ordinary operational action. The previous worker's
+  *downgrade* is not. On Kubernetes a worker downgrade is already constrained — the staged
+  worker-fence upgrade in `docs/operating/runbooks/kubernetes-deploy.md` is forward-only and says
+  not to restore an old worker image — so what follows is a **prerequisite of a downgrade that is
+  already permitted**, not a reason one becomes permitted. It applies wherever a rollback is on the
+  table at all, which includes the systemd and compose paths. The previous worker's
   `accepted_lanes` default is `("default",)`, so it never claims a `state-fenced` row: every
   restore, reprovision, and snapshot enqueued after the upgrade and still `queued` at rollback sits
   there indefinitely, with its System pinned in `RESTORING`/`REPROVISIONING` or its Snapshot in

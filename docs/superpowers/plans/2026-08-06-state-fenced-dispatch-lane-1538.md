@@ -281,22 +281,34 @@ code.
 
 **Task.**
 
-1. **Worker sizing.** In the operator worker guidance and `deploy/helm/kdive/README.md`'s worker
-   section: a replica now runs one in-flight job per accepted lane (two by default) where it ran
-   one, so CPU, memory, and database connections per replica rise on upgrade with no operator
-   action. Idle cost scales too — each loop polls every `poll_interval` whether or not work exists.
-2. **Rollback.** The downgrade procedure, in order: stop the new workers; run
+1. **Worker sizing** — in `deploy/helm/kdive/README.md`'s worker section (near the `worker.replicas`
+   guidance) and `docs/operating/systemd.md`: a replica now runs one in-flight job per accepted lane
+   (two by default) where it ran one, so CPU, memory, and database connections per replica rise on
+   upgrade with no operator action. Idle cost scales too — each loop polls every `poll_interval`
+   whether or not work exists.
+2. **Rollback** — in `docs/operating/runbooks/kubernetes-deploy.md`, **beside** the "Staged
+   worker-fence upgrade" section, not somewhere else in the file. The procedure, in order: stop the
+   new workers; run
    `UPDATE jobs SET dispatch_lane = 'default' WHERE dispatch_lane = 'state-fenced' AND state IN
    ('queued', 'running')`; start the old workers. State why `running` is included (its lease has no
-   claimant left and an old worker will not reclaim a lane it does not accept, and
+   claimant left, an old worker will not reclaim a lane it does not accept, and
    `repair_abandoned_jobs` does not dead-letter until `attempt >= max_attempts`) and why the
    ordering matters (running the `UPDATE` while new workers still claim moves rows out from under
-   them). Put this where an operator reaching for a rollback will find it — the worker
-   upgrade/downgrade guidance, not only the spec.
+   them).
+
+   **Scope it against the existing stance, or it reads as permission.** That runbook already says
+   the staged worker-fence upgrade is "stop-old-first and forward-only: do not restore an old worker
+   image ... Do not use `--reuse-values`, `--atomic`, or a rollback", and the Helm README calls it
+   "the only supported path". So write the drain as a **prerequisite of a downgrade that is already
+   permitted** — never as a reason one becomes permitted — and cross-reference the staged procedure
+   explicitly so the forward-only rule is visible from the new text. An operator who follows an
+   unqualified rollback recipe during a fence release can strand a finalizer, which is worse than
+   the stranded jobs this prevents.
 
 Operator docs do not use `just` recipes; give the underlying commands.
 
-**Files.** the operator worker runbook, `deploy/helm/kdive/README.md`.
+**Files.** `docs/operating/runbooks/kubernetes-deploy.md`, `deploy/helm/kdive/README.md`,
+`docs/operating/systemd.md`.
 
 **Acceptance criteria.**
 

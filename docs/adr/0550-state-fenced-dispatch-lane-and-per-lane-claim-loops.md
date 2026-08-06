@@ -144,8 +144,10 @@ start would make a deliberate single-lane fleet impossible, which is a shape thi
   fenced, and nothing sweeps it — `repair_abandoned_jobs` reaps only `running` rows, and at attempt
   1 of 3 it does not dead-letter those either. A downgrade therefore stops the new workers, moves
   every **non-terminal** fenced row back to `default` with one `UPDATE`, and only then starts the
-  old ones. This is the cost of routing on a column an older reader filters on, and it is why the
-  lane value is a constant rather than something a deployment can rename.
+  old ones — a prerequisite of a rollback that is already permitted, not a reason one becomes
+  permitted, since the staged worker-fence upgrade is forward-only on Kubernetes regardless. This is
+  the cost of routing on a column an older reader filters on, and it is why the lane value is a
+  constant rather than something a deployment can rename.
 - Rows already `queued` at upgrade stay on `default` and are drained once by the `default` loop; a
   restore enqueued before the upgrade keeps its old wait. That residue is bounded to those rows,
   because the recycle path re-derives the lane — without that, the residue would instead be
