@@ -36,7 +36,7 @@ Each is falsifiable and has a test in the plan.
 | # | Criterion | How it is observed |
 |---|---|---|
 | S1 | `restore`, `reprovision`, `snapshot` rows carry `dispatch_lane = 'state-fenced'` | Read `jobs.dispatch_lane` after each tool call |
-| S2 | Every other active kind carries `dispatch_lane = 'default'` | Parametrized over `ACTIVE_JOB_KINDS - STATE_FENCED_JOB_KINDS` |
+| S2 | Every other active kind derives `dispatch_lane = 'default'` | Parametrized over `ACTIVE_JOB_KINDS - STATE_FENCED_JOB_KINDS` against the **derivation** alone — no payload needed. Reaching `enqueue` needs a valid `ActivePayloadModel` per kind, so the through-`enqueue` assertion covers one representative kind per lane, not all twenty |
 | S3 | A worker holding a running `default` job still claims a queued `state-fenced` job | Two-lane worker; block the `default` handler, assert the fenced job reaches `running` |
 | S4 | A single-lane worker claims nothing outside its lane | `accepted_lanes=("state-fenced",)`; a queued `default` job stays `queued` |
 | S5 | Every lane a kind routes to is in the default `accepted_lanes` | Guard test over `STATE_FENCED_JOB_KINDS ∪ {default}` vs. the setting's default |
@@ -57,6 +57,16 @@ Each is falsifiable and has a test in the plan.
   `recycle_terminal=True` under a durable `dedup_key`, so without the re-derivation a
   System/snapshot pair restored once before the upgrade would keep recycling its `default` row
   forever — the fix would silently not apply to exactly the systems that had used the feature.
+- **Rolling the worker back.** The upgrade is safe in both the queued and terminal directions; the
+  *downgrade* is not, and it is an ordinary operational action. The previous worker's
+  `accepted_lanes` default is `("default",)`, so it never claims a `state-fenced` row: every
+  restore, reprovision, and snapshot enqueued after the upgrade and still `queued` at rollback sits
+  there indefinitely, with its System pinned in `RESTORING`/`REPROVISIONING` or its Snapshot in
+  `CREATING`. Nothing detects it — `repair_abandoned_jobs` reaps only `running` rows, so there is no
+  sweep and no alert. **Procedure:** before rolling the worker back, drain the fenced lane, or move
+  its queued rows over with
+  `UPDATE jobs SET dispatch_lane = 'default' WHERE state = 'queued' AND dispatch_lane =
+  'state-fenced'`. This belongs in the operator documentation, not only here.
 - **A lane with no consumer.** The failure is silent and unbounded: the rows sit `queued` forever
   and the fenced object never recovers. S5 makes it unreachable while the default accepts all lanes;
   an operator who narrows `KDIVE_WORKER_ACCEPTED_LANES` opts into it knowingly, the setting's help
@@ -69,9 +79,15 @@ Each is falsifiable and has a test in the plan.
   the lane, a row's lane converges on its kind's lane at the first post-upgrade recycle, and a kind
   can never end up split across two lanes.
 - **A handler failure in one lane.** `_claim_loop` already catches per-iteration exceptions and
-  sleeps. Each lane loop gets its own; a wedged lane does not stop the other, and a crashed task
-  would otherwise be swallowed by `gather`, so the loops are supervised such that one loop's exit
-  does not silently reduce the worker to fewer lanes.
+  sleeps, so an ordinary handler or database failure never ends a loop — each lane gets its own loop
+  and a failing lane does not stop the other.
+- **A loop task ending unexpectedly.** The case the catch does not cover. `asyncio.gather`
+  propagates the first exception while leaving its siblings *running*, so a loop that dies on
+  something outside the catch would leave the other orphaned behind a `run()` that has already
+  returned — a worker advertising two lanes and serving one, which is the starvation case arriving
+  by a different route. So `run()` cancels the remaining loops and returns, letting the process
+  supervisor restart the worker: a restarted worker is better than a partial one, and the alternative
+  (restarting the dead loop in place) risks a hot loop against whatever killed it.
 - **Shutdown.** Both loops observe the same `stop` event; the process exits when both have drained
   their current job, which is the existing single-loop contract applied twice.
 - **Lease and fence.** Two concurrently running jobs share one `worker_id`. The fence is per row
@@ -140,5 +156,7 @@ are the existing controls for that and are unchanged.
 
 - `docs/guide/reference/config.md` is generated; regenerate via the `config-docs-check` recipe's
   generator after adding the setting.
-- The worker capacity note (two jobs per replica) belongs with the operator guidance for worker
-  sizing, and the Helm chart README's worker section.
+- The worker capacity note (one in-flight job per accepted lane, two by default) belongs with the
+  operator guidance for worker sizing, and the Helm chart README's worker section.
+- The rollback procedure above belongs with the worker upgrade/downgrade guidance, since an operator
+  reaching for a rollback will not be reading this spec.
