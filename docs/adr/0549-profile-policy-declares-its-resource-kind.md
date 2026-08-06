@@ -92,7 +92,7 @@ rejected-at-create.
   use. The fault-inject provisioner discards the profile entirely
   (`providers/fault_inject/lifecycle/provisioning.py`), so a mismatched fault-inject System did
   reach `ready`; what failed later was `destructive_opt_in` / `capture_method` on the control,
-  install, vmcore and debug-session lanes.
+  install, boot-evidence and vmcore lanes.
 - **This is a write-path fix only, and it repairs nothing already stored.** The check runs at
   create and reprovision, never on a stored-profile read — which is why no previously-working read
   path can start raising (`control._op_opt_in` parses a stored profile unguarded and still does).

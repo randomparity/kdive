@@ -253,9 +253,10 @@ def _artifact_rootfs_profile() -> dict[str, Any]:
 def _kind_mismatched_profile() -> dict[str, Any]:
     """A fault-inject-section profile; the handlers under test carry the local-libvirt policy.
 
-    Fault-inject is the section the pre-ADR-0549 code accepted outright — its ``rootfs_source``
-    returned ``None`` and its ``validate_profile`` was a no-op — so this is the mismatch that
-    used to be persisted rather than merely mis-reported.
+    Pre-ADR-0549 this direction failed loudly: ``LocalLibvirtProfilePolicy.validate_profile``
+    dereferenced ``profile.provider.local_libvirt`` and raised a bare ``AttributeError`` that
+    admission (which catches only ``CategorizedError``) let escape as an untyped tool error. The
+    silently-persisted direction is the other one — see the fault-inject-policy test below.
     """
     profile = provisioning_profile()
     profile["provider"] = {"fault-inject": {"capture_method": "console"}}
@@ -728,14 +729,16 @@ def test_provision_kind_mismatched_profile_is_config_error_no_system_or_job(
     asyncio.run(_run())
 
 
-def test_provision_libvirt_profile_on_fault_inject_resource_writes_nothing(
+def test_provision_libvirt_profile_under_fault_inject_policy_writes_nothing(
     migrated_url: str,
 ) -> None:
-    # The inverse of the test above, and the severe half of #1899: a fault-inject Resource holding
-    # a local-libvirt profile was accepted OUTRIGHT — fault-inject's rootfs_source returns None and
+    # The inverse direction, and the severe half of #1899: a fault-inject Resource holding a
+    # local-libvirt profile was accepted OUTRIGHT — fault-inject's rootfs_source returns None and
     # its validate_profile was a no-op — so the System was minted and the job enqueued, and the
     # fault-inject provisioner discards the profile, so it even reached `ready` before dying at
-    # first use. The handlers carry the policy, which is what stands in for the Resource kind here.
+    # first use. The handlers carry the policy and nothing on this path reads the Resource kind
+    # again, so the policy is what stands in for it; granted_allocation still seeds a local
+    # resource row, hence "under fault-inject policy" rather than "on a fault-inject Resource".
     async def _run() -> None:
         handlers = SystemProvisionHandlers(
             FaultInjectProfilePolicy(), TEST_COMPONENT_SOURCES, _noop_rootfs_validator
@@ -754,6 +757,8 @@ def test_provision_libvirt_profile_on_fault_inject_resource_writes_nothing(
                 alloc_row = await cur.fetchone()
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        assert resp.detail is not None
+        assert "local-libvirt" in resp.detail and "fault-inject" in resp.detail
         assert resp.data["profile_provider_section"] == "local-libvirt"
         assert resp.data["resource_kind"] == "fault-inject"
         assert sys_n is not None and sys_n["n"] == 0  # was 1 before ADR-0549

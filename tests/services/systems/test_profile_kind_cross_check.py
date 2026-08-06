@@ -8,7 +8,6 @@ silently accepted).
 
 from __future__ import annotations
 
-import copy
 from typing import Any
 
 import pytest
@@ -37,13 +36,18 @@ _SECTIONS: dict[ResourceKind, dict[str, Any]] = {
         }
     },
     # ADR-0080 pairs the remote-libvirt section with boot_method 'disk-image' biconditionally,
-    # so this section forces that boot_method in _profile below.
+    # so this section forces that boot_method in _profile_for below.
     ResourceKind.REMOTE_LIBVIRT: {
         "remote-libvirt": {"base_image_volume": "kdive-base-fedora-42.qcow2"}
     },
     ResourceKind.FAULT_INJECT: {"fault-inject": {"capture_method": "console"}},
 }
 
+# The severity of a mismatch differed per policy before ADR-0549: local-libvirt raised a bare
+# AttributeError out of validate_profile, remote-libvirt out of rootfs_source, and fault-inject
+# raised nothing at all — its rootfs_source returns None and its validate_profile was a no-op, so
+# a libvirt-section profile passed admission COMPLETELY and was persisted. Every pair is now the
+# same typed rejection, which is what this matrix pins.
 _MISMATCHES = [
     (policy_kind, profile_kind)
     for policy_kind in _POLICIES
@@ -52,25 +56,24 @@ _MISMATCHES = [
 ]
 
 
-def _profile(kind: ResourceKind, **overrides: Any) -> ProvisioningProfile:
+def _profile_for(kind: ResourceKind) -> ProvisioningProfile:
     data: dict[str, Any] = {
         "schema_version": 1,
         "arch": "x86_64",
         "vcpu": 2,
         "memory_mb": 2048,
         "disk_gb": 20,
-        "provider": copy.deepcopy(_SECTIONS[kind]),
+        "provider": _SECTIONS[kind],
     }
     if kind is ResourceKind.REMOTE_LIBVIRT:
         data["boot_method"] = "disk-image"
     else:
         data["boot_method"] = "direct-kernel"
         data["kernel_source_ref"] = "git+https://git.kernel.org/pub/scm/linux.git#v6.9"
-    data.update(overrides)
     return ProvisioningProfile.parse(data)
 
 
-def _capabilities() -> ComponentSourceCapabilities:
+def _permissive_capabilities() -> ComponentSourceCapabilities:
     # Permissive on purpose: the component-source gate must not be what rejects a mismatch.
     return ComponentSourceCapabilities(
         provider="test-provider",
@@ -84,7 +87,7 @@ def test_mismatched_profile_section_is_a_configuration_error(
 ) -> None:
     with pytest.raises(CategorizedError) as caught:
         validate_profile_for_provider(
-            _profile(profile_kind), _POLICIES[policy_kind], _capabilities()
+            _profile_for(profile_kind), _POLICIES[policy_kind], _permissive_capabilities()
         )
 
     error = caught.value
@@ -103,7 +106,7 @@ def test_matching_profile_section_is_accepted(kind: ResourceKind) -> None:
     # The happy path keeps the mismatch guard from passing vacuously: a policy that declared the
     # wrong kind would redden here rather than silently reject everything. It pins the kind check
     # only — for remote-libvirt and fault-inject the rest of the function short-circuits.
-    validate_profile_for_provider(_profile(kind), _POLICIES[kind], _capabilities())
+    validate_profile_for_provider(_profile_for(kind), _POLICIES[kind], _permissive_capabilities())
 
 
 @pytest.mark.parametrize("kind", list(_POLICIES))
@@ -115,25 +118,15 @@ def test_kind_mismatch_is_reported_before_the_destructive_ops_token_check() -> N
     # Ordering is load-bearing (ADR-0549): the cross-check runs before any provider dereference,
     # which is what makes the bare-AttributeError paths unreachable for a mismatch. A profile that
     # is both mismatched and carries a bogus token must surface the mismatch, not the token.
-    profile = _profile(ResourceKind.FAULT_INJECT)
+    profile = _profile_for(ResourceKind.FAULT_INJECT)
     data = profile.model_dump(mode="json", by_alias=True)
     data["provider"]["fault-inject"]["destructive_ops"] = ["force-crash"]  # hyphen typo
 
     with pytest.raises(CategorizedError) as caught:
         validate_profile_for_provider(
-            ProvisioningProfile.parse(data), _POLICIES[ResourceKind.LOCAL_LIBVIRT], _capabilities()
+            ProvisioningProfile.parse(data),
+            _POLICIES[ResourceKind.LOCAL_LIBVIRT],
+            _permissive_capabilities(),
         )
 
     assert caught.value.details["profile_provider_section"] == "fault-inject"
-
-
-def test_fault_inject_policy_no_longer_accepts_a_libvirt_profile_outright() -> None:
-    # The regression this issue was filed for: fault-inject's rootfs_source returns None and its
-    # validate_profile was a no-op, so a libvirt-section profile passed admission COMPLETELY and
-    # was persisted; the AttributeError was deferred to destructive_opt_in/capture_method.
-    with pytest.raises(CategorizedError):
-        validate_profile_for_provider(
-            _profile(ResourceKind.LOCAL_LIBVIRT),
-            _POLICIES[ResourceKind.FAULT_INJECT],
-            _capabilities(),
-        )

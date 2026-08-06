@@ -20,7 +20,7 @@ class ProfilePolicy(Protocol):
     def kind(self) -> ResourceKind:
         """The ``ResourceKind`` whose profile section this policy reads (ADR-0549).
 
-        Every other member here dereferences that one section, so a policy applied to a profile
+        The section-reading members here read that one section, so a policy applied to a profile
         carrying a different section reads an absent attribute. The policy is resolved from the
         Resource (``ProviderResolver.runtime_for_allocation``/``runtime_for_system``), so this is
         what admission cross-checks ``ProviderSection.kind`` against.

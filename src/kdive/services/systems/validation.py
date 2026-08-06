@@ -102,9 +102,10 @@ def _require_profile_matches_resource_kind(
 
     The policy is resolved from the Resource — ``runtime_for_allocation`` on the create lane,
     ``runtime_for_system`` on reprovision — so ``profile_policy.kind`` *is* that Resource's kind.
-    A profile carrying a different section makes every policy member dereference an absent
-    ``ProviderSection`` attribute, which raises a bare ``AttributeError`` admission does not
-    catch (and, for fault-inject, raises nothing at all until long after the System is stored).
+    A profile carrying a different section makes the policy's section-reading members dereference
+    an absent ``ProviderSection`` attribute, which raises a bare ``AttributeError`` admission does
+    not catch — or, for fault-inject, whose admission-time members read no section at all, raises
+    nothing until long after the System is stored.
 
     Runs before ``_reject_unknown_destructive_ops`` and before any provider dereference, so the
     mismatch is what an agent is told rather than whatever the mismatched section trips over
