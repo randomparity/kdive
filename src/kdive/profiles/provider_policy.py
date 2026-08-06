@@ -7,6 +7,7 @@ from typing import Protocol
 from uuid import UUID
 
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
@@ -14,6 +15,15 @@ from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 
 class ProfilePolicy(Protocol):
     """Provider-owned behavior derived from a parsed provisioning profile."""
+
+    kind: ResourceKind
+    """The ``ResourceKind`` whose profile section this policy reads (ADR-0549).
+
+    Every other member here dereferences that one section, so a policy applied to a profile
+    carrying a different section reads an absent attribute. The policy is resolved from the
+    Resource (``ProviderResolver.runtime_for_allocation``/``runtime_for_system``), so this is
+    what admission cross-checks ``ProviderSection.kind`` against.
+    """
 
     def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None: ...
 

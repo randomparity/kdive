@@ -202,7 +202,9 @@ def _register_systems_provision(
 
         A profile whose `arch` the backing host cannot boot is rejected `configuration_error`
         at admission — before any capacity is committed — naming the arches the host supports;
-        pick one of those or an allocation on a host that offers the arch you need.
+        pick one of those or an allocation on a host that offers the arch you need. A profile
+        whose `provider` section names a different kind than this Allocation's resource is
+        rejected the same way, naming both; the section must match the resource you allocated.
         """
         ctx = current_context()
         try:

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.operations.jobs import JobKind
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 
 
 class RemoteLibvirtProfilePolicy:
     """Behavior decisions owned by the remote-libvirt profile section."""
+
+    kind: ResourceKind = ResourceKind.REMOTE_LIBVIRT
 
     def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None:
         # A supplied worker-host qcow2 (ADR-0440, #1433) activates the component-source gate; an

@@ -142,7 +142,9 @@ System. Requires contributor on the Allocation's project.
 
 A profile whose `arch` the backing host cannot boot is rejected `configuration_error`
 at admission — before any capacity is committed — naming the arches the host supports;
-pick one of those or an allocation on a host that offers the arch you need.
+pick one of those or an allocation on a host that offers the arch you need. A profile
+whose `provider` section names a different kind than this Allocation's resource is
+rejected the same way, naming both; the section must match the resource you allocated.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
