@@ -186,10 +186,13 @@ drains.
    `queue.dequeue` and `queue.count_claimable`. `_claim_loop` takes the same lane and threads it
    through.
 4. `run` starts one `_claim_loop` task per accepted lane alongside the existing heartbeat ticker.
-   When any loop task ends unexpectedly, cancel the remaining loops and return, so the process
-   supervisor restarts the worker — a worker serving fewer lanes than it advertises is the
-   starvation case. `asyncio.gather` alone does not give this (it propagates the first exception and
-   leaves siblings running), so cancel explicitly. Both loops observe the same `stop` event.
+   Both loops observe the same `stop` event. **The supervision trigger is a loop ending while `stop`
+   is unset** — a loop returning with `stop` set is the normal shutdown and needs no action; do not
+   write the rule as "ends unexpectedly" and leave it to inference, or it fires on every clean
+   exit. On that trigger, cancel the remaining loops and return, so the process supervisor restarts
+   the worker: a worker serving fewer lanes than it advertises is the starvation case.
+   `asyncio.gather` alone does not give this — it propagates the first exception and leaves siblings
+   running — so cancel explicitly.
 5. At construction, log a `warning` naming any lane in the routed set that `accepted_lanes` omits.
    A warning, not a refusal — a deliberate single-lane fleet is a shape ADR-0550 supports.
 
@@ -201,6 +204,12 @@ drains.
   queued `state-fenced` job. Assert both jobs reach their own terminal state under their own fences
   — this is the criterion that proves the reported defect is fixed, so do not weaken it to "the
   fenced job was claimed".
+- **Mutation-check S3**, for the same reason task 2 mutation-checks S9, and more so: S3 is the
+  easiest criterion here to write so that it passes for the wrong reason — a `default` handler that
+  does not genuinely block, or an assertion on claim rather than on concurrent progress, is green on
+  the unfixed code too. Collapse `run` back to a single all-lanes claim loop, confirm S3 goes red,
+  restore. Clear `__pycache__` before re-confirming green: a same-size revert inside a second can
+  reuse cached bytecode and invert the verdict.
 - **S4**: a worker with `accepted_lanes=("state-fenced",)` leaves a queued `default` job `queued`.
 - **S6**: `pool.max_size` one below `2 * len(lanes) + 1` raises `ValueError` naming both numbers;
   exactly at the floor constructs.
