@@ -146,9 +146,13 @@ start would make a deliberate single-lane fleet impossible, which is a shape thi
   are tests that enqueued onto an arbitrary lane to exercise the `accepted_lanes` boundary; they
   write the row directly instead. A test seam is the right thing to lose here — it was also the
   seam that would have let production routing drift from the membership rule unnoticed.
-- The kinds on `state-fenced` share one loop, so two fenced operations still serialize against each
-  other. That is the intended behavior — they contend for the same objects anyway — but it means
-  the lane is not a general priority mechanism and should not be extended into one.
+- The kinds on `state-fenced` share one loop, so two fenced operations serialize against each other
+  even when they touch different objects — the fences are per object (`RESTORING` and
+  `REPROVISIONING` per System, `CREATING` per Snapshot, `_active_snapshot_op` filtered by
+  `system_id`), so a snapshot of one System now waits behind a restore of another. That residual is
+  accepted rather than designed: it is no worse than the single lane they share today, and the wait
+  is bounded by fenced work, which is far rarer than builds. It is also the reason the lane must not
+  be extended into a general priority mechanism — every kind added to it lengthens that queue.
 - `STATE_FENCED_JOB_KINDS` is a fourth kind set beside `SYSTEM_FAILING_JOB_KINDS`,
   `CONTRIBUTOR_CANCELABLE_JOB_KINDS`, and `OPT_IN_DESTRUCTIVE_JOB_KINDS`. Its rule is deliberately
   different from all three and stated in its docstring, because the nearest neighbour
