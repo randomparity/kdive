@@ -22,11 +22,12 @@ Stated in full in ADR-0550. Summarized:
 1. `STATE_FENCED_JOB_KINDS = {RESTORE, REPROVISION, SNAPSHOT}`, selected by the rule *the enqueue
    transaction writes a transient state that another tool rejects on*.
 2. `queue.enqueue` derives the lane from the kind — `state-fenced` for those three, `default`
-   otherwise. Callers do not pass it.
+   otherwise — on both the insert and the `recycle_terminal` reset. Its `dispatch_lane` parameter
+   is removed.
 3. `Worker.run` starts one claim loop per accepted lane, so a claimed job in one lane cannot delay a
    claim in another.
 4. `KDIVE_WORKER_ACCEPTED_LANES` makes the set operator-configurable, defaulting to every lane a
-   kind routes to.
+   kind routes to; a worker that omits a routed lane warns at startup.
 
 ## Success criteria
 
@@ -39,29 +40,34 @@ Each is falsifiable and has a test in the plan.
 | S3 | A worker holding a running `default` job still claims a queued `state-fenced` job | Two-lane worker; block the `default` handler, assert the fenced job reaches `running` |
 | S4 | A single-lane worker claims nothing outside its lane | `accepted_lanes=("state-fenced",)`; a queued `default` job stays `queued` |
 | S5 | Every lane a kind routes to is in the default `accepted_lanes` | Guard test over `STATE_FENCED_JOB_KINDS ∪ {default}` vs. the setting's default |
-| S6 | `pool.max_size < 2 * len(accepted_lanes)` raises at construction | `ValueError` naming both numbers |
+| S6 | `pool.max_size < 2 * len(accepted_lanes) + 1` raises at construction | `ValueError` naming both numbers |
 | S7 | Queue depth is reported per lane, not overwritten across lanes | Two loops observe; assert two labelled observations with their own counts |
 | S8 | `KDIVE_WORKER_ACCEPTED_LANES` rejects an unknown or blank lane | `config validate` surfaces the parse error |
+| S9 | A recycled terminal job is re-routed to its kind's lane | Insert a `restore` row on `default`, drive it terminal, re-enqueue, assert `state-fenced` |
+| S10 | A worker omitting a routed lane warns at startup naming it | `accepted_lanes=("default",)`; assert the warning names `state-fenced` |
 
 ## Edge cases and failure modes
 
-- **Pre-existing `queued` rows.** Rows enqueued before the upgrade keep `dispatch_lane = 'default'`
-  and are drained by the `default` loop. Not rewritten; a pre-upgrade restore keeps its old wait.
-  Nothing in the design depends on lane and kind agreeing for historical rows, and no reader derives
-  a kind from a lane.
+- **Pre-existing `queued` rows.** Rows already `queued` at upgrade keep `dispatch_lane = 'default'`
+  and are drained once by the `default` loop. Not rewritten; a pre-upgrade restore keeps its old
+  wait. Nothing in the design depends on lane and kind agreeing for historical rows, and no reader
+  derives a kind from a lane.
+- **Pre-existing *terminal* rows.** These are the ones that matter, and they are why the recycle
+  path re-derives the lane. `systems.restore` and `systems.snapshot` enqueue with
+  `recycle_terminal=True` under a durable `dedup_key`, so without the re-derivation a
+  System/snapshot pair restored once before the upgrade would keep recycling its `default` row
+  forever — the fix would silently not apply to exactly the systems that had used the feature.
 - **A lane with no consumer.** The failure is silent and unbounded: the rows sit `queued` forever
   and the fenced object never recovers. S5 makes it unreachable while the default accepts all lanes;
-  an operator who narrows `KDIVE_WORKER_ACCEPTED_LANES` to one lane opts into it knowingly, and the
-  setting's help text says so.
+  an operator who narrows `KDIVE_WORKER_ACCEPTED_LANES` opts into it knowingly, the setting's help
+  text says so, and S10's startup warning names the omitted lane so the choice is visible in the
+  log rather than only in the environment.
 - **A single-lane worker fleet split by operators.** Supported and unchanged in risk: two processes
   each accepting one lane behave exactly as two loops in one process, minus the shared pool.
-- **Recycled jobs.** `recycle_terminal` resets a row in place and does not touch `dispatch_lane`;
-  a recycled `restore` stays on `state-fenced` because it was written there at first insert. The
-  lane derivation runs on the `INSERT` path only, so a recycle cannot move a row between lanes.
-- **Duplicate `dedup_key` across lanes.** `dedup_key` is globally unique and lane-independent, so a
-  kind that changed lanes between releases could collide with its own historical row. It cannot
-  here: the three fenced kinds keep the same dedup keys, and the conflict path returns the existing
-  row whatever lane it carries.
+- **Duplicate `dedup_key` across lanes.** `dedup_key` is globally unique and lane-independent, so
+  the conflict path returns the existing row whatever lane it carries. With the recycle re-deriving
+  the lane, a row's lane converges on its kind's lane at the first post-upgrade recycle, and a kind
+  can never end up split across two lanes.
 - **A handler failure in one lane.** `_claim_loop` already catches per-iteration exceptions and
   sleeps. Each lane loop gets its own; a wedged lane does not stop the other, and a crashed task
   would otherwise be swallowed by `gather`, so the loops are supervised such that one loop's exit
@@ -119,10 +125,10 @@ are the existing controls for that and are unchanged.
 
 ## Testing
 
-- `tests/jobs/test_queue.py` — lane derivation per kind (S1, S2), and that a recycle preserves the
-  lane.
+- `tests/jobs/test_queue.py` — lane derivation per kind (S1, S2) and on the recycle path (S9).
 - `tests/jobs/test_worker.py` — concurrent claim across lanes (S3), single-lane isolation (S4),
-  pool-size validation (S6), and one-loop-exit-does-not-silently-shrink-the-worker.
+  pool-size validation (S6), the omitted-lane warning (S10), and
+  one-loop-exit-does-not-silently-shrink-the-worker.
 - `tests/jobs/test_worker_telemetry.py` — per-lane queue depth (S7).
 - `tests/domain/` — the membership guard (S5) and the rule's agreement with the enqueue-site
   routing.

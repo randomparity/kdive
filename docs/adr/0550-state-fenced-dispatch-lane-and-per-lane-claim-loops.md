@@ -59,7 +59,16 @@ protocol, which is a larger decision than the availability defect warrants.
 kinds enqueue onto `STATE_FENCED_JOB_DISPATCH_LANE = "state-fenced"`. The lane is chosen from the
 kind inside `queue.enqueue`, not passed by each caller: a caller-supplied lane makes the routing
 opt-in at fourteen call sites, which is the same shape that left the column unused for the lane's
-whole existence.
+whole existence. `enqueue`'s `dispatch_lane` parameter is **removed** rather than kept as an
+override — two mechanisms deciding one value give the guard test nothing to prove, since it could
+check the kind-to-lane map while a caller still wrote something else.
+
+**The recycle path derives the lane too.** `recycle_terminal` resets a terminal row in place, and
+`systems.restore` and `systems.snapshot` both use it under a durable `dedup_key`. Left alone, the
+reset would preserve whatever lane the row was first inserted with, so every future restore of a
+System/snapshot pair restored before this change would stay on `default` — permanently, silently,
+for exactly the tool that motivated the change. The recycle `UPDATE` therefore sets `dispatch_lane`
+to the kind-derived lane alongside `created_at`, so a recycled attempt is routed like a fresh one.
 
 `delete_snapshot` stays on `default` even though a queued row of that kind makes
 `_active_snapshot_op` reject a restore. It writes no state, so the rule that selects it would be
@@ -73,17 +82,25 @@ in `accepted_lanes`; each loop calls `dequeue` with its own single-lane list, so
 `accepted_lanes` becomes operator-configurable through `KDIVE_WORKER_ACCEPTED_LANES`, defaulting to
 **every** lane a kind routes to.
 
-This is safe to do in-process because the per-job path already holds no mutable worker state:
-`_dispatch`, `_run_handler`, and `_heartbeat_loop` keep everything in locals and take their own
-pool connections, `SecretRegistry` is thread-safe and reference-counted per scope (so one job's
-`release` cannot unmask a value another job still holds), and the job fence is per-row
-`(id, attempt, worker_id)` — nothing assumes a `worker_id` has at most one `running` job.
+This is safe to do in-process because of four properties, all of which hold today: the per-job path
+holds no mutable worker state (`_dispatch`, `_run_handler`, and `_heartbeat_loop` keep everything in
+locals and take their own pool connections); `SecretRegistry` is thread-safe and reference-counted
+per scope, so one job's `release` cannot unmask a value another job still holds; the job fence is
+per-row `(id, attempt, worker_id)`, and neither `dequeue`, `fail`, `complete`, nor
+`repair_abandoned_jobs` assumes a `worker_id` has at most one `running` job; and worker-local disk
+is already concurrency-safe, because install stages into a per-run directory and image publication
+is an atomic rename onto a shared name. That fourth property is the one a new lane member has to be
+checked against — the worker is the only process with local state, and one-job-per-process was an
+implicit lock over it.
 
 Two things do change and are part of this decision:
 
 - **Pool sizing is now per lane.** Each in-flight job holds a handler connection and a heartbeat
-  connection, so the constructor's `pool.max_size >= 2` guard becomes
-  `>= 2 * len(accepted_lanes)`, raised as the same `ValueError` at construction.
+  connection, and the worker's readiness probe shares the same pool, so the constructor's
+  `pool.max_size >= 2` guard becomes `>= 2 * len(accepted_lanes) + 1`, raised as the same
+  `ValueError` at construction. The `+ 1` is the probe's: sized to exactly `2 * len(lanes)`, a
+  readiness check during full dispatch has no connection available, and `run_once` skips `dequeue`
+  while not ready — so the worker would stop claiming precisely when it is busiest.
 - **The queue-depth gauge is labelled by lane.** `WorkerTelemetry` kept one `_last_depth` scalar;
   with two loops observing it, each would overwrite the other's count and the gauge would report a
   value belonging to neither lane. It becomes a per-lane mapping emitting one labelled
@@ -92,7 +109,10 @@ Two things do change and are part of this decision:
 **A guard test asserts every lane a kind routes to is in the default `accepted_lanes`.** A lane no
 deployed worker accepts means those jobs never run, and that starvation is invisible until someone
 notices a System fenced forever. The default accepting all lanes makes it unreachable by
-construction; the test is what keeps it that way when a fourth lane is added.
+construction; the test is what keeps it that way when a fourth lane is added. A guard on the default
+does not cover an operator who narrows the setting, so a worker whose `accepted_lanes` omits a
+routed lane logs a warning at startup naming the omitted lanes. It stays a warning: refusing to
+start would make a deliberate single-lane fleet impossible, which is a shape this decision supports.
 
 ## Consequences
 
@@ -105,14 +125,22 @@ construction; the test is what keeps it that way when a fourth lane is added.
   step. `KDIVE_WORKER_ACCEPTED_LANES=default,state-fenced` is the shipped default and setting it to
   a single lane restores the old footprint — at the cost of starving the omitted lane, which is why
   the guard test bounds the default rather than the setting.
-- A pool whose `max_size` is below `2 * len(accepted_lanes)` now fails at worker construction
+- A pool whose `max_size` is below `2 * len(accepted_lanes) + 1` now fails at worker construction
   rather than stalling every dispatch on connection acquisition. That converts a silent hang into a
   startup error, and it is a **new** startup failure for a deployment that pinned `max_size` to 2.
+  The bound is a correctness floor, not a sizing recommendation — it leaves no headroom for
+  concurrent probes beyond the one, and a deployment under load should size above it.
 - No migration. The `dispatch_lane` column, its non-empty constraint, and the `accepted_lanes`
   dequeue predicate all already exist and are unchanged; only the values written to the column and
   the worker's lane set change.
-- Existing `queued` rows stay on `default` and are drained by the `default` loop. A `restore`
-  enqueued before the upgrade keeps its old lane and its old wait; nothing rewrites history.
+- Rows already `queued` at upgrade stay on `default` and are drained once by the `default` loop; a
+  restore enqueued before the upgrade keeps its old wait. That residue is bounded to those rows,
+  because the recycle path re-derives the lane — without that, the residue would instead be
+  permanent for every `dedup_key` that existed before the upgrade.
+- `queue.enqueue` loses a parameter. No production caller passed it, so the only callers affected
+  are tests that enqueued onto an arbitrary lane to exercise the `accepted_lanes` boundary; they
+  write the row directly instead. A test seam is the right thing to lose here — it was also the
+  seam that would have let production routing drift from the membership rule unnoticed.
 - The kinds on `state-fenced` share one loop, so two fenced operations still serialize against each
   other. That is the intended behavior — they contend for the same objects anyway — but it means
   the lane is not a general priority mechanism and should not be extended into one.
