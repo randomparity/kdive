@@ -306,6 +306,12 @@ compose-down:
 test-compose-lifecycle:
     KDIVE_RUN_COMPOSE_LIFECYCLE_PROOF=1 KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest tests/compose/test_compose_worker_lifecycle_live.py -m live_stack --strict-markers -q
 
+# Run the isolated executable proof that a plain `docker compose down` preserves the named data
+# volumes and `down --volumes` still drops them (ADR-0552). Same fail-loud contract as above:
+# the explicit environment makes unavailable Docker a failure rather than a reported skip.
+test-compose-volumes:
+    KDIVE_RUN_COMPOSE_VOLUME_PROOF=1 KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest tests/compose/test_compose_volume_persistence_live.py -m live_stack --strict-markers -q
+
 # Lint and format-check the shell scripts (recursively under scripts/).
 lint-shell:
     shfmt -f scripts deploy/compose deploy/remote-libvirt-guest-helpers deploy/ansible/tests | xargs shellcheck
