@@ -143,7 +143,7 @@ def test_stop_postgres_removes_the_containers_anonymous_volume(
     assert calls["force"] is True
 
 
-def test_stop_postgres_leaves_no_dangling_volume_behind() -> None:
+def test_stop_postgres_leaves_no_dangling_volume_behind(tmp_path: Path) -> None:
     """End-to-end: start the real container the fixture starts, stop it the way the
     fixture stops it, and assert the anonymous volume it created is gone.
 
@@ -151,27 +151,33 @@ def test_stop_postgres_leaves_no_dangling_volume_behind() -> None:
     daemon's volume list before and after. Under xdist the other workers are starting
     and stopping their own containers concurrently, so a global diff would attribute
     their volumes to this container and fail for someone else's leak.
+
+    The liveness lock is held for the container's whole life for the same reason: this
+    host runs concurrent suites, and an unheld lock is precisely the signal that tells
+    another run's sweep to reap the container out from under this test.
     """
     xdist_backend.skip_without_docker()
     import docker
 
     client = docker.from_env()
-    labels = xdist_backend.backend_container_labels(Path("/nonexistent-run-root"), "pg")
-    _server_url, container_id = db_conftest._start_postgres(labels)
-    volumes: set[str] = set()
-    try:
-        container = client.containers.get(container_id)
-        mounts = container.attrs["Mounts"]
-        volumes = {m["Name"] for m in mounts if m["Type"] == "volume"}
-        # The crash reaper is inert unless `with_kwargs(labels=…)` really reaches the
-        # daemon, and every unit test in this suite would still pass if it did not
-        # (ADR-0551, #1910). Read them back off the running container instead.
-        assert container.labels[xdist_backend.BACKEND_LABEL] == "pg"
-        assert (
-            container.labels[xdist_backend.LIVENESS_LABEL] == labels[xdist_backend.LIVENESS_LABEL]
-        )
-    finally:
-        db_conftest._stop_postgres(container_id)
+    labels = xdist_backend.backend_container_labels(tmp_path, "pg")
+    with xdist_backend._liveness_held(tmp_path, "pg"):
+        _server_url, container_id = db_conftest._start_postgres(labels)
+        volumes: set[str] = set()
+        try:
+            container = client.containers.get(container_id)
+            mounts = container.attrs["Mounts"]
+            volumes = {m["Name"] for m in mounts if m["Type"] == "volume"}
+            # The crash reaper is inert unless `with_kwargs(labels=…)` really reaches the
+            # daemon, and every unit test in this suite would still pass if it did not
+            # (ADR-0551, #1910). Read them back off the running container instead.
+            assert container.labels[xdist_backend.BACKEND_LABEL] == "pg"
+            assert (
+                container.labels[xdist_backend.LIVENESS_LABEL]
+                == labels[xdist_backend.LIVENESS_LABEL]
+            )
+        finally:
+            db_conftest._stop_postgres(container_id)
 
     assert volumes, "the postgres container is expected to create an anonymous volume"
     surviving = volumes & {v.id for v in client.volumes.list()}
