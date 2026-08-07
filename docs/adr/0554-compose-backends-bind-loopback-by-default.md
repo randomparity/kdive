@@ -102,3 +102,23 @@ correct and are kept as-is — an isolated run with a unique project still needs
 
 **Documentation.** The operator-facing docs note that the default posture is loopback and that
 a full `ADDR:PORT` override is the opt-in path to remote access.
+
+## Considered & rejected
+
+- **Prefix the template with a hardcoded `127.0.0.1:` bind address** —
+  `"127.0.0.1:${KDIVE_POSTGRES_PORT:-5432}:5432"`. The first implementation took this path.
+  Rejected because an `ADDR:PORT` override (e.g. `KDIVE_POSTGRES_PORT=0.0.0.0:5432`) expands
+  to `"127.0.0.1:0.0.0.0:5432:5432"`, a four-segment string docker compose rejects as an
+  invalid IP address. The escape hatch becomes non-functional. Embedding the address in the
+  variable default preserves the full left-side ownership the variable has always had.
+- **Add a separate `KDIVE_*_BIND_ADDR` variable per backend.** More explicit, but adds three
+  new variables for a problem the existing `KDIVE_*_PORT` variables already solve once the
+  address is in the default. It also grows the operator-facing env contract for no benefit.
+- **Leave the defaults as `0.0.0.0` and document the risk.** Rejected: ADR-0552's named data
+  volumes made the exposure unbounded (the stack no longer restarts empty on a plain `down`),
+  and warning text in a doc does not close the network exposure on a machine that ran the demo
+  once and was left on a shared or multi-interface host.
+- **Scope the fix to include Prometheus and Grafana.** Both sit behind the opt-in `obs` profile
+  and carry no fixed-credential literals in the repository. The risk model differs and the
+  remediation is out of scope for this change. A follow-on can address them if the same posture
+  is desired.

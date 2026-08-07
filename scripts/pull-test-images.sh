@@ -20,8 +20,8 @@ set -euo pipefail
 # never requests warms nothing and still passes. tests/guards/test_prepull_images_match_fixtures.py
 # parses this array and both constants and fails on any drift.
 readonly IMAGES=(
-  "postgres:17"                              # tests/db/conftest.py::_POSTGRES_IMAGE
-  "minio/minio:RELEASE.2025-09-07T16-13-09Z" # tests/store/conftest.py::_MINIO_IMAGE
+  "postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317"                              # tests/db/conftest.py::_POSTGRES_IMAGE  # noqa: E501  # 17
+  "minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e" # tests/store/conftest.py::_MINIO_IMAGE  # noqa: E501  # RELEASE.2025-09-07T16-13-09Z
 )
 
 # One attempt per backoff entry, plus the first. Deriving ATTEMPTS keeps the two in step:
