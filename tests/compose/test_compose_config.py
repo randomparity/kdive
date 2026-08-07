@@ -460,6 +460,33 @@ def test_server_binds_all_interfaces_and_publishes_its_port() -> None:
     assert "8000" in _published_ports(server)
 
 
+def _host_ips(service: dict[str, Any]) -> set[str | None]:
+    """Return the set of host_ip values across all port mappings for a service.
+
+    When a port is published with no explicit bind address, ``docker compose config``
+    omits the ``host_ip`` key (or sets it to ``None``). A loopback binding sets it to
+    ``"127.0.0.1"``.
+    """
+    return {p.get("host_ip") for p in service.get("ports", [])}
+
+
+# Fixed-credential backends that must not be reachable from outside the host (ADR-0554).
+_FIXED_CREDENTIAL_BACKENDS = ("postgres", "minio", "oidc")
+
+
+@pytest.mark.parametrize("service", _FIXED_CREDENTIAL_BACKENDS)
+def test_fixed_credential_backend_binds_loopback_by_default(service: str) -> None:
+    """ADR-0554: bare HOST:CONTAINER binds 0.0.0.0; every fixed-credential backend must
+    carry an explicit 127.0.0.1 bind so its credentials are not reachable from outside
+    the host without an operator override.
+    """
+    svc = _services()[service]
+    host_ips = _host_ips(svc)
+    assert host_ips == {"127.0.0.1"}, (
+        f"{service}: expected every port mapping to bind 127.0.0.1, got {host_ips!r}"
+    )
+
+
 # Configurable host-published ports: the publish (left) side is a ${VAR:-default} override; the
 # container-internal port and the env the process binds inside stay fixed. Each case renders the
 # model with the override set and asserts ONLY the host mapping moved.

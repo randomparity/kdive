@@ -3,9 +3,10 @@
 # Drops the host port publishing from every service the smoke starts. The smoke asserts the
 # server /readyz *inside* the compose network (via the container healthcheck), so it needs no
 # published host ports — and publishing them makes the smoke fail against any process already
-# bound to 5432 / 9000 / 9001 / 8090 / 8000 (e.g. a local live-stack). `!reset []` removes the
-# base service's list; a plain `ports: []` would *concatenate* with it, per compose-spec merge
-# rules, and leave the bindings in place.
+# bound to those ports on 127.0.0.1 (e.g. a local live-stack; ADR-0554 changed the default
+# binding from 0.0.0.0 to 127.0.0.1, so cross-interface conflicts are no longer a concern, but
+# same-host conflicts remain). `!reset []` removes the base service's list; a plain `ports: []`
+# would *concatenate* with it, per compose-spec merge rules, and leave the bindings in place.
 services:
   postgres:
     ports: !reset []

@@ -32,6 +32,21 @@ after Postgres recovers.
 Configuration is read from `KDIVE_*` variables; see
 [the config reference](../guide/reference/config.md) for every setting.
 
+## Backend port binding
+
+Postgres, MinIO, and the mock OIDC issuer all carry fixed credential literals in the
+repository and are published to the host for local access only (ADR-0554). Their port
+mappings bind `127.0.0.1` by default, so they are reachable on `localhost` only and are not
+exposed on other network interfaces. The `KDIVE_*_PORT` override variables accept a full
+`ADDR:PORT` left side, so remote access is an explicit opt-in:
+
+```bash
+KDIVE_POSTGRES_PORT=0.0.0.0:5432 just compose-up
+```
+
+The MCP server port (8000) is not bound to loopback because agents may connect from another
+machine. Its port is separately overridable via `KDIVE_HTTP_PORT`.
+
 ## Backend and migrate ordering
 
 The app services declare `depends_on: migrate` with
