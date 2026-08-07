@@ -66,7 +66,7 @@ services:
       POSTGRES_PASSWORD: kdive # pragma: allowlist secret — local dev only
       POSTGRES_DB: kdive
     ports:
-      - "127.0.0.1:${KDIVE_POSTGRES_PORT:-5432}:5432"
+      - "${KDIVE_POSTGRES_PORT:-127.0.0.1:5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kdive -d kdive"]
       interval: 5s
@@ -97,8 +97,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin # pragma: allowlist secret — local dev only
     ports:
-      - "127.0.0.1:${KDIVE_MINIO_PORT:-9000}:9000"
-      - "127.0.0.1:${KDIVE_MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${KDIVE_MINIO_PORT:-127.0.0.1:9000}:9000"
+      - "${KDIVE_MINIO_CONSOLE_PORT:-127.0.0.1:9001}:9001"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 5s
@@ -157,7 +157,7 @@ services:
       # Bind the mock issuer to 0.0.0.0:8080 inside the container (published as 8090 on host).
       SERVER_PORT: "8080"
     ports:
-      - "127.0.0.1:${KDIVE_OIDC_PORT:-8090}:8080"
+      - "${KDIVE_OIDC_PORT:-127.0.0.1:8090}:8080"
 
   # Forward-only schema rollout as a dedicated one-shot (ADR-0088 decision 4). The
   # app services gate on its successful completion, so they never hit the DB before

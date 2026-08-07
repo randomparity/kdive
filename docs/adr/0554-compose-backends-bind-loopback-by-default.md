@@ -41,19 +41,23 @@ No in-repo consumer connects to these backends from a different host.
 
 ## Decision
 
-Add a `127.0.0.1:` bind address to the default value of each backend port mapping:
+Embed the `127.0.0.1:` bind address in the *default value* of each backend port variable so
+the variable controls the entire left side of the mapping:
 
 ```yaml
 ports:
-  - "127.0.0.1:${KDIVE_POSTGRES_PORT:-5432}:5432"
-  - "127.0.0.1:${KDIVE_MINIO_PORT:-9000}:9000"
-  - "127.0.0.1:${KDIVE_MINIO_CONSOLE_PORT:-9001}:9001"
-  - "127.0.0.1:${KDIVE_OIDC_PORT:-8090}:8080"
+  - "${KDIVE_POSTGRES_PORT:-127.0.0.1:5432}:5432"
+  - "${KDIVE_MINIO_PORT:-127.0.0.1:9000}:9000"
+  - "${KDIVE_MINIO_CONSOLE_PORT:-127.0.0.1:9001}:9001"
+  - "${KDIVE_OIDC_PORT:-127.0.0.1:8090}:8080"
 ```
 
-The `KDIVE_*_PORT` variables that override the host-side port already accept a full
-`ADDR:PORT` left side, so an operator who genuinely needs remote access can override the
-default explicitly, e.g. `KDIVE_POSTGRES_PORT=0.0.0.0:5432`.
+Embedding the address in the default rather than prefixing the template preserves the
+`ADDR:PORT` override contract without ambiguity: setting `KDIVE_POSTGRES_PORT=0.0.0.0:5432`
+produces `0.0.0.0:5432:5432`, which docker compose accepts. A hardcoded `127.0.0.1:` prefix
+would instead produce `127.0.0.1:0.0.0.0:5432:5432` — a four-segment string that docker
+compose rejects as an invalid IP address. The variable has always controlled the full left
+side; this decision makes the default safe rather than adding a fixed prefix.
 
 The Prometheus and Grafana `obs`-profile services are out of scope: they sit behind an
 opt-in profile, do not carry fixed-credential literals in the repository, and do not hold
@@ -70,16 +74,22 @@ The reference Compose stack is local-only by default. Fixed-credential Postgres,
 the mock OIDC issuer are no longer reachable from outside the host without an explicit
 `KDIVE_*_PORT` override.
 
-Remote access to these backends becomes an explicit opt-in through the existing
-`KDIVE_*_PORT` variables, which already accepted `ADDR:PORT` syntax before this change.
+Remote access to these backends becomes an explicit opt-in through the existing `KDIVE_*_PORT`
+variables. Operators who need remote access pass the full `ADDR:PORT` as the override, e.g.
+`KDIVE_POSTGRES_PORT=0.0.0.0:5432 just compose-up`. The variable has always controlled the
+entire left side of the mapping; this decision changes only what the default value is.
 
 **Test changes.**
-`tests/compose/test_compose_config.py::test_backend_host_port_is_overridable` currently passes
-a bare port string (`"17777"`) as the override and asserts that string appears in the
-published ports. With loopback-bound defaults the `docker compose config` model renders the
-published address as the full `host:port` string (e.g. `"0.0.0.0:17777"`), not `"17777"`,
-when the override is bare. The test is updated to pass a full `ADDR:PORT` override and assert
-on the port segment only, matching what `_published_ports` already extracts as a string.
+`tests/compose/test_compose_config.py` adds two new test groups:
+
+- `test_fixed_credential_backend_binds_loopback_by_default` — asserts the `host_ip` rendered
+  by `docker compose config` is `"127.0.0.1"` for each backend using the default.
+- `test_fixed_credential_backend_addr_port_override_works` — asserts an `ADDR:PORT` override
+  (e.g. `KDIVE_POSTGRES_PORT=0.0.0.0:17778`) renders the correct host port and bind address
+  so the escape hatch is proven live.
+
+`tests/compose/test_compose_config.py::test_backend_host_port_is_overridable` is unchanged —
+it tests bare-port overrides, which continue to work.
 
 `tests/image/compose.smoke.override.yml` drops port publishing with `!reset []` so the CI
 smoke test does not conflict with a running stack. With loopback-bound defaults the risk of

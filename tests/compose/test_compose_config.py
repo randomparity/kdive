@@ -514,6 +514,31 @@ def test_backend_host_port_is_overridable(
     assert internal in targets
 
 
+# ADR-0554 §Escape hatch: operators who need remote access pass ADDR:PORT via the
+# override variable (e.g. KDIVE_POSTGRES_PORT=0.0.0.0:5432). The var controls the
+# entire left side, so no prefix collision can produce a four-segment string.
+@pytest.mark.parametrize(
+    ("service", "env_var", "container_port"),
+    [
+        ("postgres", "KDIVE_POSTGRES_PORT", "5432"),
+        ("minio", "KDIVE_MINIO_PORT", "9000"),
+        ("oidc", "KDIVE_OIDC_PORT", "8080"),
+    ],
+)
+def test_fixed_credential_backend_addr_port_override_works(
+    service: str, env_var: str, container_port: str
+) -> None:
+    """An ADDR:PORT override changes both the bind address and the host port without error."""
+    override = "0.0.0.0:17778"
+    svc = _config({env_var: override})["services"][service]
+    published = _published_ports(svc)
+    host_ips = _host_ips(svc)
+    assert "17778" in published, f"{service}: ADDR:PORT override did not move the host port"
+    assert "0.0.0.0" in host_ips, f"{service}: ADDR:PORT override did not change the bind address"
+    targets = {str(p.get("target")) for p in svc.get("ports", [])}
+    assert container_port in targets
+
+
 # Per-process aux health/metrics ports (ADR-0090 §5): the loopback default ports the
 # bind decision keeps, but bound to 0.0.0.0 inside each container so the compose
 # healthcheck (and an in-network scrape) can reach a side port that is never published.
