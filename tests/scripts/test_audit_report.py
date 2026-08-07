@@ -124,6 +124,16 @@ def test_a_skipped_dependency_is_not_reported_as_clean() -> None:
     assert lines == ["acme 1.0: PYSEC-1", "not audited (1 skipped): libvirt-python"]
 
 
+def test_a_dependency_entry_with_no_vulns_key_is_not_a_pass() -> None:
+    # A pip-audit release that renamed or dropped `vulns` would otherwise present every
+    # dependency as unaffected — a silently green supply-chain gate. Unreadable must fail
+    # toward unexamined, so the check is the absence of `vulns`, not the presence of
+    # `skip_reason`.
+    renamed = {"name": "packaging", "version": "25.0", "advisories": []}
+
+    assert classify(json.dumps({"dependencies": [renamed]})) == (NO_VERDICT, [])
+
+
 def test_an_audit_that_examined_nothing_is_not_a_pass() -> None:
     # `affected` is empty both when every dependency came back clean and when there were no
     # dependencies at all. Only the first is a pass: an export whose group selection resolved

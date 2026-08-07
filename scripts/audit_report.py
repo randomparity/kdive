@@ -54,12 +54,19 @@ def classify(raw: str) -> tuple[int, list[str]]:
     reads as unaffected. ``--strict`` makes the runtime gate abort before any output, so this
     only bites the informational dev mode, whose sole channel is the job summary: without it,
     packages that were never queried are reported as carrying no known advisories.
+
+    The test is the *absence of* ``vulns`` rather than the presence of ``skip_reason``, so a
+    future release that renames either key reads as unexamined instead of clean. Every
+    unreadable shape has to fail in that direction; the reverse is the silently green gate.
     """
     try:
         report = json.loads(raw)
         dependencies = report["dependencies"]
         affected = [dep for dep in dependencies if dep.get("vulns")]
-        skipped = [dep for dep in dependencies if "skip_reason" in dep]
+        # `pip-audit` emits exactly one of these keys per dependency. An entry carrying
+        # neither is a shape this cannot read — a renamed `vulns` would look like a clean
+        # audit otherwise — so it counts as unexamined rather than unaffected.
+        skipped = [dep for dep in dependencies if "vulns" not in dep]
     except ValueError, KeyError, TypeError, AttributeError:
         return NO_VERDICT, []
 

@@ -46,23 +46,38 @@ not the exit code — it is whether the run **produced a verdict at all**.
 
 **Retry a network step only when it produced no verdict. Never retry a verdict.**
 
-For `pip-audit`, "produced a verdict" means it emitted parseable JSON. `scripts/audit-deps.sh`
-runs the audit with `-f json` to a file and classifies:
+For `pip-audit`, "produced a verdict" means it emitted a report that is legible *as an audit*.
+`scripts/audit-deps.sh` runs the audit with `-f json` to a file and classifies. There is one
+rule — **no verdict is retried, then failed; a verdict is acted on immediately** — and these
+are its cases:
 
-- **Parseable JSON** — the audit completed and its answer is authoritative. A finding is never
-  retried. The script derives its own exit status from the *content*: non-empty `vulns`
-  anywhere fails the runtime (gating) mode, and `pip-audit`'s exit code never decides that on
-  its own.
-- **Parseable JSON that looks clean, from a run that nonetheless exited non-zero** — passing
-  requires the two to agree. A clean report from a failed run is a disagreement the script
-  cannot explain (a `--strict` collection abort is the case to worry about), and the safe
-  reading of "cannot explain" is *no verdict*: retried, then failed. This is the one place the
-  exit code is consulted, and it only ever moves the result away from green.
-- **No parseable JSON** — the audit did not complete. Only this is retried, up to 3 attempts
-  with 5s/15s backoff.
-- **Attempts exhausted** — fails. An unreachable PyPI is an unaudited dependency set, and an
-  unaudited set is not a passing audit. The gate stays fail-closed on every path; the only
-  route to exit 0 is a completed audit that found nothing.
+- **Parseable JSON naming a finding** — a verdict, and authoritative. Never retried. The
+  script derives its exit status from the *content*: non-empty `vulns` anywhere fails the
+  runtime (gating) mode, and `pip-audit`'s exit code never decides that on its own.
+- **Parseable JSON with every dependency examined and clean** — a verdict, and the only route
+  to exit 0.
+- **Parseable JSON that is not legible as an audit of this dependency set** — no verdict.
+  An empty `dependencies` list is the clearest case: the runtime export
+  (`--no-default-groups --group live`) could resolve to nothing if that group were renamed or
+  emptied, and a set that was not examined has not been found clean. A dependency `pip-audit`
+  reports as skipped (`skip_reason`, which a 404 from the advisory feed produces silently)
+  is the same principle per package. `--strict` already aborts the runtime gate on a skip
+  before any output, so this bites the informational dev mode, whose only channel is the job
+  summary.
+- **Parseable JSON that looks clean, from a run that nonetheless exited non-zero** — no
+  verdict. Passing requires the two to agree; a clean report from a failed run is a
+  disagreement the script cannot explain (a `--strict` collection abort is the case to worry
+  about). This is the one place the exit code is consulted, and it only ever moves the result
+  away from green.
+- **No parseable JSON at all** — the audit did not complete. The transport failure this issue
+  reports.
+- **Attempts exhausted** (3, with 5s/15s backoff) — fails. An unreachable PyPI is an unaudited
+  dependency set, and an unaudited set is not a passing audit.
+
+The gate is fail-closed on every path: the only route to exit 0 is a completed audit that
+examined the whole set and found nothing. A report shape this cannot read is never *clean* —
+if that ever inverts, the gate goes silently green, which is the failure this design exists to
+foreclose.
 
 The audit also stops running under `uvx`. `pip-audit` resolves wheels for the interpreter it
 runs on, and an ephemeral `uvx` environment is built on whatever Python `uv` happens to find.
