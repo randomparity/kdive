@@ -532,6 +532,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the data volumes in every teardown description
 - Make the one-time upgrade snippet correct under bash
 - Amend ADR-0401's falsified residual and fix the cleanup command
+- Retry a network CI step only when it produced no verdict
 
 ### Fixed
 
@@ -913,6 +914,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Require a regular file before locking a liveness path
 - Only a missing liveness file answers "the run is dead"
 - Move --maxprocesses from addopts to justfile recipes
+- Run the classifier on the project's interpreter
+- Assert the flags the gate depends on, and scope the guard
+- Correct the ADR's decision text and stop trusting a skip
+- State every fail-closed case in the ADR, and read the shape
 
 ### Build
 
