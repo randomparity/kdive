@@ -24,8 +24,10 @@ readonly IMAGES=(
   "minio/minio:RELEASE.2025-09-07T16-13-09Z" # tests/store/conftest.py::_MINIO_IMAGE
 )
 
-readonly ATTEMPTS=3
+# One attempt per backoff entry, plus the first. Deriving ATTEMPTS keeps the two in step:
+# raising it alone would index past the array, and `set -u` aborts on an unbound element.
 readonly BACKOFF_S=(5 15)
+readonly ATTEMPTS=$((${#BACKOFF_S[@]} + 1))
 
 pull_with_retry() {
   local image="$1" attempt

@@ -18,8 +18,15 @@ service — not hand-invented shapes. The advisory ids below are real PyPI/OSV r
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
 
 from scripts.audit_report import CLEAN, FOUND, NO_VERDICT, classify
+
+_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "audit_report.py"
 
 #: `pip-audit --no-deps --strict -r <requests==2.19.1> -f json`, trimmed to the fields the
 #: classifier reads. The real run exited 1 and reported 23 advisories across 3 packages.
@@ -89,6 +96,58 @@ def test_an_unrecognised_shape_is_no_verdict_never_clean() -> None:
         assert status == NO_VERDICT, f"{raw!r} must not be a verdict"
         assert status != CLEAN, f"{raw!r} must never read as a clean audit"
         assert lines == []
+
+
+def test_an_audit_that_examined_nothing_is_not_a_pass() -> None:
+    # `affected` is empty both when every dependency came back clean and when there were no
+    # dependencies at all. Only the first is a pass: an export whose group selection resolved
+    # to nothing has not found the shipped set clean, it has not looked at it.
+    assert classify(json.dumps({"dependencies": []})) == (NO_VERDICT, [])
+
+
+@pytest.mark.parametrize(
+    ("report", "expected_status", "expected_stdout"),
+    [
+        (_GENUINE_ADVISORY, FOUND, "requests 2.19.1: PYSEC-2018-28, PYSEC-2023-74\n"),
+        (_CLEAN, CLEAN, ""),
+        ("not json at all", NO_VERDICT, ""),
+    ],
+    ids=["advisory", "clean", "no-verdict"],
+)
+def test_the_shell_sees_the_verdict_as_an_exit_status(
+    tmp_path: Path, report: str, expected_status: int, expected_stdout: str
+) -> None:
+    """Run the module the way ``audit-deps.sh`` does: as a child process.
+
+    Every other test here calls ``classify`` in-process, which is the half that was already
+    easy. The shell reads this module's **exit status** and **stdout**, and nothing asserted
+    that boundary — so a module that could not even be parsed by the invoking interpreter
+    passed the whole suite while the gate was dead. A SyntaxError makes the exit status wrong,
+    which is exactly what this catches, whichever interpreter CI ends up using.
+    """
+    report_path = tmp_path / "audit.json"
+    report_path.write_text(report, encoding="utf-8")
+
+    result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [sys.executable, str(_SCRIPT), str(report_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == expected_status, f"stderr: {result.stderr}"
+    assert result.stdout.startswith(expected_stdout)
+    assert not result.stderr, f"the classifier must stay silent on stderr: {result.stderr}"
+
+
+def test_a_missing_report_file_is_no_verdict_not_a_crash(tmp_path: Path) -> None:
+    result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [sys.executable, str(_SCRIPT), str(tmp_path / "absent.json")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == NO_VERDICT
 
 
 def test_a_vuln_entry_missing_its_id_still_fails_the_gate() -> None:

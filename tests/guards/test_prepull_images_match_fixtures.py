@@ -93,23 +93,28 @@ def test_prepull_images_are_exactly_the_fixture_images() -> None:
 
 
 def test_every_suite_workflow_prepulls_before_it_runs_the_suite() -> None:
+    # Every `just test`, not merely the first. `search` would let a second suite-running job
+    # added later inherit the first job's pre-pull and pass while pre-pulling nothing for
+    # itself — the guard going quiet exactly as the workflow grows.
     for name in _SUITE_WORKFLOWS:
-        path = _WORKFLOWS / name
-        text = path.read_text(encoding="utf-8")
+        text = (_WORKFLOWS / name).read_text(encoding="utf-8")
+        test_steps = [match.start() for match in _TEST_STEP.finditer(text)]
+        prepull_steps = [match.start() for match in _PREPULL_STEP.finditer(text)]
 
-        test_step = _TEST_STEP.search(text)
-        assert test_step is not None, (
+        assert test_steps, (
             f"{name} no longer has a `run: just test` step, so this guard is vacuous for it. "
             "If the suite moved to another recipe, re-point _TEST_STEP; if the workflow stopped "
             "running the suite, drop it from _SUITE_WORKFLOWS (ADR-0553)."
         )
-        prepull_step = _PREPULL_STEP.search(text)
-        assert prepull_step is not None, (
-            f"{name} runs the suite with real containers but never runs `just pull-test-images`. "
-            "Without it an unreachable registry surfaces as thousands of downstream fixture "
-            "errors instead of one red step (ADR-0553, #1913)."
+        assert len(prepull_steps) == len(test_steps), (
+            f"{name} has {len(test_steps)} `run: just test` step(s) but "
+            f"{len(prepull_steps)} `run: just pull-test-images` step(s). Each suite run needs "
+            "its own pre-pull; without one, an unreachable registry surfaces as thousands of "
+            "downstream fixture errors instead of one red step (ADR-0553, #1913)."
         )
-        assert prepull_step.start() < test_step.start(), (
-            f"{name} runs `just pull-test-images` after `just test`, which pre-pulls nothing: "
-            "the fixtures have already tried the registry themselves by then (ADR-0553)."
-        )
+        for index, (prepull, test) in enumerate(zip(prepull_steps, test_steps, strict=True)):
+            assert prepull < test, (
+                f"{name} runs `just pull-test-images` after `just test` (pair {index}), which "
+                "pre-pulls nothing: the fixtures have already tried the registry by then "
+                "(ADR-0553)."
+            )

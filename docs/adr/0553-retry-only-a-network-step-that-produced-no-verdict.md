@@ -122,6 +122,21 @@ Both `supply chain` jobs now resolve the project environment, where before they 
 `pip-audit` standalone. They already apt-install `libvirt-dev` for exactly this reason, so the
 toolchain is present; the cost is the sync, and it buys the interpreter match above.
 
+That is an ordering change as well as a cost: the audit jobs now install the dependency set
+before auditing it, so they are no longer the one place in CI that inspects the locked set
+without instantiating it. The marginal exposure is small — `pip-audit` already built
+`libvirt-python`'s sdist to read its metadata, which is why both jobs install `libvirt-dev`,
+and `lint · type · test` runs `uv sync --locked` on the same commit regardless — so this grants
+nothing an attacker did not already have. It costs defence in depth, and it is accepted for the
+interpreter match rather than overlooked.
+
+The same interpreter argument binds the classifier, and less obviously. `scripts/audit_report.py`
+is linted at the project's `target-version = "py314"`, so `ruff --fix` rewrites it to 3.14-only
+syntax — it did, to an `except` clause — which means an older ambient `python3` cannot parse it
+at all. A classifier that dies is not a classifier that found something, so `audit-deps.sh` runs
+it under `uv run python` and treats any exit outside its 0/1/2 contract as *no verdict*. Both
+halves matter: the first stops it dying, the second stops a death being read as an advisory.
+
 Adding a third test-fixture image, or bumping either tag, now requires editing the pull script
 in the same change. The guard names both files and the mismatched values, so the fix is
 mechanical.

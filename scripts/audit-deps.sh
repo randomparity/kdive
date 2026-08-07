@@ -31,8 +31,11 @@ set -euo pipefail
 # whose default interpreter happens to match. `uv run` uses the project's interpreter by
 # construction, so there is nothing to keep in step (ADR-0553).
 readonly PIP_AUDIT=(uv run --with 'pip-audit==2.10.0' pip-audit)
-readonly ATTEMPTS=3
+#: Seconds to wait between attempts. One attempt per entry, plus the first — deriving ATTEMPTS
+#: keeps the two in step, since raising ATTEMPTS alone would index past the array and `set -u`
+#: would abort the run between attempts with a bare `unbound variable`.
 readonly BACKOFF_S=(5 15)
+readonly ATTEMPTS=$((${#BACKOFF_S[@]} + 1))
 
 readonly MODE="${1:-}"
 case "$MODE" in
@@ -60,10 +63,15 @@ fi
 
 # 0 = completed, no findings; 1 = completed, findings (named on stdout); 2 = no verdict.
 # The logic lives in scripts/audit_report.py so it can be proven offline against real report
-# shapes; see tests/scripts/test_audit_report.py. It is stdlib-only and imports nothing from
-# kdive, so plain python3 runs it — it does not need the project environment.
+# shapes; see tests/scripts/test_audit_report.py.
+#
+# `uv run python`, not bare `python3`, for the same reason pip-audit runs under `uv run` above:
+# the runner's ambient interpreter is not the project's. This file is linted at
+# `target-version = "py314"`, so ruff rewrites it to 3.14-only syntax (it did, to the `except`
+# clause) — under an older `python3` it then dies on a SyntaxError, which the caller would read
+# as a verdict. The project's interpreter is the only one it is checked against.
 classify() {
-  python3 "$(dirname "$0")/audit_report.py" "$report"
+  uv run python "$(dirname "$0")/audit_report.py" "$report"
 }
 
 verdict=2
@@ -75,6 +83,14 @@ for ((attempt = 1; attempt <= ATTEMPTS; attempt++)); do
     verdict=0
   else
     verdict=$?
+  fi
+  # The classifier's contract is exactly 0, 1, 2. Anything else is the classifier itself
+  # failing — a SyntaxError (1), no interpreter on PATH (127), the OOM killer (137) — and
+  # must not be read as its verdict. Untreated, 1 means FOUND, so a broken classifier reports
+  # "your dependencies are vulnerable" and names none.
+  if ((verdict > 2)) || { ((verdict == 1)) && [[ -z "$findings" ]]; }; then
+    echo "audit-deps: classifier exited ${verdict} with no findings — treating as no verdict" >&2
+    verdict=2
   fi
   # Passing requires the report and pip-audit's own exit status to agree. The exit status
   # cannot tell a finding from a timeout, which is why it never decides on its own — but a
