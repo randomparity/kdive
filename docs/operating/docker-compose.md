@@ -21,7 +21,7 @@ The four supported worker lifecycle recipes are `just compose-up`, `just compose
 `just compose-recreate-worker`, and `just compose-down`. `just compose-stop` preserves named
 volumes after recording worker termination; `just compose-down` removes named volumes for a
 destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-minio-data` (the
-artifacts bucket), `kdive-prom-data` (the metrics TSDB), and `kdive-build` / `kdive-install`;
+artifacts bucket), and `kdive-build` / `kdive-install`;
 `docker compose down --volumes` and `scripts/live-stack/down.sh --wipe` drop them too, and
 nothing else does. These recipes preserve exact worker-incarnation evidence in Postgres. Raw
 Compose/Docker lifecycle commands and host workers bypass that evidence boundary. A database failure

@@ -571,21 +571,21 @@ def test_prometheus_static_config_passes_promtool() -> None:
     assert res.returncode == 0, res.stdout + res.stderr
 
 
-# --- Named data volumes for every image-declared VOLUME (ADR-0552) ------------------------
+# --- Every image-declared VOLUME is mounted explicitly (ADR-0552) --------------------------
 
-#: The complete rendered mount set of each service whose *image* declares a `VOLUME`, as
+#: The complete rendered mount set of every service whose *image* declares a `VOLUME`, as
 #: sorted (type, source, target) tuples. Full-set equality, not membership: a mount that
 #: disappears, changes path, or displaces another reddens the case that names it. Sorted
 #: rather than in declaration order, which is a cosmetic choice nothing should depend on.
 #:
-#: Without the named entry Compose allocates an anonymous volume at that path on every `up`,
-#: and a `down` without `--volumes` orphans it rather than removing it — so the stack silently
-#: restarts empty while `just compose-stop` and both operator guides promise it preserves state
-#: (#1911). Bind sources are repo-relative so the expectation carries no checkout path.
+#: With nothing mounted at the image's `VOLUME` path, Compose allocates an anonymous volume
+#: there on every `up`, and a `down` without `--volumes` orphans it rather than removing it —
+#: so the stack silently restarts empty while `just compose-stop` and both operator guides
+#: promise a plain teardown preserves state (#1911). Bind sources are repo-relative so the
+#: expectation carries no checkout path.
 #:
-#: Note what is deliberately NOT asserted: that no service mounts a data directory without a
-#: source. An image's `VOLUME` never appears in the rendered model at all, so such a check
-#: passes unchanged on the broken file — it reads as a guard while proving nothing.
+#: `prometheus` gets tmpfs rather than a named volume (see the case below). grafana is absent
+#: on purpose: `grafana/grafana:13.0.3` declares no `VOLUME`, so it has nothing to cover.
 _EXPECTED_MOUNTS: dict[str, tuple[tuple[str, str, str], ...]] = {
     "postgres": (
         (
@@ -596,14 +596,10 @@ _EXPECTED_MOUNTS: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("volume", "kdive-pgdata", "/var/lib/postgresql/data"),
     ),
     "minio": (("volume", "kdive-minio-data", "/data"),),
-    "prometheus": (
-        ("bind", "deploy/compose/prometheus.yml", "/etc/prometheus/prometheus.yml"),
-        ("volume", "kdive-prom-data", "/prometheus"),
-    ),
+    "prometheus": (("bind", "deploy/compose/prometheus.yml", "/etc/prometheus/prometheus.yml"),),
 }
 
-#: Derived from the mount table above, so the two can never disagree. grafana is absent on
-#: purpose: `grafana/grafana:13.0.3` declares no `VOLUME`, so it has nothing to name.
+#: Derived from the mount table above, so the two can never disagree.
 _NAMED_DATA_VOLUMES = {
     source for mounts in _EXPECTED_MOUNTS.values() for kind, source, _ in mounts if kind == "volume"
 }
@@ -620,7 +616,7 @@ def _rendered_mounts(service: dict[str, Any]) -> tuple[tuple[str, str, str], ...
 
 
 @pytest.mark.parametrize("service", sorted(_EXPECTED_MOUNTS))
-def test_image_declared_volume_is_backed_by_a_named_project_volume(service: str) -> None:
+def test_image_declared_volume_is_mounted_explicitly(service: str) -> None:
     # `prometheus` renders only under the obs profile; asking for it costs the other two nothing.
     assert _rendered_mounts(_services_with_obs_profile()[service]) == tuple(
         sorted(_EXPECTED_MOUNTS[service])
@@ -635,3 +631,21 @@ def test_named_data_volume_is_declared_in_the_project_volumes_block(volume: str)
     declared = _config(obs=True)["volumes"]
     assert volume in declared, sorted(declared)
     assert declared[volume]["name"].endswith(f"_{volume}")
+
+
+def test_prometheus_tsdb_is_tmpfs_rather_than_a_named_volume() -> None:
+    # ADR-0189 decided the demo TSDB is ephemeral; the anonymous volume it actually got was
+    # orphaned, not dropped. tmpfs makes that decision true without adding a volume that
+    # `just compose-down` cannot reach: that recipe runs a profile-less `down --volumes`,
+    # which does not stop this profile-gated service, so a named volume here would survive
+    # every destructive path except `scripts/live-stack/down.sh --wipe`.
+    #
+    # `mode=1777` is load-bearing, not decoration: the image runs as `nobody` and a
+    # default-mode tmpfs makes prometheus panic on its first write.
+    #
+    # The complementary half — that no named volume is mounted at /prometheus — is the
+    # `prometheus` case of the mount table above. Asserting the *absence* of a top-level
+    # `kdive-prom-data` declaration here would prove nothing: Compose prunes declared-but-
+    # unreferenced volumes from the rendered model, so that check cannot fail.
+    prometheus = _services_with_obs_profile()["prometheus"]
+    assert prometheus["tmpfs"] == ["/prometheus:mode=1777"]

@@ -43,8 +43,16 @@ _COMPOSE_FILE = _ROOT / "docker-compose.yml"
 _DATA_MOUNTS = {
     "postgres": ("kdive-pgdata", "/var/lib/postgresql/data"),
     "minio": ("kdive-minio-data", "/data"),
-    "prometheus": ("kdive-prom-data", "/prometheus"),
 }
+
+#: prometheus is started too, but its image `VOLUME /prometheus` is covered by tmpfs rather
+#: than a named volume (ADR-0189, ADR-0552), so it is proven by absence of any volume mount
+#: at that path rather than by a persistence round trip.
+_TMPFS_SERVICE = "prometheus"
+_TMPFS_PATH = "/prometheus"
+
+#: Every service the proof starts. None has a `build:` or a `depends_on`.
+_SERVICES = (*sorted(_DATA_MOUNTS), _TMPFS_SERVICE)
 
 _MARKER_TABLE = "kdive_volume_proof"
 _MARKER_KEY = "marker"
@@ -109,19 +117,39 @@ def _container_id(env: dict[str, str], service: str) -> str:
     return container
 
 
-def _mounted_volume_name(env: dict[str, str], service: str) -> str:
-    """Return the volume name the container actually has at the service's data path."""
-    _volume, destination = _DATA_MOUNTS[service]
+def _container_mounts(env: dict[str, str], service: str) -> list[dict[str, str]]:
     raw = _run(
         ("docker", "inspect", "--format", "{{json .Mounts}}", _container_id(env, service)),
         env,
         timeout=60,
     )
-    for mount in json.loads(raw):
+    return list(json.loads(raw))
+
+
+def _mounted_volume_name(env: dict[str, str], service: str) -> str:
+    """Return the volume name the container actually has at the service's data path."""
+    _volume, destination = _DATA_MOUNTS[service]
+    for mount in _container_mounts(env, service):
         if mount["Destination"] == destination:
             assert mount["Type"] == "volume", (service, destination, mount["Type"])
             return str(mount["Name"])
     raise AssertionError(f"{service} has no mount at {destination}")
+
+
+def _assert_tmpfs_leaves_no_volume(env: dict[str, str]) -> None:
+    """A tmpfs mount is container-internal, so it appears in no `docker inspect` mount entry.
+
+    That is exactly what makes it the right cover for prometheus: the anonymous volume it used
+    to get was orphaned by every plain `down`, and a *named* volume would outlive
+    `just compose-down`, which runs a profile-less `down --volumes` that never stops this
+    profile-gated service.
+    """
+    stray = [
+        mount
+        for mount in _container_mounts(env, _TMPFS_SERVICE)
+        if mount["Destination"] == _TMPFS_PATH
+    ]
+    assert stray == [], stray
 
 
 def _existing_volumes(env: dict[str, str]) -> set[str]:
@@ -205,8 +233,9 @@ def _teardown(env: dict[str, str], project: str) -> None:
 
 
 def _up(env: dict[str, str]) -> None:
-    services = sorted(_DATA_MOUNTS)
-    _compose(env, "up", "-d", "--wait", "--wait-timeout", "180", *services, timeout=360)
+    # Always the explicit service list: a bare `up -d` would start the whole default graph
+    # and build the app image via `migrate`, which defeats the isolation this proof relies on.
+    _compose(env, "up", "-d", "--wait", "--wait-timeout", "180", *_SERVICES, timeout=360)
 
 
 def test_plain_down_preserves_backend_state_and_down_volumes_resets_it() -> None:
@@ -223,6 +252,7 @@ def test_plain_down_preserves_backend_state_and_down_volumes_resets_it() -> None
         mounted = {service: _mounted_volume_name(env, service) for service in _DATA_MOUNTS}
         # A 64-hex name here is the #1911 defect: an anonymous volume Compose will orphan.
         assert mounted == expected_volumes
+        _assert_tmpfs_leaves_no_volume(env)
 
         with _connect_when_ready(dsn) as conn:
             conn.execute(f"CREATE TABLE {_MARKER_TABLE} (marker text primary key)")  # noqa: S608
@@ -231,7 +261,9 @@ def test_plain_down_preserves_backend_state_and_down_volumes_resets_it() -> None
         s3.create_bucket(Bucket=bucket)
         s3.put_object(Bucket=bucket, Key=_MARKER_KEY, Body=payload)
 
-        # --- arm 2: a plain `down` keeps every named volume and adds no anonymous one
+        # --- arm 2: a plain `down` keeps every named volume. Nothing is orphaned: arm 1
+        # already proved each data path holds the project's named volume rather than an
+        # anonymous one, and that the tmpfs path holds no volume at all.
         _compose(env, "down", timeout=180)
         surviving = _existing_volumes(env)
         assert set(expected_volumes.values()) <= surviving, sorted(expected_volumes.values())

@@ -7,7 +7,7 @@
 # by bare number would take down the wrong thing. Survivors get SIGKILL; the pid file is kept
 # if a real kdive process won't die so a re-run can finish the job. The backends are left
 # running; from the repo root `docker compose down` stops them and keeps their data volumes,
-# and `docker compose down --volumes` also drops the database, bucket, and metrics TSDB.
+# and `docker compose down --volumes` also drops the database and the artifacts bucket.
 set -euo pipefail
 
 example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -96,4 +96,4 @@ fi
 rm -f "${pid_file}"
 echo "stopped local-libvirt example processes"
 echo "backends still running — from the repo root, 'docker compose down' stops them and keeps" \
-  "their data; add --volumes to also drop the database, bucket, and metrics TSDB"
+  "their data; add --volumes to also drop the database and the artifacts bucket"
