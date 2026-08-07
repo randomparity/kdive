@@ -112,6 +112,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scope a clause to the arches it applies to
 - State where omitting a feature's symbols surfaces
 - Publish the enforcement of the one bpf_tracing symbol kdive reads
+- Name the state-fenced kinds and derive their lane
+- Route on the kind, on both insert and recycle
+- Declare KDIVE_WORKER_ACCEPTED_LANES
+- Run one claim loop per accepted dispatch lane
 
 ### Changed
 
@@ -513,6 +517,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct the last stale initrd claims and the I2 rationale
 - Qualify the =y claim in the advisory's opening paragraph
 - Propose 0549 — profile policies declare their ResourceKind
+- Record the state-fenced dispatch lane and per-lane claim loops
+- Route the recycle path and size the pool for the probe
+- Amend ADR-0447 for the lane the recycle now derives
+- Correct why intra-lane serialization is acceptable
+- Cover the worker rollback that strands fenced rows
+- Include running rows in the rollback procedure
+- State S5 in lane terms
+- Sequence the state-fenced lane implementation
+- Keep the lane default out of the config layer
+- Scope rollback against the forward-only worker upgrade
+- Define the loop supervision trigger and mutation-check S3
 
 ### Fixed
 
@@ -884,6 +899,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reject a profile section that is not the Resource's kind
 - Make ProfilePolicy.kind read-only and correct ADR-0549
 - Keep the refusal set with one publisher, and name what narrows the seam
+- Drain in-flight jobs on shutdown instead of cancelling them
 
 ### Build
 
