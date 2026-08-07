@@ -912,6 +912,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the sweep alive past a container it cannot inspect
 - Require a regular file before locking a liveness path
 - Only a missing liveness file answers "the run is dead"
+- Move --maxprocesses from addopts to justfile recipes
 
 ### Build
 
