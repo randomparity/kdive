@@ -35,7 +35,12 @@ from psycopg import sql
 from kdive.db import migrate
 from tests.support import xdist_backend
 
-_POSTGRES_IMAGE = "postgres:17"
+# Pinned to the manifest-list digest so a re-tag of `postgres:17` on Docker Hub cannot
+# silently change what the schema-test gate asserts (ADR-0505 shape, #1921).
+# To update: `docker pull postgres:17` and replace the digest with the new one.
+_POSTGRES_IMAGE = (
+    "postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317"  # noqa: E501  # 17
+)
 
 
 def _start_postgres(labels: Mapping[str, str]) -> tuple[str, str]:

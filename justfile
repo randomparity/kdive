@@ -64,8 +64,11 @@ type:
 # Run the test suite, excluding the gated live_vm, live_stack, and agent_smoke suites.
 # (oidc_issuer-marked tests stay selected; they skip cleanly without the issuer container.)
 #
-# `-n auto` runs the suite across all cores via pytest-xdist; each worker gets its own
-# session-scoped Postgres/MinIO container, so there is no cross-worker DB contention.
+# `-n auto` runs the suite in parallel via pytest-xdist; workers share one Postgres and one
+# MinIO container per run (xdist_backend). `--maxprocesses=16` in pyproject.toml caps the
+# worker count on high-CPU-count machines (e.g. 128-logical-CPU ppc64le POWER hosts):
+# without a cap, saturating a single shared container causes timing-sensitive tests to flap.
+# CI runners have ≤8 CPUs, so the cap is never reached there (#1921).
 # `--dist worksteal` lets an idle worker pull queued tests from a busy worker's queue
 # instead of running its up-front chunk to completion (the `load` default); durations here
 # range from ~2ms to hundreds of ms per test, so worksteal shortens the straggler tail

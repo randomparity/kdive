@@ -112,7 +112,12 @@ typeCheckingMode = "off"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# --maxprocesses caps -n auto on high-CPU-count machines (e.g. ppc64le POWER hosts with 128
+# logical CPUs). Without it `-n auto` (which falls back to multiprocessing.cpu_count() when
+# psutil is absent) spawns 128 workers against a single shared Postgres/MinIO container,
+# saturating the container scheduler and causing timing-sensitive tests to flap. CI runners
+# have ≤8 CPUs so the cap is never reached there; it only applies locally (#1921).
+addopts = "-ra --maxprocesses=16"
 pythonpath = ["."]
 markers = [
   "live_vm: requires an operator-provided libvirt/KVM/debug environment (KVM/nested-virt host, libvirt, drgn, kdump-enabled guest image)",
