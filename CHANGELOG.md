@@ -918,6 +918,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Assert the flags the gate depends on, and scope the guard
 - Correct the ADR's decision text and stop trusting a skip
 - State every fail-closed case in the ADR, and read the shape
+- Bind backend ports to 127.0.0.1 by default (#1918)
+- Embed bind address in variable default, not template prefix
+- Update prepull guard + script for digest-pinned images; add ADR-0554 Considered & rejected
 
 ### Build
 
