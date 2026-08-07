@@ -96,3 +96,10 @@ def test_compose_bootstrap_script_is_covered_by_the_shell_gate() -> None:
     lint_shell = justfile.split("lint-shell:", 1)[1].split("\n\n", 1)[0]
 
     assert "deploy/compose" in lint_shell
+
+
+def test_examples_scripts_are_covered_by_the_shell_gate() -> None:
+    justfile = (Path(__file__).resolve().parents[2] / "justfile").read_text()
+    lint_shell = justfile.split("lint-shell:", 1)[1].split("\n\n", 1)[0]
+
+    assert "examples" in lint_shell
