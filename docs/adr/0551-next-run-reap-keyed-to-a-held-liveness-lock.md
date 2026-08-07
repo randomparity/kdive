@@ -91,7 +91,7 @@ tore down cleanly has already removed its container.
 
 3. **A run sweeps before it starts a container.** `_start_postgres` / `_start_minio` call
    `sweep_stale_backend_containers()` first. It lists containers filtered by
-   `kdive.test-backend`, and for each reads the recorded liveness path and attempts
+   `kdive.test-backend`, and for each opens the recorded liveness path and attempts
    `LOCK_EX | LOCK_NB` on it:
 
    - **acquired** — no process holds a shared lock, so the owning run is gone by any
@@ -99,9 +99,25 @@ tore down cleanly has already removed its container.
      whatever killed it. Remove the container with `force=True, v=True`, taking the
      anonymous volume with it.
    - **`EWOULDBLOCK`** — a live run holds it. Leave it alone.
-   - **file absent** — the run root was removed, which pytest does only to roots of
+   - **file missing** — the run root was removed, which pytest does only to roots of
      finished runs. Treat as gone.
+   - **anything else** — unreadable, or not a regular file. Treat as **live**.
    - **no `kdive.test-backend-liveness` label** — not provably ours. Never reap.
+
+   **Only a missing file answers "dead".** The asymmetry is deliberate and is the safety
+   property: failing to reap costs one stale container until the next run, while reaping
+   wrongly destroys a running suite's backend mid-test. The multi-user case makes this
+   concrete — pytest's per-run root is `/tmp/pytest-of-<user>`, mode 0700, so on a shared
+   Docker daemon every container another user's *live* run owns has a liveness path this
+   process cannot stat. A `Path.is_file()` guard reports False for exactly that and would
+   read it as reapable.
+
+   For the same reason the predicate is **one open, not a stat-then-open**: the path comes
+   off a container label, so it is neither necessarily ours nor stable across two
+   resolutions, and checking one resolution while opening another leaves a symlink-swap
+   window. `O_RDONLY | O_NONBLOCK` keeps the open from blocking on a FIFO — which would
+   hang the sweep and the run behind it, with no timeout to catch it — and `fstat` on the
+   returned descriptor interrogates the object actually opened.
 
    The sweep is best-effort: a Docker failure warns and the run continues. A concurrent
    sweep from another run racing to remove the same container gets `NotFound`, which is

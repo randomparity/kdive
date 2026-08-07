@@ -154,11 +154,65 @@ def test_labels_name_the_backend_and_point_at_its_liveness_lock(tmp_path: Path) 
     assert liveness.is_absolute() and liveness.parent == tmp_path.resolve()
 
 
-def test_a_liveness_path_that_is_not_a_regular_file_reads_as_stale(tmp_path: Path) -> None:
-    # The path arrives from a container label, not from this process. A FIFO there would
-    # block `open` until someone opened the write end, hanging the sweep and the run.
+def test_a_liveness_path_that_is_not_a_regular_file_is_left_alone(tmp_path: Path) -> None:
+    """A FIFO must neither hang the sweep nor be read as permission to reap.
+
+    The path arrives from a container label, not from this process, so it can be any file
+    type. Without `O_NONBLOCK` this call blocks until someone opens the write end — it
+    hangs rather than fails, so it would burn a CI job's whole timeout.
+    """
     os.mkfifo(tmp_path / "kdive-pg.alive")
-    assert xdist_backend.is_stale_backend_container(_labels(tmp_path)) is True
+    assert xdist_backend.is_stale_backend_container(_labels(tmp_path)) is False
+
+
+def test_a_liveness_lock_this_process_cannot_reach_is_left_alone(tmp_path: Path) -> None:
+    """The multi-user case, and the one a stat-based guard gets backwards.
+
+    pytest's per-run root is `/tmp/pytest-of-<user>`, mode 0700. Two users sharing one
+    Docker daemon means every container the other user's LIVE run owns has a liveness path
+    this process cannot stat. `Path.is_file()` reports False for exactly that, which would
+    make a live suite's backend look reapable and destroy it mid-run.
+    """
+    unreachable = tmp_path / "other-users-run"
+    unreachable.mkdir()
+    (unreachable / "kdive-pg.alive").touch()
+    unreachable.chmod(0o000)
+    try:
+        assert xdist_backend.is_stale_backend_container(_labels(unreachable)) is False
+    finally:
+        unreachable.chmod(0o700)  # so tmp_path cleanup can remove it
+
+
+def test_an_unreadable_liveness_file_is_left_alone(tmp_path: Path) -> None:
+    # Same asymmetry at file level: only a *missing* file is evidence the run is gone.
+    lock = tmp_path / "kdive-pg.alive"
+    lock.touch()
+    lock.chmod(0o000)
+    assert xdist_backend.is_stale_backend_container(_labels(tmp_path)) is False
+
+
+def test_the_liveness_lock_is_already_held_when_start_runs(tmp_path: Path) -> None:
+    """The ordering the whole safety case rests on (ADR-0551): lock first, container second.
+
+    Were the lock taken after `start` returned, a container would exist for a window with
+    a free lock behind it, and any concurrent run's sweep would read it as crash debris
+    and force-remove it. Nothing else in this file catches that: every other liveness
+    assertion observes state from inside the `with`, by which time the lock is held either
+    way, so moving `_liveness_held` after `start()` leaves them all green.
+
+    Asserting *inside* `start` is what pins the order — that is the exact instant the
+    container would come into existence.
+    """
+    observed: list[bool] = []
+
+    def start(labels: Mapping[str, str]) -> tuple[str, str]:
+        observed.append(xdist_backend.is_stale_backend_container(labels))
+        return "postgresql://u:p@host:5432/test", "cid-ordering"
+
+    with xdist_backend.shared_container(tmp_path, "pg", start=start, stop=lambda _cid: None):
+        pass
+
+    assert observed == [False], "start() ran before its container's liveness lock was held"
 
 
 def test_start_is_handed_the_labels_it_must_stamp(tmp_path: Path) -> None:

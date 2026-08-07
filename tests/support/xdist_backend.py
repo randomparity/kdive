@@ -20,6 +20,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 import uuid
 import warnings
 from collections.abc import Callable, Iterator, Mapping
@@ -132,23 +133,41 @@ def _liveness_held(root: Path, name: str) -> Iterator[None]:
 def _run_is_live(liveness_path: Path) -> bool:
     """True while any process still holds the shared lock on ``liveness_path``.
 
-    An absent file means the per-run temp root was rotated away, which pytest does only
-    to a finished run's root. Any other error answers "live": the caller reaps on a False,
-    so an unreadable lock must never be read as permission to destroy a container.
+    **Only a missing file answers "dead".** The caller reaps on a False, so every other
+    outcome — unreadable, wrong file type, lock held — answers "live". That asymmetry is
+    the whole safety property: failing to reap costs one stale container until the next
+    run, while reaping wrongly destroys a running suite's backend mid-test.
 
-    The path is read back off a container label, so it is not necessarily one this code
-    wrote. ``is_file`` rather than ``exists`` keeps that honest — anything other than a
-    regular file cannot be a lock we took, and opening a FIFO here would block the sweep
-    (and the run behind it) until someone opened the other end.
+    A missing file means the per-run temp root was rotated away, which pytest does only to
+    a finished run's root.
+
+    One open, not a stat-then-open. The path is read back off a container label, so it is
+    neither necessarily one this code wrote nor stable between two calls:
+
+    - ``Path.is_file()`` would answer False for a file this process merely cannot *reach*
+      — ``/tmp/pytest-of-<user>`` is mode 0700, so another user's live run is exactly that
+      case, and a stat-based guard would read it as reapable and destroy it.
+    - Two resolutions of the same path can differ. Checking one and opening the other
+      leaves a window for a symlink swap.
+
+    ``O_NONBLOCK`` keeps the open from blocking on a FIFO, and ``fstat`` interrogates the
+    object actually opened rather than whatever the name resolves to next.
     """
-    if not liveness_path.is_file():
-        return False
     try:
-        with open(liveness_path) as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(handle, fcntl.LOCK_UN)
+        fd = os.open(liveness_path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # unreadable is never permission to destroy
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return True  # not a lock we took, and so not ours to reap either
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
     except OSError:
         return True
+    finally:
+        os.close(fd)
     return False
 
 
