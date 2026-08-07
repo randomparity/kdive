@@ -22,7 +22,10 @@ just compose-up   # builds the image, runs the backends + migrate, then gates th
 The four supported worker lifecycle recipes are `just compose-up`, `just compose-stop`,
 `just compose-recreate-worker`, and `just compose-down`. `just compose-stop` preserves named
 volumes after recording worker termination; `just compose-down` removes named volumes for a
-destructive teardown. Their operator-side lifecycle wrapper binds the exact full container ID to a
+destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-minio-data` (the
+artifacts bucket), `kdive-prom-data` (the metrics TSDB), and `kdive-build` / `kdive-install`;
+`docker compose down --volumes` and `scripts/live-stack/down.sh --wipe` drop them too, and
+nothing else does. Their operator-side lifecycle wrapper binds the exact full container ID to a
 random nonce in Postgres before start and records retained terminal inspect evidence before removal.
 Compose does not run a persistent lifecycle-witness service. Raw Compose/Docker lifecycle commands
 and host-launched workers bypass that chain and are unsupported. On a database failure, the wrapper
@@ -132,8 +135,9 @@ docker compose --profile obs up -d prometheus
 
 It scrapes `server:9464` / `worker:9465` / `reconciler:9466` over the compose network (those
 aux ports stay unpublished — only the `9090` UI is published to the host) using the static
-config in [`prometheus.yml`](prometheus.yml). TSDB is ephemeral container-local (no named
-volume): a `docker compose down` drops the history, matching the demo posture.
+config in [`prometheus.yml`](prometheus.yml). TSDB lives in the `kdive-prom-data` named volume
+and survives a plain `docker compose down`; `just compose-down` drops the history. Retention is
+capped at 6h, so it stays a demo store rather than a monitoring system of record.
 
 ## Driving an authenticated request
 
@@ -194,11 +198,11 @@ root worker and libvirt, so run them via the `!` prefix in the agent or directly
 
 - `up.sh` — full bring-up in order: backends → host migrations → libvirt → host processes →
   status. `--skip-obs` omits prometheus/grafana; `--reset-db` runs a full `down.sh --wipe` first
-  (drops the Postgres volume AND reaps all `kdive-*` libvirt domains/overlays — live VMs are
-  destroyed); recovery from migration drift — see below.
+  (drops the compose data volumes AND reaps all `kdive-*` libvirt domains/overlays — live VMs
+  are destroyed); recovery from migration drift — see below.
 - `down.sh` — stop host processes + compose backends, keeping state. `--wipe` is a full reset:
-  drops the Postgres volume and reaps `kdive-*` libvirt domains + their `/var/lib/kdive/rootfs`
-  overlays.
+  drops the compose data volumes (`kdive-pgdata`, `kdive-minio-data`, `kdive-prom-data`) and
+  reaps `kdive-*` libvirt domains + their `/var/lib/kdive/rootfs` overlays.
 - `status.sh` — read-only per-layer health (backends, host daemons + build stamps, server,
   database, libvirt + provision prereqs).
 

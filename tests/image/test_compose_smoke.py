@@ -74,6 +74,11 @@ def test_migrate_then_server_reaches_readyz() -> None:
     # minio + bucket-init → oidc → server) and blocks until the server healthcheck passes
     # or a dependency fails. The healthcheck GETs /readyz, so a zero exit proves migrate
     # completed and the server reached readiness on the built image.
+    # The data volumes are named and project-scoped (ADR-0552), and `_PROJECT` is fixed, so
+    # they now persist between runs. The teardown below is in a `finally` that a killed run
+    # (SIGINT, a cancelled CI job, a timeout) never reaches, which would leave the next run
+    # exercising migrations against an already-migrated database. Tear down first as well.
+    _compose("down", "--volumes", "--remove-orphans", timeout=120)
     try:
         up = _compose(
             "up",
@@ -92,6 +97,6 @@ def test_migrate_then_server_reaches_readyz() -> None:
                 f"--- service logs ---\n{logs.stdout}\n{logs.stderr}"
             )
     finally:
-        # `down -v` drops the containers, network, and the named build/install volumes so a
-        # rerun starts clean; run even on failure so a broken attempt leaves nothing behind.
+        # `down -v` drops the containers, network, and every named volume so a rerun starts
+        # clean; run even on failure so a broken attempt leaves nothing behind.
         _compose("down", "--volumes", "--remove-orphans", timeout=120)

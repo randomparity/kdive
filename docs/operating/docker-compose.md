@@ -20,7 +20,10 @@ just compose-up
 The four supported worker lifecycle recipes are `just compose-up`, `just compose-stop`,
 `just compose-recreate-worker`, and `just compose-down`. `just compose-stop` preserves named
 volumes after recording worker termination; `just compose-down` removes named volumes for a
-destructive teardown. These recipes preserve exact worker-incarnation evidence in Postgres. Raw
+destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-minio-data` (the
+artifacts bucket), `kdive-prom-data` (the metrics TSDB), and `kdive-build` / `kdive-install`;
+`docker compose down --volumes` and `scripts/live-stack/down.sh --wipe` drop them too, and
+nothing else does. These recipes preserve exact worker-incarnation evidence in Postgres. Raw
 Compose/Docker lifecycle commands and host workers bypass that evidence boundary. A database failure
 is fail-closed, retaining the never-started or terminal worker so the same recipe can be retried
 after Postgres recovers.
@@ -39,6 +42,26 @@ bucket-wide versioning and verifies `Enabled`, MFA Delete off, and no MinIO pref
 exclusions. A suspended, malformed, or excluded state makes the one-shot fail and blocks app
 start. A non-zero `migrate` exit also blocks app start. You do not order these services by hand —
 Compose does it from the graph.
+
+## One-time note: upgrading a stack created before the volumes were named
+
+Before ADR-0552 the backends had no declared data volume, so Compose allocated an anonymous
+one per `up` and a plain `down` orphaned it — the stack already restarted empty after every
+teardown. Naming the volumes does not adopt that old anonymous volume: the first `up` after
+this change mounts an empty `kdive-pgdata`, and the old volume is left dangling exactly as
+before. Reclaim it with `docker volume prune`.
+
+If a stack is running right now and its database contents matter, capture them before the
+upgrade and restore afterwards:
+
+```bash
+docker compose exec -T postgres pg_dumpall -U kdive > kdive-predates-named-volumes.sql
+just compose-stop            # select the new image and configuration
+just compose-up
+docker compose exec -T postgres psql -U kdive -d kdive < kdive-predates-named-volumes.sql
+```
+
+This applies once. Afterwards a plain `down` genuinely preserves the database.
 
 ## Upgrading worker-fence authority
 
