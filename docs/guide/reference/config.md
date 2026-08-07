@@ -257,6 +257,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_REMOTE_BASE_IMAGE_VOLUME` | — | Name of the prebuilt remote-libvirt base-image storage volume for the remote live_stack test; unset → that test skips. |
 | `KDIVE_REQUIRE_DOCKER` | `0` | Set to 1 to fail (not skip) the disposable-Postgres/MinIO fixtures when Docker is absent. |
 | `KDIVE_RUN_COMPOSE_LIFECYCLE_PROOF` | — | Presence gate for the isolated executable Compose worker-lifecycle proof; the dedicated just recipe sets it to 1 and treats unavailable Docker as a failure. |
+| `KDIVE_RUN_COMPOSE_VOLUME_PROOF` | — | Presence gate for the isolated executable proof that a plain Compose down preserves the named data volumes; the dedicated just recipe sets it to 1 and treats unavailable Docker as a failure. |
 | `KDIVE_SEAM_DOMAIN` | — | libvirt domain name for the in-target guest-agent seam live test. |
 | `KDIVE_SEAM_URI` | — | libvirt connection URI for the in-target guest-agent seam live test. |
 | `KDIVE_SSH_PARITY_DOMAIN` | — | Running, agent-ready remote-libvirt domain name for the SSH-parity bootstrap-key injection live test (#966); unset → that test skips. |

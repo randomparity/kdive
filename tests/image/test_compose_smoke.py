@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -46,8 +47,12 @@ pytestmark = pytest.mark.skipif(
     reason="set KDIVE_IMAGE and have docker + the compose v2 plugin to run the compose smoke",
 )
 
-#: Isolate this run's containers/network/volumes from any local `docker compose up`.
-_PROJECT = "kdive-smoke"
+#: Isolate this run's containers/network/volumes from any local `docker compose up` and from
+#: any concurrent smoke run. Unique per run because the data volumes are named now (ADR-0552):
+#: under a fixed project name two runs on one host would share `<project>_kdive-pgdata`, so the
+#: `--volumes` teardown below would destroy a sibling run's database mid-test. The lifecycle
+#: proof takes the same per-run token for the same reason.
+_PROJECT = f"kdive-smoke-{uuid.uuid4().hex[:12]}"
 
 
 def _compose(*args: str, timeout: float) -> subprocess.CompletedProcess[str]:
@@ -92,6 +97,6 @@ def test_migrate_then_server_reaches_readyz() -> None:
                 f"--- service logs ---\n{logs.stdout}\n{logs.stderr}"
             )
     finally:
-        # `down -v` drops the containers, network, and the named build/install volumes so a
-        # rerun starts clean; run even on failure so a broken attempt leaves nothing behind.
+        # `down -v` drops the containers, network, and every named volume so a rerun starts
+        # clean; run even on failure so a broken attempt leaves nothing behind.
         _compose("down", "--volumes", "--remove-orphans", timeout=120)

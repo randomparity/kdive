@@ -72,7 +72,13 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    # The image declares VOLUME /var/lib/postgresql/data, so without a named volume here
+    # Compose allocates an anonymous one per `up` and a plain `down` orphans it — the stack
+    # would silently restart empty (ADR-0552). The bootstrap SQL runs from initdb.d, which
+    # Postgres executes only on an empty data directory: now once per volume lifetime rather
+    # than once per `up`, so editing it needs a `just compose-down` to take effect.
     volumes:
+      - kdive-pgdata:/var/lib/postgresql/data
       - ./deploy/compose/bootstrap-migration-owner.sql:/docker-entrypoint-initdb.d/010-migration-owner.sql:ro
 
   minio:
@@ -83,6 +89,10 @@ services:
     # section 4) and does not make this dev-credential backend boot-persistent.
     restart: on-failure
     command: server /data --console-address ":9001"
+    # The image declares VOLUME /data; naming it keeps the artifacts bucket across a plain
+    # `down` instead of orphaning an anonymous volume per `up` (ADR-0552).
+    volumes:
+      - kdive-minio-data:/data
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin # pragma: allowlist secret — local dev only
@@ -332,8 +342,14 @@ services:
   # `docker compose up` graph is unchanged. Scrapes each process's aux /metrics over the
   # compose network (those aux ports stay unpublished); only the UI is published to the host.
   #   docker compose --profile obs up -d prometheus    # then open http://localhost:9090
-  # TSDB is ephemeral container-local (no named volume) — matches the demo posture; a
-  # `docker compose down` drops history. Only the config is mounted (read-only).
+  # The image declares VOLUME /prometheus, so without a mount there Compose allocated an
+  # anonymous volume per `up` that a plain `down` orphaned. The TSDB is tmpfs rather than a
+  # named volume (ADR-0552): ADR-0189 decided the demo store is ephemeral, and a named volume
+  # here would outlive `just compose-down`, which runs a profile-less `down --volumes` that
+  # cannot stop this profile-gated service. tmpfs makes "ephemeral" true instead of orphaned.
+  # Every tmpfs option is load-bearing: the image runs as uid/gid 65534 and a default-mode
+  # tmpfs (root-owned 0775) makes Prometheus panic on its first write, and without `size=`
+  # the mount defaults to half of host RAM. 256m holds far more than 6h of three targets.
   prometheus:
     image: prom/prometheus:v3.12.0
     restart: on-failure
@@ -343,6 +359,8 @@ services:
       - --storage.tsdb.retention.time=6h
     volumes:
       - ./deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    tmpfs:
+      - /prometheus:mode=0700,uid=65534,gid=65534,size=256m
     ports:
       - "${KDIVE_PROMETHEUS_PORT:-9090}:9090"
 
@@ -381,6 +399,13 @@ networks:
   worker-death:
     internal: true
 
+# Every service that keeps state has a named volume here (ADR-0552). A plain `docker compose
+# down` and `just compose-stop` keep all of it; `docker compose down --volumes`,
+# `just compose-down`, and `scripts/live-stack/down.sh --wipe` drop it — the only supported
+# paths that do. grafana is absent because its image declares no VOLUME, and prometheus because
+# its demo TSDB is tmpfs (ADR-0189).
 volumes:
   kdive-build:
   kdive-install:
+  kdive-pgdata:
+  kdive-minio-data:

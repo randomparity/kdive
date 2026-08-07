@@ -230,6 +230,18 @@ jobs:
           KDIVE_REQUIRE_DOCKER: "1"
         run: just test
 
+      - name: Compose data-volume persistence proof
+        # The structural guard in `just test` only reads `docker compose config`; this drives
+        # the committed compose file for real and proves a plain `down` keeps the named data
+        # volumes while `down --volumes` drops them (ADR-0552). It carries the `live_stack`
+        # marker, which `just test` excludes, and CI invokes recipes individually, so adding
+        # it only to `just ci` would not gate PRs. The recipe's own environment makes an
+        # unavailable Docker daemon a failure rather than a reported skip.
+        #
+        # It starts only postgres, minio, and prometheus under a unique project name on free
+        # loopback ports; none has a `build:`, so nothing is built here.
+        run: just test-compose-volumes
+
   image-build:
     name: image build + smoke
     runs-on: ubuntu-latest

@@ -20,7 +20,11 @@ just compose-up
 The four supported worker lifecycle recipes are `just compose-up`, `just compose-stop`,
 `just compose-recreate-worker`, and `just compose-down`. `just compose-stop` preserves named
 volumes after recording worker termination; `just compose-down` removes named volumes for a
-destructive teardown. These recipes preserve exact worker-incarnation evidence in Postgres. Raw
+destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-minio-data` (the
+artifacts bucket), and `kdive-build` / `kdive-install` — Docker prefixes each with the
+Compose project name, so `docker volume ls` shows them as `<project>_kdive-pgdata` and so on.
+`docker compose down --volumes` and `scripts/live-stack/down.sh --wipe` drop them too. Those
+are the only supported paths that do. These recipes preserve exact worker-incarnation evidence in Postgres. Raw
 Compose/Docker lifecycle commands and host workers bypass that evidence boundary. A database failure
 is fail-closed, retaining the never-started or terminal worker so the same recipe can be retried
 after Postgres recovers.
@@ -39,6 +43,57 @@ bucket-wide versioning and verifies `Enabled`, MFA Delete off, and no MinIO pref
 exclusions. A suspended, malformed, or excluded state makes the one-shot fail and blocks app
 start. A non-zero `migrate` exit also blocks app start. You do not order these services by hand —
 Compose does it from the graph.
+
+## One-time note: upgrading a stack created before the volumes were named
+
+Before ADR-0552 the backends had no declared data volume, so Compose allocated an anonymous
+one per `up` and a plain `down` orphaned it — the stack already restarted empty after every
+teardown. Naming the volumes does not adopt that old anonymous volume: the first `up` after
+this change mounts an empty `kdive-pgdata`, and the old volume is left dangling exactly as
+before.
+
+If your stack is **not** running, or its contents do not matter, there is nothing to do.
+
+If it **is** running and the database matters, copy the bytes across while the container still
+names the old volume. Do this before bringing up the new configuration, so the copy lands in an
+empty volume rather than on top of a migrated one:
+
+```bash
+# 1. While the container still exists, read the volume it is attached to and the Compose
+#    project name (which is what Docker prefixes volume names with).
+cid=$(docker compose ps -q postgres)
+old=$(echo "$cid" | xargs -r docker inspect -f \
+  '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')
+project=$(echo "$cid" | xargs -r docker inspect -f \
+  '{{index .Config.Labels "com.docker.compose.project"}}')
+echo "old=$old project=$project"
+# `old` is a 64-hex name. If it is empty, there is nothing to migrate: either the stack is
+# not running, or it is already on the named volume. Stop here in that case.
+
+# 2. Stop the stack, then check out the revision that names the volumes.
+just compose-stop
+
+# 3. Create the new volume through Compose, so it carries the labels Compose expects
+#    (`docker volume create` makes an unlabelled one, and the next `up` then warns and
+#    suggests `external: true` — which would stop `just compose-down` ever removing it).
+docker compose create postgres
+docker run --rm -v "$old":/from:ro -v "${project}_kdive-pgdata":/to \
+  postgres:17 sh -c 'cp -a /from/. /to/'
+
+# 4. Bring the new configuration up. `migrate` rolls the copied database forward.
+just compose-up
+
+# 5. Once you have confirmed the data is there, drop the old volume by name.
+docker volume rm "$old"
+```
+
+Do **not** use `docker volume prune` for step 5: it is host-wide and removes every unused
+volume on the machine, including other projects' detached data.
+
+The MinIO bucket can be moved the same way (`kdive-minio-data` at `/data`), or left behind —
+in this reference stack its artifacts are reproducible.
+
+This applies once. Afterwards a plain `down` genuinely preserves both.
 
 ## Upgrading worker-fence authority
 
@@ -113,7 +168,9 @@ is started with `max_connections=500` so ~18 xdist workers do not exhaust it.
 
 **Required cleanup:** a run that crashes leaves its `kdive_test_*` databases and
 `kdive-test-*` buckets behind (the uuid names never recur, so they are not reclaimed by
-reuse). Periodically drop them, or recreate the Compose volume:
+reuse). Since ADR-0552 named the data volumes they also survive a plain `docker compose down`,
+so nothing reclaims them on its own any more. Drop them periodically with the query below, or
+recreate the volume outright with `just compose-down`:
 
 ```
 psql "$KDIVE_TEST_PG_URL" -tAc \

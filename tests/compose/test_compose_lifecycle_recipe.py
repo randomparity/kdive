@@ -80,6 +80,17 @@ def test_executable_lifecycle_proof_has_a_dedicated_fail_loud_recipe() -> None:
     assert "tests/compose/test_compose_worker_lifecycle_live.py" in justfile
 
 
+def test_volume_persistence_proof_has_a_dedicated_fail_loud_recipe() -> None:
+    # `just test-live-stack` treats a skip as success, so the sole carrier of the ADR-0552
+    # runtime evidence needs its own recipe whose environment makes absent Docker a failure.
+    justfile = (Path(__file__).resolve().parents[2] / "justfile").read_text()
+    recipe = _recipe(justfile, "test-compose-volumes")
+
+    assert "KDIVE_RUN_COMPOSE_VOLUME_PROOF=1" in recipe
+    assert "KDIVE_REQUIRE_DOCKER=1" in recipe
+    assert "tests/compose/test_compose_volume_persistence_live.py" in recipe
+
+
 def test_compose_bootstrap_script_is_covered_by_the_shell_gate() -> None:
     justfile = (Path(__file__).resolve().parents[2] / "justfile").read_text()
     lint_shell = justfile.split("lint-shell:", 1)[1].split("\n\n", 1)[0]

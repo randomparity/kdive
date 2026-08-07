@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
 # Tear down the local kdive infrastructure: stop host processes + compose backends.
-# Plain teardown keeps state (Postgres volume + any running kdive-* domains). `--wipe` is a
-# full reset: it drops the Postgres volume AND reaps kdive-provisioned libvirt domains and
-# their qcow2 overlays (these live outside compose, so a DB wipe alone would orphan them).
+# Plain teardown keeps state (the compose data volumes + any running kdive-* domains).
+# `--wipe` is a full reset: it drops the compose data volumes -- kdive-pgdata,
+# kdive-minio-data, kdive-build, kdive-install (ADR-0552) -- AND reaps
+# kdive-provisioned libvirt domains and their qcow2 overlays (these live outside compose,
+# so a DB wipe alone would orphan them).
 # libvirt itself is left enabled and running (host service; not cycled per teardown).
 #
 # Usage:
@@ -34,7 +36,8 @@ for arg in "$@"; do
 done
 
 if [[ "$wipe" == "1" && "$assume_yes" != "1" ]]; then
-  echo "WARNING: --wipe drops the Postgres volume and destroys all kdive-* libvirt domains" >&2
+  echo "WARNING: --wipe drops the compose data volumes (database, artifacts bucket," >&2
+  echo "build/install caches) and destroys all kdive-* libvirt domains" >&2
   echo "and their overlay disks. This is irreversible." >&2
   # An interactive prompt needs a tty; under the agent `!` prefix (or any piped stdin) `read`
   # gets EOF and would silently abort. Require --yes instead of hanging/aborting confusingly.
