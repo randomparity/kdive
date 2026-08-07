@@ -64,8 +64,14 @@ type:
 # Run the test suite, excluding the gated live_vm, live_stack, and agent_smoke suites.
 # (oidc_issuer-marked tests stay selected; they skip cleanly without the issuer container.)
 #
-# `-n auto` runs the suite across all cores via pytest-xdist; each worker gets its own
-# session-scoped Postgres/MinIO container, so there is no cross-worker DB contention.
+# `-n auto` runs the suite in parallel via pytest-xdist; workers share one Postgres and one
+# MinIO container per run (xdist_backend). `--maxprocesses=16` caps the worker count on
+# high-CPU-count machines (e.g. 128-logical-CPU ppc64le POWER hosts where -n auto falls back
+# to multiprocessing.cpu_count()=128 when psutil is absent): saturating a single shared
+# container causes timing-sensitive tests to flap. The flag lives here, not in addopts,
+# because --maxprocesses is a pytest-xdist option and bare pytest (used by the image-smoke
+# CI step with --no-project) would reject it as unrecognised. CI runners have ≤8 CPUs so
+# the cap is never reached there (#1921).
 # `--dist worksteal` lets an idle worker pull queued tests from a busy worker's queue
 # instead of running its up-front chunk to completion (the `load` default); durations here
 # range from ~2ms to hundreds of ms per test, so worksteal shortens the straggler tail
@@ -77,14 +83,14 @@ type:
 # PYTHONHASHSEED=random to surface any new ordering-dependent test the pinned seed would
 # otherwise mask.
 test:
-    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack and not agent_smoke" -n auto --dist worksteal -q
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack and not agent_smoke" -n auto --maxprocesses=16 --dist worksteal -q
 
 # Rerun the tests that failed on the previous run, failures first — the fast inner loop
 # (#1334, ADR-0420). Additive: `just test` stays the full pre-push gate and this never runs
 # in CI. Same marker exclusion and pinned PYTHONHASHSEED as `test:`, so a stale/empty --lf
 # cache (pytest then runs everything) still skips the gated live tiers and collects stably.
 test-lf:
-    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack and not agent_smoke" --lf -n auto -q
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack and not agent_smoke" --lf -n auto --maxprocesses=16 -q
 
 # Run only the tests your working changes touch — the fast inner loop (#1334, ADR-0420).
 # scripts/select_changed_tests.py maps each changed src file to every tests/**/test_<stem>.py
@@ -97,7 +103,7 @@ test-changed:
     set -euo pipefail
     marks="not live_vm and not live_stack and not agent_smoke"
     run_full() {
-      PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "$marks" -n auto --dist worksteal -q
+      PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "$marks" -n auto --maxprocesses=16 --dist worksteal -q
     }
     # Command substitution (not `< <(...)`) so a selector crash is caught, not read as "no
     # changed tests" — a false green is the one failure this recipe must never produce.
@@ -119,7 +125,7 @@ test-changed:
       # (a changed live_vm/live_stack/agent_smoke test) — report it, don't abort as a
       # false-red under set -e. Other non-zero codes are real failures and propagate.
       rc=0
-      PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest "${targets[@]}" -m "$marks" -n auto --dist worksteal -q || rc=$?
+      PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest "${targets[@]}" -m "$marks" -n auto --maxprocesses=16 --dist worksteal -q || rc=$?
       if [[ "$rc" -eq 5 ]]; then
         echo "all selected tests are gated (live_vm/live_stack/agent_smoke) — none ran; use 'just test' or a live recipe"
         exit 0
