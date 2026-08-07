@@ -58,6 +58,13 @@ jobs:
         with:
           version: v3.21.0
 
+      - name: Pre-pull the testcontainer images
+        # Same reason as the PR gate: this job runs the same `just test` with
+        # KDIVE_REQUIRE_DOCKER=1, so it carries the identical registry-cascade exposure
+        # (ADR-0553, #1913). Fixing only ci.yml would leave the weekly run failing in the
+        # thousands-of-errors shape that issue is about.
+        run: just pull-test-images
+
       - name: Test (randomized hash seed)
         # PYTHONHASHSEED=random overrides the recipe default of 0; KDIVE_REQUIRE_DOCKER=1
         # turns the db suite's skip-when-no-Docker into a hard failure (ADR-0015), matching
