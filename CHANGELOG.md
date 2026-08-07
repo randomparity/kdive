@@ -528,6 +528,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the lane default out of the config layer
 - Scope rollback against the forward-only worker upgrade
 - Define the loop supervision trigger and mutation-check S3
+- Record named Compose data volumes for postgres and minio
+- Name the data volumes in every teardown description
+- Make the one-time upgrade snippet correct under bash
 
 ### Fixed
 
@@ -901,6 +904,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the refusal set with one publisher, and name what narrows the seam
 - Drain in-flight jobs on shutdown instead of cancelling them
 - Remove backend anonymous volumes on container teardown
+- Name the postgres, minio, and prometheus data volumes
+- Cover the prometheus TSDB with tmpfs, not a named volume
+- Document KDIVE_RUN_COMPOSE_VOLUME_PROOF and harden the change
 
 ### Build
 
