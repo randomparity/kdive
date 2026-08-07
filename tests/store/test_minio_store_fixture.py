@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -33,7 +34,7 @@ def test_override_selected_without_starting_a_container(
 ) -> None:
     monkeypatch.setenv("KDIVE_TEST_S3_URL", "http://minio.example:9000")
 
-    def _boom() -> tuple[str, str]:
+    def _boom(_labels: Mapping[str, str]) -> tuple[str, str]:
         raise AssertionError("override path must not start a container")
 
     monkeypatch.setattr(store_conftest, "_start_minio", _boom)
@@ -51,7 +52,7 @@ def test_require_docker_reraises_start_failure(
     monkeypatch.delenv("KDIVE_TEST_S3_URL", raising=False)
     _isolate_root(monkeypatch, tmp_path)
 
-    def _boom() -> tuple[str, str]:
+    def _boom(_labels: Mapping[str, str]) -> tuple[str, str]:
         raise RuntimeError("docker down")
 
     monkeypatch.setattr(store_conftest, "_start_minio", _boom)
@@ -68,7 +69,7 @@ def test_no_docker_skips_when_not_required(
     monkeypatch.delenv("KDIVE_TEST_S3_URL", raising=False)
     _isolate_root(monkeypatch, tmp_path)
 
-    def _boom() -> tuple[str, str]:
+    def _boom(_labels: Mapping[str, str]) -> tuple[str, str]:
         raise RuntimeError("docker down")
 
     monkeypatch.setattr(store_conftest, "_start_minio", _boom)
@@ -120,7 +121,7 @@ def test_readiness_error_propagates_not_skipped(
 ) -> None:
     monkeypatch.delenv("KDIVE_TEST_S3_URL", raising=False)
     _isolate_root(monkeypatch, tmp_path)
-    monkeypatch.setattr(store_conftest, "_start_minio", lambda: ("http://h:9000", "cid"))
+    monkeypatch.setattr(store_conftest, "_start_minio", lambda _labels: ("http://h:9000", "cid"))
     monkeypatch.setattr(store_conftest, "_stop_minio", lambda _cid: None)
     with (
         pytest.raises(ValueError),  # a body error must NOT become pytest.skip

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 
@@ -27,7 +28,7 @@ def test_override_is_selected_without_starting_a_container(
 ) -> None:
     monkeypatch.setenv("KDIVE_TEST_PG_URL", "postgresql://u:p@h:5432/somedb")
 
-    def _boom() -> tuple[str, str]:
+    def _boom(_labels: Mapping[str, str]) -> tuple[str, str]:
         raise AssertionError("override path must not start a container")
 
     monkeypatch.setattr(db_conftest, "_start_postgres", _boom)
@@ -41,7 +42,7 @@ def test_require_docker_reraises_start_failure(
     monkeypatch.delenv("KDIVE_TEST_PG_URL", raising=False)
     _isolate_root(monkeypatch, tmp_path)
 
-    def _boom() -> tuple[str, str]:
+    def _boom(_labels: Mapping[str, str]) -> tuple[str, str]:
         raise RuntimeError("docker down")
 
     monkeypatch.setattr(db_conftest, "_start_postgres", _boom)
@@ -58,7 +59,7 @@ def test_no_docker_skips_when_not_required(
     monkeypatch.delenv("KDIVE_TEST_PG_URL", raising=False)
     _isolate_root(monkeypatch, tmp_path)
 
-    def _boom() -> tuple[str, str]:
+    def _boom(_labels: Mapping[str, str]) -> tuple[str, str]:
         raise RuntimeError("docker down")
 
     monkeypatch.setattr(db_conftest, "_start_postgres", _boom)
@@ -78,7 +79,7 @@ def test_real_error_propagates_even_when_not_required(
     monkeypatch.delenv("KDIVE_TEST_PG_URL", raising=False)
     _isolate_root(monkeypatch, tmp_path)
 
-    def _boom() -> tuple[str, str]:
+    def _boom(_labels: Mapping[str, str]) -> tuple[str, str]:
         raise RuntimeError("disk full writing state")
 
     monkeypatch.setattr(db_conftest, "_start_postgres", _boom)
@@ -96,7 +97,7 @@ def test_provisioning_error_propagates_not_skipped(
     monkeypatch.delenv("KDIVE_TEST_PG_URL", raising=False)
     _isolate_root(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        db_conftest, "_start_postgres", lambda: ("postgresql://u:p@h:5432/test", "cid")
+        db_conftest, "_start_postgres", lambda _labels: ("postgresql://u:p@h:5432/test", "cid")
     )
     monkeypatch.setattr(db_conftest, "_stop_postgres", lambda _cid: None)
     with (
@@ -155,11 +156,20 @@ def test_stop_postgres_leaves_no_dangling_volume_behind() -> None:
     import docker
 
     client = docker.from_env()
-    _server_url, container_id = db_conftest._start_postgres()
+    labels = xdist_backend.backend_container_labels(Path("/nonexistent-run-root"), "pg")
+    _server_url, container_id = db_conftest._start_postgres(labels)
     volumes: set[str] = set()
     try:
-        mounts = client.containers.get(container_id).attrs["Mounts"]
+        container = client.containers.get(container_id)
+        mounts = container.attrs["Mounts"]
         volumes = {m["Name"] for m in mounts if m["Type"] == "volume"}
+        # The crash reaper is inert unless `with_kwargs(labels=…)` really reaches the
+        # daemon, and every unit test in this suite would still pass if it did not
+        # (ADR-0551, #1910). Read them back off the running container instead.
+        assert container.labels[xdist_backend.BACKEND_LABEL] == "pg"
+        assert (
+            container.labels[xdist_backend.LIVENESS_LABEL] == labels[xdist_backend.LIVENESS_LABEL]
+        )
     finally:
         db_conftest._stop_postgres(container_id)
 

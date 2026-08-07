@@ -9,7 +9,10 @@ override it lazily starts one shared testcontainer coordinated across xdist work
 bucket; ``key_ns`` gives each test a unique key prefix within it. When Docker is
 unreachable the fixture skips, unless ``KDIVE_REQUIRE_DOCKER=1``, which re-raises so a
 broken runner cannot mask the suite. On a *persistent* override backend, crashed runs
-leave ``kdive-test-*`` buckets that must be swept periodically (ADR-0401 residual).
+leave ``kdive-test-*`` buckets that must be swept periodically (ADR-0401 residual). On the
+container path a killed run strands the container itself; the next run to start one reaps
+it, keyed to a lock the owning run holds while alive, so a concurrent suite's container is
+never taken (ADR-0551, #1910).
 
 MinIO's official image is archived (final tag pinned below); if it stops resolving,
 swap in localstack or a Chainguard MinIO rebuild (ADR-0017).
@@ -19,7 +22,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from typing import Any
 from uuid import uuid4
@@ -72,17 +75,23 @@ def _worker_bucket_name() -> str:
     return f"kdive-test-{xdist_backend.xdist_worker_id()}-{xdist_backend.worker_namespace_token()}"
 
 
-def _start_minio() -> tuple[str, str]:
+def _start_minio(labels: Mapping[str, str]) -> tuple[str, str]:
     from testcontainers.core.config import testcontainers_config
     from testcontainers.core.container import DockerContainer
 
-    testcontainers_config.ryuk_disabled = True  # refcount owns lifecycle (ADR-0401)
+    # Ryuk stays disabled: its reap is keyed to the creating process, and this container is
+    # deliberately shared across xdist workers (ADR-0401). Crash coverage comes instead from
+    # `labels`, which let the next run reap this container if we are killed (ADR-0551) —
+    # and from sweeping any container a previous run left behind, before starting ours.
+    testcontainers_config.ryuk_disabled = True
+    xdist_backend.sweep_stale_backend_containers()
     container = (
         DockerContainer(_MINIO_IMAGE)
         .with_command("server /data")
         .with_env("MINIO_ROOT_USER", _ROOT_USER)
         .with_env("MINIO_ROOT_PASSWORD", _ROOT_PASSWORD)
         .with_exposed_ports(_MINIO_PORT)
+        .with_kwargs(labels=dict(labels))
     )
     container.start()
     endpoint = (

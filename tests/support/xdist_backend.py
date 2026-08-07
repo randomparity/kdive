@@ -5,6 +5,14 @@ container fixture would start one container per worker. This helper lets all of 
 run's workers share a single container: the per-run temp root holds a
 ``fcntl.flock`` guard and a refcounted JSON state file, so the first worker starts
 the container and the last to leave stops it by id. See ADR-0401.
+
+The refcount only reaps when a run unwinds. A run killed outright — SIGKILL, OOM, a
+cancelled CI or agent run — never decrements, so its container used to survive forever
+(#1910). Every holder therefore also keeps a **shared** ``flock`` on a per-run
+``kdive-<name>.alive`` file for its whole reference lifetime, and every container is
+labelled with that file's path. The kernel drops the lock however the process died, so a
+later run can tell a crashed run's container (lock free) from a concurrently-running
+suite's (lock held) and reap only the former. See ADR-0551.
 """
 
 from __future__ import annotations
@@ -14,9 +22,10 @@ import json
 import os
 import uuid
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
@@ -24,6 +33,11 @@ import pytest
 _POOL_MAX_SIZE = 10  # kdive.db.pool.create_pool default
 _HEADROOM = 2
 _CONNECTIONS_FLOOR = 500
+
+# The `org.testcontainers` namespace is reserved by testcontainers' own `create_labels`,
+# which raises on any label under it, so these live in a private `kdive.` namespace.
+BACKEND_LABEL = "kdive.test-backend"
+LIVENESS_LABEL = "kdive.test-backend-liveness"
 
 
 def xdist_worker_id() -> str:
@@ -86,12 +100,109 @@ def skip_without_docker() -> None:
         pytest.skip("Docker unavailable")
 
 
+def _liveness_path(root: Path, name: str) -> Path:
+    """The file whose held ``flock`` proves the run owning ``name``'s container is alive."""
+    return root / f"kdive-{name}.alive"
+
+
+def backend_container_labels(root: Path, name: str) -> dict[str, str]:
+    """Labels every backend container must carry so a later run can judge it (ADR-0551).
+
+    The liveness path is absolute because the run that reads it back off the container is
+    a different process in an unrelated working directory.
+    """
+    return {BACKEND_LABEL: name, LIVENESS_LABEL: str(_liveness_path(root, name).resolve())}
+
+
+@contextmanager
+def _liveness_held(root: Path, name: str) -> Iterator[None]:
+    """Hold a shared lock on the run's liveness file for the caller's whole reference.
+
+    Shared, not exclusive: every xdist worker holding a reference takes one concurrently,
+    so the lock is free only once the last of them has let go — or died.
+    """
+    with open(_liveness_path(root, name), "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _run_is_live(liveness_path: Path) -> bool:
+    """True while any process still holds the shared lock on ``liveness_path``.
+
+    An absent file means the per-run temp root was rotated away, which pytest does only
+    to a finished run's root. Any other error answers "live": the caller reaps on a False,
+    so an unreadable lock must never be read as permission to destroy a container.
+    """
+    if not liveness_path.exists():
+        return False
+    try:
+        with open(liveness_path) as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError:
+        return True
+    return False
+
+
+def is_stale_backend_container(labels: Mapping[str, str]) -> bool:
+    """True when ``labels`` name a backend container whose owning run is gone.
+
+    A container carrying no liveness label is not provably ours — someone else's, or one
+    started before ADR-0551 — and is never reported stale.
+    """
+    recorded = labels.get(LIVENESS_LABEL)
+    if not recorded:
+        return False
+    return not _run_is_live(Path(recorded))
+
+
+def sweep_stale_backend_containers(client: Any | None = None) -> list[str]:
+    """Remove this repo's backend containers whose owning run is gone; return their ids.
+
+    Best-effort by construction: this runs on the way to starting a container, and a
+    Docker hiccup while reaping someone else's leak must not fail the caller's run.
+    """
+    import docker.errors
+
+    try:
+        if client is None:
+            from testcontainers.core.docker_client import DockerClient
+
+            client = DockerClient().client
+        candidates = client.containers.list(all=True, filters={"label": BACKEND_LABEL})
+    except Exception as exc:  # noqa: BLE001 - any failure means "cannot sweep now"
+        warnings.warn(f"shared_container: stale-backend sweep skipped: {exc}", stacklevel=2)
+        return []
+
+    reaped: list[str] = []
+    for container in candidates:
+        if not is_stale_backend_container(container.labels):
+            continue
+        try:
+            # `v=True` takes the anonymous volume with it. On this path nothing else ever
+            # will: `docker volume prune` skips a volume an existing container holds.
+            container.remove(force=True, v=True)
+        except docker.errors.NotFound:
+            continue  # a concurrently sweeping run got there first — not a failure
+        except Exception as exc:  # noqa: BLE001 - keep sweeping the rest
+            warnings.warn(
+                f"shared_container: could not reap stale container {container.id}: {exc}",
+                stacklevel=2,
+            )
+            continue
+        reaped.append(container.id)
+    return reaped
+
+
 @contextmanager
 def shared_container_or_skip(
     root: Path,
     name: str,
     *,
-    start: Callable[[], tuple[str, str]],
+    start: Callable[[Mapping[str, str]], tuple[str, str]],
     stop: Callable[[str], None],
     require_docker: bool,
 ) -> Iterator[str]:
@@ -122,63 +233,70 @@ def shared_container(
     root: Path,
     name: str,
     *,
-    start: Callable[[], tuple[str, str]],
+    start: Callable[[Mapping[str, str]], tuple[str, str]],
     stop: Callable[[str], None],
 ) -> Iterator[str]:
     """Yield one shared container's server URL, coordinated across xdist workers.
 
-    ``start()`` returns ``(server_url, container_id)``; ``stop(container_id)`` stops
-    it. Exactly one container is alive at a time: the first holder starts it, later
-    holders reuse the URL, and the holder that releases last stops it.
+    ``start(labels)`` returns ``(server_url, container_id)`` and must stamp ``labels``
+    onto the container it creates, so a later run can reap it if this one is killed
+    (ADR-0551); ``stop(container_id)`` stops it. Exactly one container is alive at a
+    time: the first holder starts it, later holders reuse the URL, and the holder that
+    releases last stops it.
     """
     lock_path = root / f"kdive-{name}.lock"
     state_path = root / f"kdive-{name}.json"
 
-    with _locked(lock_path):
-        state = _read_state(state_path)
-        if state is None:
-            server_url, cid = start()
-            state = {"url": server_url, "container_id": cid, "refcount": 1}
-            try:
-                _write_state(state_path, state)
-            except Exception:
-                # The container is started but its id was never recorded, so no later
-                # release can reap it — stop it now rather than leak it, then re-raise
-                # the real (non-Docker) write failure so it is not masked as a skip.
-                with suppress(Exception):
-                    stop(cid)
-                raise
-        else:
-            state["refcount"] += 1
-            server_url = str(state["url"])
-            _write_state(state_path, state)
-
-    try:
-        yield server_url
-    finally:
-        # No `return` in this finally: it would swallow a body exception. Guard with an
-        # `if state is not None` block instead so any in-flight exception propagates.
+    # Held for this whole reference, and taken before any container exists, so a
+    # container carrying our liveness label always has a live lock behind it.
+    with _liveness_held(root, name):
         with _locked(lock_path):
             state = _read_state(state_path)
-            if state is not None:
-                state["refcount"] -= 1
-                if state["refcount"] <= 0:
-                    # Best-effort stop: teardown must never raise — a raise here would
-                    # wedge the run and (via a caller's finally: manager.__exit__)
-                    # could mask an in-flight body exception. Warn instead of
-                    # swallowing silently; always unlink so the next run starts clean
-                    # (a failed stop leaks one container, the ADR-0401 residual).
-                    try:
-                        stop(state["container_id"])
-                    except Exception as exc:  # noqa: BLE001
-                        warnings.warn(
-                            f"shared_container: stop({state['container_id']}) failed: {exc}",
-                            stacklevel=2,
-                        )
-                    finally:
-                        state_path.unlink(missing_ok=True)
-                else:
+            if state is None:
+                server_url, cid = start(backend_container_labels(root, name))
+                state = {"url": server_url, "container_id": cid, "refcount": 1}
+                try:
                     _write_state(state_path, state)
+                except Exception:
+                    # The container is started but its id was never recorded, so no later
+                    # release can reap it — stop it now rather than leak it, then re-raise
+                    # the real (non-Docker) write failure so it is not masked as a skip.
+                    with suppress(Exception):
+                        stop(cid)
+                    raise
+            else:
+                state["refcount"] += 1
+                server_url = str(state["url"])
+                _write_state(state_path, state)
+
+        try:
+            yield server_url
+        finally:
+            # No `return` in this finally: it would swallow a body exception. Guard with
+            # an `if state is not None` block instead so any in-flight exception
+            # propagates.
+            with _locked(lock_path):
+                state = _read_state(state_path)
+                if state is not None:
+                    state["refcount"] -= 1
+                    if state["refcount"] <= 0:
+                        # Best-effort stop: teardown must never raise — a raise here would
+                        # wedge the run and (via a caller's finally: manager.__exit__)
+                        # could mask an in-flight body exception. Warn instead of
+                        # swallowing silently; always unlink so the next run starts clean
+                        # (a failed stop leaks one container; the next run's sweep reaps
+                        # it, ADR-0551).
+                        try:
+                            stop(state["container_id"])
+                        except Exception as exc:  # noqa: BLE001
+                            warnings.warn(
+                                f"shared_container: stop({state['container_id']}) failed: {exc}",
+                                stacklevel=2,
+                            )
+                        finally:
+                            state_path.unlink(missing_ok=True)
+                    else:
+                        _write_state(state_path, state)
 
 
 @contextmanager
