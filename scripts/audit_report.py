@@ -1,0 +1,73 @@
+"""Classify a ``pip-audit --format json`` report: did it produce a verdict, and what was it?
+
+``pip-audit`` exits 1 both when it finds a genuine advisory and when it cannot reach PyPI, so
+its exit status cannot drive a retry — a loop that retries on it re-runs real findings until
+the attempt budget is exhausted (#1913). What separates the two is whether the run produced a
+verdict at all: a completed audit emits parseable JSON, a transport failure emits nothing.
+
+``scripts/audit-deps.sh`` retries only :data:`NO_VERDICT` and never a verdict. This module is
+the half that decides which one it got, kept out of the shell so it can be proven offline
+against real report shapes (``tests/scripts/test_audit_report.py``) — the gate is fail-closed
+by construction, and that only means anything if it is tested (ADR-0553).
+
+Stdlib only, and it imports nothing from ``kdive``: it runs in a job with no project install.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from typing import Any
+
+#: The audit completed and found nothing.
+CLEAN = 0
+#: The audit completed and found at least one advisory. Authoritative — never retried.
+FOUND = 1
+#: The audit did not complete, so there is no verdict to trust. The only retryable outcome.
+NO_VERDICT = 2
+
+
+def classify(raw: str) -> tuple[int, list[str]]:
+    """Return ``(status, lines)`` for one ``pip-audit -f json`` report.
+
+    ``status`` is :data:`CLEAN`, :data:`FOUND`, or :data:`NO_VERDICT`; ``lines`` names each
+    affected package and its advisory ids, and is empty unless the status is :data:`FOUND`.
+
+    Anything unrecognised — empty output, a traceback, truncated JSON, valid JSON without the
+    ``dependencies`` key pip-audit always emits — is :data:`NO_VERDICT`, never :data:`CLEAN`.
+    That direction is the whole point: a shape this cannot read must not be reported as an
+    audit that passed.
+    """
+    try:
+        report = json.loads(raw)
+        dependencies = report["dependencies"]
+        affected = [dep for dep in dependencies if dep.get("vulns")]
+    except ValueError, KeyError, TypeError, AttributeError:
+        return NO_VERDICT, []
+
+    if not affected:
+        return CLEAN, []
+    return FOUND, [_describe(dep) for dep in affected]
+
+
+def _describe(dep: dict[str, Any]) -> str:
+    ids = ", ".join(str(vuln.get("id", "?")) for vuln in dep["vulns"])
+    return f"{dep.get('name', '?')} {dep.get('version', '?')}: {ids}"
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        print(f"usage: {argv[0] if argv else 'audit_report.py'} REPORT.json", file=sys.stderr)
+        return NO_VERDICT
+    try:
+        raw = open(argv[1], encoding="utf-8").read()  # noqa: SIM115
+    except OSError:
+        return NO_VERDICT
+    status, lines = classify(raw)
+    for line in lines:
+        print(line)
+    return status
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised via audit-deps.sh
+    sys.exit(main(sys.argv))

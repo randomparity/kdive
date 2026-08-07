@@ -222,6 +222,16 @@ jobs:
         with:
           version: v3.21.0
 
+      - name: Pre-pull the testcontainer images
+        # The db/store fixtures pull postgres:17 and the MinIO tag lazily from inside pytest,
+        # so an unreachable Docker Hub surfaced as `3 failed, 8938 passed, 3448 errors` with
+        # the real cause several screens down (#1913). Pulling here makes a registry outage
+        # one red step naming one image, and a transient blip a retry rather than a re-run
+        # (ADR-0553). The tags are guarded against drifting from the fixtures'
+        # (tests/guards/test_prepull_images_match_fixtures.py). CI invokes recipes
+        # individually, so this is listed here rather than added to `just ci`.
+        run: just pull-test-images
+
       - name: Test
         # KDIVE_REQUIRE_DOCKER turns the db suite's skip-when-no-Docker into a hard
         # failure, so a broken daemon on the runner can't mask the schema tests
@@ -389,10 +399,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends libvirt-dev
 
       - name: Audit runtime dependencies
-        run: |
-          uv export --no-emit-project --no-dev --no-default-groups --group live \
-            --format requirements-txt > runtime-reqs.txt
-          uvx pip-audit@2.10.0 --no-deps --strict -r runtime-reqs.txt
+        # Same script `just audit` runs. It retries only a run that produced no verdict — a
+        # ReadTimeout against pypi.org failed this job on #1912 — and never retries a run that
+        # produced one, because pip-audit exits 1 for a genuine advisory and for an unreachable
+        # PyPI alike. An audit that never completes still fails here (ADR-0553, #1913).
+        run: ./scripts/audit-deps.sh runtime
 
   supply-chain-dev:
     name: supply chain (dev)
@@ -417,19 +428,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends libvirt-dev
 
       - name: Audit all dependencies (including dev)
-        # Dev advisories do not ship to users, so this never fails the build — but
-        # it surfaces findings in the job summary and as a warning annotation
-        # rather than hiding them behind a green check.
-        run: |
-          uv export --no-emit-project --format requirements-txt > dev-reqs.txt
-          if uvx pip-audit@2.10.0 --no-deps -r dev-reqs.txt > dev-audit.txt 2>&1; then
-            echo "No known advisories in dev dependencies." >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "### pip-audit: dev-dependency advisories (informational)"
-              echo '```'
-              cat dev-audit.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning::pip-audit found dev-dependency advisories (see job summary)"
-          fi
+        # Dev advisories do not ship to users, so this never fails the build — but it surfaces
+        # findings in the job summary and as a warning annotation rather than hiding them
+        # behind a green check. `dev` mode keeps that contract and adds the same
+        # verdict-versus-transport classification, so a timeout no longer posts a warning that
+        # reads like a discovered advisory (ADR-0553).
+        run: ./scripts/audit-deps.sh dev
