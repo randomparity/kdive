@@ -166,7 +166,19 @@ class ComposeWorkerLifecycle:
             await asyncio.to_thread(self._cleanup_credential)
         else:
             await self._require_safe_absence()
-        args = (*_COMPOSE, "down", *(("--volumes",) if volumes else ()), "--remove-orphans")
+        # Pass every known profile so teardown reaches profile-gated services (e.g. obs).
+        # Without these flags, `docker compose down` exits 0 while leaving obs containers
+        # running and failing their network-remove step silently.
+        args = (
+            *_COMPOSE,
+            "--profile",
+            "obs",
+            "--profile",
+            "managed-worker",
+            "down",
+            *(("--volumes",) if volumes else ()),
+            "--remove-orphans",
+        )
         await self._run_command(args)
         if volumes:
             await asyncio.to_thread(self._cleanup_managed_volumes)
@@ -179,6 +191,7 @@ def _bounded_command(
     timeout: float,
     max_stdout_bytes: int,
     max_stderr_bytes: int,
+    raise_on_nonempty_stderr: bool = False,
 ) -> str:
     process = subprocess.Popen(
         argv,
@@ -235,6 +248,8 @@ def _bounded_command(
     stderr = output["stderr"].decode("utf-8", errors="replace")
     if returncode != 0:
         raise subprocess.CalledProcessError(returncode, argv, output=stdout, stderr=stderr)
+    if raise_on_nonempty_stderr and stderr.strip():
+        raise subprocess.CalledProcessError(0, argv, output=stdout, stderr=stderr)
     return stdout
 
 
@@ -249,12 +264,16 @@ def _command_timeout(argv: tuple[str, ...]) -> int:
 
 
 def _command(argv: tuple[str, ...], extra_env: dict[str, str] | None = None) -> str:
+    # Compose teardown (down) may exit 0 while printing a network-removal failure to stderr;
+    # treat any stderr output from a down command as a hard failure.
+    is_compose_down = len(argv) >= 3 and argv[:2] == _COMPOSE and "down" in argv[2:]
     return _bounded_command(
         argv,
         extra_env,
         timeout=_command_timeout(argv),
         max_stdout_bytes=_COMMAND_STDOUT_BYTES,
         max_stderr_bytes=_COMMAND_STDERR_BYTES,
+        raise_on_nonempty_stderr=is_compose_down,
     )
 
 
@@ -370,7 +389,15 @@ def _credential_path(project: str) -> Path:
 
 
 def _remove_managed_worker_volumes(project: str) -> None:
-    """Remove the two exact profile-only volumes omitted after worker removal."""
+    """Remove the two exact profile-only volumes omitted after worker removal.
+
+    Under Compose v5.3.1, ``down --profile managed-worker --volumes`` removes these
+    volumes when the worker container has already been stopped; the lifecycle wrapper
+    always stops it first via the gate before calling ``down``. This explicit removal is
+    kept as a belt-and-suspenders guard: it is idempotent (``--force`` makes a missing
+    volume a no-op) and protects against any Compose version that omits profile-gated
+    volumes from a ``down -v`` pass.
+    """
     if not _PROJECT.fullmatch(project):
         raise RuntimeError("Compose project name is invalid for managed-volume cleanup")
     _bounded_command(
