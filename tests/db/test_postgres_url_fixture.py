@@ -143,24 +143,28 @@ def test_stop_postgres_removes_the_containers_anonymous_volume(
 
 def test_stop_postgres_leaves_no_dangling_volume_behind() -> None:
     """End-to-end: start the real container the fixture starts, stop it the way the
-    fixture stops it, and assert the anonymous volume it created is gone."""
+    fixture stops it, and assert the anonymous volume it created is gone.
+
+    The volume is read off *this* container's own mounts rather than by diffing the
+    daemon's volume list before and after. Under xdist the other workers are starting
+    and stopping their own containers concurrently, so a global diff would attribute
+    their volumes to this container and fail for someone else's leak.
+    """
     xdist_backend.skip_without_docker()
     import docker
 
     client = docker.from_env()
-
-    def volume_ids() -> set[str]:
-        return {v.id for v in client.volumes.list()}
-
-    before = volume_ids()
     _server_url, container_id = db_conftest._start_postgres()
-    created = volume_ids() - before
+    volumes: set[str] = set()
     try:
-        assert created, "the postgres container is expected to create an anonymous volume"
+        mounts = client.containers.get(container_id).attrs["Mounts"]
+        volumes = {m["Name"] for m in mounts if m["Type"] == "volume"}
     finally:
         db_conftest._stop_postgres(container_id)
 
-    assert not (created & volume_ids()), f"teardown leaked anonymous volume(s): {created}"
+    assert volumes, "the postgres container is expected to create an anonymous volume"
+    surviving = volumes & {v.id for v in client.volumes.list()}
+    assert not surviving, f"teardown leaked anonymous volume(s): {surviving}"
 
 
 def test_provision_and_drop_roundtrip_against_real_server() -> None:
