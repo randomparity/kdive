@@ -96,7 +96,10 @@ def _stop_minio(container_id: str) -> None:
     from testcontainers.core.docker_client import DockerClient
 
     with suppress(docker.errors.NotFound):  # already reaped
-        DockerClient().client.containers.get(container_id).remove(force=True)
+        # `v=True` is load-bearing: the MinIO image declares VOLUME /data, so every
+        # container gets an anonymous volume holding this run's uploaded artifacts.
+        # Removing the container without it leaves that volume dangling, once per run.
+        DockerClient().client.containers.get(container_id).remove(force=True, v=True)
 
 
 def _s3_client(endpoint: str, access: str, secret: str) -> Any:

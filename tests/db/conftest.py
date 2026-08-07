@@ -53,7 +53,11 @@ def _stop_postgres(container_id: str) -> None:
     from testcontainers.core.docker_client import DockerClient
 
     with suppress(docker.errors.NotFound):  # already reaped — nothing to stop
-        DockerClient().client.containers.get(container_id).remove(force=True)
+        # `v=True` is load-bearing: postgres:17 declares VOLUME /var/lib/postgresql/data,
+        # so every container gets an anonymous volume. Removing the container without it
+        # leaves that volume dangling — one per run, and on a many-core host each holds
+        # the whole run's per-worker databases (measured up to 2.4 GB).
+        DockerClient().client.containers.get(container_id).remove(force=True, v=True)
 
 
 def _server_url_without_db(url: str) -> str:

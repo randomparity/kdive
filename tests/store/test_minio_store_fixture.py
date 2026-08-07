@@ -80,6 +80,41 @@ def test_no_docker_skips_when_not_required(
         pass
 
 
+def test_stop_minio_removes_the_containers_anonymous_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`remove` must be called with `v=True`.
+
+    The MinIO image declares VOLUME /data, so dropping `v` leaks one dangling
+    anonymous volume per run — holding every artifact the run uploaded. The suite
+    stays green either way, so the call is the only in-process observable.
+    """
+    import testcontainers.core.docker_client as tc_docker
+
+    calls: dict[str, object] = {}
+
+    class _Container:
+        def remove(self, **kwargs: object) -> None:
+            calls.update(kwargs)
+
+    class _Containers:
+        def get(self, container_id: str) -> _Container:
+            calls["container_id"] = container_id
+            return _Container()
+
+    class _Inner:
+        containers = _Containers()
+
+    class _DockerClient:
+        client = _Inner()
+
+    monkeypatch.setattr(tc_docker, "DockerClient", _DockerClient)
+    store_conftest._stop_minio("deadbeef")
+    assert calls["container_id"] == "deadbeef"
+    assert calls["v"] is True, "removal must delete the anonymous data volume"
+    assert calls["force"] is True
+
+
 def test_readiness_error_propagates_not_skipped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:

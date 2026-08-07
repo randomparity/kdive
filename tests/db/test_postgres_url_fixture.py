@@ -105,6 +105,68 @@ def test_provisioning_error_propagates_not_skipped(
         raise ValueError("provisioning blew up")
 
 
+def test_stop_postgres_removes_the_containers_anonymous_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`remove` must be called with `v=True`.
+
+    postgres:17 declares VOLUME /var/lib/postgresql/data, so dropping `v` leaks one
+    dangling anonymous volume per run — invisible to the suite (it stays green) and
+    only noticed when the disk fills. Asserted on the call because the leak has no
+    in-process observable; the real-Docker proof below covers the end state.
+    """
+    import testcontainers.core.docker_client as tc_docker
+
+    calls: dict[str, object] = {}
+
+    class _Container:
+        def remove(self, **kwargs: object) -> None:
+            calls.update(kwargs)
+
+    class _Containers:
+        def get(self, container_id: str) -> _Container:
+            calls["container_id"] = container_id
+            return _Container()
+
+    class _Inner:
+        containers = _Containers()
+
+    class _DockerClient:
+        client = _Inner()
+
+    monkeypatch.setattr(tc_docker, "DockerClient", _DockerClient)
+    db_conftest._stop_postgres("deadbeef")
+    assert calls["container_id"] == "deadbeef"
+    assert calls["v"] is True, "removal must delete the anonymous data volume"
+    assert calls["force"] is True
+
+
+def test_stop_postgres_leaves_no_dangling_volume_behind() -> None:
+    """End-to-end: start the real container the fixture starts, stop it the way the
+    fixture stops it, and assert the anonymous volume it created is gone.
+
+    The volume is read off *this* container's own mounts rather than by diffing the
+    daemon's volume list before and after. Under xdist the other workers are starting
+    and stopping their own containers concurrently, so a global diff would attribute
+    their volumes to this container and fail for someone else's leak.
+    """
+    xdist_backend.skip_without_docker()
+    import docker
+
+    client = docker.from_env()
+    _server_url, container_id = db_conftest._start_postgres()
+    volumes: set[str] = set()
+    try:
+        mounts = client.containers.get(container_id).attrs["Mounts"]
+        volumes = {m["Name"] for m in mounts if m["Type"] == "volume"}
+    finally:
+        db_conftest._stop_postgres(container_id)
+
+    assert volumes, "the postgres container is expected to create an anonymous volume"
+    surviving = volumes & {v.id for v in client.volumes.list()}
+    assert not surviving, f"teardown leaked anonymous volume(s): {surviving}"
+
+
 def test_provision_and_drop_roundtrip_against_real_server() -> None:
     xdist_backend.skip_without_docker()
     from testcontainers.postgres import PostgresContainer
