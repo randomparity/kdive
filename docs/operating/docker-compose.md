@@ -59,20 +59,24 @@ names the old volume. Do this before bringing up the new configuration, so the c
 empty volume rather than on top of a migrated one:
 
 ```bash
-# 1. Identify the anonymous volume while the container is still attached to it.
-old=$(docker compose ps -q postgres \
-  | xargs docker inspect -f \
-    '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')
-echo "$old"   # a 64-hex name; if this is empty the stack is already on a named volume
+# 1. While the container still exists, read the volume it is attached to and the Compose
+#    project name (which is what Docker prefixes volume names with).
+cid=$(docker compose ps -q postgres)
+old=$(echo "$cid" | xargs -r docker inspect -f \
+  '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')
+project=$(echo "$cid" | xargs -r docker inspect -f \
+  '{{index .Config.Labels "com.docker.compose.project"}}')
+echo "old=$old project=$project"
+# `old` is a 64-hex name. If it is empty, there is nothing to migrate: either the stack is
+# not running, or it is already on the named volume. Stop here in that case.
 
-# 2. Stop the stack and check out the revision that names the volumes.
+# 2. Stop the stack, then check out the revision that names the volumes.
 just compose-stop
 
-# 3. Copy into the new volume. Compose prefixes volume names with the project name, which
-#    defaults to the directory name — check `docker volume ls` if you have set COMPOSE_PROJECT_NAME.
-new="$(basename "$PWD")_kdive-pgdata"
-docker volume create "$new"
-docker run --rm -v "$old":/from:ro -v "$new":/to alpine sh -c 'cp -a /from/. /to/'
+# 3. Copy the bytes into the new volume, before anything writes to it.
+docker volume create "${project}_kdive-pgdata"
+docker run --rm -v "$old":/from:ro -v "${project}_kdive-pgdata":/to \
+  alpine:3 sh -c 'cp -a /from/. /to/'
 
 # 4. Bring the new configuration up. `migrate` rolls the copied database forward.
 just compose-up
