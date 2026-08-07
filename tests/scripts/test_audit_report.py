@@ -39,6 +39,10 @@ _GENUINE_ADVISORY = json.dumps(
                 "vulns": [
                     {"id": "PYSEC-2018-28", "fix_versions": ["2.20.0"]},
                     {"id": "PYSEC-2023-74", "fix_versions": ["2.31.0"]},
+                    # pip-audit repeats an advisory once per alias — the real run against this
+                    # pin emitted PYSEC-2023-74 twice. Keeping the duplicate here is what makes
+                    # the de-duplication in `_describe` load-bearing rather than decorative.
+                    {"id": "PYSEC-2023-74", "fix_versions": ["2.31.0"]},
                 ],
             },
             {"name": "urllib3", "version": "1.23", "vulns": [{"id": "PYSEC-2026-1873"}]},
@@ -98,6 +102,26 @@ def test_an_unrecognised_shape_is_no_verdict_never_clean() -> None:
         assert status == NO_VERDICT, f"{raw!r} must not be a verdict"
         assert status != CLEAN, f"{raw!r} must never read as a clean audit"
         assert lines == []
+
+
+def test_a_skipped_dependency_is_not_reported_as_clean() -> None:
+    # pip-audit emits a package it could not query as `{"name", "skip_reason"}` with no
+    # `vulns` key — a 404 from the advisory feed does this without raising. That is one
+    # package not audited, which is not the same as one package found clean.
+    skipped = {"name": "libvirt-python", "version": "11.0.0", "skip_reason": "no metadata"}
+
+    assert classify(json.dumps({"dependencies": [skipped]})) == (NO_VERDICT, [])
+
+    # Mixed with a genuinely clean package it is still not a pass: something went unexamined.
+    audited = {"name": "packaging", "version": "25.0", "vulns": []}
+    assert classify(json.dumps({"dependencies": [audited, skipped]})) == (NO_VERDICT, [])
+
+    # Alongside a real finding the gate already fails, so the skip is reported rather than
+    # swallowed — the operator needs to know the report is also incomplete.
+    found = {"name": "acme", "version": "1.0", "vulns": [{"id": "PYSEC-1"}]}
+    status, lines = classify(json.dumps({"dependencies": [found, skipped]}))
+    assert status == FOUND
+    assert lines == ["acme 1.0: PYSEC-1", "not audited (1 skipped): libvirt-python"]
 
 
 def test_an_audit_that_examined_nothing_is_not_a_pass() -> None:

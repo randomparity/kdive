@@ -49,9 +49,15 @@ not the exit code — it is whether the run **produced a verdict at all**.
 For `pip-audit`, "produced a verdict" means it emitted parseable JSON. `scripts/audit-deps.sh`
 runs the audit with `-f json` to a file and classifies:
 
-- **Parseable JSON** — the audit completed and its answer is authoritative. Not retried, ever.
-  The script derives its own exit status from the *content*: non-empty `vulns` anywhere fails
-  the runtime (gating) mode. The exit code of `pip-audit` is not consulted for this decision.
+- **Parseable JSON** — the audit completed and its answer is authoritative. A finding is never
+  retried. The script derives its own exit status from the *content*: non-empty `vulns`
+  anywhere fails the runtime (gating) mode, and `pip-audit`'s exit code never decides that on
+  its own.
+- **Parseable JSON that looks clean, from a run that nonetheless exited non-zero** — passing
+  requires the two to agree. A clean report from a failed run is a disagreement the script
+  cannot explain (a `--strict` collection abort is the case to worry about), and the safe
+  reading of "cannot explain" is *no verdict*: retried, then failed. This is the one place the
+  exit code is consulted, and it only ever moves the result away from green.
 - **No parseable JSON** — the audit did not complete. Only this is retried, up to 3 attempts
   with 5s/15s backoff.
 - **Attempts exhausted** — fails. An unreachable PyPI is an unaudited dependency set, and an

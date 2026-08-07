@@ -118,16 +118,17 @@ def test_prepull_images_are_exactly_the_fixture_images() -> None:
 def test_every_suite_workflow_prepulls_before_it_runs_the_suite() -> None:
     # Per job, and every `just test` within it — not the first match in the file. Both
     # weaker forms pass while a suite-running job pre-pulls nothing.
-    suite_jobs = 0
+    suite_jobs: dict[str, int] = {}
     for name in _SUITE_WORKFLOWS:
         jobs = _jobs((_WORKFLOWS / name).read_text(encoding="utf-8"))
         assert jobs, f"no jobs parsed out of {name} — the workflow layout changed (ADR-0553)"
+        suite_jobs[name] = 0
 
         for job_name, body in jobs.items():
             test_steps = [match.start() for match in _TEST_STEP.finditer(body)]
             if not test_steps:
                 continue
-            suite_jobs += 1
+            suite_jobs[name] += 1
             prepull_steps = [match.start() for match in _PREPULL_STEP.finditer(body)]
 
             assert len(prepull_steps) == len(test_steps), (
@@ -144,9 +145,11 @@ def test_every_suite_workflow_prepulls_before_it_runs_the_suite() -> None:
                     "then (ADR-0553)."
                 )
 
-    # Without this the loop above passes over nothing the moment _TEST_STEP stops matching.
-    assert suite_jobs == len(_SUITE_WORKFLOWS), (
-        f"expected one suite-running job in each of {list(_SUITE_WORKFLOWS)}, found "
-        f"{suite_jobs}. If the suite moved to another recipe, re-point _TEST_STEP; if a "
-        "workflow stopped running it, drop it from _SUITE_WORKFLOWS (ADR-0553)."
+    # Per workflow, not in aggregate: a total would let one workflow lose its suite job while
+    # another gained a second, and the loop above passes over nothing for a workflow with none.
+    missing = sorted(name for name, count in suite_jobs.items() if count == 0)
+    assert not missing, (
+        f"no `run: just test` step found in {missing}, so this guard checks nothing there. "
+        "If the suite moved to another recipe, re-point _TEST_STEP; if a workflow stopped "
+        "running it, drop it from _SUITE_WORKFLOWS (ADR-0553)."
     )
