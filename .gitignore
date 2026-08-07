@@ -67,3 +67,4 @@ deploy/ansible/artifacts/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+env.sh
