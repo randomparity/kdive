@@ -347,7 +347,9 @@ services:
   # named volume (ADR-0552): ADR-0189 decided the demo store is ephemeral, and a named volume
   # here would outlive `just compose-down`, which runs a profile-less `down --volumes` that
   # cannot stop this profile-gated service. tmpfs makes "ephemeral" true instead of orphaned.
-  # `mode=1777` is load-bearing — the image runs as nobody and a default-mode tmpfs panics.
+  # Every tmpfs option is load-bearing: the image runs as uid/gid 65534 and a default-mode
+  # tmpfs (root-owned 0775) makes Prometheus panic on its first write, and without `size=`
+  # the mount defaults to half of host RAM. 256m holds far more than 6h of three targets.
   prometheus:
     image: prom/prometheus:v3.12.0
     restart: on-failure
@@ -358,7 +360,7 @@ services:
     volumes:
       - ./deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     tmpfs:
-      - /prometheus:mode=1777
+      - /prometheus:mode=0700,uid=65534,gid=65534,size=256m
     ports:
       - "${KDIVE_PROMETHEUS_PORT:-9090}:9090"
 

@@ -21,7 +21,8 @@ The four supported worker lifecycle recipes are `just compose-up`, `just compose
 `just compose-recreate-worker`, and `just compose-down`. `just compose-stop` preserves named
 volumes after recording worker termination; `just compose-down` removes named volumes for a
 destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-minio-data` (the
-artifacts bucket), and `kdive-build` / `kdive-install`;
+artifacts bucket), and `kdive-build` / `kdive-install` — Docker prefixes each with the
+Compose project name, so `docker volume ls` shows them as `<project>_kdive-pgdata` and so on.
 `docker compose down --volumes` and `scripts/live-stack/down.sh --wipe` drop them too, and
 nothing else does. These recipes preserve exact worker-incarnation evidence in Postgres. Raw
 Compose/Docker lifecycle commands and host workers bypass that evidence boundary. A database failure
@@ -49,19 +50,44 @@ Before ADR-0552 the backends had no declared data volume, so Compose allocated a
 one per `up` and a plain `down` orphaned it — the stack already restarted empty after every
 teardown. Naming the volumes does not adopt that old anonymous volume: the first `up` after
 this change mounts an empty `kdive-pgdata`, and the old volume is left dangling exactly as
-before. Reclaim it with `docker volume prune`.
+before.
 
-If a stack is running right now and its database contents matter, capture them before the
-upgrade and restore afterwards:
+If your stack is **not** running, or its contents do not matter, there is nothing to do.
+
+If it **is** running and the database matters, copy the bytes across while the container still
+names the old volume. Do this before bringing up the new configuration, so the copy lands in an
+empty volume rather than on top of a migrated one:
 
 ```bash
-docker compose exec -T postgres pg_dumpall -U kdive > kdive-predates-named-volumes.sql
-just compose-stop            # select the new image and configuration
+# 1. Identify the anonymous volume while the container is still attached to it.
+old=$(docker compose ps -q postgres \
+  | xargs docker inspect -f \
+    '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')
+echo "$old"   # a 64-hex name; if this is empty the stack is already on a named volume
+
+# 2. Stop the stack and check out the revision that names the volumes.
+just compose-stop
+
+# 3. Copy into the new volume. Compose prefixes volume names with the project name, which
+#    defaults to the directory name — check `docker volume ls` if you have set COMPOSE_PROJECT_NAME.
+new="$(basename "$PWD")_kdive-pgdata"
+docker volume create "$new"
+docker run --rm -v "$old":/from:ro -v "$new":/to alpine sh -c 'cp -a /from/. /to/'
+
+# 4. Bring the new configuration up. `migrate` rolls the copied database forward.
 just compose-up
-docker compose exec -T postgres psql -U kdive -d kdive < kdive-predates-named-volumes.sql
+
+# 5. Once you have confirmed the data is there, drop the old volume by name.
+docker volume rm "$old"
 ```
 
-This applies once. Afterwards a plain `down` genuinely preserves the database.
+Do **not** use `docker volume prune` for step 5: it is host-wide and removes every unused
+volume on the machine, including other projects' detached data.
+
+The MinIO bucket can be moved the same way (`kdive-minio-data` at `/data`), or left behind —
+in this reference stack its artifacts are reproducible.
+
+This applies once. Afterwards a plain `down` genuinely preserves both.
 
 ## Upgrading worker-fence authority
 
@@ -136,7 +162,9 @@ is started with `max_connections=500` so ~18 xdist workers do not exhaust it.
 
 **Required cleanup:** a run that crashes leaves its `kdive_test_*` databases and
 `kdive-test-*` buckets behind (the uuid names never recur, so they are not reclaimed by
-reuse). Periodically drop them, or recreate the Compose volume:
+reuse). Since ADR-0552 named the data volumes they also survive a plain `docker compose down`,
+so this is the only thing that reclaims them. Periodically drop them, or recreate the Compose
+volume with `just compose-down`:
 
 ```
 psql "$KDIVE_TEST_PG_URL" -tAc \

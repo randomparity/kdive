@@ -216,6 +216,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "just recipe sets it to 1 and treats unavailable Docker as a failure.",
     ),
     ExternalEnvVar(
+        "KDIVE_RUN_COMPOSE_VOLUME_PROOF",
+        "test",
+        None,
+        "Presence gate for the isolated executable proof that a plain Compose down preserves "
+        "the named data volumes; the dedicated just recipe sets it to 1 and treats unavailable "
+        "Docker as a failure.",
+    ),
+    ExternalEnvVar(
         "KDIVE_IMAGE",
         "test",
         None,

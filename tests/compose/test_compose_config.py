@@ -640,12 +640,15 @@ def test_prometheus_tsdb_is_tmpfs_rather_than_a_named_volume() -> None:
     # which does not stop this profile-gated service, so a named volume here would survive
     # every destructive path except `scripts/live-stack/down.sh --wipe`.
     #
-    # `mode=1777` is load-bearing, not decoration: the image runs as `nobody` and a
-    # default-mode tmpfs makes prometheus panic on its first write.
+    # Every option is load-bearing, not decoration. The image runs as uid/gid 65534, and a
+    # default-mode tmpfs (root-owned 0775) makes prometheus panic on its first write, so the
+    # mode and ownership must be set; 0700 rather than a world-writable 1777 keeps a second
+    # uid in the container from planting TSDB files. Without `size=` the mount defaults to
+    # half of host RAM, which moves unbounded growth from disk to memory.
     #
     # The complementary half — that no named volume is mounted at /prometheus — is the
     # `prometheus` case of the mount table above. Asserting the *absence* of a top-level
     # `kdive-prom-data` declaration here would prove nothing: Compose prunes declared-but-
     # unreferenced volumes from the rendered model, so that check cannot fail.
     prometheus = _services_with_obs_profile()["prometheus"]
-    assert prometheus["tmpfs"] == ["/prometheus:mode=1777"]
+    assert prometheus["tmpfs"] == ["/prometheus:mode=0700,uid=65534,gid=65534,size=256m"]

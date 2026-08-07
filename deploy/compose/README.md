@@ -23,7 +23,8 @@ The four supported worker lifecycle recipes are `just compose-up`, `just compose
 `just compose-recreate-worker`, and `just compose-down`. `just compose-stop` preserves named
 volumes after recording worker termination; `just compose-down` removes named volumes for a
 destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-minio-data` (the
-artifacts bucket), and `kdive-build` / `kdive-install`;
+artifacts bucket), and `kdive-build` / `kdive-install` — Docker prefixes each with the
+Compose project name, so `docker volume ls` shows them as `<project>_kdive-pgdata` and so on.
 `docker compose down --volumes` and `scripts/live-stack/down.sh --wipe` drop them too, and
 nothing else does. Their operator-side lifecycle wrapper binds the exact full container ID to a
 random nonce in Postgres before start and records retained terminal inspect evidence before removal.

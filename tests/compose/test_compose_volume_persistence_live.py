@@ -84,10 +84,20 @@ def _require_runnable() -> None:
     pytest.skip("the docker compose plugin is required to drive the volume proof")
 
 
-def _free_port() -> int:
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
+def _free_ports(count: int) -> list[int]:
+    """Reserve distinct free ports, holding every socket until the last one is chosen.
+
+    Closing each socket before binding the next lets the kernel hand the same port out twice,
+    which would make two of this run's four published ports collide.
+    """
+    listeners = [socket.socket() for _ in range(count)]
+    try:
+        for listener in listeners:
+            listener.bind(("127.0.0.1", 0))
+        return [int(listener.getsockname()[1]) for listener in listeners]
+    finally:
+        for listener in listeners:
+            listener.close()
 
 
 def _run(argv: tuple[str, ...], env: dict[str, str], *, timeout: int = 180) -> str:
@@ -192,16 +202,16 @@ def _s3_when_ready(endpoint: str, *, deadline_s: float = 60.0):  # noqa: ANN202 
 def _isolated_stack() -> Iterator[tuple[dict[str, str], str, str, str]]:
     token = uuid.uuid4().hex[:12]
     project = f"kdive-volume-proof-{token}"
-    postgres_port = _free_port()
-    minio_port = _free_port()
+    postgres_port, minio_port, console_port, prometheus_port = _free_ports(4)
     env = {
         "COMPOSE_PROJECT_NAME": project,
-        # Every published host port is overridden; the defaults (5432/9000/9001/9090) would
-        # collide with an operator's running stack.
+        # Every published host port is overridden, and to loopback: the defaults
+        # (5432/9000/9001/9090 on 0.0.0.0) would collide with an operator's running stack and
+        # would put this run's fixed-credential backends on every host interface.
         "KDIVE_POSTGRES_PORT": f"127.0.0.1:{postgres_port}",
         "KDIVE_MINIO_PORT": f"127.0.0.1:{minio_port}",
-        "KDIVE_MINIO_CONSOLE_PORT": f"127.0.0.1:{_free_port()}",
-        "KDIVE_PROMETHEUS_PORT": f"127.0.0.1:{_free_port()}",
+        "KDIVE_MINIO_CONSOLE_PORT": f"127.0.0.1:{console_port}",
+        "KDIVE_PROMETHEUS_PORT": f"127.0.0.1:{prometheus_port}",
     }
     dsn = f"postgresql://{_PG_CREDENTIALS}@127.0.0.1:{postgres_port}/kdive"
     endpoint = f"http://127.0.0.1:{minio_port}"
@@ -248,7 +258,12 @@ def test_plain_down_preserves_backend_state_and_down_volumes_resets_it() -> None
         payload = project.encode()
 
         # --- arm 1: bring up, prove the mounts are the project's named volumes, write markers
+        before = _existing_volumes(env)
         _up(env)
+        # Criterion 3 directly: the `up` created exactly the two expected volumes and no
+        # anonymous extra. A set difference, so an unnamed 64-hex volume shows up here even
+        # though Compose gives it no project label to filter on.
+        assert _existing_volumes(env) - before == set(expected_volumes.values())
         mounted = {service: _mounted_volume_name(env, service) for service in _DATA_MOUNTS}
         # A 64-hex name here is the #1911 defect: an anonymous volume Compose will orphan.
         assert mounted == expected_volumes

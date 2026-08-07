@@ -45,14 +45,20 @@ alongside the new volume. A plain `docker compose down` and `just compose-stop` 
 `docker compose down --volumes`, `just compose-down`, and `scripts/live-stack/down.sh --wipe`
 drop them, and are the only things that do.
 
-`prometheus` is meant to be ephemeral: `tmpfs: ["/prometheus:mode=1777"]`.
+`prometheus` is meant to be ephemeral:
+`tmpfs: ["/prometheus:mode=0700,uid=65534,gid=65534,size=256m"]`.
 [ADR-0189](0189-bundled-prometheus-metrics-collection.md) decided the bundled TSDB is a
 throwaway demo store — `emptyDir` in the chart, short retention, "a Prometheus pod restart
-drops history" — and rejected PVC-backed storage for exactly that reason. tmpfs is the Compose
-analogue of `emptyDir`, so this makes the existing "ephemeral container-local" claim true
-instead of reversing the decision, and keeps the chart and Compose postures matched. The
-`mode=1777` is load-bearing: the image runs as `nobody` and a default-mode tmpfs makes
-Prometheus panic on its first write.
+drops history" — and rejected PVC-backed storage for exactly that reason. tmpfs keeps that
+lifecycle, so this makes the existing "ephemeral container-local" claim true instead of
+reversing the decision. It is not identical to the chart's `emptyDir`, which is node-disk
+backed: tmpfs moves the TSDB to RAM, which the `size=` cap bounds.
+
+Every tmpfs option is load-bearing. The image runs as uid/gid 65534 and a default-mode tmpfs
+is root-owned `0775`, which makes Prometheus panic on its first write, so mode and ownership
+must be set. `0700` rather than a world-writable `1777` keeps a second uid inside the
+container from planting TSDB files. Without `size=` a tmpfs defaults to half of host RAM
+(measured: 125 GB here); 256 MB holds far more than 6h of three scrape targets.
 
 `grafana/grafana:13.0.3` declares no `VOLUME`, so it needs neither.
 
@@ -61,8 +67,9 @@ volume this change does not adopt, so the next `up` mounts an empty `kdive-pgdat
 volume is left dangling exactly as every prior plain `down` already left one. That is accepted
 rather than automated: the reference stack is local-development-only, with fixed credential
 literals in the compose file, and any operator who has run a plain `down` even once has already
-lost that volume's contents. `docs/operating/docker-compose.md` gains a one-time note — take a
-`pg_dump` before the upgrade and restore after — for anyone who needs continuity across it.
+lost that volume's contents. `docs/operating/docker-compose.md` gains a one-time note for anyone
+who does need continuity — copy the bytes from the old volume into `kdive-pgdata` before the
+first new `up`, while the old container still names it.
 
 ## Consequences
 
@@ -93,9 +100,16 @@ file, not this one, and is unaffected.
 the backends. That command is still correct and still destructive, but it is no longer the only
 teardown worth naming, so both places name the preserving and the dropping form.
 
-The Prometheus TSDB moves from disk to RAM. At the 6h retention this file already sets, three
-scrape targets at 15s produce a few megabytes, so the tradeoff is bounded — and it is the same
-tradeoff the chart already takes with `emptyDir`.
+The Prometheus TSDB moves from disk to RAM, capped at 256 MB by the mount. At the 6h retention
+this file already sets, three scrape targets at 15s produce a few megabytes.
+
+Retained data is also retained exposure. This stack ships fixed credential literals
+(`kdive:kdive`, `minioadmin:minioadmin`) on published host ports, and the artifacts bucket
+holds unredacted `sensitive` artifacts. Before this change a plain `down` emptied that store;
+now a machine that ran the demo once keeps every prior investigation until someone runs a
+destructive teardown. The reference stack was already documented as local-development-only,
+and binding its backend ports to loopback is tracked separately (#1918) rather than folded in
+here.
 
 ## Considered & rejected
 
@@ -122,8 +136,10 @@ tradeoff the chart already takes with `emptyDir`.
   Compose's lifecycle, so `down --volumes` and `--wipe` could no longer drop it, and they
   inherit the host's uid/gid and SELinux labelling — the class of breakage this repo already
   carries for the staged libvirt rootfs path.
-- **Adopt the existing anonymous volume automatically on first `up`.** Compose does not label
-  daemon-created anonymous volumes with a project or service, so a one-shot could not identify
-  which unreferenced volume belongs to this install. Picking wrong writes another install's
-  bytes into this database; picking nothing does less than it claims. A documented `pg_dump` is
-  honest and bounded.
+- **Adopt the existing anonymous volume automatically on first `up`.** Once the old volume is
+  unreferenced, nothing identifies it: Compose does not label daemon-created anonymous volumes
+  with a project or service, so a one-shot could not tell this install's from another's.
+  Picking wrong writes another install's bytes into this database; picking nothing does less
+  than it claims. While the old container still exists the volume *is* identifiable, by
+  `docker inspect` on its mounts — so the operating guide documents a manual adoption for that
+  case rather than automating either one.

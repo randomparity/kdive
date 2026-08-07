@@ -88,14 +88,22 @@ Every site that describes what a teardown keeps or drops, enumerated so none is 
   named volume and that `down` drops history. The first half becomes true under tmpfs and the
   second stays true; reword to say tmpfs explicitly and cite ADR-0189.
 - `deploy/compose/README.md` — the same claim about the TSDB, reworded the same way.
-- `docs/operating/docker-compose.md` — name the volumes where it discusses what a teardown
-  keeps, and add the one-time `pg_dump`/restore note for an existing install.
+- `docs/operating/docker-compose.md` — name the volumes (with their `<project>_` prefix) where
+  it discusses what a teardown keeps; note in the test-override section that `kdive_test_*`
+  leftovers now accumulate instead of self-clearing; and add the one-time upgrade note. That
+  note documents a volume-to-volume byte copy performed while the old container still names the
+  anonymous volume, not a dump/restore: `pg_dumpall` output replayed after `migrate` has already
+  run against the fresh volume collides on every `CREATE`, and `psql` without `ON_ERROR_STOP=1`
+  exits 0 through the whole failure. It also names the volume to drop rather than saying
+  `docker volume prune`, which is host-wide.
 - `deploy/compose/README.md` — the two bullets describing `up.sh --reset-db` and
   `down.sh --wipe` both say "the Postgres volume"; they now drop both data volumes.
 - `scripts/live-stack/down.sh` — the header comment and the interactive `--wipe` WARNING echo
   both say "the Postgres volume"; both name the data volumes.
 - `examples/local-libvirt/down.sh` — the header comment and the final `echo` both name only raw
   `docker compose down -v`; both name the preserving and the dropping form.
+- `examples/local-libvirt/README.md` — its step-4 shutdown says `docker compose down -v`, which
+  would now discard the database by default; same rewording.
 
 The two clauses `tests/guards/test_install_topology_contract.py` matches verbatim —
 `` `just compose-stop` preserves named volumes `` and `` `just compose-down` removes named

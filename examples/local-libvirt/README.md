@@ -64,7 +64,8 @@ cd ~/src/linux            # the .mcp.json up.sh installed lives here
 
 # 4. When finished, stop the processes (backends stay up):
 examples/local-libvirt/down.sh
-docker compose down -v    # from the repo root, to remove the backends + volumes
+docker compose down       # from the repo root: stops the backends, keeps their data
+docker compose down --volumes   # ...or also drop the database and the artifacts bucket
 ```
 
 ## Tokens

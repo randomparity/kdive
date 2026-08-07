@@ -78,7 +78,11 @@ def test_migrate_then_server_reaches_readyz() -> None:
     # they now persist between runs. The teardown below is in a `finally` that a killed run
     # (SIGINT, a cancelled CI job, a timeout) never reaches, which would leave the next run
     # exercising migrations against an already-migrated database. Tear down first as well.
-    _compose("down", "--volumes", "--remove-orphans", timeout=120)
+    # Assert it worked: a silent failure here (a volume still in use, a daemon hiccup) would
+    # leave the retained state this call exists to clear, and the run would then exercise
+    # migrations against an already-migrated database while reporting success.
+    pre = _compose("down", "--volumes", "--remove-orphans", timeout=120)
+    assert pre.returncode == 0, pre.stdout + pre.stderr
     try:
         up = _compose(
             "up",
