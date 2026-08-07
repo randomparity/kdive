@@ -254,8 +254,20 @@ class _FakeDockerContainer:
         self.removed_with = kwargs
 
 
+class _UninspectableContainer:
+    """docker-py raises from `.labels` when a container's inspect payload has no Config."""
+
+    id = "cid-uninspectable"
+
+    @property
+    def labels(self) -> dict[str, str]:
+        raise RuntimeError("no Config in inspect payload")
+
+
 class _FakeDockerClient:
-    def __init__(self, *containers: _FakeDockerContainer) -> None:
+    # `Any` because the sweep also has to cope with a container it cannot inspect, which
+    # is a different shape by construction.
+    def __init__(self, *containers: Any) -> None:
         self._containers = list(containers)
         self.filters: dict[str, str] | None = None
         self.containers = self
@@ -305,6 +317,15 @@ def test_sweep_warns_and_keeps_going_when_a_removal_fails(tmp_path: Path) -> Non
         reaped = xdist_backend.sweep_stale_backend_containers(_FakeDockerClient(doomed, other))
     # One failure must not abandon the rest of the sweep.
     assert reaped == ["cid-other"]
+
+
+def test_sweep_survives_a_container_it_cannot_inspect(tmp_path: Path) -> None:
+    # The sweep runs on the way to starting a backend, so anything it raises fails the
+    # caller's whole suite. One unreadable container must not cost the rest of the sweep.
+    reapable = _FakeDockerContainer("cid-reapable", _labels(tmp_path / "gone"))
+    client = _FakeDockerClient(_UninspectableContainer(), reapable)
+    with pytest.warns(UserWarning, match="cid-uninspectable"):
+        assert xdist_backend.sweep_stale_backend_containers(client) == ["cid-reapable"]
 
 
 def test_sweep_warns_rather_than_failing_the_run_when_docker_is_unusable() -> None:

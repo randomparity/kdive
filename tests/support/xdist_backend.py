@@ -179,9 +179,12 @@ def sweep_stale_backend_containers(client: Any | None = None) -> list[str]:
 
     reaped: list[str] = []
     for container in candidates:
-        if not is_stale_backend_container(container.labels):
-            continue
+        # Reading `.labels` is inside the guard too: docker-py raises on a container whose
+        # inspect payload lacks `Config`, and one such container must not abort the sweep
+        # and take the caller's run down with it.
         try:
+            if not is_stale_backend_container(container.labels):
+                continue
             # `v=True` takes the anonymous volume with it. On this path nothing else ever
             # will: `docker volume prune` skips a volume an existing container holds.
             container.remove(force=True, v=True)
