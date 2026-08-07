@@ -375,19 +375,18 @@ served-doc-links:
 adr-status-check:
     python3 scripts/check_adr_status.py
 
-# Audit runtime dependencies for known vulnerabilities.
+# Audit runtime dependencies for known vulnerabilities. The script retries only a run that
+# produced no verdict (unreachable PyPI), never a run that found something — pip-audit exits 1
+# for both, so retrying on exit status alone would re-run genuine advisories (ADR-0553, #1913).
 audit:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    reqs="$(mktemp)"
-    trap 'rm -f "$reqs"' EXIT
-    uv export \
-      --no-emit-project \
-      --no-dev \
-      --no-default-groups \
-      --group live \
-      --format requirements-txt > "$reqs"
-    uv run --with 'pip-audit==2.10.0' pip-audit --no-deps --strict -r "$reqs"
+    ./scripts/audit-deps.sh runtime
+
+# Pull the images the db/store testcontainer fixtures start, ahead of the suite, with a bounded
+# retry. CI runs this as its own step so an unreachable registry is one red step naming one
+# image instead of thousands of downstream fixture errors (ADR-0553, #1913). Not part of `ci:`:
+# a developer's daemon already holds these layers, and `just test` still pulls lazily without it.
+pull-test-images:
+    ./scripts/pull-test-images.sh
 
 # Set the project version in pyproject.toml AND uv.lock together. `--no-sync` re-locks
 # (updates uv.lock) WITHOUT rebuilding the virtual environment — so a version bump does not
