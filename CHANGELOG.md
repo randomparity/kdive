@@ -900,6 +900,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make ProfilePolicy.kind read-only and correct ADR-0549
 - Keep the refusal set with one publisher, and name what narrows the seam
 - Drain in-flight jobs on shutdown instead of cancelling them
+- Remove backend anonymous volumes on container teardown
 
 ### Build
 
