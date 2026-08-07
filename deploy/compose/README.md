@@ -13,7 +13,9 @@ image built by the repo [`Dockerfile`](../../Dockerfile) (`image: kdive:dev`).
 
 The dependency graph is self-contained, so a single `up` brings the whole stack. The checked-in
 passwords below are allowlisted for local development only; never reuse them in a
-production deployment:
+production deployment. Postgres, MinIO, and the mock OIDC issuer bind `127.0.0.1` by default
+(ADR-0554), so they are reachable on `localhost` only. Use a full `ADDR:PORT` override
+(e.g. `KDIVE_POSTGRES_PORT=0.0.0.0:5432`) to expose a backend on another interface.
 
 ```bash
 just compose-up   # builds the image, runs the backends + migrate, then gates the worker

@@ -71,13 +71,23 @@ def _jobs(text: str) -> dict[str, str]:
 
 def _fixture_image(rel_path: str, constant: str) -> str:
     text = (_ROOT / rel_path).read_text(encoding="utf-8")
-    match = re.search(rf'^{re.escape(constant)}\s*=\s*"(?P<image>[^"]+)"', text, re.MULTILINE)
+    # Accept both the inline form  CONST = "image"
+    # and the parenthesized form   CONST = (
+    #                                   "image"  # optional comment
+    #                               )
+    # The digest-pin convention (#1921) uses the parenthesized form to keep lines short.
+    match = re.search(
+        rf'^{re.escape(constant)}\s*=\s*(?:"(?P<image>[^"]+)"|'
+        rf'\(\s*\n\s*"(?P<image2>[^"]+)")',
+        text,
+        re.MULTILINE,
+    )
     assert match is not None, (
         f'{rel_path} no longer defines a module-level `{constant} = "..."`. The fixture image '
         "moved or was renamed; re-point this guard at its new home rather than deleting it — "
         "without it the CI pre-pull step can drift to a tag the suite never requests (ADR-0553)."
     )
-    return match.group("image")
+    return match.group("image") or match.group("image2")
 
 
 def _script_images() -> list[str]:

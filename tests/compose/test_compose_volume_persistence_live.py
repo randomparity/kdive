@@ -221,9 +221,9 @@ def _isolated_stack() -> Iterator[tuple[dict[str, str], str, str, str]]:
     postgres_port, minio_port, console_port, prometheus_port = _free_ports(4)
     env = {
         "COMPOSE_PROJECT_NAME": project,
-        # Every published host port is overridden, and to loopback: the defaults
-        # (5432/9000/9001/9090 on 0.0.0.0) would collide with an operator's running stack and
-        # would put this run's fixed-credential backends on every host interface.
+        # Every published host port is overridden to an isolated loopback address and port:
+        # the defaults (5432/9000/9001/9090 on 127.0.0.1, ADR-0554) would still collide with
+        # an operator's running stack on the same host.
         "KDIVE_POSTGRES_PORT": f"127.0.0.1:{postgres_port}",
         "KDIVE_MINIO_PORT": f"127.0.0.1:{minio_port}",
         "KDIVE_MINIO_CONSOLE_PORT": f"127.0.0.1:{console_port}",

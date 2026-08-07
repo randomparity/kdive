@@ -460,6 +460,33 @@ def test_server_binds_all_interfaces_and_publishes_its_port() -> None:
     assert "8000" in _published_ports(server)
 
 
+def _host_ips(service: dict[str, Any]) -> set[str | None]:
+    """Return the set of host_ip values across all port mappings for a service.
+
+    When a port is published with no explicit bind address, ``docker compose config``
+    omits the ``host_ip`` key (or sets it to ``None``). A loopback binding sets it to
+    ``"127.0.0.1"``.
+    """
+    return {p.get("host_ip") for p in service.get("ports", [])}
+
+
+# Fixed-credential backends that must not be reachable from outside the host (ADR-0554).
+_FIXED_CREDENTIAL_BACKENDS = ("postgres", "minio", "oidc")
+
+
+@pytest.mark.parametrize("service", _FIXED_CREDENTIAL_BACKENDS)
+def test_fixed_credential_backend_binds_loopback_by_default(service: str) -> None:
+    """ADR-0554: bare HOST:CONTAINER binds 0.0.0.0; every fixed-credential backend must
+    carry an explicit 127.0.0.1 bind so its credentials are not reachable from outside
+    the host without an operator override.
+    """
+    svc = _services()[service]
+    host_ips = _host_ips(svc)
+    assert host_ips == {"127.0.0.1"}, (
+        f"{service}: expected every port mapping to bind 127.0.0.1, got {host_ips!r}"
+    )
+
+
 # Configurable host-published ports: the publish (left) side is a ${VAR:-default} override; the
 # container-internal port and the env the process binds inside stay fixed. Each case renders the
 # model with the override set and asserts ONLY the host mapping moved.
@@ -485,6 +512,31 @@ def test_backend_host_port_is_overridable(
     # The container-internal target is unchanged: the service still binds its canonical port.
     targets = {str(p.get("target")) for p in svc.get("ports", [])}
     assert internal in targets
+
+
+# ADR-0554 §Escape hatch: operators who need remote access pass ADDR:PORT via the
+# override variable (e.g. KDIVE_POSTGRES_PORT=0.0.0.0:5432). The var controls the
+# entire left side, so no prefix collision can produce a four-segment string.
+@pytest.mark.parametrize(
+    ("service", "env_var", "container_port"),
+    [
+        ("postgres", "KDIVE_POSTGRES_PORT", "5432"),
+        ("minio", "KDIVE_MINIO_PORT", "9000"),
+        ("oidc", "KDIVE_OIDC_PORT", "8080"),
+    ],
+)
+def test_fixed_credential_backend_addr_port_override_works(
+    service: str, env_var: str, container_port: str
+) -> None:
+    """An ADDR:PORT override changes both the bind address and the host port without error."""
+    override = "0.0.0.0:17778"
+    svc = _config({env_var: override})["services"][service]
+    published = _published_ports(svc)
+    host_ips = _host_ips(svc)
+    assert "17778" in published, f"{service}: ADDR:PORT override did not move the host port"
+    assert "0.0.0.0" in host_ips, f"{service}: ADDR:PORT override did not change the bind address"
+    targets = {str(p.get("target")) for p in svc.get("ports", [])}
+    assert container_port in targets
 
 
 # Per-process aux health/metrics ports (ADR-0090 §5): the loopback default ports the
