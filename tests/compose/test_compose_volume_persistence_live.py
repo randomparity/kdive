@@ -162,6 +162,22 @@ def _assert_tmpfs_leaves_no_volume(env: dict[str, str]) -> None:
     assert stray == [], stray
 
 
+def _volumes_held_by_project(env: dict[str, str]) -> set[str]:
+    """Every volume any started service is attached to, from the containers themselves.
+
+    Not a `docker volume ls` filter: Compose gives daemon-created anonymous volumes no project
+    label, so a filtered query cannot see the defect. Not a host-wide `volume ls` delta either
+    — this repo's disposable-Postgres fixtures create anonymous volumes continuously, so a
+    global before/after would redden on another process's work.
+    """
+    return {
+        mount["Name"]
+        for service in _SERVICES
+        for mount in _container_mounts(env, service)
+        if mount["Type"] == "volume"
+    }
+
+
 def _existing_volumes(env: dict[str, str]) -> set[str]:
     return set(_run(("docker", "volume", "ls", "--quiet"), env, timeout=60).split())
 
@@ -258,12 +274,12 @@ def test_plain_down_preserves_backend_state_and_down_volumes_resets_it() -> None
         payload = project.encode()
 
         # --- arm 1: bring up, prove the mounts are the project's named volumes, write markers
-        before = _existing_volumes(env)
         _up(env)
-        # Criterion 3 directly: the `up` created exactly the two expected volumes and no
-        # anonymous extra. A set difference, so an unnamed 64-hex volume shows up here even
-        # though Compose gives it no project label to filter on.
-        assert _existing_volumes(env) - before == set(expected_volumes.values())
+        # Criterion 3, read from the project's own containers rather than from a host-wide
+        # `docker volume ls` delta: every volume any started service holds, at any path, is
+        # one of the two expected names. An anonymous volume anywhere in the project reddens
+        # it, and nothing another process does on this host can.
+        assert _volumes_held_by_project(env) == set(expected_volumes.values())
         mounted = {service: _mounted_volume_name(env, service) for service in _DATA_MOUNTS}
         # A 64-hex name here is the #1911 defect: an anonymous volume Compose will orphan.
         assert mounted == expected_volumes

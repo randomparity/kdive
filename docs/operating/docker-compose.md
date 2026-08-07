@@ -73,10 +73,12 @@ echo "old=$old project=$project"
 # 2. Stop the stack, then check out the revision that names the volumes.
 just compose-stop
 
-# 3. Copy the bytes into the new volume, before anything writes to it.
-docker volume create "${project}_kdive-pgdata"
+# 3. Create the new volume through Compose, so it carries the labels Compose expects
+#    (`docker volume create` makes an unlabelled one, and the next `up` then warns and
+#    suggests `external: true` — which would stop `just compose-down` ever removing it).
+docker compose create postgres
 docker run --rm -v "$old":/from:ro -v "${project}_kdive-pgdata":/to \
-  alpine:3 sh -c 'cp -a /from/. /to/'
+  postgres:17 sh -c 'cp -a /from/. /to/'
 
 # 4. Bring the new configuration up. `migrate` rolls the copied database forward.
 just compose-up
@@ -167,8 +169,8 @@ is started with `max_connections=500` so ~18 xdist workers do not exhaust it.
 **Required cleanup:** a run that crashes leaves its `kdive_test_*` databases and
 `kdive-test-*` buckets behind (the uuid names never recur, so they are not reclaimed by
 reuse). Since ADR-0552 named the data volumes they also survive a plain `docker compose down`,
-so this is the only thing that reclaims them. Periodically drop them, or recreate the Compose
-volume with `just compose-down`:
+so nothing reclaims them on its own any more. Drop them periodically with the query below, or
+recreate the volume outright with `just compose-down`:
 
 ```
 psql "$KDIVE_TEST_PG_URL" -tAc \
