@@ -59,9 +59,11 @@ def test_a_genuine_advisory_is_a_verdict_and_fails() -> None:
 
     assert status == FOUND
     assert status != NO_VERDICT, "a real advisory must never be classified as retryable"
-    # Name every affected package, and only those — a report the operator can act on.
+    # Name every affected package, and only those, with the version to upgrade to. The JSON
+    # report is deleted with the caller's temp dir, so anything missing here an operator has
+    # to reproduce the audit locally to recover.
     assert lines == [
-        "requests 2.19.1: PYSEC-2018-28, PYSEC-2023-74",
+        "requests 2.19.1: PYSEC-2018-28 (fix: 2.20.0), PYSEC-2023-74 (fix: 2.31.0)",
         "urllib3 1.23: PYSEC-2026-1873",
     ]
 
@@ -108,7 +110,7 @@ def test_an_audit_that_examined_nothing_is_not_a_pass() -> None:
 @pytest.mark.parametrize(
     ("report", "expected_status", "expected_stdout"),
     [
-        (_GENUINE_ADVISORY, FOUND, "requests 2.19.1: PYSEC-2018-28, PYSEC-2023-74\n"),
+        (_GENUINE_ADVISORY, FOUND, "requests 2.19.1: PYSEC-2018-28 (fix: 2.20.0)"),
         (_CLEAN, CLEAN, ""),
         ("not json at all", NO_VERDICT, ""),
     ],

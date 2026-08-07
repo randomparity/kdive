@@ -63,8 +63,19 @@ def classify(raw: str) -> tuple[int, list[str]]:
 
 
 def _describe(dep: dict[str, Any]) -> str:
-    ids = ", ".join(str(vuln.get("id", "?")) for vuln in dep["vulns"])
-    return f"{dep.get('name', '?')} {dep.get('version', '?')}: {ids}"
+    """One line per affected package: what is wrong, and what to upgrade to.
+
+    The fix version is the whole remediation, and the report this is derived from is deleted
+    with the caller's temp directory — so anything dropped here an operator has to reproduce
+    the audit locally to recover. ``pip-audit`` repeats an advisory once per alias, so ids are
+    de-duplicated while keeping the order they were reported in.
+    """
+    seen: dict[str, str] = {}
+    for vuln in dep["vulns"]:
+        identifier = str(vuln.get("id", "?"))
+        fixes = ", ".join(str(version) for version in vuln.get("fix_versions") or [])
+        seen.setdefault(identifier, f"{identifier} (fix: {fixes})" if fixes else identifier)
+    return f"{dep.get('name', '?')} {dep.get('version', '?')}: {', '.join(seen.values())}"
 
 
 def main(argv: list[str]) -> int:

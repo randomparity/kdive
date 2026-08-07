@@ -141,6 +141,31 @@ def test_a_clean_audit_passes(run_audit) -> None:  # noqa: ANN001
     assert "No known advisories" in result.stdout
 
 
+def test_the_runtime_audit_keeps_the_flags_the_gate_depends_on(run_audit) -> None:  # noqa: ANN001
+    """Assert pip-audit's argv, not just how many times it ran.
+
+    Counting alone leaves every flag unguarded, and three of them are load-bearing: dropping
+    `--strict` silently stops the shipped gate failing on a dependency pip-audit could not
+    collect, dropping `-f json` makes every attempt classify as no-verdict, and unpinning the
+    version moves a supply-chain tool the ADR says stays at 2.10.0.
+    """
+    argv = run_audit("runtime", _CLEAN, audit_exit=0).audit_calls[0]
+
+    assert "--strict" in argv, "the shipped-dependency audit must fail on a collection failure"
+    assert "-f json" in argv, "the verdict is read from the JSON report, not the exit status"
+    assert "--no-deps" in argv
+    assert "pip-audit==2.10.0" in argv, "pip-audit stays pinned"
+
+
+def test_the_dev_audit_is_not_strict(run_audit) -> None:  # noqa: ANN001
+    # Dev is informational, so a collection failure there must not be escalated the way the
+    # shipped set's is. This pins the asymmetry rather than leaving the two modes free to converge.
+    argv = run_audit("dev", _CLEAN, audit_exit=0).audit_calls[0]
+
+    assert "--strict" not in argv
+    assert "-f json" in argv
+
+
 def test_a_transport_failure_is_retried_then_fails_closed(run_audit) -> None:  # noqa: ANN001
     result = run_audit("runtime", "", audit_exit=1)
 
@@ -171,16 +196,25 @@ def test_dev_mode_reports_an_advisory_without_failing_the_build(  # noqa: ANN001
     assert "acme 1.0: PYSEC-1" in summary.read_text(encoding="utf-8")
 
 
-def test_dev_mode_says_so_in_the_summary_when_it_finds_nothing(  # noqa: ANN001
-    run_audit, tmp_path: Path
+@pytest.mark.parametrize(
+    ("report", "audit_exit", "expected"),
+    [
+        (_CLEAN, 0, "No known advisories"),
+        ("", 1, "could not complete"),
+    ],
+    ids=["clean", "no-verdict"],
+)
+def test_dev_mode_always_says_something_in_the_summary(  # noqa: ANN001
+    run_audit, tmp_path: Path, report: str, audit_exit: int, expected: str
 ) -> None:
-    # The dev job reports only through the summary, so an empty one is indistinguishable from
-    # a step that never ran.
+    # The summary is the dev job's only reporting channel, so every outcome has to reach it.
+    # An empty summary is indistinguishable from a step that never ran — including the case
+    # where the audit genuinely never completed, which is the one worth knowing about.
     summary = tmp_path / "summary.md"
-    result = run_audit("dev", _CLEAN, audit_exit=0, summary=summary)
+    result = run_audit("dev", report, audit_exit=audit_exit, summary=summary)
 
     assert result.exit_code == 0
-    assert "No known advisories" in summary.read_text(encoding="utf-8")
+    assert expected in summary.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("classifier_exit", [1, 127, 137], ids=["crash", "no-interpreter", "oom"])

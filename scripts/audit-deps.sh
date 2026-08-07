@@ -122,6 +122,9 @@ if ((verdict == 2)); then
   tail -n 20 "$errlog" >&2
   echo >&2 # pip's last line often lacks a newline, which would swallow the annotation below
   if [[ "$MODE" == dev ]]; then
+    # The summary is the dev job's only reporting channel, so this has to land there too —
+    # an empty summary is indistinguishable from a step that never ran.
+    echo "pip-audit could not complete after ${ATTEMPTS} attempts — dev dependencies are unaudited." | summary
     echo "::warning::pip-audit could not complete the dev audit after ${ATTEMPTS} attempts (see log)"
     exit 0
   fi

@@ -45,6 +45,29 @@ _QUOTED = re.compile(r'"(?P<image>[^"\s]+)"')
 _PREPULL_STEP = re.compile(r"^\s*run:\s*just pull-test-images\s*$", re.MULTILINE)
 _TEST_STEP = re.compile(r"^\s*run:\s*just test\s*$", re.MULTILINE)
 
+#: A job key: two-space indent under the top-level ``jobs:`` mapping.
+_JOBS_BLOCK = re.compile(r"^jobs:$", re.MULTILINE)
+_JOB_KEY = re.compile(r"^  (?P<job>[A-Za-z0-9_-]+):$", re.MULTILINE)
+
+
+def _jobs(text: str) -> dict[str, str]:
+    """Split a workflow into ``{job name: that job's YAML}``.
+
+    "Before" has to mean *earlier in the same job*, not merely earlier in the file. A pre-pull
+    step sitting in an unrelated job textually above another job's ``just test`` satisfies a
+    whole-file ordering check while pre-pulling nothing for the job that runs the suite — the
+    drift an ordinary workflow refactor produces, and the one this guard exists to catch.
+    """
+    block = _JOBS_BLOCK.search(text)
+    if block is None:
+        return {}
+    body = text[block.end() :]
+    bounds = list(_JOB_KEY.finditer(body))
+    ends = [*(match.start() for match in bounds[1:]), len(body)]
+    return {
+        match.group("job"): body[match.end() : end] for match, end in zip(bounds, ends, strict=True)
+    }
+
 
 def _fixture_image(rel_path: str, constant: str) -> str:
     text = (_ROOT / rel_path).read_text(encoding="utf-8")
@@ -93,28 +116,37 @@ def test_prepull_images_are_exactly_the_fixture_images() -> None:
 
 
 def test_every_suite_workflow_prepulls_before_it_runs_the_suite() -> None:
-    # Every `just test`, not merely the first. `search` would let a second suite-running job
-    # added later inherit the first job's pre-pull and pass while pre-pulling nothing for
-    # itself — the guard going quiet exactly as the workflow grows.
+    # Per job, and every `just test` within it — not the first match in the file. Both
+    # weaker forms pass while a suite-running job pre-pulls nothing.
+    suite_jobs = 0
     for name in _SUITE_WORKFLOWS:
-        text = (_WORKFLOWS / name).read_text(encoding="utf-8")
-        test_steps = [match.start() for match in _TEST_STEP.finditer(text)]
-        prepull_steps = [match.start() for match in _PREPULL_STEP.finditer(text)]
+        jobs = _jobs((_WORKFLOWS / name).read_text(encoding="utf-8"))
+        assert jobs, f"no jobs parsed out of {name} — the workflow layout changed (ADR-0553)"
 
-        assert test_steps, (
-            f"{name} no longer has a `run: just test` step, so this guard is vacuous for it. "
-            "If the suite moved to another recipe, re-point _TEST_STEP; if the workflow stopped "
-            "running the suite, drop it from _SUITE_WORKFLOWS (ADR-0553)."
-        )
-        assert len(prepull_steps) == len(test_steps), (
-            f"{name} has {len(test_steps)} `run: just test` step(s) but "
-            f"{len(prepull_steps)} `run: just pull-test-images` step(s). Each suite run needs "
-            "its own pre-pull; without one, an unreachable registry surfaces as thousands of "
-            "downstream fixture errors instead of one red step (ADR-0553, #1913)."
-        )
-        for index, (prepull, test) in enumerate(zip(prepull_steps, test_steps, strict=True)):
-            assert prepull < test, (
-                f"{name} runs `just pull-test-images` after `just test` (pair {index}), which "
-                "pre-pulls nothing: the fixtures have already tried the registry by then "
-                "(ADR-0553)."
+        for job_name, body in jobs.items():
+            test_steps = [match.start() for match in _TEST_STEP.finditer(body)]
+            if not test_steps:
+                continue
+            suite_jobs += 1
+            prepull_steps = [match.start() for match in _PREPULL_STEP.finditer(body)]
+
+            assert len(prepull_steps) == len(test_steps), (
+                f"{name} job `{job_name}` has {len(test_steps)} `run: just test` step(s) but "
+                f"{len(prepull_steps)} `run: just pull-test-images` step(s) of its own. A "
+                "pre-pull in a different job warms nothing for this one; without it an "
+                "unreachable registry surfaces as thousands of downstream fixture errors "
+                "instead of one red step (ADR-0553, #1913)."
             )
+            for prepull, test in zip(prepull_steps, test_steps, strict=True):
+                assert prepull < test, (
+                    f"{name} job `{job_name}` runs `just pull-test-images` after `just test`, "
+                    "which pre-pulls nothing: the fixtures have already tried the registry by "
+                    "then (ADR-0553)."
+                )
+
+    # Without this the loop above passes over nothing the moment _TEST_STEP stops matching.
+    assert suite_jobs == len(_SUITE_WORKFLOWS), (
+        f"expected one suite-running job in each of {list(_SUITE_WORKFLOWS)}, found "
+        f"{suite_jobs}. If the suite moved to another recipe, re-point _TEST_STEP; if a "
+        "workflow stopped running it, drop it from _SUITE_WORKFLOWS (ADR-0553)."
+    )
