@@ -111,6 +111,20 @@ therefore gains `RETURNING id` and logs one `INFO` line per actual recycle (job 
 `dedup_key`) — no schema, no new metric, and a thrashing `dedup_key` says so in the log rather than
 only in the lane-depth gauge.
 
+### Amendment (2026-08-06): the recycle also re-derives the row's lane (#1538)
+
+This is an amendment rather than a supersession: the decision above is unchanged — the recycle
+`UPDATE` still re-dates `created_at` and a revived job still takes its place at the back of a lane.
+What it qualifies is the phrase *its lane*. When this record was written there was one lane, so the
+row's lane was not a variable and the sentence had nothing to distinguish.
+
+[ADR-0550](0550-state-fenced-dispatch-lane-and-per-lane-claim-loops.md) routes the state-fenced
+kinds (`restore`, `reprovision`, `snapshot`) onto their own lane, derived from the kind inside
+`enqueue`. It extends this same `UPDATE` to set `dispatch_lane` alongside `created_at`, so a revived
+job goes to the back of **its kind's** lane, which for a row first inserted before that change is
+not the lane it was inserted with. Without that, a `dedup_key` created before ADR-0550 would recycle
+onto `default` forever and never reach the fenced lane.
+
 ## Alternatives considered
 
 **An explicit `queued_at` (or priority) column that `dequeue` orders by, keeping `created_at` as

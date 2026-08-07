@@ -99,6 +99,12 @@
 | `KDIVE_RESOURCE_LEASE_TTL_SECONDS` | server | `86400` | no | Lease window in seconds for a runtime-registered resource (resources.register). register_* sets lease_expires_at = now() + this window and resources.renew extends it by the same window; the reconciler reaps a runtime resource once its lease expires (ADR-0112). Tunes the leak-resistance horizon for imperatively-registered capacity. |
 | `KDIVE_SYSTEMS_TOML` | reconciler, worker | — | no | Path to the declarative systems inventory file reconciled into the catalog (ADR-0112). The reconciler's inventory pass reads it each loop; the worker resolves the per-op remote-libvirt connection config from it (ADR-0112 §connection). When unset the path defaults to the per-user XDG location $XDG_CONFIG_HOME/kdive/systems.toml (falling back to ~/.config/kdive/systems.toml) — a CWD-independent default, never a working-directory-relative ./systems.toml. An absent default file is the normal pre-config state (systems.toml is gitignored) and is a quiet no-op, while a present-but-malformed file fails that pass without aborting siblings. |
 
+## jobs
+
+| Variable | Processes | Default | Required | Value |
+|----------|-----------|---------|----------|-------|
+| `KDIVE_WORKER_ACCEPTED_LANES` | worker | `default,state-fenced` | no | Comma-separated dispatch lanes this worker claims from; it runs one claim loop per lane. Defaults to every lane a job kind routes to. Narrowing it starves the omitted lane — those jobs are never claimed and the System or Snapshot they fence stays fenced, with no sweep to surface it. |
+
 ## lease
 
 | Variable | Processes | Default | Required | Value |

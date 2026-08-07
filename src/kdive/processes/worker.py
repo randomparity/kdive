@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING
 
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
+from kdive.config.core_settings import WORKER_ACCEPTED_LANES
 from kdive.db.pool import create_pool
+from kdive.jobs.worker import worker_pool_floor
 from kdive.processes.lifecycle.worker_incarnation import (
     worker_incarnation_credential,
     worker_incarnation_id,
@@ -23,6 +26,10 @@ from kdive.services.runs.worker_incarnations import (
     WorkerIncarnation,
     authenticate_worker_incarnation,
 )
+
+# The historic pool ceiling. Kept as a floor of its own so a single-lane worker keeps the same
+# headroom it always had rather than being narrowed to its bare correctness minimum.
+_MIN_POOL_MAX_SIZE = 4
 
 if TYPE_CHECKING:
     from kdive.health.heartbeat import Heartbeat
@@ -57,6 +64,12 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
     configured_worker_id = worker_incarnation_id(os.getpid())
     incarnation_credential = worker_incarnation_credential()
     secret_registry.register(incarnation_credential.get_secret_value(), scope=None)
+    # Read once, here: the pool is built as an argument to `run_process_runtime` (outside
+    # `run_worker_body`) while `WorkerConfig` is built inside it, so a read at either site alone
+    # is out of scope for the other — and the two must agree or the worker's own floor check
+    # fails at construction on every start (ADR-0550).
+    accepted_lanes = config.require(WORKER_ACCEPTED_LANES)
+    pool_max_size = max(_MIN_POOL_MAX_SIZE, worker_pool_floor(accepted_lanes))
 
     def build_probe(pool: AsyncConnectionPool) -> HealthProbe:
         return build_worker_probe(
@@ -81,6 +94,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
             incarnation_credential=incarnation_credential,
             secret_registry=secret_registry,
             config=WorkerConfig(
+                accepted_lanes=accepted_lanes,
                 heartbeat=heartbeat,
                 readiness=readiness(probe),
                 telemetry=WorkerTelemetry(
@@ -93,7 +107,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
 
     await run_process_runtime(
         process="worker",
-        pool=create_pool(min_size=2, max_size=4),
+        pool=create_pool(min_size=2, max_size=pool_max_size),
         secret_registry=secret_registry,
         telemetry=telemetry,
         heartbeat_stale_after=HEARTBEAT_STALE_SECONDS,

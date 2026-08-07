@@ -967,7 +967,7 @@
             "uid": "${datasource}"
           },
           "expr": "kdive_job_queue_depth",
-          "legendFormat": "depth",
+          "legendFormat": "{{dispatch_lane}}",
           "refId": "A",
           "range": true
         }

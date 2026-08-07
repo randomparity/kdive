@@ -1,4 +1,4 @@
-"""Connection-scoped operations over the durable ``jobs`` queue (ADR-0018, ADR-0533).
+"""Connection-scoped operations over the durable ``jobs`` queue (ADR-0018, ADR-0533, ADR-0550).
 
 ``enqueue`` admits a job idempotently on ``dedup_key``; ``dequeue`` claims the oldest
 eligible job with ``FOR UPDATE SKIP LOCKED``, charging an attempt and reclaiming a
@@ -30,6 +30,7 @@ from kdive.domain.operations.jobs import (
     Job,
     JobAuthorizing,
     JobKind,
+    dispatch_lane_for_kind,
 )
 from kdive.jobs.payloads import (
     ActivePayloadModel,
@@ -55,7 +56,6 @@ async def enqueue(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     recycle_terminal: bool = False,
     recycle_canceled: bool = False,
-    dispatch_lane: str = DEFAULT_JOB_DISPATCH_LANE,
 ) -> Job:
     """Admit a job, returning the existing one on a ``dedup_key`` conflict.
 
@@ -88,10 +88,20 @@ async def enqueue(
     it also keeps a row's ``created_at`` moving only forward, so ``jobs.list``'s ``(created_at,
     id)`` keyset cursor can only *skip* a re-dated row, never return it twice.
 
-    ``authorizing``, ``max_attempts``, ``kind`` and ``dispatch_lane`` are deliberately **not**
-    reset: they describe the job's slot, not the attempt. ``authorizing`` in particular stays with
-    the principal who first enqueued it, so a re-dated ``created_at`` must not be read as the
-    recycling principal's action time. Overwriting the payload matters for a re-stage
+    ``authorizing``, ``max_attempts`` and ``kind`` are deliberately **not** reset: they describe the
+    job's slot, not the attempt. ``authorizing`` in particular stays with the principal who first
+    enqueued it, so a re-dated ``created_at`` must not be read as the recycling principal's action
+    time.
+
+    ``dispatch_lane`` **is** reset, to the same kind-derived value the ``INSERT`` uses (ADR-0550
+    amending ADR-0447). It has to be: ``systems.restore`` and ``systems.snapshot`` recycle under a
+    durable ``dedup_key``, so a row first inserted before the state-fenced lane existed would keep
+    its original lane for **every future attempt** — the routing would silently never reach a
+    System that had already used the feature, which is the opposite of the availability fix it
+    exists for. Re-deriving here means a row's lane converges on its kind's lane at the first
+    recycle, and a kind can never end up split across two lanes.
+
+    Overwriting the payload matters for a re-stage
     (ADR-0299): the new ``runs.install`` cmdline must reach the recycled job, otherwise it re-runs
     the prior cmdline. The failed case is the transient install/boot retry (ADR-0185); the succeeded
     case is the ledger-driven re-stage (the caller deletes the ``run_steps`` row first, so an absent
@@ -111,7 +121,6 @@ async def enqueue(
         ValueError: ``max_attempts < 1`` (a job that ``dequeue`` could never claim).
         ValueError: ``recycle_canceled`` without ``recycle_terminal``.
         ValueError: ``kind`` is a retired historical kind without an active handler.
-        ValueError: ``dispatch_lane`` is blank.
     """
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
@@ -119,8 +128,7 @@ async def enqueue(
         raise ValueError("recycle_canceled requires recycle_terminal")
     if kind in RETIRED_JOB_KINDS:
         raise ValueError(f"job kind {kind.value!r} is retired and cannot be enqueued")
-    if not dispatch_lane:
-        raise ValueError("dispatch_lane must not be blank")
+    dispatch_lane = dispatch_lane_for_kind(kind)
     payload_json = dump_payload(kind, payload)
     authorizing = dump_authorizing(authorizing)
     recycled_id: UUID | None = None
@@ -149,12 +157,13 @@ async def enqueue(
                 "UPDATE jobs SET state = %s, payload = %s, attempt = 0, worker_id = NULL, "
                 "    lease_expires_at = NULL, heartbeat_at = NULL, error_category = NULL, "
                 "    result_ref = NULL, failure_context = '{}'::jsonb, "
-                "    created_at = clock_timestamp() "
+                "    dispatch_lane = %s, created_at = clock_timestamp() "
                 "WHERE dedup_key = %s AND state = ANY(%s) "
                 "RETURNING id",
                 (
                     JobState.QUEUED.value,
                     Jsonb(payload_json),
+                    dispatch_lane,
                     dedup_key,
                     recyclable,
                 ),

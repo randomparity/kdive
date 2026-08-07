@@ -58,7 +58,7 @@ def test_instrument_contract_names_units_and_descriptions() -> None:
     telemetry, reader, _exporter = _telemetry()
     from kdive.jobs.provider_context import set_provider_kind
 
-    telemetry.observe_queue_depth(1)
+    telemetry.observe_queue_depth(1, lane="default")
     with telemetry.job_span("build") as span:
         set_provider_kind("local-libvirt")
         span.set_outcome("error")  # also drives provider.op.errors
@@ -89,7 +89,7 @@ def test_disabled_is_a_noop() -> None:
     telemetry = WorkerTelemetry.disabled()
     with telemetry.job_span("build") as span:
         span.set_outcome("ok")
-    telemetry.observe_queue_depth(3)  # no meter wired; must not raise
+    telemetry.observe_queue_depth(3, lane="default")  # no meter wired; must not raise
 
 
 def test_job_span_records_duration_and_labels() -> None:
@@ -132,7 +132,8 @@ def _gauge_value(reader: InMemoryMetricReader, name: str) -> float | int | None:
     from opentelemetry.sdk.metrics.export import NumberDataPoint
 
     data = reader.get_metrics_data()
-    assert data is not None
+    if data is None:
+        return None
     for rm in data.resource_metrics:
         for sm in rm.scope_metrics:
             for metric in sm.metrics:
@@ -144,29 +145,65 @@ def _gauge_value(reader: InMemoryMetricReader, name: str) -> float | int | None:
     return None
 
 
-def test_queue_depth_gauge_starts_at_zero_before_any_observation() -> None:
-    # A freshly-built telemetry reports an empty backlog (0), not a phantom one, until the
-    # first poll observes a real depth.
+def test_queue_depth_gauge_reports_nothing_before_any_observation() -> None:
+    # The gauge is labelled by dispatch lane (ADR-0550), so before the first poll there is no
+    # lane to attribute a reading to. Reporting `0` would mean inventing one — the phantom
+    # reading this case has always guarded against, now expressed as an absent series rather
+    # than an unlabelled zero. The first poll lands within `poll_interval` of startup.
     telemetry, reader, _exporter = _telemetry()
-    assert _gauge_value(reader, "kdive.job.queue.depth") == 0
+    assert _gauge_value(reader, "kdive.job.queue.depth") is None
+
+
+def test_queue_depth_is_reported_per_lane_not_overwritten_across_them() -> None:
+    """S7. Two loops sharing one scalar would each clobber the other's count.
+
+    The reported depth would then belong to neither lane — and would flip between them on
+    successive scrapes, which reads as a queue oscillating rather than as a broken gauge.
+    """
+    telemetry, reader, _exporter = _telemetry()
+    telemetry.observe_queue_depth(7, lane="default")
+    telemetry.observe_queue_depth(2, lane="state-fenced")
+
+    by_lane = _gauge_by_lane(reader, "kdive.job.queue.depth")
+
+    assert by_lane == {"default": 7, "state-fenced": 2}
+
+
+def _gauge_by_lane(reader: InMemoryMetricReader, name: str) -> dict[str, float | int]:
+    from opentelemetry.sdk.metrics.export import NumberDataPoint
+
+    data = reader.get_metrics_data()
+    assert data is not None, "expected the lane-labelled gauge to have been observed"
+    found: dict[str, float | int] = {}
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name == name:
+                    for point in metric.data.data_points:
+                        lane = (point.attributes or {}).get("dispatch_lane")
+                        assert isinstance(lane, str)
+                        assert isinstance(point, NumberDataPoint)
+                        found[lane] = point.value
+    return found
 
 
 def test_queue_depth_gauge_reports_last_observed_not_a_running_sum() -> None:
     telemetry, reader, _exporter = _telemetry()
-    telemetry.observe_queue_depth(3)
+    telemetry.observe_queue_depth(3, lane="default")
     assert _gauge_value(reader, "kdive.job.queue.depth") == 3
     # A second observation REPLACES, not accumulates — it is a gauge, not a counter.
-    telemetry.observe_queue_depth(1)
+    telemetry.observe_queue_depth(1, lane="default")
     assert _gauge_value(reader, "kdive.job.queue.depth") == 1
 
 
 def test_queue_depth_disabled_is_noop() -> None:
-    WorkerTelemetry.disabled().observe_queue_depth(5)  # must not raise
+    WorkerTelemetry.disabled().observe_queue_depth(5, lane="default")  # must not raise
 
 
 def _error_points(reader: InMemoryMetricReader) -> dict[tuple[tuple[str, str], ...], float]:
     data = reader.get_metrics_data()
-    assert data is not None
+    if data is None:  # nothing recorded at all — trivially no error points
+        return {}
     points: dict[tuple[tuple[str, str], ...], float] = {}
     for rm in data.resource_metrics:
         for sm in rm.scope_metrics:
@@ -204,7 +241,8 @@ def test_record_job_failure_disabled_is_noop() -> None:
 def _points_for(reader: InMemoryMetricReader, family_name: str) -> list[Any]:
     """Return all data points whose metric name matches ``family_name``."""
     data = reader.get_metrics_data()
-    assert data is not None
+    if data is None:  # nothing recorded at all — trivially no points
+        return []
     out: list[Any] = []
     for rm in data.resource_metrics:
         for sm in rm.scope_metrics:

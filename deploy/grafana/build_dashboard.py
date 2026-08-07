@@ -344,7 +344,10 @@ def _row_jobs(grid: _Grid) -> None:
     grid.add(
         _timeseries(
             "Job queue depth",
-            [_target("kdive_job_queue_depth", "depth")],
+            # One series per dispatch lane (ADR-0550). A literal legend would render the lanes
+            # as two identically-named lines; the label is what tells a fenced backlog apart
+            # from a build backlog, which is the distinction the lane split exists to make.
+            [_target("kdive_job_queue_depth", "{{dispatch_lane}}")],
             unit="short",
         ),
         width=12,

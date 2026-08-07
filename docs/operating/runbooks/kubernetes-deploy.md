@@ -1641,6 +1641,50 @@ kubectl get pods -l app.kubernetes.io/name=kdive
 > The external-path ConfigMap is also a pre-upgrade hook, so `helm upgrade --no-hooks` **skips**
 > it — use a hooked upgrade for config changes.
 
+### Draining the state-fenced lane before a worker downgrade (ADR-0550)
+
+**This does not make a worker downgrade supported.** The staged worker-fence upgrade above stays
+stop-old-first and forward-only: do not restore an old worker image for a release carrying the
+fence protocol. What follows is a **prerequisite of a downgrade that is already permitted** — on a
+non-fence release, or on the systemd and Compose paths — and never a reason one becomes permitted.
+
+Since ADR-0550, `restore`, `reprovision`, and `snapshot` jobs are admitted onto the `state-fenced`
+dispatch lane. A worker built before that change accepts only the `default` lane, so after a
+downgrade it never claims those rows. They sit unclaimed indefinitely with their System pinned in
+`restoring`/`reprovisioning` or their Snapshot in `creating`, and nothing surfaces it: the
+abandoned-job repair reaps only `running` rows, and at attempt 1 of 3 it does not dead-letter those
+either — so a `running` fenced row is stranded harder than a queued one, its lease lapsing with no
+claimant left and no old worker willing to reclaim its lane.
+
+Run these in order. The ordering is the point: the `UPDATE` moves rows out from under any worker
+still claiming, so the new workers must be stopped first.
+
+1. Stop the new workers.
+
+   ```bash
+   kubectl -n "$NAMESPACE" scale statefulset "$RELEASE-worker" --replicas=0
+   kubectl -n "$NAMESPACE" rollout status statefulset "$RELEASE-worker" --timeout=5m
+   ```
+
+2. Move every **non-terminal** fenced row back to the default lane.
+
+   ```sql
+   UPDATE jobs
+      SET dispatch_lane = 'default'
+    WHERE dispatch_lane = 'state-fenced'
+      AND state IN ('queued', 'running');
+   ```
+
+3. Start the old workers, and confirm the lane is empty before declaring the downgrade complete.
+
+   ```sql
+   SELECT count(*) FROM jobs
+    WHERE dispatch_lane = 'state-fenced' AND state IN ('queued', 'running');
+   ```
+
+A non-zero count in step 3 means a worker admitted new fenced work between steps 1 and 2; repeat
+from step 1.
+
 ## 5. Reach the MCP endpoint
 
 The chart's only Service fronts the server's MCP port `8000` as a **ClusterIP** (the per-process

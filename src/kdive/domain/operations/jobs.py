@@ -55,6 +55,32 @@ RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_
 DEFAULT_JOB_DISPATCH_LANE = "default"
 """Dispatch lane used by the generic worker pool and all historical jobs."""
 
+STATE_FENCED_JOB_DISPATCH_LANE = "state-fenced"
+"""Dispatch lane for the kinds that fence a durable object at enqueue (ADR-0550)."""
+
+STATE_FENCED_JOB_KINDS: frozenset[JobKind] = frozenset(
+    {JobKind.RESTORE, JobKind.REPROVISION, JobKind.SNAPSHOT}
+)
+"""The kinds whose **enqueue transaction** writes a transient state another tool rejects on.
+
+That is the whole rule, and it is checkable at the enqueue site: ``systems.restore`` sets
+``SystemState.RESTORING``, ``systems.reprovision`` sets ``SystemState.REPROVISIONING``, and
+``systems.snapshot`` inserts its ledger row as ``SnapshotState.CREATING`` — each in the same
+transaction as the ``enqueue``, so the job's *queue wait* is time the object is unusable rather
+than time the agent waits. These route to :data:`STATE_FENCED_JOB_DISPATCH_LANE` so that wait
+cannot sit behind unrelated long work (ADR-0550, #1538).
+
+Three near misses stay on the default lane. ``delete_snapshot`` writes no state — only its queued
+presence is read, by ``_active_snapshot_op`` — so the rule admitting it would be "queued presence
+is a rejection predicate", a property of the readers that cannot be evaluated where the routing
+happens. ``teardown``'s handler writes the state, not its enqueue. ``provision`` has no
+pre-existing object to fence.
+
+Distinct from :data:`SYSTEM_FAILING_JOB_KINDS`, which is scoped to handlers that write
+``SystemState.FAILED``: that answers *why is this System failed*, this answers *is this object
+fenced while the job merely waits*. Neither set is a substitute for the other.
+"""
+
 ACTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
     kind for kind in JobKind if kind not in RETIRED_JOB_KINDS
 )
@@ -153,15 +179,30 @@ class Job(DomainModel):
     dedup_key: str
 
 
+def dispatch_lane_for_kind(kind: JobKind) -> str:
+    """Return the dispatch lane ``kind`` is admitted onto (ADR-0550).
+
+    Total over :class:`JobKind`. This is the single point that decides routing: ``enqueue``
+    derives the lane here rather than accepting one from its caller, so a new kind lands on the
+    lane its membership implies instead of on whichever lane fourteen call sites remembered.
+    """
+    if kind in STATE_FENCED_JOB_KINDS:
+        return STATE_FENCED_JOB_DISPATCH_LANE
+    return DEFAULT_JOB_DISPATCH_LANE
+
+
 __all__ = [
     "ACTIVE_JOB_KINDS",
     "CONTRIBUTOR_CANCELABLE_JOB_KINDS",
     "DEFAULT_JOB_DISPATCH_LANE",
     "OPT_IN_DESTRUCTIVE_JOB_KINDS",
     "RETIRED_JOB_KINDS",
+    "STATE_FENCED_JOB_DISPATCH_LANE",
+    "STATE_FENCED_JOB_KINDS",
     "SYSTEM_FAILING_JOB_KINDS",
     "Job",
     "JobAuthorizing",
     "JobKind",
     "PowerAction",
+    "dispatch_lane_for_kind",
 ]

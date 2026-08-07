@@ -48,7 +48,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import JobState, RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, InstallPayload
@@ -200,7 +200,7 @@ def test_faulting_the_run_transition_leaves_the_job_reapable(migrated_url: str) 
             async with _run_row_locked(migrated_url, run_id):
                 # `_claim_loop` swallows this in production; no process death is needed.
                 with pytest.raises(psycopg.errors.LockNotAvailable):
-                    await worker.run_once()
+                    await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
 
             job_row = await _job_row(pool, job.id)
             assert job_row["state"] == JobState.RUNNING.value
@@ -249,7 +249,7 @@ def test_worker_torn_down_in_the_gap_loses_neither_write(
 
             monkeypatch.setattr(queue, "fail", fail_then_die)
             with pytest.raises(asyncio.CancelledError):
-                await worker.run_once()
+                await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             monkeypatch.undo()
 
             job_row = await _job_row(pool, job.id)
@@ -264,7 +264,7 @@ def test_worker_torn_down_in_the_gap_loses_neither_write(
             # Reapable by the queue itself: the lapsed lease is reclaimable while attempts
             # remain, and this attempt finalizes both writes together.
             await _lapse_lease(pool, job.id)
-            reclaimed = await worker.run_once()
+            reclaimed = await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             assert reclaimed is not None and reclaimed.id == job.id
             assert (await _job_row(pool, job.id))["attempt"] == 2
             assert await _run_row(pool, run_id) == {
@@ -292,7 +292,7 @@ def test_unknown_kind_dead_letter_and_run_transition_are_one_unit(migrated_url: 
 
             async with _run_row_locked(migrated_url, run_id):
                 with pytest.raises(psycopg.errors.LockNotAvailable):
-                    await worker.run_once()
+                    await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
 
             job_row = await _job_row(pool, job.id)
             assert job_row["state"] == JobState.RUNNING.value
@@ -331,7 +331,7 @@ def test_stale_worker_that_lost_its_lease_does_not_fail_the_run(migrated_url: st
 
             registry = HandlerRegistry()
             registry.register(JobKind.INSTALL, handler)
-            await _worker(pool, registry).run_once()
+            await _worker(pool, registry).run_once(DEFAULT_JOB_DISPATCH_LANE)
 
             job_row = await _job_row(pool, job.id)
             assert job_row["worker_id"] == _RECLAIMER
@@ -381,7 +381,7 @@ def test_worker_takes_the_run_lock_before_queue_fail_writes_anything(
                 advisory_xact_lock(holder, LockScope.RUN, UUID(run_id)),
             ):
                 with pytest.raises(psycopg.errors.LockNotAvailable):
-                    await worker.run_once()
+                    await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
 
             assert calls == [], "the RUN lock must be held before queue.fail writes anything"
             job_row = await _job_row(pool, job.id)

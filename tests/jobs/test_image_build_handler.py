@@ -27,7 +27,7 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.catalog.images import ImageState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.operations.jobs import JobKind
+from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, JobKind
 from kdive.images.cataloging.validation import GUEST_CONTRACT_PATHS
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
 from kdive.jobs import queue
@@ -336,7 +336,7 @@ def test_handler_dead_letters_validation_failure_with_named_category(
                 incarnation_credential=incarnation_credential("w1"),
                 secret_registry=SecretRegistry(),
             )
-            await worker.run_once()
+            await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
             async with pool.connection() as conn:
                 final = await JOBS.get(conn, job.id)
                 assert final is not None

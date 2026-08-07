@@ -17,12 +17,22 @@ from pydantic import SecretStr
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import RETIRED_JOB_KINDS, Job, JobKind
+from kdive.domain.operations.jobs import (
+    DEFAULT_JOB_DISPATCH_LANE,
+    RETIRED_JOB_KINDS,
+    STATE_FENCED_JOB_DISPATCH_LANE,
+    STATE_FENCED_JOB_KINDS,
+    Job,
+    JobKind,
+)
 from kdive.jobs import queue
 from kdive.jobs.payloads import (
     AuthorizeSshKeyPayload,
     Authorizing,
     InstallPayload,
+    ReprovisionPayload,
+    RestorePayload,
+    SnapshotPayload,
     SystemPayload,
 )
 from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
@@ -203,20 +213,102 @@ def test_enqueue_rejects_canceled_recycling_without_terminal_recycling(migrated_
     asyncio.run(_run())
 
 
-def test_enqueue_rejects_blank_dispatch_lane(migrated_url: str) -> None:
+def _fenced_payload(kind: JobKind) -> Any:
+    """A minimal valid payload for each state-fenced kind (ADR-0550)."""
+    system_id = str(uuid4())
+    if kind is JobKind.SNAPSHOT:
+        return SnapshotPayload(
+            system_id=system_id, snapshot_id=str(uuid4()), name="snap", include_memory=False
+        )
+    if kind is JobKind.RESTORE:
+        return RestorePayload(system_id=system_id, name="snap", start_paused=False)
+    return ReprovisionPayload(system_id=system_id, profile_digest="sha256:abc")
+
+
+@pytest.mark.parametrize(
+    "kind", sorted(STATE_FENCED_JOB_KINDS, key=lambda kind: cast(JobKind, kind).value)
+)
+def test_enqueue_routes_state_fenced_kinds_to_the_fenced_lane(
+    migrated_url: str, kind: JobKind
+) -> None:
+    """S1: the three fencing kinds land on the fenced lane, derived from the kind alone."""
+
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
-            with pytest.raises(ValueError, match="dispatch_lane"):
-                await queue.enqueue(
-                    conn,
-                    JobKind.INSTALL,
-                    _build_payload(),
-                    _AUTHORIZING,
-                    "dk-blank-lane",
-                    dispatch_lane="",
-                )
+            job = await queue.enqueue(
+                conn, kind, _fenced_payload(kind), _AUTHORIZING, f"dk-fenced-{kind.value}"
+            )
+            assert job.dispatch_lane == STATE_FENCED_JOB_DISPATCH_LANE
 
     asyncio.run(_run())
+
+
+def test_enqueue_routes_a_non_fenced_kind_to_the_default_lane(migrated_url: str) -> None:
+    """S2, through-enqueue half. The derivation over every kind is covered in tests/domain."""
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            job = await queue.enqueue(
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-default-lane"
+            )
+            assert job.dispatch_lane == DEFAULT_JOB_DISPATCH_LANE
+
+    asyncio.run(_run())
+
+
+def test_recycle_reroutes_a_row_first_inserted_on_another_lane(migrated_url: str) -> None:
+    """S9: a restore row created before ADR-0550 must not keep recycling onto `default`.
+
+    ``systems.restore`` recycles under a durable ``dedup_key``, so a row left on its original
+    lane would stay there for every future attempt — the fix would silently never reach a System
+    that had already used the feature.
+    """
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            payload = _fenced_payload(JobKind.RESTORE)
+            job = await queue.enqueue(
+                conn, JobKind.RESTORE, payload, _AUTHORIZING, "dk-recycle-lane"
+            )
+            # Simulate the pre-upgrade row: on `default`, and terminal so the recycle fires.
+            await conn.execute(
+                "UPDATE jobs SET dispatch_lane = %s, state = %s WHERE id = %s",
+                (DEFAULT_JOB_DISPATCH_LANE, JobState.FAILED.value, job.id),
+            )
+            before = await _row(conn, job.id)
+
+            recycled = await queue.enqueue(
+                conn,
+                JobKind.RESTORE,
+                payload,
+                _AUTHORIZING,
+                "dk-recycle-lane",
+                recycle_terminal=True,
+            )
+
+            assert recycled.id == job.id
+            assert recycled.state is JobState.QUEUED
+            assert recycled.dispatch_lane == STATE_FENCED_JOB_DISPATCH_LANE
+            # ADR-0447's re-dating still holds; this test must not silently drop that guard.
+            after = await _row(conn, job.id)
+            assert after["created_at"] > before["created_at"]
+
+    asyncio.run(_run())
+
+
+async def _set_lane(conn: psycopg.AsyncConnection, job_id: Any, lane: str) -> None:
+    """Put a job on an arbitrary lane. ``enqueue`` derives the lane, so tests of the *dequeue*
+    boundary write the column directly rather than asking ``enqueue`` for a lane it no longer
+    accepts (ADR-0550)."""
+    await conn.execute("UPDATE jobs SET dispatch_lane = %s WHERE id = %s", (lane, job_id))
+
+
+async def _row(conn: psycopg.AsyncConnection, job_id: Any) -> dict[str, Any]:
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT * FROM jobs WHERE id = %s", (job_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    return row
 
 
 # Named rather than sorted inline: inside the decorator the element type comes from
@@ -237,22 +329,16 @@ def test_enqueue_rejects_retired_job_kinds(migrated_url: str, kind: JobKind) -> 
 def test_dequeue_claims_only_accepted_dispatch_lanes(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
-            await queue.enqueue(
-                conn,
-                JobKind.INSTALL,
-                _build_payload(),
-                _AUTHORIZING,
-                "dk-provider-a",
-                dispatch_lane="provider-a",
+            # `enqueue` derives the lane from the kind (ADR-0550), so an arbitrary lane is set
+            # on the column directly. The boundary under test is `dequeue`'s, not `enqueue`'s.
+            first = await queue.enqueue(
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-provider-a"
             )
+            await _set_lane(conn, first.id, "provider-a")
             second = await queue.enqueue(
-                conn,
-                JobKind.INSTALL,
-                _build_payload(),
-                _AUTHORIZING,
-                "dk-provider-b",
-                dispatch_lane="provider-b",
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-provider-b"
             )
+            await _set_lane(conn, second.id, "provider-b")
             skipped = await _dequeue(conn, "w-a", accepted_lanes=("provider-c",))
             assert skipped is None
             assert await queue.count_claimable(conn, accepted_lanes=("provider-c",)) == 0
