@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from pathlib import Path
 
 import psycopg
@@ -164,6 +165,12 @@ def test_stop_postgres_leaves_no_dangling_volume_behind() -> None:
 
     assert volumes, "the postgres container is expected to create an anonymous volume"
     surviving = volumes & {v.id for v in client.volumes.list()}
+    # Reap before asserting: on a regression this test would otherwise leak a volume
+    # per run — the very thing it exists to catch — and the failure output would be
+    # buried under the disk growth it caused.
+    for name in surviving:
+        with suppress(Exception):
+            client.volumes.get(name).remove(force=True)
     assert not surviving, f"teardown leaked anonymous volume(s): {surviving}"
 
 
