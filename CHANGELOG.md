@@ -531,6 +531,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record named Compose data volumes for postgres and minio
 - Name the data volumes in every teardown description
 - Make the one-time upgrade snippet correct under bash
+- Amend ADR-0401's falsified residual and fix the cleanup command
 
 ### Fixed
 
@@ -907,6 +908,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the postgres, minio, and prometheus data volumes
 - Cover the prometheus TSDB with tmpfs, not a named volume
 - Document KDIVE_RUN_COMPOSE_VOLUME_PROOF and harden the change
+- Reap crash-stranded backend containers on the next run
+- Keep the sweep alive past a container it cannot inspect
+- Require a regular file before locking a liveness path
+- Only a missing liveness file answers "the run is dead"
 
 ### Build
 
