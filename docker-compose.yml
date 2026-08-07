@@ -401,9 +401,9 @@ networks:
 
 # Every service that keeps state has a named volume here (ADR-0552). A plain `docker compose
 # down` and `just compose-stop` keep all of it; `docker compose down --volumes`,
-# `just compose-down`, and `scripts/live-stack/down.sh --wipe` drop it, and are the only things
-# that do. grafana is absent because its image declares no VOLUME, and prometheus because its
-# demo TSDB is tmpfs (ADR-0189).
+# `just compose-down`, and `scripts/live-stack/down.sh --wipe` drop it — the only supported
+# paths that do. grafana is absent because its image declares no VOLUME, and prometheus because
+# its demo TSDB is tmpfs (ADR-0189).
 volumes:
   kdive-build:
   kdive-install:

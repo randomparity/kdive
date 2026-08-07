@@ -204,10 +204,18 @@ a skip as success, so this proof gets the same treatment as the lifecycle proof:
 recipe appended to the `justfile`, `test-compose-volumes`, setting `KDIVE_REQUIRE_DOCKER=1` and
 `KDIVE_RUN_COMPOSE_VOLUME_PROOF=1`, which the module requires before running. Without the
 opt-in it skips; with it, an absent Docker is a failure rather than a skip, so the sole carrier
-cannot report a skip as proof. That recipe's output is what gets reported with this change, and
-`tests/compose/test_compose_lifecycle_recipe.py` gains a case asserting the recipe keeps both
-environment variables and names the proof module — mirroring the guard the lifecycle proof's
-recipe already has.
+cannot report a skip as proof.
+
+The recipe is wired into `.github/workflows/ci.yml` as its own step in the `lint · type · test`
+job, so it gates PRs: CI invokes justfile recipes individually, and the proof carries the
+`live_stack` marker that `just test` excludes, so neither `just test` nor the `just ci` umbrella
+would run it. It goes in that job rather than `image build + smoke` because the latter runs
+`pytest --no-project --noconftest` with no `uv sync`, so the proof's `boto3` and `psycopg`
+imports would not resolve there.
+
+`tests/compose/test_compose_lifecycle_recipe.py` also gains a case asserting the recipe keeps
+both environment variables and names the proof module — mirroring the guard the lifecycle
+proof's recipe already has.
 
 ### Criterion 4 evidence
 
@@ -224,13 +232,14 @@ unchanged.
 `tests/guards/test_install_topology_contract.py` and
 `tests/compose/test_compose_lifecycle_recipe.py` stay green unchanged.
 `tests/image/test_compose_smoke.py` needs one change: it drives this compose file under the
-fixed project name `kdive-smoke` and tears down with `--volumes` in a `finally` that an
-interrupted run does not reach, so its volumes are now stable across runs. It gains a
-`down --volumes --remove-orphans` **before** its `up`, so a killed run cannot leave the next
-one testing migrations against an already-migrated database. The project name stays fixed —
-that is what isolates it from the operator's stack. Two concurrent smoke runs already destroy
-each other through the shared project name and the `finally` teardown; the pre-`up` teardown
-does not change that, and making the name unique is a separate question this does not settle.
+fixed project name `kdive-smoke`, which was harmless while every `up` allocated fresh anonymous
+volumes. With the volumes named, two runs on one host share `kdive-smoke_kdive-pgdata`, so the
+`--volumes` teardown destroys a sibling run's database mid-test, and a killed run leaves state
+the next run inherits. The project name becomes unique per run
+(`kdive-smoke-<token>`), which closes both — the same token the lifecycle proof already uses.
+The `finally` teardown is unchanged. The tradeoff is the one that token already carries
+everywhere in this repo: an interrupted run strands its own project rather than corrupting the
+next one, greppable by the `kdive-smoke-` prefix.
 `tests/compose/test_compose_worker_lifecycle_live.py` drives its own fixture compose file
 (`tests/compose/fixtures/worker-lifecycle-live.yml`, which already declares a named volume),
 not this one, and is untouched.

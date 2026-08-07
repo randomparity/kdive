@@ -43,7 +43,8 @@ state that is meant to be ephemeral gets tmpfs.
 `kdive-build` and `kdive-install`. Postgres keeps its read-only bootstrap-SQL bind mount
 alongside the new volume. A plain `docker compose down` and `just compose-stop` keep them;
 `docker compose down --volumes`, `just compose-down`, and `scripts/live-stack/down.sh --wipe`
-drop them, and are the only things that do.
+drop them. Those are the only supported paths that do; a raw `docker volume rm` or
+`docker system prune --volumes` obviously still reaches them.
 
 `prometheus` is meant to be ephemeral:
 `tmpfs: ["/prometheus:mode=0700,uid=65534,gid=65534,size=256m"]`.
@@ -73,8 +74,7 @@ first new `up`, while the old container still names it.
 
 ## Consequences
 
-Database and artifact state accumulates across teardowns where it previously vanished, and
-four consequences follow from that.
+Database and artifact state accumulates across teardowns where it previously vanished.
 
 A shared local backend used as the test override (`KDIVE_TEST_PG_URL`) keeps crashed runs'
 `kdive_test_*` databases and `kdive-test-*` buckets until an operator drops them: the periodic
@@ -89,12 +89,12 @@ becomes once per `kdive-pgdata` lifetime. A later edit to that file, or to `POST
 `just compose-down`. A `postgres:17` → `18` image bump now fails at startup on a retained
 volume rather than starting on a fresh one.
 
-`tests/image/test_compose_smoke.py` drives the committed compose file under the fixed project
-name `kdive-smoke`, and its `--volumes` teardown lives in a `finally` an interrupted run does
-not reach. Its volumes are now stable across runs, so it must also tear down *before* it starts
-— otherwise one killed run leaves the next one testing migrations against an already-migrated
-database. `tests/compose/test_compose_worker_lifecycle_live.py` drives its own fixture compose
-file, not this one, and is unaffected.
+`tests/image/test_compose_smoke.py` drives the committed compose file under a fixed project
+name, which was harmless while every `up` got a fresh anonymous volume. Named volumes make that
+name shared state: two runs on one host would collide on `kdive-smoke_kdive-pgdata`, and the
+`--volumes` teardown would destroy a sibling run's database mid-test. Its project name becomes
+unique per run. `tests/compose/test_compose_worker_lifecycle_live.py` drives its own fixture
+compose file, not this one, and is unaffected.
 
 `examples/local-libvirt/down.sh` tells the operator twice that `docker compose down -v` removes
 the backends. That command is still correct and still destructive, but it is no longer the only
@@ -136,6 +136,13 @@ here.
   Compose's lifecycle, so `down --volumes` and `--wipe` could no longer drop it, and they
   inherit the host's uid/gid and SELinux labelling — the class of breakage this repo already
   carries for the staged libvirt rootfs path.
+- **Name only the Postgres volume.** MinIO leaks an anonymous volume on the same terms and
+  holds the artifacts bucket the app tier writes to, so this leaves half the reported defect
+  open and gives an operator two teardown rules where one would do.
+- **Add `--volumes` to every teardown path instead.** This also makes the file and the prose
+  agree, by deleting the state deliberately rather than orphaning it. It forecloses the
+  stop-old-first upgrade entirely and leaves the reference stack unable to hold anything across
+  a restart.
 - **Adopt the existing anonymous volume automatically on first `up`.** Once the old volume is
   unreferenced, nothing identifies it: Compose does not label daemon-created anonymous volumes
   with a project or service, so a one-shot could not tell this install's from another's.

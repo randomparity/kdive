@@ -25,8 +25,8 @@ volumes after recording worker termination; `just compose-down` removes named vo
 destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-minio-data` (the
 artifacts bucket), and `kdive-build` / `kdive-install` — Docker prefixes each with the
 Compose project name, so `docker volume ls` shows them as `<project>_kdive-pgdata` and so on.
-`docker compose down --volumes` and `scripts/live-stack/down.sh --wipe` drop them too, and
-nothing else does. Their operator-side lifecycle wrapper binds the exact full container ID to a
+`docker compose down --volumes` and `scripts/live-stack/down.sh --wipe` drop them too. Those
+are the only supported paths that do. Their operator-side lifecycle wrapper binds the exact full container ID to a
 random nonce in Postgres before start and records retained terminal inspect evidence before removal.
 Compose does not run a persistent lifecycle-witness service. Raw Compose/Docker lifecycle commands
 and host-launched workers bypass that chain and are unsupported. On a database failure, the wrapper

@@ -23,8 +23,8 @@ volumes after recording worker termination; `just compose-down` removes named vo
 destructive teardown. Those volumes are `kdive-pgdata` (the database), `kdive-minio-data` (the
 artifacts bucket), and `kdive-build` / `kdive-install` — Docker prefixes each with the
 Compose project name, so `docker volume ls` shows them as `<project>_kdive-pgdata` and so on.
-`docker compose down --volumes` and `scripts/live-stack/down.sh --wipe` drop them too, and
-nothing else does. These recipes preserve exact worker-incarnation evidence in Postgres. Raw
+`docker compose down --volumes` and `scripts/live-stack/down.sh --wipe` drop them too. Those
+are the only supported paths that do. These recipes preserve exact worker-incarnation evidence in Postgres. Raw
 Compose/Docker lifecycle commands and host workers bypass that evidence boundary. A database failure
 is fail-closed, retaining the never-started or terminal worker so the same recipe can be retried
 after Postgres recovers.
