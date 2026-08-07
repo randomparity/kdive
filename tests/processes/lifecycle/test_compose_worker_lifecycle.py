@@ -157,6 +157,17 @@ def test_recreate_terminates_old_generation_before_creating_new_one() -> None:
     assert events[2] == ("cleanup-credential", None)
 
 
+_DOWN_ARGS = (
+    "docker",
+    "compose",
+    "--profile",
+    "obs",
+    "--profile",
+    "managed-worker",
+    "down",
+)
+
+
 def test_down_terminates_worker_before_database_and_gate_services() -> None:
     lifecycle, events = _lifecycle(initially_created=True)
 
@@ -166,8 +177,28 @@ def test_down_terminates_worker_before_database_and_gate_services() -> None:
     assert events[2] == ("cleanup-credential", None)
     assert events[-1] == (
         "command",
-        (("docker", "compose", "down", "--volumes", "--remove-orphans"), None),
+        ((*_DOWN_ARGS, "--volumes", "--remove-orphans"), None),
     )
+
+
+def test_down_passes_all_profiles_so_obs_services_are_reachable() -> None:
+    lifecycle, events = _lifecycle(initially_created=True)
+
+    asyncio.run(lifecycle.down())
+
+    down_event = next(
+        event
+        for event in events
+        if event[0] == "command" and cast(_CommandEvent, event[1])[0][2:4] == ("--profile", "obs")
+    )
+    argv = cast(_CommandEvent, down_event[1])[0]
+    assert argv[:2] == ("docker", "compose")
+    assert "--profile" in argv
+    assert "obs" in argv
+    assert "--profile" in argv
+    assert "managed-worker" in argv
+    assert "down" in argv
+    assert "--remove-orphans" in argv
 
 
 def test_down_volumes_removes_profile_only_managed_volumes_after_compose_down() -> None:
@@ -178,7 +209,7 @@ def test_down_volumes_removes_profile_only_managed_volumes_after_compose_down() 
     down_index = events.index(
         (
             "command",
-            (("docker", "compose", "down", "--volumes", "--remove-orphans"), None),
+            ((*_DOWN_ARGS, "--volumes", "--remove-orphans"), None),
         )
     )
     assert events[down_index + 1] == ("cleanup-volumes", None)
@@ -298,7 +329,7 @@ def test_absent_worker_with_retained_credential_refuses_destructive_bypass() -> 
     with pytest.raises(RuntimeError, match="retained worker credential"):
         asyncio.run(lifecycle.down(volumes=True))
 
-    assert not any(command[0][2:3] == ("down",) for command in _commands(events))
+    assert not any("down" in command[0] for command in _commands(events))
 
 
 def test_credential_archive_is_worker_only_and_mode_0400() -> None:
@@ -425,6 +456,41 @@ def test_bounded_command_kills_a_stalled_child_at_its_deadline() -> None:
     assert time.monotonic() - started < 2
 
 
+def test_bounded_command_raises_on_nonempty_stderr_with_exit_zero() -> None:
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        compose_worker_lifecycle._bounded_command(
+            (
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('Network default  Resource is still in use\\n')",
+            ),
+            None,
+            timeout=5,
+            max_stdout_bytes=1_048_576,
+            max_stderr_bytes=1_048_576,
+            raise_on_nonempty_stderr=True,
+        )
+
+    assert raised.value.returncode == 0
+    assert "Resource is still in use" in (raised.value.stderr or "")
+
+
+def test_bounded_command_does_not_raise_on_stderr_without_flag() -> None:
+    # Default behaviour: non-empty stderr with exit 0 is not an error.
+    result = compose_worker_lifecycle._bounded_command(
+        (
+            sys.executable,
+            "-c",
+            "import sys; sys.stderr.write('harmless warning\\n')",
+        ),
+        None,
+        timeout=5,
+        max_stdout_bytes=1_048_576,
+        max_stderr_bytes=1_048_576,
+    )
+    assert result == ""
+
+
 def test_inspect_returns_only_the_bounded_identity_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -491,6 +557,7 @@ def test_lifecycle_commands_use_operation_specific_deadlines(
         timeout: float,
         max_stdout_bytes: int,
         max_stderr_bytes: int,
+        raise_on_nonempty_stderr: bool = False,
     ) -> str:
         deadlines[argv] = timeout
         return ""
