@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import sys
@@ -150,7 +151,14 @@ def test_labels_name_the_backend_and_point_at_its_liveness_lock(tmp_path: Path) 
     assert labels["kdive.test-backend"] == "minio"
     # An absolute path, so a sweeping run in any cwd can resolve it.
     liveness = Path(labels["kdive.test-backend-liveness"])
-    assert liveness.is_absolute() and liveness.parent == tmp_path
+    assert liveness.is_absolute() and liveness.parent == tmp_path.resolve()
+
+
+def test_a_liveness_path_that_is_not_a_regular_file_reads_as_stale(tmp_path: Path) -> None:
+    # The path arrives from a container label, not from this process. A FIFO there would
+    # block `open` until someone opened the write end, hanging the sweep and the run.
+    os.mkfifo(tmp_path / "kdive-pg.alive")
+    assert xdist_backend.is_stale_backend_container(_labels(tmp_path)) is True
 
 
 def test_start_is_handed_the_labels_it_must_stamp(tmp_path: Path) -> None:

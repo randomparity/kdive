@@ -135,8 +135,13 @@ def _run_is_live(liveness_path: Path) -> bool:
     An absent file means the per-run temp root was rotated away, which pytest does only
     to a finished run's root. Any other error answers "live": the caller reaps on a False,
     so an unreadable lock must never be read as permission to destroy a container.
+
+    The path is read back off a container label, so it is not necessarily one this code
+    wrote. ``is_file`` rather than ``exists`` keeps that honest — anything other than a
+    regular file cannot be a lock we took, and opening a FIFO here would block the sweep
+    (and the run behind it) until someone opened the other end.
     """
-    if not liveness_path.exists():
+    if not liveness_path.is_file():
         return False
     try:
         with open(liveness_path) as handle:
