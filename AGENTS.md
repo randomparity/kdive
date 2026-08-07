@@ -63,7 +63,19 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
 - The db/integration tests need a reachable Docker daemon (disposable Postgres via
   testcontainers). They **skip** when Docker is absent — unless `KDIVE_REQUIRE_DOCKER=1`
   (set in CI), which turns the skip into a hard failure so a broken runner can't mask the
-  schema tests.
+  schema tests. Ryuk is disabled (ADR-0401), so a run killed outright cannot reap its own
+  shared backend container; the next run that starts one sweeps it instead, keyed to a
+  lock the owning run holds while alive (ADR-0551). Containers started before ADR-0551
+  carry no `kdive.test-backend` label, and the sweep will not touch what it cannot prove
+  it owns. Clear that backlog once, with no test run in flight on the host:
+
+  ```sh
+  docker ps -aq --filter "label=org.testcontainers=true" | xargs -r docker rm -fv
+  ```
+
+  This is **host-wide and not scoped to kdive** — it removes every testcontainers
+  container from every project on the daemon, including any a concurrent run owns. The
+  `-r` keeps it a no-op once the backlog is clear rather than an error.
 
 ## Architecture
 

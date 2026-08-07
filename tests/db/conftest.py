@@ -15,13 +15,16 @@ drop+recreate can never invalidate the "already migrated" assumption `migrated_u
 relies on. When Docker is unreachable the fixture skips, unless
 `KDIVE_REQUIRE_DOCKER=1`, which re-raises so a broken runner cannot mask the suite.
 On a *persistent* override backend, crashed runs leave `kdive_test_*` databases that
-must be swept periodically (ADR-0401 residual).
+must be swept periodically (ADR-0401 residual). On the container path a killed run
+strands the container itself; the next run to start one reaps it, keyed to a lock the
+owning run holds while alive, so a concurrent suite's container is never taken
+(ADR-0551, #1910).
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 
@@ -35,14 +38,21 @@ from tests.support import xdist_backend
 _POSTGRES_IMAGE = "postgres:17"
 
 
-def _start_postgres() -> tuple[str, str]:
+def _start_postgres(labels: Mapping[str, str]) -> tuple[str, str]:
     """Start one shared Postgres testcontainer; return (server_url, container_id)."""
     from testcontainers.core.config import testcontainers_config
     from testcontainers.postgres import PostgresContainer
 
-    testcontainers_config.ryuk_disabled = True  # refcount owns lifecycle (ADR-0401)
-    container = PostgresContainer(_POSTGRES_IMAGE).with_command(
-        f"postgres -c max_connections={xdist_backend.postgres_max_connections()}"
+    # Ryuk stays disabled: its reap is keyed to the creating process, and this container is
+    # deliberately shared across xdist workers (ADR-0401). Crash coverage comes instead from
+    # `labels`, which let the next run reap this container if we are killed (ADR-0551) —
+    # and from sweeping any container a previous run left behind, before starting ours.
+    testcontainers_config.ryuk_disabled = True
+    xdist_backend.sweep_stale_backend_containers()
+    container = (
+        PostgresContainer(_POSTGRES_IMAGE)
+        .with_command(f"postgres -c max_connections={xdist_backend.postgres_max_connections()}")
+        .with_kwargs(labels=dict(labels))
     )
     container.start()
     return container.get_connection_url(driver=None), container.get_wrapped_container().id

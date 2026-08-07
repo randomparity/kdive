@@ -141,6 +141,15 @@ the algorithm rather than duplicating it.
   next run against a container path (a fresh container is started; the stale one is
   orphaned, not reused), and cleaned by `docker container prune` or CI runner
   recycling. Documented in the fixture docstrings.
+
+  **Amended by [ADR-0551](0551-next-run-reap-keyed-to-a-held-liveness-lock.md).** Field
+  evidence falsified this bullet's characterization. The bound is **per crashed run, not
+  per host**, so the aggregate is unbounded: a dev host accrued 21 stranded containers at
+  roughly two per day (#1910). "Self-healing" does not follow from "orphaned, not
+  reused" — that is a correctness claim, and nothing here ever removed the orphan. The
+  `docker container prune` remedy is also wrong for the volumes: the containers stayed
+  *running*, so prune skipped both them and the ~7.5 GB of anonymous volumes they held.
+  ADR-0551 adds the missing reaper; the residual that remains is stated there.
 - **Residual — Ryuk is disabled process-wide.** `ryuk_disabled` /
   `TESTCONTAINERS_RYUK_DISABLED` is a process-global switch, not per-container. Today
   the suite starts only these two backend container kinds (no other

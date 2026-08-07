@@ -3,6 +3,7 @@ by id (AC1 real, AC6b). Skips without Docker; hard-fails under KDIVE_REQUIRE_DOC
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import psycopg
@@ -16,8 +17,8 @@ def test_one_real_container_for_two_holders(tmp_path: Path) -> None:
     xdist_backend.skip_without_docker()
     starts: list[str] = []
 
-    def counting_start() -> tuple[str, str]:
-        url, cid = db_conftest._start_postgres()
+    def counting_start(labels: Mapping[str, str]) -> tuple[str, str]:
+        url, cid = db_conftest._start_postgres(labels)
         starts.append(cid)
         return url, cid
 
