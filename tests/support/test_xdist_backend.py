@@ -6,8 +6,8 @@ import subprocess
 import sys
 import textwrap
 import warnings
-from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -154,15 +154,37 @@ def test_labels_name_the_backend_and_point_at_its_liveness_lock(tmp_path: Path) 
     assert liveness.is_absolute() and liveness.parent == tmp_path.resolve()
 
 
+@contextmanager
+def _fail_rather_than_hang(seconds: int = 5) -> Iterator[None]:
+    """Turn a blocked call into a failure, so a regression reddens instead of hanging.
+
+    A test that hangs burns the whole CI job timeout and reports nothing useful. SIGALRM
+    interrupts the blocking syscall, and PEP 475 only retries on EINTR when the handler
+    returns normally — raising here propagates out of the call instead.
+    """
+
+    def _blocked(_signum: int, _frame: object) -> None:
+        raise AssertionError(f"call blocked for more than {seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, _blocked)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def test_a_liveness_path_that_is_not_a_regular_file_is_left_alone(tmp_path: Path) -> None:
     """A FIFO must neither hang the sweep nor be read as permission to reap.
 
     The path arrives from a container label, not from this process, so it can be any file
-    type. Without `O_NONBLOCK` this call blocks until someone opens the write end — it
-    hangs rather than fails, so it would burn a CI job's whole timeout.
+    type. Opening a FIFO without `O_NONBLOCK` blocks until someone opens the write end,
+    which is why this is wrapped: dropping that flag must fail here, not stall CI.
     """
     os.mkfifo(tmp_path / "kdive-pg.alive")
-    assert xdist_backend.is_stale_backend_container(_labels(tmp_path)) is False
+    with _fail_rather_than_hang():
+        assert xdist_backend.is_stale_backend_container(_labels(tmp_path)) is False
 
 
 def test_a_liveness_lock_this_process_cannot_reach_is_left_alone(tmp_path: Path) -> None:
