@@ -569,3 +569,69 @@ def test_prometheus_static_config_passes_promtool() -> None:
         timeout=60,
     )
     assert res.returncode == 0, res.stdout + res.stderr
+
+
+# --- Named data volumes for every image-declared VOLUME (ADR-0552) ------------------------
+
+#: The complete rendered mount set of each service whose *image* declares a `VOLUME`, as
+#: sorted (type, source, target) tuples. Full-set equality, not membership: a mount that
+#: disappears, changes path, or displaces another reddens the case that names it. Sorted
+#: rather than in declaration order, which is a cosmetic choice nothing should depend on.
+#:
+#: Without the named entry Compose allocates an anonymous volume at that path on every `up`,
+#: and a `down` without `--volumes` orphans it rather than removing it — so the stack silently
+#: restarts empty while `just compose-stop` and both operator guides promise it preserves state
+#: (#1911). Bind sources are repo-relative so the expectation carries no checkout path.
+#:
+#: Note what is deliberately NOT asserted: that no service mounts a data directory without a
+#: source. An image's `VOLUME` never appears in the rendered model at all, so such a check
+#: passes unchanged on the broken file — it reads as a guard while proving nothing.
+_EXPECTED_MOUNTS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "postgres": (
+        (
+            "bind",
+            "deploy/compose/bootstrap-migration-owner.sql",
+            "/docker-entrypoint-initdb.d/010-migration-owner.sql",
+        ),
+        ("volume", "kdive-pgdata", "/var/lib/postgresql/data"),
+    ),
+    "minio": (("volume", "kdive-minio-data", "/data"),),
+    "prometheus": (
+        ("bind", "deploy/compose/prometheus.yml", "/etc/prometheus/prometheus.yml"),
+        ("volume", "kdive-prom-data", "/prometheus"),
+    ),
+}
+
+#: Derived from the mount table above, so the two can never disagree. grafana is absent on
+#: purpose: `grafana/grafana:13.0.3` declares no `VOLUME`, so it has nothing to name.
+_NAMED_DATA_VOLUMES = {
+    source for mounts in _EXPECTED_MOUNTS.values() for kind, source, _ in mounts if kind == "volume"
+}
+
+
+def _rendered_mounts(service: dict[str, Any]) -> tuple[tuple[str, str, str], ...]:
+    rendered = []
+    for mount in service.get("volumes") or ():
+        source = mount["source"]
+        if mount["type"] == "bind":
+            source = Path(source).relative_to(_COMPOSE_FILE.parent).as_posix()
+        rendered.append((mount["type"], source, mount["target"]))
+    return tuple(sorted(rendered))
+
+
+@pytest.mark.parametrize("service", sorted(_EXPECTED_MOUNTS))
+def test_image_declared_volume_is_backed_by_a_named_project_volume(service: str) -> None:
+    # `prometheus` renders only under the obs profile; asking for it costs the other two nothing.
+    assert _rendered_mounts(_services_with_obs_profile()[service]) == tuple(
+        sorted(_EXPECTED_MOUNTS[service])
+    )
+
+
+@pytest.mark.parametrize("volume", sorted(_NAMED_DATA_VOLUMES))
+def test_named_data_volume_is_declared_in_the_project_volumes_block(volume: str) -> None:
+    # A mount naming a volume the top-level block never declares is an external-volume
+    # reference to Compose, which fails the `up` outright. Assert the declaration and that
+    # the resolved name is project-scoped, which is what makes `down --volumes` reach it.
+    declared = _config(obs=True)["volumes"]
+    assert volume in declared, sorted(declared)
+    assert declared[volume]["name"].endswith(f"_{volume}")
