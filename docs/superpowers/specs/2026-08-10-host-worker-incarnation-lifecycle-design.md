@@ -86,14 +86,24 @@ Host provisioning supplies:
 
 - a no-login `kdive-worker` account with no sudo or Docker access and read-only code/configuration;
 - a distinct no-login `kdive-lifecycle` account for witness authority;
+- a distinct no-login `kdive-guardian` account with neither database role;
 - a root-created socket group shared only for connecting to the bounded protocol;
 - an authority-private `0700` state directory owned by `kdive-lifecycle`; and
 - a traversable parent containing one group-connectable socket that the worker cannot replace.
 
+`kdive-worker` owns a persistent user libvirt daemon. Its socket has an explicit
+`qemu+unix:///session?socket=...` URI and a group containing only `kdive-worker` plus the trusted
+live-test account. The worker, test preflight, reaper, mint, and live suite all receive that URI; no
+caller relies on caller-relative `qemu:///session`. Staged image and provider runtime directories
+use declared setgid-group ownership so the staging/test account and worker have only the access each
+path requires.
+
 The launcher validates account identity, memberships, directory ownership and modes, checkout
-non-writability, absence of worker sudo/Docker authority, and session-libvirt reachability before
-opening any database credential. Hosted CI provisions this boundary in its job setup; the
-self-hosted runner declares it in the owning Ansible role.
+non-writability, absence of worker sudo/Docker authority, and explicit-socket libvirt reachability
+from both worker and test identities before opening any database credential. Hosted CI provisions
+this boundary and a narrowly scoped root launcher in its job setup; the self-hosted runner declares
+the same service accounts, daemon, socket, paths, and root-owned launcher in the owning Ansible
+role.
 
 The root-owned short-lived launcher then starts one witness daemon as `kdive-lifecycle` with only
 `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL`. The daemon owns a `0700` runtime directory and a private
@@ -103,20 +113,21 @@ credential. The worker account cannot read, signal, trace, or replace that proce
 state. It can only connect to the group-owned socket.
 
 For every configured worker the launcher creates a random one-use slot capability and starts one
-root-owned guardian with the worker DSN, slot, capability, control-socket path, and a launcher-life
-pipe. The guardian:
+guardian initially under the trusted root setup phase. The guardian forks its blocked child, drops
+that child permanently to `kdive-worker`, then drops itself permanently to `kdive-guardian`, becomes
+non-dumpable, and erases inherited role material before the launcher sends the capability. The
+guardian receives the slot, capability, control-socket path, and a launcher-life pipe. It:
 
-1. forks one worker child, drops it to `kdive-worker`, and supplies only the worker DSN, one-use
-   slot, socket path, and its session-libvirt environment;
+1. supplies the child only the worker DSN, slot, socket path, and explicit session-libvirt URI;
 2. sets the child's parent-death signal and verifies the parent remains the guardian;
-3. removes the DSN from its retained environment and state before the child handoff begins;
-4. opens and retains a pidfd for the exact child;
-5. authenticates the one-use slot capability, transfers the pidfd with `SCM_RIGHTS`, and waits for
+3. retains a pidfd for the exact child while worker bootstrap waits on the lifecycle channels;
+4. authenticates the one-use slot capability, transfers the pidfd with `SCM_RIGHTS`, erases the
+   capability, and waits for
    the witness to accept that expected identity;
-6. waits for EOF on the launcher-life pipe, proving the multi-role launcher exited, before releasing
+5. waits for EOF on the launcher-life pipe, proving the multi-role launcher exited, before releasing
    the child;
-7. waits with `waitid(..., WNOWAIT)` so a terminated child remains inspectable; and
-8. reaps only after the witness acknowledges durable terminal evidence.
+6. waits with `waitid(..., WNOWAIT)` so a terminated child remains inspectable; and
+7. reaps only after the witness acknowledges durable terminal evidence.
 
 For an unused configured slot, the witness:
 
@@ -142,13 +153,22 @@ guardian forwards SIGINT or SIGTERM to the exact child but retains a terminated 
 `WNOWAIT`. Guardian death triggers the child's parent-death signal; the surviving witness observes
 its pidfd.
 
-The witness holds a Postgres advisory singleton lock while serving a launch generation. After a
-witness crash, connection loss makes each worker exit while its guardian preserves the pidfd and
-unreaped process. A guardian does not reconnect while its worker can execute. The launcher starts a
-replacement witness, which must acquire the singleton lock before binding the socket. Each guardian
-then transfers its retained pidfd and holder for terminal-only adoption. The witness loads the
-registered authority binding, compares it with the still-inspectable process identity, observes
-pidfd termination, and commits evidence before acknowledging reap. Duplicate, live, mismatched, and
+The witness holds a Postgres advisory singleton lock while serving a launch generation. Each slot
+has four phases: `prepared` after expected-pidfd acceptance, `registered` after the database commit,
+`delivered` after the exact worker peer receives its credential, and `terminal-evidenced` after the
+termination commit.
+
+Control EOF, initial-connect failure, witness loss, or a bounded delivery timeout makes the guardian
+terminate the blocked/bootstrap child and retain its pidfd plus unreaped process. Bootstrap watches
+the guardian and witness channels before delivery, so this stop does not depend on worker
+application cooperation. A guardian does not reconnect while its child can execute.
+
+The launcher starts a replacement witness, which must acquire the singleton lock before binding the
+socket. Each guardian transfers its retained pidfd, holder when known, and prior phase for
+terminal-only adoption. The witness loads any registered authority binding, compares it with the
+still-inspectable process identity, and observes pidfd termination. It acknowledges immediate reap
+only when registration provably never committed; otherwise it commits matching terminal evidence
+first. Slot and capability reuse follows cleanup acknowledgment. Duplicate, live, mismatched, and
 already-reaped adoptions fail closed. Startup resolves every retained slot before opening a new
 generation. Simultaneous force loss of the witness and guardian can strand a fence, as can host
 power loss, but ordinary witness restart retains the runtime evidence ADR-0533 requires.
@@ -219,6 +239,9 @@ errors retain their daemon exception without changing the original failed step's
 - Missing account, unsafe membership, writable code/configuration, unsafe runtime ownership/mode, or
   unreachable session libvirt: preflight fails before opening database credentials and names the
   provisioning repair.
+- Guardian fails to drop UID, become non-dumpable, erase inherited role material, or acknowledge
+  capability erasure: launcher retains its life pipe, kills the blocked setup, and no worker code
+  runs.
 - Missing witness DSN: the witness fails before opening its control socket and no guardian starts.
 - Missing worker DSN: the guardian fails before forking a child; host bring-up names its log.
 - Registration conflict or database failure: no worker authentication race; the connection closes
@@ -235,8 +258,10 @@ errors retain their daemon exception without changing the original failed step's
 - Guardian crash: its exact child receives the parent-death signal; the witness observes the pidfd
   and persists terminal evidence.
 - Witness crash: connection loss stops each worker while its guardian retains the pidfd and
-  unreaped process. The restarted witness adopts the exact identity and persists evidence before
-  acknowledging reap or replacement.
+  unreaped process. Before delivery, bootstrap exits on the control failure; after delivery, the
+  retained liveness connection triggers worker shutdown. The restarted witness proves whether
+  registration committed and persists evidence when required before acknowledging reap or
+  replacement.
 - Multi-worker health-port conflict: the existing exact worker-count check fails bring-up and names
   the affected log; every successfully started worker still has a distinct credential and identity.
 - Runtime-role bootstrap failure: no host process starts; the operator fixes the bootstrap or role
@@ -253,9 +278,11 @@ another unprivileged local process, and stale or conflicting database incarnatio
 local operator account, migration owner, and lifecycle-witness database role are trusted within
 this single-host development and CI topology. Root is a trusted deployment authority. The witness,
 guardian, and worker run under distinct privilege boundaries: the worker service account cannot
-inspect, signal, trace, or modify the root launcher/guardian, lifecycle witness, their executable or
-configuration, or their private runtime state. GitHub-hosted and self-hosted workflow processes are
-trusted provisioning actors but do not run worker application code under their own account.
+inspect, signal, trace, or modify the root launcher, dropped-privilege guardian, lifecycle witness,
+their executable or configuration, or their private runtime state. The guardian has no database
+authority and receives its capability only after its irreversible drop. GitHub-hosted and
+self-hosted workflow processes are trusted provisioning actors but do not run worker application
+code under their own account.
 
 ### Added boundaries
 
@@ -280,6 +307,9 @@ trusted provisioning actors but do not run worker application code under their o
   libvirt, and the worker child environment. A dedicated no-login account, no sudo/Docker access,
   read-only code/configuration, protected lifecycle accounts and paths, and preflighted ownership
   prevent worker compromise from acquiring deployment or witness authority.
+- **Worker session libvirt → live tests.** The input is one explicit Unix socket URI and shared
+  staged/runtime paths. A worker-owned persistent daemon, bounded group membership, setgid paths,
+  and preflight from both worker and test identities prevent caller-relative session skew.
 
 ### Widened boundaries
 
@@ -300,7 +330,8 @@ incarnation registration, termination functions, process start-tick identity, an
 redaction. It does not add an independent secret store or a second worker authentication mechanism.
 The witness environment contains no worker DSN; guardian and worker environments contain no witness
 DSN. The guardian has no incarnation credential, and removes the worker DSN from retained state
-before handoff. The trusted short-lived launcher exits before worker code is released. A process
+before handoff; it receives and erases its one-use capability only after becoming non-dumpable under
+its final account. The trusted short-lived launcher exits before worker code is released. A process
 receiving both database authorities, a guardian receiving the credential, or a worker account able
 to modify authority code/state would violate ADR-0536 rather than merely misconfigure this topology.
 
@@ -330,16 +361,19 @@ to modify authority code/state would violate ADR-0536 rather than merely misconf
    on registration failure.
 3. Account-boundary tests prove the worker identity cannot read or write witness secrets, code,
    configuration, or private state; cannot signal or trace the witness; and has no sudo or Docker
-   authority. The launcher-life proof fails if worker code runs before the launcher exits.
+   authority. They also prove the guardian's irreversible UID drop, non-dumpable state, inherited
+   role cleanup, and capability erasure. The launcher-life proof fails if worker code runs before
+   the launcher exits.
 4. A disposable-Postgres process test starts a real `python -m kdive worker` through one guardian
    and witness, observes an active registered incarnation and a live worker-role connection, then
    stops it and observes exact terminal evidence.
 5. The same process test starts two workers on distinct aux ports, observes two active identities
    and credentials, proves both terminate independently, and restarts the witness while a guardian
    retains an unreaped child to prove adoption precedes reap and replacement.
-6. Crash-transition tests stop the witness before registration, after registration, after delivery,
-   and after child exit; each case either completes authenticated adoption and evidence or retains
-   the child and refuses replacement.
+6. Crash-transition tests stop the witness in `prepared`, `registered`, `delivered`, and after child
+   exit. Each case terminates bootstrap/application execution, proves whether a row committed, and
+   either completes authenticated adoption and evidence or retains the child and refuses
+   replacement. Capability and slot reuse remain blocked until cleanup acknowledgment.
 7. Script tests prove root mode fails before application launch, then prove
    migration-before-bootstrap-before-process ordering, exact role DSNs for every process,
    unrelated-role scrubbing, witness and guardian use for every configured non-root worker, and
@@ -347,7 +381,9 @@ to modify authority code/state would violate ADR-0536 rather than merely misconf
 8. Workflow and log-reporter tests prove both live jobs run the failure-only step and that bounded
    output redacts URL credentials and secret-named values without following symlinks.
 9. Hosted workflow setup and the self-hosted Ansible role provision the same dedicated accounts,
-   memberships, runtime paths, and session-libvirt contract, and their first real preflight passes.
+   memberships, root-owned launcher, runtime paths, and worker-owned explicit session-libvirt
+   contract. Worker-identity and test-identity preflights both reach the same daemon before the
+   first real test.
 10. Focused Python, shell, configuration-doc, and workflow checks pass, followed by `just ci` with
     no warnings.
 

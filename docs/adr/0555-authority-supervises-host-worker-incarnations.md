@@ -38,9 +38,18 @@ starting its child. No long-running process receives both runtime authorities.
 The worker runs as a dedicated unprivileged `kdive-worker` service account with no login shell,
 sudo policy, Docker socket access, or write access to the checkout, lifecycle executable,
 configuration, or authority runtime state. The witness runs as the distinct `kdive-lifecycle`
-service account. A root-owned, short-lived launcher selects the role credentials and starts a
-guardian that drops the child to `kdive-worker`; root is the trusted deployment authority and exits
-before the guardian releases worker application code.
+service account. Each guardian runs as a third no-login `kdive-guardian` account. A root-owned,
+short-lived launcher forks the blocked worker and guardian, drops each to its final account, and
+waits for the guardian to become non-dumpable and erase inherited role material before sending the
+one-use capability. Root is the trusted deployment authority and exits before the guardian releases
+worker application code. A guardian erases its capability immediately after pidfd transfer.
+
+The `kdive-worker` account owns one persistent user libvirt daemon and its explicit Unix socket.
+Only the worker and trusted live-test account belong to the socket group; both use the same explicit
+URI rather than resolving `qemu:///session` by caller identity. Staged images and provider runtime
+paths are setgid group paths writable by the producer and worker as required and readable by the
+test account. Bring-up runs libvirt and path preflight once as the worker and once as the test
+account before starting application processes.
 
 The guardian starts one blocked worker under a bounded slot and retains a pidfd. Before releasing
 the child, it authenticates a one-use launch capability to the witness and transfers that exact
@@ -72,14 +81,20 @@ provider operations keep protected consumption in worker threads or wait for syn
 commands before returning; they may not detach an artifact-consuming descendant from the worker.
 This is the same process-death boundary ADR-0533 protects, not a new process-tree recovery claim.
 
-The witness holds a database advisory singleton lock while serving a launch generation. If it
-crashes, connection loss stops the worker and the guardian retains the terminated child as an
-unreaped process plus its pidfd. It does not reconnect while its child can execute. The launcher
-starts one replacement witness, which acquires the singleton lock before binding the socket. Each
-guardian then transfers its retained pidfd and holder for terminal-only adoption. The witness reads
-the registered authority binding, compares it with the still-inspectable PID and start tuple,
-observes pidfd termination, and commits evidence before acknowledging reap or opening a replacement
-slot. Duplicate, live, mismatched, or already-reaped adoptions fail closed.
+The witness holds a database advisory singleton lock while serving a launch generation. Each slot
+moves through `prepared`, `registered`, `delivered`, and `terminal-evidenced`. Witness loss, control
+EOF, initial-connect failure, or a bounded delivery timeout makes the guardian terminate the exact
+blocked/bootstrap child and retain it with `WNOWAIT`. If registration provably never committed, a
+replacement witness acknowledges immediate reap. If a row may exist, the guardian retains the
+process and pidfd until a replacement witness publishes matching terminal evidence. A slot and its
+capability are reusable only after that cleanup acknowledgment.
+
+The launcher starts one replacement witness, which acquires the singleton lock before binding the
+socket. Each guardian transfers its retained pidfd, holder when known, and prior phase for
+terminal-only adoption. The witness reads any registered authority binding, compares it with the
+still-inspectable PID and start tuple, observes pidfd termination, and either confirms no committed
+row or commits evidence before acknowledging reap or opening a replacement slot. Duplicate, live,
+mismatched, or already-reaped adoptions fail closed.
 
 If the guardian disappears, a parent-death signal set before credential delivery terminates the
 child and the surviving witness observes its pidfd. Simultaneous force loss of both lifecycle
