@@ -24,42 +24,43 @@ lifecycle witness. ADR-0533's credential, ordering, role-separation, termination
 artifact-fence requirements remain unchanged.
 
 The host stack runs one dedicated local lifecycle-witness daemon plus one worker-side guardian for
-each configured worker. The daemon receives only the lifecycle-witness database DSN. Each guardian
-and its child receive only the worker database DSN. No long-running process receives both runtime
-authorities.
+each configured worker. The daemon receives only the lifecycle-witness database DSN. Each worker
+receives only the worker database DSN. The guardian retains neither database authority after
+starting its child. No long-running process receives both runtime authorities.
 
-The guardian creates a one-shot pipe and starts the worker blocked on its read descriptor. Through
-a private local control socket it gives the witness an exact pidfd for that child under a bounded,
-one-use worker slot. The witness derives the child's immutable identity from hostname, PID, boot ID,
-and process start ticks, mints a random 256-bit credential, and registers the identity and
-credential hash. Only after registration commits does it return the credential to the guardian for
-delivery through the pipe. The worker reads the bounded credential once and closes the descriptor
-before authenticating through the worker role.
+The guardian starts one worker under a bounded, one-use worker slot and retains a pidfd. The worker
+makes itself non-dumpable, then connects directly to the witness through a private local socket. The
+witness takes the peer PID from `SO_PEERCRED`, opens its own pidfd, and derives the immutable
+identity from hostname, PID, boot ID, and process start ticks. It mints a random 256-bit credential
+and registers the identity and credential hash. Only after registration commits does it send the
+credential directly over that peer-bound connection. The worker reads the bounded credential once
+before authenticating through the worker role; neither the guardian nor a sibling receives it.
 
-The descriptor is inherited only by that child. The credential is never placed in argv, an
-environment value, or a shared filesystem path. The witness control socket lives in a
-supervisor-owned `0700` runtime directory and accepts each configured slot once. Compose and
-Kubernetes workers retain their existing private file handoffs; the descriptor input is an additive
-local-supervisor transport, not an optional authentication path. A worker without either
-authority-delivered transport still fails startup.
+The credential is never placed in argv, an environment value, a guardian message, or a shared
+filesystem path. The witness socket lives in a supervisor-owned `0700` runtime directory and
+accepts each configured slot once. Compose and Kubernetes workers retain their existing private
+file handoffs; the peer-bound socket is an additive local-supervisor transport, not an optional
+authentication path. A worker without either authority-delivered transport still fails startup.
 
-The witness holds the pidfd while the guardian waits for its exact child. On pidfd termination the
-witness records the same immutable binding and a terminal outcome. It accepts the guardian's exit
-status only after independently observing termination; that status affects diagnostics, not whether
-the death is authoritative. A transient database failure keeps the witness retrying and prevents a
-graceful host-stack restart or teardown from claiming completion.
+The worker keeps its witness connection open for its lifetime and exits if that connection closes.
+The witness holds its pidfd while the guardian waits without reaping the exact child. On pidfd
+termination the witness records the same immutable binding and a terminal outcome. It accepts the
+guardian's exit status only after independently observing termination; that status affects
+diagnostics, not whether the death is authoritative. A transient database failure keeps the witness
+retrying and prevents a graceful host-stack restart or teardown from claiming completion.
 
 The artifact-fence holder remains the worker process named by that immutable identity. Supported
 provider operations keep protected consumption in worker threads or wait for synchronous child
 commands before returning; they may not detach an artifact-consuming descendant from the worker.
 This is the same process-death boundary ADR-0533 protects, not a new process-tree recovery claim.
 
-The guardian keeps its control connection open for the worker lifetime. If the witness disappears,
-the guardian terminates and reaps its child. If the guardian disappears, a parent-death signal set
-before credential delivery terminates the child and the surviving witness observes the pidfd. A
-witness crash can still lose the only authoritative handle and strand a fence; launch refuses a
-replacement while the corresponding worker or guardian remains, and the explicit force-stop path
-cannot publish false termination evidence or release the fence.
+If the witness crashes, connection loss stops the worker and the guardian retains the terminated
+child as an unreaped process plus its pidfd. A restarted witness adopts that exact handle, verifies
+the immutable registered binding while `/proc` still retains it, and commits termination before the
+guardian reaps the child or the launcher opens a replacement slot. If the guardian disappears, a
+parent-death signal set before credential delivery terminates the child and the surviving witness
+observes its pidfd. Simultaneous force loss of both lifecycle processes can strand a fence, but
+cannot publish false termination evidence or release one.
 
 The local stack applies migrations with the migration-owner login, runs the existing idempotent
 runtime-role bootstrap, and launches server, worker, reconciler, guardian, and witness with only
@@ -88,7 +89,7 @@ External operators continue to supply their own role DSNs and disable the local 
   path.
 - **Give every worker a configurable private credential file.** This can separate paths, but it
   persists credential bytes and still needs an additional start barrier to ensure registration
-  commits before the worker reads. A one-shot inherited pipe supplies both properties directly.
+  commits before the worker reads. A peer-bound socket supplies both properties directly.
 - **Make credentials optional for local workers.** This recreates the bypass ADR-0533 removed and
   lets a host worker claim jobs without an authority-bound identity.
 - **Give one supervisor both runtime DSNs.** A process compromise could use worker authority and
