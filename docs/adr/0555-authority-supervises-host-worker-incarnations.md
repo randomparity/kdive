@@ -35,6 +35,13 @@ each configured worker. The daemon receives only the lifecycle-witness database 
 receives only the worker database DSN. The guardian retains neither database authority after
 starting its child. No long-running process receives both runtime authorities.
 
+The worker runs as a dedicated unprivileged `kdive-worker` service account with no login shell,
+sudo policy, Docker socket access, or write access to the checkout, lifecycle executable,
+configuration, or authority runtime state. The witness runs as the distinct `kdive-lifecycle`
+service account. A root-owned, short-lived launcher selects the role credentials and starts a
+guardian that drops the child to `kdive-worker`; root is the trusted deployment authority and exits
+before the guardian releases worker application code.
+
 The guardian starts one blocked worker under a bounded slot and retains a pidfd. Before releasing
 the child, it authenticates a one-use launch capability to the witness and transfers that exact
 pidfd with `SCM_RIGHTS`. The non-dumpable worker then connects directly to the witness. The witness
@@ -45,12 +52,13 @@ bounded credential once before authenticating through the worker role; neither t
 sibling receives it.
 
 The credential is never placed in argv, an environment value, a guardian message, or a shared
-filesystem path. The witness socket lives in a supervisor-owned `0700` runtime directory and
-accepts each configured slot and launch capability once. A slot cannot receive credential bytes
-until its worker peer matches the guardian-supplied pidfd. Compose and Kubernetes workers retain
-their existing private file handoffs; the peer-bound socket is an additive local-supervisor
-transport, not an optional authentication path. A worker without either authority-delivered
-transport still fails startup.
+filesystem path. Authority state lives in a `0700` directory owned by `kdive-lifecycle`. The worker
+can reach only a root-created parent directory and group-connectable socket; it cannot list or
+modify the authority directory. The socket accepts each configured slot and launch capability once.
+A slot cannot receive credential bytes until its worker peer matches the guardian-supplied pidfd.
+Compose and Kubernetes workers retain their existing private file handoffs; the peer-bound socket
+is an additive local-supervisor transport, not an optional authentication path. A worker without
+either authority-delivered transport still fails startup.
 
 The worker keeps its witness connection open for its lifetime and exits if that connection closes.
 The witness holds its pidfd while the guardian waits without reaping the exact child. On pidfd
@@ -81,7 +89,8 @@ The local stack applies migrations with the migration-owner login, runs the exis
 runtime-role bootstrap, and launches server, worker, reconciler, guardian, and witness with only
 their role-specific database authorities. The short-lived operator launcher selects which DSN each
 process receives, removes every unrelated role DSN before execution, and supplies a unique one-use
-capability for each configured guardian slot.
+capability for each configured guardian slot. Host provisioning creates the two service accounts,
+socket group and runtime directories; a missing or writable authority boundary fails preflight.
 
 ## Consequences
 
@@ -117,6 +126,9 @@ need a separately designed privileged interface rather than weakening worker-fen
 - **Keep the root worker and trust it beside the witness.** A compromised host-root worker can read,
   trace, signal, or replace the witness, so process names and separate DSNs do not form an authority
   boundary.
+- **Run the non-root worker as the invoking operator account.** The live-job account can administer
+  Docker and, on hosted CI, use passwordless sudo. A compromised worker under that identity could
+  still acquire lifecycle authority. A dedicated service account removes those ambient privileges.
 - **Run the worker in the existing managed Compose service.** The container lacks the host libvirt,
   staged-image, runtime-directory, and native toolchain access that the live-VM topology requires.
 - **Have the launcher register a PID after starting an ordinary worker.** The worker can read its
