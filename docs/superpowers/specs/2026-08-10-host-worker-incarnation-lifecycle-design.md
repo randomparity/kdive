@@ -11,21 +11,24 @@ ADR index coupling: not coupled; `docs/adr/` is the index.
 ## Frozen authority
 
 - Scope identity: `https://github.com/randomparity/kdive/issues/1926` plus token
-  `6d4d89ca-849a-4668-95cf-c0cc2c64e4c1`.
+  `a8cb0290-3b7a-4ace-b5d1-ead255606b3e`.
 - Interaction: interactive.
-- Outcome: restore the supported host-process live-stack topology so local workers start through
-  an authority-backed incarnation lifecycle and both live-VM CI jobs reach their tests.
-- Criteria: supervise every configured worker; deliver a unique registered 256-bit credential
-  privately; use role-specific database authorities; record termination and remove the handoff;
-  preserve ADR-0533 for one and several workers; gate omissions before merge; expose redacted daemon
-  logs when either live job fails.
-- Provenance: issue #1926's Problem, Expected, and Proposed approach; accepted ADR-0533 and its
-  accepted amendments.
-- Exclusions: optional incarnation credentials, a shared static credential, weakened artifact
-  fences, unrelated provider behavior, and unsupported deployment topologies.
-- Surface: host lifecycle supervision; live-stack launcher, bootstrap, and environment wiring;
-  existing incarnation and runtime-role seams; focused tests; live workflow diagnostics; required
-  ADR and operator documentation; direct dependencies of those files.
+- Outcome: restore the supported non-root host-process live-stack topology so local workers start
+  through an authority-backed incarnation lifecycle and both live-VM CI jobs reach their tests;
+  reject root-worker launch before startup with the non-root session-mode remedy.
+- Criteria: supervise every configured non-root worker; deliver a unique registered 256-bit
+  credential privately; use role-specific database authorities; record termination and remove the
+  handoff; preserve ADR-0533 for one and several workers; reject root-worker mode before process
+  launch with an actionable remedy; gate omissions before merge; expose redacted daemon logs when
+  either live job fails.
+- Provenance: issue #1926; accepted ADR-0533 and ADR-0536; user decision on 2026-08-10 to adopt the
+  recommended non-root/session-only rescope.
+- Exclusions: root-worker mode as a supported lifecycle topology; a new privileged provider helper;
+  optional or shared incarnation credentials; weakened artifact fences; unrelated provider
+  behavior; unsupported deployment topologies.
+- Surface: non-root host lifecycle supervision; live-stack launcher, root-mode gate, bootstrap, and
+  environment wiring; existing incarnation and runtime-role seams; focused tests; live workflow
+  diagnostics; required ADR and operator documentation; direct dependencies of those files.
 - Ambiguities: none.
 
 ## Approaches
@@ -44,6 +47,9 @@ after spawning and never receives the incarnation credential. This reuses the ex
 identity, role, worker authentication, and termination functions without giving one long-running
 process both sides of the fence. It adds no database migration and no shared secret path.
 
+The topology is non-root only. Both live jobs already use `qemu:///session` and
+`KDIVE_WORKER_AS_ROOT=0`; root mode cannot isolate a co-resident witness from a compromised worker.
+
 ### Rejected: per-worker credential files
 
 Unique directories could avoid the current fixed-path collision, but credential bytes would persist
@@ -56,6 +62,13 @@ The Compose gate already implements the authority protocol, but its worker canno
 local-libvirt and native live-test environment. Moving those authorities into the container would be
 a different deployment design and is outside this repair.
 
+### Rejected: retain host-root worker mode
+
+A host-root worker can inspect, signal, trace, or replace any co-resident lifecycle process.
+Distinct database settings do not preserve ADR-0536 against that authority. Supporting root-only
+provider operations would require a separately designed constrained privileged interface, which the
+rescope explicitly excludes.
+
 ## Architecture
 
 ### Local lifecycle witness and guardian
@@ -64,32 +77,39 @@ Add `kdive.processes.lifecycle.local_worker_lifecycle`, following the narrow, in
 the Compose lifecycle module. It exposes fixed `witness` and `guard` modes rather than a public
 arbitrary-command option. Guard mode always executes `<current-python> -m kdive worker`.
 
-The launcher starts one witness daemon with only
+The launcher rejects `KDIVE_WORKER_AS_ROOT=1` before migrations, role bootstrap, or application
+process launch and names `KDIVE_WORKER_AS_ROOT=0` with `qemu:///session` as the supported remedy.
+
+It then starts one witness daemon with only
 `KDIVE_LIFECYCLE_WITNESS_DATABASE_URL`. The daemon owns a `0700` runtime directory and a private
 Unix control socket, preconfigures the bounded worker slots, and accepts each slot once per launch
 generation. It receives no worker DSN and makes itself non-dumpable before opening the database
 credential so a same-UID worker cannot inspect its memory or `/proc` secret surfaces. A worker can
 still kill a same-UID witness; that closes guardian connections and fails workers closed.
 
-For every configured worker the launcher starts one guardian with the worker DSN, slot, and control
-socket path. Root and non-root worker modes remain supported. The guardian:
+For every configured worker the launcher creates a random one-use slot capability and starts one
+guardian with the worker DSN, slot, capability, and control-socket path. The guardian:
 
 1. forks one worker child with the worker DSN, one-use slot, and socket path;
 2. sets the child's parent-death signal and verifies the parent remains the guardian;
 3. removes the DSN from its retained environment and state before the child handoff begins;
 4. opens and retains a pidfd for the exact child;
-5. waits with `waitid(..., WNOWAIT)` so a terminated child remains inspectable; and
-6. reaps only after the witness acknowledges durable terminal evidence.
+5. authenticates the one-use slot capability, transfers the pidfd with `SCM_RIGHTS`, and waits for
+   the witness to accept that expected identity before releasing the child;
+6. waits with `waitid(..., WNOWAIT)` so a terminated child remains inspectable; and
+7. reaps only after the witness acknowledges durable terminal evidence.
 
 For an unused configured slot, the witness:
 
-1. validates the bounded worker hello, `SO_PEERCRED` identity, and unused slot;
-2. opens a pidfd and derives `hostname:pid:boot-id:start-ticks` from that live peer;
-3. creates a random lowercase-hex 256-bit credential;
-4. registers the identity, local authority binding, hash, and current fence protocol;
-5. returns exactly the credential bytes directly to the same peer after registration commits;
-6. watches the pidfd independently of the guardian; and
-7. records `succeeded`, `failed`, or `killed` only after pidfd termination.
+1. validates the guardian's bounded control message, one-use capability, unused slot, and pidfd;
+2. derives the expected `hostname:pid:boot-id:start-ticks` from that live handle;
+3. validates the worker hello and requires `SO_PEERCRED` plus the live start tuple to match the
+   expected handle;
+4. creates a random lowercase-hex 256-bit credential;
+5. registers the identity, local authority binding, hash, and current fence protocol;
+6. returns exactly the credential bytes directly to the same peer after registration commits;
+7. watches the pidfd independently of the guardian; and
+8. records `succeeded`, `failed`, or `killed` only after pidfd termination.
 
 Before connecting, the worker makes itself non-dumpable. Registration or delivery failure closes
 the connection without a usable credential, and the guardian reaps the failed child after the
@@ -103,12 +123,16 @@ guardian forwards SIGINT or SIGTERM to the exact child but retains a terminated 
 `WNOWAIT`. Guardian death triggers the child's parent-death signal; the surviving witness observes
 its pidfd.
 
-After a witness crash, each guardian preserves its child's pidfd and unreaped process. On the next
-witness start it sends that pidfd and the registered holder for adoption. The witness checks the
-holder's database binding against the still-inspectable process identity, observes terminal state,
-and commits evidence before acknowledging reap. Startup resolves every retained slot before opening
-a new generation. Simultaneous force loss of the witness and guardian can strand a fence, as can
-host power loss, but ordinary witness restart retains the runtime evidence ADR-0533 requires.
+The witness holds a Postgres advisory singleton lock while serving a launch generation. After a
+witness crash, connection loss makes each worker exit while its guardian preserves the pidfd and
+unreaped process. A guardian does not reconnect while its worker can execute. The launcher starts a
+replacement witness, which must acquire the singleton lock before binding the socket. Each guardian
+then transfers its retained pidfd and holder for terminal-only adoption. The witness loads the
+registered authority binding, compares it with the still-inspectable process identity, observes
+pidfd termination, and commits evidence before acknowledging reap. Duplicate, live, mismatched, and
+already-reaped adoptions fail closed. Startup resolves every retained slot before opening a new
+generation. Simultaneous force loss of the witness and guardian can strand a fence, as can host
+power loss, but ordinary witness restart retains the runtime evidence ADR-0533 requires.
 
 Supported providers do not detach artifact-consuming descendants. Protected install consumption
 runs in a worker thread, and synchronous child commands are waited before their provider operation
@@ -135,14 +159,15 @@ available to test and operator helpers that explicitly use it; no long-running p
 
 Bring-up ordering becomes:
 
-1. start the backend services and wait for Postgres;
-2. apply migrations with the host migration-owner DSN;
-3. run the existing idempotent local runtime-role bootstrap without starting the Compose app tier;
-4. start server with only the server DSN and reconciler with only the reconciler DSN;
-5. start one witness with only its DSN and the configured worker-slot count, and resolve every
+1. reject root-worker mode with the non-root session-mode remedy;
+2. start the backend services and wait for Postgres;
+3. apply migrations with the host migration-owner DSN;
+4. run the existing idempotent local runtime-role bootstrap without starting the Compose app tier;
+5. start server with only the server DSN and reconciler with only the reconciler DSN;
+6. start one witness with only its DSN and the configured worker-slot count, and resolve every
    retained guardian adoption before opening new slots;
-6. start each guardian and worker with only the worker DSN; and
-7. settle on server, reconciler, witness, guardians, and every real worker process before inventory
+7. start each guardian and worker with only the worker DSN; and
+8. settle on server, reconciler, witness, guardians, and every real worker process before inventory
    reconciliation.
 
 External role provisioning remains supported: `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` skips the fixed local
@@ -168,10 +193,14 @@ errors retain their daemon exception without changing the original failed step's
 
 ## Failure contracts
 
+- Root-worker mode selected: bring-up fails before any application process starts and names
+  `KDIVE_WORKER_AS_ROOT=0` with `qemu:///session` as the supported configuration.
 - Missing witness DSN: the witness fails before opening its control socket and no guardian starts.
 - Missing worker DSN: the guardian fails before forking a child; host bring-up names its log.
 - Registration conflict or database failure: no worker authentication race; the connection closes
   without credential bytes and the child is retained or reaped according to registration state.
+- Slot capability replay, wrong peer PID, or start-tick mismatch: witness refuses delivery, retains
+  immutable conflict evidence, and guardian reaps only after the registration state is resolved.
 - Missing socket, bad peer, used slot, empty, oversized, malformed, or closed response: worker
   startup fails without falling back to another credential source.
 - Credential bound to another identity or protocol: existing worker validation rejects it before
@@ -197,8 +226,8 @@ errors retain their daemon exception without changing the original failed step's
 
 Untrusted actors are a compromised worker child, malformed inherited environment or socket input,
 another unprivileged local process, and stale or conflicting database incarnation state. The
-local operator account, root when root-worker mode is selected, migration owner, and
-lifecycle-witness database role are trusted within this single-host development and CI topology.
+local operator account, migration owner, and lifecycle-witness database role are trusted within
+this single-host development and CI topology.
 The witness, guardian, and worker are separate process compromise domains even when the operator
 runs them under one OS account. Non-dumpable witness and worker processes prevent same-UID guardian
 inspection of their secrets; a same-UID process may still kill them, which fails the lifecycle
@@ -207,11 +236,15 @@ boundaries.
 
 ### Added boundaries
 
-- **Witness → worker credential.** The inputs are the registered slot, peer identity, and 64
-  credential bytes. A private bounded socket protocol, one-use slot, `SO_PEERCRED`, non-dumpable
-  endpoints, exact length and hex checks, and no fallback control it. The guardian never handles
-  credential bytes. A failure retains or reaps the worker according to registration state and
-  reaches the redacting collector.
+- **Guardian → witness expected identity.** The inputs are the slot, one-use capability, and pidfd.
+  A private bounded control protocol, capability consumption, `SCM_RIGHTS`, and live immutable
+  identity checks bind one configured child before it can run. A mismatch fails without credential
+  delivery.
+- **Witness → worker credential.** The inputs are the pre-registered pidfd, peer identity, and 64
+  credential bytes. A private bounded socket protocol, `SO_PEERCRED` equality with the expected PID,
+  live start-tick equality, non-dumpable endpoints, exact length and hex checks, and no fallback
+  control it. The guardian never handles credential bytes. A failure retains or reaps the worker
+  according to registration state and reaches the redacting collector.
 - **Witness → witness database.** The inputs are the derived identity, binding, hash, and outcome.
   The witness-only DSN, existing bounded SQL functions, independent pidfd observation, and exact
   binding reuse control it. A failure leaves the witness failed or retrying and creates no false
@@ -223,9 +256,13 @@ boundaries.
 ### Widened boundaries
 
 - **Local process identity → incarnation row.** The input is live `/proc` identity owned by the
-  spawned child. The guardian's parent-child handle, witness peer-bound pidfd,
-  hostname/PID/boot/start tuple, registration before handoff, and unreaped restart adoption control
-  it. A failure retains the child and immutable conflict until evidence is resolved.
+  spawned child. The guardian's parent-child handle, capability-bound transferred pidfd, witness
+  peer check, hostname/PID/boot/start tuple, registration before handoff, and unreaped restart
+  adoption control it. A failure retains the child and immutable conflict until evidence is
+  resolved.
+- **Guardian → replacement witness.** The input is the unreaped child's pidfd and registered holder.
+  A database advisory singleton lock, terminal-only adoption, database binding comparison, and
+  evidence-before-reap acknowledgment prevent duplicate or false restart evidence.
 - **Live CI → daemon logs.** The input is application and supervisor output. Regular-file checks,
   a 256 KiB per-file tail, and URL and secret-value redaction control it. A failure emits labelled,
   bounded text in the failed job.
@@ -240,6 +277,8 @@ credential, would violate ADR-0536 rather than merely misconfigure this topology
 
 ### Explicitly out of scope
 
+- Root-worker mode is not a supported lifecycle topology. Root-only provider operations need a
+  separately authorized constrained interface; this change fails the mode before process launch.
 - A malicious host root or migration owner can read process memory, descriptors, or database state;
   this local topology treats them as deployment authorities.
 - Simultaneous force loss of witness and guardian, host power loss, or the explicit force-stop path
@@ -254,8 +293,8 @@ credential, would violate ADR-0536 rather than merely misconfigure this topology
 ## Executable acceptance proofs
 
 1. Unit tests redden when registration does not precede credential delivery, when the socket
-   response is empty, oversized, malformed, or unavailable, and when peer identity or termination
-   binding differs.
+   response is empty, oversized, malformed, or unavailable, and when capability, expected pidfd,
+   peer identity, or termination binding differs.
 2. Witness and guardian tests prove a unique credential and identity per child,
    peer-pidfd-before-handoff ordering, direct witness-to-worker delivery, exact outcome mapping,
    signal and parent-death handling, termination retry, mutually exclusive role DSNs, and cleanup
@@ -266,12 +305,16 @@ credential, would violate ADR-0536 rather than merely misconfigure this topology
 4. The same process test starts two workers on distinct aux ports, observes two active identities
    and credentials, proves both terminate independently, and restarts the witness while a guardian
    retains an unreaped child to prove adoption precedes reap and replacement.
-5. Script tests prove migration-before-bootstrap-before-process ordering, exact role DSNs for every
-   process, unrelated-role scrubbing, witness and guardian use for every configured worker, and
+5. Crash-transition tests stop the witness before registration, after registration, after delivery,
+   and after child exit; each case either completes authenticated adoption and evidence or retains
+   the child and refuses replacement.
+6. Script tests prove root mode fails before application launch, then prove
+   migration-before-bootstrap-before-process ordering, exact role DSNs for every process,
+   unrelated-role scrubbing, witness and guardian use for every configured non-root worker, and
    graceful refusal while evidence persistence is outstanding.
-6. Workflow and log-reporter tests prove both live jobs run the failure-only step and that bounded
+7. Workflow and log-reporter tests prove both live jobs run the failure-only step and that bounded
    output redacts URL credentials and secret-named values without following symlinks.
-7. Focused Python, shell, configuration-doc, and workflow checks pass, followed by `just ci` with no
+8. Focused Python, shell, configuration-doc, and workflow checks pass, followed by `just ci` with no
    warnings.
 
 ## Rollback

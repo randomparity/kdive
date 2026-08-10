@@ -14,33 +14,43 @@ credential, so the worker exits before it can claim jobs. The same launcher give
 shared development database principal and therefore bypasses the runtime-role split.
 
 The host topology is required: its local-libvirt worker needs the host's libvirt socket, staged
-images, runtime directories, and, on the native runner, the provisioned Python toolchain. It must
-support several concurrent worker processes without sharing a credential or handoff path.
+images, runtime directories, and, on the native runner, the provisioned Python toolchain. Both live
+jobs already use a non-root worker with `qemu:///session`. The launcher's root-worker mode cannot
+provide an authority independent from a compromised worker: host root can inspect or replace any
+co-resident witness. It must not be presented as an ADR-0533-preserving topology.
 
 ## Decision
 
-This decision partially supersedes ADR-0533's two-authority exclusivity by adding the local host
-lifecycle witness. ADR-0533's credential, ordering, role-separation, termination-evidence, and
+This decision partially supersedes ADR-0533's two-authority exclusivity by adding the non-root local
+host lifecycle witness. ADR-0533's credential, ordering, role-separation, termination-evidence, and
 artifact-fence requirements remain unchanged.
+
+Host lifecycle startup rejects `KDIVE_WORKER_AS_ROOT=1` before launching any application process.
+The error directs the operator to an unprivileged worker under `qemu:///session`. A future root-mode
+replacement requires a separate decision and a constrained privilege boundary; it cannot reuse this
+host-process authority.
 
 The host stack runs one dedicated local lifecycle-witness daemon plus one worker-side guardian for
 each configured worker. The daemon receives only the lifecycle-witness database DSN. Each worker
 receives only the worker database DSN. The guardian retains neither database authority after
 starting its child. No long-running process receives both runtime authorities.
 
-The guardian starts one worker under a bounded, one-use worker slot and retains a pidfd. The worker
-makes itself non-dumpable, then connects directly to the witness through a private local socket. The
-witness takes the peer PID from `SO_PEERCRED`, opens its own pidfd, and derives the immutable
-identity from hostname, PID, boot ID, and process start ticks. It mints a random 256-bit credential
-and registers the identity and credential hash. Only after registration commits does it send the
-credential directly over that peer-bound connection. The worker reads the bounded credential once
-before authenticating through the worker role; neither the guardian nor a sibling receives it.
+The guardian starts one blocked worker under a bounded slot and retains a pidfd. Before releasing
+the child, it authenticates a one-use launch capability to the witness and transfers that exact
+pidfd with `SCM_RIGHTS`. The non-dumpable worker then connects directly to the witness. The witness
+requires its `SO_PEERCRED` PID and immutable start tuple to match the pre-registered pidfd. It mints
+a random 256-bit credential and registers the identity and credential hash. Only after registration
+commits does it send the credential directly over that peer-bound connection. The worker reads the
+bounded credential once before authenticating through the worker role; neither the guardian nor a
+sibling receives it.
 
 The credential is never placed in argv, an environment value, a guardian message, or a shared
 filesystem path. The witness socket lives in a supervisor-owned `0700` runtime directory and
-accepts each configured slot once. Compose and Kubernetes workers retain their existing private
-file handoffs; the peer-bound socket is an additive local-supervisor transport, not an optional
-authentication path. A worker without either authority-delivered transport still fails startup.
+accepts each configured slot and launch capability once. A slot cannot receive credential bytes
+until its worker peer matches the guardian-supplied pidfd. Compose and Kubernetes workers retain
+their existing private file handoffs; the peer-bound socket is an additive local-supervisor
+transport, not an optional authentication path. A worker without either authority-delivered
+transport still fails startup.
 
 The worker keeps its witness connection open for its lifetime and exits if that connection closes.
 The witness holds its pidfd while the guardian waits without reaping the exact child. On pidfd
@@ -54,18 +64,24 @@ provider operations keep protected consumption in worker threads or wait for syn
 commands before returning; they may not detach an artifact-consuming descendant from the worker.
 This is the same process-death boundary ADR-0533 protects, not a new process-tree recovery claim.
 
-If the witness crashes, connection loss stops the worker and the guardian retains the terminated
-child as an unreaped process plus its pidfd. A restarted witness adopts that exact handle, verifies
-the immutable registered binding while `/proc` still retains it, and commits termination before the
-guardian reaps the child or the launcher opens a replacement slot. If the guardian disappears, a
-parent-death signal set before credential delivery terminates the child and the surviving witness
-observes its pidfd. Simultaneous force loss of both lifecycle processes can strand a fence, but
-cannot publish false termination evidence or release one.
+The witness holds a database advisory singleton lock while serving a launch generation. If it
+crashes, connection loss stops the worker and the guardian retains the terminated child as an
+unreaped process plus its pidfd. It does not reconnect while its child can execute. The launcher
+starts one replacement witness, which acquires the singleton lock before binding the socket. Each
+guardian then transfers its retained pidfd and holder for terminal-only adoption. The witness reads
+the registered authority binding, compares it with the still-inspectable PID and start tuple,
+observes pidfd termination, and commits evidence before acknowledging reap or opening a replacement
+slot. Duplicate, live, mismatched, or already-reaped adoptions fail closed.
+
+If the guardian disappears, a parent-death signal set before credential delivery terminates the
+child and the surviving witness observes its pidfd. Simultaneous force loss of both lifecycle
+processes can strand a fence, but cannot publish false termination evidence or release one.
 
 The local stack applies migrations with the migration-owner login, runs the existing idempotent
 runtime-role bootstrap, and launches server, worker, reconciler, guardian, and witness with only
 their role-specific database authorities. The short-lived operator launcher selects which DSN each
-process receives and removes every unrelated role DSN before execution.
+process receives, removes every unrelated role DSN before execution, and supplies a unique one-use
+capability for each configured guardian slot.
 
 ## Consequences
 
@@ -82,6 +98,10 @@ Local development retains fixed allowlisted passwords, but they are divided amon
 server, worker, reconciler, and witness logins and are never suitable for external deployment.
 External operators continue to supply their own role DSNs and disable the local role bootstrap.
 
+The prior root-worker default is no longer a supported live-stack path. Operators use the non-root
+session-mode configuration already exercised by both live jobs. Root-only local-libvirt operations
+need a separately designed privileged interface rather than weakening worker-fence authority.
+
 ## Considered & rejected
 
 - **Share the fixed credential file among host workers.** Concurrent workers can overwrite or read
@@ -94,6 +114,9 @@ External operators continue to supply their own role DSNs and disable the local 
   lets a host worker claim jobs without an authority-bound identity.
 - **Give one supervisor both runtime DSNs.** A process compromise could use worker authority and
   publish its own termination evidence, recreating the dual-authority boundary ADR-0536 removed.
+- **Keep the root worker and trust it beside the witness.** A compromised host-root worker can read,
+  trace, signal, or replace the witness, so process names and separate DSNs do not form an authority
+  boundary.
 - **Run the worker in the existing managed Compose service.** The container lacks the host libvirt,
   staged-image, runtime-directory, and native toolchain access that the live-VM topology requires.
 - **Have the launcher register a PID after starting an ordinary worker.** The worker can read its
