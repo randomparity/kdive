@@ -44,21 +44,24 @@ per-start generation. The lifecycle witness mints a random 256-bit credential, d
 root-only credential source and a `prepared` state file containing the binding and hash, and then
 registers those exact facts and the current fence protocol through the lifecycle-witness database
 role. It persists `registered` only after the transaction commits, then verifies that the fixed
-unit is inactive with no invocation identifier and durably records `starting` with the current host
-boot identifier before asking systemd to start it. Systemd assigns an invocation identifier when it
-accepts the start. Once accepted, the witness records that identifier and the `started` phase.
-Systemd `LoadCredential=` copies the source into that slot UID's service credential directory. The
-worker reads that private copy and authenticates through the worker database role. No application
-process receives both roles or the source credential file.
+unit is inactive with neither a pending job nor an invocation identifier and durably records
+`starting` with the current host boot identifier before asking systemd to start it. Systemd first
+exposes an accepted asynchronous request as the unit's pending start job, then assigns an invocation
+identifier when activation begins. The witness waits for the exact start job and records the
+invocation identifier and `started` phase. Systemd `LoadCredential=` copies the source into that
+slot UID's service credential directory. The worker reads that private copy and authenticates
+through the worker database role. No application process receives both roles or the source
+credential file.
 
 A crash in `prepared` retries registration with the same generation, binding, hash, and credential;
 the existing registration function accepts an exact replay of an active incarnation. A crash after
 the database commit but before `registered` is persisted follows the same replay path. A crash in
 `registered` advances the same generation rather than minting a replacement. After a crash in
-`starting`, a non-empty invocation identifier is the accepted invocation and is re-adopted. On the
-same host boot, an inactive unit whose invocation identifier is still empty proves that systemd did
-not accept the request, so the witness retries the same generation. A changed boot identifier,
-missing unit, or contradictory unit state is ambiguous and fails closed.
+`starting`, the witness adopts and waits for the unit's pending start job; a non-empty invocation
+identifier is re-adopted after the job advances. On the same host boot, an inactive unit with no job
+and no invocation has no submitted or running invocation, so the witness retries the same
+generation. A pending non-start job, changed boot identifier, missing unit, or contradictory unit
+state is ambiguous and fails closed.
 
 The lifecycle witness is a system service with `Restart=on-failure`. It owns only the witness DSN,
 credential source files, lifecycle state, and authority to inspect and operate the fixed worker

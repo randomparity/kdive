@@ -122,9 +122,11 @@ symlink following, and fixed directories. The phases are:
    credential source and state containing the unit/generation binding and credential hash;
 2. `registered`: idempotently register those exact durable facts through the witness database role,
    then persist and `fsync` the phase after the transaction commits;
-3. `starting`: prove the unit is inactive and never invoked, then persist and `fsync` start intent
-   with the current host boot identifier before asking systemd to start the fixed unit;
-4. `started`: after systemd accepts the start, persist its invocation identifier and the phase;
+3. `starting`: prove the unit is inactive with no pending job or invocation, then persist and
+   `fsync` start intent with the current host boot identifier before asking systemd to start the
+   fixed unit;
+4. `started`: adopt and wait for systemd's exact pending start job, then persist its invocation
+   identifier and the phase when activation begins;
 5. `terminal`: observe the matching retained unit with an empty cgroup; and
 6. `evidenced`: commit terminal evidence, stop/reset the retained unit, then remove credential and
    state files.
@@ -137,13 +139,15 @@ Registration failure never starts the unit. An ambiguous database result retains
 state and credential for an exact retry; the existing database function accepts the replay when all
 facts match an active row. A definitive rejection may remove the unused source only after proving
 that no row exists. A restart from `registered` durably advances to `starting` and starts the same
-generation. In `starting`, systemd's non-empty invocation identifier proves acceptance and is
-re-adopted. If the host boot identifier still matches and the unit remains inactive with an empty
-invocation identifier, systemd never accepted the request and the witness safely retries the same
-generation. A changed boot identifier, missing unit, or contradictory state fails closed. Start
-failure after systemd accepted the invocation is a terminal incarnation only when the retained
-failed unit, matching generation, and recorded invocation identifier agree; the witness then
-records `failed` before cleanup. A live unit is never replaced in place or reset before evidence.
+generation. In `starting`, the unit's pending start job proves that systemd accepted but has not yet
+activated the request, so the witness adopts and waits for that job. A non-empty invocation
+identifier is re-adopted after activation begins. If the host boot identifier still matches and the
+unit remains inactive with neither a pending job nor an invocation identifier, no runtime
+invocation exists and the witness safely retries the same generation. A pending non-start job,
+changed boot identifier, missing unit, or contradictory state fails closed. Start failure after
+systemd accepted the invocation is a terminal incarnation only when the retained failed unit,
+matching generation, and recorded invocation identifier agree; the witness then records `failed`
+before cleanup. A live unit is never replaced in place or reset before evidence.
 
 For graceful stop the witness sends SIGTERM to the unit cgroup without unloading it, waits for the
 exact cgroup to empty, then records evidence. A bounded stop timeout leaves the unit and fence
@@ -153,12 +157,13 @@ creates evidence.
 On witness restart, reconciliation runs before new starts. It enumerates the fixed configured units
 and root-owned state files with hard ceilings. `prepared` replays registration with the same facts;
 this covers a crash immediately before or after the database commit. `registered` safely advances
-to `starting` and starts the same generation. On the same host boot, `starting` retries an inactive
-unit with no invocation identifier or re-adopts its existing invocation. Live matching cgroups are
-re-adopted. Empty matching units receive evidence and cleanup. A changed boot identifier, missing
-state, a unit missing from `starting` onward, generation or invocation mismatch, duplicate state,
-unexpected instance, or ambiguous cgroup status fails closed and names the slot. Systemd and
-database outages leave all objects for retry.
+to `starting` and starts the same generation. On the same host boot, `starting` adopts a pending
+start job, retries an inactive unit with no job or invocation identifier, or re-adopts its existing
+invocation. Live matching cgroups are re-adopted. Empty matching units receive evidence and cleanup.
+A pending non-start job, changed boot identifier, missing state, a unit missing from `starting`
+onward, generation or invocation mismatch, duplicate state, unexpected instance, or ambiguous
+cgroup status fails closed and names the slot. Systemd and database outages leave all objects for
+retry.
 
 ### Worker credential and identity input
 
@@ -273,8 +278,9 @@ Explicitly out of scope:
    and retry retention.
 3. Reconciliation tests inject a crash before and after every durable phase boundary, including
    before registration, after commit but before the phase write, immediately before the systemd
-   request, after acceptance, and before persisting the invocation identifier. They prove the
-   empty-invocation same-boot retry, accepted-invocation adoption, boot-change refusal,
+   request, after acceptance while the start job is queued, after activation, and before persisting
+   the invocation identifier. They prove pending-start-job adoption, no-job/no-invocation same-boot
+   retry, accepted-invocation adoption, non-start-job and boot-change refusal,
    missing/mismatched/duplicate state, system manager/database outages, live adoption, empty-unit
    evidence, and force behavior.
 4. Unit-shape and provisioning tests pin fixed commands, distinct slot/server/reconciler/libvirt
