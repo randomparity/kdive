@@ -62,17 +62,19 @@ has neither capability.
 
 ### Provisioned identities and libvirt
 
-Host provisioning creates a no-login `kdive-worker` account with no sudo or Docker access. The
-checkout, installed lifecycle code, unit files, role environment files, and witness state are
-read-only or inaccessible to it. The system manager and lifecycle witness are root deployment
-authority. Server and reconciler continue under the trusted invoking account with separate database
-roles.
+Host provisioning creates bounded no-login `kdive-worker-1` through `kdive-worker-8` accounts and
+separate no-login `kdive-server`, `kdive-reconciler`, and `kdive-libvirt` accounts. None has sudo or
+Docker access. The checkout, installed lifecycle code, unit files, other roles' environment files,
+and witness state are read-only or inaccessible to them. The system manager and lifecycle witness
+are root deployment authority. The sudo-capable invoking account performs short-lived provisioning
+and observation only; no long-running KDIVE application inherits its authority.
 
-`kdive-worker` owns one persistent user libvirt daemon. Its socket uses one explicit
-`qemu+unix:///session?socket=...` URI and a group containing only the worker plus the trusted
-live-test account. The worker, reaper, mint, preflight, and live suite all receive that same URI.
-Staged images and provider runtime directories use declared setgid ownership so staging, worker, and
-test identities have only their required access.
+`kdive-libvirt` owns one persistent session-libvirt daemon. Its socket uses one explicit
+`qemu+unix:///session?socket=...` URI and a bounded group containing the configured slot accounts,
+reconciler, and trusted live-test account. These consumers share socket access but never a login
+UID. The worker, reconciler, reaper, mint, preflight, and live suite all receive that same URI.
+Staged images and provider runtime directories use declared setgid ownership so staging, workers,
+reconciler, and tests have only their required access.
 
 Hosted live CI provisions the accounts, socket, directories, and units before bring-up. The
 self-hosted `live_vm_host` Ansible role declares the same state. Preflight verifies account IDs,
@@ -84,13 +86,15 @@ libvirt/path access from both worker and test identities.
 Add the fixed system template `kdive-live-worker@.service`. Instance names are decimal slots in
 `1..KDIVE_WORKER_COUNT`, whose existing maximum is eight. Each unit has:
 
-- `User=kdive-worker`, `Group=kdive-worker`, and the bounded libvirt/runtime supplementary group;
+- `User=kdive-worker-%i`, its private primary group, and the bounded libvirt/runtime supplementary
+  group;
 - a fixed `ExecStart` for the configured KDIVE Python and `-m kdive worker`;
 - `Restart=no`, so the witness is the only generation creator;
 - `KillMode=control-group`, so stop reaches the entire incarnation process tree;
 - `RemainAfterExit=yes`, so an empty cgroup leaves a retained terminal unit;
 - `LoadCredential=kdive-worker-incarnation:<root-only per-generation source>`;
-- one root-owned worker-role environment file and no witness-role environment file; and
+- one root-owned slot environment file containing only worker-role settings and no witness-role
+  environment file; and
 - a distinct health bind and journal identity per slot.
 
 Add `kdive-live-worker-lifecycle.service` with `Restart=on-failure`. It runs the fixed lifecycle
@@ -99,29 +103,44 @@ source directories, and may inspect/start/signal/stop/reset only the fixed worke
 instances. Root is already the accepted host deployment authority; no worker process receives its
 credentials or control surface.
 
+The live topology also installs server and reconciler system units under their dedicated accounts.
+Their root-owned environment files contain only the matching role DSN and required non-database
+settings. The reconciler joins the libvirt socket group; neither role can read witness or worker
+credentials, control worker units, invoke sudo, or reach Docker.
+
 User-systemd deployment units remain unchanged and are not a worker-fence authority. The live-stack
 launcher refuses to fall back to them or to direct `python -m kdive worker`.
 
 ### Incarnation state machine
 
 For each slot, the witness uses a bounded root-owned state document containing schema version, unit
-name, generation, holder, credential hash, phase, and service result. Writes use create-new or
-atomic replace, `fsync`, mode `0600`, no symlink following, and fixed directories. The phases are:
+name, generation, holder, credential hash, phase, optional systemd invocation identifier, and
+service result. Writes use create-new or atomic replace, `fsync`, mode `0600`, no symlink following,
+and fixed directories. The phases are:
 
-1. `prepared`: mint generation and credential; persist state and credential source;
-2. `registered`: register unit/generation binding and hash through the witness database role;
-3. `started`: start the fixed unit only after registration commits;
-4. `terminal`: observe the matching retained unit with an empty cgroup; and
-5. `evidenced`: commit terminal evidence, stop/reset the retained unit, then remove credential and
+1. `prepared`: mint generation and credential, then atomically persist and `fsync` both the
+   credential source and state containing the unit/generation binding and credential hash;
+2. `registered`: idempotently register those exact durable facts through the witness database role,
+   then persist and `fsync` the phase after the transaction commits;
+3. `starting`: persist and `fsync` start intent before asking systemd to start the fixed unit;
+4. `started`: after systemd accepts the start, persist its invocation identifier and the phase;
+5. `terminal`: observe the matching retained unit with an empty cgroup; and
+6. `evidenced`: commit terminal evidence, stop/reset the retained unit, then remove credential and
    state files.
 
 The holder is derived from the bounded unit name and random generation, not a reusable PID. The
 authority binding stores those same values. The worker receives both through its allowlisted systemd
 environment and must derive the identical holder before credential authentication.
 
-Registration failure never starts the unit and removes the unused credential source. Start failure
-after registration is a terminal incarnation: the retained failed unit and matching generation are
-evidence, so the witness records `failed` before cleanup. A live unit is never replaced in place.
+Registration failure never starts the unit. An ambiguous database result retains the `prepared`
+state and credential for an exact retry; the existing database function accepts the replay when all
+facts match an active row. A definitive rejection may remove the unused source only after proving
+that no row exists. A restart from `registered` durably advances to `starting` and starts the same
+generation. A restart in `starting` re-adopts a matching systemd invocation; a missing unit fails
+closed because the start request may have been accepted. Start failure after systemd accepted the
+invocation is a terminal incarnation only when the retained failed unit, matching generation, and
+recorded invocation identifier agree; the witness then records `failed` before cleanup. A live unit
+is never replaced in place.
 
 For graceful stop the witness sends SIGTERM to the unit cgroup without unloading it, waits for the
 exact cgroup to empty, then records evidence. A bounded stop timeout leaves the unit and fence
@@ -129,10 +148,14 @@ retained; the operator retries or uses the explicit force path, which may strand
 creates evidence.
 
 On witness restart, reconciliation runs before new starts. It enumerates the fixed configured units
-and root-owned state files with hard ceilings. Live matching cgroups are re-adopted. Empty matching
-units receive evidence and cleanup. Missing state, missing unit, generation mismatch, duplicate
-state, unexpected instance, or ambiguous cgroup status fails closed and names the slot. Systemd and
-database outages leave all objects for retry.
+and root-owned state files with hard ceilings. `prepared` replays registration with the same facts;
+this covers a crash immediately before or after the database commit. `registered` safely advances
+to `starting` and starts the same generation. `starting` re-adopts an existing matching invocation,
+but a missing unit is ambiguous and fails closed. Live matching cgroups are re-adopted. Empty
+matching units receive evidence and cleanup. A unit missing through `registered` is a recoverable
+not-yet-started state. Missing state, a unit missing from `starting` onward, generation or invocation
+mismatch, duplicate state, unexpected instance, or ambiguous cgroup status fails closed and names
+the slot. Systemd and database outages leave all objects for retry.
 
 ### Worker credential and identity input
 
@@ -158,7 +181,7 @@ Bring-up ordering is:
 3. apply migrations with the migration-owner DSN;
 4. run idempotent local runtime-role bootstrap;
 5. write separate root-owned role environment files;
-6. start server and reconciler with only their respective DSNs;
+6. start server and reconciler under their dedicated accounts with only their respective DSNs;
 7. start/reconcile the lifecycle witness, which registers and starts every configured worker slot;
 8. settle on server, reconciler, witness, and the exact worker count; and
 9. reconcile inventory only after all real workers remain authenticated and alive.
@@ -188,7 +211,8 @@ test failures therefore retain their daemon exception without replacing the orig
 - Missing witness or worker DSN: no worker starts; the affected role and environment file are named.
 - State, credential, or environment path ownership/mode mismatch: fail closed without following or
   replacing the path.
-- Registration failure: no systemd start; unused handoff is removed.
+- Registration failure: no systemd start; ambiguous outcomes retain the exact handoff for replay,
+  and only a proven absent row permits discard.
 - Start failure after registration: retain the unit, record `failed`, then clean the handoff.
 - Worker credential or identity mismatch: worker exits; retained unit becomes failure evidence.
 - Worker crash: unit and generation remain; witness records evidence before reset or replacement.
@@ -202,25 +226,29 @@ test failures therefore retain their daemon exception without replacing the orig
 
 ## Threat model
 
-Untrusted actors are a compromised worker, malformed systemd environment/credential/state input,
-another unprivileged local process, stale database state, and hostile log content. Root, the system
-manager, migration owner, and lifecycle-witness role are trusted deployment authorities. The trusted
-workflow/test account provisions and observes the stack but does not run worker code under its own
-identity.
+Untrusted actors are a compromised worker, server, or reconciler; malformed systemd
+environment/credential/state input; another unprivileged local process; stale database state; and
+hostile log content. Root, the system manager, migration owner, and lifecycle-witness role are
+trusted deployment authorities. The trusted workflow/test account provisions and observes the
+stack but does not run long-lived KDIVE application code under its own identity.
 
 Added or widened boundaries are:
 
-- **System manager → worker.** Fixed unit template, dedicated UID, no sudo/Docker access, read-only
-  code/configuration, allowlisted environment, private credentials, and cgroup ownership isolate the
-  worker from lifecycle authority.
+- **System manager → worker.** Fixed unit template, one dedicated UID per slot, no sudo/Docker
+  access, read-only code/configuration, allowlisted environment, per-UID credentials, and cgroup
+  ownership isolate each worker from lifecycle authority and sibling credentials.
+- **System manager → server/reconciler.** Dedicated non-escalating accounts, role-specific
+  environment files, and fixed units keep compromised application roles away from witness and
+  operator authority.
 - **Witness → witness database.** Existing bounded registration/termination functions receive the
   exact unit/generation binding and hash. The worker DSN is absent.
 - **Systemd credentials → worker.** Root-only unique source, systemd copy, exact-size/hex
   validation, redaction-before-authentication, and cleanup after evidence bound the handoff.
 - **Worker unit/cgroup → termination evidence.** Matching root state, retained named unit, empty
   exact cgroup, and evidence-before-reset prevent PID absence or timeout from becoming proof.
-- **Worker session libvirt → live tests.** One explicit socket URI, bounded group membership, setgid
-  paths, and dual-identity preflight prevent caller-relative session skew.
+- **Worker session libvirt → live tests.** A separate daemon identity, one explicit socket URI,
+  bounded group membership, setgid paths, and per-consumer preflight prevent caller-relative
+  session skew without merging worker credentials under one UID.
 - **Live CI → system journal.** Fixed unit allowlist, per-source byte bound, regular-file checks,
   and redaction constrain failure disclosure.
 
@@ -237,13 +265,17 @@ Explicitly out of scope:
 
 1. Worker tests redden for missing/malformed systemd identity, credential, generation, overflow,
    cross-transport fallback, and credential/holder mismatch.
-2. Lifecycle unit tests prove register-before-start, unique slot generations and credentials,
-   evidence-before-reset/cleanup, cgroup-empty checks, outcome mapping, and retry retention.
-3. Reconciliation tests cover daemon crash in every phase, missing/mismatched/duplicate state,
-   system manager/database outages, live adoption, empty-unit evidence, and force behavior.
-4. Unit-shape and provisioning tests pin fixed commands, dedicated identity, role-file separation,
-   `Restart=no`, `KillMode=control-group`, `RemainAfterExit=yes`, credential loading, path modes,
-   and the explicit libvirt socket contract.
+2. Lifecycle unit tests prove register-before-start, unique slot UIDs, generations, and credentials,
+   sibling credential denial, evidence-before-reset/cleanup, cgroup-empty checks, outcome mapping,
+   and retry retention.
+3. Reconciliation tests inject a crash before and after every durable phase boundary, including
+   before registration, after commit but before the phase write, and before start. They also cover
+   missing/mismatched/duplicate state, system manager/database outages, live adoption, empty-unit
+   evidence, and force behavior.
+4. Unit-shape and provisioning tests pin fixed commands, distinct slot/server/reconciler/libvirt
+   identities, absence of sudo and Docker authority, role-file separation, `Restart=no`,
+   `KillMode=control-group`, `RemainAfterExit=yes`, credential loading, path modes, and the explicit
+   libvirt socket contract.
 5. A disposable-Postgres process test starts one and then several real workers through the lifecycle
    seam, observes distinct active incarnations and worker-role connections, terminates them, and
    observes exact evidence. A systemd-hosted live proof exercises the real units.
@@ -251,8 +283,9 @@ Explicitly out of scope:
    count, restart refusal on unresolved evidence, and no shared DSN reaches a daemon.
 7. Workflow/reporter tests prove both live jobs invoke failure-only diagnostics and redact bounded
    file and journal output without following symlinks or accepting arbitrary units.
-8. Hosted setup and self-hosted Ansible provisioning pass worker-identity and test-identity libvirt
-   preflight against the same daemon before their first real live proof.
+8. Hosted setup and self-hosted Ansible provisioning pass every worker, reconciler, and test
+   identity's libvirt preflight against the same daemon before their first real live proof; an
+   actual two-worker run proves one slot cannot read the other's credential.
 9. Focused Python, shell, systemd-unit, Ansible, configuration-doc, and workflow checks pass,
    followed by `just ci` with no warnings.
 

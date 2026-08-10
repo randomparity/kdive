@@ -31,19 +31,31 @@ error directs the operator to the provisioned non-root worker and its explicit s
 A future root-mode replacement requires a separate decision and constrained provider privilege
 boundary.
 
-Each configured worker uses one installed `kdive-live-worker@<slot>.service` instance. The unit runs
-as a dedicated no-login `kdive-worker` account with no sudo or Docker access and read-only code and
-configuration. It uses `Restart=no`, `KillMode=control-group`, `ExitType=cgroup`, and
-`RemainAfterExit=yes`. The unit therefore retains an exact named runtime object after its complete
-cgroup becomes empty; it cannot silently restart or disappear before evidence is recorded.
+Each configured worker uses one installed `kdive-live-worker@<slot>.service` instance. Every slot
+in the bounded range has its own no-login `kdive-worker-<slot>` account with no sudo or Docker
+access and read-only code and configuration. Distinct UIDs prevent one worker from reading another
+unit's systemd credential directory. The unit uses `Restart=no`, `KillMode=control-group`,
+`ExitType=cgroup`, and `RemainAfterExit=yes`. It therefore retains an exact named runtime object
+after its complete cgroup becomes empty; it cannot silently restart or disappear before evidence
+is recorded.
 
 The worker incarnation identity and authority binding contain the bounded unit name and a random
-per-start generation. A root-owned lifecycle state file records that binding before registration.
-The lifecycle witness mints a random 256-bit credential, registers its hash and the current fence
-protocol through the lifecycle-witness database role, writes the credential to a root-only
-per-generation source file, and only then starts the unit. Systemd `LoadCredential=` copies it into
-the service credential directory. The worker reads that private copy and authenticates through the
-worker database role. No application process receives both roles or the source credential file.
+per-start generation. The lifecycle witness mints a random 256-bit credential, durably writes the
+root-only credential source and a `prepared` state file containing the binding and hash, and then
+registers those exact facts and the current fence protocol through the lifecycle-witness database
+role. It persists `registered` only after the transaction commits, then durably records `starting`
+before asking systemd to start the unit. Once systemd accepts the start, the witness records the
+unit's invocation identifier and `started` phase. Systemd `LoadCredential=` copies the source into
+that slot UID's service credential directory. The worker reads that private copy and authenticates
+through the worker database role. No application process receives both roles or the source
+credential file.
+
+A crash in `prepared` retries registration with the same generation, binding, hash, and credential;
+the existing registration function accepts an exact replay of an active incarnation. A crash after
+the database commit but before `registered` is persisted follows the same replay path. A crash in
+`registered` advances the same generation rather than minting a replacement. A crash in `starting`
+re-adopts a matching invocation; a missing runtime is ambiguous and fails closed because systemd
+might have accepted the request. Absence of a unit is expected only through `registered`.
 
 The lifecycle witness is a system service with `Restart=on-failure`. It owns only the witness DSN,
 credential source files, lifecycle state, and authority to inspect and operate the fixed worker
@@ -51,10 +63,16 @@ template instances. The trusted root deployment launcher prepares separate root-
 files containing each process's role-specific DSN; it exits before workers start. Worker units
 receive only the worker environment file. The witness receives no worker environment file.
 
+The server and reconciler also run as separate no-login `kdive-server` and `kdive-reconciler`
+accounts with no sudo or Docker access. Each receives only its own environment file and database
+role. The sudo-capable workflow or operator account performs bounded provisioning and observation,
+then exits; it does not host a long-running KDIVE application process.
+
 For normal stop, the witness sends SIGTERM to the unit cgroup without unloading the unit, waits for
-the cgroup to become empty, compares the retained unit name and generation with its root-owned
-state, and records terminal evidence before stopping/resetting the unit and deleting the credential
-source and lifecycle state. A spontaneous worker exit reaches the same retained
+the cgroup to become empty, compares the retained unit name, generation, and systemd invocation
+identifier with its root-owned state, and records terminal evidence before stopping/resetting the
+unit and deleting the credential source and lifecycle state. A spontaneous worker exit reaches the
+same retained
 `active (exited)` state.
 The witness maps the retained service result to `succeeded`, `failed`, or `killed`; the outcome is
 diagnostic, while empty exact cgroup plus matching generation is the termination authority.
@@ -66,10 +84,11 @@ missing, mismatched, multiply active, or prematurely cleaned unit fails closed a
 incarnation and artifact uses pinned. The explicit force-cleanup path may strand a fence but cannot
 publish evidence or release one.
 
-The `kdive-worker` account owns one persistent user libvirt daemon and explicit Unix socket. The
-worker and trusted live-test account use the same `qemu+unix:///session?socket=...` URI through a
-bounded socket group. Staged images and provider runtime paths use declared setgid ownership. Host
-preflight proves socket and path access from both identities before application startup.
+A separate no-login `kdive-libvirt` account owns one persistent session-libvirt daemon and explicit
+Unix socket. The slot worker accounts, reconciler, and trusted live-test account use the same
+`qemu+unix:///session?socket=...` URI through a bounded socket group; the accounts do not share a
+login UID. Staged images and provider runtime paths use declared setgid ownership. Host preflight
+proves socket and path access from every configured consumer identity before application startup.
 
 The host stack applies migrations with the migration-owner login, runs the idempotent runtime-role
 bootstrap, and starts server, reconciler, lifecycle witness, and worker units with only their
@@ -78,13 +97,14 @@ role-specific database authorities. Each worker slot keeps its existing distinct
 ## Consequences
 
 Host workers now have registration-before-start and evidence-before-cleanup ordering analogous to
-the Compose gate. One and several workers receive separate credentials, generations, systemd units,
-cgroups, environment files, and log files.
+the Compose gate. One and several workers receive separate UIDs, credentials, generations, systemd
+units, cgroups, environment files, and log files.
 
-Supported live-stack hosts must run the systemd system manager and provision the worker account,
-session-libvirt daemon and socket, lifecycle directories, units, and narrowly scoped launcher
-authority. Hosted CI installs that boundary during setup; the self-hosted runner declares it in
-Ansible. A host without it fails preflight instead of falling back to direct process launch.
+Supported live-stack hosts must run the systemd system manager and provision the bounded slot,
+server, reconciler, and libvirt accounts; session-libvirt daemon and socket; lifecycle directories;
+units; and narrowly scoped launcher authority. Hosted CI installs that boundary during setup; the
+self-hosted runner declares it in Ansible. A host without it fails preflight instead of falling
+back to direct process launch.
 
 The previous root-worker and invoking-user worker paths are no longer supported live-stack modes.
 Root-only local-libvirt operations need a separate privileged interface. User-systemd services
