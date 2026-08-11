@@ -43,13 +43,25 @@ fleet and `stop` deliberately stops the current fleet, so overlapping local flow
 
 For each slot, the witness mints a random generation and 256-bit credential, atomically publishes
 their fixed files, derives `local-systemd:<unit>:<generation>`, and places that exact non-secret ID
-in the per-start environment handoff. It registers the same incarnation, bound to the fixed unit
-and generation, before starting the unit; worker authentication must return that ID. It records the
-unit invocation identifier after activation. Stop sends SIGTERM to the complete unit cgroup and
-waits for that exact invocation to become empty. The witness publishes the mapped terminal outcome
-through the lifecycle-witness database role before resetting the unit or removing the credential
-and state. A database or systemd failure retains those objects for an idempotent retry; absence
-alone is never termination evidence.
+in the per-start environment handoff. The unit first runs a root-installed gate wrapper as the slot
+UID; the wrapper loads no application code and cannot `exec` the worker until the witness creates
+its fixed root-owned release marker. The witness starts that gate, durably records the host boot ID
+and systemd invocation ID, then registers the incarnation bound to the unit, generation, boot, and
+invocation. Only after registration commits does it release the wrapper to `exec` the worker;
+worker authentication must return the same incarnation ID.
+
+A crash before registration leaves either no invocation or an exact gated invocation that the next
+request can adopt without worker code having run. A crash after registration replays the same facts
+and releases or adopts that invocation. Stop sends SIGTERM to the complete unit cgroup and waits for
+that exact invocation to become empty. The witness publishes the mapped terminal outcome through
+the lifecycle-witness database role before resetting the unit or removing the credential and state.
+A database or systemd failure retains those objects for an idempotent retry; absence within the same
+host boot is never termination evidence.
+
+The boot ID is part of the immutable binding because a host restart destroys every process and
+cgroup from the prior boot. When retained state names a different boot ID, the witness records that
+exact incarnation as `killed` before cleanup and replacement. It never applies this rule when the
+boot ID is unreadable or unchanged.
 
 `start(count)` first scans for live `kdive worker` processes outside the fixed unit cgroups and
 refuses to activate anything while one exists. It then applies the same evidence-before-cleanup

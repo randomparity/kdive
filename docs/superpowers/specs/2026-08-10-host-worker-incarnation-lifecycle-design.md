@@ -97,15 +97,21 @@ operation status, fixed slot numbers, bounded errors, and, for `diagnostics`, sa
 
 Each slot has one root-owned state document and fixed credential and environment files. The state
 contains schema version, slot, fixed unit, random generation, derived incarnation ID, credential
-hash, phase, and optional systemd invocation ID and terminal outcome. Phases are `prepared`,
-`registered`, `started`, and `terminated`. State replacements are write-file, `fsync`, atomic
-rename, and parent-directory `fsync`; there is no run-wide record or receipt graph.
+hash, phase, and optional host boot ID, systemd invocation ID, and terminal outcome. Phases are
+`prepared`, `gated`, `registered`, `started`, and `terminated`. State replacements are write-file,
+`fsync`, atomic rename, and parent-directory `fsync`; there is no run-wide record or receipt graph.
 
 The incarnation ID is `local-systemd:<unit>:<generation>`. The database authority kind remains
-`local`, with binding `{"unit": <unit>, "generation": <generation>}`. Worker identity loading
-accepts this configured local-systemd identity only from the root-owned unit environment; ordinary
-local PID identity remains available to existing non-systemd callers but is not a supported live
-worker authority.
+`local`, with binding containing the unit, generation, host boot ID, and systemd invocation ID.
+Worker identity loading accepts this configured local-systemd identity only from the root-owned
+unit environment; ordinary local PID identity remains available to existing non-systemd callers
+but is not a supported live worker authority.
+
+The fixed unit starts a root-installed gate wrapper as the slot UID. The wrapper reads only its
+fixed environment and waits for a root-owned release marker in the slot runtime directory; the
+slot UID can read but not create or replace that marker. It imports no checkout or KDIVE code before
+release. After release it removes no state and `exec`s the configured Python worker in the same
+cgroup and systemd invocation.
 
 ### Start
 
@@ -114,18 +120,19 @@ slot above a reduced count. An unresolved slot blocks every new activation. Once
 are cleared, the witness starts exactly slots `1..count`. For each requested slot, it:
 
 1. requires an inactive fixed unit and no unresolved earlier state;
-2. publishes a new environment, credential, and `prepared` state;
-3. registers the exact incarnation and credential hash through the witness role;
-4. persists `registered` after the transaction commits;
-5. starts the fixed unit; and
-6. verifies the matching unit is active with a non-empty cgroup, records its invocation ID, and
-   persists `started`.
+2. publishes a new environment, credential, absent release marker, and `prepared` state;
+3. starts the fixed gate wrapper, then records the current boot ID and exact invocation as `gated`;
+4. registers that incarnation, binding, and credential hash through the witness role;
+5. persists `registered` after the transaction commits;
+6. atomically publishes the root-owned release marker; and
+7. verifies the same invocation has `exec`d a live worker and persists `started`.
 
-Registration is idempotent for identical facts. A crash after the database commit replays the same
-registration. A crash around unit start examines only the fixed state and unit: an active matching
-unit is adopted, an inactive unit with no invocation retries the same registered generation, and a
+Registration is idempotent for identical facts. Before `gated`, an inactive unit with no invocation
+retries the same prepared generation; an active gate is adopted and its exact invocation recorded.
+A crash after the database commit replays the same registration. A crash around release sees either
+the still-gated wrapper or the worker in the same registered invocation and resumes accordingly. A
 contradictory or foreign invocation fails closed. A partial multi-worker start stops and evidences
-already started slots; it does not mint replacement generations in the same request.
+already started or registered slots; it does not mint replacement generations in the same request.
 
 ### Status and unexpected exit
 
@@ -138,15 +145,18 @@ manager, or an unreadable cgroup never becomes evidence.
 
 The witness is not a monitor. An unexpected exit can remain unevidenced until `status`, `stop`,
 `diagnostics`, or the next `start`; the active database fence remains pinned during that delay.
+State also records the boot ID. If the current boot differs, the old invocation and every process
+it contained are definitively gone; the witness commits that exact binding as `killed` before
+cleanup. An unreadable or unchanged boot ID never licenses this transition.
 
 ### Stop and cleanup
 
-`stop` sends SIGTERM to every `started` unit cgroup, then gives all selected cgroups 45 seconds on
-the monotonic clock, within the 120-second request budget, to become empty. It records each terminal
-outcome and then stops/resets only the
-fixed unit and deletes the environment, credential, and state after the database confirms the same
-incarnation is terminated. `prepared` or `registered` states with positive proof that no invocation
-was created are terminated as failed before cleanup. Repeating `stop` adopts the same facts.
+`stop` sends SIGTERM to every `gated`, `registered`, or `started` unit cgroup, then gives all
+selected cgroups 45 seconds on the monotonic clock, within the 120-second request budget, to become
+empty. It records each terminal outcome and then stops/resets only the fixed unit and deletes the
+environment, credential, and state after the database confirms the same incarnation is terminated.
+A `prepared` state with positive proof that no invocation was created needs no database termination
+and is discarded before cleanup. Repeating `stop` adopts the same facts.
 
 If systemd, the database, or the worker does not converge within the bound, `stop` fails and keeps
 the unit, state, credential, and incarnation row. The operator retries after restoring the
@@ -225,15 +235,16 @@ component is unavailable.
 1. Worker identity tests reject malformed configured local-systemd IDs and prove the authenticated
    database incarnation must equal the configured ID.
 2. Lifecycle unit tests prove unique credentials and generations, register-before-start,
-   exact identity handoff, start adoption, exact cgroup/invocation checks, mapped outcomes,
+   gate-before-registration and release-after-registration, exact identity handoff, gated/start
+   adoption, exact boot/cgroup/invocation checks, reboot outcome, mapped outcomes,
    evidence-before-cleanup, idempotent registration/termination replay, whole-fleet count
    convergence, unmanaged-worker refusal, partial-start cleanup, bounds, and fail-closed dependency
    behavior. Limit tests use a fake monotonic clock and prove request, stop, diagnostic acquisition,
    and emitted-byte ceilings retain retryable state.
 3. Unit-shape and provisioning tests pin fixed commands, per-slot UIDs, `LoadCredential`,
    `Restart=no`, `KillMode=control-group`, `ExitType=cgroup`, socket permissions, root-only witness
-   configuration, `RemainAfterExit=yes`, shared libvirt access, and absence of worker
-   sudo/Docker/control membership.
+   configuration, `RemainAfterExit=yes`, the root-owned release marker, no application import before
+   release, shared libvirt access, and absence of worker sudo/Docker/control membership.
 4. Script tests prove migration then role bootstrap ordering, role-specific daemon DSNs, removal of
    direct/root worker launch, exact worker counts, lifecycle start/status/stop wiring, and refusal
    to tear down backends after unresolved evidence.
