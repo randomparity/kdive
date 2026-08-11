@@ -140,23 +140,25 @@ fails closed while the record exists. `running` requires every receipt to descri
 requested stop, first persists run outcome `failed` and report state `pending`. The witness stages a
 safe failure report while every retained unit, role file, and credential source still exists, then
 moves to `stopping`, evidences that slot, and terminates and evidences the remaining slots. A caller
-stop is serialized under the same run lock. It may persist `stopping/not-required` only when the run
-has no failure outcome, report is still `not-required`, and every configured slot is verified live;
-it does so before signaling a unit, so subsequent expected terminations do not take the failure path.
-If outcome is already `failed` or report is `pending`, stop preserves those facts, completes or
-retries safe report staging with all seeds retained, and enters `stopping` only with report
-`complete`. Outcome may advance only from null to `failed`; report state may advance only
-`not-required` to `pending` to `complete`, and retries preserve `complete`. `complete` requires every
-expected receipt to be in one positive terminal disposition plus the server, reconciler,
-reconcile-once invocation, role files, and report staging to have their specified terminal
-disposition.
+stop is serialized under the same run lock. While every configured slot and seed is still present,
+it advances `not-required` to `pending`, stages the bounded sanitized baseline, and enters
+`stopping` only with report `complete`; an existing `failed` or `pending` state is preserved and
+completed first. It then signals units, so subsequent expected terminations do not take the failure
+path. A later stop failure advances a null outcome to `failed` without downgrading the report. If all
+seeds still exist, the helper may atomically replace the baseline; after any seed deletion it keeps
+the baseline and appends only non-secret operation receipts plus the fixed property-only snapshots
+for exact stop/helper invocations, never rereading application journals. Outcome may advance only
+from null to `failed`; report state may advance only `not-required` to `pending` to `complete`, and
+retries preserve `complete`. `complete` requires every expected receipt to be in one positive
+terminal disposition plus the server, reconciler, reconcile-once invocation receipt/reset, role
+files, and report staging to have their specified terminal disposition.
 
 The fixed `report` operation ensures the report oneshot atomically publishes sanitized output
 beneath a root-owned staging directory derived from the active control-run token; it does not return
 journal bytes in the 4 KiB control response. The response names only fixed staged files that the
 authorized peer may read, and the client copies them into its checkout. A retry for the same run
-adopts a complete report or replaces an incomplete temporary report. Failure reporting runs before
-`stop`. The run record
+adopts a complete report or replaces an incomplete temporary report. Report staging always precedes
+destructive `stop` work. The run record
 reaches `complete` only after every slot is evidenced and cleaned, server and reconciler are stopped,
 and the cleanup oneshot's non-secret receipt proves the role files removed. The completed record and
 report remain as an idempotent `stop` result until the next `start` atomically retires them before
@@ -221,8 +223,13 @@ The live topology also installs `kdive-live-server.service` and
 environment file, executes the installed `reconcile-systems` command once, and uses
 `RemainAfterExit=yes` so its exact invocation identifier and success result remain observable. The
 lifecycle service starts it only after all workers are authenticated, persists its invocation and
-result in the run record, and treats any non-success result as a failed run. Neither the caller nor
-the lifecycle service receives its database DSN.
+result in the run record, and treats any non-success result as a failed run. After that positive
+receipt is durable, it stops/resets the retained oneshot, verifies inactive state with no pending
+job, and persists `reconcile_once_reset=true` before the run may become ready or complete. On
+restart, a retained unit without a receipt is harvested first; a receipt without the reset flag
+resumes reset; an inactive unit plus the exact receipt permits the flag update. The next run cannot
+retire the completed record or start reconcile-once until this transition finishes. Neither the
+caller nor the lifecycle service receives its database DSN.
 Their root-owned environment files contain only the matching role DSN and required non-database
 settings. The reconciler joins the libvirt socket group; neither role can read witness or worker
 credentials, control worker units, invoke sudo, or reach Docker.
@@ -395,8 +402,11 @@ unit's exact `_SYSTEMD_INVOCATION_ID` before treating the step as ready or start
 restarted lifecycle service appends its new invocation identifier before resuming run work. The
 report helper accepts per-run unit journal entries only when their invocation identifier is in the
 run record; lifecycle entries must be after the stored cursor and match a lifecycle invocation
-recorded for that run. A source with no accepted invocation emits only a bounded systemd status
-snapshot and an explicit no-current-invocation marker. It never falls back to a fixed-unit tail.
+recorded for that run. A source with no accepted invocation emits only an explicit
+no-current-invocation marker and a property-only D-Bus/`systemctl show` snapshot allowlisting `Id`,
+`LoadState`, `ActiveState`, `SubState`, `Result`, `InvocationID`, `Job`, `NRestarts`, `ExecMainCode`,
+and `ExecMainStatus`. It never invokes `systemctl status`, requests journal lines, renders arbitrary
+properties, or falls back to a fixed-unit tail.
 
 The helper reads only the lifecycle and configured application units and returns regular staged
 files through the later fixed `report` request; the caller cannot supply a unit or source path.
@@ -413,16 +423,18 @@ escapes hostile journal control characters, and succeeds with an explicit marker
 source exists. It writes outputs with create-new/no-follow semantics and never returns its redaction
 seed set.
 
-Each live job adds a final `if: failure()` step invoking the bounded control client's `report`
-operation before its always-run `stop`. The operation adopts the already staged automatic failure
-report or durably sets run outcome `failed` and report state `pending` before starting the helper if
-failure happened outside a daemon transition. After copying only manifest-listed files, the client
-prints their fixed headings and bounded sanitized content into the Actions job log, prefixing every
-content line with `| ` so hostile text cannot become a workflow command. The 1 MiB report ceiling is
-also the per-job console-publication ceiling; reaching it emits one truncation marker and `report`
-still succeeds. Startup, role, lifecycle, and test failures therefore expose their daemon exception
-in the failed run without replacing the original failed step. Self-hosted and hosted workspaces may
-then disappear without being the only copy visible to the operator.
+Each live job first adds an `if: failure()` staging step before its always-run `stop`. That operation
+adopts the already staged automatic failure report or durably sets run outcome `failed` and report
+state `pending` before starting the helper when failure happened outside a daemon transition. Stop
+itself stages the healthy baseline before destructive work. A final `if: failure()` publication step
+after stop adopts the retained report, including any stop-failure augmentation, and copies only its
+manifest-listed files. The client prints fixed headings and bounded sanitized content into the
+Actions job log, prefixing every content line with `| ` so hostile text cannot become a workflow
+command. The 1 MiB report ceiling is also the per-job console-publication ceiling; reaching it emits
+one truncation marker and `report` still succeeds. Startup, role, lifecycle, test, and teardown
+failures therefore expose their daemon exception without replacing an earlier failed step.
+Self-hosted and hosted workspaces may then disappear without being the only copy visible to the
+operator.
 
 ## Failure contracts
 
@@ -456,7 +468,9 @@ then disappear without being the only copy visible to the operator.
   generation on the same boot; retain the credential and fence.
 - Start-limit result: fail closed as provisioned-unit drift; do not reset or mint a generation.
 - Witness crash: systemd restarts it; workers and retained unit state survive for reconciliation.
-- Stop timeout or database outage: unit, state, credential source, and fence remain for retry.
+- Stop timeout or database outage: every unresolved unit, state, credential source, and fence remains
+  for retry; already cleaned slots rely on positive receipts, and the pre-cleanup report plus
+  property-only failure augmentation remains publishable.
 - Multi-worker bind collision: the exact instance fails and blocks bring-up without affecting other
   generations.
 - System manager restart: installed units and root state remain; witness reconciles before starts.
@@ -466,7 +480,8 @@ then disappear without being the only copy visible to the operator.
 - Atomic-replacement temporary: retain the valid canonical record, remove its one validated `.next`
   sibling, and retry; any other shape fails closed with the exact path class.
 - Cleanup oneshot failure: retain the run in `stopping`, retry the fixed helper, and do not claim
-  `complete` until its non-secret receipt proves every fixed role file absent.
+  `complete` until its non-secret receipt proves every fixed role file absent; retain and publish the
+  pre-cleanup report with the helper's exact property-only failure augmentation.
 - Stop during failed/pending report: preserve the monotonic failure state, retry safe report
   publication, and signal or clean no unit until the report manifest is durable.
 - Missing or mismatched journal boundary: withhold that source, emit its fixed status snapshot and
@@ -552,7 +567,9 @@ Explicitly out of scope:
    loading, path modes, and the explicit libvirt socket contract. A real unit proof leaves a child
    alive after the main process exits and verifies that evidence waits for the exact cgroup to empty.
    Reconcile-once unit tests pin its reconciler identity/environment, retained invocation result,
-   ordering after worker readiness, and failure-to-report transition.
+   ordering after worker readiness, evidence-before-reset transition, inactive/no-job verification,
+   and failure-to-report transition. Two successful runs observe distinct invocation identifiers;
+   crash cases cover before receipt, after receipt, after reset, and before the reset flag persists.
 5. A disposable-Postgres process test starts one and then several real workers through the lifecycle
    seam, observes distinct active incarnations and worker-role connections, terminates them, and
    observes exact evidence. A systemd-hosted live proof exercises the real units.
@@ -575,7 +592,9 @@ Explicitly out of scope:
    proves no state downgrade, unit reset, bundle deletion, or role cleanup occurs before the report
    retry publishes its manifest. Ownership tests distinguish GitHub run attempts, reject delayed
    duplicate starts after completion, and exercise local `up`, `status`, `report`, and `down` in
-   separate shells through one atomically persisted nonce.
+   separate shells through one atomically persisted nonce. Teardown tests prove healthy stop stages
+   its baseline before signaling, and stop timeout, database outage, and cleanup-helper failure keep
+   a publishable report with exact property-only failure augmentation.
 7. Workflow/reporter tests prove both live jobs invoke failure-only diagnostics and redact bare
    worker credentials and role passwords, including values crossing the output cutoff. They cover
    hostile journal formatting, multiple sources, per-source and total bounds, malformed seed
@@ -583,9 +602,11 @@ Explicitly out of scope:
    still emits redacted daemon logs after the witness and report helper restart. The same proof runs
    for clean and abnormal worker exits after `running` and distinguishes them from caller-requested
    normal stop. A two-run proof logs unique bare secrets in run one, cleans it, and proves run two's
-   cursor/invocation-filtered report cannot emit them. Workflow tests prove both failed jobs render
-   the bounded manifest files into their job logs with every hostile content line prefixed, rather
-   than merely leaving files in a runner workspace.
+   cursor/invocation-filtered report and no-invocation property fallback cannot emit them. Workflow
+   tests prove both jobs stage before stop and a final post-stop failure step renders bounded
+   manifest files into the job log with every hostile content line prefixed. A clean test followed
+   by stop timeout or cleanup-helper failure must publish diagnostics rather than merely leave files
+   in a runner workspace.
 8. Hosted setup and self-hosted Ansible provisioning pass every worker, reconciler, and test
    identity's libvirt preflight against the same daemon before their first real live proof; an
    actual two-worker run proves one slot cannot read the other's credential.
