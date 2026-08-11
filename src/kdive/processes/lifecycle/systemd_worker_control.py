@@ -40,6 +40,7 @@ from kdive.processes.lifecycle.systemd_worker_runtime import (
 from kdive.processes.lifecycle.systemd_worker_state import SlotStore
 
 _REQUEST_SECONDS = 120.0
+_RESPONSE_RESERVE_SECONDS = 1.0
 _SOCKET_PATH = Path("/run/kdive/live-worker-lifecycle.sock")
 _LOCK_PATH = Path("/run/lock/kdive-live-worker-lifecycle.lock")
 _STATE_ROOT = Path("/var/lib/kdive/live-workers")
@@ -181,29 +182,45 @@ def _open_lock(path: Path):
 async def _call_lifecycle(
     lifecycle: Lifecycle, request: LifecycleRequest, deadline: Deadline
 ) -> LifecycleResponse:
-    timeout = _remaining(deadline)
     if request.operation == "start":
         operation = lifecycle.start(request, deadline)
     else:
         operation = getattr(lifecycle, request.operation)(deadline)
-    try:
-        return await asyncio.wait_for(operation, timeout=timeout)
-    except TimeoutError:
-        return _response(
-            "deadline_exceeded",
-            "lifecycle operation exceeded its 120-second monotonic deadline",
-            "retry_same_operation",
-        )
+    return await operation
 
 
 async def _dispatch(
     request: LifecycleRequest, deadline: Deadline, build_lifecycle: LifecycleFactory
 ) -> LifecycleResponse:
-    built = build_lifecycle(deadline)
-    if isinstance(built, AbstractAsyncContextManager):
-        async with built as lifecycle:
-            return await _call_lifecycle(cast(Lifecycle, lifecycle), request, deadline)
-    return await _call_lifecycle(cast(Lifecycle, built), request, deadline)
+    try:
+        built = build_lifecycle(deadline)
+        if isinstance(built, AbstractAsyncContextManager):
+            async with built as lifecycle:
+                return await _call_lifecycle(cast(Lifecycle, lifecycle), request, deadline)
+        return await _call_lifecycle(cast(Lifecycle, built), request, deadline)
+    except Exception:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise asyncio.CancelledError from None
+        raise
+
+
+async def _bounded_dispatch(
+    request: LifecycleRequest, deadline: Deadline, build_lifecycle: LifecycleFactory
+) -> LifecycleResponse:
+    remaining = _remaining(deadline)
+    response_reserve = min(_RESPONSE_RESERVE_SECONDS, remaining / 2)
+    try:
+        return await asyncio.wait_for(
+            _dispatch(request, deadline, build_lifecycle),
+            timeout=remaining - response_reserve,
+        )
+    except TimeoutError:
+        return _response(
+            "deadline_exceeded",
+            "lifecycle operation exceeded its monotonic deadline",
+            "retry_same_operation",
+        )
 
 
 def serve_one(
@@ -213,13 +230,14 @@ def serve_one(
     build_lifecycle: LifecycleFactory,
     lock_path: Path = _LOCK_PATH,
     monotonic: Callable[[], float] = time.monotonic,
+    request_seconds: float = _REQUEST_SECONDS,
 ) -> LifecycleResponse:
     """Authenticate, handle, and close exactly one connected Unix socket request."""
     try:
         peer = _peer_credentials(connection)
         if peer.uid != expected_uid:
             raise PeerRejected("lifecycle socket peer does not match the provisioned operator")
-        deadline = MonotonicDeadline.after(_REQUEST_SECONDS, monotonic=monotonic)
+        deadline = MonotonicDeadline.after(request_seconds, monotonic=monotonic)
         try:
             frame = _receive_frame(connection, deadline, MAX_REQUEST_BYTES)
             request = LifecycleRequest.model_validate_json(frame)
@@ -248,7 +266,7 @@ def serve_one(
                 _send_response(connection, response, deadline)
                 return response
             try:
-                response = asyncio.run(_dispatch(request, deadline, build_lifecycle))
+                response = asyncio.run(_bounded_dispatch(request, deadline, build_lifecycle))
             except _DeadlineElapsed:
                 response = _response(
                     "deadline_exceeded",

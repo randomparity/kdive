@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import json
 import os
@@ -152,18 +153,23 @@ def test_server_checks_peer_before_request_read(tmp_path: Path) -> None:
 
 
 def test_server_rejects_request_above_32_kib(tmp_path: Path) -> None:
-    fake_socket = FakeSocket(uid=1000, chunks=[b"x" * (MAX_REQUEST_BYTES + 1)])
+    valid = b'{"operation":"status"}'
+    frame = valid + b" " * (MAX_REQUEST_BYTES + 1 - len(valid))
+    assert len(frame) == MAX_REQUEST_BYTES + 1
+    fake_socket = FakeSocket(uid=1000, chunks=[frame])
+    lock_path = tmp_path / "control.lock"
 
     response = serve_one(
         fake_socket,
         expected_uid=1000,
-        lock_path=tmp_path / "control.lock",
+        lock_path=lock_path,
         build_lifecycle=lambda _deadline: pytest.fail("oversized request reached assembly"),
     )
 
     assert response.code == "invalid_request"
     assert response.retry_action == "correct_request"
     assert _decoded(fake_socket)["code"] == "invalid_request"
+    assert not lock_path.exists()
 
 
 def test_held_nonblocking_lock_returns_busy(tmp_path: Path) -> None:
@@ -254,6 +260,95 @@ def test_assembly_failure_returns_fixed_response_without_external_text(tmp_path:
 
     assert (response.code, response.retry_action) == ("internal_error", "operator_recovery")
     assert secret.encode() not in fake_socket.sent
+
+
+class BlockingLifecycleContext:
+    """Block one async resource edge until the request timeout cancels it."""
+
+    def __init__(self, lifecycle: FakeLifecycle, *, block: str) -> None:
+        self.lifecycle = lifecycle
+        self.block = block
+        self.cancel_secret = "async-context-cancel-secret"  # pragma: allowlist secret
+        self.entry_cancelled = threading.Event()
+        self.exit_cancelled = threading.Event()
+
+    async def __aenter__(self) -> FakeLifecycle:
+        if self.block == "entry":
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.entry_cancelled.set()
+                raise RuntimeError(self.cancel_secret) from None
+        return self.lifecycle
+
+    async def __aexit__(self, *_exc: object) -> None:
+        if self.block == "exit":
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.exit_cancelled.set()
+                raise RuntimeError(self.cancel_secret) from None
+
+
+def _assert_lock_released(lock_path: Path) -> None:
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_deadline_wraps_blocked_async_context_entry(tmp_path: Path) -> None:
+    lock_path = tmp_path / "control.lock"
+    fake_socket = FakeSocket(uid=1000, chunks=[_status_frame(), b""])
+    lifecycle = FakeLifecycle()
+    context = BlockingLifecycleContext(lifecycle, block="entry")
+
+    response = serve_one(
+        fake_socket,
+        expected_uid=1000,
+        lock_path=lock_path,
+        build_lifecycle=lambda _deadline: context,
+        request_seconds=0.05,
+    )
+
+    assert (response.code, response.retry_action) == (
+        "deadline_exceeded",
+        "retry_same_operation",
+    )
+    assert context.entry_cancelled.is_set()
+    assert lifecycle.operations == []
+    assert b"deadline_exceeded" in fake_socket.sent
+    assert context.cancel_secret.encode() not in fake_socket.sent
+    _assert_lock_released(lock_path)
+
+
+def test_deadline_wraps_blocked_async_context_exit_and_cancels_cleanup(tmp_path: Path) -> None:
+    lock_path = tmp_path / "control.lock"
+    fake_socket = FakeSocket(uid=1000, chunks=[_status_frame(), b""])
+    lifecycle = FakeLifecycle()
+    context = BlockingLifecycleContext(lifecycle, block="exit")
+    factory_deadlines: list[Deadline] = []
+
+    def build_lifecycle(deadline: Deadline) -> BlockingLifecycleContext:
+        factory_deadlines.append(deadline)
+        return context
+
+    response = serve_one(
+        fake_socket,
+        expected_uid=1000,
+        lock_path=lock_path,
+        build_lifecycle=build_lifecycle,
+        request_seconds=0.05,
+    )
+
+    assert (response.code, response.retry_action) == (
+        "deadline_exceeded",
+        "retry_same_operation",
+    )
+    assert lifecycle.operations == ["status"]
+    assert lifecycle.deadlines == factory_deadlines
+    assert context.exit_cancelled.is_set()
+    assert b"deadline_exceeded" in fake_socket.sent
+    assert context.cancel_secret.encode() not in fake_socket.sent
+    _assert_lock_released(lock_path)
 
 
 def test_client_that_never_half_closes_times_out_without_dispatch(tmp_path: Path) -> None:
