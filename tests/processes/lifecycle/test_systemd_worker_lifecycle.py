@@ -8,10 +8,13 @@ import os
 from collections.abc import Awaitable, Sequence
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import SecretStr
 
+import kdive.processes.lifecycle.systemd_worker_runtime as runtime_module
+import kdive.processes.lifecycle.systemd_worker_state as state_module
 from kdive.processes.lifecycle.systemd_worker_contract import (
     LifecycleRequest,
     LifecycleResponse,
@@ -35,7 +38,7 @@ from kdive.processes.lifecycle.systemd_worker_runtime import (
     UnmanagedWorker,
     load_slot_redaction_values,
 )
-from kdive.processes.lifecycle.systemd_worker_state import SlotState, TerminationOutcome
+from kdive.processes.lifecycle.systemd_worker_state import SlotState, SlotStore, TerminationOutcome
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _BOOT_ID = "01234567-89ab-cdef-0123-456789abcdef"
@@ -990,9 +993,8 @@ def test_diagnostics_redacts_secrets_split_across_journal_chunks(
         secret not in first + second for first, second in zip(lines, lines[1:], strict=False)
     )
     if template.startswith("url="):
-        assert "url=postgresql://localhost/kdive" in response.diagnostics
-    else:
-        assert "[REDACTED]" in response.diagnostics
+        assert "url=postgresql://" in response.diagnostics
+        assert "@localhost/kdive" in response.diagnostics
     assert events == []
     assert stores[0].state == state
 
@@ -1134,6 +1136,159 @@ def test_diagnostics_removes_overlapping_secret_literals_longest_first(
     assert "SUFFIX" not in response.diagnostics
 
 
+def test_diagnostics_does_not_move_acquisition_guard_bytes_into_emission() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    secret = "S" * 4096
+    full_literals = (secret + "\n") * 16
+    journal_budget = 320 * 1024 - 4096
+    padding = "x" * (journal_budget - len(full_literals) - 2000)
+    runtime.journal_chunks[state.invocation_id or ""] = (full_literals + padding + secret[:2000],)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: (secret,)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert "S" * 100 not in response.diagnostics
+    assert len(response.diagnostics.encode()) <= 256 * 1024
+
+
+@pytest.mark.parametrize("secret", ("[REDACTED]", "ACT"))
+def test_diagnostics_redaction_marker_cannot_reproduce_a_secret(secret: str) -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    runtime.journal_chunks[state.invocation_id or ""] = (f"literal={secret}",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: (secret,)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert secret not in response.diagnostics
+
+
+def test_diagnostics_mask_cannot_reproduce_an_unknown_structural_secret() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    runtime.journal_chunks[state.invocation_id or ""] = ("PASSWORD=~",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("retained",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert "~" not in response.diagnostics
+
+
+def test_diagnostics_escapes_unicode_format_and_separator_controls() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    controls = "\u200b\u202e\u2066\u2028\u2029"
+    runtime.journal_chunks[state.invocation_id or ""] = (f"before{controls}after",)
+    coordinator = _coordinator(
+        stores, runtime, authority, clock, redaction_sources={1: ("retained",)}
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert all(character not in response.diagnostics for character in controls)
+    assert "\\u200b\\u202e\\u2066\\u2028\\u2029" in response.diagnostics
+
+
+@pytest.mark.parametrize(
+    ("journal", "leaked"),
+    (
+        (
+            "PASSWORD='quoted-secret with suffix' visible",  # pragma: allowlist secret
+            ("quoted-secret", "suffix", "visible"),
+        ),
+        (
+            'API_TOKEN="unterminated-secret suffix',  # pragma: allowlist secret
+            ("unterminated-secret", "suffix"),
+        ),
+    ),
+)
+def test_diagnostics_masks_the_rest_of_a_structural_secret_assignment(
+    journal: str, leaked: tuple[str, ...]
+) -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    runtime.journal_chunks[state.invocation_id or ""] = (journal,)
+    coordinator = _coordinator(
+        stores, runtime, authority, clock, redaction_sources={1: ("retained",)}
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert all(value not in response.diagnostics for value in leaked)
+
+
+def test_diagnostics_masks_unterminated_url_userinfo_beyond_acquisition_guard() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    report_prefix = "=== slot 1 ===\nActiveState=active\nJournal:\n"
+    padding = "x" * (256 * 1024 - len(report_prefix.encode()) - 100)
+    userinfo = "U" * (70 * 1024)
+    runtime.journal_chunks[state.invocation_id or ""] = (
+        f"{padding}postgresql://{userinfo}@localhost/kdive",
+    )
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("retained",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert "U" * 50 not in response.diagnostics
+    assert len(response.diagnostics.encode()) <= 256 * 1024
+
+
+def test_diagnostics_reserves_an_aggregate_truncation_marker() -> None:
+    states = {slot: _state(slot, SlotPhase.STARTED) for slot in range(1, 6)}
+    stores, runtime, authority, clock, _ = _fleet(states=states)
+    for slot, state in states.items():
+        prefix = f"=== slot {slot} ===\nActiveState=active\nJournal:\n"
+        runtime.journal_chunks[state.invocation_id or ""] = (
+            "x" * (256 * 1024 - len(prefix.encode())),
+        )
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={slot: (f"retained-{slot}",) for slot in states},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert response.diagnostics.endswith("[aggregate diagnostics truncated]\n")
+    assert response.diagnostics.count("[aggregate diagnostics truncated]") == 1
+    assert len(response.diagnostics.encode()) <= 1_048_576
+
+
 class _DiagnosticPropertyRunner:
     def __init__(self, invocation_id: str) -> None:
         self.invocation_id = invocation_id
@@ -1178,7 +1333,7 @@ def _diagnostic_source_tree(tmp_path: Path) -> Path:
     slot = slots / "1"
     slot.mkdir(parents=True)
     root.chmod(0o755)
-    slots.chmod(0o755)
+    slots.chmod(0o711)
     slot.chmod(0o750)
     credential = slot / "worker-incarnation.credential"
     credential.write_text("retained-credential", encoding="utf-8")
@@ -1187,9 +1342,9 @@ def _diagnostic_source_tree(tmp_path: Path) -> Path:
     environment.write_text(
         "AWS_ACCESS_KEY_ID=access-key\n"
         "AWS_SECRET_ACCESS_KEY=object-secret\n"
-        "KDIVE_API_TOKEN=future-token\n"
         "KDIVE_DATABASE_URL="
         "postgresql://worker:password@localhost/kdive\n"  # pragma: allowlist secret
+        "KDIVE_API_TOKEN=future-token\n"
         "KDIVE_LOG_LEVEL=INFO\n",
         encoding="utf-8",
     )
@@ -1210,6 +1365,86 @@ def test_diagnostic_source_loader_returns_only_secret_classified_values(tmp_path
         "postgresql://worker:password@localhost/kdive",  # pragma: allowlist secret
     }
     assert "INFO" not in values
+
+
+def test_diagnostic_loader_reads_a_real_prepared_slot_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "live-workers"
+    root.mkdir(mode=0o755)
+    monkeypatch.setattr(state_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(state_module.os, "fchown", lambda _fd, _uid, _gid: None)
+    monkeypatch.setattr(
+        state_module.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_gid=os.getgid()),
+    )
+    store = SlotStore(root=root, slot=1)
+    store.prepare(_settings())
+
+    values = load_slot_redaction_values(
+        root,
+        1,
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+    )
+
+    assert _stat_mode(root / "slots") == 0o711
+    assert {"access", "secret", "postgresql://worker@localhost/kdive"} <= set(values)
+
+
+def _stat_mode(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+def test_diagnostic_source_loader_reads_to_eof_after_a_short_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _diagnostic_source_tree(tmp_path)
+    environment = root / "slots/1/worker.env"
+    prefix_size = environment.read_bytes().index(b"KDIVE_API_TOKEN")
+    real_read = os.read
+    shortened = False
+
+    def short_read(descriptor: int, count: int) -> bytes:
+        nonlocal shortened
+        path = os.readlink(f"/proc/self/fd/{descriptor}")
+        if path == str(environment) and not shortened:
+            shortened = True
+            return real_read(descriptor, min(prefix_size, count))
+        return real_read(descriptor, count)
+
+    monkeypatch.setattr(runtime_module.os, "read", short_read)
+
+    values = load_slot_redaction_values(root, 1, expected_uid=os.getuid(), expected_gid=os.getgid())
+
+    assert "future-token" in values
+
+
+def test_diagnostic_source_loader_rejects_post_read_metadata_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _diagnostic_source_tree(tmp_path)
+    environment = root / "slots/1/worker.env"
+    real_fstat = os.fstat
+    environment_stats = 0
+
+    def changing_fstat(descriptor: int) -> os.stat_result:
+        nonlocal environment_stats
+        metadata = real_fstat(descriptor)
+        if os.readlink(f"/proc/self/fd/{descriptor}") != str(environment):
+            return metadata
+        environment_stats += 1
+        if environment_stats == 1:
+            return metadata
+        fields = list(metadata)
+        fields[6] += 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(runtime_module.os, "fstat", changing_fstat)
+
+    with pytest.raises(PermissionError, match="source is unsafe"):
+        load_slot_redaction_values(root, 1, expected_uid=os.getuid(), expected_gid=os.getgid())
 
 
 @pytest.mark.parametrize("unsafe_kind", ("symlink", "nonregular", "mode", "owner"))

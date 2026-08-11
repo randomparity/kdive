@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Literal, Protocol
 
+from kdive.processes.lifecycle.systemd_worker_state import _SLOTS_MODE
+
 type CgroupMembership = Literal["populated", "empty", "unknown"]
 
 _UNIT = re.compile(r"kdive-live-worker@[1-8]\.service")
@@ -365,7 +367,7 @@ def _open_diagnostic_slot(
             parent, mode=0o755, expected_uid=expected_uid, expected_gid=expected_uid
         )
         for name, mode, gid in (
-            ("slots", 0o755, expected_uid),
+            ("slots", _SLOTS_MODE, expected_uid),
             (str(slot), 0o750, slot_gid),
         ):
             parent = os.open(
@@ -418,23 +420,67 @@ def _read_diagnostic_source(
         dir_fd=parent,
     )
     try:
-        metadata = os.fstat(descriptor)
-        trusted = (
-            stat.S_ISREG(metadata.st_mode)
-            and stat.S_IMODE(metadata.st_mode) == mode
-            and metadata.st_uid == expected_uid
-            and metadata.st_gid == expected_gid
-            and metadata.st_nlink == 1
-            and metadata.st_size <= maximum
-        )
-        if not trusted:
+        before = os.fstat(descriptor)
+        if not _trusted_diagnostic_source(
+            before,
+            mode=mode,
+            maximum=maximum,
+            expected_uid=expected_uid,
+            expected_gid=expected_gid,
+        ):
             raise PermissionError("slot diagnostic redaction source is unsafe")
-        data = os.read(descriptor, maximum + 1)
+        data = _read_exact_diagnostic_source(descriptor, before.st_size)
+        after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
-    if len(data) > maximum:
+    if len(data) != before.st_size or not _same_diagnostic_source(before, after):
         raise PermissionError("slot diagnostic redaction source is unsafe")
     return data
+
+
+def _trusted_diagnostic_source(
+    metadata: os.stat_result,
+    *,
+    mode: int,
+    maximum: int,
+    expected_uid: int,
+    expected_gid: int,
+) -> bool:
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and stat.S_IMODE(metadata.st_mode) == mode
+        and metadata.st_uid == expected_uid
+        and metadata.st_gid == expected_gid
+        and metadata.st_nlink == 1
+        and metadata.st_size <= maximum
+    )
+
+
+def _read_exact_diagnostic_source(descriptor: int, expected_size: int) -> bytes:
+    data = bytearray()
+    while len(data) < expected_size:
+        chunk = os.read(descriptor, min(64 * 1024, expected_size - len(data)))
+        if not chunk:
+            raise PermissionError("slot diagnostic redaction source is unsafe")
+        data.extend(chunk)
+    if os.read(descriptor, 1):
+        raise PermissionError("slot diagnostic redaction source is unsafe")
+    return bytes(data)
+
+
+def _same_diagnostic_source(before: os.stat_result, after: os.stat_result) -> bool:
+    attributes = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_nlink",
+        "st_uid",
+        "st_gid",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    )
+    return all(getattr(before, name) == getattr(after, name) for name in attributes)
 
 
 def _secret_environment_values(data: bytes) -> tuple[str, ...]:

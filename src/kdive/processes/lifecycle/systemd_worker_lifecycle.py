@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+import unicodedata
 from collections.abc import Callable, Coroutine, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -35,7 +37,6 @@ from kdive.processes.lifecycle.systemd_worker_state import (
     StateConflict,
     TerminationOutcome,
 )
-from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
@@ -55,13 +56,18 @@ _MAX_REDACTION_VALUES = 32
 _MAX_REDACTION_VALUE_BYTES = 4096
 _POLL_SECONDS = 0.1
 _TRUNCATION_MARKER = "[diagnostics truncated]\n"
+_AGGREGATE_TRUNCATION_MARKER = "[aggregate diagnostics truncated]\n"
 _WITHHELD_TEMPLATE = "[diagnostics withheld for slot {slot}]\n"
-_URL_USERINFO = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/@\s]+@")
-_SCHEMELESS_USERINFO = re.compile(r"(?<![\w/])[^/:@\s]+:[^/@\s]*@(?=[^/\s]+)")
+_URL_USERINFO = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)([^/@\s]+)(@)")
+_SCHEMELESS_USERINFO = re.compile(r"(?<![\w/])([^/:@\s]+:[^/@\s]*)(@)(?=[^/\s]+)")
+_UNTERMINATED_URL_AUTHORITY = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)([^\s/]*)\Z")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b([A-Za-z0-9_-]*(?:password|passwd|token|api[_-]?key|access[_-]?key|secret|"
-    r"credential|database_url)[A-Za-z0-9_-]*)(\s*[=:]\s*)([^\s]+)"
+    r"credential|database_url)[A-Za-z0-9_-]*)(\s*[=:]\s*)([^\r\n]*)"
 )
+_MASK_SENTINELS = ("~", "^", "#", "%", "?")
+
+type _DiagnosticEntry = tuple[SlotStorage, SlotState | None, bool]
 
 
 class EvidenceRejected(RuntimeError):
@@ -119,6 +125,22 @@ class SlotStorage(Protocol):
     def discard_prepared(self, state: SlotState) -> None: ...
 
     def cleanup_terminated(self, state: SlotState) -> None: ...
+
+
+@dataclass(slots=True)
+class _DiagnosticCapture:
+    reports: list[str] = field(default_factory=list)
+    results: list[SlotResult] = field(default_factory=list)
+    withheld_slots: set[int] = field(default_factory=set)
+    acquired: int = 0
+    emitted: int = 0
+    aggregate_truncated: bool = False
+
+    def append(self, report: str) -> None:
+        available = max(0, _TOTAL_EMISSION_BYTES - self.emitted)
+        bounded = _bounded_text(report, available, truncated=False)
+        self.reports.append(bounded)
+        self.emitted += len(bounded.encode("utf-8"))
 
 
 class SystemdControl(Protocol):
@@ -257,78 +279,18 @@ class SystemdWorkerLifecycle:
         """Select exact retained invocation journals without mutating lifecycle state."""
         operation_deadline = _BudgetDeadline(deadline, _REQUEST_SECONDS)
         diagnostic_deadline = _BudgetDeadline(operation_deadline, _DIAGNOSTIC_SECONDS)
-        acquired = 0
-        emitted = 0
-        reports: list[str] = []
-        results: list[SlotResult] = []
-        withheld = False
-        aggregate_marker_emitted = False
-        for store in self._stores:
-            state, unsafe_state = self._diagnostic_state(store, diagnostic_deadline)
-            if unsafe_state:
-                withheld = True
-                available = max(0, _TOTAL_EMISSION_BYTES - emitted)
-                report = _bounded_text(
-                    _WITHHELD_TEMPLATE.format(slot=store.slot), available, truncated=False
-                )
-                emitted += len(report.encode("utf-8"))
-                reports.append(report)
-                results.append(
-                    SlotResult(
-                        slot=store.slot,
-                        unit=store.unit,
-                        code="diagnostics_withheld",
-                        message="withheld",
-                    )
-                )
-                continue
-            if state is None:
-                continue
-            remaining_acquisition = _TOTAL_ACQUISITION_BYTES - acquired
-            if remaining_acquisition < _PROPERTY_ACQUISITION_BYTES:
-                if not aggregate_marker_emitted:
-                    available = max(0, _TOTAL_EMISSION_BYTES - emitted)
-                    report = _bounded_text(
-                        f"=== slot {state.slot} ===\n{_TRUNCATION_MARKER}",
-                        available,
-                        truncated=False,
-                    )
-                    emitted += len(report.encode("utf-8"))
-                    reports.append(report)
-                    aggregate_marker_emitted = True
-                results.append(_result(state))
-                continue
-            if emitted >= _TOTAL_EMISSION_BYTES:
-                results.append(_result(state))
-                continue
-            slot_withheld = False
-            try:
-                report, used = self._diagnose_slot(
-                    store,
-                    state,
-                    diagnostic_deadline,
-                    acquisition_budget=remaining_acquisition,
-                    emission_budget=_TOTAL_EMISSION_BYTES - emitted,
-                )
-            except Exception:
-                withheld = True
-                slot_withheld = True
-                report = _WITHHELD_TEMPLATE.format(slot=store.slot)
-                used = 0
-            acquired += used
-            available = max(0, _TOTAL_EMISSION_BYTES - emitted)
-            report = _bounded_text(report, available, truncated=False)
-            emitted += len(report.encode("utf-8"))
-            reports.append(report)
-            results.append(_result(state, code="diagnostics_withheld" if slot_withheld else "ok"))
-        diagnostics = "".join(reports)
-        if withheld:
+        entries = tuple(
+            (store, *self._diagnostic_state(store, diagnostic_deadline)) for store in self._stores
+        )
+        capture = self._capture_diagnostics(entries, diagnostic_deadline)
+        diagnostics = "".join(capture.reports)
+        if capture.withheld_slots:
             return LifecycleResponse(
                 ok=False,
                 code="diagnostics_withheld",
                 message="diagnostics withheld for one or more slots",
                 retry_action="operator_recovery",
-                slots=tuple(results),
+                slots=tuple(capture.results),
                 diagnostics=diagnostics,
             )
         return LifecycleResponse(
@@ -336,9 +298,71 @@ class SystemdWorkerLifecycle:
             code="ok",
             message="worker diagnostics captured",
             retry_action="none",
-            slots=tuple(results),
+            slots=tuple(capture.results),
             diagnostics=diagnostics,
         )
+
+    def _capture_diagnostics(
+        self, entries: tuple[_DiagnosticEntry, ...], deadline: Deadline
+    ) -> _DiagnosticCapture:
+        capture = _DiagnosticCapture()
+        for index, (store, state, unsafe_state) in enumerate(entries):
+            if unsafe_state:
+                capture.withheld_slots.add(store.slot)
+                capture.append(_WITHHELD_TEMPLATE.format(slot=store.slot))
+                capture.results.append(
+                    SlotResult(
+                        slot=store.slot,
+                        unit=store.unit,
+                        code="diagnostics_withheld",
+                        message="withheld",
+                    )
+                )
+            elif state is not None:
+                has_later = any(
+                    later_state is not None or later_unsafe
+                    for _, later_state, later_unsafe in entries[index + 1 :]
+                )
+                capture.results.append(
+                    self._capture_diagnostic_slot(
+                        store, state, deadline, capture, has_later=has_later
+                    )
+                )
+        return capture
+
+    def _capture_diagnostic_slot(
+        self,
+        store: SlotStorage,
+        state: SlotState,
+        deadline: Deadline,
+        capture: _DiagnosticCapture,
+        *,
+        has_later: bool,
+    ) -> SlotResult:
+        if capture.aggregate_truncated:
+            return _result(state)
+        remaining_acquisition = _TOTAL_ACQUISITION_BYTES - capture.acquired
+        if remaining_acquisition < _PROPERTY_ACQUISITION_BYTES:
+            capture.append(_AGGREGATE_TRUNCATION_MARKER)
+            capture.aggregate_truncated = True
+            return _result(state)
+        try:
+            report, used, aggregate_truncated = self._diagnose_slot(
+                store,
+                state,
+                deadline,
+                acquisition_budget=remaining_acquisition,
+                emission_budget=_TOTAL_EMISSION_BYTES - capture.emitted,
+                reserve_aggregate=has_later,
+            )
+        except Exception:
+            capture.withheld_slots.add(store.slot)
+            capture.append(_WITHHELD_TEMPLATE.format(slot=store.slot))
+            return _result(state, code="diagnostics_withheld")
+        capture.acquired += used
+        capture.append(report)
+        capture.aggregate_truncated = aggregate_truncated
+        return _result(state)
 
     def _diagnostic_state(
         self, store: SlotStorage, deadline: Deadline
@@ -356,7 +380,8 @@ class SystemdWorkerLifecycle:
         *,
         acquisition_budget: int,
         emission_budget: int,
-    ) -> tuple[str, int]:
+        reserve_aggregate: bool,
+    ) -> tuple[str, int, bool]:
         invocation_id = _require_diagnostic_budget(state, acquisition_budget, emission_budget)
         secret_values = _validated_redaction_values(
             self._load_redaction_values(store.root, store.slot)
@@ -378,13 +403,24 @@ class SystemdWorkerLifecycle:
             invocation_id, journal_budget, deadline
         )
         raw = f"{public_text}Journal:\n{journal_text}"
-        safe = _sanitize_diagnostics(raw, secret_values)
-        report = f"=== slot {state.slot} ===\n{safe}"
-        truncated = any(
+        acquisition_truncated = any(
             (public_truncated, journal_truncated, slot_budget < _SLOT_ACQUISITION_BYTES)
         )
+        safe, forbidden = _sanitize_diagnostics(
+            raw, secret_values, acquisition_truncated=acquisition_truncated
+        )
+        report = f"=== slot {state.slot} ===\n{safe}"
         emit_limit = min(_SLOT_EMISSION_BYTES, emission_budget)
-        return _bounded_text(report, emit_limit, truncated=truncated), public_bytes + journal_bytes
+        report = _bounded_text(report, emit_limit, truncated=acquisition_truncated)
+        aggregate_truncated = reserve_aggregate and (
+            len(report.encode("utf-8")) + len(_AGGREGATE_TRUNCATION_MARKER.encode("utf-8"))
+            > emission_budget
+        )
+        if aggregate_truncated:
+            report = _aggregate_bounded_text(report, emission_budget)
+        if _contains_forbidden(report, forbidden):
+            raise StateConflict("sanitized diagnostics retained a secret value")
+        return report, public_bytes + journal_bytes, aggregate_truncated
 
     def _diagnostic_journal(
         self, invocation_id: str, byte_limit: int, deadline: Deadline
@@ -807,31 +843,92 @@ def _validated_redaction_values(values: tuple[str, ...]) -> tuple[str, ...]:
     return values
 
 
-def _sanitize_diagnostics(text: str, secret_values: tuple[str, ...]) -> str:
+def _sanitize_diagnostics(
+    text: str,
+    secret_values: tuple[str, ...],
+    *,
+    acquisition_truncated: bool,
+) -> tuple[str, tuple[str, ...]]:
     registry = SecretRegistry()
     scope = object()
     for value in secret_values:
         registry.register(value, scope=scope)
+    registered = tuple(sorted(registry.snapshot(), key=len, reverse=True))
+    structural = _structural_secret_values(text, acquisition_truncated=acquisition_truncated)
+    forbidden = tuple(dict.fromkeys((*registered, *structural)))
+    for sentinel in _MASK_SENTINELS:
+        if any(sentinel in value or value in sentinel for value in forbidden):
+            continue
+        redacted = _render_sanitized_diagnostics(
+            text,
+            registered,
+            sentinel,
+            acquisition_truncated=acquisition_truncated,
+        )
+        if not _contains_forbidden(redacted, forbidden):
+            return redacted, forbidden
+    raise StateConflict("diagnostics cannot be rendered without reproducing a secret")
+
+
+def _structural_secret_values(text: str, *, acquisition_truncated: bool) -> tuple[str, ...]:
+    values = [match.group(2) for match in _URL_USERINFO.finditer(text)]
+    values.extend(match.group(1) for match in _SCHEMELESS_USERINFO.finditer(text))
+    values.extend(match.group(3) for match in _SECRET_ASSIGNMENT.finditer(text))
+    if acquisition_truncated and (match := _UNTERMINATED_URL_AUTHORITY.search(text)):
+        values.append(match.group(2))
+    return tuple(value for value in values if value)
+
+
+def _render_sanitized_diagnostics(
+    text: str,
+    registered: tuple[str, ...],
+    sentinel: str,
+    *,
+    acquisition_truncated: bool,
+) -> str:
     redacted = text
-    for value in sorted(secret_values, key=len, reverse=True):
-        redacted = redacted.replace(value, "[REDACTED]")
-    redacted = Redactor(registry=registry).redact_text(redacted)
-    redacted = _URL_USERINFO.sub(r"\1", redacted)
-    redacted = _SCHEMELESS_USERINFO.sub("", redacted)
-    redacted = _SECRET_ASSIGNMENT.sub(
-        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", redacted
+    for value in registered:
+        redacted = redacted.replace(value, _mask_bytes(value, sentinel))
+    redacted = _URL_USERINFO.sub(
+        lambda match: f"{match.group(1)}{_mask_bytes(match.group(2), sentinel)}{match.group(3)}",
+        redacted,
     )
+    redacted = _SCHEMELESS_USERINFO.sub(
+        lambda match: f"{_mask_bytes(match.group(1), sentinel)}{match.group(2)}",
+        redacted,
+    )
+    redacted = _SECRET_ASSIGNMENT.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{_mask_bytes(match.group(3), sentinel)}",
+        redacted,
+    )
+    if acquisition_truncated:
+        redacted = _UNTERMINATED_URL_AUTHORITY.sub(
+            lambda match: f"{match.group(1)}{_mask_bytes(match.group(2), sentinel)}",
+            redacted,
+        )
     return _escape_diagnostic_controls(redacted)
+
+
+def _mask_bytes(value: str, sentinel: str) -> str:
+    return sentinel * len(value.encode("utf-8"))
+
+
+def _contains_forbidden(text: str, forbidden: tuple[str, ...]) -> bool:
+    return any(value in text for value in forbidden)
 
 
 def _escape_diagnostic_controls(text: str) -> str:
     escaped: list[str] = []
     for character in text:
         value = ord(character)
+        category = unicodedata.category(character)
         if character == "\n":
             escaped.append(character)
-        elif value < 32 or 127 <= value < 160:
+        elif category == "Cc":
             escaped.append(f"\\x{value:02x}")
+        elif category in {"Cf", "Zl", "Zp"}:
+            width = 4 if value <= 0xFFFF else 8
+            escaped.append(f"\\{'u' if width == 4 else 'U'}{value:0{width}x}")
         else:
             escaped.append(character)
     return "".join(escaped).replace("::", "\\x3a\\x3a")
@@ -846,6 +943,14 @@ def _bounded_text(text: str, limit: int, *, truncated: bool) -> str:
         return ""
     prefix = encoded[: limit - len(marker) - 1].decode("utf-8", errors="ignore")
     return prefix.rstrip("\n") + "\n" + _TRUNCATION_MARKER
+
+
+def _aggregate_bounded_text(text: str, limit: int) -> str:
+    marker = _AGGREGATE_TRUNCATION_MARKER.encode("utf-8")
+    if limit < len(marker):
+        return ""
+    prefix = text.encode("utf-8")[: limit - len(marker)].decode("utf-8", errors="ignore")
+    return prefix + _AGGREGATE_TRUNCATION_MARKER
 
 
 def _require_time(deadline: Deadline) -> float:
