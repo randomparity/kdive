@@ -72,6 +72,12 @@ service reads `SO_PEERCRED` and rejects every other UID before parsing bytes. It
 bounded JSON request. Operations are `start`, `status`, `stop`, and `diagnostics`. A non-blocking
 root-owned lock rejects concurrent operations with an actionable retry message.
 
+One live-stack flow owns a host from `up` through `down`. The hosted job has a disposable host and
+the native job's non-cancelling workflow concurrency serializes flows on its persistent host. Local
+operators must provide the same whole-flow serialization; `start` replaces the current fleet and
+`stop` targets the current fleet. The request lock prevents simultaneous mutation but does not
+create per-flow ownership. Concurrent local stacks require separate hosts.
+
 `start` accepts a worker count in `1..8` plus an allowlist of worker runtime values already needed
 by the live stack: absolute Python and source paths, worker database DSN, libvirt URI, provider
 directories, object-store settings, accepted lanes, and per-slot health binds. A request is at most
@@ -79,7 +85,9 @@ directories, object-store settings, accepted lanes, and per-slot health binds. A
 and tells the caller to correct and retry it. The witness validates path type, ownership, and
 writability before copying values into fixed per-slot environment files. It derives every unit
 name, state path, identity, generation, and credential itself. Other operations accept no mutable
-runtime configuration.
+runtime configuration. Every operation has a 120-second per-request deadline measured by the
+service's monotonic clock. A deadline aborts child operations, retains unresolved state, and tells
+the caller which operation to retry.
 
 The lifecycle-witness DSN is a root-only systemd credential installed by provisioning. It is never
 read from the request, worker environment, checkout, or invoking process. Responses contain only
@@ -133,8 +141,9 @@ The witness is not a monitor. An unexpected exit can remain unevidenced until `s
 
 ### Stop and cleanup
 
-`stop` sends SIGTERM to every `started` unit cgroup, waits a fixed 45 seconds per request for the
-exact invocation to become empty, and records its terminal outcome. It then stops/resets only the
+`stop` sends SIGTERM to every `started` unit cgroup, then gives all selected cgroups 45 seconds on
+the monotonic clock, within the 120-second request budget, to become empty. It records each terminal
+outcome and then stops/resets only the
 fixed unit and deletes the environment, credential, and state after the database confirms the same
 incarnation is terminated. `prepared` or `registered` states with positive proof that no invocation
 was created are terminated as failed before cleanup. Repeating `stop` adopts the same facts.
@@ -170,9 +179,11 @@ allowlist of unit properties. The request schema classifies every worker setting
 secret. Diagnostics replaces the exact retained credential and every delivered secret setting,
 including database and object-store credentials, before emitting text, applies structural
 URL-userinfo and secret-key redaction,
-escapes control characters, limits each slot to 256 KiB, and limits the response to 1 MiB per
-request. Reaching a byte ceiling emits one truncation marker. Unsafe state or an oversized
-redaction source withholds that slot rather than returning unredacted content.
+escapes control characters, and emits at most 256 KiB per slot and 1 MiB per request. Acquisition
+uses a 30-second monotonic budget and reads at most 320 KiB per slot and 1.25 MiB total before
+redaction. Reaching a time or byte ceiling stops acquisition and emits one truncation marker from
+the safely redacted material; the caller may retry. Unsafe state or an oversized redaction source
+withholds that slot rather than returning unredacted content.
 
 Both live jobs add a separate `if: failure() || cancelled()` step after their existing live-test
 step and before any cleanup. It invokes the diagnostics script and prints the bounded output with
@@ -205,7 +216,9 @@ manifests are not part of this issue.
 
 Out of scope are a malicious root or provisioner, a compromised kernel/systemd/PostgreSQL server,
 force cleanup that strands fences, continuous worker monitoring, and durable diagnostics after
-teardown. The design does not weaken behavior when any of those components is unavailable.
+teardown. Two sequential trusted local flows on one host are also out of scope: the later operation
+intentionally targets the current fleet. The design does not weaken behavior when any named
+component is unavailable.
 
 ## Acceptance proofs
 
@@ -215,7 +228,8 @@ teardown. The design does not weaken behavior when any of those components is un
    exact identity handoff, start adoption, exact cgroup/invocation checks, mapped outcomes,
    evidence-before-cleanup, idempotent registration/termination replay, whole-fleet count
    convergence, unmanaged-worker refusal, partial-start cleanup, bounds, and fail-closed dependency
-   behavior.
+   behavior. Limit tests use a fake monotonic clock and prove request, stop, diagnostic acquisition,
+   and emitted-byte ceilings retain retryable state.
 3. Unit-shape and provisioning tests pin fixed commands, per-slot UIDs, `LoadCredential`,
    `Restart=no`, `KillMode=control-group`, `ExitType=cgroup`, socket permissions, root-only witness
    configuration, `RemainAfterExit=yes`, shared libvirt access, and absence of worker

@@ -35,6 +35,12 @@ name, command, credential, state path, or lifecycle-witness DSN. One host lock s
 The service exits after each request; systemd units and root-owned per-slot state retain authority
 between requests.
 
+The supported topology has one live-stack flow per host. The configured operator serializes the
+whole interval from `up` through `down`; hosted jobs get a fresh host and the persistent native job
+keeps its existing non-cancelling workflow concurrency. The request lock prevents simultaneous
+mutations but is not a cross-flow lease. `start` deliberately replaces the host's current worker
+fleet and `stop` deliberately stops the current fleet, so overlapping local flows are unsupported.
+
 For each slot, the witness mints a random generation and 256-bit credential, atomically publishes
 their fixed files, derives `local-systemd:<unit>:<generation>`, and places that exact non-secret ID
 in the per-start environment handoff. It registers the same incarnation, bound to the fixed unit
@@ -50,6 +56,15 @@ refuses to activate anything while one exists. It then applies the same evidence
 flow to every occupied slot in `1..8`, including slots above a reduced count, and starts exactly
 slots `1..count`. Any unresolved termination blocks all new activation. The launcher has no root or
 direct-worker option and reports an outsider without adopting or killing it.
+
+Each request is at most 32 KiB and has a 120-second deadline measured on the service's monotonic
+clock. Stop signals all selected cgroups and gives them 45 seconds within that per-request budget to
+empty. Timeout returns an error and retains every unresolved unit, generation, credential, and
+fence; the operator may run `diagnostics` or `status`, restore the dependency, and retry `stop`.
+Diagnostics has a 30-second acquisition budget, reads at most 320 KiB per slot and 1.25 MiB total,
+and emits at most 256 KiB per slot and 1 MiB total with a truncation marker. An over-limit request
+is rejected without state change; an acquisition limit returns only safely redacted bounded output
+and may be retried.
 
 The host launcher continues to run server and reconciler as ordinary host processes, but gives
 each process its role-specific database DSN. It invokes the existing local runtime-role bootstrap
@@ -78,6 +93,10 @@ termination evidence.
 The request-scoped witness does not monitor workers continuously. Unexpected exits remain retained
 by systemd and are evidenced on the next lifecycle or diagnostics request. This may delay recovery,
 but it cannot authorize recovery early.
+
+The design does not protect two trusted local operators from sequentially replacing or stopping
+each other's live stack. That host is a single-flow development resource; callers needing concurrent
+stacks use separate hosts.
 
 ## Considered & rejected
 
