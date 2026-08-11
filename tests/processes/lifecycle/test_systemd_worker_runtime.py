@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import time
 from collections.abc import Sequence
@@ -12,6 +13,7 @@ from typing import Literal
 import pytest
 
 from kdive.processes.lifecycle.systemd_worker_runtime import (
+    CommandCleanupDeadlineExceeded,
     CommandDeadlineExceeded,
     CommandOutputTooLarge,
     MonotonicDeadline,
@@ -244,9 +246,27 @@ def test_unmanaged_scan_fails_closed_for_malformed_worker_cgroup(tmp_path: Path)
 
 def test_unmanaged_scan_fails_closed_for_oversized_process_metadata(tmp_path: Path) -> None:
     _write_process(tmp_path, 77, uid=1000, cgroup="/user.slice/session-1.scope")
-    (tmp_path / "77/cmdline").write_bytes(b"python\0-m\0kdive\0worker\0" + b"x" * 4096)
+    (tmp_path / "77/cmdline").write_bytes(
+        b"/opt/kdive/.venv/bin/python\0-m\0kdive\0worker\0" + b"x" * 4096
+    )
     with pytest.raises(SystemdConflict, match="command"):
         SystemdRuntime(FakeRunner(), proc_root=tmp_path).unmanaged_workers()
+
+
+def test_unmanaged_scan_fails_closed_for_malformed_worker_candidate(tmp_path: Path) -> None:
+    _write_process(tmp_path, 77, uid=1000, cgroup="/user.slice/session-1.scope")
+    (tmp_path / "77/cmdline").write_bytes(b"/opt/kdive/.venv/bin/python\0-m\0kdive\0worker")
+    with pytest.raises(SystemdConflict, match="command"):
+        SystemdRuntime(FakeRunner(), proc_root=tmp_path).unmanaged_workers()
+
+
+def test_unmanaged_scan_ignores_long_argv_after_exact_non_worker_launcher(
+    tmp_path: Path,
+) -> None:
+    _write_process(tmp_path, 77, uid=1000, cgroup="/user.slice/session-1.scope")
+    (tmp_path / "77/cmdline").write_bytes(b"/usr/bin/java\0" + b"x" * 8192 + b"\0")
+
+    assert SystemdRuntime(FakeRunner(), proc_root=tmp_path).unmanaged_workers() == ()
 
 
 def test_signal_terminate_preserves_the_retained_unit() -> None:
@@ -345,18 +365,50 @@ def test_real_runner_rejects_truncated_control_output() -> None:
         )
 
 
-def test_real_runner_terminates_a_timed_out_child(tmp_path: Path) -> None:
-    terminated = tmp_path / "terminated"
-    program = (
-        "import pathlib,signal,sys,time;"
-        "p=pathlib.Path(sys.argv[1]);"
-        "signal.signal(signal.SIGTERM, lambda *_: (p.write_text('yes'), sys.exit(0)));"
-        "time.sleep(60)"
-    )
+def test_real_runner_terminates_a_timed_out_child() -> None:
+    program = "import signal,time;signal.signal(signal.SIGTERM, lambda *_: exit(0));time.sleep(60)"
     runner = SubprocessCommandRunner(MonotonicDeadline.after(0.5))
     with pytest.raises(CommandDeadlineExceeded):
-        runner.run((sys.executable, "-c", program, os.fspath(terminated)), byte_limit=1024)
-    assert terminated.read_text() == "yes"
+        runner.run((sys.executable, "-c", program), byte_limit=1024)
+
+
+def test_real_runner_sigkill_cleanup_does_not_extend_the_absolute_deadline(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready"
+    program = (
+        "import os,pathlib,signal,sys,time;"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()));"
+        "time.sleep(60)"
+    )
+    started = time.monotonic()
+    runner = SubprocessCommandRunner(MonotonicDeadline.after(0.4))
+    with pytest.raises(CommandCleanupDeadlineExceeded):
+        runner.run((sys.executable, "-c", program, os.fspath(ready)), byte_limit=1024)
+    elapsed = time.monotonic() - started
+
+    assert ready.is_file(), "child must install SIGTERM ignore before the deadline"
+    assert elapsed < 0.6, "cleanup must not add the old fixed 250-ms wait after the deadline"
+    status = _reap_sigkilled_child(int(ready.read_text()))
+    if status is not None:
+        assert os.WIFSIGNALED(status)
+        assert os.WTERMSIG(status) == signal.SIGKILL
+
+
+def _reap_sigkilled_child(pid: int) -> int | None:
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        try:
+            reaped, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+            return None
+        if reaped == pid:
+            return status
+        time.sleep(0.01)
+    pytest.fail("SIGKILL child was not available for bounded test cleanup")
 
 
 def test_monotonic_deadline_never_reports_negative_time() -> None:

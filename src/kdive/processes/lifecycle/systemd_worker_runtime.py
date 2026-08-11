@@ -11,11 +11,12 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import BinaryIO, Literal, Protocol
 
 type CgroupMembership = Literal["populated", "empty", "unknown"]
 
 _UNIT = re.compile(r"kdive-live-worker@[1-8]\.service")
+_PYTHON_LAUNCHER = re.compile(rb"/(?:[^/\0]+/)*python(?:3(?:\.14)?)?")
 _INVOCATION_ID = re.compile(r"[0-9a-f]{32}")
 _BOOT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _SYSTEMD_VALUE = re.compile(r"[A-Za-z0-9_.@:-]+")
@@ -44,6 +45,10 @@ class SystemdConflict(RuntimeError):
 
 class CommandDeadlineExceeded(SystemdUnavailable):
     """A child command did not finish inside the shared monotonic deadline."""
+
+
+class CommandCleanupDeadlineExceeded(CommandDeadlineExceeded):
+    """A child could not be terminated and reaped by the shared deadline."""
 
 
 class CommandOutputTooLarge(SystemdConflict):
@@ -120,8 +125,20 @@ class SubprocessCommandRunner:
         operation_deadline = deadline or self.deadline
         if operation_deadline.remaining() <= 0:
             raise CommandDeadlineExceeded("command deadline elapsed before child launch")
+        process = self._launch(argv)
+        output, truncated = self._collect_with_cleanup(process, byte_limit, operation_deadline)
+        if truncated:
+            self._terminate(process, operation_deadline)
+        if truncated and not allow_truncation:
+            raise CommandOutputTooLarge(f"{argv[0]} output exceeded {byte_limit} bytes")
+        if not truncated and process.returncode != 0:
+            raise SystemdUnavailable(f"{argv[0]} exited with status {process.returncode}")
+        return output.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _launch(argv: Sequence[str]) -> subprocess.Popen[bytes]:
         try:
-            process = subprocess.Popen(  # noqa: S603 - argv is fixed or validated by the caller.
+            return subprocess.Popen(  # noqa: S603 - argv is fixed or validated by the caller.
                 tuple(argv),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -130,22 +147,23 @@ class SubprocessCommandRunner:
             )
         except OSError as exc:
             raise SystemdUnavailable(f"failed to launch {argv[0]}") from exc
+
+    def _collect_with_cleanup(
+        self, process: subprocess.Popen[bytes], byte_limit: int, deadline: Deadline
+    ) -> tuple[bytes, bool]:
         try:
-            output, truncated = self._collect(process, byte_limit, operation_deadline)
-        except BaseException:
-            self._terminate(process)
+            return self._collect(process, byte_limit, deadline)
+        except BaseException as exc:
+            try:
+                self._terminate(process, deadline)
+            except CommandCleanupDeadlineExceeded as cleanup_exc:
+                raise cleanup_exc from exc
             raise
-        if truncated and not allow_truncation:
-            raise CommandOutputTooLarge(f"{argv[0]} output exceeded {byte_limit} bytes")
-        if not truncated and process.returncode != 0:
-            raise SystemdUnavailable(f"{argv[0]} exited with status {process.returncode}")
-        return output.decode("utf-8", errors="replace")
 
     def _collect(
         self, process: subprocess.Popen[bytes], byte_limit: int, deadline: Deadline
     ) -> tuple[bytes, bool]:
         if process.stdout is None:
-            self._terminate(process)
             raise RuntimeError("bounded command child has no stdout pipe")
         output = bytearray()
         selector = selectors.DefaultSelector()
@@ -164,7 +182,6 @@ class SubprocessCommandRunner:
                     continue
                 output.extend(chunk)
                 if len(output) > byte_limit:
-                    self._terminate(process)
                     return bytes(output[:byte_limit]), True
             self._wait(process, deadline)
             return bytes(output), False
@@ -182,16 +199,42 @@ class SubprocessCommandRunner:
         except subprocess.TimeoutExpired as exc:
             raise CommandDeadlineExceeded("child command exceeded its monotonic deadline") from exc
 
-    @staticmethod
-    def _terminate(process: subprocess.Popen[bytes]) -> None:
+    @classmethod
+    def _terminate(cls, process: subprocess.Popen[bytes], deadline: Deadline) -> None:
         if process.poll() is not None:
             return
-        process.terminate()
         try:
-            process.wait(timeout=0.25)
-        except subprocess.TimeoutExpired:
+            process.terminate()
+        except OSError as exc:
+            raise CommandCleanupDeadlineExceeded(
+                "child command could not receive SIGTERM before its deadline"
+            ) from exc
+        if cls._wait_for_cleanup(process, deadline, ceiling=0.25):
+            return
+        try:
             process.kill()
-            process.wait()
+        except OSError as exc:
+            raise CommandCleanupDeadlineExceeded(
+                "child command could not receive SIGKILL before its deadline"
+            ) from exc
+        if not cls._wait_for_cleanup(process, deadline):
+            raise CommandCleanupDeadlineExceeded(
+                "child command could not be reaped before its monotonic deadline"
+            )
+
+    @staticmethod
+    def _wait_for_cleanup(
+        process: subprocess.Popen[bytes], deadline: Deadline, *, ceiling: float | None = None
+    ) -> bool:
+        remaining = deadline.remaining()
+        if remaining <= 0:
+            return False
+        timeout = remaining if ceiling is None else min(remaining, ceiling)
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,13 +367,12 @@ class SystemdRuntime:
 
     def _unmanaged_worker(self, process: Path) -> UnmanagedWorker | None:
         try:
-            command = self._read_proc_file(process / "cmdline")
+            is_worker = self._is_worker_command(process / "cmdline")
         except FileNotFoundError:
             return None
         except (OSError, ValueError) as exc:
             raise SystemdConflict(f"cannot inspect process {process.name} command") from exc
-        arguments = tuple(part for part in command.split(b"\0") if part)
-        if not self._is_worker_command(arguments):
+        if not is_worker:
             return None
         try:
             cgroup = self._process_cgroup(self._read_proc_file(process / "cgroup"))
@@ -351,12 +393,61 @@ class SystemdRuntime:
             raise ValueError("process metadata exceeds 4096 bytes")
         return data
 
+    @classmethod
+    def _is_worker_command(cls, path: Path) -> bool:
+        with path.open("rb") as stream:
+            launcher, ending, used = cls._read_command_token(stream, _PROC_FILE_LIMIT)
+            if ending == "limit":
+                if launcher.startswith(b"/"):
+                    raise ValueError("process launcher exceeds the exact command bound")
+                return False
+            if not _PYTHON_LAUNCHER.fullmatch(launcher):
+                return False
+            if ending != "nul":
+                raise ValueError("worker launcher has no argument delimiter")
+            remaining = _PROC_FILE_LIMIT - used
+            for expected in (b"-m", b"kdive", b"worker"):
+                matched, consumed = cls._read_expected_token(stream, expected, remaining)
+                if not matched:
+                    return False
+                remaining -= consumed
+            if stream.read(1):
+                raise ValueError("worker command has unsupported trailing arguments")
+            return True
+
     @staticmethod
-    def _is_worker_command(arguments: tuple[bytes, ...]) -> bool:
-        return any(
-            arguments[index : index + 3] == (b"-m", b"kdive", b"worker")
-            for index in range(max(0, len(arguments) - 2))
-        )
+    def _read_command_token(
+        stream: BinaryIO, budget: int
+    ) -> tuple[bytes, Literal["nul", "eof", "limit"], int]:
+        token = bytearray()
+        while len(token) < budget:
+            value = stream.read(1)
+            if not value:
+                return bytes(token), "eof", len(token)
+            if value == b"\0":
+                return bytes(token), "nul", len(token) + 1
+            token.extend(value)
+        return bytes(token), "limit", budget
+
+    @staticmethod
+    def _read_expected_token(stream: BinaryIO, expected: bytes, budget: int) -> tuple[bool, int]:
+        consumed = 0
+        for offset in range(len(expected)):
+            if consumed >= budget:
+                raise ValueError("worker command is ambiguous at its byte limit")
+            value = stream.read(1)
+            if not value:
+                raise ValueError("worker command ends inside a candidate argument")
+            consumed += 1
+            if value != expected[offset : offset + 1]:
+                return False, consumed
+        if consumed >= budget:
+            raise ValueError("worker command is ambiguous at its byte limit")
+        delimiter = stream.read(1)
+        if not delimiter:
+            raise ValueError("worker command has no exact argument delimiter")
+        consumed += 1
+        return delimiter == b"\0", consumed
 
     @staticmethod
     def _process_cgroup(data: bytes) -> bytes:

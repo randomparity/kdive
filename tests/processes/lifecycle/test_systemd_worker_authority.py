@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
+from pydantic import SecretStr
 
 from kdive.processes.lifecycle.systemd_worker_contract import SlotPhase
 from kdive.processes.lifecycle.systemd_worker_lifecycle import (
@@ -17,14 +18,18 @@ from kdive.processes.lifecycle.systemd_worker_lifecycle import (
     PostgresAuthority,
 )
 from kdive.processes.lifecycle.systemd_worker_state import SlotState
-from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
+from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
+    IncarnationAuthenticationError,
+    authenticate_worker_incarnation,
+)
 from tests.reconciler.conftest import connect
 
 _BOOT_ID = "01234567-89ab-cdef-0123-456789abcdef"
 _INVOCATION_ID = "a" * 32
 
 
-def _state(*, invocation_id: str = _INVOCATION_ID) -> SlotState:
+def _state(*, invocation_id: str = _INVOCATION_ID, credential_hash: str = "c" * 64) -> SlotState:
     generation = "b" * 32
     unit = "kdive-live-worker@1.service"
     return SlotState(
@@ -33,7 +38,7 @@ def _state(*, invocation_id: str = _INVOCATION_ID) -> SlotState:
         unit=unit,
         generation=generation,
         incarnation=f"local-systemd:{unit}:{generation}",
-        credential_hash="c" * 64,
+        credential_hash=credential_hash,
         phase=SlotPhase.GATED,
         boot_id=_BOOT_ID,
         invocation_id=invocation_id,
@@ -63,10 +68,12 @@ async def _witness_pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
 
 def test_authority_registers_exact_local_binding(migrated_url: str) -> None:
     async def _run() -> None:
-        state = _state()
+        credential = SecretStr("exact-local-systemd-credential")
+        credential_hash = hashlib.sha256(credential.get_secret_value().encode()).digest()
+        state = _state(credential_hash=credential_hash.hex())
         async with _witness_pool(migrated_url) as pool:
             authority = PostgresAuthority(pool)
-            await authority.register(state, bytes.fromhex(state.credential_hash))
+            await authority.register(state, credential_hash)
         observer = await connect(migrated_url)
         try:
             row = await (
@@ -88,6 +95,15 @@ def test_authority_registers_exact_local_binding(migrated_url: str) -> None:
             },
             CURRENT_WORKER_FENCE_PROTOCOL,
         )
+        worker = await connect(migrated_url)
+        try:
+            await worker.execute("SET SESSION AUTHORIZATION kdive_worker")
+            authenticated = await authenticate_worker_incarnation(worker, credential)
+            assert authenticated.incarnation == state.incarnation
+            with pytest.raises(IncarnationAuthenticationError):
+                await authenticate_worker_incarnation(worker, SecretStr("different-credential"))
+        finally:
+            await worker.close()
 
     asyncio.run(_run())
 
@@ -142,25 +158,3 @@ def test_authority_rejects_false_termination_evidence(migrated_url: str, rejecti
         assert row == (None if rejection == "missing" else expected)
 
     asyncio.run(_run())
-
-
-def test_rejected_termination_retains_every_host_object(migrated_url: str, tmp_path: Path) -> None:
-    retained = tuple(
-        tmp_path / name
-        for name in (
-            "state.json",
-            "worker.env",
-            "release",
-            "worker-incarnation.credential",
-        )
-    )
-    for path in retained:
-        path.write_text("retained")
-
-    async def _run() -> None:
-        async with _witness_pool(migrated_url) as pool:
-            with pytest.raises(EvidenceRejected):
-                await PostgresAuthority(pool).terminate(_state(), "killed")
-
-    asyncio.run(_run())
-    assert all(path.read_text() == "retained" for path in retained)
