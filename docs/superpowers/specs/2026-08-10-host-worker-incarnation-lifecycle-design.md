@@ -4,7 +4,7 @@ Issue: #1926
 
 Decision: [ADR-0555](../../adr/0555-systemd-supervises-host-worker-incarnations.md)
 
-Scope: `WORK:SCOPE` token `4bc2344d-1928-4516-8988-c3af19b89e5d`
+Scope: `WORK:SCOPE` token `4f128723-af12-4c57-a749-c20a2cdf9c30`
 
 ## Goal and boundary
 
@@ -39,6 +39,16 @@ Direct launch cannot keep lifecycle-witness authority outside the worker account
 evidence to a retained cgroup. Compose is already an authority, but the live jobs deliberately need
 host libvirt and host-staged provider artifacts.
 
+### Selected deployment compatibility: use each distro's packaged daemon model
+
+The lifecycle contract requires one operator-owned, group-accessible session-libvirt endpoint; it
+does not require one daemon binary or socket basename on every distro. Provisioning follows the
+repository's existing libvirt split: Debian-family systems use monolithic `libvirtd` and
+`libvirt-sock`, while Red Hat-family systems use modular `virtqemud` and `virtqemud-sock`. A
+root-owned, non-secret environment file publishes the selected URI to the launcher, which passes it
+into worker configuration. Provisioning fails before worker activation when the selected daemon is
+not installed. It does not create a compatibility socket alias or run both daemon models.
+
 ## Host contract
 
 Provisioning installs:
@@ -59,10 +69,11 @@ also rejects execution as root and removes `KDIVE_WORKER_AS_ROOT` as a supported
 activation, the witness scans live processes for `kdive worker` commands outside its fixed unit
 cgroups and fails with their bounded identities; it never adopts or kills an unmanaged process.
 
-The operator starts a session `virtqemud` with an explicit socket beneath the provisioned
-group-traversable runtime directory. Worker accounts connect to that URI; QEMU remains owned by the
-operator so the live suite can read its console and artifacts. No worker receives sudo, Docker, the
-control group, or another slot's primary group.
+The operator starts the target distro's packaged session daemon with an explicit socket beneath the
+provisioned group-traversable runtime directory: `libvirtd` on Debian-family systems and
+`virtqemud` on Red Hat-family systems. Worker accounts connect to the URI published by
+provisioning; QEMU remains owned by the operator so the live suite can read its console and
+artifacts. No worker receives sudo, Docker, the control group, or another slot's primary group.
 
 ## Control boundary
 
