@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import socket
 import stat
 import subprocess
 from pathlib import Path
@@ -272,6 +274,55 @@ def test_libvirt_config_and_shared_provider_directories_are_fixed() -> None:
         assert path in provisioning
 
 
+def test_socket_namespaces_are_traversable_but_not_worker_writable() -> None:
+    installer = _text(INSTALLER)
+    tasks = _text(MAIN_TASKS)
+    verify = _text(VERIFY_TASKS)
+
+    assert "install -d -o root -g root -m 0755 /run/kdive" in installer
+    assert "_install_libvirt_runtime_directories" in installer
+    assert "-m 0750" in installer
+    assert "-m 2770" in installer
+
+    parent = tasks[
+        tasks.index("- name: Create the protected runtime parent") : tasks.index(
+            "- name: Create the protected session-libvirt socket namespaces"
+        )
+    ]
+    assert "path: /run/kdive" in parent
+    assert "owner: root" in parent
+    assert "group: root" in parent
+    assert 'mode: "0755"' in parent
+
+    namespaces = tasks[
+        tasks.index("- name: Create the protected session-libvirt socket namespaces") : tasks.index(
+            "- name: Create group-writable provider data directories"
+        )
+    ]
+    assert 'mode: "0750"' in namespaces
+    assert "live_vm_host_worker_libvirt_runtime + '/libvirt'" in namespaces
+
+    provider_data = tasks[
+        tasks.index("- name: Create group-writable provider data directories") : tasks.index(
+            "- name: Install the fixed live-worker executables"
+        )
+    ]
+    assert 'mode: "2770"' in provider_data
+    assert "live_vm_host_worker_shared_directories" in provider_data
+
+    for path in (
+        "/run/kdive",
+        "/run/kdive/live-libvirt",
+        "/run/kdive/live-libvirt/libvirt",
+    ):
+        assert path in verify
+    assert "Assert the runtime parent and socket namespace authority" in verify
+    assert "Prove a worker cannot write protected socket namespaces" in verify
+    assert "/usr/bin/test ! -w {{ item }}" in verify
+    assert 'mode == "0755"' in verify
+    assert 'mode == "0750"' in verify
+
+
 def test_ansible_materializes_only_debian_libvirt_tuple() -> None:
     defaults = _text(DEFAULTS)
     tasks = _text(MAIN_TASKS)
@@ -302,10 +353,181 @@ def test_selected_uri_file_is_public_root_owned_and_verified() -> None:
 def test_installer_validates_selected_daemon_pid_and_socket_authority() -> None:
     source = _text(INSTALLER)
     assert '--pid-file "$libvirt_pid_path"' in source
-    assert 'kill -0 "$libvirt_pid"' in source
-    assert "[[ -S $libvirt_socket_path ]]" in source
-    assert "stat -c '%U:%G:%a' \"$libvirt_socket_path\"" in source
-    assert '"$operator:$libvirt_group:770"' in source
+    assert 'kill -0 "$_libvirt_tuple_pid"' in source
+    assert "[[ ! -S $socket_path || -L $socket_path ]]" in source
+    assert "stat -c '%u:%g:%a' \"$socket_path\"" in source
+    assert '"$operator_uid:$group_gid:770"' in source
+
+
+def _reconcile_libvirt_tuple(
+    socket_path: Path, pid_path: Path, daemon: str
+) -> subprocess.CompletedProcess[str]:
+    command = r"""
+source "$1"
+_reconcile_libvirt_tuple "$2" "$3" "$4" "$5" "$6"
+printf '%s\n' "$_libvirt_tuple_action"
+"""
+    return subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            command,
+            "bash",
+            str(INSTALLER),
+            str(socket_path),
+            str(pid_path),
+            daemon,
+            str(os.getuid()),
+            str(os.getgid()),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _stale_unix_socket(path: Path) -> None:
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(str(path))
+    path.chmod(0o770)
+
+
+def test_installer_clears_only_proven_stale_selected_tuple(tmp_path: Path) -> None:
+    socket_path = tmp_path / "libvirt-sock"
+    pid_path = tmp_path / "libvirtd.pid"
+    _stale_unix_socket(socket_path)
+    pid_path.write_text("999999999\n", encoding="utf-8")
+
+    result = _reconcile_libvirt_tuple(socket_path, pid_path, "libvirtd")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "start"
+    assert not socket_path.exists()
+    assert not pid_path.exists()
+    source = _text(INSTALLER)
+    assert "if [[ $_libvirt_tuple_action == start ]]" in source
+    assert 'runuser -u "$operator"' in source
+
+
+def test_installer_adopts_complete_matching_live_tuple(tmp_path: Path) -> None:
+    socket_path = tmp_path / "libvirt-sock"
+    pid_path = tmp_path / "libvirtd.pid"
+    daemon = Path(f"/proc/{os.getpid()}/comm").read_text(encoding="utf-8").strip()
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(str(socket_path))
+        listener.listen()
+        socket_path.chmod(0o770)
+        pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+        result = _reconcile_libvirt_tuple(socket_path, pid_path, daemon)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "adopt"
+    assert socket_path.exists()
+    assert pid_path.exists()
+
+
+def test_installer_leaves_contradictory_live_tuple_untouched(tmp_path: Path) -> None:
+    socket_path = tmp_path / "libvirt-sock"
+    pid_path = tmp_path / "libvirtd.pid"
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(str(socket_path))
+        listener.listen()
+        socket_path.chmod(0o770)
+        pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+        result = _reconcile_libvirt_tuple(socket_path, pid_path, "libvirtd")
+
+    assert result.returncode != 0
+    assert "contradictory selected libvirt tuple" in result.stderr
+    assert "left untouched" in result.stderr
+    assert socket_path.exists()
+    assert pid_path.exists()
+
+
+def test_installer_leaves_wrong_authority_residue_untouched(tmp_path: Path) -> None:
+    socket_path = tmp_path / "libvirt-sock"
+    pid_path = tmp_path / "libvirtd.pid"
+    _stale_unix_socket(socket_path)
+    socket_path.chmod(0o777)
+    pid_path.write_text("999999999\n", encoding="utf-8")
+
+    result = _reconcile_libvirt_tuple(socket_path, pid_path, "libvirtd")
+
+    assert result.returncode != 0
+    assert "wrong authority" in result.stderr
+    assert "left untouched" in result.stderr
+    assert socket_path.exists()
+    assert pid_path.exists()
+
+
+def test_installer_does_not_partially_remove_changed_stale_tuple(tmp_path: Path) -> None:
+    socket_path = tmp_path / "libvirt-sock"
+    pid_path = tmp_path / "libvirtd.pid"
+    _stale_unix_socket(socket_path)
+    pid_path.write_text("999999999\n", encoding="utf-8")
+    replace_socket = """
+import os
+import socket
+import sys
+
+os.unlink(sys.argv[1])
+with socket.socket(socket.AF_UNIX) as replacement:
+    replacement.bind(sys.argv[1])
+os.chmod(sys.argv[1], 0o770)
+"""
+    command = r"""
+source "$1"
+_inspect_libvirt_pid "$3" "$5" "$2"
+_inspect_libvirt_socket "$2" "$5" "$6" "$3"
+/usr/bin/python3 -c "$4" "$2"
+_remove_stale_libvirt_tuple "$2" "$3"
+"""
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            command,
+            "bash",
+            str(INSTALLER),
+            str(socket_path),
+            str(pid_path),
+            replace_socket,
+            str(os.getuid()),
+            str(os.getgid()),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "changed during inspection" in result.stderr
+    assert "left untouched" in result.stderr
+    assert pid_path.exists()
+    assert socket_path.exists()
+
+
+def test_ansible_reconciles_complete_tuple_before_start() -> None:
+    tasks = _text(MAIN_TASKS)
+    start = tasks[tasks.index("- name: Start the operator-owned dedicated session libvirtd") :]
+    assert "creates:" not in start
+    for evidence in (
+        "Inspect the selected libvirtd pid file",
+        "Inspect the selected libvirt socket residue",
+        "Probe the selected libvirt socket listener",
+        "Inspect the selected libvirtd pid process",
+        "Fail closed on contradictory selected libvirt evidence",
+        "Remove proven stale selected libvirt residues",
+    ):
+        assert evidence in tasks
+    assert tasks.index("Fail closed on contradictory selected libvirt evidence") < tasks.index(
+        "Remove proven stale selected libvirt residues"
+    )
+    assert tasks.index("Remove proven stale selected libvirt residues") < tasks.index(
+        "Start the operator-owned dedicated session libvirtd"
+    )
 
 
 def test_installer_has_no_compatibility_socket_alias() -> None:

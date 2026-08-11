@@ -64,6 +64,16 @@ qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock
 ```
 
 Exactly one daemon tuple is activated; the installer does not create a compatibility socket alias.
+`/run/kdive` is root-owned mode `0755`. Its `live-libvirt` and `live-libvirt/libvirt`
+subdirectories are operator-owned mode `0750`, so workers can traverse to the explicit mode-`0770`
+libvirt socket but cannot unlink or replace either control socket. Only provider data directories
+are group-writable mode `2770`.
+
+An existing endpoint is adopted only when its pid file names a live operator-owned process with
+the selected daemon identity and its socket has the selected owner, group, mode, and a live
+listener. A dead pid and refused, correctly owned selected socket are removed as exact stale
+residues before restart. Contradictory process, type, ownership, or listener evidence is left
+untouched; inspect the two paths named by the installer, correct that evidence, and rerun.
 
 Only the configured operator belongs to `kdive-live-control`. Worker accounts belong to
 `kdive-live-libvirt` and never to the control, sudo, or Docker groups. The witness credential and
