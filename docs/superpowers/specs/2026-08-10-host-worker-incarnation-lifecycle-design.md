@@ -90,6 +90,8 @@ Add the fixed system template `kdive-live-worker@.service`. Instance names are d
   group;
 - a fixed `ExecStart` for the configured KDIVE Python and `-m kdive worker`;
 - `Restart=no`, so the witness is the only generation creator;
+- `StartLimitIntervalSec=0`, so witness retries of the same registered generation cannot be rejected
+  by systemd's service start limiter;
 - `KillMode=control-group`, so stop reaches the entire incarnation process tree;
 - `RemainAfterExit=yes`, so an empty cgroup leaves a retained terminal unit;
 - `LoadCredential=kdive-worker-incarnation:<root-only per-generation source>`;
@@ -157,8 +159,11 @@ creates evidence.
 A clean worker exit is retained as `active (exited)` and an abnormal exit is retained as `failed`.
 The witness accepts either terminal state only when the exact unit, generation, invocation
 identifier, and empty cgroup match. It maps systemd `success` to `succeeded`, `exit-code` to
-`failed`, and signal, core-dump, timeout, watchdog, and OOM-kill results to `killed`; any other state
-or result fails closed without resetting the unit.
+`failed`, `resources` with a matching invocation to `failed`, and signal, core-dump, timeout,
+watchdog, and OOM-kill results to `killed`. A same-boot `resources` failure with no pending job or
+invocation created no runtime, so the witness resets only the failed unit state and retries the same
+registered generation. Provisioning disables the unit start limiter; `start-limit-hit` therefore
+proves unit drift and fails closed, as does any other unknown state or result.
 
 On witness restart, reconciliation runs before new starts. It enumerates the fixed configured units
 and root-owned state files with hard ceilings. `prepared` replays registration with the same facts;
@@ -231,6 +236,9 @@ test failures therefore retain their daemon exception without replacing the orig
 - Worker credential or identity mismatch: worker exits; retained unit becomes failure evidence.
 - Worker crash: the failed unit, generation, and invocation remain; witness records mapped evidence
   before reset or replacement.
+- Pre-invocation resource failure: reset only the failed unit state and retry the same registered
+  generation on the same boot; retain the credential and fence.
+- Start-limit result: fail closed as provisioned-unit drift; do not reset or mint a generation.
 - Witness crash: systemd restarts it; workers and retained unit state survive for reconciliation.
 - Stop timeout or database outage: unit, state, credential source, and fence remain for retry.
 - Multi-worker bind collision: the exact instance fails and blocks bring-up without affecting other
@@ -288,13 +296,13 @@ Explicitly out of scope:
    request, after acceptance while the start job is queued, after activation, and before persisting
    the invocation identifier. They prove pending-start-job adoption, no-job/no-invocation same-boot
    retry, accepted-invocation adoption, non-start-job and boot-change refusal, clean and non-zero
-   exits, fatal signals, timeouts, watchdog failures, OOM kills, unknown-result refusal,
-   missing/mismatched/duplicate state, system manager/database outages, live adoption, empty-unit
-   evidence, and force behavior.
+   exits, fatal signals, timeouts, watchdog failures, OOM kills, resource failures before and after
+   invocation, start-limit drift, unknown-result refusal, missing/mismatched/duplicate state, system
+   manager/database outages, live adoption, empty-unit evidence, and force behavior.
 4. Unit-shape and provisioning tests pin fixed commands, distinct slot/server/reconciler/libvirt
-   identities, absence of sudo and Docker authority, role-file separation, `Restart=no`,
-   `KillMode=control-group`, `RemainAfterExit=yes`, credential loading, path modes, and the explicit
-   libvirt socket contract.
+   identities, absence of sudo and Docker authority, role-file separation, `Restart=no`, disabled
+   start limiting, `KillMode=control-group`, `RemainAfterExit=yes`, credential loading, path modes,
+   and the explicit libvirt socket contract.
 5. A disposable-Postgres process test starts one and then several real workers through the lifecycle
    seam, observes distinct active incarnations and worker-role connections, terminates them, and
    observes exact evidence. A systemd-hosted live proof exercises the real units.

@@ -35,9 +35,9 @@ Each configured worker uses one installed `kdive-live-worker@<slot>.service` ins
 in the bounded range has its own no-login `kdive-worker-<slot>` account with no sudo or Docker
 access and read-only code and configuration. Distinct UIDs prevent one worker from reading another
 unit's systemd credential directory. The unit uses `Restart=no`, `KillMode=control-group`,
-`ExitType=cgroup`, and `RemainAfterExit=yes`. It therefore retains an exact named runtime object
-after its complete cgroup becomes empty; it cannot silently restart or disappear before evidence
-is recorded.
+`ExitType=cgroup`, `RemainAfterExit=yes`, and `StartLimitIntervalSec=0`. It therefore retains an
+exact named runtime object after its complete cgroup becomes empty, never restarts silently, and
+cannot reject an exact-generation witness retry because of a service start-rate limit.
 
 The worker incarnation identity and authority binding contain the bounded unit name and a random
 per-start generation. The lifecycle witness mints a random 256-bit credential, durably writes the
@@ -82,10 +82,14 @@ as `active (exited)` by `RemainAfterExit=yes`; a non-zero exit, fatal signal, ti
 OOM is retained as `failed`. Either is terminal evidence only when the exact unit, generation,
 invocation identifier, and empty cgroup match.
 
-The witness maps a clean `success` result to `succeeded`, `exit-code` to `failed`, and the bounded
-signal, core-dump, timeout, watchdog, and OOM-kill results to `killed`. An unknown result fails closed
-without resetting the unit. The outcome is diagnostic, while the empty exact cgroup plus matching
-unit, generation, and invocation identifier is the termination authority.
+The witness maps a clean `success` result to `succeeded`, `exit-code` or `resources` with a matching
+invocation to `failed`, and the bounded signal, core-dump, timeout, watchdog, and OOM-kill results to
+`killed`. A `resources` failure with no invocation and no pending job did not create a runtime; on
+the same boot, the witness resets only that failed unit state and retries the same registered
+generation. `start-limit-hit` is impossible for the provisioned template and therefore proves unit
+drift; it and every unknown result fail closed without resetting the unit. The outcome is
+diagnostic, while the empty exact cgroup plus matching unit, generation, and invocation identifier
+is the termination authority for an invocation that ran.
 
 If the witness crashes, systemd retains the worker unit, cgroup, generation state, and credential
 source. The restarted witness reconciles every configured slot before opening a new generation. A
