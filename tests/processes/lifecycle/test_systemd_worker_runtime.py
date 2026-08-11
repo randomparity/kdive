@@ -1,0 +1,371 @@
+"""Exact and bounded systemd worker runtime evidence."""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Literal
+
+import pytest
+
+from kdive.processes.lifecycle.systemd_worker_runtime import (
+    CommandDeadlineExceeded,
+    CommandOutputTooLarge,
+    MonotonicDeadline,
+    SubprocessCommandRunner,
+    SystemdConflict,
+    SystemdRuntime,
+    SystemdUnavailable,
+    UnmanagedWorker,
+)
+
+_BOOT_ID = "01234567-89ab-cdef-0123-456789abcdef"
+_INVOCATION_ID = "a" * 32
+_PROPERTIES = (
+    "ActiveState=active\n"
+    "SubState=running\n"
+    "Result=success\n"
+    "ExecMainStatus=0\n"
+    "ControlGroup=/system.slice/kdive-live-worker@1.service\n"
+    f"InvocationID={_INVOCATION_ID}\n"
+)
+
+
+class FakeDeadline:
+    """Fixed remaining-time view for command-port assertions."""
+
+    def __init__(self, remaining: float) -> None:
+        self.value = remaining
+
+    def remaining(self) -> float:
+        return self.value
+
+
+class FakeRunner:
+    """Injected command boundary returning one complete systemctl response."""
+
+    def __init__(self, output: str = _PROPERTIES) -> None:
+        self.output = output
+        self.calls: list[tuple[str, ...]] = []
+        self.deadlines: list[object | None] = []
+        self.byte_limits: list[int] = []
+        self.truncations: list[bool] = []
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        byte_limit: int,
+        deadline: object | None = None,
+        allow_truncation: bool = False,
+    ) -> str:
+        self.calls.append(tuple(argv))
+        self.deadlines.append(deadline)
+        self.byte_limits.append(byte_limit)
+        self.truncations.append(allow_truncation)
+        return self.output
+
+
+@pytest.fixture
+def fake_host(tmp_path: Path) -> tuple[Path, Path]:
+    boot_id_path = tmp_path / "proc/sys/kernel/random/boot_id"
+    boot_id_path.parent.mkdir(parents=True)
+    boot_id_path.write_text(f"{_BOOT_ID}\n", encoding="ascii")
+    cgroup_root = tmp_path / "sys/fs/cgroup"
+    events = cgroup_root / "system.slice/kdive-live-worker@1.service/cgroup.events"
+    events.parent.mkdir(parents=True)
+    events.write_text("populated 1\nfrozen 0\n", encoding="ascii")
+    return boot_id_path, cgroup_root
+
+
+def _runtime(fake_host: tuple[Path, Path], runner: FakeRunner) -> SystemdRuntime:
+    boot_id_path, cgroup_root = fake_host
+    return SystemdRuntime(runner, boot_id_path=boot_id_path, cgroup_root=cgroup_root)
+
+
+def test_observe_uses_one_fixed_property_query_and_exact_cgroup(
+    fake_host: tuple[Path, Path],
+) -> None:
+    runner = FakeRunner()
+
+    observation = _runtime(fake_host, runner).observe("kdive-live-worker@1.service")
+
+    assert runner.calls == [
+        (
+            "systemctl",
+            "show",
+            "--property=ActiveState,SubState,Result,ExecMainStatus,ControlGroup,InvocationID",
+            "kdive-live-worker@1.service",
+        )
+    ]
+    assert observation.unit == "kdive-live-worker@1.service"
+    assert observation.boot_id == _BOOT_ID
+    assert observation.invocation_id == _INVOCATION_ID
+    assert observation.active_state == "active"
+    assert observation.sub_state == "running"
+    assert observation.result == "success"
+    assert observation.exec_main_status == 0
+    assert observation.control_group == "/system.slice/kdive-live-worker@1.service"
+    assert observation.membership == "populated"
+
+
+def test_observe_requires_every_exact_property(fake_host: tuple[Path, Path]) -> None:
+    runner = FakeRunner("ActiveState=active\nInvocationID=\nControlGroup=/x\n")
+    with pytest.raises(SystemdUnavailable, match="InvocationID"):
+        _runtime(fake_host, runner).observe("kdive-live-worker@1.service")
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        _PROPERTIES + "InvocationID=" + "b" * 32 + "\n",
+        _PROPERTIES + "Description=foreign\n",
+        _PROPERTIES.replace("ExecMainStatus=0", "ExecMainStatus=not-an-integer"),
+        _PROPERTIES.replace("ExecMainStatus=0", "ExecMainStatus=+1"),
+        _PROPERTIES.replace(
+            "/system.slice/kdive-live-worker@1.service",
+            "/system.slice/kdive-live-worker@2.service",
+        ),
+    ],
+)
+def test_observe_rejects_ambiguous_or_conflicting_properties(
+    fake_host: tuple[Path, Path], output: str
+) -> None:
+    with pytest.raises(SystemdConflict):
+        _runtime(fake_host, FakeRunner(output)).observe("kdive-live-worker@1.service")
+
+
+@pytest.mark.parametrize(
+    ("events", "membership"),
+    [
+        ("populated 1\nfrozen 0\n", "populated"),
+        ("populated 0\nfrozen 0\n", "empty"),
+        ("populated maybe\n", "unknown"),
+        ("populated 0\npopulated 0\n", "unknown"),
+        ("populated 0\nforeign 0\n", "unknown"),
+        ("populated    0\n", "unknown"),
+        ("frozen 0\n", "unknown"),
+    ],
+)
+def test_observe_reads_recursive_cgroup_membership(
+    fake_host: tuple[Path, Path],
+    events: str,
+    membership: Literal["populated", "empty", "unknown"],
+) -> None:
+    _, cgroup_root = fake_host
+    path = cgroup_root / "system.slice/kdive-live-worker@1.service/cgroup.events"
+    path.write_text(events, encoding="ascii")
+
+    assert (
+        _runtime(fake_host, FakeRunner()).observe("kdive-live-worker@1.service").membership
+        == membership
+    )
+
+
+def test_missing_unreadable_and_oversized_membership_are_unknown(
+    fake_host: tuple[Path, Path],
+) -> None:
+    _, cgroup_root = fake_host
+    path = cgroup_root / "system.slice/kdive-live-worker@1.service/cgroup.events"
+    path.unlink()
+    runtime = _runtime(fake_host, FakeRunner())
+    assert runtime.observe("kdive-live-worker@1.service").membership == "unknown"
+
+    path.mkdir()
+    assert runtime.observe("kdive-live-worker@1.service").membership == "unknown"
+    path.rmdir()
+
+    path.write_bytes(b"populated 0\n" + b"x" * 4096)
+    assert runtime.observe("kdive-live-worker@1.service").membership == "unknown"
+
+
+@pytest.mark.parametrize("boot_id", ["", "not-a-boot-id", _BOOT_ID + "suffix"])
+def test_observe_rejects_missing_or_malformed_boot_id(
+    fake_host: tuple[Path, Path], boot_id: str
+) -> None:
+    boot_id_path, _ = fake_host
+    boot_id_path.write_text(boot_id, encoding="ascii")
+    with pytest.raises(SystemdUnavailable, match="boot ID"):
+        _runtime(fake_host, FakeRunner()).observe("kdive-live-worker@1.service")
+
+
+def _write_process(
+    proc_root: Path, pid: int, *, uid: int, cgroup: str, worker: bool = True
+) -> None:
+    process = proc_root / str(pid)
+    process.mkdir(parents=True)
+    argv = [b"/opt/kdive/.venv/bin/python", b"-m", b"kdive", b"worker"]
+    if not worker:
+        argv[-1] = b"server"
+    (process / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
+    (process / "status").write_text(f"Name:\tpython\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+    (process / "cgroup").write_text(f"0::{cgroup}\n")
+
+
+def test_unmanaged_worker_scan_excludes_only_fixed_unit_cgroups(tmp_path: Path) -> None:
+    _write_process(tmp_path, 77, uid=1000, cgroup="/user.slice/session-1.scope")
+    _write_process(
+        tmp_path,
+        88,
+        uid=1001,
+        cgroup="/system.slice/kdive-live-worker@1.service",
+    )
+    _write_process(tmp_path, 99, uid=1002, cgroup="/user.slice/session-1.scope", worker=False)
+
+    runtime = SystemdRuntime(FakeRunner(), proc_root=tmp_path)
+
+    assert runtime.unmanaged_workers() == (UnmanagedWorker(pid=77, uid=1000),)
+
+
+@pytest.mark.parametrize(
+    "cgroup",
+    [
+        "/system.slice/kdive-live-worker@9.service",
+        "/system.slice/kdive-live-worker@1.service/foreign",
+        "/user.slice/kdive-live-worker@1.service",
+    ],
+)
+def test_unmanaged_scan_does_not_accept_lookalike_cgroups(tmp_path: Path, cgroup: str) -> None:
+    _write_process(tmp_path, 77, uid=1000, cgroup=cgroup)
+    assert SystemdRuntime(FakeRunner(), proc_root=tmp_path).unmanaged_workers() == (
+        UnmanagedWorker(pid=77, uid=1000),
+    )
+
+
+def test_unmanaged_scan_fails_closed_for_malformed_worker_cgroup(tmp_path: Path) -> None:
+    _write_process(tmp_path, 77, uid=1000, cgroup="/user.slice/session-1.scope")
+    (tmp_path / "77/cgroup").write_text("1:name=foreign:/x\n")
+    with pytest.raises(SystemdConflict, match="cgroup"):
+        SystemdRuntime(FakeRunner(), proc_root=tmp_path).unmanaged_workers()
+
+
+def test_unmanaged_scan_fails_closed_for_oversized_process_metadata(tmp_path: Path) -> None:
+    _write_process(tmp_path, 77, uid=1000, cgroup="/user.slice/session-1.scope")
+    (tmp_path / "77/cmdline").write_bytes(b"python\0-m\0kdive\0worker\0" + b"x" * 4096)
+    with pytest.raises(SystemdConflict, match="command"):
+        SystemdRuntime(FakeRunner(), proc_root=tmp_path).unmanaged_workers()
+
+
+def test_signal_terminate_preserves_the_retained_unit() -> None:
+    runner = FakeRunner()
+    SystemdRuntime(runner).signal_terminate("kdive-live-worker@2.service")
+    assert runner.calls == [
+        (
+            "systemctl",
+            "kill",
+            "--kill-whom=all",
+            "--signal=SIGTERM",
+            "kdive-live-worker@2.service",
+        )
+    ]
+
+
+def test_stop_retained_is_a_separate_bounded_operation() -> None:
+    runner = FakeRunner()
+    deadline = FakeDeadline(120.0)
+    SystemdRuntime(runner).stop_retained("kdive-live-worker@2.service", deadline=deadline)
+    assert runner.calls == [("systemctl", "stop", "kdive-live-worker@2.service")]
+    assert runner.deadlines == [deadline]
+
+
+def test_start_and_reset_use_only_the_exact_fixed_unit() -> None:
+    runner = FakeRunner()
+    runtime = SystemdRuntime(runner)
+    runtime.start("kdive-live-worker@2.service")
+    runtime.reset("kdive-live-worker@2.service")
+    assert runner.calls == [
+        ("systemctl", "start", "kdive-live-worker@2.service"),
+        ("systemctl", "reset-failed", "kdive-live-worker@2.service"),
+    ]
+
+
+def test_runtime_rejects_caller_selected_or_special_unit_names() -> None:
+    runner = FakeRunner()
+    runtime = SystemdRuntime(runner)
+    for unit in (
+        "kdive-live-worker@0.service",
+        "kdive-live-worker@9.service",
+        "kdive-live-worker@1.service --now",
+        "../kdive-live-worker@1.service",
+    ):
+        with pytest.raises(SystemdConflict, match="fixed worker unit"):
+            runtime.start(unit)
+    assert runner.calls == []
+
+
+def test_journal_selects_only_the_exact_invocation() -> None:
+    runner = FakeRunner("journal bytes")
+    deadline = FakeDeadline(30.0)
+    output = SystemdRuntime(runner).journal(_INVOCATION_ID, 320 * 1024, deadline)
+    assert output == "journal bytes"
+    assert runner.calls == [
+        ("journalctl", "--no-pager", f"_SYSTEMD_INVOCATION_ID={_INVOCATION_ID}")
+    ]
+    assert runner.deadlines == [deadline]
+    assert runner.byte_limits == [320 * 1024]
+    assert runner.truncations == [True]
+
+
+def test_journal_rejects_non_exact_invocation_before_running() -> None:
+    runner = FakeRunner()
+    with pytest.raises(SystemdConflict, match="invocation"):
+        SystemdRuntime(runner).journal("a" * 31 + "Z", 1024, FakeDeadline(1.0))
+    assert runner.calls == []
+
+
+def test_real_runner_passes_argument_arrays_without_a_shell() -> None:
+    token = "$(printf shell-expanded)"
+    runner = SubprocessCommandRunner(MonotonicDeadline.after(5.0))
+    output = runner.run(
+        (sys.executable, "-c", "import sys; print(sys.argv[1], end='')", token),
+        byte_limit=1024,
+    )
+    assert output == token
+
+
+def test_real_runner_caps_bytes_before_replacement_decoding() -> None:
+    runner = SubprocessCommandRunner(MonotonicDeadline.after(5.0))
+    output = runner.run(
+        (sys.executable, "-c", "import os; os.write(1, b'\\xffabcdef')"),
+        byte_limit=4,
+        allow_truncation=True,
+    )
+    assert output == "�abc"
+
+
+def test_real_runner_rejects_truncated_control_output() -> None:
+    runner = SubprocessCommandRunner(MonotonicDeadline.after(5.0))
+    with pytest.raises(CommandOutputTooLarge):
+        runner.run(
+            (sys.executable, "-c", "print('x' * 128, end='')"),
+            byte_limit=8,
+        )
+
+
+def test_real_runner_terminates_a_timed_out_child(tmp_path: Path) -> None:
+    terminated = tmp_path / "terminated"
+    program = (
+        "import pathlib,signal,sys,time;"
+        "p=pathlib.Path(sys.argv[1]);"
+        "signal.signal(signal.SIGTERM, lambda *_: (p.write_text('yes'), sys.exit(0)));"
+        "time.sleep(60)"
+    )
+    runner = SubprocessCommandRunner(MonotonicDeadline.after(0.5))
+    with pytest.raises(CommandDeadlineExceeded):
+        runner.run((sys.executable, "-c", program, os.fspath(terminated)), byte_limit=1024)
+    assert terminated.read_text() == "yes"
+
+
+def test_monotonic_deadline_never_reports_negative_time() -> None:
+    now = time.monotonic()
+    deadline = MonotonicDeadline(expires_at=now - 1.0, monotonic=lambda: now)
+    assert deadline.remaining() == 0.0
+
+
+@pytest.mark.parametrize("seconds", [-1.0, float("nan"), float("inf")])
+def test_monotonic_deadline_rejects_unbounded_durations(seconds: float) -> None:
+    with pytest.raises(ValueError, match="finite non-negative"):
+        MonotonicDeadline.after(seconds)
