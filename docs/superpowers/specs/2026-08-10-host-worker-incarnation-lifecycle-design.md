@@ -55,7 +55,9 @@ Provisioning installs:
 The hosted job installs the same files on its disposable VM. The `live_vm_host` Ansible role owns
 the persistent self-hosted installation. `up.sh` fails before migration or process launch when the
 socket, accounts, installed version, directory permissions, or shared libvirt access are absent. It
-also rejects execution as root and removes `KDIVE_WORKER_AS_ROOT` as a supported mode.
+also rejects execution as root and removes `KDIVE_WORKER_AS_ROOT` as a supported mode. Before
+activation, the witness scans live processes for `kdive worker` commands outside its fixed unit
+cgroups and fails with their bounded identities; it never adopts or kills an unmanaged process.
 
 The operator starts a session `virtqemud` with an explicit socket beneath the provisioned
 group-traversable runtime directory. Worker accounts connect to that URI; QEMU remains owned by the
@@ -99,7 +101,9 @@ worker authority.
 
 ### Start
 
-For each requested slot, the witness:
+`start(count)` first runs the stop/evidence flow over every occupied slot in `1..8`, including a
+slot above a reduced count. An unresolved slot blocks every new activation. Once all old generations
+are cleared, the witness starts exactly slots `1..count`. For each requested slot, it:
 
 1. requires an inactive fixed unit and no unresolved earlier state;
 2. publishes a new environment, credential, and `prepared` state;
@@ -162,8 +166,10 @@ chooses the existing force path and accepts stranded fences.
 
 `diagnostics` first reconciles terminal worker states without deleting their sources. For each
 current slot it reads only the journal entries for the recorded unit invocation plus a fixed
-allowlist of unit properties. It replaces the exact retained credential and every secret-valued
-worker setting before emitting text, applies structural URL-userinfo and secret-key redaction,
+allowlist of unit properties. The request schema classifies every worker setting as public or
+secret. Diagnostics replaces the exact retained credential and every delivered secret setting,
+including database and object-store credentials, before emitting text, applies structural
+URL-userinfo and secret-key redaction,
 escapes control characters, limits each slot to 256 KiB, and limits the response to 1 MiB per
 request. Reaching a byte ceiling emits one truncation marker. Unsafe state or an oversized
 redaction source withholds that slot rather than returning unredacted content.
@@ -206,23 +212,24 @@ teardown. The design does not weaken behavior when any of those components is un
 1. Worker identity tests reject malformed configured local-systemd IDs and prove the authenticated
    database incarnation must equal the configured ID.
 2. Lifecycle unit tests prove unique credentials and generations, register-before-start,
-   start adoption, exact cgroup/invocation checks, mapped outcomes, evidence-before-cleanup,
-   idempotent registration/termination replay, partial-start cleanup, bounds, and fail-closed
-   dependency behavior.
+   exact identity handoff, start adoption, exact cgroup/invocation checks, mapped outcomes,
+   evidence-before-cleanup, idempotent registration/termination replay, whole-fleet count
+   convergence, unmanaged-worker refusal, partial-start cleanup, bounds, and fail-closed dependency
+   behavior.
 3. Unit-shape and provisioning tests pin fixed commands, per-slot UIDs, `LoadCredential`,
    `Restart=no`, `KillMode=control-group`, `ExitType=cgroup`, socket permissions, root-only witness
    configuration, `RemainAfterExit=yes`, shared libvirt access, and absence of worker
    sudo/Docker/control membership.
 4. Script tests prove migration then role bootstrap ordering, role-specific daemon DSNs, removal of
-   direct/root worker launch, exact worker counts, lifecycle start/status/stop wiring, and refusal to
-   tear down backends after unresolved evidence.
+   direct/root worker launch, exact worker counts, lifecycle start/status/stop wiring, and refusal
+   to tear down backends after unresolved evidence.
 5. A disposable-Postgres process proof starts one and several real worker units through the
    lifecycle seam, observes distinct active incarnations and worker-role connections, terminates
    them, and observes exact terminal rows. A systemd-hosted proof exercises the installed units
    where the host supports it.
 6. Workflow tests prove both live jobs reach their existing test commands and run bounded redacted
    diagnostics on failure or cancellation before cleanup. Reporter tests cover bare credentials,
-   DSN passwords, hostile control text, missing journals, and output bounds.
+   every secret request-field class, hostile control text, missing journals, and output bounds.
 7. Focused Python, shell, systemd, Ansible, and workflow checks pass, followed by `just ci`.
 
 ## Rollback

@@ -36,12 +36,20 @@ The service exits after each request; systemd units and root-owned per-slot stat
 between requests.
 
 For each slot, the witness mints a random generation and 256-bit credential, atomically publishes
-their fixed files, and registers a `local` incarnation bound to the fixed unit and generation. Only
-then may it start the unit. It records the unit invocation identifier after activation. Stop sends
-SIGTERM to the complete unit cgroup and waits for that exact invocation to become empty. The
-witness publishes the mapped terminal outcome through the lifecycle-witness database role before
-resetting the unit or removing the credential and state. A database or systemd failure retains
-those objects for an idempotent retry; absence alone is never termination evidence.
+their fixed files, derives `local-systemd:<unit>:<generation>`, and places that exact non-secret ID
+in the per-start environment handoff. It registers the same incarnation, bound to the fixed unit
+and generation, before starting the unit; worker authentication must return that ID. It records the
+unit invocation identifier after activation. Stop sends SIGTERM to the complete unit cgroup and
+waits for that exact invocation to become empty. The witness publishes the mapped terminal outcome
+through the lifecycle-witness database role before resetting the unit or removing the credential
+and state. A database or systemd failure retains those objects for an idempotent retry; absence
+alone is never termination evidence.
+
+`start(count)` first scans for live `kdive worker` processes outside the fixed unit cgroups and
+refuses to activate anything while one exists. It then applies the same evidence-before-cleanup
+flow to every occupied slot in `1..8`, including slots above a reduced count, and starts exactly
+slots `1..count`. Any unresolved termination blocks all new activation. The launcher has no root or
+direct-worker option and reports an outsider without adopting or killing it.
 
 The host launcher continues to run server and reconciler as ordinary host processes, but gives
 each process its role-specific database DSN. It invokes the existing local runtime-role bootstrap
@@ -49,10 +57,11 @@ after migrations. The worker accounts share only the provisioned session-libvirt
 provider directories needed by the live topology.
 
 Failure diagnostics are deliberately non-transactional. Before teardown, the fixed diagnostics
-request reads only the current worker units, removes the retained credential and worker DSN
-literals, bounds the output, and returns it to the caller. Both live workflows print that output in
-an `if: failure() || cancelled()` step before any cleanup. The lifecycle repair does not promise
-post-stop augmentation or durable cross-run journal archives.
+request reads only the current worker units. Every allowlisted worker setting is classified public
+or secret, and the response removes every delivered secret literal, including the incarnation,
+database, and object-store credentials, before bounding output. Both live workflows print that
+output in an `if: failure() || cancelled()` step before any cleanup. The lifecycle repair does not
+promise post-stop augmentation or durable cross-run journal archives.
 
 ## Consequences
 
@@ -62,7 +71,7 @@ host contract explicitly; the self-hosted runner receives it from Ansible and ho
 on its disposable VM.
 
 An unresolved stop can retain a failed unit, credential, and active incarnation row. This is the
-intentional fail-closed result: the next `status`, `stop`, or `start` reconciles the same slot before
+intentional fail-closed result: the next lifecycle request reconciles the same slot before
 replacement. Force removal remains an operator recovery that may strand fences and cannot create
 termination evidence.
 
