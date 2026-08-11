@@ -102,6 +102,7 @@ def test_installer_provisions_the_fixed_worker_fixture_catalog() -> None:
     assert "/var/lib/kdive/fixtures/local-libvirt" in source
     assert "--no-dereference" in source
     assert "_fixture_files" in source
+    assert '/var/lib/kdive/fixtures/local-libvirt 0 "$libvirt_group_gid"' in source
 
 
 def _fixture_catalog(tmp_path: Path) -> Path:

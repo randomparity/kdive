@@ -514,9 +514,9 @@ install -d -o "$operator" -g "$libvirt_group" -m 2770 \
   /var/lib/kdive/rootfs /var/lib/kdive/console \
   /var/lib/kdive/pcap /var/lib/kdive/build /var/lib/kdive/install
 _require_real_directory /var/lib/kdive 0 0 0755
-_require_real_directory /var/lib/kdive/fixtures 0 "$libvirt_group" 0750
+_require_real_directory /var/lib/kdive/fixtures 0 "$libvirt_group_gid" 0750
 install_fixed_fixture_catalog "$source_root/fixtures/local-libvirt" \
-  /var/lib/kdive/fixtures/local-libvirt 0 "$libvirt_group"
+  /var/lib/kdive/fixtures/local-libvirt 0 "$libvirt_group_gid"
 
 for slot in {1..8}; do
   install -d -o root -g "kdive-worker-${slot}" -m 0750 "$state_root/slots/${slot}"
