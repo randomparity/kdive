@@ -104,9 +104,10 @@ one root-owned mode-`0600` run record containing schema version, run identifier,
 worker count, workspace identity, and operation phase (`starting`, `running`, `stopping`, or
 `complete`) plus a nullable run outcome and report state (`not-required`, `pending`, or `complete`).
 A fixed receipts directory contains exactly one mode-`0600` receipt for each configured slot. Each
-receipt retains the run identifier, slot, unit, generation, incarnation, authority binding,
-credential hash, lifecycle phase, terminal outcome, database termination-commit flag, and
-bundle-cleanup flag. The service builds the record and initial
+receipt retains the run identifier, slot, unit, nullable generation/incarnation/binding/hash until
+publication, lifecycle phase, terminal outcome, database termination-commit flag, and bundle-cleanup
+flag. Its terminal disposition is exactly one of `not-created`,
+`discarded-before-registration`, or `cleaned`. The service builds the record and initial
 `pending` receipts in a temporary run directory, `fsync`s every file and directory, atomically
 renames it to the absent active-run path, and `fsync`s the parent before taking another action.
 Receipt and run-record updates use atomic replacement plus directory `fsync`. That complete run
@@ -128,8 +129,8 @@ fails closed while the record exists. `running` requires every receipt to descri
 `started` invocation. A terminal slot during start first persists the run outcome `failed` and moves
 the report state to `pending`. The witness stages a safe failure report before moving to `stopping`,
 then terminates and evidences the remaining slots. `complete` requires every expected receipt to be
-positively cleaned plus the server, reconciler, role files, and report staging to have their
-specified terminal disposition.
+in one positive terminal disposition plus the server, reconciler, role files, and report staging to
+have their specified terminal disposition.
 
 The fixed `report` operation ensures the report oneshot atomically publishes sanitized output
 beneath a root-owned staging directory derived from the active run identifier; it does not return
@@ -138,9 +139,10 @@ authorized peer may read, and the client copies them into its checkout. A retry 
 adopts a complete report or replaces an incomplete temporary report. Failure reporting runs before
 `stop`. The run record
 reaches `complete` only after every slot is evidenced and cleaned, server and reconciler are stopped,
-and role files are removed. The completed record and report remain as an idempotent `stop` result
-until the next `start` atomically retires them before publishing the new owner. A crash at any
-boundary reconstructs the same owner and cannot let another run take over unresolved state.
+and the cleanup oneshot's non-secret receipt proves the role files removed. The completed record and
+report remain as an idempotent `stop` result until the next `start` atomically retires them before
+publishing the new owner. A crash at any boundary reconstructs the same owner and cannot let another
+run take over unresolved state.
 
 The lifecycle service uses only its provisioned root-owned code. After the digest check it may pass
 the configured checkout's `src` directory to server, reconciler, and worker units, which execute it
@@ -173,22 +175,28 @@ Add the fixed system template `kdive-live-worker@.service`. Instance names are d
 
 Add `kdive-live-worker-lifecycle.service` with `Restart=on-failure`. It runs the fixed lifecycle
 entrypoint as root, receives only the lifecycle-witness DSN, owns the root-only state and credential
-source directories, and may inspect/start/signal/stop/reset only the fixed worker template
-instances. Root is already the accepted host deployment authority; no worker process receives its
-credentials or control surface.
+source directories, and uses a literal allowlist to inspect or operate only
+`kdive-live-stack-prepare.service`, `kdive-live-stack-report.service`,
+`kdive-live-stack-cleanup.service`, `kdive-live-server.service`,
+`kdive-live-reconciler.service`, and configured `kdive-live-worker@<slot>.service` instances in
+`1..8`. It accepts no unit name through the control protocol. Root is already the accepted host
+deployment authority; no worker process receives its credentials or control surface.
 
-Two fixed root oneshots keep other database and secret authorities out of that long-lived service.
+Three fixed root oneshots keep other database and secret authorities out of that long-lived service.
 `kdive-live-stack-prepare.service` reads provisioned migration and role configuration, applies
 migrations, bootstraps roles, writes the fixed role environment files, writes a non-secret completion
 receipt, and exits before any application unit starts. `kdive-live-stack-report.service` reads the
 fixed role files, active generation credentials, and fixed journals; publishes the bounded sanitized
-report and a non-secret manifest; and exits immediately. Both use installed root-owned code and
-derived paths, accept no socket or caller arguments, and are invoked and observed by the lifecycle
-service only through their fixed unit names and non-secret receipts. The lifecycle service's
-configuration and environment never contain migration-owner, server, worker, or reconciler
-credentials, and its sandbox makes the role environment directory unreadable.
+report and a non-secret manifest; and exits immediately. `kdive-live-stack-cleanup.service` verifies
+and unlinks only the fixed role files, `fsync`s their directory, writes a non-secret cleanup receipt,
+and exits without database configuration. All three use installed root-owned code and derived paths,
+accept no socket or caller arguments, and are invoked and observed by the lifecycle service only
+through their fixed unit names and non-secret receipts. The lifecycle service's configuration and
+environment never contain migration-owner, server, worker, or reconciler credentials, and its
+sandbox makes the role environment directory unreadable.
 
-The live topology also installs server and reconciler system units under their dedicated accounts.
+The live topology also installs `kdive-live-server.service` and
+`kdive-live-reconciler.service` under their dedicated accounts.
 Their root-owned environment files contain only the matching role DSN and required non-database
 settings. The reconciler joins the libvirt socket group; neither role can read witness or worker
 credentials, control worker units, invoke sudo, or reach Docker.
@@ -222,9 +230,22 @@ validated matching bundle, unit, and database row. After the termination transac
 witness persists `evidenced` in the bundle, then persists an `evidenced` receipt with the exact
 generation, binding, outcome, and termination-commit flag and verifies the matching terminal
 database row. Only that positive receipt permits unit reset and bundle deletion. After deletion it
-persists `cleaned`. A missing bundle with an earlier receipt phase fails closed; a missing bundle
-with an `evidenced` or `cleaned` receipt is accepted only after the same exact database verification
-and expected inactive unit state. Absence by itself is never evidence.
+persists `cleaned`. A missing bundle with a published generation and an earlier receipt phase fails
+closed; a missing bundle with an `evidenced` or `cleaned` receipt is accepted only after the same
+exact database verification and expected inactive unit state. `not-created` and
+`discarded-before-registration` follow the separate no-incarnation rules below. Absence by itself is
+never evidence.
+
+When a run durably enters `stopping`, no slot-creation step may begin or publish afterward. For a
+`pending` receipt with null generation, the witness first resolves any validated pre-publication
+temporary, then requires no published bundle, pending systemd job, invocation identifier, or active
+cgroup before atomically persisting `not-created`. This is positive creation-state accounting, not
+incarnation termination evidence. If a generation bundle was published but registration is proven
+absent, the witness requires the same no-runtime facts, persists
+`discarded-before-registration` with the exact generation and hash, and only then removes the unused
+bundle. An ambiguous registration result replays the exact registration facts; it never takes the
+discard path. A registered incarnation can reach only `cleaned` through exact terminal evidence.
+Run completion accepts the three terminal dispositions according to those mutually exclusive facts.
 
 The fixed unit references the slot bundle's identity and credential paths. Before every start or
 re-adoption, the witness parses the identity file itself and requires its unit, generation, and
@@ -323,8 +344,9 @@ Bring-up ordering is:
 External role provisioning remains supported: `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` requires role DSNs in
 root-owned provisioned configuration. The preparation oneshot scrubs unrelated role variables.
 Graceful restart/down sends `stop`; the witness terminates and evidences every worker before the
-runner tears down backends. It refuses completion while a unit, bundle, or incarnation remains
-unresolved.
+runner tears down backends, stops the fixed application units, then invokes and verifies the fixed
+cleanup oneshot. It refuses completion while a unit, bundle, incarnation, nonterminal receipt, or
+cleanup receipt remains unresolved.
 
 ### Failure diagnostics in live CI
 
@@ -369,7 +391,8 @@ retain their daemon exception without replacing the original failed step.
   require the caller owning the recorded identifier to resume or stop it.
 - Missing witness or worker DSN: no worker starts; the affected role and environment file are named.
 - Preparation oneshot failure: no application starts; its fixed non-secret receipt names the failed
-  phase while role credentials leave memory when the helper exits.
+  phase, the run stops slot creation and records every untouched receipt `not-created`, and role
+  credentials leave memory when the helper exits.
 - State, credential, or environment path ownership/mode mismatch: fail closed without following or
   replacing the path.
 - Registration failure: no systemd start; ambiguous outcomes retain the exact handoff for replay,
@@ -394,6 +417,8 @@ retain their daemon exception without replacing the original failed step.
 - Unsafe or oversized redaction seed: withhold the affected source and preserve the earlier failure.
 - Atomic-replacement temporary: retain the valid canonical record, remove its one validated `.next`
   sibling, and retry; any other shape fails closed with the exact path class.
+- Cleanup oneshot failure: retain the run in `stopping`, retry the fixed helper, and do not claim
+  `complete` until its non-secret receipt proves every fixed role file absent.
 
 ## Threat model
 
@@ -454,10 +479,13 @@ Explicitly out of scope:
    exits, fatal signals, timeouts, watchdog failures, OOM kills, resource failures before and after
    invocation, start-limit drift, unknown-result refusal, missing/mismatched/duplicate state, system
    manager/database outages, live adoption, empty-unit evidence, pre-publication orphan and cleanup
-   tombstone recovery, and force behavior. Publication tests inject crashes after every file write,
-   file `fsync`, directory `fsync`, bundle rename, parent `fsync`, and registration commit. Every
-   run-record, receipt, and generation-state replacement test covers write, file `fsync`, the fixed
-   `.next` entry before rename, rename, parent `fsync`, validated cleanup, and malformed-entry refusal.
+   tombstone recovery, and force behavior. Early-failure tests prove preparation failure,
+   pre-publication failure, and partial start converge through `not-created`,
+   `discarded-before-registration`, or exact evidenced `cleaned` receipts without treating absence as
+   termination. Publication tests inject crashes after every file write, file `fsync`, directory
+   `fsync`, bundle rename, parent `fsync`, and registration commit. Every run-record, receipt, and
+   generation-state replacement test covers write, file `fsync`, the fixed `.next` entry before
+   rename, rename, parent `fsync`, validated cleanup, and malformed-entry refusal.
 4. Unit-shape and provisioning tests pin fixed commands, distinct slot/server/reconciler/libvirt
    identities, absence of sudo and Docker authority, role-file separation, `Restart=no`, disabled
    start limiting, `KillMode=control-group`, `ExitType=cgroup`, `RemainAfterExit=yes`, credential
@@ -472,13 +500,15 @@ Explicitly out of scope:
    same-run retry, mismatched-run refusal, restart refusal on unresolved evidence, and no shared DSN
    reaches a daemon. Process-boundary tests inspect environments and open configuration paths to
    prove only the preparation oneshot receives migration/application role credentials, the reporter
-   reads seeds only for its bounded lifetime, and the long-lived witness retains only its witness
-   DSN. Crash tests cover atomic run-bundle publication, every per-slot receipt update, each slot of
-   partial multi-worker start and stop, startup-failure evidence, safe report completion before seed
-   deletion, helper restart, bundle removal after a positive receipt, the last bundle removal before
-   run `complete`, each operation-phase write, final cleanup, and completed-record retirement. An
-   Ansible-hosted proof invokes every allowed operation as `github-runner`, rejects another UID, and
-   proves the account still has no general sudo or arbitrary systemd control.
+   reads seeds only for its bounded lifetime, the cleanup helper removes only fixed role files, and
+   the long-lived witness retains only its witness DSN. Unit-control tests pin the literal helper,
+   server, reconciler, and bounded worker allowlist and reject every other unit. Crash tests cover
+   atomic run-bundle publication, every per-slot receipt update, each slot of partial multi-worker
+   start and stop, startup-failure evidence, safe report completion before seed deletion, each helper
+   restart and non-secret receipt, bundle removal after a positive receipt, the last bundle removal
+   before run `complete`, each operation-phase write, final cleanup, and completed-record retirement.
+   An Ansible-hosted proof invokes every allowed operation as `github-runner`, rejects another UID,
+   and proves the account still has no general sudo or arbitrary systemd control.
 7. Workflow/reporter tests prove both live jobs invoke failure-only diagnostics and redact bare
    worker credentials and role passwords, including values crossing the output cutoff. They cover
    hostile journal formatting, multiple sources, per-source and total bounds, malformed seed
