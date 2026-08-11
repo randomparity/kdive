@@ -178,6 +178,23 @@ jobs:
         # and the mapped spine env must live in the same shell as the preflight and the suite.
         run: |
           set -euo pipefail
+          # The installer updates /etc/group after this job process starts. Enter one refreshed
+          # group context for the whole hosted spine; sg preserves the configured operator uid.
+          exec sg kdive-live-control -c \
+            'exec /bin/bash -s -e -u -o pipefail' <<'KDIVE_LIVE_SPINE'
+
+          control_gid="$(getent group kdive-live-control | cut -d: -f3)"
+          case " $(id -G) " in
+            *" ${control_gid} "*) ;;
+            *) echo "hosted spine lacks the live-worker control group" >&2; exit 1 ;;
+          esac
+          .venv/bin/python - <<'PY'
+          import socket
+
+          with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+              connection.connect("/run/kdive/live-worker-lifecycle.sock")
+          PY
+
           # Session mode (worker-owned QEMU, runner-readable console — ADR-0223), for the same
           # reason the native job below pins it: under qemu:///system the console log and core are
           # root-owned and this non-root job could not read them back. It also needs no libvirt
@@ -243,6 +260,7 @@ jobs:
 
           scripts/live-vm/preflight-env.sh tcg
           just test-live-tcg
+          KDIVE_LIVE_SPINE
 
   native:
     name: live_vm (self-hosted KVM)

@@ -60,3 +60,8 @@ Only the configured operator belongs to `kdive-live-control`. Worker accounts be
 `kdive-live-libvirt` and never to the control, sudo, or Docker groups. The witness credential and
 service configuration are root-only beneath `/etc/kdive`; per-slot state is root-owned beneath
 `/var/lib/kdive/live-workers`.
+
+Adding the operator to `kdive-live-control` does not refresh an already-running process's kernel
+group list. The hosted workflow therefore enters one `sg kdive-live-control` context for its full
+post-install spine, verifies the effective numeric group, and opens the installed socket before
+bring-up. Interactive operators must start a new login session after installation.

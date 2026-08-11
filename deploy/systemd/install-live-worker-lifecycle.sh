@@ -1,6 +1,33 @@
 #!/bin/bash
 set -euo pipefail
 
+_created_source_link=""
+
+_prepare_source_link() {
+  local source_root="$1" install_link="$2"
+  if [[ -L $install_link ]] &&
+    [[ $(readlink -f "$install_link") == "$(readlink -f "$source_root")" ]]; then
+    return
+  fi
+  if [[ -e $install_link || -L $install_link ]]; then
+    echo "$install_link already exists and does not name --source" >&2
+    return 1
+  fi
+  ln -s "$source_root" "$install_link"
+  _created_source_link="$install_link"
+}
+
+_cleanup_source_link() {
+  if [[ -n $_created_source_link && -L $_created_source_link ]]; then
+    unlink "$_created_source_link"
+  fi
+  _created_source_link=""
+}
+
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+  return 0
+fi
+
 usage() {
   echo "usage: $0 --operator USER --source PATH" >&2
   exit 2
@@ -39,7 +66,6 @@ IFS= read -r witness_dsn || [[ -n $witness_dsn ]]
 control_group="kdive-live-control"
 libvirt_group="kdive-live-libvirt"
 state_root="/var/lib/kdive/live-workers"
-source_link=""
 credential_temp=""
 config_temp=""
 revision_temp=""
@@ -48,7 +74,7 @@ cleanup() {
   [[ -z $credential_temp || ! -e $credential_temp ]] || unlink "$credential_temp"
   [[ -z $config_temp || ! -e $config_temp ]] || unlink "$config_temp"
   [[ -z $revision_temp || ! -e $revision_temp ]] || unlink "$revision_temp"
-  [[ -z $source_link || ! -L $source_link ]] || unlink "$source_link"
+  _cleanup_source_link
 }
 trap cleanup EXIT
 
@@ -107,15 +133,7 @@ unlink "$config_temp"
 config_temp=""
 
 if [[ $source_root != /opt/kdive ]]; then
-  if [[ -L /opt/kdive ]] && [[ $(readlink -f /opt/kdive) == "$(readlink -f "$source_root")" ]]; then
-    source_link=/opt/kdive
-  elif [[ -e /opt/kdive || -L /opt/kdive ]]; then
-    echo "/opt/kdive already exists and does not name --source" >&2
-    exit 1
-  else
-    ln -s "$source_root" /opt/kdive
-    source_link=/opt/kdive
-  fi
+  _prepare_source_link "$source_root" /opt/kdive
 fi
 uv venv --python /usr/bin/python3 /opt/kdive-live-worker-lifecycle/.venv
 uv pip install --python /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive

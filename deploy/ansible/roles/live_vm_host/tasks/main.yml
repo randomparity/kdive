@@ -220,6 +220,14 @@
     - {path: "{{ live_vm_host_worker_state_root }}", mode: "0755"}
     - {path: /opt/kdive-live-worker-lifecycle, mode: "0755"}
 
+- name: Create the shared slots parent
+  ansible.builtin.file:
+    path: "{{ live_vm_host_worker_state_root }}/slots"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Create root-owned fixed slot directories
   ansible.builtin.file:
     path: >-

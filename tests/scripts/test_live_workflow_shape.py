@@ -244,6 +244,14 @@ def test_hosted_job_installs_fixed_lifecycle_contract_after_uv_sync() -> None:
     assert "--witness-dsn" not in command
 
 
+def test_hosted_spine_enters_refreshed_control_group_and_probes_socket() -> None:
+    spine = _tcg_spine()
+    assert "sg kdive-live-control" in spine
+    assert "id -G" in spine and "kdive-live-control" in spine
+    assert "live-worker-lifecycle.sock" in spine
+    assert ".connect(" in spine
+
+
 def test_tcg_job_links_the_guestfs_binding_into_the_venv_and_proves_it_imports() -> None:
     """No PyPI wheel exists, so the binding is symlinked in — and the import is verified here.
 

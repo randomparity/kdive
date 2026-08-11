@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import stat
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -90,6 +92,68 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert "-m 0600" in source
     assert "/etc/kdive/credentials/live-worker-witness.dsn" in source
     assert "/opt/kdive-live-worker-lifecycle/revision" in source
+
+
+def test_installer_is_an_executable_host_contract() -> None:
+    assert INSTALLER.stat().st_mode & stat.S_IXUSR
+
+
+def test_ansible_creates_shared_slots_parent_before_private_children() -> None:
+    tasks = _text(MAIN_TASKS)
+    parent_start = tasks.index("- name: Create the shared slots parent")
+    child_start = tasks.index("- name: Create root-owned fixed slot directories")
+    assert parent_start < child_start
+    parent = tasks[parent_start:child_start]
+    assert 'path: "{{ live_vm_host_worker_state_root }}/slots"' in parent
+    assert "owner: root" in parent
+    assert "group: root" in parent
+    assert 'mode: "0755"' in parent
+
+
+def _exercise_source_link_helper(
+    tmp_path: Path, *, preexisting: bool
+) -> subprocess.CompletedProcess:
+    source = tmp_path / "source"
+    source.mkdir()
+    link = tmp_path / "kdive"
+    if preexisting:
+        link.symlink_to(source, target_is_directory=True)
+    command = r"""
+source "$1"
+_prepare_source_link "$2" "$3"
+[[ -L "$3" ]]
+_cleanup_source_link
+if [[ "$4" == preexisting ]]; then
+  [[ -L "$3" ]]
+else
+  [[ ! -e "$3" && ! -L "$3" ]]
+fi
+"""
+    return subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            command,
+            "bash",
+            str(INSTALLER),
+            str(source),
+            str(link),
+            "preexisting" if preexisting else "created",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_installer_preserves_preexisting_matching_source_link(tmp_path: Path) -> None:
+    result = _exercise_source_link_helper(tmp_path, preexisting=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_removes_only_source_link_created_by_this_run(tmp_path: Path) -> None:
+    result = _exercise_source_link_helper(tmp_path, preexisting=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_installer_and_ansible_install_the_same_fixed_files() -> None:
