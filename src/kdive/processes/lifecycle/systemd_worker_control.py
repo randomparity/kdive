@@ -112,6 +112,17 @@ class ServiceConfiguration:
     witness_dsn: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ResponseReservedDeadline:
+    """Clip one caller-owned deadline so the parent retains response-write time."""
+
+    parent: Deadline
+    reserve_seconds: float
+
+    def remaining(self) -> float:
+        return max(0.0, self.parent.remaining() - self.reserve_seconds)
+
+
 def _peer_credentials(connection: SocketLike) -> PeerCredentials:
     raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, _PEER_SIZE)
     if not isinstance(raw, bytes) or len(raw) != _PEER_SIZE:
@@ -210,10 +221,11 @@ async def _bounded_dispatch(
 ) -> LifecycleResponse:
     remaining = _remaining(deadline)
     response_reserve = min(_RESPONSE_RESERVE_SECONDS, remaining / 2)
+    operation_deadline = _ResponseReservedDeadline(deadline, response_reserve)
     try:
-        return await asyncio.wait_for(
-            _dispatch(request, deadline, build_lifecycle),
-            timeout=remaining - response_reserve,
+        response = await asyncio.wait_for(
+            _dispatch(request, operation_deadline, build_lifecycle),
+            timeout=operation_deadline.remaining(),
         )
     except TimeoutError:
         return _response(
@@ -221,6 +233,13 @@ async def _bounded_dispatch(
             "lifecycle operation exceeded its monotonic deadline",
             "retry_same_operation",
         )
+    if operation_deadline.remaining() <= 0:
+        return _response(
+            "deadline_exceeded",
+            "lifecycle operation exceeded its monotonic deadline",
+            "retry_same_operation",
+        )
+    return response
 
 
 def serve_one(

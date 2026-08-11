@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,7 +33,7 @@ from kdive.processes.lifecycle.systemd_worker_control import (
     serve_one,
     service_configuration,
 )
-from kdive.processes.lifecycle.systemd_worker_runtime import Deadline, MonotonicDeadline
+from kdive.processes.lifecycle.systemd_worker_runtime import Deadline
 from tests.processes.lifecycle.test_systemd_worker_contract import start_payload
 
 
@@ -204,8 +205,7 @@ def test_deadline_starts_after_peer_auth_and_is_shared_with_lifecycle(tmp_path: 
     assert response.ok
     assert lifecycle.operations == ["status"]
     assert len(lifecycle.deadlines) == 1
-    assert isinstance(lifecycle.deadlines[0], MonotonicDeadline)
-    assert lifecycle.deadlines[0].expires_at == 130.0
+    assert lifecycle.deadlines[0].remaining() == 119.0
     assert fake_socket.timeouts[0] == 120.0
 
 
@@ -290,6 +290,16 @@ class BlockingLifecycleContext:
                 raise RuntimeError(self.cancel_secret) from None
 
 
+class SynchronousLateLifecycle(FakeLifecycle):
+    """Return success only after synchronously exhausting the supplied child deadline."""
+
+    async def status(self, deadline: Deadline) -> LifecycleResponse:
+        self.operations.append("status")
+        self.deadlines.append(deadline)
+        time.sleep(deadline.remaining() + 0.01)
+        return _response()
+
+
 def _assert_lock_released(lock_path: Path) -> None:
     with lock_path.open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -348,6 +358,32 @@ def test_deadline_wraps_blocked_async_context_exit_and_cancels_cleanup(tmp_path:
     assert context.exit_cancelled.is_set()
     assert b"deadline_exceeded" in fake_socket.sent
     assert context.cancel_secret.encode() not in fake_socket.sent
+    _assert_lock_released(lock_path)
+
+
+def test_child_deadline_rejects_late_synchronous_success_before_parent_write(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "control.lock"
+    fake_socket = FakeSocket(uid=1000, chunks=[_status_frame(), b""])
+    lifecycle = SynchronousLateLifecycle()
+    started = time.monotonic()
+
+    response = serve_one(
+        fake_socket,
+        expected_uid=1000,
+        lock_path=lock_path,
+        build_lifecycle=lambda _deadline: lifecycle,
+        request_seconds=0.2,
+    )
+
+    assert time.monotonic() - started < 0.2
+    assert (response.code, response.retry_action) == (
+        "deadline_exceeded",
+        "retry_same_operation",
+    )
+    assert lifecycle.operations == ["status"]
+    assert b"deadline_exceeded" in fake_socket.sent
     _assert_lock_released(lock_path)
 
 
