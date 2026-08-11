@@ -11,6 +11,7 @@ from pydantic import (
     Field,
     SecretStr,
     StringConstraints,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -18,6 +19,7 @@ from pydantic import (
 Operation = Literal["start", "status", "stop", "diagnostics"]
 MAX_REQUEST_BYTES = 32 * 1024
 MAX_RESPONSE_BYTES = 1_114_112
+MAX_STRING_BYTES = 4096
 ResponseCode = Literal[
     "ok",
     "busy",
@@ -37,6 +39,13 @@ RetryAction = Literal[
     "restore_database",
     "operator_recovery",
 ]
+
+
+def validate_utf8_bytes(value: str, maximum: int) -> str:
+    """Return one string only when its UTF-8 representation fits its protocol limit."""
+    if len(value.encode("utf-8")) > maximum:
+        raise ValueError(f"string exceeds {maximum} UTF-8 bytes")
+    return value
 
 
 class SlotPhase(StrEnum):
@@ -83,6 +92,33 @@ class WorkerSettings(BaseModel):
         "build_component_roots",
         "install_staging",
         "fixture_catalog_path",
+        "libvirt_uri",
+        "s3_endpoint_url",
+        "s3_bucket",
+        "s3_region",
+        "build_user",
+        "log_level",
+    )
+    @classmethod
+    def validate_string_bytes(cls, value: str) -> str:
+        """Apply the 4-KiB bound in wire bytes, not Unicode code points."""
+        return validate_utf8_bytes(value, MAX_STRING_BYTES)
+
+    @field_validator("worker_database_url", "aws_access_key_id", "aws_secret_access_key")
+    @classmethod
+    def validate_secret_bytes(cls, value: SecretStr) -> SecretStr:
+        """Apply the 4-KiB wire bound without exposing a secret in validation errors."""
+        validate_utf8_bytes(value.get_secret_value(), MAX_STRING_BYTES)
+        return value
+
+    @field_validator(
+        "python",
+        "source_root",
+        "rootfs_dir",
+        "build_workspace",
+        "build_component_roots",
+        "install_staging",
+        "fixture_catalog_path",
     )
     @classmethod
     def validate_absolute_path(cls, value: str) -> str:
@@ -97,6 +133,8 @@ class WorkerSettings(BaseModel):
         """Keep health binds assigned to the fixed worker slot range."""
         if any(slot not in range(1, 9) for slot in value):
             raise ValueError("health binds must use slots 1 through 8")
+        for bind in value.values():
+            validate_utf8_bytes(bind, MAX_STRING_BYTES)
         return value
 
     @field_validator("accepted_lanes")
@@ -150,6 +188,16 @@ class SlotResult(BaseModel):
     code: Annotated[str, StringConstraints(max_length=64)] = "ok"
     message: Annotated[str, StringConstraints(max_length=1024)] = ""
 
+    @field_validator("unit", "code", "message")
+    @classmethod
+    def validate_string_bytes(cls, value: str, info: ValidationInfo) -> str:
+        """Keep each result field within its documented UTF-8 wire budget."""
+        limits = {"unit": 128, "code": 64, "message": 1024}
+        field = info.field_name
+        if field is None:
+            raise RuntimeError("result byte validator has no field name")
+        return validate_utf8_bytes(value, limits[field])
+
     @model_validator(mode="after")
     def validate_fixed_unit(self) -> Self:
         """Keep response results bound to their fixed derived unit names."""
@@ -169,6 +217,20 @@ class LifecycleResponse(BaseModel):
     retry_action: RetryAction
     slots: tuple[SlotResult, ...] = Field(max_length=8, default=())
     diagnostics: Annotated[str, StringConstraints(max_length=1_048_576)] | None = None
+
+    @field_validator("message")
+    @classmethod
+    def validate_message_bytes(cls, value: str) -> str:
+        """Keep the response message within its 4-KiB UTF-8 bound."""
+        return validate_utf8_bytes(value, MAX_STRING_BYTES)
+
+    @field_validator("diagnostics")
+    @classmethod
+    def validate_diagnostics_bytes(cls, value: str | None) -> str | None:
+        """Keep diagnostics within its 1-MiB UTF-8 bound before framing."""
+        if value is not None:
+            validate_utf8_bytes(value, 1_048_576)
+        return value
 
     @model_validator(mode="after")
     def validate_ordered_slots(self) -> Self:

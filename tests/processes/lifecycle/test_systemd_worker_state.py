@@ -36,11 +36,12 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SlotStore:
     def fstat(descriptor: int):
         metadata = real_fstat(descriptor)
         if stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode):
+            target = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
             return SimpleNamespace(
                 st_mode=metadata.st_mode,
                 st_size=metadata.st_size,
                 st_uid=0,
-                st_gid=2345,
+                st_gid=0 if target.name == "slots" else 2345,
                 st_nlink=1,
             )
         return metadata
@@ -361,3 +362,51 @@ def test_first_slot_creation_fsyncs_each_parent_before_descending(
     store.prepare(settings)
 
     assert events[:4] == ["mkdir:slots", "fsync", "mkdir:1", "fsync"]
+
+
+def test_slots_directory_is_root_owned_traversal_only_for_all_worker_accounts(
+    store: SlotStore, settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ownership: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        worker_state.os, "fchown", lambda _fd, uid, gid: ownership.append((uid, gid))
+    )
+
+    store.prepare(settings)
+
+    mode = store.slots_path.stat().st_mode & 0o777
+    assert mode == 0o711
+    assert mode & 0o040 == 0
+    assert mode & 0o001
+    assert ownership[0] == (0, 0)
+    assert store.slot_path.stat().st_mode & 0o777 == 0o750
+
+
+def test_observational_load_rejects_untrusted_slots_metadata(
+    store: SlotStore, settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.prepare(settings)
+    real_fstat = worker_state.os.fstat
+    calls: list[str] = []
+
+    def untrusted_slots(descriptor: int):
+        metadata = real_fstat(descriptor)
+        target = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        if target.name == "slots":
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o750,
+                st_size=metadata.st_size,
+                st_uid=0,
+                st_gid=0,
+                st_nlink=1,
+            )
+        return metadata
+
+    monkeypatch.setattr(worker_state.os, "fstat", untrusted_slots)
+    monkeypatch.setattr(worker_state.os, "fchmod", lambda *_args: calls.append("chmod"))
+    monkeypatch.setattr(worker_state.os, "fchown", lambda *_args: calls.append("chown"))
+
+    with pytest.raises(StateConflict, match="slots directory"):
+        store.load()
+
+    assert calls == []

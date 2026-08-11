@@ -13,9 +13,21 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
-from kdive.processes.lifecycle.systemd_worker_contract import SlotPhase, WorkerSettings
+from kdive.processes.lifecycle.systemd_worker_contract import (
+    SlotPhase,
+    WorkerSettings,
+    validate_utf8_bytes,
+)
 
 type TerminationOutcome = Literal["succeeded", "failed", "killed"]
 _HEX_32 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
@@ -24,6 +36,7 @@ _STATE_MODE = 0o600
 _ENVIRONMENT_MODE = 0o600
 _CREDENTIAL_MODE = 0o400
 _RELEASE_MODE = 0o440
+_SLOTS_MODE = 0o711
 _MAX_STATE_BYTES = 65_536
 
 
@@ -68,6 +81,18 @@ with warnings.catch_warnings():
                 raise ValueError("only terminated state has a terminal outcome")
             return self
 
+        @field_validator("unit", "incarnation", "boot_id", "invocation_id")
+        @classmethod
+        def validate_string_bytes(cls, value: str | None, info: ValidationInfo) -> str | None:
+            """Keep persisted identity strings inside their protocol byte limits."""
+            if value is not None:
+                limits = {"unit": 128, "incarnation": 512, "boot_id": 128, "invocation_id": 128}
+                field = info.field_name
+                if field is None:
+                    raise RuntimeError("slot state byte validator has no field name")
+                validate_utf8_bytes(value, limits[field])
+            return value
+
         def authority_binding(self) -> dict[str, str]:
             """Return the exact non-secret binding required by the witness authority."""
             if self.boot_id is None or self.invocation_id is None:
@@ -89,7 +114,8 @@ class SlotStore:
         self.root = root
         self.slot = slot
         self.unit = f"kdive-live-worker@{slot}.service"
-        self.slot_path = root / "slots" / str(slot)
+        self.slots_path = root / "slots"
+        self.slot_path = self.slots_path / str(slot)
         self.state_path = self.slot_path / "state.json"
         self.environment_path = self.slot_path / "worker.env"
         self.credential_path = self.slot_path / "worker-incarnation.credential"
@@ -207,11 +233,15 @@ class SlotStore:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
         root = os.open(self.root, flags)
         try:
-            slots = self._open_directory(root, "slots", create)
+            slots = self._open_directory(root, "slots", create, _SLOTS_MODE)
             if slots is None:
                 return None
             try:
-                descriptor = self._open_directory(slots, str(self.slot), create)
+                if create:
+                    self._set_slots_permissions(slots)
+                else:
+                    self._validate_slots_permissions(slots)
+                descriptor = self._open_directory(slots, str(self.slot), create, 0o750)
                 if descriptor is None:
                     return None
                 if create:
@@ -224,10 +254,10 @@ class SlotStore:
         finally:
             os.close(root)
 
-    def _open_directory(self, parent: int, name: str, create: bool) -> int | None:
+    def _open_directory(self, parent: int, name: str, create: bool, mode: int) -> int | None:
         if create:
             try:
-                os.mkdir(name, 0o750, dir_fd=parent)
+                os.mkdir(name, mode, dir_fd=parent)
             except FileExistsError:
                 pass
             else:
@@ -245,6 +275,22 @@ class SlotStore:
         account = pwd.getpwnam(f"kdive-worker-{self.slot}")
         os.fchmod(descriptor, 0o750)
         os.fchown(descriptor, 0, account.pw_gid)
+
+    @staticmethod
+    def _set_slots_permissions(descriptor: int) -> None:
+        os.fchmod(descriptor, _SLOTS_MODE)
+        os.fchown(descriptor, 0, 0)
+
+    @staticmethod
+    def _validate_slots_permissions(descriptor: int) -> None:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != _SLOTS_MODE
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+        ):
+            raise StateConflict("slots directory has untrusted traversal metadata")
 
     def _validate_slot_permissions(self, descriptor: int) -> None:
         account = pwd.getpwnam(f"kdive-worker-{self.slot}")
