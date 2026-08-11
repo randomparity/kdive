@@ -139,9 +139,18 @@ has_permissions() {
   done
 }
 
+component_is_accessible() {
+  local bits="$1" is_target="$2" required="$3"
+  if [[ $is_target == true ]]; then
+    has_permissions "$bits" "$required"
+  else
+    has_permissions "$bits" x
+  fi
+}
+
 account_has_path_access() {
   local account="$1" target="$2" final_permissions="$3"
-  local account_uid account_groups current resolved metadata owner group mode bits index
+  local account_uid account_groups current resolved metadata owner group mode bits index target_component
   local -a path_parts=()
   account_uid="$(id -u "$account")"
   account_groups=" $(id -G "$account") "
@@ -158,13 +167,8 @@ account_has_path_access() {
     metadata="$(stat -Lc '%u:%g:%a' "$current" 2>/dev/null)" || return 1
     IFS=: read -r owner group mode <<<"$metadata"
     bits="$(account_permission_bits "$account_uid" "$account_groups" "$owner" "$group" "$mode")"
-    if [[ $index -eq 0 ]]; then
-      has_permissions "$bits" "$final_permissions" || return 1
-    elif has_permissions "$bits" x; then
-      :
-    else
-      return 1
-    fi
+    [[ $index -ne 0 ]] && target_component=false || target_component=true
+    component_is_accessible "$bits" "$target_component" "$final_permissions" || return 1
   done
 }
 

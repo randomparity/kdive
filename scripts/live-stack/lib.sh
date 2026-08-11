@@ -265,11 +265,6 @@ restart_host_processes() {
 # an unavailable role-specific database now kills it outright instead of showing up as a not-ready
 # /readyz.
 DAEMON_SETTLE_SECONDS=15
-# server + reconciler + KDIVE_WORKER_COUNT workers. restart_host_processes() recomputes this from
-# the count it resolved; the initializer is the one-worker stack so a consumer that only reads it
-# still sees the ordinary shape.
-DAEMON_COUNT=3
-
 wait_for_daemons_to_settle() {
   local elapsed alive
   for ((elapsed = 0; elapsed < DAEMON_SETTLE_SECONDS; elapsed++)); do
