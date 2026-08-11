@@ -711,7 +711,7 @@ def test_up_starts_prometheus_independently_of_grafana() -> None:
 def test_lifecycle_wrapper_uses_the_validated_public_uri_and_python_client() -> None:
     text = (ROOT / "scripts/live-stack/worker-lifecycle.sh").read_text()
     assert "live-worker-libvirt.env" in text
-    assert 'source "$LIBVIRT_ENV"' in text
+    assert 'source "$LIBVIRT_ENV"' not in text
     assert "LIBVIRT_SOCKET_URIS" in text
     assert "LifecycleRequest.model_validate" in text
     assert "request_path" in text

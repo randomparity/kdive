@@ -10,4 +10,4 @@ if [[ "${KDIVE_LOCAL_ROLE_BOOTSTRAP:-1}" == "0" ]]; then
   exit 0
 fi
 
-docker compose run --rm --no-deps role-bootstrap
+env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL docker compose run --rm --no-deps role-bootstrap

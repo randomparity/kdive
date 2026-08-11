@@ -37,10 +37,7 @@ load_libvirt_uri() {
     echo "${LIBVIRT_ENV} must contain exactly one KDIVE_LIBVIRT_URI assignment" >&2
     return 1
   }
-  # The file is root-owned and prevalidated above; source it only after its one-line grammar check.
-  # shellcheck disable=SC1090 # fixed root-owned public environment file
-  source "$LIBVIRT_ENV"
-  uri="${KDIVE_LIBVIRT_URI:-}"
+  uri="${lines[0]#KDIVE_LIBVIRT_URI=}"
   for candidate in "${LIBVIRT_SOCKET_URIS[@]}"; do
     [[ "$uri" == "$candidate" ]] && allowed=1
   done
@@ -57,8 +54,8 @@ require_start_prerequisites() {
     echo "worker Python must be an executable absolute path: ${py}" >&2
     return 1
   }
-  [[ "$repo_root" == /* && -d "$repo_root" ]] || {
-    echo "worker source root must be an absolute directory: ${repo_root}" >&2
+  [[ "${KDIVE_KERNEL_SRC:-}" == /* && -d "${KDIVE_KERNEL_SRC}" ]] || {
+    echo "worker kernel source must be an existing absolute directory" >&2
     return 1
   }
   for slot in {1..8}; do
@@ -84,17 +81,11 @@ require_start_prerequisites() {
     echo "installed lifecycle witness revision does not match this checkout" >&2
     return 1
   }
+  mkdir -p "$KDIVE_BUILD_WORKSPACE"
   for component_root in "$KDIVE_ROOTFS_DIR" "$KDIVE_BUILD_WORKSPACE" "$KDIVE_INSTALL_STAGING" \
     "$KDIVE_FIXTURE_CATALOG_PATH"; do
     [[ "$component_root" == /* && -d "$component_root" ]] || {
       echo "worker provider path must be an existing absolute directory: ${component_root}" >&2
-      return 1
-    }
-  done
-  IFS=: read -r -a component_roots <<<"$KDIVE_BUILD_COMPONENT_ROOTS"
-  for component_root in "${component_roots[@]}"; do
-    [[ "$component_root" == /* && -d "$component_root" ]] || {
-      echo "worker component root must be an existing absolute directory: ${component_root}" >&2
       return 1
     }
   done
@@ -106,9 +97,11 @@ request() {
     require_start_prerequisites || return 1
     libvirt_uri="$(load_libvirt_uri)" || return 1
   fi
-  KDIVE_LIFECYCLE_OPERATION="$operation" KDIVE_LIFECYCLE_COUNT="$count" \
+  env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+    -u KDIVE_RECONCILER_DATABASE_URL KDIVE_LIFECYCLE_OPERATION="$operation" \
+    KDIVE_LIFECYCLE_COUNT="$count" \
     KDIVE_LIFECYCLE_LIBVIRT_URI="$libvirt_uri" KDIVE_PYTHON="$py" \
-    KDIVE_SOURCE_ROOT="$repo_root" "$py" - <<'PY'
+    KDIVE_SOURCE_ROOT="${KDIVE_KERNEL_SRC:-}" KDIVE_EXPECTED_SLOTS="${3:-}" "$py" - <<'PY'
 import os
 import sys
 from pathlib import Path
@@ -116,21 +109,22 @@ from pathlib import Path
 from kdive.processes.lifecycle.systemd_worker_control import ProtocolRejected, request_path
 from kdive.processes.lifecycle.systemd_worker_contract import LifecycleRequest
 
-operation = os.environ["KDIVE_LIFECYCLE_OPERATION"]
-if operation != "start":
-    request = LifecycleRequest.model_validate({"operation": operation})
-else:
-    count = int(os.environ["KDIVE_LIFECYCLE_COUNT"])
-    lanes = tuple(filter(None, os.environ["KDIVE_ACCEPTED_LANES"].split(",")))
-    binds = {
-        slot: f"127.0.0.1:{9465 if slot == 1 else 9468 + slot}"
-        for slot in range(1, count + 1)
-    }
-    request = LifecycleRequest.model_validate(
-        {
-            "operation": "start",
-            "worker_count": count,
-            "settings": {
+try:
+    operation = os.environ["KDIVE_LIFECYCLE_OPERATION"]
+    if operation != "start":
+        request = LifecycleRequest.model_validate({"operation": operation})
+    else:
+        count = int(os.environ["KDIVE_LIFECYCLE_COUNT"])
+        lanes = tuple(filter(None, os.environ["KDIVE_ACCEPTED_LANES"].split(",")))
+        binds = {
+            slot: f"127.0.0.1:{9465 if slot == 1 else 9468 + slot}"
+            for slot in range(1, count + 1)
+        }
+        request = LifecycleRequest.model_validate(
+            {
+                "operation": "start",
+                "worker_count": count,
+                "settings": {
                 "python": os.environ["KDIVE_PYTHON"],
                 "source_root": os.environ["KDIVE_SOURCE_ROOT"],
                 "rootfs_dir": os.environ["KDIVE_ROOTFS_DIR"],
@@ -149,14 +143,19 @@ else:
                 "build_user": os.environ.get("KDIVE_BUILD_USER", os.environ["USER"]),
                 "log_level": os.environ["KDIVE_LOG_LEVEL"],
                 "health_binds": binds,
-            },
-        }
-    )
-try:
+                },
+            }
+        )
     response = request_path(Path("/run/kdive/live-worker-lifecycle.sock"), request)
-except (OSError, ProtocolRejected, ValueError) as exc:
-    print(f"lifecycle request failed: {exc}", file=sys.stderr)
-    raise SystemExit(5) from exc
+    expected = os.environ["KDIVE_EXPECTED_SLOTS"]
+    if expected:
+        want = tuple(range(1, int(expected) + 1))
+        actual = tuple((slot.slot, slot.phase.value if slot.phase else None) for slot in response.slots)
+        if actual != tuple((slot, "started") for slot in want):
+            raise ValueError("lifecycle status does not report the requested started slots")
+except Exception:
+    print("lifecycle request failed safely", file=sys.stderr)
+    raise SystemExit(5) from None
 print(response.model_dump_json())
 raise SystemExit(0 if response.ok and response.code == "ok" else 4)
 PY
@@ -174,7 +173,14 @@ start)
   }
   request start "$2"
   ;;
-status | stop | diagnostics)
+status)
+  [[ $# == 1 || $# == 2 ]] || {
+    usage
+    exit 2
+  }
+  request "$1" "" "${2:-}"
+  ;;
+stop | diagnostics)
   [[ $# == 1 ]] || {
     usage
     exit 2
