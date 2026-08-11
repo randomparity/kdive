@@ -279,6 +279,17 @@ class UnitObservation:
     membership: CgroupMembership
 
 
+@dataclass(frozen=True, slots=True)
+class BootObservation:
+    """Current boot evidence when one fixed unit has no active invocation identity."""
+
+    unit: str
+    boot_id: str
+
+
+type SystemdObservation = UnitObservation | BootObservation
+
+
 @dataclass(frozen=True, slots=True, order=True)
 class UnmanagedWorker:
     """A live ``kdive worker`` process outside every fixed worker unit cgroup."""
@@ -319,15 +330,19 @@ class SystemdRuntime:
         self._require_unit(unit)
         self._run(("systemctl", "start", unit), deadline=deadline)
 
-    def observe(self, unit: str, deadline: Deadline) -> UnitObservation:
-        """Return only complete, exact manager and recursive-cgroup evidence."""
+    def observe(self, unit: str, deadline: Deadline) -> SystemdObservation:
+        """Return exact invocation evidence or an inactive unit's current boot evidence."""
         self._require_unit(unit)
         output = self.runner.run(
             ("systemctl", "show", _PROPERTY_ARGUMENT, unit),
             byte_limit=_CONTROL_OUTPUT_LIMIT,
             deadline=deadline,
         )
-        properties = self._parse_properties(output)
+        boot_id = self._boot_id()
+        properties = self._property_lines(output)
+        if self._has_empty_inactive_identity(properties):
+            return BootObservation(unit=unit, boot_id=boot_id)
+        self._require_complete_properties(properties)
         control_group = properties["ControlGroup"]
         expected_group = f"/system.slice/{unit}"
         if control_group != expected_group:
@@ -343,7 +358,7 @@ class SystemdRuntime:
             raise SystemdConflict("systemd ExecMainStatus is outside 0..255")
         return UnitObservation(
             unit=unit,
-            boot_id=self._boot_id(),
+            boot_id=boot_id,
             invocation_id=invocation_id,
             active_state=properties["ActiveState"],
             sub_state=properties["SubState"],
@@ -554,12 +569,6 @@ class SystemdRuntime:
         return "unknown"
 
     @staticmethod
-    def _parse_properties(output: str) -> dict[str, str]:
-        properties = SystemdRuntime._property_lines(output)
-        SystemdRuntime._require_complete_properties(properties)
-        return properties
-
-    @staticmethod
     def _property_lines(output: str) -> dict[str, str]:
         properties: dict[str, str] = {}
         for line in output.splitlines():
@@ -582,6 +591,23 @@ class SystemdRuntime:
         for key in ("ActiveState", "SubState", "Result"):
             if not _SYSTEMD_VALUE.fullmatch(properties[key]):
                 raise SystemdConflict(f"systemctl show returned a malformed {key}")
+
+    @staticmethod
+    def _has_empty_inactive_identity(properties: dict[str, str]) -> bool:
+        missing = tuple(key for key in _PROPERTIES if key not in properties)
+        if missing:
+            for key, value in properties.items():
+                if not value:
+                    raise SystemdUnavailable(f"systemctl show did not return a non-empty {key}")
+            raise SystemdUnavailable(f"systemctl show did not return {missing[0]}")
+        control_group = properties["ControlGroup"]
+        invocation_id = properties["InvocationID"]
+        if bool(control_group) != bool(invocation_id):
+            raise SystemdConflict("systemctl show returned a partial unit identity")
+        if control_group:
+            return False
+        SystemdRuntime._require_inactive_properties(properties)
+        return True
 
     @staticmethod
     def _require_inactive_properties(properties: dict[str, str]) -> None:

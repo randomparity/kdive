@@ -21,7 +21,9 @@ from kdive.processes.lifecycle.systemd_worker_lifecycle import (
     SystemdWorkerLifecycle,
 )
 from kdive.processes.lifecycle.systemd_worker_runtime import (
+    BootObservation,
     CgroupMembership,
+    CommandDeadlineExceeded,
     Deadline,
     MonotonicDeadline,
     SystemdConflict,
@@ -133,7 +135,7 @@ class FakeRuntime:
     def __init__(self, events: list[str], clock: FakeClock) -> None:
         self.events = events
         self.clock = clock
-        self.current: dict[str, UnitObservation] = {}
+        self.current: dict[str, UnitObservation | BootObservation] = {}
         self.unmanaged: tuple[UnmanagedWorker, ...] = ()
         self.start_failures: dict[str, Exception] = {}
         self.observe_failures: dict[str, Exception] = {}
@@ -163,6 +165,8 @@ class FakeRuntime:
         if failure := self.start_failures.get(unit):
             raise failure
         retained = self.current.get(unit)
+        if isinstance(retained, BootObservation):
+            retained = None
         if retained is None or retained.membership == "empty":
             count = self.start_counts.get(unit, 0) + 1
             self.start_counts[unit] = count
@@ -171,13 +175,17 @@ class FakeRuntime:
                 _slot_from_unit(unit), "populated", invocation_id=invocation_id
             )
 
-    def observe(self, unit: str, deadline: Deadline) -> UnitObservation:
+    def observe(self, unit: str, deadline: Deadline) -> UnitObservation | BootObservation:
         self.systemd_deadlines.append(("observe", deadline))
         assert deadline.remaining() >= 0
         if failure := self.observe_failures.get(unit):
             raise failure
         observation = self.current[unit]
-        if unit in self.signaled and observation.membership == "empty":
+        if (
+            unit in self.signaled
+            and isinstance(observation, UnitObservation)
+            and observation.membership == "empty"
+        ):
             self.events.append(f"systemd:observe-empty:{unit}")
         return observation
 
@@ -188,6 +196,7 @@ class FakeRuntime:
         self.signaled.append(unit)
         if unit not in self.keep_populated:
             current = self.current[unit]
+            assert isinstance(current, UnitObservation)
             self.current[unit] = replace(
                 current,
                 active_state="inactive",
@@ -293,6 +302,10 @@ def _observation(
         control_group=f"/system.slice/{unit}",
         membership=membership,
     )
+
+
+def _boot_observation(slot: int, *, boot_id: str = _BOOT_ID) -> BootObservation:
+    return BootObservation(unit=f"kdive-live-worker@{slot}.service", boot_id=boot_id)
 
 
 def _slot_from_unit(unit: str) -> int:
@@ -676,12 +689,7 @@ def test_same_boot_unit_absence_is_not_terminal_evidence() -> None:
 def test_reboot_maps_exact_retained_binding_to_killed() -> None:
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: started})
-    runtime.current[started.unit] = _observation(
-        1,
-        "populated",
-        boot_id=_NEXT_BOOT_ID,
-        invocation_id="f" * 32,
-    )
+    runtime.current[started.unit] = _boot_observation(1, boot_id=_NEXT_BOOT_ID)
 
     response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
 
@@ -690,6 +698,21 @@ def test_reboot_maps_exact_retained_binding_to_killed() -> None:
     assert stores[0].state is not None
     assert stores[0].state.phase is SlotPhase.TERMINATED
     assert stores[0].state.outcome == "killed"
+
+
+def test_same_boot_inactive_unit_is_not_terminal_evidence() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.current[started.unit] = _boot_observation(1)
+
+    response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
+
+    assert (response.code, response.retry_action) == (
+        "dependency_unavailable",
+        "restore_systemd",
+    )
+    assert authority.terminations == []
+    assert stores[0].state == started
 
 
 @pytest.mark.parametrize(
@@ -745,6 +768,21 @@ def test_stop_signaling_and_observation_share_a_45_second_ceiling() -> None:
     assert clock.value == pytest.approx(45.0)
     assert authority.terminations == []
     assert runtime.stopped == [] and runtime.resets == []
+    assert stores[0].state == started
+
+
+def test_reserved_child_timeout_is_reported_as_deadline_exceeded() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: started})
+    runtime.observe_failures[started.unit] = CommandDeadlineExceeded("command timed out")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).status(_deadline(clock)))
+
+    assert (response.code, response.retry_action) == (
+        "deadline_exceeded",
+        "retry_same_operation",
+    )
+    assert authority.terminations == []
     assert stores[0].state == started
 
 

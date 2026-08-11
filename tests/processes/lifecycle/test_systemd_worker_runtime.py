@@ -14,6 +14,7 @@ from typing import Literal, cast
 import pytest
 
 from kdive.processes.lifecycle.systemd_worker_runtime import (
+    BootObservation,
     CommandCleanupDeadlineExceeded,
     CommandDeadlineExceeded,
     CommandOutputTooLarge,
@@ -22,6 +23,7 @@ from kdive.processes.lifecycle.systemd_worker_runtime import (
     SystemdConflict,
     SystemdRuntime,
     SystemdUnavailable,
+    UnitObservation,
     UnmanagedWorker,
 )
 
@@ -138,6 +140,7 @@ def test_observe_uses_one_fixed_property_query_and_exact_cgroup(
         "kdive-live-worker@1.service", FakeDeadline(120.0)
     )
 
+    assert isinstance(observation, UnitObservation)
     assert runner.calls == [
         (
             "systemctl",
@@ -155,6 +158,37 @@ def test_observe_uses_one_fixed_property_query_and_exact_cgroup(
     assert observation.exec_main_status == 0
     assert observation.control_group == "/system.slice/kdive-live-worker@1.service"
     assert observation.membership == "populated"
+
+
+def test_observe_returns_boot_only_evidence_for_inactive_empty_unit(
+    fake_host: tuple[Path, Path],
+) -> None:
+    observation = _runtime(fake_host, FakeRunner(_INACTIVE_PROPERTIES)).observe(
+        "kdive-live-worker@1.service", FakeDeadline(120.0)
+    )
+
+    assert observation == BootObservation(
+        unit="kdive-live-worker@1.service",
+        boot_id=_BOOT_ID,
+    )
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        _INACTIVE_PROPERTIES.replace(
+            "ControlGroup=\n", "ControlGroup=/system.slice/kdive-live-worker@1.service\n"
+        ),
+        _INACTIVE_PROPERTIES.replace("InvocationID=\n", f"InvocationID={_INVOCATION_ID}\n"),
+    ],
+)
+def test_observe_rejects_partial_inactive_identity(
+    fake_host: tuple[Path, Path], output: str
+) -> None:
+    with pytest.raises(SystemdConflict, match="identity"):
+        _runtime(fake_host, FakeRunner(output)).observe(
+            "kdive-live-worker@1.service", FakeDeadline(120.0)
+        )
 
 
 def test_observe_requires_every_exact_property(fake_host: tuple[Path, Path]) -> None:
@@ -206,12 +240,10 @@ def test_observe_reads_recursive_cgroup_membership(
     path = cgroup_root / "system.slice/kdive-live-worker@1.service/cgroup.events"
     path.write_text(events, encoding="ascii")
 
-    assert (
-        _runtime(fake_host, FakeRunner())
-        .observe("kdive-live-worker@1.service", FakeDeadline(120.0))
-        .membership
-        == membership
+    observation = _runtime(fake_host, FakeRunner()).observe(
+        "kdive-live-worker@1.service", FakeDeadline(120.0)
     )
+    assert cast(UnitObservation, observation).membership == membership
 
 
 def test_missing_unreadable_and_oversized_membership_are_unknown(
@@ -221,20 +253,17 @@ def test_missing_unreadable_and_oversized_membership_are_unknown(
     path = cgroup_root / "system.slice/kdive-live-worker@1.service/cgroup.events"
     path.unlink()
     runtime = _runtime(fake_host, FakeRunner())
-    assert (
-        runtime.observe("kdive-live-worker@1.service", FakeDeadline(120.0)).membership == "unknown"
-    )
+    observation = runtime.observe("kdive-live-worker@1.service", FakeDeadline(120.0))
+    assert cast(UnitObservation, observation).membership == "unknown"
 
     path.mkdir()
-    assert (
-        runtime.observe("kdive-live-worker@1.service", FakeDeadline(120.0)).membership == "unknown"
-    )
+    observation = runtime.observe("kdive-live-worker@1.service", FakeDeadline(120.0))
+    assert cast(UnitObservation, observation).membership == "unknown"
     path.rmdir()
 
     path.write_bytes(b"populated 0\n" + b"x" * 4096)
-    assert (
-        runtime.observe("kdive-live-worker@1.service", FakeDeadline(120.0)).membership == "unknown"
-    )
+    observation = runtime.observe("kdive-live-worker@1.service", FakeDeadline(120.0))
+    assert cast(UnitObservation, observation).membership == "unknown"
 
 
 @pytest.mark.parametrize("boot_id", ["", "not-a-boot-id", _BOOT_ID + "suffix"])

@@ -19,6 +19,8 @@ from kdive.processes.lifecycle.systemd_worker_contract import (
     WorkerSettings,
 )
 from kdive.processes.lifecycle.systemd_worker_runtime import (
+    BootObservation,
+    CommandDeadlineExceeded,
     Deadline,
     SystemdConflict,
     SystemdUnavailable,
@@ -106,7 +108,7 @@ class SystemdControl(Protocol):
 
     def start(self, unit: str, deadline: Deadline) -> None: ...
 
-    def observe(self, unit: str, deadline: Deadline) -> UnitObservation: ...
+    def observe(self, unit: str, deadline: Deadline) -> UnitObservation | BootObservation: ...
 
     def signal_terminate(self, unit: str, deadline: Deadline) -> None: ...
 
@@ -632,15 +634,19 @@ def _require_time(deadline: Deadline) -> float:
     return remaining
 
 
-def _require_prepared_observation(state: SlotState, observation: UnitObservation) -> None:
+def _require_prepared_observation(
+    state: SlotState, observation: UnitObservation | BootObservation
+) -> None:
     if observation.unit != state.unit:
         raise LifecycleConflict("systemd returned a foreign unit observation")
+    if isinstance(observation, BootObservation):
+        raise SystemdUnavailable("prepared worker has no exact systemd invocation")
     if observation.membership == "unknown":
         raise SystemdUnavailable("worker cgroup membership is unavailable")
 
 
 def _terminal_observation(
-    state: SlotState, observation: UnitObservation
+    state: SlotState, observation: UnitObservation | BootObservation
 ) -> TerminationOutcome | None:
     if observation.unit != state.unit:
         raise LifecycleConflict("systemd returned a foreign unit observation")
@@ -648,6 +654,8 @@ def _terminal_observation(
         raise LifecycleConflict("bound lifecycle phase has no exact invocation")
     if observation.boot_id != state.boot_id:
         return "killed"
+    if isinstance(observation, BootObservation):
+        raise SystemdUnavailable("worker invocation is absent on the retained boot")
     if observation.invocation_id != state.invocation_id:
         raise LifecycleConflict("systemd invocation does not match retained state")
     if observation.membership == "unknown":
@@ -688,7 +696,7 @@ def _invalid_start_response() -> LifecycleResponse:
 
 
 def _map_failure(error: Exception, *, diagnostic: bool) -> tuple[ResponseCode, RetryAction, str]:
-    if isinstance(error, LifecycleDeadlineExceeded):
+    if isinstance(error, (LifecycleDeadlineExceeded, CommandDeadlineExceeded)):
         return "deadline_exceeded", "retry_same_operation", "lifecycle deadline exceeded"
     if isinstance(error, EvidenceRejected):
         return "evidence_rejected", "retry_same_operation", "termination evidence was rejected"
