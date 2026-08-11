@@ -157,8 +157,8 @@ after the database transaction commits but retains the unit and credential until
 diagnostics can redact the credential. Unit absence, a generation mismatch, an unavailable system
 manager, or an unreadable cgroup never becomes evidence.
 
-The witness is not a monitor. An unexpected exit can remain unevidenced until `status`, `stop`,
-`diagnostics`, or the next `start`; the active database fence remains pinned during that delay.
+The witness is not a monitor. An unexpected exit can remain unevidenced until `status`, `stop`, or
+the next `start`; the active database fence remains pinned during that delay.
 State also records the boot ID. If the current boot differs, the old invocation and every process
 it contained are definitively gone; the witness commits that exact binding as `killed` before
 cleanup. An unreadable or unchanged boot ID never licenses this transition.
