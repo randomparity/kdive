@@ -790,7 +790,7 @@ def test_lifecycle_wrapper_uses_the_validated_public_uri_and_python_client() -> 
             "/run/kdive/live-libvirt/libvirt/libvirt-sock\n",
             True,
         ),
-        ("KDIVE_LIBVIRT_URI=$(touch /tmp/unsafe)\n", False),
+        ("KDIVE_LIBVIRT_URI=$(touch TMP_CANARY)\n", False),
         ("KDIVE_LIBVIRT_URI=not-a-supported-uri\n", False),
     ],
 )
@@ -812,7 +812,8 @@ def test_lifecycle_uri_is_parsed_as_literal_data(
         encoding="utf-8",
     )
     uri_file = tmp_path / "libvirt.env"
-    uri_file.write_text(content, encoding="utf-8")
+    canary = tmp_path / "unsafe"
+    uri_file.write_text(content.replace("TMP_CANARY", str(canary)), encoding="utf-8")
     uri_file.chmod(0o644)
     result = subprocess.run(
         [
@@ -827,7 +828,7 @@ def test_lifecycle_uri_is_parsed_as_literal_data(
         check=False,
     )
     assert (result.returncode == 0) is success, result.stderr
-    assert not (tmp_path / "unsafe").exists()
+    assert not canary.exists()
 
 
 def test_role_bootstrap_uses_compose_default_only_when_migration_is_implicit(
@@ -911,6 +912,48 @@ def test_lifecycle_status_preserves_non_ok_response_and_scrubs_other_role_dsns(
     ]
 
 
+def test_status_database_probe_scrubs_unrelated_role_dsns(tmp_path: Path) -> None:
+    status = tmp_path / "status.sh"
+    source = (ROOT / "scripts/live-stack/status.sh").read_text()
+    setup = source[: source.index('echo "=== compose')]
+    database = source[source.index('echo "=== database') : source.index('echo "=== libvirt')]
+    status.write_text(setup + database + "exit 0\n", encoding="utf-8")
+    for name in ("lib.sh", "env.sh"):
+        (tmp_path / name).write_text(
+            (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
+        )
+    worker = tmp_path / "worker-lifecycle.sh"
+    worker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    worker.chmod(0o755)
+    probe = tmp_path / "environment"
+    python = tmp_path / "python"
+    python.write_text(
+        "#!/bin/sh\nenv | grep '^KDIVE_.*DATABASE_URL=' > \"$KDIVE_STATUS_PROBE\"\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(status)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "KDIVE_PYTHON": str(python),
+            "KDIVE_STATUS_PROBE": str(probe),
+            "KDIVE_SERVER_DATABASE_URL": "server-canary",
+            "KDIVE_MIGRATION_DATABASE_URL": "migration-canary",
+            "KDIVE_WORKER_DATABASE_URL": "worker-canary",
+            "KDIVE_RECONCILER_DATABASE_URL": "reconciler-canary",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert set(probe.read_text(encoding="utf-8").splitlines()) == {
+        "KDIVE_DATABASE_URL=server-canary",
+        "KDIVE_SERVER_DATABASE_URL=server-canary",
+    }
+
+
 def test_host_daemon_children_receive_only_their_role_database_authority(tmp_path: Path) -> None:
     lifecycle = tmp_path / "scripts/live-stack"
     lifecycle.mkdir(parents=True)
@@ -972,6 +1015,7 @@ def test_lifecycle_status_rejects_any_non_exact_successful_slot_set(
     result = _lifecycle_status(tmp_path, response, expected_slots="2")
     assert result.returncode == 5
     assert "lifecycle status does not report the requested started slots" in result.stderr
+    assert '"ok":true' not in result.stdout
 
 
 def test_lifecycle_status_accepts_exact_successful_started_slots(tmp_path: Path) -> None:
@@ -994,6 +1038,42 @@ def test_lifecycle_status_public_syntax_does_not_accept_a_count() -> None:
     assert "usage:" in result.stderr
 
 
+def test_lifecycle_request_construction_hides_oversized_secret_canaries(tmp_path: Path) -> None:
+    canary = "credential-canary-" * 300
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"\n'
+            'uri="$2"\n'
+            "require_start_prerequisites() { :; }\n"
+            'load_libvirt_uri() { printf %s "$uri"; }\n'
+            "request start 1",
+            "bash",
+            str(LIFECYCLE),
+            "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "KDIVE_ROOTFS_DIR": "/tmp/rootfs",
+            "KDIVE_BUILD_WORKSPACE": "/tmp/build",
+            "KDIVE_BUILD_COMPONENT_ROOTS": "/tmp/fixtures",
+            "KDIVE_INSTALL_STAGING": "/tmp/install",
+            "KDIVE_FIXTURE_CATALOG_PATH": "/tmp/fixtures",
+            "KDIVE_KERNEL_SRC": "/tmp/kernel",
+            "KDIVE_WORKER_DATABASE_URL": canary,
+            "AWS_ACCESS_KEY_ID": canary,
+            "AWS_SECRET_ACCESS_KEY": canary,
+        },
+    )
+    assert result.returncode == 2
+    assert "lifecycle request construction failed safely" in result.stderr
+    assert canary not in result.stdout + result.stderr
+
+
 def _worker_path_access(
     tmp_path: Path, target: Path, permissions: str, groups: str
 ) -> subprocess.CompletedProcess[str]:
@@ -1002,7 +1082,8 @@ def _worker_path_access(
             "bash",
             "-c",
             'source "$1"\n'
-            'id() { if [[ $1 == -u ]]; then echo 424242; else echo "$3"; fi; }\n'
+            'worker_groups="$3"\n'
+            'id() { if [[ $1 == -u ]]; then echo 424242; else echo "$worker_groups"; fi; }\n'
             'require_worker_path_access "$2" "$4" "test path"',
             "bash",
             str(LIFECYCLE),
@@ -1026,16 +1107,29 @@ def test_lifecycle_preflight_rejects_a_worker_denied_by_a_parent(tmp_path: Path)
     assert "test path is not accessible to kdive-worker-1" in result.stderr
 
 
-def test_lifecycle_preflight_rejects_an_unwritable_workspace(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("mode", "success"), [(0o2750, False), (0o2770, True)])
+def test_lifecycle_preflight_interprets_setgid_group_permissions(
+    tmp_path: Path, mode: int, success: bool
+) -> None:
     workspace = Path("/tmp") / f"kdive-workspace-{os.getpid()}"
-    workspace.mkdir(mode=0o750)
-    workspace.chmod(0o750)
+    workspace.mkdir(mode=mode)
+    workspace.chmod(mode)
     try:
         result = _worker_path_access(tmp_path, workspace, "rwx", str(os.getgid()))
     finally:
         workspace.rmdir()
+    assert (result.returncode == 0) is success, result.stderr
+
+
+def test_lifecycle_preflight_resolves_a_symlink_before_checking_ancestry(tmp_path: Path) -> None:
+    denied_parent = tmp_path / "private"
+    denied_parent.mkdir(mode=0o700)
+    target = denied_parent / "kernel"
+    target.mkdir(mode=0o755)
+    link = tmp_path / "kernel-link"
+    link.symlink_to(target, target_is_directory=True)
+    result = _worker_path_access(tmp_path, link, "rx", "424242")
     assert result.returncode != 0
-    assert "test path is not accessible to kdive-worker-1" in result.stderr
 
 
 def test_down_blocks_backend_teardown_after_an_unresolved_lifecycle_stop() -> None:

@@ -108,13 +108,44 @@ require_start_prerequisites() {
   done
 }
 
+account_permission_bits() {
+  local account_uid="$1" account_groups="$2" owner="$3" group="$4" mode="$5"
+  mode="${mode: -3}"
+  if [[ $owner == "$account_uid" ]]; then
+    printf '%s' "${mode:0:1}"
+  elif [[ $account_groups == *" $group "* ]]; then
+    printf '%s' "${mode:1:1}"
+  else
+    printf '%s' "${mode:2:1}"
+  fi
+}
+
+permission_mask() {
+  case "$1" in
+  r) printf 4 ;;
+  w) printf 2 ;;
+  x) printf 1 ;;
+  *) return 1 ;;
+  esac
+}
+
+has_permissions() {
+  local bits="$1" required="$2" permission mask
+  for ((position = 0; position < ${#required}; position++)); do
+    permission="${required:position:1}"
+    mask="$(permission_mask "$permission")" || return 1
+    ((8#$bits & mask)) || return 1
+  done
+}
+
 account_has_path_access() {
   local account="$1" target="$2" final_permissions="$3"
-  local account_uid account_groups current metadata owner group mode permissions permission required
+  local account_uid account_groups current resolved metadata owner group mode bits
   local -a path_parts=()
   account_uid="$(id -u "$account")"
   account_groups=" $(id -G "$account") "
-  current="$target"
+  resolved="$(realpath -e -- "$target")" || return 1
+  current="$resolved"
   while :; do
     path_parts+=("$current")
     [[ $current == / ]] && break
@@ -125,24 +156,10 @@ account_has_path_access() {
     current="${path_parts[index]}"
     metadata="$(stat -Lc '%u:%g:%a' "$current" 2>/dev/null)" || return 1
     IFS=: read -r owner group mode <<<"$metadata"
-    if [[ $owner == "$account_uid" ]]; then
-      permissions="${mode:0:1}"
-    elif [[ $account_groups == *" $group "* ]]; then
-      permissions="${mode:1:1}"
-    else
-      permissions="${mode:2:1}"
-    fi
+    bits="$(account_permission_bits "$account_uid" "$account_groups" "$owner" "$group" "$mode")"
     if [[ $index -eq 0 ]]; then
-      for permission in $(fold -w1 <<<"$final_permissions"); do
-        case "$permission" in
-        r) required=4 ;;
-        w) required=2 ;;
-        x) required=1 ;;
-        *) return 1 ;;
-        esac
-        ((8#$permissions & required)) || return 1
-      done
-    elif ((8#$permissions & 1)); then
+      has_permissions "$bits" "$final_permissions" || return 1
+    elif has_permissions "$bits" x; then
       :
     else
       return 1
@@ -229,8 +246,8 @@ except (OSError, ProtocolRejected):
     print("lifecycle request transport failed safely", file=sys.stderr)
     raise SystemExit(5) from None
 
-print(response.model_dump_json())
 if not response.ok:
+    print(response.model_dump_json())
     raise SystemExit(client_exit_status(response))
 
 try:
@@ -240,12 +257,16 @@ try:
         if not 1 <= expected_count <= 8:
             raise ValueError
         want = tuple(range(1, expected_count + 1))
-        actual = tuple((slot.slot, slot.phase.value if slot.phase else None) for slot in response.slots)
+        actual = tuple(
+            (slot.slot, slot.phase.value if slot.phase else None)
+            for slot in response.slots
+        )
         if actual != tuple((slot, "started") for slot in want):
             raise ValueError("lifecycle status does not report the requested started slots")
 except ValueError:
     print("lifecycle status does not report the requested started slots", file=sys.stderr)
     raise SystemExit(5) from None
+print(response.model_dump_json())
 raise SystemExit(client_exit_status(response))
 PY
 }

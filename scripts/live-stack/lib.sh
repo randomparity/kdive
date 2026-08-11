@@ -239,7 +239,9 @@ restart_host_processes() {
   # Stopped our own daemons above; anything still on KDIVE_HTTP_PORT is foreign — fail loudly rather
   # than let the new server lose the bind race and die silently.
   require_free_http_port || return 1
-  echo "starting kdive host processes (${worker_count} lifecycle worker(s)) @ $(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?') ..."
+  local revision
+  revision="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  echo "starting kdive host processes (${worker_count} lifecycle worker(s)) @ ${revision} ..."
   env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
     -u KDIVE_RECONCILER_DATABASE_URL KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
     setsid nohup "$py" -m kdive server >"${log_dir}/server.log" 2>&1 </dev/null &

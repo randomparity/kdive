@@ -34,7 +34,9 @@ server_health || true
 
 echo
 echo "=== database ==="
-if KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" "$py" - <<PY 2>/dev/null; then
+if env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+  -u KDIVE_RECONCILER_DATABASE_URL KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
+  "$py" - <<PY 2>/dev/null; then
 import os, sys
 import psycopg
 
