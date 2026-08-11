@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import os
+import selectors
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 
@@ -44,6 +45,38 @@ class FakeDeadline:
 
     def remaining(self) -> float:
         return self.value
+
+
+class ScriptedDeadline:
+    """Return exact remaining-time readings for cleanup assertions."""
+
+    def __init__(self, remaining: Sequence[float]) -> None:
+        self.values = iter(remaining)
+
+    def remaining(self) -> float:
+        return next(self.values)
+
+
+class UnreapableProcess:
+    """Record cleanup calls while refusing each bounded wait."""
+
+    def __init__(self) -> None:
+        self.calls: list[str | tuple[str, float | None]] = []
+
+    def poll(self) -> None:
+        self.calls.append("poll")
+
+    def terminate(self) -> None:
+        self.calls.append("terminate")
+
+    def kill(self) -> None:
+        self.calls.append("kill")
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.calls.append(("wait", timeout))
+        if timeout is None:
+            pytest.fail("cleanup wait must carry the remaining deadline budget")
+        raise subprocess.TimeoutExpired("fake-child", timeout)
 
 
 class FakeRunner:
@@ -195,11 +228,17 @@ def test_observe_rejects_missing_or_malformed_boot_id(
 
 
 def _write_process(
-    proc_root: Path, pid: int, *, uid: int, cgroup: str, worker: bool = True
+    proc_root: Path,
+    pid: int,
+    *,
+    uid: int,
+    cgroup: str,
+    worker: bool = True,
+    launcher: bytes = b"/opt/kdive/.venv/bin/python",
 ) -> None:
     process = proc_root / str(pid)
     process.mkdir(parents=True)
-    argv = [b"/opt/kdive/.venv/bin/python", b"-m", b"kdive", b"worker"]
+    argv = [launcher, b"-m", b"kdive", b"worker"]
     if not worker:
         argv[-1] = b"server"
     (process / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
@@ -220,6 +259,72 @@ def test_unmanaged_worker_scan_excludes_only_fixed_unit_cgroups(tmp_path: Path) 
     runtime = SystemdRuntime(FakeRunner(), proc_root=tmp_path)
 
     assert runtime.unmanaged_workers() == (UnmanagedWorker(pid=77, uid=1000),)
+
+
+@pytest.mark.parametrize(
+    "launcher",
+    [
+        b"python",
+        b"python3",
+        b"python3.14",
+        b"/usr/bin/python",
+        b"/usr/bin/python3",
+        b"/usr/bin/python3.14",
+    ],
+)
+def test_unmanaged_scan_recognizes_each_supported_python_launcher(
+    tmp_path: Path, launcher: bytes
+) -> None:
+    _write_process(
+        tmp_path,
+        77,
+        uid=1000,
+        cgroup="/user.slice/session-1.scope",
+        launcher=launcher,
+    )
+
+    assert SystemdRuntime(FakeRunner(), proc_root=tmp_path).unmanaged_workers() == (
+        UnmanagedWorker(pid=77, uid=1000),
+    )
+
+
+@pytest.mark.parametrize("launcher", [b"python", b"python3", b"python3.14"])
+def test_unmanaged_scan_excludes_relative_launchers_in_fixed_cgroups(
+    tmp_path: Path, launcher: bytes
+) -> None:
+    _write_process(
+        tmp_path,
+        77,
+        uid=1000,
+        cgroup="/system.slice/kdive-live-worker@1.service",
+        launcher=launcher,
+    )
+
+    assert SystemdRuntime(FakeRunner(), proc_root=tmp_path).unmanaged_workers() == ()
+
+
+@pytest.mark.parametrize(
+    "launcher",
+    [
+        b"python3.13",
+        b"python3.140",
+        b"python-worker",
+        b"xpython",
+        b"/usr/bin/python3.13",
+        b"/usr/bin/python-wrapper",
+        b"./python",
+    ],
+)
+def test_unmanaged_scan_rejects_lookalike_python_launchers(tmp_path: Path, launcher: bytes) -> None:
+    _write_process(
+        tmp_path,
+        77,
+        uid=1000,
+        cgroup="/user.slice/session-1.scope",
+        launcher=launcher,
+    )
+
+    assert SystemdRuntime(FakeRunner(), proc_root=tmp_path).unmanaged_workers() == ()
 
 
 @pytest.mark.parametrize(
@@ -372,43 +477,55 @@ def test_real_runner_terminates_a_timed_out_child() -> None:
         runner.run((sys.executable, "-c", program), byte_limit=1024)
 
 
-def test_real_runner_sigkill_cleanup_does_not_extend_the_absolute_deadline(
-    tmp_path: Path,
-) -> None:
-    ready = tmp_path / "ready"
+def test_sigkill_cleanup_uses_only_the_exact_remaining_deadline_budget() -> None:
+    process = UnreapableProcess()
+    deadline = ScriptedDeadline((0.4, 0.1))
+
+    with pytest.raises(CommandCleanupDeadlineExceeded):
+        SubprocessCommandRunner._terminate(
+            cast(subprocess.Popen[bytes], process),
+            deadline,
+        )
+
+    assert process.calls == [
+        "poll",
+        "terminate",
+        ("wait", 0.25),
+        "kill",
+        ("wait", 0.1),
+    ]
+
+
+def test_real_process_sigkills_and_reaps_a_child_that_ignores_sigterm() -> None:
     program = (
-        "import os,pathlib,signal,sys,time;"
+        "import os,signal,time;"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
-        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()));"
+        "print(os.getpid(), flush=True);"
         "time.sleep(60)"
     )
-    started = time.monotonic()
-    runner = SubprocessCommandRunner(MonotonicDeadline.after(0.4))
-    with pytest.raises(CommandCleanupDeadlineExceeded):
-        runner.run((sys.executable, "-c", program, os.fspath(ready)), byte_limit=1024)
-    elapsed = time.monotonic() - started
+    process = subprocess.Popen(  # noqa: S603 - fixed test interpreter and program.
+        (sys.executable, "-c", program),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        shell=False,
+    )
+    try:
+        assert process.stdout is not None
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            assert selector.select(10.0), "child must install SIGTERM ignore before cleanup"
+        assert int(process.stdout.readline()) == process.pid
 
-    assert ready.is_file(), "child must install SIGTERM ignore before the deadline"
-    assert elapsed < 0.6, "cleanup must not add the old fixed 250-ms wait after the deadline"
-    status = _reap_sigkilled_child(int(ready.read_text()))
-    if status is not None:
-        assert os.WIFSIGNALED(status)
-        assert os.WTERMSIG(status) == signal.SIGKILL
+        started = time.monotonic()
+        SubprocessCommandRunner._terminate(process, MonotonicDeadline.after(2.0))
 
-
-def _reap_sigkilled_child(pid: int) -> int | None:
-    deadline = time.monotonic() + 1.0
-    while time.monotonic() < deadline:
-        try:
-            reaped, status = os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError:
-            with pytest.raises(ProcessLookupError):
-                os.kill(pid, 0)
-            return None
-        if reaped == pid:
-            return status
-        time.sleep(0.01)
-    pytest.fail("SIGKILL child was not available for bounded test cleanup")
+        assert time.monotonic() - started < 3.0
+        assert process.returncode == -signal.SIGKILL
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5.0)
 
 
 def test_monotonic_deadline_never_reports_negative_time() -> None:

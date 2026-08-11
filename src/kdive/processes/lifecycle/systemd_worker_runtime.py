@@ -16,7 +16,7 @@ from typing import BinaryIO, Literal, Protocol
 type CgroupMembership = Literal["populated", "empty", "unknown"]
 
 _UNIT = re.compile(r"kdive-live-worker@[1-8]\.service")
-_PYTHON_LAUNCHER = re.compile(rb"/(?:[^/\0]+/)*python(?:3(?:\.14)?)?")
+_PYTHON_LAUNCHER = re.compile(rb"(?:/(?:[^/\0]+/)*)?python(?:3(?:\.14)?)?")
 _INVOCATION_ID = re.compile(r"[0-9a-f]{32}")
 _BOOT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _SYSTEMD_VALUE = re.compile(r"[A-Za-z0-9_.@:-]+")
