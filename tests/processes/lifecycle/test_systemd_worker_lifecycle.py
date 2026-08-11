@@ -24,6 +24,7 @@ from kdive.processes.lifecycle.systemd_worker_runtime import (
     CgroupMembership,
     Deadline,
     MonotonicDeadline,
+    SystemdConflict,
     SystemdUnavailable,
     UnitObservation,
     UnmanagedWorker,
@@ -135,8 +136,18 @@ class FakeRuntime:
         self.resets: list[str] = []
         self.journal_calls: list[tuple[str, int, float]] = []
         self.stop_budgets: list[float] = []
+        self.inactive_checks: list[tuple[str, float]] = []
+        self.systemd_deadlines: list[tuple[str, Deadline]] = []
 
-    def start(self, unit: str) -> None:
+    def require_inactive(self, unit: str, deadline: Deadline) -> None:
+        self.systemd_deadlines.append(("require-inactive", deadline))
+        self.inactive_checks.append((unit, deadline.remaining()))
+        if unit in self.current:
+            raise SystemdConflict("fixed worker unit is not inactive and empty")
+
+    def start(self, unit: str, deadline: Deadline) -> None:
+        self.systemd_deadlines.append(("start", deadline))
+        assert deadline.remaining() >= 0
         self.events.append(f"systemd:start:{unit}")
         if self.advance_on_start:
             self.clock.advance(self.advance_on_start)
@@ -151,7 +162,9 @@ class FakeRuntime:
                 _slot_from_unit(unit), "populated", invocation_id=invocation_id
             )
 
-    def observe(self, unit: str) -> UnitObservation:
+    def observe(self, unit: str, deadline: Deadline) -> UnitObservation:
+        self.systemd_deadlines.append(("observe", deadline))
+        assert deadline.remaining() >= 0
         if failure := self.observe_failures.get(unit):
             raise failure
         observation = self.current[unit]
@@ -159,7 +172,9 @@ class FakeRuntime:
             self.events.append(f"systemd:observe-empty:{unit}")
         return observation
 
-    def signal_terminate(self, unit: str) -> None:
+    def signal_terminate(self, unit: str, deadline: Deadline) -> None:
+        self.systemd_deadlines.append(("signal-terminate", deadline))
+        assert deadline.remaining() >= 0
         self.events.append(f"systemd:signal-terminate:{unit}")
         self.signaled.append(unit)
         if unit not in self.keep_populated:
@@ -174,13 +189,17 @@ class FakeRuntime:
             )
 
     def stop_retained(self, unit: str, deadline: Deadline) -> None:
+        self.systemd_deadlines.append(("stop-retained", deadline))
         self.stop_budgets.append(deadline.remaining())
         self.stopped.append(unit)
         self.events.append(f"systemd:stop:{unit}")
 
-    def reset(self, unit: str) -> None:
+    def reset(self, unit: str, deadline: Deadline) -> None:
+        self.systemd_deadlines.append(("reset", deadline))
+        assert deadline.remaining() >= 0
         self.resets.append(unit)
         self.events.append(f"systemd:reset:{unit}")
+        self.current.pop(unit, None)
 
     def unmanaged_workers(self) -> tuple[UnmanagedWorker, ...]:
         return self.unmanaged
@@ -374,6 +393,24 @@ def test_start_refuses_unmanaged_worker_without_mutating_slots() -> None:
     assert events == []
 
 
+def test_start_refuses_populated_fixed_unit_without_retained_state() -> None:
+    stores, runtime, authority, clock, events = _fleet()
+    unit = "kdive-live-worker@1.service"
+    runtime.current[unit] = _observation(1, "populated")
+
+    response = _run(
+        _coordinator(stores, runtime, authority, clock).start(_request(), _deadline(clock))
+    )
+
+    assert (response.code, response.retry_action) == ("conflict", "operator_recovery")
+    assert stores[0].preparations == 0
+    assert stores[0].state is None
+    assert authority.registered == set() and authority.terminations == []
+    assert not stores[0].release
+    assert runtime.signaled == [] and runtime.stopped == [] and runtime.resets == []
+    assert "state:cleanup" not in events
+
+
 def test_start_reconciles_all_occupied_slots_before_replacement() -> None:
     states = {slot: _state(slot, SlotPhase.STARTED) for slot in (1, 2)}
     stores, runtime, authority, clock, events = _fleet(states=states)
@@ -385,6 +422,25 @@ def test_start_reconciles_all_occupied_slots_before_replacement() -> None:
     assert response.ok
     first_prepare = events.index("persist:prepared")
     assert events[:first_prepare].count("state:cleanup") == 2
+    first_signal = next(
+        index
+        for index, (operation, _) in enumerate(runtime.systemd_deadlines)
+        if operation == "signal-terminate"
+    )
+    last_reset = max(
+        index
+        for index, (operation, _) in enumerate(runtime.systemd_deadlines)
+        if operation == "reset"
+    )
+    assert (
+        len(
+            {
+                id(deadline)
+                for _, deadline in runtime.systemd_deadlines[first_signal : last_reset + 1]
+            }
+        )
+        == 1
+    )
     assert stores[0].state is not None and stores[0].state.phase is SlotPhase.STARTED
     assert stores[1].state is None
 
@@ -508,6 +564,12 @@ def test_partial_start_rolls_back_only_slots_activated_by_this_request() -> None
     assert stores[0].state is None
     assert stores[1].state is not None and stores[1].state.phase is SlotPhase.PREPARED
     assert runtime.stopped == ["kdive-live-worker@1.service"]
+    first_signal = next(
+        index
+        for index, (operation, _) in enumerate(runtime.systemd_deadlines)
+        if operation == "signal-terminate"
+    )
+    assert len({id(deadline) for _, deadline in runtime.systemd_deadlines[first_signal:]}) == 1
     assert [result.slot for result in response.slots] == [1, 2]
 
 
@@ -596,6 +658,12 @@ def test_stop_commits_evidence_before_reset_and_cleanup() -> None:
         "systemd:reset:kdive-live-worker@1.service",
         "state:cleanup",
     ]
+    stop_path_deadlines = [
+        deadline
+        for operation, deadline in runtime.systemd_deadlines
+        if operation in {"observe", "signal-terminate", "stop-retained", "reset"}
+    ]
+    assert len({id(deadline) for deadline in stop_path_deadlines}) == 1
 
 
 def test_stop_signaling_and_observation_share_a_45_second_ceiling() -> None:

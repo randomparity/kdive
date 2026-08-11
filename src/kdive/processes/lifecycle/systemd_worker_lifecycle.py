@@ -100,15 +100,17 @@ class SlotStorage(Protocol):
 class SystemdControl(Protocol):
     """Exact retained-unit operations consumed by the coordinator."""
 
-    def start(self, unit: str) -> None: ...
+    def require_inactive(self, unit: str, deadline: Deadline) -> None: ...
 
-    def observe(self, unit: str) -> UnitObservation: ...
+    def start(self, unit: str, deadline: Deadline) -> None: ...
 
-    def signal_terminate(self, unit: str) -> None: ...
+    def observe(self, unit: str, deadline: Deadline) -> UnitObservation: ...
+
+    def signal_terminate(self, unit: str, deadline: Deadline) -> None: ...
 
     def stop_retained(self, unit: str, deadline: Deadline) -> None: ...
 
-    def reset(self, unit: str) -> None: ...
+    def reset(self, unit: str, deadline: Deadline) -> None: ...
 
     def unmanaged_workers(self) -> tuple[UnmanagedWorker, ...]: ...
 
@@ -260,10 +262,11 @@ class SystemdWorkerLifecycle:
                 bound.append((store, state))
             elif state.phase is SlotPhase.TERMINATED:
                 terminated.append((store, state))
-        newly_terminated = await self._stop_bound_states(tuple(bound), deadline)
+        stop_deadline = _BudgetDeadline(deadline, _STOP_SECONDS)
+        newly_terminated = await self._stop_bound_states(tuple(bound), deadline, stop_deadline)
         terminated.extend(zip((store for store, _ in bound), newly_terminated, strict=True))
         for store, state in terminated:
-            self._post_evidence_cleanup(store, state, deadline)
+            self._post_evidence_cleanup(store, state, stop_deadline)
 
     async def _activate_fleet(
         self, request: LifecycleRequest, deadline: Deadline
@@ -273,6 +276,7 @@ class SystemdWorkerLifecycle:
         activated: list[tuple[SlotStorage, SlotState]] = []
         for store in self._stores[: request.worker_count]:
             try:
+                self._systemd_call(deadline, self._runtime.require_inactive, store.unit, deadline)
                 prepared = self._store_call(deadline, store.prepare, request.settings)
                 state = await self._reconcile_prepared(store, prepared, deadline)
                 if state.phase is not SlotPhase.STARTED:
@@ -290,9 +294,10 @@ class SystemdWorkerLifecycle:
             return ()
         cleaned: list[SlotState] = []
         try:
-            terminated = await self._stop_bound_states(tuple(activated), deadline)
+            stop_deadline = _BudgetDeadline(deadline, _STOP_SECONDS)
+            terminated = await self._stop_bound_states(tuple(activated), deadline, stop_deadline)
             for (store, _), state in zip(activated, terminated, strict=True):
-                self._post_evidence_cleanup(store, state, deadline)
+                self._post_evidence_cleanup(store, state, stop_deadline)
                 cleaned.append(state)
         except Exception:
             return tuple(cleaned)
@@ -314,8 +319,8 @@ class SystemdWorkerLifecycle:
     async def _reconcile_prepared(
         self, store: SlotStorage, state: SlotState, deadline: Deadline
     ) -> SlotState:
-        self._systemd_call(deadline, self._runtime.start, state.unit)
-        observation = self._systemd_call(deadline, self._runtime.observe, state.unit)
+        self._systemd_call(deadline, self._runtime.start, state.unit, deadline)
+        observation = self._systemd_call(deadline, self._runtime.observe, state.unit, deadline)
         _require_prepared_observation(state, observation)
         gated = state.model_copy(
             update={
@@ -335,7 +340,9 @@ class SystemdWorkerLifecycle:
         *,
         observation: UnitObservation | None = None,
     ) -> SlotState:
-        observed = observation or self._systemd_call(deadline, self._runtime.observe, state.unit)
+        observed = observation or self._systemd_call(
+            deadline, self._runtime.observe, state.unit, deadline
+        )
         terminal = _terminal_observation(state, observed)
         await self._register(state, deadline)
         registered = state.model_copy(update={"phase": SlotPhase.REGISTERED})
@@ -347,12 +354,12 @@ class SystemdWorkerLifecycle:
     async def _reconcile_registered(
         self, store: SlotStorage, state: SlotState, deadline: Deadline
     ) -> SlotState:
-        observation = self._systemd_call(deadline, self._runtime.observe, state.unit)
+        observation = self._systemd_call(deadline, self._runtime.observe, state.unit, deadline)
         terminal = _terminal_observation(state, observation)
         if terminal is not None:
             return await self._publish_termination(store, state, terminal, deadline)
         self._store_call(deadline, store.publish_release, state)
-        released = self._systemd_call(deadline, self._runtime.observe, state.unit)
+        released = self._systemd_call(deadline, self._runtime.observe, state.unit, deadline)
         terminal = _terminal_observation(state, released)
         if terminal is not None:
             return await self._publish_termination(store, state, terminal, deadline)
@@ -363,7 +370,7 @@ class SystemdWorkerLifecycle:
     async def _reconcile_started(
         self, store: SlotStorage, state: SlotState, deadline: Deadline
     ) -> SlotState:
-        observation = self._systemd_call(deadline, self._runtime.observe, state.unit)
+        observation = self._systemd_call(deadline, self._runtime.observe, state.unit, deadline)
         terminal = _terminal_observation(state, observation)
         if terminal is None:
             return state
@@ -380,7 +387,7 @@ class SystemdWorkerLifecycle:
     ) -> SlotState:
         if state.phase in {SlotPhase.PREPARED, SlotPhase.TERMINATED}:
             return state
-        observation = self._systemd_call(deadline, self._runtime.observe, state.unit)
+        observation = self._systemd_call(deadline, self._runtime.observe, state.unit, deadline)
         terminal = _terminal_observation(state, observation)
         if terminal is None:
             return state
@@ -403,7 +410,9 @@ class SystemdWorkerLifecycle:
             if state.phase is SlotPhase.TERMINATED:
                 terminated.append((store, state))
                 continue
-            observation = self._systemd_call(stop_deadline, self._runtime.observe, state.unit)
+            observation = self._systemd_call(
+                stop_deadline, self._runtime.observe, state.unit, stop_deadline
+            )
             outcome = _terminal_observation(state, observation)
             if outcome is not None:
                 state = await self._terminate_for_stop(store, state, outcome, deadline)
@@ -413,12 +422,12 @@ class SystemdWorkerLifecycle:
         newly_terminated = await self._stop_bound_states(tuple(bound), deadline, stop_deadline)
         terminated.extend(zip((store for store, _ in bound), newly_terminated, strict=True))
         for store, state in terminated:
-            self._post_evidence_cleanup(store, state, deadline)
+            self._post_evidence_cleanup(store, state, stop_deadline)
         return tuple(state for _, state in terminated)
 
     def _bind_prepared(self, store: SlotStorage, state: SlotState, deadline: Deadline) -> SlotState:
-        self._systemd_call(deadline, self._runtime.start, state.unit)
-        observation = self._systemd_call(deadline, self._runtime.observe, state.unit)
+        self._systemd_call(deadline, self._runtime.start, state.unit, deadline)
+        observation = self._systemd_call(deadline, self._runtime.observe, state.unit, deadline)
         _require_prepared_observation(state, observation)
         gated = state.model_copy(
             update={
@@ -434,20 +443,24 @@ class SystemdWorkerLifecycle:
         self,
         states: tuple[tuple[SlotStorage, SlotState], ...],
         deadline: Deadline,
-        stop_deadline: Deadline | None = None,
+        stop_deadline: Deadline,
     ) -> tuple[SlotState, ...]:
-        signaling_deadline = stop_deadline or _BudgetDeadline(deadline, _STOP_SECONDS)
         for _, state in states:
-            self._systemd_call(signaling_deadline, self._runtime.signal_terminate, state.unit)
+            self._systemd_call(
+                stop_deadline,
+                self._runtime.signal_terminate,
+                state.unit,
+                stop_deadline,
+            )
         terminated: list[SlotState] = []
         for store, state in states:
-            outcome = self._wait_for_terminal(state, signaling_deadline)
+            outcome = self._wait_for_terminal(state, stop_deadline)
             terminated.append(await self._terminate_for_stop(store, state, outcome, deadline))
         return tuple(terminated)
 
     def _wait_for_terminal(self, state: SlotState, deadline: Deadline) -> TerminationOutcome:
         while True:
-            observation = self._systemd_call(deadline, self._runtime.observe, state.unit)
+            observation = self._systemd_call(deadline, self._runtime.observe, state.unit, deadline)
             outcome = _terminal_observation(state, observation)
             if outcome is not None:
                 return outcome
@@ -487,7 +500,7 @@ class SystemdWorkerLifecycle:
         if state.phase is not SlotPhase.TERMINATED:
             raise LifecycleConflict("cleanup requires persisted terminal evidence")
         self._systemd_call(deadline, self._runtime.stop_retained, state.unit, deadline)
-        self._systemd_call(deadline, self._runtime.reset, state.unit)
+        self._systemd_call(deadline, self._runtime.reset, state.unit, deadline)
         self._store_call(deadline, store.cleanup_terminated, state)
 
     async def _register(self, state: SlotState, deadline: Deadline) -> None:

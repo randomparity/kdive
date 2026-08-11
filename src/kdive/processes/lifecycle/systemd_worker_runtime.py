@@ -277,17 +277,29 @@ class SystemdRuntime:
         self.cgroup_root = cgroup_root
         self.proc_root = proc_root
 
-    def start(self, unit: str) -> None:
+    def require_inactive(self, unit: str, deadline: Deadline) -> None:
+        """Require the fixed unit to have no active state, cgroup, or invocation."""
+        self._require_unit(unit)
+        output = self.runner.run(
+            ("systemctl", "show", _PROPERTY_ARGUMENT, unit),
+            byte_limit=_CONTROL_OUTPUT_LIMIT,
+            deadline=deadline,
+        )
+        properties = self._property_lines(output)
+        self._require_inactive_properties(properties)
+
+    def start(self, unit: str, deadline: Deadline) -> None:
         """Start one exact fixed unit through the injected bounded command runner."""
         self._require_unit(unit)
-        self._run(("systemctl", "start", unit))
+        self._run(("systemctl", "start", unit), deadline=deadline)
 
-    def observe(self, unit: str) -> UnitObservation:
+    def observe(self, unit: str, deadline: Deadline) -> UnitObservation:
         """Return only complete, exact manager and recursive-cgroup evidence."""
         self._require_unit(unit)
         output = self.runner.run(
             ("systemctl", "show", _PROPERTY_ARGUMENT, unit),
             byte_limit=_CONTROL_OUTPUT_LIMIT,
+            deadline=deadline,
         )
         properties = self._parse_properties(output)
         control_group = properties["ControlGroup"]
@@ -315,7 +327,7 @@ class SystemdRuntime:
             membership=self._membership(control_group),
         )
 
-    def signal_terminate(self, unit: str) -> None:
+    def signal_terminate(self, unit: str, deadline: Deadline) -> None:
         """Send SIGTERM to every process while preserving the retained unit."""
         self._require_unit(unit)
         self._run(
@@ -325,7 +337,8 @@ class SystemdRuntime:
                 "--kill-whom=all",
                 "--signal=SIGTERM",
                 unit,
-            )
+            ),
+            deadline=deadline,
         )
 
     def stop_retained(self, unit: str, deadline: Deadline) -> None:
@@ -333,10 +346,10 @@ class SystemdRuntime:
         self._require_unit(unit)
         self._run(("systemctl", "stop", unit), deadline=deadline)
 
-    def reset(self, unit: str) -> None:
+    def reset(self, unit: str, deadline: Deadline) -> None:
         """Reset one exact retained unit after the post-evidence stop path."""
         self._require_unit(unit)
-        self._run(("systemctl", "reset-failed", unit))
+        self._run(("systemctl", "reset-failed", unit), deadline=deadline)
 
     def unmanaged_workers(self) -> tuple[UnmanagedWorker, ...]:
         """List exact worker commands outside the eight fixed unit cgroups."""
@@ -543,6 +556,25 @@ class SystemdRuntime:
         for key in ("ActiveState", "SubState", "Result"):
             if not _SYSTEMD_VALUE.fullmatch(properties[key]):
                 raise SystemdConflict(f"systemctl show returned a malformed {key}")
+
+    @staticmethod
+    def _require_inactive_properties(properties: dict[str, str]) -> None:
+        for key in _PROPERTIES:
+            if key not in properties:
+                raise SystemdUnavailable(f"systemctl show did not return {key}")
+        for key in ("ActiveState", "SubState", "Result"):
+            if not _SYSTEMD_VALUE.fullmatch(properties[key]):
+                raise SystemdConflict(f"systemctl show returned a malformed {key}")
+        status = properties["ExecMainStatus"]
+        if not status.isascii() or not status.isdecimal() or int(status, 10) not in range(256):
+            raise SystemdConflict("systemctl show returned a malformed ExecMainStatus")
+        if (
+            properties["ActiveState"] != "inactive"
+            or properties["SubState"] != "dead"
+            or properties["ControlGroup"]
+            or properties["InvocationID"]
+        ):
+            raise SystemdConflict("fixed worker unit is not inactive with empty identity")
 
     @staticmethod
     def _require_unit(unit: str) -> None:
