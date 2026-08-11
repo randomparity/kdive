@@ -96,6 +96,14 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert "/opt/kdive-live-worker-lifecycle/revision" in source
 
 
+def test_installer_provisions_the_fixed_worker_fixture_catalog() -> None:
+    source = _text(INSTALLER)
+    assert '"$source_root/fixtures/local-libvirt/."' in source
+    assert "/var/lib/kdive/fixtures/local-libvirt" in source
+    assert 'root:"$libvirt_group"' in source
+    assert "g=rX,o=" in source
+
+
 def test_installer_is_an_executable_host_contract() -> None:
     assert INSTALLER.stat().st_mode & stat.S_IXUSR
 
@@ -270,8 +278,20 @@ def test_libvirt_config_and_shared_provider_directories_are_fixed() -> None:
         "/var/lib/kdive/pcap",
         "/var/lib/kdive/build",
         "/var/lib/kdive/install",
+        "/var/lib/kdive/fixtures/local-libvirt",
     ):
         assert path in provisioning
+
+
+def test_ansible_provisions_and_verifies_worker_accessible_fixture_catalog() -> None:
+    tasks = _text(MAIN_TASKS)
+    verify = _text(VERIFY_TASKS)
+    assert "Create the fixed worker fixture catalog" in tasks
+    assert "{{ live_vm_venv }}/fixtures/local-libvirt/" in tasks
+    assert "live_vm_host_worker_fixture_catalog" in tasks
+    assert "Verify workers can access installed Python and provider paths" in verify
+    assert "/opt/kdive-live-worker-lifecycle/.venv/bin/python" in verify
+    assert "/var/lib/kdive/build" in verify
 
 
 def test_socket_namespaces_are_traversable_but_not_worker_writable() -> None:

@@ -362,6 +362,25 @@
     mode: "2770"
   loop: "{{ live_vm_host_worker_shared_directories }}"
 
+- name: Create the fixed worker fixture catalog
+  ansible.builtin.copy:
+    src: "{{ live_vm_venv }}/fixtures/local-libvirt/"
+    dest: "{{ live_vm_host_worker_fixture_catalog }}/"
+    remote_src: true
+    owner: root
+    group: "{{ live_vm_host_worker_libvirt_group }}"
+    directory_mode: "0750"
+    mode: preserve
+
+- name: Keep the fixed worker fixture catalog group-readable
+  ansible.builtin.file:
+    path: "{{ live_vm_host_worker_fixture_catalog }}"
+    state: directory
+    owner: root
+    group: "{{ live_vm_host_worker_libvirt_group }}"
+    mode: "u=rwX,g=rX,o="
+    recurse: true
+
 - name: Install the fixed live-worker executables
   ansible.builtin.copy:
     src: "{{ live_vm_venv }}/deploy/systemd/bin/{{ item.source }}"

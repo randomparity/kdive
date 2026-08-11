@@ -209,6 +209,18 @@
   become_user: kdive-worker-1
   changed_when: false
 
+- name: Verify workers can access installed Python and provider paths
+  ansible.builtin.command: >-
+    /bin/sh -c '/usr/bin/test -x /opt/kdive-live-worker-lifecycle/.venv/bin/python
+    && /usr/bin/test -r {{ live_vm_host_worker_fixture_catalog }}
+    && /usr/bin/test -x {{ live_vm_host_worker_fixture_catalog }}
+    && /usr/bin/test -w /var/lib/kdive/build
+    && /usr/bin/test -x /var/lib/kdive/build'
+  become: true
+  become_user: "{{ item }}"
+  loop: "{{ live_vm_host_worker_accounts }}"
+  changed_when: false
+
 - name: Verify the selected session libvirtd process is live
   ansible.builtin.command: >-
     pgrep --uid {{ github_runner_user }} --exact libvirtd

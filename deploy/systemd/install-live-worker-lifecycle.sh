@@ -360,6 +360,10 @@ done
   exit 1
 }
 [[ -n $operator && -d $source_root ]] || usage
+[[ -d $source_root/fixtures/local-libvirt ]] || {
+  echo "fixed local-libvirt fixture catalog is missing from the installation source" >&2
+  exit 1
+}
 operator_uid="$(id -u "$operator")"
 _select_libvirt_tuple /etc/os-release
 IFS= read -r witness_dsn || [[ -n $witness_dsn ]]
@@ -414,6 +418,11 @@ _restore_libvirt_runtime
 install -d -o "$operator" -g "$libvirt_group" -m 2770 \
   /var/lib/kdive/rootfs /var/lib/kdive/console \
   /var/lib/kdive/pcap /var/lib/kdive/build /var/lib/kdive/install
+install -d -o root -g "$libvirt_group" -m 0750 \
+  /var/lib/kdive/fixtures /var/lib/kdive/fixtures/local-libvirt
+cp -a "$source_root/fixtures/local-libvirt/." /var/lib/kdive/fixtures/local-libvirt
+chown -R root:"$libvirt_group" /var/lib/kdive/fixtures/local-libvirt
+chmod -R u=rwX,g=rX,o= /var/lib/kdive/fixtures/local-libvirt
 
 for slot in {1..8}; do
   install -d -o root -g "kdive-worker-${slot}" -m 0750 "$state_root/slots/${slot}"

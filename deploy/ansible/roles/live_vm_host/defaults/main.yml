@@ -68,3 +68,4 @@ live_vm_host_worker_shared_directories:
   - /var/lib/kdive/pcap
   - /var/lib/kdive/build
   - /var/lib/kdive/install
+live_vm_host_worker_fixture_catalog: /var/lib/kdive/fixtures/local-libvirt
