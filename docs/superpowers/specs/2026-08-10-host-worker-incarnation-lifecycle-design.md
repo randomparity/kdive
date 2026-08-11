@@ -66,8 +66,10 @@ Host provisioning creates bounded no-login `kdive-worker-1` through `kdive-worke
 separate no-login `kdive-server`, `kdive-reconciler`, and `kdive-libvirt` accounts. None has sudo or
 Docker access. The checkout, installed lifecycle code, unit files, other roles' environment files,
 and witness state are read-only or inaccessible to them. The system manager and lifecycle witness
-are root deployment authority. The sudo-capable invoking account performs short-lived provisioning
-and observation only; no long-running KDIVE application inherits its authority.
+are root deployment authority. A sudo-capable operator or hosted-runner setup performs provisioning;
+the no-sudo self-hosted runner receives only the bounded lifecycle control socket. Both invoking
+accounts perform short-lived control and observation only; no long-running KDIVE application
+inherits their Docker or host authority.
 
 `kdive-libvirt` owns one persistent session-libvirt daemon. Its socket uses one explicit
 `qemu+unix:///session?socket=...` URI and a bounded group containing the configured slot accounts,
@@ -79,7 +81,31 @@ reconciler, and tests have only their required access.
 Hosted live CI provisions the accounts, socket, directories, and units before bring-up. The
 self-hosted `live_vm_host` Ansible role declares the same state. Preflight verifies account IDs,
 memberships, directory and unit ownership/modes, absence of worker sudo/Docker authority, and
-libvirt/path access from both worker and test identities.
+libvirt/path access from every consumer identity. It also compares a digest of the privileged
+lifecycle files in the checkout with the root-owned installed lifecycle manifest. A mismatch fails
+before live testing and directs the operator to re-run the Ansible role; current application code
+is never imported into the root service.
+
+The Ansible role installs `kdive-live-worker-lifecycle.socket` as the runner's narrow root entry
+point. Its fixed Unix socket is `root:kdive-live-control` mode `0660`; only the configured
+`github-runner` account joins that group. The root lifecycle service verifies `SO_PEERCRED` and
+accepts one versioned Unix seqpacket of at most 4 KiB containing only `start`, `status`, `stop`, or
+`report`, an ASCII GitHub run identifier of at most 128 bytes, the worker count in `1..8`, and the
+privileged-lifecycle digest. The byte ceiling applies per request; an oversized or malformed packet
+is rejected without state change and the client may retry a corrected request. It accepts no
+command, unit name, environment value, credential, or caller-selected filesystem path. The service
+derives the single Ansible-configured workspace and unit set, serializes one active run, and rejects
+a mismatched run identifier. `start` and `stop` return an operation state for `status` polling rather
+than holding the control connection across daemon work. Force cleanup remains root-operator-only
+and is not exposed on the socket.
+
+The lifecycle service uses only its provisioned root-owned code. After the digest check it may pass
+the configured checkout's `src` directory to server, reconciler, and worker units, which execute it
+only under their dedicated non-root identities. It validates that the workspace and source tree are
+owned by the runner, are not group/world writable, contain no symlink in the resolved path, and are
+readable but not writable by application identities. It stages no caller-controlled executable as
+root. The hosted ephemeral job installs the same socket, service, identities, and checks during its
+root-capable setup; the self-hosted job only invokes the bounded client.
 
 ### Systemd unit topology
 
@@ -93,10 +119,13 @@ Add the fixed system template `kdive-live-worker@.service`. Instance names are d
 - `StartLimitIntervalSec=0`, so witness retries of the same registered generation cannot be rejected
   by systemd's service start limiter;
 - `KillMode=control-group`, so stop reaches the entire incarnation process tree;
+- `ExitType=cgroup`, so completion follows the complete incarnation cgroup rather than only the main
+  process;
 - `RemainAfterExit=yes`, so an empty cgroup leaves a retained terminal unit;
 - `LoadCredential=kdive-worker-incarnation:<root-only per-generation source>`;
-- one root-owned slot environment file containing only worker-role settings and no witness-role
-  environment file; and
+- one root-owned role environment file containing only worker-role settings, plus a separate fixed
+  per-slot identity environment reference owned by the witness, and no witness-role environment
+  file; and
 - a distinct health bind and journal identity per slot.
 
 Add `kdive-live-worker-lifecycle.service` with `Restart=on-failure`. It runs the fixed lifecycle
@@ -115,23 +144,40 @@ launcher refuses to fall back to them or to direct `python -m kdive worker`.
 
 ### Incarnation state machine
 
-For each slot, the witness uses a bounded root-owned state document containing schema version, unit
-name, generation, holder, credential hash, phase, host boot identifier, optional systemd invocation
-identifier, and service result. Writes use create-new or atomic replace, `fsync`, mode `0600`, no
-symlink following, and fixed directories. The phases are:
+For each slot, the witness uses one root-owned generation bundle under a fixed slot directory. The
+bundle contains a bounded state document, the credential source, and an identity environment file.
+The state contains schema version, unit name, generation, holder, credential hash, phase, host boot
+identifier, optional systemd invocation identifier, and service result. The identity file contains
+only the fixed unit name, random lowercase-hex generation, and derived holder. The credential is not
+an environment value. All opens use fixed directories, no symlink following, and bounded names.
 
-1. `prepared`: mint generation and credential, then atomically persist and `fsync` both the
-   credential source and state containing the unit/generation binding and credential hash;
+To publish `prepared`, the witness creates a mode-`0700` temporary generation directory under the
+fixed parent, writes the credential, identity, and state with their final modes, `fsync`s every file
+and the temporary directory, then atomically renames that directory to the absent fixed slot name
+and `fsync`s the parent. Registration begins only after that rename. A crash before the rename
+leaves an unregistered temporary directory that bounded startup enumeration removes after verifying
+its shape; a crash after the rename leaves one complete enumerable `prepared` bundle. Later phase
+writes use atomic replacement of `state.json` plus directory `fsync`. Cleanup after evidence
+atomically renames the bundle to a bounded tombstone, `fsync`s the parent, unlinks only its three
+known regular files, and removes the directory.
+
+The fixed unit references the slot bundle's identity and credential paths. Before every start or
+re-adoption, the witness parses the identity file itself and requires its unit, generation, and
+holder to equal the state and registered binding. The host authority deliberately uses the existing
+database authority kind `local`; its binding is the fixed unit plus generation, so no new SQL kind
+or migration is required. The phases are:
+
+1. `prepared`: mint generation and credential, then publish the complete generation bundle;
 2. `registered`: idempotently register those exact durable facts through the witness database role,
    then persist and `fsync` the phase after the transaction commits;
-3. `starting`: prove the unit is inactive with no pending job or invocation, then persist and
-   `fsync` start intent with the current host boot identifier before asking systemd to start the
-   fixed unit;
+3. `starting`: prove the identity file matches, and the unit is inactive with no pending job or
+   invocation, then persist and `fsync` start intent with the current host boot identifier before
+   asking systemd to start the fixed unit;
 4. `started`: adopt and wait for systemd's exact pending start job, then persist its invocation
    identifier and the phase when activation begins;
 5. `terminal`: observe the matching retained unit with an empty cgroup; and
-6. `evidenced`: commit terminal evidence, stop/reset the retained unit, then remove credential and
-   state files.
+6. `evidenced`: commit terminal evidence, stop/reset the retained unit, then remove the generation
+   bundle.
 
 The holder is derived from the bounded unit name and random generation, not a reusable PID. The
 authority binding stores those same values. The worker receives both through its allowlisted systemd
@@ -165,8 +211,10 @@ invocation created no runtime, so the witness resets only the failed unit state 
 registered generation. Provisioning disables the unit start limiter; `start-limit-hit` therefore
 proves unit drift and fails closed, as does any other unknown state or result.
 
-On witness restart, reconciliation runs before new starts. It enumerates the fixed configured units
-and root-owned state files with hard ceilings. `prepared` replays registration with the same facts;
+On witness restart, reconciliation runs before new starts. It enumerates fixed configured units,
+published slot bundles, pre-publication temporary directories, and cleanup tombstones with hard
+ceilings. It rejects unknown entries and validates regular-file types, ownership, modes, and bundle
+agreement before acting. `prepared` replays registration with the same facts;
 this covers a crash immediately before or after the database commit. `registered` safely advances
 to `starting` and starts the same generation. On the same host boot, `starting` adopts a pending
 start job, retries an inactive unit with no job or invocation identifier, or re-adopts its existing
@@ -189,37 +237,50 @@ One authority transport remains mandatory.
 
 ### Host launcher and role wiring
 
-`scripts/live-stack/env.sh` defines host-reachable defaults for migration, server, worker,
-reconciler, and lifecycle-witness login members. The shared development DSN remains available only
-to explicit helpers. No long-running process receives it.
+`scripts/live-stack/env.sh` defines host-reachable non-secret settings and local role member names.
+The root lifecycle service reads fixed local development passwords or operator-supplied role DSNs
+from its provisioned configuration, not from the control request. The shared development DSN
+remains available only to explicit short-lived helpers. No long-running process receives it.
 
 Bring-up ordering is:
 
 1. reject root-worker mode and an absent/unsafe systemd boundary;
 2. start backends and wait for Postgres;
-3. apply migrations with the migration-owner DSN;
-4. run idempotent local runtime-role bootstrap;
-5. write separate root-owned role environment files;
-6. start server and reconciler under their dedicated accounts with only their respective DSNs;
-7. start/reconcile the lifecycle witness, which registers and starts every configured worker slot;
+3. send `start`; the root service applies migrations with the migration-owner DSN;
+4. the root service runs idempotent local runtime-role bootstrap;
+5. it writes separate root-owned role environment files;
+6. it starts server and reconciler under their dedicated accounts with their respective DSNs;
+7. it registers and starts every configured worker slot through the lifecycle witness;
 8. settle on server, reconciler, witness, and the exact worker count; and
 9. reconcile inventory only after all real workers remain authenticated and alive.
 
-External role provisioning remains supported: `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` requires supplied
-role DSNs. The launcher scrubs unrelated role variables. Graceful restart/down asks the witness to
-terminate and evidence every worker before backend teardown. It refuses to continue while a unit,
-state file, or incarnation remains unresolved.
+External role provisioning remains supported: `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` requires role DSNs in
+root-owned provisioned configuration. The lifecycle service scrubs unrelated role variables.
+Graceful restart/down sends `stop`; the witness terminates and evidences every worker before the
+runner tears down backends. It refuses completion while a unit, bundle, or incarnation remains
+unresolved.
 
 ### Failure diagnostics in live CI
 
-Add one bounded redacting reporter used by both live jobs. It emits regular files under
-`.live-stack-logs` and bounded journal tails for the lifecycle and exact worker units. It accepts
-only fixed unit-name patterns, emits at most 256 KiB per source, strips URL userinfo and
-secret-named key/value fields, and succeeds when no logs exist. It never follows symlinks or accepts
-a caller supplied unit name.
+Add one bounded redacting reporter owned by the root lifecycle service and used by both live jobs
+through the fixed `report` request. It reads only the lifecycle and configured application units,
+and returns regular files under `.live-stack-logs`; the caller cannot supply a unit or source path.
+Before reading logs, it seeds literal-value redaction from every published worker credential and
+every role-secret value in the root-owned environment files, then adds URL-userinfo and
+secret-named key/value rules. A malformed or over-limit secret source withholds that log source
+rather than emitting unredacted content.
 
-Each live job adds a final `if: failure()` step invoking the reporter. Startup, role, lifecycle, and
-test failures therefore retain their daemon exception without replacing the original failed step.
+For each source the reporter captures at most 320 KiB into a bounded buffer, applies literal and
+structural redaction to the complete buffer, and only then truncates emitted content to 256 KiB.
+Registered literal values are bounded to 4 KiB; the input allowance covers a value crossing the
+output cutoff. The reporter emits at most 1 MiB total in fixed source order, never follows symlinks,
+escapes hostile journal control characters, and succeeds with an explicit marker when no safe log
+source exists. It writes outputs with create-new/no-follow semantics and never returns its redaction
+seed set.
+
+Each live job adds a final `if: failure()` step invoking the bounded control client and reporter.
+Startup, role, lifecycle, and test failures therefore retain their daemon exception without
+replacing the original failed step.
 
 ## Failure contracts
 
@@ -227,6 +288,8 @@ test failures therefore retain their daemon exception without replacing the orig
   systemd/non-root remedy.
 - Unsafe or absent systemd boundary: fail before opening role credentials and name the provisioning
   mismatch.
+- Privileged lifecycle digest mismatch or unauthorized control peer: perform no root action and name
+  the Ansible reprovisioning or identity remedy.
 - Missing witness or worker DSN: no worker starts; the affected role and environment file are named.
 - State, credential, or environment path ownership/mode mismatch: fail closed without following or
   replacing the path.
@@ -246,6 +309,7 @@ test failures therefore retain their daemon exception without replacing the orig
 - System manager restart: installed units and root state remain; witness reconciles before starts.
 - Force cleanup or host loss: may strand a fence, but cannot fabricate evidence or release it.
 - Missing logs: reporter states that no source was available and preserves the earlier failure.
+- Unsafe or oversized redaction seed: withhold the affected source and preserve the earlier failure.
 
 ## Threat model
 
@@ -263,6 +327,9 @@ Added or widened boundaries are:
 - **System manager → server/reconciler.** Dedicated non-escalating accounts, role-specific
   environment files, and fixed units keep compromised application roles away from witness and
   operator authority.
+- **Runner → lifecycle witness.** A fixed peer-credentialed socket, bounded verb schema, installed
+  lifecycle digest, derived workspace/unit paths, and one-run serialization expose lifecycle
+  control without general sudo, arbitrary unit control, or root execution of checkout code.
 - **Witness → witness database.** Existing bounded registration/termination functions receive the
   exact unit/generation binding and hash. The worker DSN is absent.
 - **Systemd credentials → worker.** Root-only unique source, systemd copy, exact-size/hex
@@ -272,8 +339,9 @@ Added or widened boundaries are:
 - **Worker session libvirt → live tests.** A separate daemon identity, one explicit socket URI,
   bounded group membership, setgid paths, and per-consumer preflight prevent caller-relative
   session skew without merging worker credentials under one UID.
-- **Live CI → system journal.** Fixed unit allowlist, per-source byte bound, regular-file checks,
-  and redaction constrain failure disclosure.
+- **Live CI → system journal.** Root-side literal seeding from active secrets, structural redaction
+  before truncation, fixed sources, per-source and total byte bounds, and regular-file checks
+  constrain failure disclosure even when a compromised application writes bare secrets.
 
 Explicitly out of scope:
 
@@ -289,8 +357,8 @@ Explicitly out of scope:
 1. Worker tests redden for missing/malformed systemd identity, credential, generation, overflow,
    cross-transport fallback, and credential/holder mismatch.
 2. Lifecycle unit tests prove register-before-start, unique slot UIDs, generations, and credentials,
-   sibling credential denial, evidence-before-reset/cleanup, cgroup-empty checks, outcome mapping,
-   and retry retention.
+   sibling credential denial, identity-bundle agreement, `local` authority mapping,
+   evidence-before-reset/cleanup, cgroup-empty checks, outcome mapping, and retry retention.
 3. Reconciliation tests inject a crash before and after every durable phase boundary, including
    before registration, after commit but before the phase write, immediately before the systemd
    request, after acceptance while the start job is queued, after activation, and before persisting
@@ -298,18 +366,27 @@ Explicitly out of scope:
    retry, accepted-invocation adoption, non-start-job and boot-change refusal, clean and non-zero
    exits, fatal signals, timeouts, watchdog failures, OOM kills, resource failures before and after
    invocation, start-limit drift, unknown-result refusal, missing/mismatched/duplicate state, system
-   manager/database outages, live adoption, empty-unit evidence, and force behavior.
+   manager/database outages, live adoption, empty-unit evidence, pre-publication orphan and cleanup
+   tombstone recovery, and force behavior. Publication tests inject crashes after every file write,
+   file `fsync`, directory `fsync`, bundle rename, parent `fsync`, and registration commit.
 4. Unit-shape and provisioning tests pin fixed commands, distinct slot/server/reconciler/libvirt
    identities, absence of sudo and Docker authority, role-file separation, `Restart=no`, disabled
-   start limiting, `KillMode=control-group`, `RemainAfterExit=yes`, credential loading, path modes,
-   and the explicit libvirt socket contract.
+   start limiting, `KillMode=control-group`, `ExitType=cgroup`, `RemainAfterExit=yes`, credential
+   loading, path modes, and the explicit libvirt socket contract. A real unit proof leaves a child
+   alive after the main process exits and verifies that evidence waits for the exact cgroup to empty.
 5. A disposable-Postgres process test starts one and then several real workers through the lifecycle
    seam, observes distinct active incarnations and worker-role connections, terminates them, and
    observes exact evidence. A systemd-hosted live proof exercises the real units.
-6. Script tests prove root/direct mode rejection, migration/bootstrap/role ordering, exact worker
-   count, restart refusal on unresolved evidence, and no shared DSN reaches a daemon.
-7. Workflow/reporter tests prove both live jobs invoke failure-only diagnostics and redact bounded
-   file and journal output without following symlinks or accepting arbitrary units.
+6. Script and control-protocol tests prove root/direct mode rejection, exact peer admission, schema
+   and size bounds, fixed workspace/unit derivation, lifecycle-digest mismatch refusal,
+   migration/bootstrap/role ordering, exact worker count, one-run serialization, restart refusal on
+   unresolved evidence, and no shared DSN reaches a daemon. An Ansible-hosted proof invokes every
+   allowed operation as `github-runner`, rejects another UID, and proves the account still has no
+   general sudo or arbitrary systemd control.
+7. Workflow/reporter tests prove both live jobs invoke failure-only diagnostics and redact bare
+   worker credentials and role passwords, including values crossing the output cutoff. They cover
+   hostile journal formatting, multiple sources, per-source and total bounds, malformed seed
+   withholding, no symlink following, and rejection of arbitrary units.
 8. Hosted setup and self-hosted Ansible provisioning pass every worker, reconciler, and test
    identity's libvirt preflight against the same daemon before their first real live proof; an
    actual two-worker run proves one slot cannot read the other's credential.
