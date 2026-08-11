@@ -150,7 +150,8 @@ component_is_accessible() {
 
 account_has_path_access() {
   local account="$1" target="$2" final_permissions="$3"
-  local account_uid account_groups current resolved metadata owner group mode bits index target_component
+  local account_uid account_groups current resolved metadata owner group mode bits
+  local index target_component
   local -a path_parts=()
   account_uid="$(id -u "$account")"
   account_groups=" $(id -G "$account") "
