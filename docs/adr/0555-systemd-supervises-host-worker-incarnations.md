@@ -77,11 +77,15 @@ then exits; it does not host a long-running KDIVE application process.
 For normal stop, the witness sends SIGTERM to the unit cgroup without unloading the unit, waits for
 the cgroup to become empty, compares the retained unit name, generation, and systemd invocation
 identifier with its root-owned state, and records terminal evidence before stopping/resetting the
-unit and deleting the credential source and lifecycle state. A spontaneous worker exit reaches the
-same retained
-`active (exited)` state.
-The witness maps the retained service result to `succeeded`, `failed`, or `killed`; the outcome is
-diagnostic, while empty exact cgroup plus matching generation is the termination authority.
+unit and deleting the credential source and lifecycle state. A clean spontaneous exit is retained
+as `active (exited)` by `RemainAfterExit=yes`; a non-zero exit, fatal signal, timeout, watchdog, or
+OOM is retained as `failed`. Either is terminal evidence only when the exact unit, generation,
+invocation identifier, and empty cgroup match.
+
+The witness maps a clean `success` result to `succeeded`, `exit-code` to `failed`, and the bounded
+signal, core-dump, timeout, watchdog, and OOM-kill results to `killed`. An unknown result fails closed
+without resetting the unit. The outcome is diagnostic, while the empty exact cgroup plus matching
+unit, generation, and invocation identifier is the termination authority.
 
 If the witness crashes, systemd retains the worker unit, cgroup, generation state, and credential
 source. The restarted witness reconciles every configured slot before opening a new generation. A

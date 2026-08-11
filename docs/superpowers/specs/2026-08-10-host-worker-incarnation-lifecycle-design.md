@@ -154,6 +154,12 @@ exact cgroup to empty, then records evidence. A bounded stop timeout leaves the 
 retained; the operator retries or uses the explicit force path, which may strand the fence but never
 creates evidence.
 
+A clean worker exit is retained as `active (exited)` and an abnormal exit is retained as `failed`.
+The witness accepts either terminal state only when the exact unit, generation, invocation
+identifier, and empty cgroup match. It maps systemd `success` to `succeeded`, `exit-code` to
+`failed`, and signal, core-dump, timeout, watchdog, and OOM-kill results to `killed`; any other state
+or result fails closed without resetting the unit.
+
 On witness restart, reconciliation runs before new starts. It enumerates the fixed configured units
 and root-owned state files with hard ceilings. `prepared` replays registration with the same facts;
 this covers a crash immediately before or after the database commit. `registered` safely advances
@@ -223,7 +229,8 @@ test failures therefore retain their daemon exception without replacing the orig
   and only a proven absent row permits discard.
 - Start failure after registration: retain the unit, record `failed`, then clean the handoff.
 - Worker credential or identity mismatch: worker exits; retained unit becomes failure evidence.
-- Worker crash: unit and generation remain; witness records evidence before reset or replacement.
+- Worker crash: the failed unit, generation, and invocation remain; witness records mapped evidence
+  before reset or replacement.
 - Witness crash: systemd restarts it; workers and retained unit state survive for reconciliation.
 - Stop timeout or database outage: unit, state, credential source, and fence remain for retry.
 - Multi-worker bind collision: the exact instance fails and blocks bring-up without affecting other
@@ -280,7 +287,8 @@ Explicitly out of scope:
    before registration, after commit but before the phase write, immediately before the systemd
    request, after acceptance while the start job is queued, after activation, and before persisting
    the invocation identifier. They prove pending-start-job adoption, no-job/no-invocation same-boot
-   retry, accepted-invocation adoption, non-start-job and boot-change refusal,
+   retry, accepted-invocation adoption, non-start-job and boot-change refusal, clean and non-zero
+   exits, fatal signals, timeouts, watchdog failures, OOM kills, unknown-result refusal,
    missing/mismatched/duplicate state, system manager/database outages, live adoption, empty-unit
    evidence, and force behavior.
 4. Unit-shape and provisioning tests pin fixed commands, distinct slot/server/reconciler/libvirt
