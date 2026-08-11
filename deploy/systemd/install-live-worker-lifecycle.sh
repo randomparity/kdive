@@ -24,6 +24,80 @@ _libvirt_runtime_group_gid=""
 _libvirt_runtime_root_locked="false"
 _libvirt_runtime_child_locked="false"
 
+_fixture_files=(
+  manifest.yaml
+  rootfs_catalog.toml
+  profiles/console-ready_ppc64le.yaml
+  profiles/console-ready_x86_64.yaml
+)
+
+_require_real_directory() {
+  local path="$1" owner="$2" group="$3" mode="$4"
+  if [[ -e $path || -L $path ]]; then
+    [[ -d $path && ! -L $path ]] || {
+      echo "fixture directory must be a real directory: $path" >&2
+      return 1
+    }
+  else
+    install -d -o "$owner" -g "$group" -m "$mode" -- "$path"
+  fi
+  chown -h "$owner:$group" -- "$path"
+  chmod "$mode" -- "$path"
+}
+
+_fixture_inventory_is_exact() {
+  local catalog="$1" entry relative
+  [[ -d $catalog && ! -L $catalog ]] || return 1
+  while IFS= read -r entry; do
+    case "$entry" in
+    d:profiles | f:manifest.yaml | f:rootfs_catalog.toml | \
+      f:profiles/console-ready_ppc64le.yaml | f:profiles/console-ready_x86_64.yaml) ;;
+    *) return 1 ;;
+    esac
+  done < <(find -P "$catalog" -mindepth 1 -printf '%y:%P\n')
+  for relative in "${_fixture_files[@]}"; do
+    [[ -f $catalog/$relative && ! -L $catalog/$relative ]] || return 1
+  done
+}
+
+_clear_fixture_catalog() {
+  local catalog="$1"
+  _fixture_inventory_is_exact "$catalog" || {
+    [[ -d $catalog && ! -L $catalog ]] || return 1
+  }
+  find -P "$catalog" -mindepth 1 -delete
+}
+
+install_fixed_fixture_catalog() {
+  local source_catalog="$1" destination_catalog="$2" owner="$3" group="$4"
+  local fixture_parent stage relative
+  _fixture_inventory_is_exact "$source_catalog" || {
+    echo "fixed local-libvirt fixture catalog has an unsafe inventory" >&2
+    return 1
+  }
+  fixture_parent="$(dirname -- "$destination_catalog")"
+  _require_real_directory "$fixture_parent" "$owner" "$group" 0750 || return 1
+  if [[ -e $destination_catalog || -L $destination_catalog ]]; then
+    [[ -d $destination_catalog && ! -L $destination_catalog ]] || {
+      echo "fixture catalog destination must be a real directory" >&2
+      return 1
+    }
+  fi
+  stage="$(mktemp -d "$fixture_parent/.fixture-stage.XXXXXX")"
+  trap 'find -P "$stage" -mindepth 1 -delete 2>/dev/null || :; rmdir "$stage" 2>/dev/null || :' RETURN
+  install -d -m 0700 -- "$stage/profiles"
+  for relative in "${_fixture_files[@]}"; do
+    cp --no-dereference -- "$source_catalog/$relative" "$stage/$relative"
+  done
+  _fixture_inventory_is_exact "$stage" || return 1
+  _require_real_directory "$destination_catalog" "$owner" "$group" 0750 || return 1
+  _clear_fixture_catalog "$destination_catalog" || return 1
+  install -d -o "$owner" -g "$group" -m 0750 -- "$destination_catalog/profiles"
+  for relative in "${_fixture_files[@]}"; do
+    install -o "$owner" -g "$group" -m 0640 -- "$stage/$relative" "$destination_catalog/$relative"
+  done
+}
+
 _libvirt_tuple_error() {
   local reason="$1" socket_path="$2" pid_path="$3"
   echo "contradictory selected libvirt tuple: $reason; $socket_path and $pid_path left untouched." \
@@ -418,11 +492,10 @@ _restore_libvirt_runtime
 install -d -o "$operator" -g "$libvirt_group" -m 2770 \
   /var/lib/kdive/rootfs /var/lib/kdive/console \
   /var/lib/kdive/pcap /var/lib/kdive/build /var/lib/kdive/install
-install -d -o root -g "$libvirt_group" -m 0750 \
-  /var/lib/kdive/fixtures /var/lib/kdive/fixtures/local-libvirt
-cp -a "$source_root/fixtures/local-libvirt/." /var/lib/kdive/fixtures/local-libvirt
-chown -R root:"$libvirt_group" /var/lib/kdive/fixtures/local-libvirt
-chmod -R u=rwX,g=rX,o= /var/lib/kdive/fixtures/local-libvirt
+_require_real_directory /var/lib/kdive 0 0 0755
+_require_real_directory /var/lib/kdive/fixtures 0 "$libvirt_group" 0750
+install_fixed_fixture_catalog "$source_root/fixtures/local-libvirt" \
+  /var/lib/kdive/fixtures/local-libvirt 0 "$libvirt_group"
 
 for slot in {1..8}; do
   install -d -o root -g "kdive-worker-${slot}" -m 0750 "$state_root/slots/${slot}"

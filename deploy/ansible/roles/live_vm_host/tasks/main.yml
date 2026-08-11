@@ -159,6 +159,8 @@
   ansible.builtin.file:
     path: /var/lib/kdive
     state: directory
+    owner: root
+    group: root
     mode: "0755"
 
 - name: Create the fixed live-worker groups
@@ -362,24 +364,82 @@
     mode: "2770"
   loop: "{{ live_vm_host_worker_shared_directories }}"
 
-- name: Create the fixed worker fixture catalog
-  ansible.builtin.copy:
-    src: "{{ live_vm_venv }}/fixtures/local-libvirt/"
-    dest: "{{ live_vm_host_worker_fixture_catalog }}/"
-    remote_src: true
+- name: Inspect the fixed worker fixture parent without following links
+  ansible.builtin.stat:
+    path: /var/lib/kdive/fixtures
+    follow: false
+  register: live_vm_host_worker_fixture_parent
+
+- name: Require a real fixed worker fixture parent
+  ansible.builtin.assert:
+    that: >-
+      not live_vm_host_worker_fixture_parent.stat.exists
+      or (
+      live_vm_host_worker_fixture_parent.stat.isdir
+      and not live_vm_host_worker_fixture_parent.stat.islnk
+      )
+
+- name: Create the fixed worker fixture parent
+  ansible.builtin.file:
+    path: /var/lib/kdive/fixtures
+    state: directory
     owner: root
     group: "{{ live_vm_host_worker_libvirt_group }}"
-    directory_mode: "0750"
-    mode: preserve
+    mode: "0750"
 
-- name: Keep the fixed worker fixture catalog group-readable
+- name: Inspect the fixed worker fixture catalog without following links
+  ansible.builtin.stat:
+    path: "{{ live_vm_host_worker_fixture_catalog }}"
+    follow: false
+  register: live_vm_host_worker_fixture_catalog_stat
+
+- name: Require a real fixed worker fixture catalog
+  ansible.builtin.assert:
+    that: >-
+      not live_vm_host_worker_fixture_catalog_stat.stat.exists
+      or (
+      live_vm_host_worker_fixture_catalog_stat.stat.isdir
+      and not live_vm_host_worker_fixture_catalog_stat.stat.islnk
+      )
+
+- name: Create the fixed worker fixture catalog
   ansible.builtin.file:
     path: "{{ live_vm_host_worker_fixture_catalog }}"
     state: directory
     owner: root
     group: "{{ live_vm_host_worker_libvirt_group }}"
-    mode: "u=rwX,g=rX,o="
+    mode: "0750"
+
+- name: Find fixed worker fixture catalog entries
+  ansible.builtin.find:
+    paths: "{{ live_vm_host_worker_fixture_catalog }}"
     recurse: true
+    file_type: any
+  register: live_vm_host_worker_fixture_entries
+
+- name: Remove stale fixed worker fixture entries
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ live_vm_host_worker_fixture_entries.files }}"
+  when: >-
+    item.path not in [
+    live_vm_host_worker_fixture_catalog + '/profiles',
+    live_vm_host_worker_fixture_catalog + '/manifest.yaml',
+    live_vm_host_worker_fixture_catalog + '/rootfs_catalog.toml',
+    live_vm_host_worker_fixture_catalog + '/profiles/console-ready_ppc64le.yaml',
+    live_vm_host_worker_fixture_catalog + '/profiles/console-ready_x86_64.yaml'
+    ]
+
+- name: Install exact fixed worker fixture files
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../../../fixtures/local-libvirt/{{ item }}"
+    dest: "{{ live_vm_host_worker_fixture_catalog }}/{{ item }}"
+    owner: root
+    group: "{{ live_vm_host_worker_libvirt_group }}"
+    mode: "0640"
+    follow: false
+  loop: "{{ live_vm_host_worker_fixture_files }}"
 
 - name: Install the fixed live-worker executables
   ansible.builtin.copy:

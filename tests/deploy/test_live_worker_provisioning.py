@@ -98,10 +98,69 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
 
 def test_installer_provisions_the_fixed_worker_fixture_catalog() -> None:
     source = _text(INSTALLER)
-    assert '"$source_root/fixtures/local-libvirt/."' in source
+    assert "install_fixed_fixture_catalog" in source
     assert "/var/lib/kdive/fixtures/local-libvirt" in source
-    assert 'root:"$libvirt_group"' in source
-    assert "g=rX,o=" in source
+    assert "--no-dereference" in source
+    assert "_fixture_files" in source
+
+
+def _fixture_catalog(tmp_path: Path) -> Path:
+    catalog = tmp_path / "source" / "fixtures" / "local-libvirt"
+    (catalog / "profiles").mkdir(parents=True)
+    for relative in (
+        "manifest.yaml",
+        "rootfs_catalog.toml",
+        "profiles/console-ready_ppc64le.yaml",
+        "profiles/console-ready_x86_64.yaml",
+    ):
+        (catalog / relative).write_text(relative, encoding="utf-8")
+    return catalog
+
+
+def _install_fixture_catalog(source: Path, destination: Path) -> subprocess.CompletedProcess[str]:
+    command = r"""
+source "$1"
+install_fixed_fixture_catalog "$2" "$3" "$(id -u)" "$(id -g)"
+"""
+    return subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(source), str(destination)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_installer_fixture_copy_is_exact_and_removes_stale_files(tmp_path: Path) -> None:
+    source = _fixture_catalog(tmp_path)
+    destination = tmp_path / "installed" / "local-libvirt"
+    destination.mkdir(parents=True)
+    (destination / "stale").write_text("stale", encoding="utf-8")
+    result = _install_fixture_catalog(source, destination)
+    assert result.returncode == 0, result.stderr
+    assert sorted(path.relative_to(destination).as_posix() for path in destination.rglob("*")) == [
+        "manifest.yaml",
+        "profiles",
+        "profiles/console-ready_ppc64le.yaml",
+        "profiles/console-ready_x86_64.yaml",
+        "rootfs_catalog.toml",
+    ]
+    assert all(path.stat().st_mode & 0o777 == 0o640 for path in destination.rglob("*.yaml"))
+
+
+def test_installer_fixture_copy_rejects_source_or_destination_links(tmp_path: Path) -> None:
+    source = _fixture_catalog(tmp_path)
+    external = tmp_path / "external"
+    external.mkdir()
+    source_link = tmp_path / "source-link"
+    source_link.symlink_to(source, target_is_directory=True)
+    source_result = _install_fixture_catalog(source_link, tmp_path / "installed" / "catalog")
+    assert source_result.returncode != 0
+    destination_link = tmp_path / "installed" / "catalog"
+    destination_link.parent.mkdir(parents=True)
+    destination_link.symlink_to(external, target_is_directory=True)
+    destination_result = _install_fixture_catalog(source, destination_link)
+    assert destination_result.returncode != 0
+    assert not list(external.iterdir())
 
 
 def test_installer_is_an_executable_host_contract() -> None:
@@ -287,7 +346,10 @@ def test_ansible_provisions_and_verifies_worker_accessible_fixture_catalog() -> 
     tasks = _text(MAIN_TASKS)
     verify = _text(VERIFY_TASKS)
     assert "Create the fixed worker fixture catalog" in tasks
-    assert "{{ live_vm_venv }}/fixtures/local-libvirt/" in tasks
+    assert "{{ role_path }}/../../../../fixtures/local-libvirt/{{ item }}" in tasks
+    start = tasks.index("Install exact fixed worker fixture files")
+    end = tasks.index("Install the fixed live-worker executables", start)
+    assert "remote_src: true" not in tasks[start:end]
     assert "live_vm_host_worker_fixture_catalog" in tasks
     assert "Verify workers can access installed Python and provider paths" in verify
     assert "/opt/kdive-live-worker-lifecycle/.venv/bin/python" in verify

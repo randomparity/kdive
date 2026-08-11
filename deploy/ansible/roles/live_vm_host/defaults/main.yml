@@ -69,3 +69,8 @@ live_vm_host_worker_shared_directories:
   - /var/lib/kdive/build
   - /var/lib/kdive/install
 live_vm_host_worker_fixture_catalog: /var/lib/kdive/fixtures/local-libvirt
+live_vm_host_worker_fixture_files:
+  - manifest.yaml
+  - rootfs_catalog.toml
+  - profiles/console-ready_ppc64le.yaml
+  - profiles/console-ready_x86_64.yaml
