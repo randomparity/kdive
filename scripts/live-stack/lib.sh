@@ -279,14 +279,6 @@ wait_for_daemons_to_settle() {
       echo "kdive host processes exited during startup (${alive}/${DAEMON_COUNT} alive)" >&2
       echo "check ${log_dir}/*.log — 'no database connection within' means the backend was" >&2
       echo "unreachable, or its credentials or database name are wrong" >&2
-      # Above one worker there is a second cause with a very different remedy, and each worker
-      # writes its own log so the failing one is identifiable. A worker whose aux port is held by
-      # something foreign dies on an exclusive uvicorn bind, which leaves a bind traceback rather
-      # than a database message — and the stack silently comes up with fewer workers than asked
-      # for, which is the single-worker serialization a multi-worker run exists to escape.
-      echo "on a multi-worker stack, an 'address already in use' traceback at the END of one" >&2
-      echo "worker's own log (the root launch appends) means its aux health port" >&2
-      echo "(${EXTRA_WORKER_HEALTH_PORT_BASE} and up) is taken, not that the backend is down" >&2
       return 1
     fi
   done

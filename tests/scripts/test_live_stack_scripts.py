@@ -137,56 +137,6 @@ def _lib(snippet: str, **env: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _start_workers(tmp_path: Path, worker_count: str) -> list[Path]:
-    """Really run `restart_host_processes` against a stub interpreter; return the worker logs.
-
-    Stubs only the environment the launch loop cannot have in a unit test — the interpreter, the
-    log directory, and the four helpers that touch the live process table or the HTTP port
-    (`stop_daemons`, `require_free_http_port`, `wait_for_daemons_to_settle` and
-    `require_workers_alive`, the last of which would otherwise find no live workers) — so the loop,
-    the per-worker log naming, and the per-worker health-bind override are the code under test.
-    The stub records the aux bind address it was handed, which is the collision this guards.
-    """
-    stub = tmp_path / "python-stub"
-    stub.write_text(
-        '#!/usr/bin/env bash\necho "argv=$* health=${KDIVE_HEALTH_BIND_ADDR:-<unset>}"\n'
-    )
-    stub.chmod(0o755)
-    log_dir = tmp_path / "logs"
-    result = _lib(
-        f'py="{stub}"\n'
-        f'log_dir="{log_dir}"\n'
-        "stop_daemons() { :; }\n"
-        "require_free_http_port() { :; }\n"
-        "wait_for_daemons_to_settle() { :; }\n"
-        # Stubbed too: the stub interpreter exits immediately, so the real check would scan the
-        # process table, find no workers, and fail. Without this the snippet's status came from
-        # the trailing `echo` and restart_host_processes could have failed unnoticed.
-        "require_workers_alive() { :; }\n"
-        "restart_host_processes || echo 'BRING_UP_FAILED'\n"
-        'echo "DAEMON_COUNT=${DAEMON_COUNT}"\n',
-        KDIVE_WORKER_COUNT=worker_count,
-        KDIVE_WORKER_AS_ROOT="0",
-    )
-    assert result.returncode == 0, result.stderr
-    assert "BRING_UP_FAILED" not in result.stdout, (
-        f"restart_host_processes must succeed against the stubs: {result.stdout}\n{result.stderr}"
-    )
-    expected = 2 + int(worker_count)
-    assert f"DAEMON_COUNT={expected}" in result.stdout, (
-        f"settle check must expect server + reconciler + {worker_count} workers: {result.stdout}"
-    )
-    # The launches are detached (`setsid nohup ... &`), so poll rather than `wait` on them.
-    deadline = time.monotonic() + 10
-    logs: list[Path] = []
-    while time.monotonic() < deadline:
-        logs = sorted(p for p in log_dir.glob("worker*.log") if p.read_text().strip())
-        if len(logs) >= int(worker_count):
-            break
-        time.sleep(0.1)
-    return logs
-
-
 def test_configured_worker_count_defaults_to_one_and_rejects_nonsense() -> None:
     """The knob must fail loud on a value that would silently start the wrong number of workers."""
     assert _lib("configured_worker_count").stdout == "1"
@@ -244,6 +194,18 @@ def test_configured_worker_count_rejects_an_int64_wrapping_value() -> None:
         assert result.returncode != 0, f"{wrapping!r} wraps past int64 and must be refused"
         assert "ceiling" in result.stderr, result.stderr
         assert not result.stdout, f"a refused count must print nothing, got {result.stdout!r}"
+
+
+def test_ordinary_daemon_settle_shortage_returns_without_removed_worker_state() -> None:
+    result = _lib(
+        "set -u\n"
+        "sleep() { :; }\n"
+        "daemon_pids() { :; }\n"
+        "DAEMON_COUNT=1\n"
+        "wait_for_daemons_to_settle\n",
+    )
+    assert result.returncode == 1
+    assert "unbound variable" not in result.stderr
 
 
 def _stop_daemons_signals(pid_expr: str) -> str:
@@ -1039,7 +1001,7 @@ def test_lifecycle_status_public_syntax_does_not_accept_a_count() -> None:
 
 
 def test_lifecycle_request_construction_hides_oversized_secret_canaries(tmp_path: Path) -> None:
-    canary = "credential-canary-" * 300
+    canary = "CREDENTIAL_PREFIX_" + "x" * 5000 + "_CREDENTIAL_SUFFIX"
     result = subprocess.run(
         [
             "bash",
@@ -1071,7 +1033,34 @@ def test_lifecycle_request_construction_hides_oversized_secret_canaries(tmp_path
     )
     assert result.returncode == 2
     assert "lifecycle request construction failed safely" in result.stderr
-    assert canary not in result.stdout + result.stderr
+    assert "CREDENTIAL_PREFIX_" not in result.stdout + result.stderr
+    assert "_CREDENTIAL_SUFFIX" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("mode", "groups", "file_group", "expected"),
+    [("50", " 9 ", "9", "5"), ("70", " 9 ", "9", "7"), ("7", " 8 ", "9", "7")],
+)
+def test_permission_bits_pad_short_gnu_stat_octal(
+    mode: str, groups: str, file_group: str, expected: str
+) -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1" && account_permission_bits 1 "$2" 2 "$3" "$4"',
+            "bash",
+            str(LIFECYCLE),
+            groups,
+            file_group,
+            mode,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected
 
 
 def _worker_path_access(

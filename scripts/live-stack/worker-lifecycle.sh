@@ -110,6 +110,7 @@ require_start_prerequisites() {
 
 account_permission_bits() {
   local account_uid="$1" account_groups="$2" owner="$3" group="$4" mode="$5"
+  mode="000${mode}"
   mode="${mode: -3}"
   if [[ $owner == "$account_uid" ]]; then
     printf '%s' "${mode:0:1}"
@@ -130,7 +131,7 @@ permission_mask() {
 }
 
 has_permissions() {
-  local bits="$1" required="$2" permission mask
+  local bits="$1" required="$2" permission mask position
   for ((position = 0; position < ${#required}; position++)); do
     permission="${required:position:1}"
     mask="$(permission_mask "$permission")" || return 1
@@ -140,7 +141,7 @@ has_permissions() {
 
 account_has_path_access() {
   local account="$1" target="$2" final_permissions="$3"
-  local account_uid account_groups current resolved metadata owner group mode bits
+  local account_uid account_groups current resolved metadata owner group mode bits index
   local -a path_parts=()
   account_uid="$(id -u "$account")"
   account_groups=" $(id -G "$account") "
