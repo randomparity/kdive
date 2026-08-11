@@ -247,7 +247,9 @@
     group: "{{ live_vm_host_worker_libvirt_group }}"
     mode: "2770"
   loop: >-
-    {{ [live_vm_host_worker_libvirt_runtime] + live_vm_host_worker_shared_directories }}
+    {{ [live_vm_host_worker_libvirt_runtime,
+    live_vm_host_worker_libvirt_runtime + '/libvirt']
+    + live_vm_host_worker_shared_directories }}
 
 - name: Install the fixed live-worker executables
   ansible.builtin.copy:
@@ -276,9 +278,17 @@
 
 - name: Install the dedicated session-libvirt configuration
   ansible.builtin.copy:
-    src: "{{ live_vm_venv }}/deploy/systemd/virtqemud-live.conf"
-    dest: /etc/kdive/virtqemud-live.conf
+    src: "{{ live_vm_venv }}/deploy/systemd/libvirtd-live.conf"
+    dest: /etc/kdive/libvirtd-live.conf
     remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Publish the selected worker libvirt URI
+  ansible.builtin.copy:
+    dest: /etc/kdive/live-worker-libvirt.env
+    content: "KDIVE_LIBVIRT_URI={{ live_vm_host_worker_libvirt_uri }}\n"
     owner: root
     group: root
     mode: "0644"
@@ -335,10 +345,25 @@
     group: root
     mode: "0444"
 
-- name: Start the operator-owned dedicated session virtqemud
+- name: Inspect the selected Debian-family libvirtd executable
+  ansible.builtin.stat:
+    path: /usr/sbin/libvirtd
+  register: live_vm_host_worker_libvirtd_executable
+
+- name: Require the selected Debian-family libvirtd executable
+  ansible.builtin.assert:
+    that:
+      - live_vm_host_worker_libvirtd_executable.stat.exists
+      - live_vm_host_worker_libvirtd_executable.stat.isreg
+      - live_vm_host_worker_libvirtd_executable.stat.executable
+    fail_msg: selected Debian-family libvirtd executable is missing at /usr/sbin/libvirtd
+
+- name: Start the operator-owned dedicated session libvirtd
   ansible.builtin.command:
-    cmd: virtqemud --daemon --config /etc/kdive/virtqemud-live.conf
-    creates: /run/kdive/live-libvirt/libvirt/virtqemud-sock
+    cmd: >-
+      /usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf
+      --pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid
+    creates: /run/kdive/live-libvirt/libvirt/libvirt-sock
   environment:
     XDG_RUNTIME_DIR: /run/kdive/live-libvirt
   become: true

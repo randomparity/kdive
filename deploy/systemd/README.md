@@ -48,13 +48,22 @@ printf '%s\n' "$witness_dsn" | sudo env "PATH=$PATH" \
 unset witness_dsn
 ```
 
-The installer is idempotent for one checkout on a fresh disposable host. Persistent self-hosted
-runners receive the equivalent accounts, files, modes, socket, witness environment, revision
-stamp, and session-libvirt resources from the `live_vm_host` Ansible role. The fixed endpoint is:
+The installer is idempotent for one checkout on a fresh disposable host. It selects the host
+distro's supported session daemon: Debian-family hosts use monolithic `libvirtd` and
+`libvirt-sock`; Red Hat-family hosts use modular `virtqemud` and `virtqemud-sock`. An unsupported
+distro or missing selected daemon fails before activation. Persistent self-hosted runners receive
+the Debian-family tuple and the equivalent accounts, files, modes, socket, witness environment,
+revision stamp, and session-libvirt resources from the Ubuntu/Debian-only `live_vm_host` role.
+
+The selected non-secret endpoint is published as `KDIVE_LIBVIRT_URI` in the root-owned,
+world-readable `/etc/kdive/live-worker-libvirt.env`. The possible values are:
 
 ```text
+qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock
 qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock
 ```
+
+Exactly one daemon tuple is activated; the installer does not create a compatibility socket alias.
 
 Only the configured operator belongs to `kdive-live-control`. Worker accounts belong to
 `kdive-live-libvirt` and never to the control, sudo, or Docker groups. The witness credential and

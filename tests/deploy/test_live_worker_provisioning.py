@@ -38,7 +38,7 @@ def test_fixed_slot_accounts_and_groups_are_declared() -> None:
     assert defaults["live_vm_host_worker_control_group"] == "kdive-live-control"
     assert defaults["live_vm_host_worker_libvirt_group"] == "kdive-live-libvirt"
     assert defaults["live_vm_host_worker_libvirt_uri"] == (
-        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock"
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
     )
     witness_dsn = defaults["live_vm_host_worker_witness_dsn"]
     assert isinstance(witness_dsn, str)
@@ -156,6 +156,72 @@ def test_installer_removes_only_source_link_created_by_this_run(tmp_path: Path) 
     assert result.returncode == 0, result.stderr
 
 
+def _select_libvirt_tuple(
+    tmp_path: Path, *, os_release: str, binaries: tuple[str, ...]
+) -> subprocess.CompletedProcess:
+    release = tmp_path / "os-release"
+    release.write_text(os_release, encoding="utf-8")
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    for binary in binaries:
+        path = binary_dir / binary
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    command = r"""
+source "$1"
+PATH="$2"
+_select_libvirt_tuple "$3"
+printf '%s\n' "$_libvirt_daemon" "$_libvirt_config" "$_libvirt_socket" \
+  "$_libvirt_pid" "$_libvirt_uri"
+"""
+    return subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(binary_dir), str(release)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_installer_selects_debian_monolithic_tuple(tmp_path: Path) -> None:
+    result = _select_libvirt_tuple(
+        tmp_path, os_release='ID=ubuntu\nID_LIKE="debian"\n', binaries=("libvirtd",)
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "libvirtd",
+        "libvirtd-live.conf",
+        "libvirt-sock",
+        "libvirtd.pid",
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock",
+    ]
+
+
+def test_installer_selects_redhat_modular_tuple(tmp_path: Path) -> None:
+    result = _select_libvirt_tuple(
+        tmp_path, os_release='ID=fedora\nID_LIKE="rhel fedora"\n', binaries=("virtqemud",)
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "virtqemud",
+        "virtqemud-live.conf",
+        "virtqemud-sock",
+        "virtqemud.pid",
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock",
+    ]
+
+
+def test_installer_rejects_unsupported_distro_family(tmp_path: Path) -> None:
+    result = _select_libvirt_tuple(tmp_path, os_release="ID=arch\n", binaries=())
+    assert result.returncode != 0
+    assert "unsupported distro family" in result.stderr
+
+
+def test_installer_rejects_missing_selected_daemon(tmp_path: Path) -> None:
+    result = _select_libvirt_tuple(tmp_path, os_release="ID=debian\nID_LIKE=debian\n", binaries=())
+    assert result.returncode != 0
+    assert "selected Debian-family libvirtd executable is missing" in result.stderr
+
+
 def test_installer_and_ansible_install_the_same_fixed_files() -> None:
     installer = _text(INSTALLER)
     tasks = _text(MAIN_TASKS)
@@ -165,7 +231,7 @@ def test_installer_and_ansible_install_the_same_fixed_files() -> None:
         "kdive-live-worker@.service",
         "kdive-live-worker-lifecycle.socket",
         "kdive-live-worker-lifecycle@.service",
-        "virtqemud-live.conf",
+        "libvirtd-live.conf",
         "live-worker-lifecycle.conf",
     )
     for name in names:
@@ -185,13 +251,16 @@ def test_installer_and_ansible_pin_equivalent_authority_modes() -> None:
 
 
 def test_libvirt_config_and_shared_provider_directories_are_fixed() -> None:
-    config = _text(SYSTEMD / "virtqemud-live.conf")
-    assert 'unix_sock_group = "kdive-live-libvirt"' in config
-    assert 'unix_sock_rw_perms = "0770"' in config
+    for name in ("libvirtd-live.conf", "virtqemud-live.conf"):
+        config = _text(SYSTEMD / name)
+        assert 'unix_sock_group = "kdive-live-libvirt"' in config
+        assert 'unix_sock_rw_perms = "0770"' in config
+        assert 'unix_sock_dir = "/run/kdive/live-libvirt/libvirt"' in config
     tasks = _text(MAIN_TASKS)
     provisioning = tasks + _text(DEFAULTS)
     assert "XDG_RUNTIME_DIR: /run/kdive/live-libvirt" in tasks
-    assert "virtqemud --daemon --config /etc/kdive/virtqemud-live.conf" in tasks
+    assert "/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf" in tasks
+    assert "virtqemud" not in provisioning
     for path in (
         "/run/kdive/live-libvirt",
         "/var/lib/kdive/rootfs",
@@ -201,6 +270,47 @@ def test_libvirt_config_and_shared_provider_directories_are_fixed() -> None:
         "/var/lib/kdive/install",
     ):
         assert path in provisioning
+
+
+def test_ansible_materializes_only_debian_libvirt_tuple() -> None:
+    defaults = _text(DEFAULTS)
+    tasks = _text(MAIN_TASKS)
+    verify = _text(VERIFY_TASKS)
+    assert "libvirtd-live.conf" in tasks
+    assert "libvirt-sock" in defaults + tasks + verify
+    assert "libvirtd.pid" in tasks
+    assert "virtqemud" not in defaults + tasks + verify
+    assert "pgrep" in verify and "libvirtd" in verify
+    assert "--pidfile /run/kdive/live-libvirt/libvirt/libvirtd.pid" in verify
+
+
+def test_selected_uri_file_is_public_root_owned_and_verified() -> None:
+    installer = _text(INSTALLER)
+    tasks = _text(MAIN_TASKS)
+    verify = _text(VERIFY_TASKS)
+    path = "/etc/kdive/live-worker-libvirt.env"
+    for text in (installer, tasks, verify):
+        assert path in text
+    assert "printf 'KDIVE_LIBVIRT_URI=%s\\n' \"$_libvirt_uri\"" in installer
+    assert "install -o root -g root -m 0644" in installer
+    assert "KDIVE_LIBVIRT_URI={{ live_vm_host_worker_libvirt_uri }}" in tasks
+    assert 'mode: "0644"' in tasks
+    assert "owner: root" in tasks and "group: root" in tasks
+    assert 'mode == "0644"' in verify
+
+
+def test_installer_validates_selected_daemon_pid_and_socket_authority() -> None:
+    source = _text(INSTALLER)
+    assert '--pid-file "$libvirt_pid_path"' in source
+    assert 'kill -0 "$libvirt_pid"' in source
+    assert "[[ -S $libvirt_socket_path ]]" in source
+    assert "stat -c '%U:%G:%a' \"$libvirt_socket_path\"" in source
+    assert '"$operator:$libvirt_group:770"' in source
+
+
+def test_installer_has_no_compatibility_socket_alias() -> None:
+    source = _text(INSTALLER)
+    assert not re.search(r"\bln\b[^\n]*(?:libvirt|virtqemud)-sock", source)
 
 
 def test_lifecycle_config_example_contains_no_database_authority() -> None:
