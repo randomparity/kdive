@@ -126,11 +126,14 @@ On restart the service loads and validates the run record and fixed receipt set 
 requests, reconciles only matching bundles and units, and resumes the recorded operation. A repeated
 request with identical facts is idempotent; a different run identifier or changed immutable fact
 fails closed while the record exists. `running` requires every receipt to describe a live matching
-`started` invocation. A terminal slot during start first persists the run outcome `failed` and moves
-the report state to `pending`. The witness stages a safe failure report before moving to `stopping`,
-then terminates and evidences the remaining slots. `complete` requires every expected receipt to be
-in one positive terminal disposition plus the server, reconciler, role files, and report staging to
-have their specified terminal disposition.
+`started` invocation. Any terminal slot observed during `starting` or `running`, before a durably
+requested stop, first persists run outcome `failed` and report state `pending`. The witness stages a
+safe failure report while every retained unit, role file, and credential source still exists, then
+moves to `stopping`, evidences that slot, and terminates and evidences the remaining slots. A caller
+stop first persists `stopping` with report `not-required` before signaling a unit, so its expected
+terminations do not take the failure path. `complete` requires every expected receipt to be in one
+positive terminal disposition plus the server, reconciler, role files, and report staging to have
+their specified terminal disposition.
 
 The fixed `report` operation ensures the report oneshot atomically publishes sanitized output
 beneath a root-owned staging directory derived from the active run identifier; it does not return
@@ -305,10 +308,13 @@ acting. `prepared` replays registration with the same facts;
 this covers a crash immediately before or after the database commit. `registered` safely advances
 to `starting` and starts the same generation. On the same host boot, `starting` adopts a pending
 start job, retries an inactive unit with no job or invocation identifier, or re-adopts its existing
-invocation. Live matching cgroups are re-adopted. Empty matching units receive evidence and cleanup.
-A pending non-start job, changed boot identifier, missing pre-evidence state, a unit missing from
-`starting` onward without an exact positive receipt, generation or invocation mismatch, duplicate
-state, unexpected instance, or ambiguous cgroup status fails closed and names the slot. Systemd and
+invocation. Live matching cgroups are re-adopted. If reconciliation observes an empty matching unit
+while the run is `starting` or `running`, it persists the failed-run/report-pending transition and
+completes safe report staging before terminal evidence or cleanup. Only a run already durably in
+`stopping` may send an empty matching unit directly through evidence and cleanup. A pending
+non-start job, changed boot identifier, missing pre-evidence state, a unit missing from `starting`
+onward without an exact positive receipt, generation or invocation mismatch, duplicate state,
+unexpected instance, or ambiguous cgroup status fails closed and names the slot. Systemd and
 database outages leave all objects for retry.
 
 ### Worker credential and identity input
@@ -399,8 +405,9 @@ retain their daemon exception without replacing the original failed step.
   and only a proven absent row permits discard.
 - Start failure after registration: retain the unit, record `failed`, then clean the handoff.
 - Worker credential or identity mismatch: worker exits; retained unit becomes failure evidence.
-- Worker crash: the failed unit, generation, and invocation remain; witness records mapped evidence
-  before reset or replacement.
+- Worker clean exit or crash before requested stop: the retained unit, generation, invocation, role
+  files, and all credential seeds remain while the witness persists run failure and stages the safe
+  report; only then does it record mapped evidence before reset or replacement.
 - Partial multi-worker start failure: persist run `failed`, stop/evidence every started slot, retain
   each positive slot receipt and every plaintext redaction seed until the safe report is staged, and
   report failure rather than replacing a failed slot in place.
@@ -482,10 +489,13 @@ Explicitly out of scope:
    tombstone recovery, and force behavior. Early-failure tests prove preparation failure,
    pre-publication failure, and partial start converge through `not-created`,
    `discarded-before-registration`, or exact evidenced `cleaned` receipts without treating absence as
-   termination. Publication tests inject crashes after every file write, file `fsync`, directory
-   `fsync`, bundle rename, parent `fsync`, and registration commit. Every run-record, receipt, and
-   generation-state replacement test covers write, file `fsync`, the fixed `.next` entry before
-   rename, rename, parent `fsync`, validated cleanup, and malformed-entry refusal.
+   termination. Running-phase clean and abnormal exit tests crash after terminal observation, run
+   outcome/report-state persistence, safe report publication, evidence commit, receipt write, unit
+   reset, and bundle deletion; witness restart must preserve that order. Publication tests inject
+   crashes after every file write, file `fsync`, directory `fsync`, bundle rename, parent `fsync`,
+   and registration commit. Every run-record, receipt, and generation-state replacement test covers
+   write, file `fsync`, the fixed `.next` entry before rename, rename, parent `fsync`, validated
+   cleanup, and malformed-entry refusal.
 4. Unit-shape and provisioning tests pin fixed commands, distinct slot/server/reconciler/libvirt
    identities, absence of sudo and Docker authority, role-file separation, `Restart=no`, disabled
    start limiting, `KillMode=control-group`, `ExitType=cgroup`, `RemainAfterExit=yes`, credential
@@ -513,7 +523,9 @@ Explicitly out of scope:
    worker credentials and role passwords, including values crossing the output cutoff. They cover
    hostile journal formatting, multiple sources, per-source and total bounds, malformed seed
    withholding, no symlink following, rejection of arbitrary units, and a partial-start failure that
-   still emits redacted daemon logs after the witness and report helper restart.
+   still emits redacted daemon logs after the witness and report helper restart. The same proof runs
+   for clean and abnormal worker exits after `running` and distinguishes them from caller-requested
+   normal stop.
 8. Hosted setup and self-hosted Ansible provisioning pass every worker, reconciler, and test
    identity's libvirt preflight against the same daemon before their first real live proof; an
    actual two-worker run proves one slot cannot read the other's credential.
