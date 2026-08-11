@@ -90,21 +90,31 @@ The Ansible role installs `kdive-live-worker-lifecycle.socket` as the runner's n
 point. Its fixed Unix socket is `root:kdive-live-control` mode `0660`; only the configured
 `github-runner` account joins that group. The root lifecycle service verifies `SO_PEERCRED` and
 accepts one versioned Unix seqpacket of at most 4 KiB containing only `start`, `status`, `stop`, or
-`report`, an ASCII GitHub run identifier of at most 128 bytes, the worker count in `1..8`, and the
+`report`, an ASCII control-run token of at most 128 bytes, the worker count in `1..8`, and the
 privileged-lifecycle digest. The byte ceiling applies per request; an oversized or malformed packet
 is rejected without state change and the client may retry a corrected request. It accepts no
 command, unit name, environment value, credential, or caller-selected filesystem path. The service
 derives the single Ansible-configured workspace and unit set, serializes one active run, and rejects
-a mismatched run identifier. `start` and `stop` return an operation state for `status` polling rather
+a mismatched control-run token. `start` and `stop` return an operation state for `status` polling rather
 than holding the control connection across daemon work. Force cleanup remains root-operator-only
 and is not exposed on the socket.
 
+CI derives the token from the numeric repository ID, workflow run ID, workflow run attempt, and
+fixed job name, so a GitHub rerun is a new owner while every step in one job derives the same value.
+Local `up.sh` mints a random 256-bit lowercase-hex token and atomically persists it in the fixed
+runner-owned mode-`0600` control-state file; separate-shell `status`, `report`, and `down` read that
+file. An active local token is resumed rather than replaced. After completed `down`, the client
+removes its token file. A repeated `start` for a completed token returns the retained completed
+result and never creates another run; only a different token may retire that completed record and
+publish a new owner. Delayed duplicate requests therefore cannot become new attempts.
+
 Before any migration, role-file write, or unit transition, an accepted `start` atomically publishes
-one root-owned mode-`0600` run record containing schema version, run identifier, lifecycle digest,
-worker count, workspace identity, and operation phase (`starting`, `running`, `stopping`, or
+one root-owned mode-`0600` run record containing schema version, control-run token, lifecycle digest,
+worker count, workspace identity, journal start cursor, per-run unit invocation identifiers, and
+operation phase (`starting`, `running`, `stopping`, or
 `complete`) plus a nullable run outcome and report state (`not-required`, `pending`, or `complete`).
 A fixed receipts directory contains exactly one mode-`0600` receipt for each configured slot. Each
-receipt retains the run identifier, slot, unit, nullable generation/incarnation/binding/hash until
+receipt retains the control-run token, slot, unit, nullable generation/incarnation/binding/hash until
 publication, lifecycle phase, terminal outcome, database termination-commit flag, and bundle-cleanup
 flag. Its terminal disposition is exactly one of `not-created`,
 `discarded-before-registration`, or `cleaned`. The service builds the record and initial
@@ -112,7 +122,7 @@ flag. Its terminal disposition is exactly one of `not-created`,
 renames it to the absent active-run path, and `fsync`s the parent before taking another action.
 Receipt and run-record updates use atomic replacement plus directory `fsync`. That complete run
 bundle is the serialization and positive-recovery authority across service restarts. Every
-generation bundle includes the same run identifier.
+generation bundle includes the same control-run token.
 
 Every atomic file replacement uses one exact sibling name: `.run.json.next`,
 `.slot-<n>.json.next`, or `.state.json.next`. It is opened create-exclusive, no-follow, with the
@@ -124,7 +134,7 @@ rename instead, so no valid recovery path needs to promote a replacement tempora
 
 On restart the service loads and validates the run record and fixed receipt set before units or
 requests, reconciles only matching bundles and units, and resumes the recorded operation. A repeated
-request with identical facts is idempotent; a different run identifier or changed immutable fact
+request with identical facts is idempotent; a different control-run token or changed immutable fact
 fails closed while the record exists. `running` requires every receipt to describe a live matching
 `started` invocation. Any terminal slot observed during `starting` or `running`, before a durably
 requested stop, first persists run outcome `failed` and report state `pending`. The witness stages a
@@ -137,11 +147,12 @@ If outcome is already `failed` or report is `pending`, stop preserves those fact
 retries safe report staging with all seeds retained, and enters `stopping` only with report
 `complete`. Outcome may advance only from null to `failed`; report state may advance only
 `not-required` to `pending` to `complete`, and retries preserve `complete`. `complete` requires every
-expected receipt to be in one positive terminal disposition plus the server, reconciler, role files,
-and report staging to have their specified terminal disposition.
+expected receipt to be in one positive terminal disposition plus the server, reconciler,
+reconcile-once invocation, role files, and report staging to have their specified terminal
+disposition.
 
 The fixed `report` operation ensures the report oneshot atomically publishes sanitized output
-beneath a root-owned staging directory derived from the active run identifier; it does not return
+beneath a root-owned staging directory derived from the active control-run token; it does not return
 journal bytes in the 4 KiB control response. The response names only fixed staged files that the
 authorized peer may read, and the client copies them into its checkout. A retry for the same run
 adopts a complete report or replaces an incomplete temporary report. Failure reporting runs before
@@ -186,9 +197,10 @@ entrypoint as root, receives only the lifecycle-witness DSN, owns the root-only 
 source directories, and uses a literal allowlist to inspect or operate only
 `kdive-live-stack-prepare.service`, `kdive-live-stack-report.service`,
 `kdive-live-stack-cleanup.service`, `kdive-live-server.service`,
-`kdive-live-reconciler.service`, and configured `kdive-live-worker@<slot>.service` instances in
-`1..8`. It accepts no unit name through the control protocol. Root is already the accepted host
-deployment authority; no worker process receives its credentials or control surface.
+`kdive-live-reconciler.service`, `kdive-live-reconcile-once.service`, and configured
+`kdive-live-worker@<slot>.service` instances in `1..8`. It accepts no unit name through the control
+protocol. Root is already the accepted host deployment authority; no worker process receives its
+credentials or control surface.
 
 Three fixed root oneshots keep other database and secret authorities out of that long-lived service.
 `kdive-live-stack-prepare.service` reads provisioned migration and role configuration, applies
@@ -204,7 +216,13 @@ environment never contain migration-owner, server, worker, or reconciler credent
 sandbox makes the role environment directory unreadable.
 
 The live topology also installs `kdive-live-server.service` and
-`kdive-live-reconciler.service` under their dedicated accounts.
+`kdive-live-reconciler.service` under their dedicated accounts with `Restart=no`. A fixed
+`kdive-live-reconcile-once.service` runs as `kdive-reconciler`, receives only the reconciler
+environment file, executes the installed `reconcile-systems` command once, and uses
+`RemainAfterExit=yes` so its exact invocation identifier and success result remain observable. The
+lifecycle service starts it only after all workers are authenticated, persists its invocation and
+result in the run record, and treats any non-success result as a failed run. Neither the caller nor
+the lifecycle service receives its database DSN.
 Their root-owned environment files contain only the matching role DSN and required non-database
 settings. The reconciler joins the libvirt socket group; neither role can read witness or worker
 credentials, control worker units, invoke sudo, or reach Docker.
@@ -216,7 +234,7 @@ launcher refuses to fall back to them or to direct `python -m kdive worker`.
 
 For each slot, the witness uses one root-owned generation bundle under a fixed slot directory. The
 bundle contains a bounded state document, the credential source, and an identity environment file.
-The state contains schema version, control-run identifier, unit name, generation, holder, credential
+The state contains schema version, control-run token, unit name, generation, holder, credential
 hash, phase, host boot identifier, optional systemd invocation identifier, and service result. The
 identity file contains only the fixed unit name, random lowercase-hex generation, and derived
 holder. The credential is not an environment value. All opens use fixed directories, no symlink
@@ -350,7 +368,8 @@ Bring-up ordering is:
 6. the lifecycle service starts server and reconciler under their dedicated accounts;
 7. it registers and starts every configured worker slot using only its witness DSN;
 8. settle on server, reconciler, witness, and the exact worker count; and
-9. reconcile inventory only after all real workers remain authenticated and alive.
+9. start the fixed reconcile-once unit, retain its exact successful invocation receipt, and return
+   only after that role-separated inventory pass completes.
 
 External role provisioning remains supported: `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` requires role DSNs in
 root-owned provisioned configuration. The preparation oneshot scrubs unrelated role variables.
@@ -368,6 +387,16 @@ blocked while report state is `pending`; a helper crash leaves every seed and jo
 idempotent retry. Only an atomically published safe report manifest advances report state to
 `complete` and permits destructive cleanup. A successful run uses `not-required` and needs no
 report prerequisite.
+
+Before publishing the active run bundle, the lifecycle service obtains a journald cursor and its
+current systemd invocation identifier and stores both in that bundle. After systemd accepts each
+preparation, server, reconciler, worker, or reconcile-once activation, the service persists that
+unit's exact `_SYSTEMD_INVOCATION_ID` before treating the step as ready or starting the next one. A
+restarted lifecycle service appends its new invocation identifier before resuming run work. The
+report helper accepts per-run unit journal entries only when their invocation identifier is in the
+run record; lifecycle entries must be after the stored cursor and match a lifecycle invocation
+recorded for that run. A source with no accepted invocation emits only a bounded systemd status
+snapshot and an explicit no-current-invocation marker. It never falls back to a fixed-unit tail.
 
 The helper reads only the lifecycle and configured application units and returns regular staged
 files through the later fixed `report` request; the caller cannot supply a unit or source path.
@@ -387,8 +416,13 @@ seed set.
 Each live job adds a final `if: failure()` step invoking the bounded control client's `report`
 operation before its always-run `stop`. The operation adopts the already staged automatic failure
 report or durably sets run outcome `failed` and report state `pending` before starting the helper if
-failure happened outside a daemon transition. Startup, role, lifecycle, and test failures therefore
-retain their daemon exception without replacing the original failed step.
+failure happened outside a daemon transition. After copying only manifest-listed files, the client
+prints their fixed headings and bounded sanitized content into the Actions job log, prefixing every
+content line with `| ` so hostile text cannot become a workflow command. The 1 MiB report ceiling is
+also the per-job console-publication ceiling; reaching it emits one truncation marker and `report`
+still succeeds. Startup, role, lifecycle, and test failures therefore expose their daemon exception
+in the failed run without replacing the original failed step. Self-hosted and hosted workspaces may
+then disappear without being the only copy visible to the operator.
 
 ## Failure contracts
 
@@ -398,8 +432,10 @@ retain their daemon exception without replacing the original failed step.
   mismatch.
 - Privileged lifecycle digest mismatch or unauthorized control peer: perform no root action and name
   the Ansible reprovisioning or identity remedy.
-- Mismatched control-run identifier or immutable run facts: leave the active run untouched and
+- Mismatched control-run token or immutable run facts: leave the active run untouched and
   require the caller owning the recorded identifier to resume or stop it.
+- Missing local control token: perform no lifecycle operation and direct the operator to the fixed
+  control-state file or a new `up` after the prior run is confirmed complete.
 - Missing witness or worker DSN: no worker starts; the affected role and environment file are named.
 - Preparation oneshot failure: no application starts; its fixed non-secret receipt names the failed
   phase, the run stops slot creation and records every untouched receipt `not-created`, and role
@@ -433,6 +469,10 @@ retain their daemon exception without replacing the original failed step.
   `complete` until its non-secret receipt proves every fixed role file absent.
 - Stop during failed/pending report: preserve the monotonic failure state, retry safe report
   publication, and signal or clean no unit until the report manifest is durable.
+- Missing or mismatched journal boundary: withhold that source, emit its fixed status snapshot and
+  boundary error, and never fall back to history from the unit name.
+- Reconcile-once failure: fail the run, stage the safe report, and retain its exact invocation result
+  before stopping; no caller receives the reconciler DSN.
 
 ## Threat model
 
@@ -451,8 +491,9 @@ Added or widened boundaries are:
   environment files, and fixed units keep compromised application roles away from witness and
   operator authority.
 - **Runner → lifecycle witness.** A fixed peer-credentialed socket, bounded verb schema, installed
-  lifecycle digest, derived workspace/unit paths, and one-run serialization expose lifecycle
-  control without general sudo, arbitrary unit control, or root execution of checkout code.
+  lifecycle digest, attempt-unique durable token, derived workspace/unit paths, and one-run
+  serialization expose lifecycle control without general sudo, arbitrary unit control, or root
+  execution of checkout code.
 - **Lifecycle witness → root oneshots.** Fixed unit names, installed code, derived inputs, non-secret
   receipts, immediate exit, and role-directory sandboxing keep migration/application credentials
   out of the long-lived socket service while preserving bounded preparation and reporting.
@@ -466,8 +507,10 @@ Added or widened boundaries are:
   bounded group membership, setgid paths, and per-consumer preflight prevent caller-relative
   session skew without merging worker credentials under one UID.
 - **Live CI → system journal.** Root-side literal seeding from active secrets, structural redaction
-  before truncation, fixed sources, per-source and total byte bounds, and regular-file checks
-  constrain failure disclosure even when a compromised application writes bare secrets.
+  before truncation, cursor plus invocation filtering, fixed sources, per-source and total byte
+  bounds, and regular-file checks constrain failure disclosure even when a compromised application
+  writes bare secrets. Line-prefixed console rendering exposes only sanitized current-run content and
+  prevents hostile log lines from becoming Actions workflow commands.
 
 Explicitly out of scope:
 
@@ -508,6 +551,8 @@ Explicitly out of scope:
    start limiting, `KillMode=control-group`, `ExitType=cgroup`, `RemainAfterExit=yes`, credential
    loading, path modes, and the explicit libvirt socket contract. A real unit proof leaves a child
    alive after the main process exits and verifies that evidence waits for the exact cgroup to empty.
+   Reconcile-once unit tests pin its reconciler identity/environment, retained invocation result,
+   ordering after worker readiness, and failure-to-report transition.
 5. A disposable-Postgres process test starts one and then several real workers through the lifecycle
    seam, observes distinct active incarnations and worker-role connections, terminates them, and
    observes exact evidence. A systemd-hosted live proof exercises the real units.
@@ -528,14 +573,19 @@ Explicitly out of scope:
    and proves the account still has no general sudo or arbitrary systemd control. A serialized
    interleaving test persists `failed/pending`, crashes the report helper, submits caller `stop`, and
    proves no state downgrade, unit reset, bundle deletion, or role cleanup occurs before the report
-   retry publishes its manifest.
+   retry publishes its manifest. Ownership tests distinguish GitHub run attempts, reject delayed
+   duplicate starts after completion, and exercise local `up`, `status`, `report`, and `down` in
+   separate shells through one atomically persisted nonce.
 7. Workflow/reporter tests prove both live jobs invoke failure-only diagnostics and redact bare
    worker credentials and role passwords, including values crossing the output cutoff. They cover
    hostile journal formatting, multiple sources, per-source and total bounds, malformed seed
    withholding, no symlink following, rejection of arbitrary units, and a partial-start failure that
    still emits redacted daemon logs after the witness and report helper restart. The same proof runs
    for clean and abnormal worker exits after `running` and distinguishes them from caller-requested
-   normal stop.
+   normal stop. A two-run proof logs unique bare secrets in run one, cleans it, and proves run two's
+   cursor/invocation-filtered report cannot emit them. Workflow tests prove both failed jobs render
+   the bounded manifest files into their job logs with every hostile content line prefixed, rather
+   than merely leaving files in a runner workspace.
 8. Hosted setup and self-hosted Ansible provisioning pass every worker, reconciler, and test
    identity's libvirt preflight against the same daemon before their first real live proof; an
    actual two-worker run proves one slot cannot read the other's credential.
