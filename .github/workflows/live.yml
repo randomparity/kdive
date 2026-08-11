@@ -139,6 +139,17 @@ jobs:
       - name: Sync dependencies against the system interpreter (ABI-match python3-guestfs)
         run: uv sync --locked --group live --python /usr/bin/python3
 
+      - name: Install the fixed live-worker lifecycle host contract
+        run: |
+          set -euo pipefail
+          # The credential is sent only over stdin; it must never be a command-line argument.
+          # This local-only member is created by the post-migration runtime-role bootstrap.
+          witness_password="kdive-witness-local" # pragma: allowlist secret
+          witness_dsn="postgresql://kdive-witness-member:${witness_password}@localhost:5432/kdive"
+          printf '%s\n' "$witness_dsn" | sudo env "PATH=$PATH" \
+            deploy/systemd/install-live-worker-lifecycle.sh \
+              --operator "$(id -un)" --source "$GITHUB_WORKSPACE"
+
       # libguestfs publishes no PyPI wheel, so the system binding is symlinked into the venv
       # exactly as live_vm_host does. Debian installs it into the version-agnostic
       # /usr/lib/python3/dist-packages as guestfs.py plus libguestfsmod.cpython-<abi>.so — both

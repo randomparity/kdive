@@ -40,3 +40,31 @@ live_vm_host_docker_packages:
 # venv-build command so it is found under become regardless of sudo's PATH handling; override
 # if pip is configured to install console scripts elsewhere.
 live_vm_host_uv_bin: /usr/local/bin/uv
+
+# Fixed host-worker authority contract (ADR-0555). Keep the slot count literal: unit names,
+# account isolation, and lifecycle bounds all use exactly 1..8.
+live_vm_host_worker_accounts:
+  - kdive-worker-1
+  - kdive-worker-2
+  - kdive-worker-3
+  - kdive-worker-4
+  - kdive-worker-5
+  - kdive-worker-6
+  - kdive-worker-7
+  - kdive-worker-8
+live_vm_host_worker_control_group: kdive-live-control
+live_vm_host_worker_libvirt_group: kdive-live-libvirt
+live_vm_host_worker_state_root: /var/lib/kdive/live-workers
+live_vm_host_worker_libvirt_runtime: /run/kdive/live-libvirt
+live_vm_host_worker_libvirt_uri: >-
+  qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock
+# Local development default only; production inventory must override it with the bootstrapped
+# lifecycle-witness member DSN. Provisioning keeps the resulting file root-only.
+live_vm_host_worker_witness_dsn: >-  # pragma: allowlist secret
+  postgresql://kdive-witness-member:kdive-witness-local@localhost:5432/kdive
+live_vm_host_worker_shared_directories:
+  - /var/lib/kdive/rootfs
+  - /var/lib/kdive/console
+  - /var/lib/kdive/pcap
+  - /var/lib/kdive/build
+  - /var/lib/kdive/install

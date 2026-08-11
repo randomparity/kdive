@@ -226,6 +226,24 @@ def test_tcg_job_builds_its_venv_against_the_system_interpreter() -> None:
     )
 
 
+def test_hosted_job_installs_fixed_lifecycle_contract_after_uv_sync() -> None:
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    sync = next(i for i, step in enumerate(steps) if "uv sync --locked" in step.get("run", ""))
+    install = next(
+        i
+        for i, step in enumerate(steps)
+        if "install-live-worker-lifecycle.sh" in step.get("run", "")
+    )
+    assert sync < install
+    command = steps[install]["run"]
+    assert '--operator "$(id -un)" --source "$GITHUB_WORKSPACE"' in command
+    assert "printf" in command and "| sudo" in command
+    assert "kdive-witness-member" in command
+    assert "kdive-witness-local" in command
+    assert "KDIVE_DATABASE_URL" not in command
+    assert "--witness-dsn" not in command
+
+
 def test_tcg_job_links_the_guestfs_binding_into_the_venv_and_proves_it_imports() -> None:
     """No PyPI wheel exists, so the binding is symlinked in — and the import is verified here.
 

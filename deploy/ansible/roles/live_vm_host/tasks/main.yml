@@ -161,6 +161,188 @@
     state: directory
     mode: "0755"
 
+- name: Create the fixed live-worker groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+    state: present
+  loop:
+    - "{{ live_vm_host_worker_control_group }}"
+    - "{{ live_vm_host_worker_libvirt_group }}"
+
+- name: Create the fixed live-worker primary groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+    state: present
+  loop: "{{ live_vm_host_worker_accounts }}"
+
+- name: Add the runner to the live-worker control and libvirt groups
+  ansible.builtin.user:
+    name: "{{ github_runner_user }}"
+    groups:
+      - "{{ live_vm_host_worker_control_group }}"
+      - "{{ live_vm_host_worker_libvirt_group }}"
+    append: true
+
+- name: Create the isolated live-worker accounts
+  ansible.builtin.user:
+    name: "{{ item }}"
+    system: true
+    create_home: false
+    home: /nonexistent
+    shell: /usr/sbin/nologin
+    group: "{{ item }}"
+    groups: ["{{ live_vm_host_worker_libvirt_group }}"]
+    append: false
+  loop: "{{ live_vm_host_worker_accounts }}"
+
+- name: Look up the live-worker operator account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ github_runner_user }}"
+
+- name: Record the live-worker operator uid
+  ansible.builtin.set_fact:
+    live_vm_host_worker_operator_uid: "{{ ansible_facts.getent_passwd[github_runner_user][1] }}"
+
+- name: Create root-owned live-worker installation and credential directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /usr/local/libexec, mode: "0755"}
+    - {path: /etc/kdive, mode: "0755"}
+    - {path: /etc/kdive/credentials, mode: "0700"}
+    - {path: "{{ live_vm_host_worker_state_root }}", mode: "0755"}
+    - {path: /opt/kdive-live-worker-lifecycle, mode: "0755"}
+
+- name: Create root-owned fixed slot directories
+  ansible.builtin.file:
+    path: >-
+      {{ live_vm_host_worker_state_root }}/slots/{{
+      item | regex_replace('^kdive-worker-', '') }}
+    state: directory
+    owner: root
+    group: "{{ item }}"
+    mode: "0750"
+  loop: "{{ live_vm_host_worker_accounts }}"
+
+- name: Create the shared session-libvirt runtime and provider directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ live_vm_host_worker_libvirt_group }}"
+    mode: "2770"
+  loop: >-
+    {{ [live_vm_host_worker_libvirt_runtime] + live_vm_host_worker_shared_directories }}
+
+- name: Install the fixed live-worker executables
+  ansible.builtin.copy:
+    src: "{{ live_vm_venv }}/deploy/systemd/bin/{{ item.source }}"
+    dest: "/usr/local/libexec/{{ item.destination }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - {source: kdive-live-worker-gate, destination: kdive-live-worker-gate}
+    - {source: kdive-live-worker-lifecycle, destination: kdive-live-worker-lifecycle}
+
+- name: Install the fixed live-worker units
+  ansible.builtin.copy:
+    src: "{{ live_vm_venv }}/deploy/systemd/system/{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - kdive-live-worker@.service
+    - kdive-live-worker-lifecycle.socket
+    - kdive-live-worker-lifecycle@.service
+
+- name: Install the dedicated session-libvirt configuration
+  ansible.builtin.copy:
+    src: "{{ live_vm_venv }}/deploy/systemd/virtqemud-live.conf"
+    dest: /etc/kdive/virtqemud-live.conf
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the root-only lifecycle service configuration
+  ansible.builtin.copy:
+    dest: /etc/kdive/live-worker-lifecycle.conf
+    content: |
+      KDIVE_LIVE_WORKER_OPERATOR_UID={{ live_vm_host_worker_operator_uid }}
+      KDIVE_LIVE_WORKER_STATE_ROOT={{ live_vm_host_worker_state_root }}
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Install the root-only lifecycle witness credential
+  ansible.builtin.copy:
+    dest: /etc/kdive/credentials/live-worker-witness.dsn
+    content: "{{ live_vm_host_worker_witness_dsn }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Create the root-owned lifecycle witness venv
+  ansible.builtin.command:
+    cmd: >-
+      {{ live_vm_host_uv_bin }} venv --python /usr/bin/python3
+      /opt/kdive-live-worker-lifecycle/.venv
+  args:
+    creates: /opt/kdive-live-worker-lifecycle/.venv/bin/python
+  register: live_vm_host_worker_witness_venv
+
+- name: Install KDIVE into the lifecycle witness venv
+  ansible.builtin.command:
+    cmd: >-
+      {{ live_vm_host_uv_bin }} pip install --python
+      /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive
+  when: live_vm_host_checkout is changed or live_vm_host_worker_witness_venv is changed
+  changed_when: true
+
+- name: Keep the lifecycle witness environment root-owned
+  ansible.builtin.file:
+    path: /opt/kdive-live-worker-lifecycle
+    state: directory
+    recurse: true
+    owner: root
+    group: root
+
+- name: Install the lifecycle witness source revision
+  ansible.builtin.copy:
+    dest: /opt/kdive-live-worker-lifecycle/revision
+    content: "{{ live_vm_host_checkout.after }}\n"
+    owner: root
+    group: root
+    mode: "0444"
+
+- name: Start the operator-owned dedicated session virtqemud
+  ansible.builtin.command:
+    cmd: virtqemud --daemon --config /etc/kdive/virtqemud-live.conf
+    creates: /run/kdive/live-libvirt/libvirt/virtqemud-sock
+  environment:
+    XDG_RUNTIME_DIR: /run/kdive/live-libvirt
+  become: true
+  become_user: "{{ github_runner_user }}"
+
+- name: Enable the live-worker lifecycle control socket
+  ansible.builtin.systemd_service:
+    name: kdive-live-worker-lifecycle.socket
+    daemon_reload: true
+    enabled: true
+    state: started
+
 # No static disk labeling on the Ubuntu target: libvirt confines qemu with AppArmor, and
 # virt-aa-helper adds each domain's disk paths to its per-domain profile dynamically from the
 # domain XML. The world-traversable, runner-owned staging dirs above therefore need no static

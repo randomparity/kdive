@@ -1,0 +1,3 @@
+# Numeric uid of the only account authorized to use the lifecycle control socket.
+KDIVE_LIVE_WORKER_OPERATOR_UID=1000
+KDIVE_LIVE_WORKER_STATE_ROOT=/var/lib/kdive/live-workers
