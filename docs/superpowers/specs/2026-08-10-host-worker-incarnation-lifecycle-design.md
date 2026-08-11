@@ -130,10 +130,15 @@ fails closed while the record exists. `running` requires every receipt to descri
 requested stop, first persists run outcome `failed` and report state `pending`. The witness stages a
 safe failure report while every retained unit, role file, and credential source still exists, then
 moves to `stopping`, evidences that slot, and terminates and evidences the remaining slots. A caller
-stop first persists `stopping` with report `not-required` before signaling a unit, so its expected
-terminations do not take the failure path. `complete` requires every expected receipt to be in one
-positive terminal disposition plus the server, reconciler, role files, and report staging to have
-their specified terminal disposition.
+stop is serialized under the same run lock. It may persist `stopping/not-required` only when the run
+has no failure outcome, report is still `not-required`, and every configured slot is verified live;
+it does so before signaling a unit, so subsequent expected terminations do not take the failure path.
+If outcome is already `failed` or report is `pending`, stop preserves those facts, completes or
+retries safe report staging with all seeds retained, and enters `stopping` only with report
+`complete`. Outcome may advance only from null to `failed`; report state may advance only
+`not-required` to `pending` to `complete`, and retries preserve `complete`. `complete` requires every
+expected receipt to be in one positive terminal disposition plus the server, reconciler, role files,
+and report staging to have their specified terminal disposition.
 
 The fixed `report` operation ensures the report oneshot atomically publishes sanitized output
 beneath a root-owned staging directory derived from the active run identifier; it does not return
@@ -426,6 +431,8 @@ retain their daemon exception without replacing the original failed step.
   sibling, and retry; any other shape fails closed with the exact path class.
 - Cleanup oneshot failure: retain the run in `stopping`, retry the fixed helper, and do not claim
   `complete` until its non-secret receipt proves every fixed role file absent.
+- Stop during failed/pending report: preserve the monotonic failure state, retry safe report
+  publication, and signal or clean no unit until the report manifest is durable.
 
 ## Threat model
 
@@ -518,7 +525,10 @@ Explicitly out of scope:
    restart and non-secret receipt, bundle removal after a positive receipt, the last bundle removal
    before run `complete`, each operation-phase write, final cleanup, and completed-record retirement.
    An Ansible-hosted proof invokes every allowed operation as `github-runner`, rejects another UID,
-   and proves the account still has no general sudo or arbitrary systemd control.
+   and proves the account still has no general sudo or arbitrary systemd control. A serialized
+   interleaving test persists `failed/pending`, crashes the report helper, submits caller `stop`, and
+   proves no state downgrade, unit reset, bundle deletion, or role cleanup occurs before the report
+   retry publishes its manifest.
 7. Workflow/reporter tests prove both live jobs invoke failure-only diagnostics and redact bare
    worker credentials and role passwords, including values crossing the output cutoff. They cover
    hostile journal formatting, multiple sources, per-source and total bounds, malformed seed
