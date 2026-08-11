@@ -6,7 +6,7 @@ import asyncio
 import re
 import time
 import unicodedata
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import chain
 from pathlib import Path
@@ -105,7 +105,7 @@ class _UnsafeDiagnosticText(RuntimeError):
         self,
         forbidden: tuple[str, ...],
         *,
-        used: int = 0,
+        used: int | None = None,
         aggregate_truncated: bool = False,
     ) -> None:
         super().__init__("diagnostic text could not be rendered safely")
@@ -151,6 +151,7 @@ class _DiagnosticCapture:
     reports: list[str] = field(default_factory=list)
     results: list[SlotResult] = field(default_factory=list)
     withheld_slots: set[int] = field(default_factory=set)
+    forbidden_values: set[str] = field(default_factory=set)
     acquired: int = 0
     emitted: int = 0
     aggregate_truncated: bool = False
@@ -362,32 +363,45 @@ class SystemdWorkerLifecycle:
             return _result(state)
         remaining_acquisition = _TOTAL_ACQUISITION_BYTES - capture.acquired
         if remaining_acquisition < _PROPERTY_ACQUISITION_BYTES:
-            capture.append(_AGGREGATE_TRUNCATION_MARKER)
+            marker = _AGGREGATE_TRUNCATION_MARKER
+            if _contains_forbidden(marker, tuple(capture.forbidden_values)):
+                marker = ""
+            capture.append(marker)
             capture.aggregate_truncated = True
             return _result(state)
+        reservation = min(_SLOT_ACQUISITION_BYTES, remaining_acquisition)
+        capture.acquired += reservation
         try:
-            report, used, aggregate_truncated = self._diagnose_slot(
+            report, used, aggregate_truncated, forbidden = self._diagnose_slot(
                 store,
                 state,
                 deadline,
-                acquisition_budget=remaining_acquisition,
+                acquisition_budget=reservation,
                 emission_budget=_TOTAL_EMISSION_BYTES - capture.emitted,
                 reserve_aggregate=has_later,
             )
         except _UnsafeDiagnosticText as exc:
-            capture.acquired += exc.used
+            if exc.used is not None:
+                capture.acquired -= reservation - exc.used
+            capture.forbidden_values.update(exc.forbidden)
             capture.withheld_slots.add(store.slot)
             capture.append("")
             capture.aggregate_truncated = exc.aggregate_truncated
             return _result(state, code="diagnostics_withheld")
         except Exception:
+            capture.acquired -= reservation
             capture.withheld_slots.add(store.slot)
             capture.append(_WITHHELD_TEMPLATE.format(slot=store.slot))
             return _result(state, code="diagnostics_withheld")
-        capture.acquired += used
-        capture.append(report)
+        capture.acquired -= reservation - used
+        capture.forbidden_values.update(forbidden)
+        if _contains_forbidden(report, tuple(capture.forbidden_values)):
+            capture.withheld_slots.add(store.slot)
+            report = ""
         capture.aggregate_truncated = aggregate_truncated
-        return _result(state)
+        capture.append(report)
+        code = "diagnostics_withheld" if store.slot in capture.withheld_slots else "ok"
+        return _result(state, code=code)
 
     def _diagnostic_state(
         self, store: SlotStorage, deadline: Deadline
@@ -406,7 +420,7 @@ class SystemdWorkerLifecycle:
         acquisition_budget: int,
         emission_budget: int,
         reserve_aggregate: bool,
-    ) -> tuple[str, int, bool]:
+    ) -> tuple[str, int, bool, tuple[str, ...]]:
         invocation_id = _require_diagnostic_budget(state, acquisition_budget, emission_budget)
         secret_values = _validated_redaction_values(
             self._load_redaction_values(store.root, store.slot)
@@ -436,7 +450,7 @@ class SystemdWorkerLifecycle:
         acquisition_budget: int,
         emission_budget: int,
         reserve_aggregate: bool,
-    ) -> tuple[str, int, bool]:
+    ) -> tuple[str, int, bool, tuple[str, ...]]:
         properties = self._systemd_call(
             deadline,
             self._runtime.public_properties,
@@ -474,7 +488,7 @@ class SystemdWorkerLifecycle:
                 used=public_bytes + journal_bytes,
                 aggregate_truncated=aggregate_truncated,
             )
-        return report, public_bytes + journal_bytes, aggregate_truncated
+        return report, public_bytes + journal_bytes, aggregate_truncated, forbidden
 
     def _diagnostic_journal(
         self, invocation_id: str, byte_limit: int, deadline: Deadline
@@ -910,30 +924,34 @@ def _sanitize_diagnostics(
     registered = tuple(sorted(registry.snapshot(), key=len, reverse=True))
     structural = _structural_secret_values(text, acquisition_truncated=acquisition_truncated)
     forbidden = tuple(dict.fromkeys((*registered, *structural)))
-    sentinel = _select_mask_sentinel(forbidden)
-    redacted = _render_sanitized_diagnostics(
-        text,
-        registered,
-        sentinel,
-        acquisition_truncated=acquisition_truncated,
-    )
-    return redacted, forbidden
+    for sentinel in _mask_sentinels(forbidden):
+        redacted = _render_sanitized_diagnostics(
+            text,
+            registered,
+            sentinel,
+            acquisition_truncated=acquisition_truncated,
+        )
+        if not _contains_forbidden(redacted, forbidden):
+            return redacted, forbidden
+    raise StateConflict("diagnostics have no safe visible redaction sentinel")
 
 
-def _select_mask_sentinel(forbidden: tuple[str, ...]) -> str:
+def _mask_sentinels(forbidden: tuple[str, ...]) -> Iterator[str]:
     occupied = {character for value in forbidden for character in value}
     occupied_bytes = 0
+    # Every distinct occupied graphic consumes its UTF-8 width in the bounded source material.
+    # Crossing this byte ceiling before finding a gap is therefore impossible by construction.
     codepoints = chain((0x2588,), range(0x21, 0x2588), range(0x2589, 0x110000))
     for codepoint in codepoints:
         candidate = chr(codepoint)
         if unicodedata.category(candidate)[0] not in {"L", "N", "P", "S"}:
             continue
         if candidate not in occupied:
-            return candidate
-        occupied_bytes += len(candidate.encode("utf-8"))
-        if occupied_bytes > _MAX_FORBIDDEN_SOURCE_BYTES:
-            raise AssertionError("bounded forbidden sources cannot occupy the sentinel space")
-    raise StateConflict("diagnostics have no visible redaction sentinel")
+            yield candidate
+        else:
+            occupied_bytes += len(candidate.encode("utf-8"))
+            if occupied_bytes > _MAX_FORBIDDEN_SOURCE_BYTES:
+                raise AssertionError("bounded forbidden sources cannot occupy the sentinel space")
 
 
 def _structural_secret_values(text: str, *, acquisition_truncated: bool) -> tuple[str, ...]:

@@ -159,6 +159,7 @@ class FakeRuntime:
         self.resets: list[str] = []
         self.journal_calls: list[tuple[str, int, float]] = []
         self.journal_chunks: dict[str, tuple[str, ...]] = {}
+        self.journal_failure: Exception | None = None
         self.public_property_calls: list[tuple[str, str]] = []
         self.stop_budgets: list[float] = []
         self.inactive_checks: list[tuple[str, float]] = []
@@ -243,6 +244,8 @@ class FakeRuntime:
 
     def journal(self, invocation_id: str, byte_limit: int, deadline: Deadline) -> tuple[str, ...]:
         self.journal_calls.append((invocation_id, byte_limit, deadline.remaining()))
+        if self.journal_failure is not None:
+            raise self.journal_failure
         return self.journal_chunks.get(invocation_id, ("untrusted journal text",))
 
 
@@ -1048,6 +1051,44 @@ def test_diagnostics_enforces_aggregate_acquisition_and_emission_limits() -> Non
     assert all(store.state == states[store.slot] for store in stores)
 
 
+def test_diagnostics_reserves_aggregate_acquisition_for_failed_journals() -> None:
+    states = {slot: _state(slot, SlotPhase.STARTED) for slot in range(1, 9)}
+    stores, runtime, authority, clock, _ = _fleet(states=states)
+    runtime.journal_failure = SystemdUnavailable("journal unavailable")
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={slot: (f"retained-{slot}",) for slot in states},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok and response.diagnostics is not None
+    assert len(runtime.journal_calls) == 4
+    assert sum(byte_limit + 4096 for _, byte_limit, _ in runtime.journal_calls) <= 1_310_720
+    assert response.diagnostics == "[aggregate diagnostics truncated]\n"
+
+
+def test_failed_journal_aggregate_marker_respects_known_forbidden_values() -> None:
+    states = {slot: _state(slot, SlotPhase.STARTED) for slot in range(1, 9)}
+    stores, runtime, authority, clock, _ = _fleet(states=states)
+    runtime.journal_failure = SystemdUnavailable("journal unavailable")
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={slot: ("aggregate",) for slot in states},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok and response.diagnostics == ""
+    assert len(runtime.journal_calls) == 4
+
+
 def test_diagnostics_withholds_unsafe_source_without_reading_its_journal() -> None:
     state = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, events = _fleet(states={1: state})
@@ -1253,6 +1294,27 @@ def test_diagnostics_selects_beyond_the_previous_finite_mask_set() -> None:
     assert response.ok and response.diagnostics is not None
     assert secret not in response.diagnostics
     assert "!" in response.diagnostics
+
+
+def test_diagnostics_retries_a_sentinel_that_collides_after_control_escaping() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    occupied = "█!\"#$%&'()*+,-./0123456789"
+    runtime.journal_chunks[state.invocation_id or ""] = (f"literal={occupied}",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: (occupied, "x3a")},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert occupied not in response.diagnostics
+    assert "x3a" not in response.diagnostics
+    assert ";" in response.diagnostics
 
 
 def test_diagnostics_escapes_unicode_format_and_separator_controls() -> None:
