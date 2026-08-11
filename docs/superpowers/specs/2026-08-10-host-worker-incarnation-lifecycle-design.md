@@ -102,13 +102,24 @@ and is not exposed on the socket.
 Before any migration, role-file write, or unit transition, an accepted `start` atomically publishes
 one root-owned mode-`0600` run record containing schema version, run identifier, lifecycle digest,
 worker count, workspace identity, and operation phase (`starting`, `running`, `stopping`, or
-`complete`). The
-record uses write/`fsync`/rename/parent-`fsync` ordering and is the serialization authority across
-service restarts. Every generation bundle includes the same run identifier. On restart the service
-loads and validates the run record before units or requests, reconciles only matching bundles and
-the fixed unit count, and resumes the recorded operation. A repeated request with identical facts
-is idempotent; a different run identifier or changed immutable fact fails closed while the record
-exists.
+`complete`) plus a nullable run outcome. A fixed receipts directory contains exactly one mode-`0600`
+receipt for each configured slot. Each receipt retains the run identifier, slot, unit, generation,
+incarnation, authority binding, credential hash, lifecycle phase, terminal outcome, database
+termination-commit flag, and bundle-cleanup flag. The service builds the record and initial
+`pending` receipts in a temporary run directory, `fsync`s every file and directory, atomically
+renames it to the absent active-run path, and `fsync`s the parent before taking another action.
+Receipt and run-record updates use atomic replacement plus directory `fsync`. That complete run
+bundle is the serialization and positive-recovery authority across service restarts. Every
+generation bundle includes the same run identifier.
+
+On restart the service loads and validates the run record and fixed receipt set before units or
+requests, reconciles only matching bundles and units, and resumes the recorded operation. A repeated
+request with identical facts is idempotent; a different run identifier or changed immutable fact
+fails closed while the record exists. `running` requires every receipt to describe a live matching
+`started` invocation. A terminal slot during start first persists the run outcome `failed` and moves
+the run to `stopping`; the witness then terminates and evidences the remaining slots. `complete`
+requires every expected receipt to be positively cleaned plus the server, reconciler, role files,
+and report staging to have their specified terminal disposition.
 
 The fixed `report` operation publishes sanitized output atomically beneath a root-owned staging
 directory derived from the active run identifier; it does not return journal bytes in the 4 KiB
@@ -183,6 +194,16 @@ writes use atomic replacement of `state.json` plus directory `fsync`. Cleanup af
 atomically renames the bundle to a bounded tombstone, `fsync`s the parent, unlinks only its three
 known regular files, and removes the directory.
 
+The slot receipt begins as `pending`. After generation-bundle publication, the witness persists its
+exact generation and `prepared` facts; until cleanup, a lagging receipt may be advanced only from a
+validated matching bundle, unit, and database row. After the termination transaction commits, the
+witness persists `evidenced` in the bundle, then persists an `evidenced` receipt with the exact
+generation, binding, outcome, and termination-commit flag and verifies the matching terminal
+database row. Only that positive receipt permits unit reset and bundle deletion. After deletion it
+persists `cleaned`. A missing bundle with an earlier receipt phase fails closed; a missing bundle
+with an `evidenced` or `cleaned` receipt is accepted only after the same exact database verification
+and expected inactive unit state. Absence by itself is never evidence.
+
 The fixed unit references the slot bundle's identity and credential paths. Before every start or
 re-adoption, the witness parses the identity file itself and requires its unit, generation, and
 holder to equal the state and registered binding. The host authority deliberately uses the existing
@@ -198,8 +219,8 @@ or migration is required. The phases are:
 4. `started`: adopt and wait for systemd's exact pending start job, then persist its invocation
    identifier and the phase when activation begins;
 5. `terminal`: observe the matching retained unit with an empty cgroup; and
-6. `evidenced`: commit terminal evidence, stop/reset the retained unit, then remove the generation
-   bundle.
+6. `evidenced`: commit terminal evidence, persist the positive slot receipt, stop/reset the retained
+   unit, remove the generation bundle, and persist `cleaned` in the receipt.
 
 The holder is derived from the bounded unit name and random generation, not a reusable PID. The
 authority binding stores those same values. The worker receives both through its allowlisted systemd
@@ -234,17 +255,18 @@ registered generation. Provisioning disables the unit start limiter; `start-limi
 proves unit drift and fails closed, as does any other unknown state or result.
 
 On witness restart, reconciliation runs before new starts. It enumerates fixed configured units,
-published slot bundles, pre-publication temporary directories, and cleanup tombstones with hard
-ceilings. It rejects unknown entries and validates regular-file types, ownership, modes, and bundle
-agreement before acting. `prepared` replays registration with the same facts;
+the fixed run receipt set, published slot bundles, pre-publication temporary directories, and cleanup
+tombstones with hard ceilings. It rejects unknown entries and validates regular-file types,
+ownership, modes, run/receipt/bundle agreement, and positive terminal database receipts before
+acting. `prepared` replays registration with the same facts;
 this covers a crash immediately before or after the database commit. `registered` safely advances
 to `starting` and starts the same generation. On the same host boot, `starting` adopts a pending
 start job, retries an inactive unit with no job or invocation identifier, or re-adopts its existing
 invocation. Live matching cgroups are re-adopted. Empty matching units receive evidence and cleanup.
-A pending non-start job, changed boot identifier, missing state, a unit missing from `starting`
-onward, generation or invocation mismatch, duplicate state, unexpected instance, or ambiguous
-cgroup status fails closed and names the slot. Systemd and database outages leave all objects for
-retry.
+A pending non-start job, changed boot identifier, missing pre-evidence state, a unit missing from
+`starting` onward without an exact positive receipt, generation or invocation mismatch, duplicate
+state, unexpected instance, or ambiguous cgroup status fails closed and names the slot. Systemd and
+database outages leave all objects for retry.
 
 ### Worker credential and identity input
 
@@ -323,6 +345,8 @@ replacing the original failed step.
 - Worker credential or identity mismatch: worker exits; retained unit becomes failure evidence.
 - Worker crash: the failed unit, generation, and invocation remain; witness records mapped evidence
   before reset or replacement.
+- Partial multi-worker start failure: persist run `failed`, stop/evidence every started slot, retain
+  each positive slot receipt, and report failure rather than replacing a failed slot in place.
 - Pre-invocation resource failure: reset only the failed unit state and retry the same registered
   generation on the same boot; retain the credential and fence.
 - Start-limit result: fail closed as provisioned-unit drift; do not reset or mint a generation.
@@ -405,10 +429,12 @@ Explicitly out of scope:
    and size bounds, fixed workspace/unit derivation, lifecycle-digest mismatch refusal,
    migration/bootstrap/role ordering, exact worker count, durable one-run serialization, idempotent
    same-run retry, mismatched-run refusal, restart refusal on unresolved evidence, and no shared DSN
-   reaches a daemon. Crash tests cover run-record publication, partial multi-worker start, each
-   operation-phase write, report publication, partial stop, final cleanup, and completed-record
-   retirement. An Ansible-hosted proof invokes every allowed operation as `github-runner`, rejects
-   another UID, and proves the account still has no general sudo or arbitrary systemd control.
+   reaches a daemon. Crash tests cover atomic run-bundle publication, every per-slot receipt update,
+   each slot of partial multi-worker start and stop, startup-failure evidence, bundle removal after a
+   positive receipt, the last bundle removal before run `complete`, each operation-phase write,
+   report publication, final cleanup, and completed-record retirement. An Ansible-hosted proof
+   invokes every allowed operation as `github-runner`, rejects another UID, and proves the account
+   still has no general sudo or arbitrary systemd control.
 7. Workflow/reporter tests prove both live jobs invoke failure-only diagnostics and redact bare
    worker credentials and role passwords, including values crossing the output cutoff. They cover
    hostile journal formatting, multiple sources, per-source and total bounds, malformed seed
