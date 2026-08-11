@@ -303,6 +303,38 @@ def test_unmanaged_scan_excludes_relative_launchers_in_fixed_cgroups(
     assert SystemdRuntime(FakeRunner(), proc_root=tmp_path).unmanaged_workers() == ()
 
 
+@pytest.mark.parametrize("launcher", [b"./python", b".venv/bin/python"])
+def test_unmanaged_scan_recognizes_relative_python_paths_outside_fixed_cgroups(
+    tmp_path: Path, launcher: bytes
+) -> None:
+    _write_process(
+        tmp_path,
+        77,
+        uid=1000,
+        cgroup="/user.slice/session-1.scope",
+        launcher=launcher,
+    )
+
+    assert SystemdRuntime(FakeRunner(), proc_root=tmp_path).unmanaged_workers() == (
+        UnmanagedWorker(pid=77, uid=1000),
+    )
+
+
+@pytest.mark.parametrize("launcher", [b"./python", b".venv/bin/python"])
+def test_unmanaged_scan_excludes_relative_python_paths_in_fixed_cgroups(
+    tmp_path: Path, launcher: bytes
+) -> None:
+    _write_process(
+        tmp_path,
+        77,
+        uid=1000,
+        cgroup="/system.slice/kdive-live-worker@1.service",
+        launcher=launcher,
+    )
+
+    assert SystemdRuntime(FakeRunner(), proc_root=tmp_path).unmanaged_workers() == ()
+
+
 @pytest.mark.parametrize(
     "launcher",
     [
@@ -312,7 +344,9 @@ def test_unmanaged_scan_excludes_relative_launchers_in_fixed_cgroups(
         b"xpython",
         b"/usr/bin/python3.13",
         b"/usr/bin/python-wrapper",
-        b"./python",
+        b"./python-wrapper",
+        b".venv/bin/notpython",
+        b".venv/bin/python3.140",
     ],
 )
 def test_unmanaged_scan_rejects_lookalike_python_launchers(tmp_path: Path, launcher: bytes) -> None:

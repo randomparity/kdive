@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import posixpath
 import re
 import selectors
 import subprocess
@@ -16,7 +17,7 @@ from typing import BinaryIO, Literal, Protocol
 type CgroupMembership = Literal["populated", "empty", "unknown"]
 
 _UNIT = re.compile(r"kdive-live-worker@[1-8]\.service")
-_PYTHON_LAUNCHER = re.compile(rb"(?:/(?:[^/\0]+/)*)?python(?:3(?:\.14)?)?")
+_PYTHON_LAUNCHERS = frozenset((b"python", b"python3", b"python3.14"))
 _INVOCATION_ID = re.compile(r"[0-9a-f]{32}")
 _BOOT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _SYSTEMD_VALUE = re.compile(r"[A-Za-z0-9_.@:-]+")
@@ -398,10 +399,8 @@ class SystemdRuntime:
         with path.open("rb") as stream:
             launcher, ending, used = cls._read_command_token(stream, _PROC_FILE_LIMIT)
             if ending == "limit":
-                if launcher.startswith(b"/"):
-                    raise ValueError("process launcher exceeds the exact command bound")
-                return False
-            if not _PYTHON_LAUNCHER.fullmatch(launcher):
+                raise ValueError("process launcher exceeds the exact command bound")
+            if posixpath.basename(launcher) not in _PYTHON_LAUNCHERS:
                 return False
             if ending != "nul":
                 raise ValueError("worker launcher has no argument delimiter")
