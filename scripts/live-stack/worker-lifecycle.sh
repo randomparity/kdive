@@ -11,6 +11,7 @@ source "${here}/env.sh"
 readonly LIBVIRT_ENV=/etc/kdive/live-worker-libvirt.env
 readonly LIFECYCLE_SOCKET=/run/kdive/live-worker-lifecycle.sock
 readonly LIFECYCLE_REVISION=/opt/kdive-live-worker-lifecycle/revision
+readonly WORKER_PYTHON=/opt/kdive-live-worker-lifecycle/.venv/bin/python
 readonly LIBVIRT_SOCKET_URIS=(
   'qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock'
   'qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock'
@@ -50,8 +51,9 @@ load_libvirt_uri() {
 
 require_start_prerequisites() {
   local slot component_root expected_revision actual_revision control_group
-  [[ "$py" == /* && -x "$py" ]] || {
-    echo "worker Python must be an executable absolute path: ${py}" >&2
+  local component_roots=()
+  [[ "$WORKER_PYTHON" == /* && -f "$WORKER_PYTHON" ]] || {
+    echo "installed worker Python is missing: ${WORKER_PYTHON}" >&2
     return 1
   }
   [[ "${KDIVE_KERNEL_SRC:-}" == /* && -d "${KDIVE_KERNEL_SRC}" ]] || {
@@ -81,11 +83,79 @@ require_start_prerequisites() {
     echo "installed lifecycle witness revision does not match this checkout" >&2
     return 1
   }
-  mkdir -p "$KDIVE_BUILD_WORKSPACE"
   for component_root in "$KDIVE_ROOTFS_DIR" "$KDIVE_BUILD_WORKSPACE" "$KDIVE_INSTALL_STAGING" \
     "$KDIVE_FIXTURE_CATALOG_PATH"; do
     [[ "$component_root" == /* && -d "$component_root" ]] || {
       echo "worker provider path must be an existing absolute directory: ${component_root}" >&2
+      return 1
+    }
+  done
+  IFS=: read -r -a component_roots <<<"$KDIVE_BUILD_COMPONENT_ROOTS"
+  for component_root in "${component_roots[@]}"; do
+    [[ "$component_root" == /* && -d "$component_root" ]] || {
+      echo "worker provider path must be an existing absolute directory: ${component_root}" >&2
+      return 1
+    }
+  done
+  require_worker_path_access "$WORKER_PYTHON" rx "installed worker Python" || return 1
+  require_worker_path_access "${KDIVE_KERNEL_SRC}" rx "worker kernel source" || return 1
+  require_worker_path_access "$KDIVE_ROOTFS_DIR" rwx "worker rootfs directory" || return 1
+  require_worker_path_access "$KDIVE_BUILD_WORKSPACE" rwx "worker build workspace" || return 1
+  require_worker_path_access "$KDIVE_INSTALL_STAGING" rwx "worker install staging" || return 1
+  require_worker_path_access "$KDIVE_FIXTURE_CATALOG_PATH" rx "worker fixture catalog" || return 1
+  for component_root in "${component_roots[@]}"; do
+    require_worker_path_access "$component_root" rx "worker build component root" || return 1
+  done
+}
+
+account_has_path_access() {
+  local account="$1" target="$2" final_permissions="$3"
+  local account_uid account_groups current metadata owner group mode permissions permission required
+  local -a path_parts=()
+  account_uid="$(id -u "$account")"
+  account_groups=" $(id -G "$account") "
+  current="$target"
+  while :; do
+    path_parts+=("$current")
+    [[ $current == / ]] && break
+    current="${current%/*}"
+    [[ -n $current ]] || current=/
+  done
+  for ((index = ${#path_parts[@]} - 1; index >= 0; index--)); do
+    current="${path_parts[index]}"
+    metadata="$(stat -Lc '%u:%g:%a' "$current" 2>/dev/null)" || return 1
+    IFS=: read -r owner group mode <<<"$metadata"
+    if [[ $owner == "$account_uid" ]]; then
+      permissions="${mode:0:1}"
+    elif [[ $account_groups == *" $group "* ]]; then
+      permissions="${mode:1:1}"
+    else
+      permissions="${mode:2:1}"
+    fi
+    if [[ $index -eq 0 ]]; then
+      for permission in $(fold -w1 <<<"$final_permissions"); do
+        case "$permission" in
+        r) required=4 ;;
+        w) required=2 ;;
+        x) required=1 ;;
+        *) return 1 ;;
+        esac
+        ((8#$permissions & required)) || return 1
+      done
+    elif ((8#$permissions & 1)); then
+      :
+    else
+      return 1
+    fi
+  done
+}
+
+require_worker_path_access() {
+  local target="$1" permissions="$2" description="$3" slot
+  for slot in {1..8}; do
+    account_has_path_access "kdive-worker-${slot}" "$target" "$permissions" || {
+      echo "${description} is not accessible to kdive-worker-${slot};" \
+        "fix ownership or group mode" >&2
       return 1
     }
   done
@@ -100,14 +170,17 @@ request() {
   env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
     -u KDIVE_RECONCILER_DATABASE_URL KDIVE_LIFECYCLE_OPERATION="$operation" \
     KDIVE_LIFECYCLE_COUNT="$count" \
-    KDIVE_LIFECYCLE_LIBVIRT_URI="$libvirt_uri" KDIVE_PYTHON="$py" \
-    KDIVE_SOURCE_ROOT="${KDIVE_KERNEL_SRC:-}" KDIVE_EXPECTED_SLOTS="${3:-}" "$py" - <<'PY'
+    KDIVE_LIFECYCLE_LIBVIRT_URI="$libvirt_uri" KDIVE_WORKER_PYTHON="$WORKER_PYTHON" \
+    KDIVE_SOURCE_ROOT="${KDIVE_KERNEL_SRC:-}" \
+    KDIVE_EXPECTED_SLOTS="${KDIVE_LIFECYCLE_EXPECTED_SLOTS:-}" "$py" - <<'PY'
 import os
 import sys
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from kdive.processes.lifecycle.systemd_worker_control import ProtocolRejected, request_path
-from kdive.processes.lifecycle.systemd_worker_contract import LifecycleRequest
+from kdive.processes.lifecycle.systemd_worker_contract import LifecycleRequest, client_exit_status
 
 try:
     operation = os.environ["KDIVE_LIFECYCLE_OPERATION"]
@@ -125,70 +198,88 @@ try:
                 "operation": "start",
                 "worker_count": count,
                 "settings": {
-                "python": os.environ["KDIVE_PYTHON"],
-                "source_root": os.environ["KDIVE_SOURCE_ROOT"],
-                "rootfs_dir": os.environ["KDIVE_ROOTFS_DIR"],
-                "build_workspace": os.environ["KDIVE_BUILD_WORKSPACE"],
-                "build_component_roots": os.environ["KDIVE_BUILD_COMPONENT_ROOTS"],
-                "install_staging": os.environ["KDIVE_INSTALL_STAGING"],
-                "fixture_catalog_path": os.environ["KDIVE_FIXTURE_CATALOG_PATH"],
-                "worker_database_url": os.environ["KDIVE_WORKER_DATABASE_URL"],
-                "libvirt_uri": os.environ["KDIVE_LIFECYCLE_LIBVIRT_URI"],
-                "s3_endpoint_url": os.environ["KDIVE_S3_ENDPOINT_URL"],
-                "s3_bucket": os.environ["KDIVE_S3_BUCKET"],
-                "s3_region": os.environ["KDIVE_S3_REGION"],
-                "aws_access_key_id": os.environ["AWS_ACCESS_KEY_ID"],
-                "aws_secret_access_key": os.environ["AWS_SECRET_ACCESS_KEY"],
-                "accepted_lanes": lanes,
-                "build_user": os.environ.get("KDIVE_BUILD_USER", os.environ["USER"]),
-                "log_level": os.environ["KDIVE_LOG_LEVEL"],
-                "health_binds": binds,
+                    "python": os.environ["KDIVE_WORKER_PYTHON"],
+                    "source_root": os.environ["KDIVE_SOURCE_ROOT"],
+                    "rootfs_dir": os.environ["KDIVE_ROOTFS_DIR"],
+                    "build_workspace": os.environ["KDIVE_BUILD_WORKSPACE"],
+                    "build_component_roots": os.environ["KDIVE_BUILD_COMPONENT_ROOTS"],
+                    "install_staging": os.environ["KDIVE_INSTALL_STAGING"],
+                    "fixture_catalog_path": os.environ["KDIVE_FIXTURE_CATALOG_PATH"],
+                    "worker_database_url": os.environ["KDIVE_WORKER_DATABASE_URL"],
+                    "libvirt_uri": os.environ["KDIVE_LIFECYCLE_LIBVIRT_URI"],
+                    "s3_endpoint_url": os.environ["KDIVE_S3_ENDPOINT_URL"],
+                    "s3_bucket": os.environ["KDIVE_S3_BUCKET"],
+                    "s3_region": os.environ["KDIVE_S3_REGION"],
+                    "aws_access_key_id": os.environ["AWS_ACCESS_KEY_ID"],
+                    "aws_secret_access_key": os.environ["AWS_SECRET_ACCESS_KEY"],
+                    "accepted_lanes": lanes,
+                    "build_user": os.environ.get("KDIVE_BUILD_USER", os.environ["USER"]),
+                    "log_level": os.environ["KDIVE_LOG_LEVEL"],
+                    "health_binds": binds,
                 },
             }
         )
+except (KeyError, TypeError, ValueError, ValidationError):
+    print("lifecycle request construction failed safely", file=sys.stderr)
+    raise SystemExit(2) from None
+
+try:
     response = request_path(Path("/run/kdive/live-worker-lifecycle.sock"), request)
+except (OSError, ProtocolRejected):
+    print("lifecycle request transport failed safely", file=sys.stderr)
+    raise SystemExit(5) from None
+
+print(response.model_dump_json())
+if not response.ok:
+    raise SystemExit(client_exit_status(response))
+
+try:
     expected = os.environ["KDIVE_EXPECTED_SLOTS"]
     if expected:
-        want = tuple(range(1, int(expected) + 1))
+        expected_count = int(expected)
+        if not 1 <= expected_count <= 8:
+            raise ValueError
+        want = tuple(range(1, expected_count + 1))
         actual = tuple((slot.slot, slot.phase.value if slot.phase else None) for slot in response.slots)
         if actual != tuple((slot, "started") for slot in want):
             raise ValueError("lifecycle status does not report the requested started slots")
-except Exception:
-    print("lifecycle request failed safely", file=sys.stderr)
+except ValueError:
+    print("lifecycle status does not report the requested started slots", file=sys.stderr)
     raise SystemExit(5) from None
-print(response.model_dump_json())
-raise SystemExit(0 if response.ok and response.code == "ok" else 4)
+raise SystemExit(client_exit_status(response))
 PY
 }
 
-case "${1:-}" in
-start)
-  [[ "${2:-}" =~ ^[1-8]$ ]] || {
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "${1:-}" in
+  start)
+    [[ "${2:-}" =~ ^[1-8]$ ]] || {
+      usage
+      exit 2
+    }
+    [[ $# == 2 ]] || {
+      usage
+      exit 2
+    }
+    request start "$2"
+    ;;
+  status)
+    [[ $# == 1 ]] || {
+      usage
+      exit 2
+    }
+    request "$1"
+    ;;
+  stop | diagnostics)
+    [[ $# == 1 ]] || {
+      usage
+      exit 2
+    }
+    request "$1"
+    ;;
+  *)
     usage
     exit 2
-  }
-  [[ $# == 2 ]] || {
-    usage
-    exit 2
-  }
-  request start "$2"
-  ;;
-status)
-  [[ $# == 1 || $# == 2 ]] || {
-    usage
-    exit 2
-  }
-  request "$1" "" "${2:-}"
-  ;;
-stop | diagnostics)
-  [[ $# == 1 ]] || {
-    usage
-    exit 2
-  }
-  request "$1"
-  ;;
-*)
-  usage
-  exit 2
-  ;;
-esac
+    ;;
+  esac
+fi

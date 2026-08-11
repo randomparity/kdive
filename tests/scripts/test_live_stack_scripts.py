@@ -12,6 +12,70 @@ import pytest
 from kdive.config.external_env import EXTERNAL_ENV_VARS
 
 ROOT = Path(__file__).resolve().parents[2]
+LIFECYCLE = ROOT / "scripts" / "live-stack" / "worker-lifecycle.sh"
+
+
+def _lifecycle_status(
+    tmp_path: Path, response: str, *, expected_slots: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """Run the real wrapper against a Python import-time lifecycle response stub."""
+    (tmp_path / "sitecustomize.py").write_text(
+        "import os\n"
+        "from kdive.processes.lifecycle import systemd_worker_control as control\n"
+        "from kdive.processes.lifecycle.systemd_worker_contract import LifecycleResponse\n"
+        "def request_path(path, request):\n"
+        "    values = [os.environ.get(name, '<missing>') for name in (\n"
+        "        'KDIVE_DATABASE_URL', 'KDIVE_MIGRATION_DATABASE_URL',\n"
+        "        'KDIVE_SERVER_DATABASE_URL', 'KDIVE_RECONCILER_DATABASE_URL',\n"
+        "        'KDIVE_WORKER_DATABASE_URL')]\n"
+        "    with open(os.environ['KDIVE_ENV_PROBE'], 'w') as probe:\n"
+        "        probe.write('\\n'.join(values))\n"
+        "    return LifecycleResponse.model_validate_json(os.environ['KDIVE_RESPONSE'].encode())\n"
+        "control.request_path = request_path\n",
+        encoding="utf-8",
+    )
+    probe = tmp_path / "environment"
+    return subprocess.run(
+        ["bash", str(LIFECYCLE), "status"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(tmp_path),
+            "KDIVE_RESPONSE": response,
+            "KDIVE_ENV_PROBE": str(probe),
+            "KDIVE_LIFECYCLE_EXPECTED_SLOTS": expected_slots,
+            "KDIVE_DATABASE_URL": "generic-canary",
+            "KDIVE_MIGRATION_DATABASE_URL": "migration-canary",
+            "KDIVE_SERVER_DATABASE_URL": "server-canary",
+            "KDIVE_RECONCILER_DATABASE_URL": "reconciler-canary",
+            "KDIVE_WORKER_DATABASE_URL": "worker-canary",
+        },
+    )
+
+
+def _response(*, ok: bool, code: str, slots: list[dict[str, object]] | None = None) -> str:
+    """Build a validated wire response without duplicating JSON serialization in Bash."""
+    from kdive.processes.lifecycle.systemd_worker_contract import LifecycleResponse
+
+    return LifecycleResponse.model_validate(
+        {
+            "ok": ok,
+            "code": code,
+            "message": "stubbed lifecycle result",
+            "retry_action": "retry_same_operation" if not ok else "none",
+            "slots": slots or [],
+        }
+    ).model_dump_json()
+
+
+def _slot(slot: int, phase: str = "started") -> dict[str, object]:
+    return {
+        "slot": slot,
+        "unit": f"kdive-live-worker@{slot}.service",
+        "phase": phase,
+    }
 
 
 def _grafana_supports_arch(arch: str) -> bool:
@@ -716,6 +780,262 @@ def test_lifecycle_wrapper_uses_the_validated_public_uri_and_python_client() -> 
     assert "LifecycleRequest.model_validate" in text
     assert "request_path" in text
     assert "KDIVE_WORKER_DATABASE_URL" in text
+
+
+@pytest.mark.parametrize(
+    ("content", "success"),
+    [
+        (
+            "KDIVE_LIBVIRT_URI=qemu+unix:///session?socket="
+            "/run/kdive/live-libvirt/libvirt/libvirt-sock\n",
+            True,
+        ),
+        ("KDIVE_LIBVIRT_URI=$(touch /tmp/unsafe)\n", False),
+        ("KDIVE_LIBVIRT_URI=not-a-supported-uri\n", False),
+    ],
+)
+def test_lifecycle_uri_is_parsed_as_literal_data(
+    tmp_path: Path, content: str, success: bool
+) -> None:
+    wrapper = tmp_path / "worker-lifecycle.sh"
+    (tmp_path / "lib.sh").write_text(
+        (ROOT / "scripts/live-stack/lib.sh").read_text(), encoding="utf-8"
+    )
+    (tmp_path / "env.sh").write_text(
+        (ROOT / "scripts/live-stack/env.sh").read_text(), encoding="utf-8"
+    )
+    wrapper.write_text(
+        LIFECYCLE.read_text().replace(
+            "readonly LIBVIRT_ENV=/etc/kdive/live-worker-libvirt.env",
+            f"readonly LIBVIRT_ENV={tmp_path / 'libvirt.env'}",
+        ),
+        encoding="utf-8",
+    )
+    uri_file = tmp_path / "libvirt.env"
+    uri_file.write_text(content, encoding="utf-8")
+    uri_file.chmod(0o644)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1" && require_exact_file() { :; } && load_libvirt_uri',
+            "bash",
+            str(wrapper),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) is success, result.stderr
+    assert not (tmp_path / "unsafe").exists()
+
+
+def test_role_bootstrap_uses_compose_default_only_when_migration_is_implicit(
+    tmp_path: Path,
+) -> None:
+    docker = tmp_path / "docker"
+    probe = tmp_path / "environment"
+    docker.write_text(
+        '#!/bin/sh\nenv > "$KDIVE_BOOTSTRAP_PROBE"\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    base = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "KDIVE_BOOTSTRAP_PROBE": str(probe),
+        "KDIVE_LOCAL_ROLE_BOOTSTRAP": "1",
+        "KDIVE_DATABASE_URL": "generic-canary",
+        "KDIVE_SERVER_DATABASE_URL": "server-canary",
+        "KDIVE_WORKER_DATABASE_URL": "worker-canary",
+        "KDIVE_RECONCILER_DATABASE_URL": "reconciler-canary",
+    }
+    implicit = subprocess.run(
+        ["bash", str(ROOT / "scripts/live-stack/bootstrap-runtime-roles.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=base,
+    )
+    assert implicit.returncode == 0, implicit.stderr
+    implicit_environment = probe.read_text(encoding="utf-8")
+    for name in (
+        "KDIVE_DATABASE_URL",
+        "KDIVE_MIGRATION_DATABASE_URL",
+        "KDIVE_SERVER_DATABASE_URL",
+        "KDIVE_WORKER_DATABASE_URL",
+        "KDIVE_RECONCILER_DATABASE_URL",
+    ):
+        assert f"{name}=" not in implicit_environment
+
+    explicit = (
+        "postgresql://external-owner:dummy@external-db:5432/kdive"  # pragma: allowlist secret
+    )
+    override = subprocess.run(
+        ["bash", str(ROOT / "scripts/live-stack/bootstrap-runtime-roles.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**base, "KDIVE_MIGRATION_DATABASE_URL": explicit},
+    )
+    assert override.returncode == 0, override.stderr
+    environment = probe.read_text(encoding="utf-8")
+    assert f"KDIVE_MIGRATION_DATABASE_URL={explicit}" in environment
+    assert explicit not in override.stdout + override.stderr
+
+    empty_override = subprocess.run(
+        ["bash", str(ROOT / "scripts/live-stack/bootstrap-runtime-roles.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**base, "KDIVE_MIGRATION_DATABASE_URL": ""},
+    )
+    assert empty_override.returncode == 0, empty_override.stderr
+    assert "KDIVE_MIGRATION_DATABASE_URL=\n" in probe.read_text(encoding="utf-8")
+
+
+def test_lifecycle_status_preserves_non_ok_response_and_scrubs_other_role_dsns(
+    tmp_path: Path,
+) -> None:
+    response = _response(ok=False, code="busy", slots=[_slot(1, "terminated")])
+    result = _lifecycle_status(tmp_path, response, expected_slots="2")
+    assert result.returncode == 3
+    assert '"code":"busy"' in result.stdout
+    assert "lifecycle status does not report" not in result.stderr
+    assert (tmp_path / "environment").read_text(encoding="utf-8").splitlines() == [
+        "<missing>",
+        "<missing>",
+        "<missing>",
+        "<missing>",
+        "worker-canary",
+    ]
+
+
+def test_host_daemon_children_receive_only_their_role_database_authority(tmp_path: Path) -> None:
+    lifecycle = tmp_path / "scripts/live-stack"
+    lifecycle.mkdir(parents=True)
+    (lifecycle / "worker-lifecycle.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (lifecycle / "worker-lifecycle.sh").chmod(0o755)
+    probe = tmp_path / "environment"
+    python = tmp_path / "python"
+    python.write_text(
+        "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s\\n' \"$*\" "
+        '"${KDIVE_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_MIGRATION_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_SERVER_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_WORKER_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_RECONCILER_DATABASE_URL:-<missing>}" >> "$KDIVE_DAEMON_PROBE"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    result = _lib(
+        f'repo_root="{tmp_path}"\n'
+        f'py="{python}"\n'
+        f'log_dir="{tmp_path / "logs"}"\n'
+        "stop_daemons() { :; }\n"
+        "require_free_http_port() { :; }\n"
+        "wait_for_daemons_to_settle() { :; }\n"
+        "restart_host_processes\n",
+        KDIVE_WORKER_COUNT="1",
+        KDIVE_DAEMON_PROBE=str(probe),
+        KDIVE_MIGRATION_DATABASE_URL="migration-canary",
+        KDIVE_SERVER_DATABASE_URL="server-canary",
+        KDIVE_WORKER_DATABASE_URL="worker-canary",
+        KDIVE_RECONCILER_DATABASE_URL="reconciler-canary",
+    )
+    assert result.returncode == 0, result.stderr
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and (
+        not probe.exists() or len(probe.read_text(encoding="utf-8").splitlines()) < 2
+    ):
+        time.sleep(0.05)
+    rows = probe.read_text(encoding="utf-8").splitlines()
+    assert set(rows) == {
+        "-m kdive server|server-canary|<missing>|server-canary|<missing>|<missing>",
+        "-m kdive reconciler|reconciler-canary|<missing>|<missing>|<missing>|reconciler-canary",
+    }
+
+
+@pytest.mark.parametrize(
+    "slots",
+    [
+        [],
+        [_slot(1)],
+        [_slot(1), _slot(2), _slot(3)],
+        [_slot(1), _slot(2, "terminated")],
+    ],
+)
+def test_lifecycle_status_rejects_any_non_exact_successful_slot_set(
+    tmp_path: Path, slots: list[dict[str, object]]
+) -> None:
+    response = _response(ok=True, code="ok", slots=slots)
+    result = _lifecycle_status(tmp_path, response, expected_slots="2")
+    assert result.returncode == 5
+    assert "lifecycle status does not report the requested started slots" in result.stderr
+
+
+def test_lifecycle_status_accepts_exact_successful_started_slots(tmp_path: Path) -> None:
+    result = _lifecycle_status(
+        tmp_path,
+        _response(ok=True, code="ok", slots=[_slot(1), _slot(2)]),
+        expected_slots="2",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_lifecycle_status_public_syntax_does_not_accept_a_count() -> None:
+    result = subprocess.run(
+        ["bash", str(LIFECYCLE), "status", "2"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "usage:" in result.stderr
+
+
+def _worker_path_access(
+    tmp_path: Path, target: Path, permissions: str, groups: str
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"\n'
+            'id() { if [[ $1 == -u ]]; then echo 424242; else echo "$3"; fi; }\n'
+            'require_worker_path_access "$2" "$4" "test path"',
+            "bash",
+            str(LIFECYCLE),
+            str(target),
+            groups,
+            permissions,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_lifecycle_preflight_rejects_a_worker_denied_by_a_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    target = parent / "kernel"
+    target.mkdir(mode=0o755)
+    result = _worker_path_access(tmp_path, target, "rx", "424242")
+    assert result.returncode != 0
+    assert "test path is not accessible to kdive-worker-1" in result.stderr
+
+
+def test_lifecycle_preflight_rejects_an_unwritable_workspace(tmp_path: Path) -> None:
+    workspace = Path("/tmp") / f"kdive-workspace-{os.getpid()}"
+    workspace.mkdir(mode=0o750)
+    workspace.chmod(0o750)
+    try:
+        result = _worker_path_access(tmp_path, workspace, "rwx", str(os.getgid()))
+    finally:
+        workspace.rmdir()
+    assert result.returncode != 0
+    assert "test path is not accessible to kdive-worker-1" in result.stderr
 
 
 def test_down_blocks_backend_teardown_after_an_unresolved_lifecycle_stop() -> None:

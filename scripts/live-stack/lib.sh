@@ -249,7 +249,8 @@ restart_host_processes() {
   "${repo_root}/scripts/live-stack/worker-lifecycle.sh" start "$worker_count"
   DAEMON_COUNT=2
   wait_for_daemons_to_settle || return 1
-  "${repo_root}/scripts/live-stack/worker-lifecycle.sh" status "$worker_count"
+  KDIVE_LIFECYCLE_EXPECTED_SLOTS="$worker_count" \
+    "${repo_root}/scripts/live-stack/worker-lifecycle.sh" status
 }
 
 # Host processes have no supervisor — unlike the systemd units and the compose/Helm surfaces,

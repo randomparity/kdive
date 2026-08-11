@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck disable=SC2034 # callers source env.sh and use the resolved checkout root
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # Host-published ports for the compose backends. Each is the single source of truth for BOTH the
@@ -19,10 +20,12 @@ export KDIVE_GRAFANA_PORT="${KDIVE_GRAFANA_PORT:-3000}"
 
 database_host="localhost:${KDIVE_POSTGRES_PORT}/kdive"
 # The following four values are development credentials. # pragma: allowlist secret
-default_migration_url="postgresql://kdive:kdive@${database_host}"                         # pragma: allowlist secret
-default_server_url="postgresql://kdive-server-member:kdive-server-local@${database_host}" # pragma: allowlist secret
-default_worker_url="postgresql://kdive-worker-member:kdive-worker-local@${database_host}" # pragma: allowlist secret
-reconciler_login="kdive-reconciler-member:kdive-reconciler-local"                         # pragma: allowlist secret
+default_migration_url="postgresql://kdive:kdive@${database_host}" # pragma: allowlist secret
+default_server_login="kdive-server-member:kdive-server-local"     # pragma: allowlist secret
+default_server_url="postgresql://${default_server_login}@${database_host}"
+default_worker_login="kdive-worker-member:kdive-worker-local" # pragma: allowlist secret
+default_worker_url="postgresql://${default_worker_login}@${database_host}"
+reconciler_login="kdive-reconciler-member:kdive-reconciler-local" # pragma: allowlist secret
 default_reconciler_url="postgresql://${reconciler_login}@${database_host}"
 export KDIVE_MIGRATION_DATABASE_URL="${KDIVE_MIGRATION_DATABASE_URL:-${default_migration_url}}"
 export KDIVE_SERVER_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL:-${default_server_url}}"
@@ -57,10 +60,13 @@ export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-minioadmin}"
 export KDIVE_HTTP_HOST="${KDIVE_HTTP_HOST:-127.0.0.1}"
 export KDIVE_HTTP_PORT="${KDIVE_HTTP_PORT:-8000}"
 export KDIVE_STACK_BASE_URL="${KDIVE_STACK_BASE_URL:-http://${KDIVE_HTTP_HOST}:${KDIVE_HTTP_PORT}/mcp}"
-export KDIVE_BUILD_WORKSPACE="${KDIVE_BUILD_WORKSPACE:-${repo_root}/.live-build}"
-export KDIVE_BUILD_COMPONENT_ROOTS="${KDIVE_BUILD_COMPONENT_ROOTS:-${repo_root}/fixtures/local-libvirt:${repo_root}/.live-components}"
+default_worker_workspace="/var/lib/kdive/build"
+default_worker_fixture_catalog="/var/lib/kdive/fixtures/local-libvirt"
+export KDIVE_BUILD_WORKSPACE="${KDIVE_BUILD_WORKSPACE:-${default_worker_workspace}}"
+build_component_roots="${KDIVE_BUILD_COMPONENT_ROOTS:-${default_worker_fixture_catalog}}"
+export KDIVE_BUILD_COMPONENT_ROOTS="$build_component_roots"
 export KDIVE_INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
-export KDIVE_FIXTURE_CATALOG_PATH="${KDIVE_FIXTURE_CATALOG_PATH:-${repo_root}/fixtures/local-libvirt}"
+export KDIVE_FIXTURE_CATALOG_PATH="${KDIVE_FIXTURE_CATALOG_PATH:-${default_worker_fixture_catalog}}"
 export KDIVE_ACCEPTED_LANES="${KDIVE_ACCEPTED_LANES:-default}"
 export KDIVE_LOG_LEVEL="${KDIVE_LOG_LEVEL:-INFO}"
 # KDIVE_KERNEL_SRC: warm-tree kernel source for local builds. An explicit value is honored
