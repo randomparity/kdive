@@ -11,6 +11,7 @@ from kdive.processes.lifecycle.worker_incarnation import (
     KubernetesWorkerDeathVerifier,
     LocalWorkerDeathVerifier,
     worker_death_verifier_from_env,
+    worker_incarnation_credential,
     worker_incarnation_id,
 )
 
@@ -26,6 +27,30 @@ def test_worker_incarnation_id_includes_boot_and_process_start(tmp_path: Path, m
         42, boot_id_path=tmp_path / "boot_id", stat_path=tmp_path / "stat"
     )
     assert identity == "host-a:42:boot-123:987"
+
+
+def test_local_systemd_identity_is_exactly_the_configured_holder(monkeypatch) -> None:
+    holder = "local-systemd:kdive-live-worker@3.service:" + "a" * 32
+    monkeypatch.setenv("KDIVE_WORKER_INCARNATION_KIND", "local")
+    monkeypatch.setenv("KDIVE_WORKER_INCARNATION_ID", holder)
+
+    assert worker_incarnation_id(42) == holder
+
+
+@pytest.mark.parametrize(
+    "holder",
+    [
+        "local-systemd:kdive-live-worker@0.service:" + "a" * 32,
+        "local-systemd:other@1.service:" + "a" * 32,
+        "local-systemd:kdive-live-worker@1.service:not-hex",
+    ],
+)
+def test_local_systemd_identity_rejects_malformed_holder(monkeypatch, holder: str) -> None:
+    monkeypatch.setenv("KDIVE_WORKER_INCARNATION_KIND", "local")
+    monkeypatch.setenv("KDIVE_WORKER_INCARNATION_ID", holder)
+
+    with pytest.raises(RuntimeError, match="local-systemd"):
+        worker_incarnation_id(42)
 
 
 def test_verifier_proves_exact_incarnation_dead_when_pid_start_changed(
@@ -85,6 +110,13 @@ def test_worker_incarnation_credential_is_loaded_as_a_secret(tmp_path: Path) -> 
 
     assert credential.get_secret_value() == "authority-delivered-credential"
     assert "authority-delivered-credential" not in repr(credential)
+
+
+def test_systemd_credential_directory_wins(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "worker-incarnation").write_text("systemd-secret\n")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+
+    assert worker_incarnation_credential().get_secret_value() == "systemd-secret"
 
 
 def test_worker_incarnation_credential_rejects_blank_handoff(tmp_path: Path) -> None:

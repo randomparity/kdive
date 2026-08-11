@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import ssl
@@ -32,6 +33,7 @@ _PROC_ROOT = Path("/proc")
 _INCARNATION_CREDENTIAL = Path("/run/kdive/worker-incarnation-credential")
 _CONTAINER_ID = re.compile(r"[0-9a-f]{12}(?:[0-9a-f]{52})?")
 _KUBE_NAME = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?")
+_LOCAL_SYSTEMD_ID = re.compile(r"local-systemd:kdive-live-worker@[1-8]\.service:[0-9a-f]{32}")
 
 
 class WorkerDeathVerifier(Protocol):
@@ -47,6 +49,15 @@ def _start_ticks(stat: str) -> str:
     if len(fields) <= 19 or not fields[19].isdigit():
         raise RuntimeError("worker process stat has no valid start-time field")
     return fields[19]
+
+
+def _configured_local_systemd_id() -> str | None:
+    incarnation = config.get(WORKER_INCARNATION_ID)
+    if incarnation is None:
+        return None
+    if not _LOCAL_SYSTEMD_ID.fullmatch(incarnation):
+        raise RuntimeError("local worker incarnation must be a fixed local-systemd identity")
+    return incarnation
 
 
 def worker_incarnation_id(
@@ -71,14 +82,22 @@ def worker_incarnation_id(
         return f"kubernetes:{namespace}:{name}:{uid}"
     if kind != "local":
         raise RuntimeError(f"unsupported worker incarnation kind: {kind}")
+    if incarnation := _configured_local_systemd_id():
+        return incarnation
     boot_id = boot_id_path.read_text(encoding="utf-8").strip()
     stat = (stat_path or (_PROC_ROOT / str(pid) / "stat")).read_text(encoding="utf-8")
     return f"{socket.gethostname()}:{pid}:{boot_id}:{_start_ticks(stat)}"
 
 
-def worker_incarnation_credential(path: Path = _INCARNATION_CREDENTIAL) -> SecretStr:
-    """Load the authority-delivered credential from its init-only runtime handoff."""
-    value = path.read_text(encoding="utf-8").strip()
+def worker_incarnation_credential(path: Path | None = None) -> SecretStr:
+    """Load the authority-delivered credential from systemd or the init-only handoff."""
+    credential_path = path
+    if credential_path is None:
+        directory = os.environ.get("CREDENTIALS_DIRECTORY")
+        credential_path = (
+            Path(directory) / "worker-incarnation" if directory else _INCARNATION_CREDENTIAL
+        )
+    value = credential_path.read_text(encoding="utf-8").strip()
     if not value:
         raise RuntimeError("worker incarnation credential handoff is empty")
     return SecretStr(value)
