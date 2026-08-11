@@ -206,6 +206,29 @@ class SlotStore:
         finally:
             os.close(descriptor)
 
+    def discard_prepared(self, state: SlotState) -> None:
+        """Remove one exact prepared generation proven to have no unit invocation."""
+        self._require_root()
+        state = self._validated_state(state)
+        if state.phase is not SlotPhase.PREPARED:
+            raise StateConflict("discard requires prepared state")
+        if self.load() != state:
+            raise StateConflict("discard requires the retained prepared state")
+        descriptor = self._slot_descriptor(create=False)
+        if descriptor is None:
+            raise StateConflict("discard requires the retained prepared slot")
+        try:
+            if self._exists(descriptor, "release"):
+                raise StateConflict("prepared state cannot have a release marker")
+            for name in ("worker.env", "worker-incarnation.credential"):
+                with suppress(FileNotFoundError):
+                    os.unlink(name, dir_fd=descriptor)
+            os.fsync(descriptor)
+            os.unlink("state.json", dir_fd=descriptor)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
     def cleanup_terminated(self, state: SlotState) -> None:
         """Remove the retained handoff only after exact terminal evidence is persisted."""
         self._require_root()

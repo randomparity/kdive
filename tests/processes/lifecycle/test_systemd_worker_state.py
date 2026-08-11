@@ -177,6 +177,62 @@ def test_cleanup_removes_only_the_fixed_terminated_generation(store: SlotStore, 
     assert not store.release_path.exists()
 
 
+def test_discard_prepared_removes_only_the_exact_unreleased_generation(
+    store: SlotStore, settings
+) -> None:
+    prepared = store.prepare(settings)
+
+    store.discard_prepared(prepared)
+
+    assert store.load() is None
+    assert not store.environment_path.exists()
+    assert not store.credential_path.exists()
+    assert not store.release_path.exists()
+
+
+def test_discard_prepared_requires_prepared_phase(store: SlotStore, settings) -> None:
+    prepared = store.prepare(settings)
+    gated = prepared.model_copy(
+        update={"phase": SlotPhase.GATED, "boot_id": "boot-id", "invocation_id": "invocation-id"}
+    )
+    store.persist(gated)
+
+    with pytest.raises(StateConflict, match="prepared"):
+        store.discard_prepared(gated)
+
+    assert store.load() == gated
+
+
+def test_discard_prepared_requires_the_exact_retained_state(store: SlotStore, settings) -> None:
+    prepared = store.prepare(settings)
+    generation = "f" * 32
+    other = prepared.model_copy(
+        update={
+            "generation": generation,
+            "incarnation": f"local-systemd:{store.unit}:{generation}",
+        }
+    )
+
+    with pytest.raises(StateConflict, match="retained prepared"):
+        store.discard_prepared(other)
+
+    assert store.load() == prepared
+
+
+def test_discard_prepared_refuses_a_release_marker(store: SlotStore, settings) -> None:
+    prepared = store.prepare(settings)
+    store.release_path.write_text("unexpected\n", encoding="ascii")
+    store.release_path.chmod(0o440)
+
+    with pytest.raises(StateConflict, match="release"):
+        store.discard_prepared(prepared)
+
+    assert store.load() == prepared
+    assert store.environment_path.exists()
+    assert store.credential_path.exists()
+    assert store.release_path.exists()
+
+
 def test_environment_rejects_newline_or_nul_values(store: SlotStore) -> None:
     payload = start_payload()
     settings = cast(dict[str, object], payload["settings"])

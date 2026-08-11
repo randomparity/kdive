@@ -108,6 +108,15 @@ class FakeStore:
         self.release = True
         self.events.append("release:publish")
 
+    def discard_prepared(self, state: SlotState) -> None:
+        assert state == self.state
+        assert state.phase is SlotPhase.PREPARED
+        assert not self.release
+        self.environment = False
+        self.credential = False
+        self.state = None
+        self.events.append("state:discard-prepared")
+
     def cleanup_terminated(self, state: SlotState) -> None:
         assert state == self.state
         assert state.phase is SlotPhase.TERMINATED
@@ -571,6 +580,65 @@ def test_partial_start_rolls_back_only_slots_activated_by_this_request() -> None
     )
     assert len({id(deadline) for _, deadline in runtime.systemd_deadlines[first_signal:]}) == 1
     assert [result.slot for result in response.slots] == [1, 2]
+
+
+def test_stop_discards_proven_inactive_prepared_generation() -> None:
+    prepared = _state(1, SlotPhase.PREPARED)
+    stores, runtime, authority, clock, events = _fleet(states={1: prepared})
+
+    response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
+
+    assert response.ok
+    assert events == ["state:discard-prepared"]
+    assert stores[0].state is None
+    assert not stores[0].environment and not stores[0].credential and not stores[0].release
+    assert runtime.start_counts == {}
+    assert runtime.signaled == [] and runtime.stopped == [] and runtime.resets == []
+    assert authority.registered == set() and authority.terminations == []
+
+
+def test_stop_adopts_active_prepared_gate_without_starting_another_invocation() -> None:
+    prepared = _state(1, SlotPhase.PREPARED)
+    stores, runtime, authority, clock, events = _fleet(states={1: prepared})
+    runtime.current[prepared.unit] = _observation(1, "populated")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
+
+    assert response.ok
+    assert events == [
+        "persist:gated",
+        "systemd:signal-terminate:kdive-live-worker@1.service",
+        "systemd:observe-empty:kdive-live-worker@1.service",
+        "database:register",
+        "persist:registered",
+        "database:terminate",
+        "persist:terminated",
+        "systemd:stop:kdive-live-worker@1.service",
+        "systemd:reset:kdive-live-worker@1.service",
+        "state:cleanup",
+    ]
+    assert runtime.start_counts == {}
+    assert prepared.incarnation in authority.registered
+    assert authority.terminations == [(prepared.incarnation, "succeeded")]
+
+
+def test_stop_retains_prepared_generation_when_invocation_facts_are_uncertain() -> None:
+    prepared = _state(1, SlotPhase.PREPARED)
+    stores, runtime, authority, clock, events = _fleet(states={1: prepared})
+    runtime.current[prepared.unit] = _observation(1, "unknown")
+
+    response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
+
+    assert (response.code, response.retry_action) == (
+        "dependency_unavailable",
+        "restore_systemd",
+    )
+    assert stores[0].state == prepared
+    assert stores[0].environment and stores[0].credential and not stores[0].release
+    assert runtime.start_counts == {}
+    assert runtime.signaled == [] and runtime.stopped == [] and runtime.resets == []
+    assert authority.registered == set() and authority.terminations == []
+    assert "state:discard-prepared" not in events and "state:cleanup" not in events
 
 
 def test_start_stops_slots_above_a_reduced_worker_count() -> None:

@@ -34,6 +34,8 @@ _CONTROL_OUTPUT_LIMIT = 4096
 _CGROUP_EVENTS_LIMIT = 4096
 _PROC_FILE_LIMIT = 4096
 _MAX_JOURNAL_BYTES = 320 * 1024
+_COMMAND_CLEANUP_RESERVE_SECONDS = 0.5
+_COMMAND_TERMINATE_GRACE_SECONDS = 0.1
 
 
 class SystemdUnavailable(RuntimeError):
@@ -62,6 +64,16 @@ class Deadline(Protocol):
     def remaining(self) -> float:
         """Return non-negative seconds left on the shared operation deadline."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionDeadline:
+    """Leave bounded termination and reap time inside the caller deadline."""
+
+    parent: Deadline
+
+    def remaining(self) -> float:
+        return max(0.0, self.parent.remaining() - _COMMAND_CLEANUP_RESERVE_SECONDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,10 +136,16 @@ class SubprocessCommandRunner:
         if byte_limit <= 0:
             raise ValueError("command byte limit must be positive")
         operation_deadline = deadline or self.deadline
-        if operation_deadline.remaining() <= 0:
+        execution_deadline = _ExecutionDeadline(operation_deadline)
+        if execution_deadline.remaining() <= 0:
             raise CommandDeadlineExceeded("command deadline elapsed before child launch")
         process = self._launch(argv)
-        output, truncated = self._collect_with_cleanup(process, byte_limit, operation_deadline)
+        output, truncated = self._collect_with_cleanup(
+            process,
+            byte_limit,
+            execution_deadline,
+            operation_deadline,
+        )
         if truncated:
             self._terminate(process, operation_deadline)
         if truncated and not allow_truncation:
@@ -150,13 +168,17 @@ class SubprocessCommandRunner:
             raise SystemdUnavailable(f"failed to launch {argv[0]}") from exc
 
     def _collect_with_cleanup(
-        self, process: subprocess.Popen[bytes], byte_limit: int, deadline: Deadline
+        self,
+        process: subprocess.Popen[bytes],
+        byte_limit: int,
+        execution_deadline: Deadline,
+        cleanup_deadline: Deadline,
     ) -> tuple[bytes, bool]:
         try:
-            return self._collect(process, byte_limit, deadline)
+            return self._collect(process, byte_limit, execution_deadline)
         except BaseException as exc:
             try:
-                self._terminate(process, deadline)
+                self._terminate(process, cleanup_deadline)
             except CommandCleanupDeadlineExceeded as cleanup_exc:
                 raise cleanup_exc from exc
             raise
@@ -210,7 +232,11 @@ class SubprocessCommandRunner:
             raise CommandCleanupDeadlineExceeded(
                 "child command could not receive SIGTERM before its deadline"
             ) from exc
-        if cls._wait_for_cleanup(process, deadline, ceiling=0.25):
+        if cls._wait_for_cleanup(
+            process,
+            deadline,
+            ceiling=_COMMAND_TERMINATE_GRACE_SECONDS,
+        ):
             return
         try:
             process.kill()

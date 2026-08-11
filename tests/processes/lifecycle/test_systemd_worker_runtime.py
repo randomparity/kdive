@@ -449,7 +449,7 @@ def test_signal_terminate_preserves_the_retained_unit() -> None:
 def test_signal_terminate_cancels_and_reaps_blocking_child_at_shared_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    deadline = ScriptedDeadline((45.0, 45.0, 0.1, 0.1, 0.1))
+    deadline = MonotonicDeadline.after(1.0)
     runner = SubprocessCommandRunner(deadline)
     child: subprocess.Popen[bytes] | None = None
     program = (
@@ -471,17 +471,12 @@ def test_signal_terminate_cancels_and_reaps_blocking_child_at_shared_deadline(
         return child
 
     monkeypatch.setattr(SubprocessCommandRunner, "_launch", staticmethod(launch))
-    try:
-        with pytest.raises(CommandDeadlineExceeded):
-            SystemdRuntime(runner).signal_terminate(
-                "kdive-live-worker@2.service", deadline=deadline
-            )
-        assert child is not None
-        assert child.returncode == -signal.SIGKILL
-    finally:
-        if child is not None and child.poll() is None:
-            child.kill()
-            child.wait(timeout=5.0)
+    with pytest.raises(CommandDeadlineExceeded):
+        SystemdRuntime(runner).signal_terminate("kdive-live-worker@2.service", deadline=deadline)
+
+    assert child is not None
+    assert child.returncode == -signal.SIGKILL
+    assert deadline.remaining() > 0
 
 
 def test_require_inactive_accepts_only_empty_unit_identity() -> None:
@@ -597,7 +592,7 @@ def test_real_runner_rejects_truncated_control_output() -> None:
 
 def test_real_runner_terminates_a_timed_out_child() -> None:
     program = "import signal,time;signal.signal(signal.SIGTERM, lambda *_: exit(0));time.sleep(60)"
-    runner = SubprocessCommandRunner(MonotonicDeadline.after(0.5))
+    runner = SubprocessCommandRunner(MonotonicDeadline.after(1.0))
     with pytest.raises(CommandDeadlineExceeded):
         runner.run((sys.executable, "-c", program), byte_limit=1024)
 
@@ -615,7 +610,7 @@ def test_sigkill_cleanup_uses_only_the_exact_remaining_deadline_budget() -> None
     assert process.calls == [
         "poll",
         "terminate",
-        ("wait", 0.25),
+        ("wait", 0.1),
         "kill",
         ("wait", 0.1),
     ]

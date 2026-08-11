@@ -94,6 +94,8 @@ class SlotStorage(Protocol):
 
     def publish_release(self, state: SlotState) -> None: ...
 
+    def discard_prepared(self, state: SlotState) -> None: ...
+
     def cleanup_terminated(self, state: SlotState) -> None: ...
 
 
@@ -400,13 +402,18 @@ class SystemdWorkerLifecycle:
     async def _stop_current_fleet(self, deadline: Deadline) -> tuple[SlotState, ...]:
         bound: list[tuple[SlotStorage, SlotState]] = []
         terminated: list[tuple[SlotStorage, SlotState]] = []
+        discarded: list[SlotState] = []
         stop_deadline = _BudgetDeadline(deadline, _STOP_SECONDS)
         for store in self._stores:
             state = self._store_call(stop_deadline, store.load)
             if state is None:
                 continue
             if state.phase is SlotPhase.PREPARED:
-                state = self._bind_prepared(store, state, stop_deadline)
+                adopted = self._resolve_prepared_for_stop(store, state, stop_deadline)
+                if adopted is None:
+                    discarded.append(state)
+                    continue
+                state = adopted
             if state.phase is SlotPhase.TERMINATED:
                 terminated.append((store, state))
                 continue
@@ -423,10 +430,20 @@ class SystemdWorkerLifecycle:
         terminated.extend(zip((store for store, _ in bound), newly_terminated, strict=True))
         for store, state in terminated:
             self._post_evidence_cleanup(store, state, stop_deadline)
-        return tuple(state for _, state in terminated)
+        return tuple(
+            sorted((*discarded, *(state for _, state in terminated)), key=lambda state: state.slot)
+        )
 
-    def _bind_prepared(self, store: SlotStorage, state: SlotState, deadline: Deadline) -> SlotState:
-        self._systemd_call(deadline, self._runtime.start, state.unit, deadline)
+    def _resolve_prepared_for_stop(
+        self, store: SlotStorage, state: SlotState, deadline: Deadline
+    ) -> SlotState | None:
+        try:
+            self._systemd_call(deadline, self._runtime.require_inactive, state.unit, deadline)
+        except SystemdConflict:
+            pass
+        else:
+            self._store_call(deadline, store.discard_prepared, state)
+            return None
         observation = self._systemd_call(deadline, self._runtime.observe, state.unit, deadline)
         _require_prepared_observation(state, observation)
         gated = state.model_copy(
