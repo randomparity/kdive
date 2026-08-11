@@ -35,3 +35,18 @@ def test_up_never_starts_the_app_tier() -> None:
 def test_up_uses_the_canonical_backend_list() -> None:
     text = _UP.read_text()
     assert "KDIVE_BACKEND_SERVICES" in text
+
+
+def test_up_bootstraps_runtime_roles_between_migrations_and_host_daemons() -> None:
+    text = _UP.read_text()
+    migrations = text.index("apply-migrations.sh")
+    bootstrap = text.index("bootstrap-runtime-roles.sh")
+    daemons = text.index("restart_host_processes")
+    assert migrations < bootstrap < daemons
+
+
+def test_up_refuses_root_before_migrations_or_daemon_start() -> None:
+    text = _UP.read_text()
+    root_check = text.index("EUID == 0")
+    assert root_check < text.index("apply-migrations.sh")
+    assert root_check < text.index("restart_host_processes")

@@ -292,20 +292,21 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_MAX_ALLOC` | `4` | max_concurrent_allocations quota the setup-*-libvirt.sh scripts set. |
 | `KDIVE_MAX_SYS` | `4` | max_concurrent_systems quota the setup-*-libvirt.sh scripts set. |
 | `KDIVE_MCP_BASE` | — | Server MCP endpoint (must end in /mcp) the setup-*-libvirt.sh onboarding calls target. |
+| `KDIVE_MIGRATION_DATABASE_URL` | `local Compose migration DSN` | Database login DSN supplied only to `scripts/live-stack/apply-migrations.sh` and the runtime role bootstrap; external deployments override the local development owner. |
 | `KDIVE_MINIO_CONSOLE_PORT` | `9001` | Host port the compose `minio` web console publishes (no client URL derives from it). |
 | `KDIVE_MINIO_PORT` | `9000` | Host port the compose `minio` S3 API publishes; `scripts/live-stack/env.sh` folds it into the default `KDIVE_S3_ENDPOINT_URL`. |
 | `KDIVE_OIDC_PORT` | `8090` | Host port the compose `oidc` mock issuer publishes; `scripts/live-stack/env.sh` folds it into the default `KDIVE_OIDC_ISSUER` and `KDIVE_OIDC_JWKS_URI`. |
 | `KDIVE_OS_RELEASE` | `/etc/os-release` | os-release file `check-setup-deps.sh` reads to detect the host distro. |
-| `KDIVE_POSTGRES_PORT` | `5432` | Host port the compose `postgres` service publishes; `scripts/live-stack/env.sh` folds it into the default `KDIVE_DATABASE_URL`. |
+| `KDIVE_POSTGRES_PORT` | `5432` | Host port the compose `postgres` service publishes; `scripts/live-stack/env.sh` folds it into the role-specific local database DSN defaults. |
 | `KDIVE_PROJECT` | `demo` | Project the setup-*-libvirt.sh scripts and `scripts/live-stack/onboard.sh` onboard. |
 | `KDIVE_PROMETHEUS_PORT` | `9090` | Host port the compose `prometheus` service publishes (obs profile); an off-host grafana points at this port (#1261). |
 | `KDIVE_PYTHON` | `python3` | Python interpreter the setup-*-libvirt.sh scripts invoke (set to the project venv, e.g. /opt/kdive/.venv/bin/python, when not running inside the venv). |
-| `KDIVE_RECONCILER_DATABASE_URL` | `local Compose reconciler-member DSN` | Database login DSN supplied only to the Compose reconciler service; external deployments override the local development member. |
+| `KDIVE_RECONCILER_DATABASE_URL` | `local Compose reconciler-member DSN` | Database login DSN supplied only to the host reconciler process; external deployments override the local development member. |
 | `KDIVE_REMOTE_PKI_DIR` | `/etc/pki/libvirt` | TLS PKI directory `check-remote-libvirt.sh` validates. |
 | `KDIVE_REMOTE_SSH_PORT` | `22` | SSH port `check-remote-libvirt.sh` connects on. |
 | `KDIVE_ROLE` | `admin` | Role `scripts/live-stack/onboard.sh` writes into the minted token's `roles` claim and the printed binding contract; a sub-CONTRIBUTOR value warns (allocations.request needs CONTRIBUTOR+). |
 | `KDIVE_ROOTFS_DIR` | `/var/lib/kdive/rootfs` | Per-System qcow2 overlay directory for the local-libvirt provider; `scripts/live-stack/lib.sh` reads this to locate and create guest disk overlays. |
-| `KDIVE_SERVER_DATABASE_URL` | `local Compose server-member DSN` | Database login DSN supplied only to the Compose server service; external deployments override the local development member. |
+| `KDIVE_SERVER_DATABASE_URL` | `local Compose server-member DSN` | Database login DSN supplied only to the host server process; external deployments override the local development member. |
 | `KDIVE_SETUP_AUDITED` | `0` | When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of seed-project (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN). |
 | `KDIVE_SKIP_OBS` | `0` | When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability tier; the essential backend services (postgres, minio, oidc) still start. |
 | `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory written by `scripts/live-stack/lib.sh`; also consumed by `examples/local-libvirt/up.sh`, which overrides the default to an XDG state path via `examples/local-libvirt/env.sh`. |
@@ -319,8 +320,8 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_WARM_STORE_FORCE` | `0` | When `1`, `warm-store.sh` skips the warm fast-path and rebuilds — the escape hatch for a distro that rebuilt the kernel under an unchanged NVR. |
 | `KDIVE_WARM_STORE_IMAGE` | — | Catalog rootfs image `warm-store.sh` passes to `python -m kdive build-fs`. Unset → the script dies. |
 | `KDIVE_WARM_STORE_TARGET_NVR` | — | Supplied pinned guest-kernel NVR the warm-store refresh keys freshness on (the operator/CI computes it from the base image; no live distro query). Unset → the script dies. Same-NVR distro rebuilds need `KDIVE_WARM_STORE_FORCE`. |
-| `KDIVE_WORKER_AS_ROOT` | `1` | Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker as root via sudo (1) or as the current user (0). |
-| `KDIVE_WORKER_COUNT` | `1` | How many `kdive worker` processes `restart_host_processes()` in `scripts/live-stack/lib.sh` starts. A worker runs one job at a time, so this is the local stack's only job-concurrency knob; raise it to exercise cross-worker paths such as the rootfs fetch advisory lock. Each worker past the first gets its own aux health port and log file. Values above 8 are refused at bring-up (`MAX_WORKER_COUNT` in `scripts/live-stack/lib.sh`), because every worker is a root process with its own database pool and aux port. |
+| `KDIVE_WORKER_COUNT` | `1` | How many fixed lifecycle-worker slots `scripts/live-stack/worker-lifecycle.sh` starts. A worker runs one job at a time, so this is the local stack's job-concurrency knob. Values above 8 are refused before a lifecycle request is sent. |
+| `KDIVE_WORKER_DATABASE_URL` | `local Compose worker-member DSN` | Database login DSN sent only to the host worker lifecycle witness for fixed worker units; external deployments override the local development member. |
 | `KDIVE_WORKER_INCARNATION_NONCE` | — | Ephemeral 128-bit nonce generated by the reference Compose lifecycle gate and passed only to the never-started managed worker create; operators do not set it manually. |
 
 ## In-guest helpers

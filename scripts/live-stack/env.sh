@@ -17,9 +17,17 @@ export KDIVE_OIDC_PORT="${KDIVE_OIDC_PORT:-8090}"
 export KDIVE_PROMETHEUS_PORT="${KDIVE_PROMETHEUS_PORT:-9090}"
 export KDIVE_GRAFANA_PORT="${KDIVE_GRAFANA_PORT:-3000}"
 
-default_database_url="postgresql://kdive:kdive@localhost:${KDIVE_POSTGRES_PORT}/kdive" # pragma: allowlist secret
-
-export KDIVE_DATABASE_URL="${KDIVE_DATABASE_URL:-${default_database_url}}"
+database_host="localhost:${KDIVE_POSTGRES_PORT}/kdive"
+# The following four values are development credentials. # pragma: allowlist secret
+default_migration_url="postgresql://kdive:kdive@${database_host}"                         # pragma: allowlist secret
+default_server_url="postgresql://kdive-server-member:kdive-server-local@${database_host}" # pragma: allowlist secret
+default_worker_url="postgresql://kdive-worker-member:kdive-worker-local@${database_host}" # pragma: allowlist secret
+reconciler_login="kdive-reconciler-member:kdive-reconciler-local"                         # pragma: allowlist secret
+default_reconciler_url="postgresql://${reconciler_login}@${database_host}"
+export KDIVE_MIGRATION_DATABASE_URL="${KDIVE_MIGRATION_DATABASE_URL:-${default_migration_url}}"
+export KDIVE_SERVER_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL:-${default_server_url}}"
+export KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-${default_worker_url}}"
+export KDIVE_RECONCILER_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL:-${default_reconciler_url}}"
 export KDIVE_OIDC_ISSUER="${KDIVE_OIDC_ISSUER:-http://localhost:${KDIVE_OIDC_PORT}/default}"
 export KDIVE_OIDC_JWKS_URI="${KDIVE_OIDC_JWKS_URI:-http://localhost:${KDIVE_OIDC_PORT}/default/jwks}"
 export KDIVE_OIDC_AUDIENCE="${KDIVE_OIDC_AUDIENCE:-kdive}"
@@ -52,6 +60,9 @@ export KDIVE_STACK_BASE_URL="${KDIVE_STACK_BASE_URL:-http://${KDIVE_HTTP_HOST}:$
 export KDIVE_BUILD_WORKSPACE="${KDIVE_BUILD_WORKSPACE:-${repo_root}/.live-build}"
 export KDIVE_BUILD_COMPONENT_ROOTS="${KDIVE_BUILD_COMPONENT_ROOTS:-${repo_root}/fixtures/local-libvirt:${repo_root}/.live-components}"
 export KDIVE_INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
+export KDIVE_FIXTURE_CATALOG_PATH="${KDIVE_FIXTURE_CATALOG_PATH:-${repo_root}/fixtures/local-libvirt}"
+export KDIVE_ACCEPTED_LANES="${KDIVE_ACCEPTED_LANES:-default}"
+export KDIVE_LOG_LEVEL="${KDIVE_LOG_LEVEL:-INFO}"
 # KDIVE_KERNEL_SRC: warm-tree kernel source for local builds. An explicit value is honored
 # verbatim. The convenience default ${HOME}/src/linux is HOME-relative, so a privileged restart
 # ($HOME -> /root) would silently re-point it to a nonexistent /root/src/linux and every build would

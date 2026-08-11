@@ -25,12 +25,16 @@ echo
 report_build_stamps
 
 echo
+echo "=== worker lifecycle ==="
+"${here}/worker-lifecycle.sh" status || true
+
+echo
 echo "=== app health ==="
 server_health || true
 
 echo
 echo "=== database ==="
-if "$py" - <<PY 2>/dev/null; then
+if KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" "$py" - <<PY 2>/dev/null; then
 import os, sys
 import psycopg
 
@@ -43,7 +47,7 @@ print("  reachable")
 PY
   :
 else
-  echo "  UNREACHABLE (see KDIVE_DATABASE_URL)"
+  echo "  UNREACHABLE (see KDIVE_SERVER_DATABASE_URL)"
 fi
 
 echo

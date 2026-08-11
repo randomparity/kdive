@@ -20,7 +20,7 @@ the `!` prefix in the agent or directly in a shell.
 | `status.sh` | read-only health of every layer |
 
 No-VM, no-sudo dev loop (just poke the MCP API against backends):
-`KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-libvirt`.
+`scripts/live-stack/up.sh --skip-libvirt`.
 
 ## Backends only — `just stack-up` (no sudo)
 

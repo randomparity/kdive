@@ -12,7 +12,7 @@ import psycopg
 
 from kdive.db.migrate import apply_migrations
 
-conn = psycopg.connect(os.environ["KDIVE_DATABASE_URL"], autocommit=True)
+conn = psycopg.connect(os.environ["KDIVE_MIGRATION_DATABASE_URL"], autocommit=True)
 try:
     applied = apply_migrations(conn)
 finally:

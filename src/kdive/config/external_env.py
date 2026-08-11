@@ -486,23 +486,12 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "tier; the essential backend services (postgres, minio, oidc) still start.",
     ),
     ExternalEnvVar(
-        "KDIVE_WORKER_AS_ROOT",
-        "script",
-        "1",
-        "Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker "
-        "as root via sudo (1) or as the current user (0).",
-    ),
-    ExternalEnvVar(
         "KDIVE_WORKER_COUNT",
         "script",
         "1",
-        "How many `kdive worker` processes `restart_host_processes()` in "
-        "`scripts/live-stack/lib.sh` starts. A worker runs one job at a time, so this is the "
-        "local stack's only job-concurrency knob; raise it to exercise cross-worker paths such "
-        "as the rootfs fetch advisory lock. Each worker past the first gets its own aux health "
-        "port and log file. Values above 8 are refused at bring-up (`MAX_WORKER_COUNT` in "
-        "`scripts/live-stack/lib.sh`), because every worker is a root process with its own "
-        "database pool and aux port.",
+        "How many fixed lifecycle-worker slots `scripts/live-stack/worker-lifecycle.sh` starts. "
+        "A worker runs one job at a time, so this is the local stack's job-concurrency knob. "
+        "Values above 8 are refused before a lifecycle request is sent.",
     ),
     ExternalEnvVar(
         "KDIVE_LOCAL_ROLE_BOOTSTRAP",
@@ -512,17 +501,31 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "members after migration; set to 0 only with externally provisioned role DSNs.",
     ),
     ExternalEnvVar(
+        "KDIVE_MIGRATION_DATABASE_URL",
+        "script",
+        "local Compose migration DSN",
+        "Database login DSN supplied only to `scripts/live-stack/apply-migrations.sh` and the "
+        "runtime role bootstrap; external deployments override the local development owner.",
+    ),
+    ExternalEnvVar(
         "KDIVE_SERVER_DATABASE_URL",
         "script",
         "local Compose server-member DSN",
-        "Database login DSN supplied only to the Compose server service; external deployments "
+        "Database login DSN supplied only to the host server process; external deployments "
         "override the local development member.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_WORKER_DATABASE_URL",
+        "script",
+        "local Compose worker-member DSN",
+        "Database login DSN sent only to the host worker lifecycle witness for fixed worker units; "
+        "external deployments override the local development member.",
     ),
     ExternalEnvVar(
         "KDIVE_RECONCILER_DATABASE_URL",
         "script",
         "local Compose reconciler-member DSN",
-        "Database login DSN supplied only to the Compose reconciler service; external deployments "
+        "Database login DSN supplied only to the host reconciler process; external deployments "
         "override the local development member.",
     ),
     # Host-published ports for the compose backends. Each is read by BOTH `docker-compose.yml`
@@ -534,7 +537,7 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "script",
         "5432",
         "Host port the compose `postgres` service publishes; `scripts/live-stack/env.sh` folds it "
-        "into the default `KDIVE_DATABASE_URL`.",
+        "into the role-specific local database DSN defaults.",
     ),
     ExternalEnvVar(
         "KDIVE_MINIO_PORT",
