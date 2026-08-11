@@ -20,6 +20,11 @@ from kdive.processes.lifecycle.systemd_worker_contract import SlotPhase, WorkerS
 type TerminationOutcome = Literal["succeeded", "failed", "killed"]
 _HEX_32 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 _HEX_64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+_STATE_MODE = 0o600
+_ENVIRONMENT_MODE = 0o600
+_CREDENTIAL_MODE = 0o400
+_RELEASE_MODE = 0o440
+_MAX_STATE_BYTES = 65_536
 
 
 class StateConflict(RuntimeError):
@@ -54,6 +59,11 @@ with warnings.catch_warnings():
             incarnation = f"local-systemd:{unit}:{self.generation}"
             if self.unit != unit or self.incarnation != incarnation:
                 raise ValueError("slot state must use its derived systemd identity")
+            needs_binding = self.phase is not SlotPhase.PREPARED
+            if needs_binding and (not self.boot_id or not self.invocation_id):
+                raise ValueError("gated and later state requires boot and invocation identifiers")
+            if not needs_binding and (self.boot_id is not None or self.invocation_id is not None):
+                raise ValueError("prepared state has no systemd binding")
             if (self.phase is SlotPhase.TERMINATED) != (self.outcome is not None):
                 raise ValueError("only terminated state has a terminal outcome")
             return self
@@ -110,10 +120,15 @@ class SlotStore:
                 phase=SlotPhase.PREPARED,
             )
             self._write(
-                descriptor, "worker.env", self._environment(settings, state).encode(), 0o600
+                descriptor,
+                "worker.env",
+                self._environment(settings, state).encode(),
+                _ENVIRONMENT_MODE,
             )
-            self._write(descriptor, "worker-incarnation.credential", credential.encode(), 0o400)
-            self._write(descriptor, "state.json", state.model_dump_json().encode(), 0o600)
+            self._write(
+                descriptor, "worker-incarnation.credential", credential.encode(), _CREDENTIAL_MODE
+            )
+            self._write(descriptor, "state.json", state.model_dump_json().encode(), _STATE_MODE)
             return state
         finally:
             os.close(descriptor)
@@ -137,21 +152,23 @@ class SlotStore:
     def persist(self, state: SlotState) -> None:
         """Durably replace the state document for this exact fixed slot."""
         self._require_root()
-        self._validate_state_slot(state)
+        state = self._validated_state(state)
+        self._validate_transition(self.load(), state)
         descriptor = self._slot_descriptor(create=True)
         if descriptor is None:
             raise RuntimeError("failed to create fixed systemd worker slot directory")
         try:
-            self._write(descriptor, "state.json", state.model_dump_json().encode(), 0o600)
+            self._write(descriptor, "state.json", state.model_dump_json().encode(), _STATE_MODE)
         finally:
             os.close(descriptor)
 
     def publish_release(self, state: SlotState) -> None:
         """Atomically release an already registered exact systemd invocation."""
         self._require_root()
-        self._validate_state_slot(state)
-        if state.phase is not SlotPhase.REGISTERED or state.invocation_id is None:
+        state = self._validated_state(state)
+        if state.phase is not SlotPhase.REGISTERED:
             raise StateConflict("only registered state with an invocation may release a worker")
+        state.authority_binding()
         if self.load() != state:
             raise StateConflict("release requires the retained registered state")
         descriptor = self._slot_descriptor(create=True)
@@ -159,14 +176,14 @@ class SlotStore:
             raise RuntimeError("failed to create fixed systemd worker slot directory")
         try:
             release = f"{state.generation}\n{state.invocation_id}\n".encode()
-            self._write(descriptor, "release", release, 0o440)
+            self._write(descriptor, "release", release, _RELEASE_MODE)
         finally:
             os.close(descriptor)
 
     def cleanup_terminated(self, state: SlotState) -> None:
         """Remove the retained handoff only after exact terminal evidence is persisted."""
         self._require_root()
-        self._validate_state_slot(state)
+        state = self._validated_state(state)
         if state.phase is not SlotPhase.TERMINATED:
             raise StateConflict("cleanup requires terminated state")
         retained = self.load()
@@ -176,9 +193,12 @@ class SlotStore:
         if descriptor is None:
             raise RuntimeError("failed to create fixed systemd worker slot directory")
         try:
-            for name in ("state.json", "worker.env", "worker-incarnation.credential", "release"):
+            for name in ("worker.env", "worker-incarnation.credential", "release"):
                 with suppress(FileNotFoundError):
                     os.unlink(name, dir_fd=descriptor)
+            os.fsync(descriptor)
+            with suppress(FileNotFoundError):
+                os.unlink("state.json", dir_fd=descriptor)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
@@ -194,7 +214,10 @@ class SlotStore:
                 descriptor = self._open_directory(slots, str(self.slot), create)
                 if descriptor is None:
                     return None
-                self._set_slot_permissions(descriptor)
+                if create:
+                    self._set_slot_permissions(descriptor)
+                else:
+                    self._validate_slot_permissions(descriptor)
                 return descriptor
             finally:
                 os.close(slots)
@@ -203,8 +226,12 @@ class SlotStore:
 
     def _open_directory(self, parent: int, name: str, create: bool) -> int | None:
         if create:
-            with suppress(FileExistsError):
+            try:
                 os.mkdir(name, 0o750, dir_fd=parent)
+            except FileExistsError:
+                pass
+            else:
+                os.fsync(parent)
         try:
             return os.open(
                 name,
@@ -219,28 +246,43 @@ class SlotStore:
         os.fchmod(descriptor, 0o750)
         os.fchown(descriptor, 0, account.pw_gid)
 
+    def _validate_slot_permissions(self, descriptor: int) -> None:
+        account = pwd.getpwnam(f"kdive-worker-{self.slot}")
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o750
+            or metadata.st_uid != 0
+            or metadata.st_gid != account.pw_gid
+        ):
+            raise StateConflict(f"slot {self.slot} directory has untrusted metadata")
+
     def _write(self, parent: int, name: str, data: bytes, mode: int) -> None:
         temporary = f".{name}.{secrets.token_hex(8)}"
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-            mode,
-            dir_fd=parent,
-        )
+        created = False
         try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                mode,
+                dir_fd=parent,
+            )
+            created = True
             account = pwd.getpwnam(f"kdive-worker-{self.slot}")
-            os.fchmod(descriptor, mode)
-            os.fchown(descriptor, 0, account.pw_gid)
-            self._write_all(descriptor, data)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        try:
+            try:
+                os.fchmod(descriptor, mode)
+                os.fchown(descriptor, 0, account.pw_gid)
+                self._write_all(descriptor, data)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
             os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
             os.fsync(parent)
         except BaseException:
-            with suppress(FileNotFoundError):
-                os.unlink(temporary, dir_fd=parent)
+            if created:
+                with suppress(FileNotFoundError):
+                    os.unlink(temporary, dir_fd=parent)
+                    os.fsync(parent)
             raise
 
     @staticmethod
@@ -250,26 +292,48 @@ class SlotStore:
             count = os.write(descriptor, view)
             view = view[count:]
 
-    @staticmethod
-    def _read(parent: int, name: str) -> bytes:
-        descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
+    def _read(self, parent: int, name: str) -> bytes:
+        descriptor = self._open_trusted_file(parent, name, _STATE_MODE, _MAX_STATE_BYTES)
         try:
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 65_536:
-                raise StateConflict("state document is not a bounded regular file")
-            return os.read(descriptor, 65_537)
+            return os.read(descriptor, _MAX_STATE_BYTES + 1)
         finally:
             os.close(descriptor)
 
-    @staticmethod
-    def _exists(parent: int, name: str) -> bool:
+    def _exists(self, parent: int, name: str) -> bool:
+        mode = _STATE_MODE if name == "state.json" else _RELEASE_MODE
         try:
-            descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
+            descriptor = self._open_trusted_file(parent, name, mode, _MAX_STATE_BYTES)
         except FileNotFoundError:
             return False
         else:
             os.close(descriptor)
             return True
+
+    def _open_trusted_file(self, parent: int, name: str, mode: int, maximum: int) -> int:
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent,
+            )
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError):
+                raise
+            raise StateConflict(f"slot {self.slot} {name} is not a safe fixed file") from exc
+        metadata = os.fstat(descriptor)
+        account = pwd.getpwnam(f"kdive-worker-{self.slot}")
+        trusted = (
+            stat.S_ISREG(metadata.st_mode)
+            and stat.S_IMODE(metadata.st_mode) == mode
+            and metadata.st_uid == 0
+            and metadata.st_gid == account.pw_gid
+            and metadata.st_nlink == 1
+            and metadata.st_size <= maximum
+        )
+        if trusted:
+            return descriptor
+        os.close(descriptor)
+        raise StateConflict(f"slot {self.slot} {name} has untrusted metadata")
 
     def _environment(self, settings: WorkerSettings, state: SlotState) -> str:
         values = {
@@ -303,6 +367,39 @@ class SlotStore:
     def _validate_state_slot(self, state: SlotState) -> None:
         if state.slot != self.slot or state.unit != self.unit:
             raise StateConflict("state does not belong to this fixed slot")
+
+    def _validated_state(self, state: SlotState) -> SlotState:
+        try:
+            validated = SlotState.model_validate(state.model_dump())
+        except ValueError as exc:
+            raise StateConflict("state violates the durable slot contract") from exc
+        self._validate_state_slot(validated)
+        return validated
+
+    @staticmethod
+    def _validate_transition(retained: SlotState | None, candidate: SlotState) -> None:
+        if retained is None:
+            if candidate.phase is not SlotPhase.PREPARED:
+                raise StateConflict("first persisted state must be prepared")
+            return
+        immutable = ("schema", "slot", "unit", "generation", "incarnation", "credential_hash")
+        if any(getattr(retained, field) != getattr(candidate, field) for field in immutable):
+            raise StateConflict("persist cannot change immutable incarnation facts")
+        if retained == candidate:
+            return
+        transitions = {
+            (SlotPhase.PREPARED, SlotPhase.GATED),
+            (SlotPhase.GATED, SlotPhase.REGISTERED),
+            (SlotPhase.REGISTERED, SlotPhase.STARTED),
+            (SlotPhase.REGISTERED, SlotPhase.TERMINATED),
+            (SlotPhase.STARTED, SlotPhase.TERMINATED),
+        }
+        if (retained.phase, candidate.phase) not in transitions:
+            raise StateConflict("persist requires a legal forward phase transition")
+        if retained.boot_id is not None and candidate.boot_id != retained.boot_id:
+            raise StateConflict("persist cannot change the retained boot identifier")
+        if retained.invocation_id is not None and candidate.invocation_id != retained.invocation_id:
+            raise StateConflict("persist cannot change the retained invocation identifier")
 
     @staticmethod
     def _require_root() -> None:

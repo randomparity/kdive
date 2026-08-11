@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.processes.lifecycle.systemd_worker_contract import (
+    MAX_REQUEST_BYTES,
     LifecycleRequest,
     LifecycleResponse,
     ResponseCode,
@@ -64,6 +65,27 @@ def test_start_rejects_ninth_slot_and_long_string() -> None:
         LifecycleRequest.model_validate(start_payload(worker_count=9))
     with pytest.raises(ValidationError):
         LifecycleRequest.model_validate(start_payload(python="/" + "x" * 4096))
+
+
+def test_request_rejects_whitespace_frame_above_32_kib() -> None:
+    payload = b'{"operation":"status"}'
+    oversized = payload + b" " * (MAX_REQUEST_BYTES - len(payload) + 1)
+
+    with pytest.raises(ValueError, match="32 KiB"):
+        LifecycleRequest.model_validate_json(oversized)
+
+
+def test_request_accepts_exact_32_kib_frame() -> None:
+    payload = b'{"operation":"status"}'
+    exact = payload + b" " * (MAX_REQUEST_BYTES - len(payload))
+
+    assert LifecycleRequest.model_validate_json(exact).operation == "status"
+
+
+@pytest.mark.parametrize("lanes", [["default", "default"], ["default", "state-fenced", "default"]])
+def test_start_rejects_duplicate_or_excess_accepted_lanes(lanes: list[str]) -> None:
+    with pytest.raises(ValidationError):
+        LifecycleRequest.model_validate(start_payload(accepted_lanes=lanes))
 
 
 def test_start_requires_the_complete_allowlisted_settings() -> None:
@@ -162,3 +184,16 @@ def test_response_round_trips_each_code_with_bounded_slots() -> None:
 
     assert restored == response
     assert len(json.dumps(response.model_dump(mode="json")).encode()) < 1_114_112
+
+
+def test_response_serialization_rejects_multibyte_frame_above_byte_ceiling() -> None:
+    response = LifecycleResponse(
+        ok=False,
+        code="diagnostics_withheld",
+        message="diagnostics were withheld",
+        retry_action="operator_recovery",
+        diagnostics="😀" * 300_000,
+    )
+
+    with pytest.raises(ValueError, match="1,114,112"):
+        response.to_json_bytes()

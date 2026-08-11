@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -16,6 +16,8 @@ from pydantic import (
 )
 
 Operation = Literal["start", "status", "stop", "diagnostics"]
+MAX_REQUEST_BYTES = 32 * 1024
+MAX_RESPONSE_BYTES = 1_114_112
 ResponseCode = Literal[
     "ok",
     "busy",
@@ -66,7 +68,9 @@ class WorkerSettings(BaseModel):
     s3_region: str
     aws_access_key_id: SecretStr
     aws_secret_access_key: SecretStr
-    accepted_lanes: tuple[Literal["default", "state-fenced"], ...] = Field(min_length=1)
+    accepted_lanes: tuple[Literal["default", "state-fenced"], ...] = Field(
+        min_length=1, max_length=2
+    )
     build_user: str
     log_level: str
     health_binds: dict[int, str] = Field(max_length=8)
@@ -95,6 +99,16 @@ class WorkerSettings(BaseModel):
             raise ValueError("health binds must use slots 1 through 8")
         return value
 
+    @field_validator("accepted_lanes")
+    @classmethod
+    def validate_unique_lanes(
+        cls, value: tuple[Literal["default", "state-fenced"], ...]
+    ) -> tuple[Literal["default", "state-fenced"], ...]:
+        """Reject repeated lanes rather than minting duplicate worker claim loops."""
+        if len(value) != len(set(value)):
+            raise ValueError("accepted lanes must be unique")
+        return value
+
 
 class LifecycleRequest(BaseModel):
     """One complete lifecycle request, with configuration accepted only for ``start``."""
@@ -104,6 +118,15 @@ class LifecycleRequest(BaseModel):
     operation: Operation
     worker_count: int | None = Field(default=None, ge=1, le=8)
     settings: WorkerSettings | None = None
+
+    @classmethod
+    def model_validate_json(cls, json_data: str | bytes | bytearray, **kwargs: Any) -> Self:
+        """Decode one request only when its complete UTF-8 frame fits the protocol ceiling."""
+        if not isinstance(json_data, bytes):
+            raise TypeError("lifecycle request frame must be bytes")
+        if len(json_data) > MAX_REQUEST_BYTES:
+            raise ValueError("lifecycle request exceeds 32 KiB")
+        return super().model_validate_json(json_data, **kwargs)
 
     @model_validator(mode="after")
     def validate_operation_fields(self) -> Self:
@@ -154,6 +177,13 @@ class LifecycleResponse(BaseModel):
         if slots != tuple(sorted(set(slots))):
             raise ValueError("slot results must be ordered and unique")
         return self
+
+    def to_json_bytes(self) -> bytes:
+        """Serialize one server response only when its UTF-8 frame fits the wire ceiling."""
+        frame = self.model_dump_json().encode("utf-8")
+        if len(frame) > MAX_RESPONSE_BYTES:
+            raise ValueError("lifecycle response exceeds 1,114,112 bytes")
+        return frame
 
 
 def client_exit_status(response: LifecycleResponse) -> int:
