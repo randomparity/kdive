@@ -163,6 +163,31 @@ def test_installer_fixture_copy_rejects_source_or_destination_links(tmp_path: Pa
     assert not list(external.iterdir())
 
 
+def test_installer_fixture_copy_rejects_a_symlinked_source_ancestor(tmp_path: Path) -> None:
+    source = _fixture_catalog(tmp_path)
+    external = tmp_path / "external"
+    external.mkdir()
+    linked_fixtures = tmp_path / "source" / "fixtures"
+    linked_fixtures.rename(external / "fixtures")
+    linked_fixtures.symlink_to(external / "fixtures", target_is_directory=True)
+    destination = tmp_path / "installed" / "local-libvirt"
+    result = _install_fixture_catalog(source, destination)
+    assert result.returncode != 0
+    assert not destination.exists()
+
+
+def test_installer_fixture_copy_preserves_a_converged_catalog(tmp_path: Path) -> None:
+    source = _fixture_catalog(tmp_path)
+    destination = tmp_path / "installed" / "local-libvirt"
+    first = _install_fixture_catalog(source, destination)
+    assert first.returncode == 0, first.stderr
+    before = (destination / "manifest.yaml").stat()
+    second = _install_fixture_catalog(source, destination)
+    assert second.returncode == 0, second.stderr
+    after = (destination / "manifest.yaml").stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
 def test_installer_is_an_executable_host_contract() -> None:
     assert INSTALLER.stat().st_mode & stat.S_IXUSR
 

@@ -60,6 +60,26 @@ _fixture_inventory_is_exact() {
   done
 }
 
+_fixture_source_is_safe() {
+  local current="$1"
+  while [[ $current != / ]]; do
+    [[ ! -L $current && -d $current ]] || return 1
+    current="$(dirname -- "$current")"
+  done
+}
+
+_fixture_catalog_matches() {
+  local source="$1" destination="$2" owner="$3" group="$4" relative metadata
+  _fixture_inventory_is_exact "$destination" || return 1
+  [[ "$(stat -c '%u:%g:%a' "$destination")" == "$owner:$group:750" ]] || return 1
+  [[ "$(stat -c '%u:%g:%a' "$destination/profiles")" == "$owner:$group:750" ]] || return 1
+  for relative in "${_fixture_files[@]}"; do
+    cmp -s -- "$source/$relative" "$destination/$relative" || return 1
+    metadata="$(stat -c '%u:%g:%a' "$destination/$relative")"
+    [[ $metadata == "$owner:$group:640" ]] || return 1
+  done
+}
+
 _clear_fixture_catalog() {
   local catalog="$1"
   _fixture_inventory_is_exact "$catalog" || {
@@ -68,13 +88,13 @@ _clear_fixture_catalog() {
   find -P "$catalog" -mindepth 1 -delete
 }
 
-install_fixed_fixture_catalog() {
+install_fixed_fixture_catalog() (
   local source_catalog="$1" destination_catalog="$2" owner="$3" group="$4"
   local fixture_parent stage relative
-  _fixture_inventory_is_exact "$source_catalog" || {
+  if ! _fixture_source_is_safe "$source_catalog" || ! _fixture_inventory_is_exact "$source_catalog"; then
     echo "fixed local-libvirt fixture catalog has an unsafe inventory" >&2
     return 1
-  }
+  fi
   fixture_parent="$(dirname -- "$destination_catalog")"
   _require_real_directory "$fixture_parent" "$owner" "$group" 0750 || return 1
   if [[ -e $destination_catalog || -L $destination_catalog ]]; then
@@ -83,8 +103,9 @@ install_fixed_fixture_catalog() {
       return 1
     }
   fi
+  _fixture_catalog_matches "$source_catalog" "$destination_catalog" "$owner" "$group" && exit 0
   stage="$(mktemp -d "$fixture_parent/.fixture-stage.XXXXXX")"
-  trap 'find -P "$stage" -mindepth 1 -delete 2>/dev/null || :; rmdir "$stage" 2>/dev/null || :' RETURN
+  trap 'find -P "$stage" -mindepth 1 -delete 2>/dev/null || :; rmdir "$stage" 2>/dev/null || :' EXIT
   install -d -m 0700 -- "$stage/profiles"
   for relative in "${_fixture_files[@]}"; do
     cp --no-dereference -- "$source_catalog/$relative" "$stage/$relative"
@@ -96,7 +117,7 @@ install_fixed_fixture_catalog() {
   for relative in "${_fixture_files[@]}"; do
     install -o "$owner" -g "$group" -m 0640 -- "$stage/$relative" "$destination_catalog/$relative"
   done
-}
+)
 
 _libvirt_tuple_error() {
   local reason="$1" socket_path="$2" pid_path="$3"
