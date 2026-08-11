@@ -27,8 +27,10 @@ that slot's immutable local-systemd identity and worker-role runtime settings. W
 receive the lifecycle-witness database authority.
 
 A systemd socket activates a request-scoped root lifecycle witness. It accepts only bounded
-`start`, `status`, `stop`, and `diagnostics` requests from the provisioned live-stack control group.
-The caller may supply a worker count and allowlisted unprivileged worker settings, but never a unit
+`start`, `status`, `stop`, and `diagnostics` requests. The socket is `root:kdive-live-control` mode
+`0660`, that group contains only the configured operator account, and the service requires the
+connection's `SO_PEERCRED` UID to equal that provisioned account before parsing a request. The
+caller may supply a worker count and allowlisted unprivileged worker settings, but never a unit
 name, command, credential, state path, or lifecycle-witness DSN. One host lock serializes requests.
 The service exits after each request; systemd units and root-owned per-slot state retain authority
 between requests.
@@ -49,8 +51,8 @@ provider directories needed by the live topology.
 Failure diagnostics are deliberately non-transactional. Before teardown, the fixed diagnostics
 request reads only the current worker units, removes the retained credential and worker DSN
 literals, bounds the output, and returns it to the caller. Both live workflows print that output in
-an `if: failure()` step. The lifecycle repair does not promise post-stop augmentation or durable
-cross-run journal archives.
+an `if: failure() || cancelled()` step before any cleanup. The lifecycle repair does not promise
+post-stop augmentation or durable cross-run journal archives.
 
 ## Consequences
 

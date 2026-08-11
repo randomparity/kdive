@@ -64,10 +64,11 @@ control group, or another slot's primary group.
 
 ## Control boundary
 
-The socket is root-owned, mode `0660`, and accessible only to the live-stack control group. The
-service verifies the connected peer credentials and accepts one bounded JSON request. Operations
-are `start`, `status`, `stop`, and `diagnostics`. A non-blocking root-owned lock rejects concurrent
-operations with an actionable retry message.
+The socket is `root:kdive-live-control` mode `0660`. Provisioning makes the configured operator the
+group's only member and stores that account's numeric UID in root-owned service configuration. The
+service reads `SO_PEERCRED` and rejects every other UID before parsing bytes. It then accepts one
+bounded JSON request. Operations are `start`, `status`, `stop`, and `diagnostics`. A non-blocking
+root-owned lock rejects concurrent operations with an actionable retry message.
 
 `start` accepts a worker count in `1..8` plus an allowlist of worker runtime values already needed
 by the live stack: absolute Python and source paths, worker database DSN, libvirt URI, provider
@@ -167,11 +168,11 @@ escapes control characters, limits each slot to 256 KiB, and limits the response
 request. Reaching a byte ceiling emits one truncation marker. Unsafe state or an oversized
 redaction source withholds that slot rather than returning unredacted content.
 
-Both live jobs add a separate `if: failure()` step after their existing live-test step. It invokes
-the diagnostics script before any teardown and prints the bounded output with workflow-command
-interpretation disabled. Diagnostic failure reports a short warning and does not replace the
-original job failure. Clean teardown, post-stop augmentation, and durable report manifests are not
-part of this issue.
+Both live jobs add a separate `if: failure() || cancelled()` step after their existing live-test
+step and before any cleanup. It invokes the diagnostics script and prints the bounded output with
+workflow-command interpretation disabled. Diagnostic failure reports a short warning and does not
+replace the original job failure. Clean teardown, post-stop augmentation, and durable report
+manifests are not part of this issue.
 
 ## Threat model
 
@@ -185,8 +186,9 @@ part of this issue.
 
 ### Boundaries and controls
 
-- **Operator to root socket:** filesystem permissions, peer credentials, one bounded schema,
-  allowlisted worker settings, derived privileged names, and serialized requests.
+- **Operator to root socket:** mode-`0660` dedicated-group DAC, exact provisioned-UID comparison
+  with `SO_PEERCRED` before parsing, one bounded schema, allowlisted worker settings, derived
+  privileged names, and serialized requests.
 - **Root witness to worker:** distinct UID per slot, fixed unit, systemd credential handoff,
   root-owned environment/state, cgroup containment, and no witness DSN.
 - **Witness to PostgreSQL:** root-only witness credential and exact incarnation/binding calls.
@@ -219,8 +221,8 @@ teardown. The design does not weaken behavior when any of those components is un
    them, and observes exact terminal rows. A systemd-hosted proof exercises the installed units
    where the host supports it.
 6. Workflow tests prove both live jobs reach their existing test commands and run bounded redacted
-   diagnostics on failure before teardown. Reporter tests cover bare credentials, DSN passwords,
-   hostile control text, missing journals, and output bounds.
+   diagnostics on failure or cancellation before cleanup. Reporter tests cover bare credentials,
+   DSN passwords, hostile control text, missing journals, and output bounds.
 7. Focused Python, shell, systemd, Ansible, and workflow checks pass, followed by `just ci`.
 
 ## Rollback
