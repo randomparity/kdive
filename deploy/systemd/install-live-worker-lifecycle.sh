@@ -17,12 +17,94 @@ _libvirt_tuple_process_name=""
 _libvirt_tuple_socket_state="absent"
 _libvirt_tuple_pid_identity=""
 _libvirt_tuple_socket_identity=""
+_libvirt_runtime_root=""
+_libvirt_runtime_child=""
+_libvirt_runtime_operator_uid=""
+_libvirt_runtime_group_gid=""
+_libvirt_runtime_root_locked="false"
+_libvirt_runtime_child_locked="false"
 
 _libvirt_tuple_error() {
   local reason="$1" socket_path="$2" pid_path="$3"
   echo "contradictory selected libvirt tuple: $reason; $socket_path and $pid_path left untouched." \
     "Recovery: inspect those exact paths and their owning process, correct the evidence, then rerun." >&2
   return 1
+}
+
+_libvirt_cleanup_error() {
+  local reason="$1" socket_path="$2" pid_path="$3"
+  echo "selected libvirt stale cleanup failed: $reason; start is blocked." \
+    "Recovery: inspect $socket_path and $pid_path, correct the exact residue, then rerun." >&2
+  return 1
+}
+
+_restore_libvirt_runtime() {
+  local restore_status=0 authority expected_authority
+
+  expected_authority="$_libvirt_runtime_operator_uid:$_libvirt_runtime_group_gid:750"
+
+  if [[ $_libvirt_runtime_child_locked == true ]]; then
+    if ! chown -h "$_libvirt_runtime_operator_uid:$_libvirt_runtime_group_gid" \
+      "$_libvirt_runtime_child" || ! chmod 0750 "$_libvirt_runtime_child"; then
+      echo "could not restore operator ownership on $_libvirt_runtime_child" >&2
+      restore_status=1
+    else
+      authority="$(stat -c '%u:%g:%a' "$_libvirt_runtime_child" 2>/dev/null || :)"
+      [[ $authority == "$expected_authority" ]] || restore_status=1
+    fi
+  fi
+  if [[ $_libvirt_runtime_root_locked == true ]]; then
+    if ! chown -h "$_libvirt_runtime_operator_uid:$_libvirt_runtime_group_gid" \
+      "$_libvirt_runtime_root" || ! chmod 0750 "$_libvirt_runtime_root"; then
+      echo "could not restore operator ownership on $_libvirt_runtime_root" >&2
+      restore_status=1
+    else
+      authority="$(stat -c '%u:%g:%a' "$_libvirt_runtime_root" 2>/dev/null || :)"
+      [[ $authority == "$expected_authority" ]] || restore_status=1
+    fi
+  fi
+  if [[ $restore_status -eq 0 ]]; then
+    _libvirt_runtime_child_locked="false"
+    _libvirt_runtime_root_locked="false"
+  fi
+  return "$restore_status"
+}
+
+_lock_libvirt_runtime() {
+  local runtime_parent="$1" runtime_root="$2" operator_uid="$3" group_gid="$4"
+  local lock_uid="$5" lock_gid="${6:-$5}"
+
+  _libvirt_runtime_root="$runtime_root"
+  _libvirt_runtime_child="$runtime_root/libvirt"
+  _libvirt_runtime_operator_uid="$operator_uid"
+  _libvirt_runtime_group_gid="$group_gid"
+  _libvirt_runtime_root_locked="false"
+  _libvirt_runtime_child_locked="false"
+  if [[ -L $runtime_parent || (-e $runtime_parent && ! -d $runtime_parent) ]]; then
+    echo "libvirt runtime parent must be a real directory: $runtime_parent" >&2
+    return 1
+  fi
+  [[ -d $runtime_parent ]] || mkdir -- "$runtime_parent"
+  chown -h "$lock_uid:$lock_gid" "$runtime_parent"
+  chmod 0755 "$runtime_parent"
+  if [[ -L $runtime_root || (-e $runtime_root && ! -d $runtime_root) ]]; then
+    echo "libvirt runtime root must be a real directory: $runtime_root" >&2
+    return 1
+  fi
+  [[ -d $runtime_root ]] || mkdir -- "$runtime_root"
+  chown -h "$lock_uid:$group_gid" "$runtime_root"
+  chmod 0750 "$runtime_root"
+  _libvirt_runtime_root_locked="true"
+  if [[ -L $_libvirt_runtime_child ||
+    (-e $_libvirt_runtime_child && ! -d $_libvirt_runtime_child) ]]; then
+    echo "libvirt runtime child must be a real directory: $_libvirt_runtime_child" >&2
+    _restore_libvirt_runtime || :
+    return 1
+  fi
+  [[ -d $_libvirt_runtime_child ]] || mkdir -- "$_libvirt_runtime_child"
+  chown -h "$lock_uid:$group_gid" "$_libvirt_runtime_child"
+  chmod 0750 "$_libvirt_runtime_child"
+  _libvirt_runtime_child_locked="true"
 }
 
 _inspect_libvirt_pid() {
@@ -103,9 +185,9 @@ _inspect_libvirt_socket() {
   _libvirt_tuple_error "socket listener state is indeterminate" "$socket_path" "$pid_path"
 }
 
-_remove_stale_libvirt_tuple() {
+_verify_stale_libvirt_tuple_unchanged() {
   local socket_path="$1" pid_path="$2"
-  local current_identity
+  local current_identity probe_status
 
   if [[ -n $_libvirt_tuple_pid_identity ]]; then
     current_identity="$(stat -c '%d:%i:%u:%a' "$pid_path" 2>/dev/null || :)"
@@ -121,9 +203,35 @@ _remove_stale_libvirt_tuple() {
       _libvirt_tuple_error "socket residue changed during inspection" "$socket_path" "$pid_path"
       return
     fi
+    if _probe_libvirt_socket "$socket_path"; then
+      _libvirt_tuple_error "socket gained a listener during inspection" "$socket_path" "$pid_path"
+      return
+    else
+      probe_status=$?
+    fi
+    if [[ $probe_status -ne 3 ]]; then
+      _libvirt_tuple_error "socket state changed during inspection" "$socket_path" "$pid_path"
+      return
+    fi
   fi
-  [[ -z $_libvirt_tuple_pid_identity ]] || unlink "$pid_path"
-  [[ -z $_libvirt_tuple_socket_identity ]] || unlink "$socket_path"
+}
+
+_remove_stale_libvirt_tuple() {
+  local socket_path="$1" pid_path="$2"
+
+  _verify_stale_libvirt_tuple_unchanged "$socket_path" "$pid_path" || return
+  if [[ -n $_libvirt_tuple_pid_identity ]] && ! unlink "$pid_path"; then
+    _libvirt_cleanup_error "could not remove stale pid residue" "$socket_path" "$pid_path"
+    return
+  fi
+  if [[ -n $_libvirt_tuple_socket_identity ]] && ! unlink "$socket_path"; then
+    _libvirt_cleanup_error "could not remove stale socket residue" "$socket_path" "$pid_path"
+    return
+  fi
+  if [[ -e $pid_path || -L $pid_path || -e $socket_path || -L $socket_path ]]; then
+    _libvirt_cleanup_error "stale residue survived exact removal" "$socket_path" "$pid_path"
+    return
+  fi
 }
 
 _reconcile_libvirt_tuple() {
@@ -157,11 +265,6 @@ _reconcile_libvirt_tuple() {
   fi
   _remove_stale_libvirt_tuple "$socket_path" "$pid_path" || return
   _libvirt_tuple_action="start"
-}
-
-_install_libvirt_runtime_directories() {
-  local runtime_root="$1" operator="$2" group="$3"
-  install -d -o "$operator" -g "$group" -m 0750 "$runtime_root" "$runtime_root/libvirt"
 }
 
 _select_libvirt_tuple() {
@@ -274,6 +377,9 @@ revision_temp=""
 uri_temp=""
 
 cleanup() {
+  if ! _restore_libvirt_runtime; then
+    echo "live-libvirt runtime ownership restoration failed; inspect before retrying" >&2
+  fi
   [[ -z $credential_temp || ! -e $credential_temp ]] || unlink "$credential_temp"
   [[ -z $config_temp || ! -e $config_temp ]] || unlink "$config_temp"
   [[ -z $revision_temp || ! -e $revision_temp ]] || unlink "$revision_temp"
@@ -284,6 +390,7 @@ trap cleanup EXIT
 
 getent group "$control_group" >/dev/null || groupadd --system "$control_group"
 getent group "$libvirt_group" >/dev/null || groupadd --system "$libvirt_group"
+IFS=: read -r _ _ libvirt_group_gid _ < <(getent group "$libvirt_group")
 usermod -a -G "$control_group,$libvirt_group" "$operator"
 
 for slot in {1..8}; do
@@ -301,8 +408,9 @@ install -d -o root -g root -m 0755 /usr/local/libexec /etc/kdive
 install -d -o root -g root -m 0700 /etc/kdive/credentials
 install -d -o root -g root -m 0755 \
   "$state_root" "$state_root/slots" /opt/kdive-live-worker-lifecycle
-install -d -o root -g root -m 0755 /run/kdive
-_install_libvirt_runtime_directories /run/kdive/live-libvirt "$operator" "$libvirt_group"
+_lock_libvirt_runtime /run/kdive /run/kdive/live-libvirt \
+  "$operator_uid" "$libvirt_group_gid" 0 0
+_restore_libvirt_runtime
 install -d -o "$operator" -g "$libvirt_group" -m 2770 \
   /var/lib/kdive/rootfs /var/lib/kdive/console \
   /var/lib/kdive/pcap /var/lib/kdive/build /var/lib/kdive/install
@@ -361,20 +469,27 @@ revision_temp=""
 
 libvirt_socket_path="/run/kdive/live-libvirt/libvirt/$_libvirt_socket"
 libvirt_pid_path="/run/kdive/live-libvirt/libvirt/$_libvirt_pid"
-IFS=: read -r _ _ libvirt_group_gid _ < <(getent group "$libvirt_group")
+_lock_libvirt_runtime /run/kdive /run/kdive/live-libvirt \
+  "$operator_uid" "$libvirt_group_gid" 0 0
 _reconcile_libvirt_tuple "$libvirt_socket_path" "$libvirt_pid_path" "$_libvirt_daemon" \
   "$operator_uid" "$libvirt_group_gid"
-if [[ $_libvirt_tuple_action == start ]]; then
+libvirt_tuple_action="$_libvirt_tuple_action"
+_restore_libvirt_runtime
+if [[ $libvirt_tuple_action == start ]]; then
   runuser -u "$operator" -- env XDG_RUNTIME_DIR=/run/kdive/live-libvirt \
     "$_libvirt_executable" --daemon --config "/etc/kdive/$_libvirt_config" \
     --pid-file "$libvirt_pid_path"
-fi
-_reconcile_libvirt_tuple "$libvirt_socket_path" "$libvirt_pid_path" "$_libvirt_daemon" \
-  "$operator_uid" "$libvirt_group_gid"
-if [[ $_libvirt_tuple_action != adopt ]]; then
-  echo "selected $_libvirt_family $_libvirt_daemon did not produce a complete live tuple;" \
-    "inspect $libvirt_pid_path and $libvirt_socket_path, then rerun" >&2
-  exit 1
+  _lock_libvirt_runtime /run/kdive /run/kdive/live-libvirt \
+    "$operator_uid" "$libvirt_group_gid" 0 0
+  _reconcile_libvirt_tuple "$libvirt_socket_path" "$libvirt_pid_path" "$_libvirt_daemon" \
+    "$operator_uid" "$libvirt_group_gid"
+  libvirt_tuple_action="$_libvirt_tuple_action"
+  _restore_libvirt_runtime
+  if [[ $libvirt_tuple_action != adopt ]]; then
+    echo "selected $_libvirt_family $_libvirt_daemon did not produce a complete live tuple;" \
+      "inspect $libvirt_pid_path and $libvirt_socket_path, then rerun" >&2
+    exit 1
+  fi
 fi
 
 systemctl daemon-reload

@@ -74,6 +74,10 @@ the selected daemon identity and its socket has the selected owner, group, mode,
 listener. A dead pid and refused, correctly owned selected socket are removed as exact stale
 residues before restart. Contradictory process, type, ownership, or listener evidence is left
 untouched; inspect the two paths named by the installer, correct that evidence, and rerun.
+Before privileged inspection, the installer temporarily locks the runtime hierarchy as root,
+rejects symlink or non-directory entries without following them, and restores operator ownership
+on every exit. Stale removal rechecks file identity, process state, and the listener while locked;
+any unlink or postcondition failure blocks startup and names the exact paths to inspect.
 
 Only the configured operator belongs to `kdive-live-control`. Worker accounts belong to
 `kdive-live-libvirt` and never to the control, sudo, or Docker groups. The witness credential and
