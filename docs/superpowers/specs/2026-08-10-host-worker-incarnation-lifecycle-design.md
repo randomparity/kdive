@@ -99,6 +99,27 @@ a mismatched run identifier. `start` and `stop` return an operation state for `s
 than holding the control connection across daemon work. Force cleanup remains root-operator-only
 and is not exposed on the socket.
 
+Before any migration, role-file write, or unit transition, an accepted `start` atomically publishes
+one root-owned mode-`0600` run record containing schema version, run identifier, lifecycle digest,
+worker count, workspace identity, and operation phase (`starting`, `running`, `stopping`, or
+`complete`). The
+record uses write/`fsync`/rename/parent-`fsync` ordering and is the serialization authority across
+service restarts. Every generation bundle includes the same run identifier. On restart the service
+loads and validates the run record before units or requests, reconciles only matching bundles and
+the fixed unit count, and resumes the recorded operation. A repeated request with identical facts
+is idempotent; a different run identifier or changed immutable fact fails closed while the record
+exists.
+
+The fixed `report` operation publishes sanitized output atomically beneath a root-owned staging
+directory derived from the active run identifier; it does not return journal bytes in the 4 KiB
+control response. The response names only fixed staged files that the authorized peer may read, and
+the client copies them into its checkout. A retry for the same run adopts a complete report or
+replaces an incomplete temporary report. Failure reporting runs before `stop`. The run record
+reaches `complete` only after every slot is evidenced and cleaned, server and reconciler are stopped,
+and role files are removed. The completed record and report remain as an idempotent `stop` result
+until the next `start` atomically retires them before publishing the new owner. A crash at any
+boundary reconstructs the same owner and cannot let another run take over unresolved state.
+
 The lifecycle service uses only its provisioned root-owned code. After the digest check it may pass
 the configured checkout's `src` directory to server, reconciler, and worker units, which execute it
 only under their dedicated non-root identities. It validates that the workspace and source tree are
@@ -146,10 +167,11 @@ launcher refuses to fall back to them or to direct `python -m kdive worker`.
 
 For each slot, the witness uses one root-owned generation bundle under a fixed slot directory. The
 bundle contains a bounded state document, the credential source, and an identity environment file.
-The state contains schema version, unit name, generation, holder, credential hash, phase, host boot
-identifier, optional systemd invocation identifier, and service result. The identity file contains
-only the fixed unit name, random lowercase-hex generation, and derived holder. The credential is not
-an environment value. All opens use fixed directories, no symlink following, and bounded names.
+The state contains schema version, control-run identifier, unit name, generation, holder, credential
+hash, phase, host boot identifier, optional systemd invocation identifier, and service result. The
+identity file contains only the fixed unit name, random lowercase-hex generation, and derived
+holder. The credential is not an environment value. All opens use fixed directories, no symlink
+following, and bounded names.
 
 To publish `prepared`, the witness creates a mode-`0700` temporary generation directory under the
 fixed parent, writes the credential, identity, and state with their final modes, `fsync`s every file
@@ -290,6 +312,8 @@ replacing the original failed step.
   mismatch.
 - Privileged lifecycle digest mismatch or unauthorized control peer: perform no root action and name
   the Ansible reprovisioning or identity remedy.
+- Mismatched control-run identifier or immutable run facts: leave the active run untouched and
+  require the caller owning the recorded identifier to resume or stop it.
 - Missing witness or worker DSN: no worker starts; the affected role and environment file are named.
 - State, credential, or environment path ownership/mode mismatch: fail closed without following or
   replacing the path.
@@ -379,10 +403,12 @@ Explicitly out of scope:
    observes exact evidence. A systemd-hosted live proof exercises the real units.
 6. Script and control-protocol tests prove root/direct mode rejection, exact peer admission, schema
    and size bounds, fixed workspace/unit derivation, lifecycle-digest mismatch refusal,
-   migration/bootstrap/role ordering, exact worker count, one-run serialization, restart refusal on
-   unresolved evidence, and no shared DSN reaches a daemon. An Ansible-hosted proof invokes every
-   allowed operation as `github-runner`, rejects another UID, and proves the account still has no
-   general sudo or arbitrary systemd control.
+   migration/bootstrap/role ordering, exact worker count, durable one-run serialization, idempotent
+   same-run retry, mismatched-run refusal, restart refusal on unresolved evidence, and no shared DSN
+   reaches a daemon. Crash tests cover run-record publication, partial multi-worker start, each
+   operation-phase write, report publication, partial stop, final cleanup, and completed-record
+   retirement. An Ansible-hosted proof invokes every allowed operation as `github-runner`, rejects
+   another UID, and proves the account still has no general sudo or arbitrary systemd control.
 7. Workflow/reporter tests prove both live jobs invoke failure-only diagnostics and redact bare
    worker credentials and role passwords, including values crossing the output cutoff. They cover
    hostile journal formatting, multiple sources, per-source and total bounds, malformed seed
