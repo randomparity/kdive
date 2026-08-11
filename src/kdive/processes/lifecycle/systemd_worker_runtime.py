@@ -5,8 +5,11 @@ from __future__ import annotations
 import math
 import os
 import posixpath
+import pwd
 import re
 import selectors
+import shlex
+import stat
 import subprocess
 import time
 from collections.abc import Callable, Sequence
@@ -30,10 +33,18 @@ _PROPERTIES = (
     "InvocationID",
 )
 _PROPERTY_ARGUMENT = "--property=" + ",".join(_PROPERTIES)
+_DIAGNOSTIC_PROPERTIES = ("ActiveState", "SubState", "Result", "ExecMainStatus")
 _CONTROL_OUTPUT_LIMIT = 4096
 _CGROUP_EVENTS_LIMIT = 4096
 _PROC_FILE_LIMIT = 4096
 _MAX_JOURNAL_BYTES = 320 * 1024
+_MAX_DIAGNOSTIC_ENVIRONMENT_BYTES = 64 * 1024
+_MAX_DIAGNOSTIC_CREDENTIAL_BYTES = 4096
+_SECRET_ENVIRONMENT_NAMES = frozenset(
+    ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "KDIVE_DATABASE_URL")
+)
+_SECRET_ENVIRONMENT_PATTERN = re.compile(r"(?i)(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|DATABASE_URL)")
+_ENVIRONMENT_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 _COMMAND_CLEANUP_RESERVE_SECONDS = 0.5
 _COMMAND_TERMINATE_GRACE_SECONDS = 0.1
 
@@ -298,6 +309,163 @@ class UnmanagedWorker:
     uid: int
 
 
+def load_slot_redaction_values(
+    root: Path,
+    slot: int,
+    *,
+    expected_uid: int = 0,
+    expected_gid: int | None = None,
+) -> tuple[str, ...]:
+    """Read only trusted secret sources for one fixed retained slot."""
+    if slot not in range(1, 9):
+        raise ValueError("diagnostic slot must be in 1..8")
+    descriptors: list[int] = []
+    try:
+        gid = pwd.getpwnam(f"kdive-worker-{slot}").pw_gid if expected_gid is None else expected_gid
+        descriptors, parent = _open_diagnostic_slot(root, slot, expected_uid, gid)
+        credential = _read_diagnostic_source(
+            parent,
+            "worker-incarnation.credential",
+            mode=0o400,
+            maximum=_MAX_DIAGNOSTIC_CREDENTIAL_BYTES,
+            expected_uid=expected_uid,
+            expected_gid=gid,
+        )
+        environment = _read_diagnostic_source(
+            parent,
+            "worker.env",
+            mode=0o600,
+            maximum=_MAX_DIAGNOSTIC_ENVIRONMENT_BYTES,
+            expected_uid=expected_uid,
+            expected_gid=gid,
+        )
+    except (KeyError, OSError, UnicodeError, ValueError) as exc:
+        raise PermissionError("slot diagnostic redaction source is unsafe") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    try:
+        credential_text = credential.decode("utf-8")
+        secret_values = _secret_environment_values(environment)
+    except (UnicodeError, ValueError) as exc:
+        raise PermissionError("slot diagnostic redaction source is unsafe") from exc
+    if not credential_text or any(character in credential_text for character in "\r\n\x00"):
+        raise PermissionError("slot diagnostic redaction source is unsafe")
+    return (credential_text, *secret_values)
+
+
+def _open_diagnostic_slot(
+    root: Path, slot: int, expected_uid: int, slot_gid: int
+) -> tuple[list[int], int]:
+    descriptors: list[int] = []
+    try:
+        parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        descriptors.append(parent)
+        _validate_diagnostic_directory(
+            parent, mode=0o755, expected_uid=expected_uid, expected_gid=expected_uid
+        )
+        for name, mode, gid in (
+            ("slots", 0o755, expected_uid),
+            (str(slot), 0o750, slot_gid),
+        ):
+            parent = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent,
+            )
+            descriptors.append(parent)
+            _validate_diagnostic_directory(
+                parent, mode=mode, expected_uid=expected_uid, expected_gid=gid
+            )
+    except BaseException:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise
+    return descriptors, parent
+
+
+def _validate_diagnostic_directory(
+    descriptor: int,
+    *,
+    mode: int,
+    expected_uid: int,
+    expected_gid: int,
+) -> None:
+    metadata = os.fstat(descriptor)
+    trusted = (
+        stat.S_ISDIR(metadata.st_mode)
+        and stat.S_IMODE(metadata.st_mode) == mode
+        and metadata.st_uid == expected_uid
+        and metadata.st_gid == expected_gid
+        and metadata.st_nlink >= 2
+    )
+    if not trusted:
+        raise PermissionError("slot diagnostic redaction source is unsafe")
+
+
+def _read_diagnostic_source(
+    parent: int,
+    name: str,
+    *,
+    mode: int,
+    maximum: int,
+    expected_uid: int,
+    expected_gid: int,
+) -> bytes:
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW,
+        dir_fd=parent,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        trusted = (
+            stat.S_ISREG(metadata.st_mode)
+            and stat.S_IMODE(metadata.st_mode) == mode
+            and metadata.st_uid == expected_uid
+            and metadata.st_gid == expected_gid
+            and metadata.st_nlink == 1
+            and metadata.st_size <= maximum
+        )
+        if not trusted:
+            raise PermissionError("slot diagnostic redaction source is unsafe")
+        data = os.read(descriptor, maximum + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > maximum:
+        raise PermissionError("slot diagnostic redaction source is unsafe")
+    return data
+
+
+def _secret_environment_values(data: bytes) -> tuple[str, ...]:
+    text = data.decode("utf-8")
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        name, value = _environment_assignment(line, values)
+        if name in _SECRET_ENVIRONMENT_NAMES or _SECRET_ENVIRONMENT_PATTERN.search(name):
+            values[name] = value
+    _require_complete_secret_environment(values)
+    return tuple(values[name] for name in sorted(values))
+
+
+def _environment_assignment(line: str, values: dict[str, str]) -> tuple[str, str]:
+    fields = shlex.split(line, posix=True)
+    if len(fields) != 1 or "=" not in fields[0]:
+        raise ValueError("worker environment is malformed")
+    name, value = fields[0].split("=", 1)
+    if not _ENVIRONMENT_NAME.fullmatch(name) or name in values:
+        raise ValueError("worker environment is malformed")
+    return name, value
+
+
+def _require_complete_secret_environment(values: dict[str, str]) -> None:
+    if _SECRET_ENVIRONMENT_NAMES.difference(values):
+        raise ValueError("worker environment has incomplete secret sources")
+    for value in values.values():
+        if not value or len(value.encode("utf-8")) > 4096:
+            raise ValueError("worker environment has incomplete secret sources")
+
+
 class SystemdRuntime:
     """Observe and control only the eight fixed retained worker units."""
 
@@ -419,6 +587,22 @@ class SystemdRuntime:
             deadline=deadline,
             allow_truncation=True,
         )
+
+    def public_properties(self, unit: str, invocation_id: str, deadline: Deadline) -> str:
+        """Render only the public diagnostic allowlist for one retained invocation."""
+        self._require_unit(unit)
+        if not _INVOCATION_ID.fullmatch(invocation_id):
+            raise SystemdConflict("diagnostic properties require an exact invocation identifier")
+        output = self.runner.run(
+            ("systemctl", "show", _PROPERTY_ARGUMENT, unit),
+            byte_limit=_CONTROL_OUTPUT_LIMIT,
+            deadline=deadline,
+        )
+        properties = self._property_lines(output)
+        self._require_complete_properties(properties)
+        if properties["InvocationID"] != invocation_id:
+            raise SystemdConflict("diagnostic properties do not match the retained invocation")
+        return "".join(f"{name}={properties[name]}\n" for name in _DIAGNOSTIC_PROPERTIES)
 
     def _unmanaged_worker(self, process: Path) -> UnmanagedWorker | None:
         try:

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Callable, Coroutine, Sequence
+from pathlib import Path
 from typing import Any, Protocol
 
 from psycopg_pool import AsyncConnectionPool
@@ -26,12 +28,15 @@ from kdive.processes.lifecycle.systemd_worker_runtime import (
     SystemdUnavailable,
     UnitObservation,
     UnmanagedWorker,
+    load_slot_redaction_values,
 )
 from kdive.processes.lifecycle.systemd_worker_state import (
     SlotState,
     StateConflict,
     TerminationOutcome,
 )
+from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     register_worker_incarnation,
@@ -41,8 +46,22 @@ from kdive.services.runs.worker_incarnations import (
 _REQUEST_SECONDS = 120.0
 _STOP_SECONDS = 45.0
 _DIAGNOSTIC_SECONDS = 30.0
-_JOURNAL_BYTES = 320 * 1024
+_SLOT_ACQUISITION_BYTES = 320 * 1024
+_TOTAL_ACQUISITION_BYTES = 1_310_720
+_PROPERTY_ACQUISITION_BYTES = 4096
+_SLOT_EMISSION_BYTES = 256 * 1024
+_TOTAL_EMISSION_BYTES = 1_048_576
+_MAX_REDACTION_VALUES = 32
+_MAX_REDACTION_VALUE_BYTES = 4096
 _POLL_SECONDS = 0.1
+_TRUNCATION_MARKER = "[diagnostics truncated]\n"
+_WITHHELD_TEMPLATE = "[diagnostics withheld for slot {slot}]\n"
+_URL_USERINFO = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/@\s]+@")
+_SCHEMELESS_USERINFO = re.compile(r"(?<![\w/])[^/:@\s]+:[^/@\s]*@(?=[^/\s]+)")
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b([A-Za-z0-9_-]*(?:password|passwd|token|api[_-]?key|access[_-]?key|secret|"
+    r"credential|database_url)[A-Za-z0-9_-]*)(\s*[=:]\s*)([^\s]+)"
+)
 
 
 class EvidenceRejected(RuntimeError):
@@ -87,6 +106,7 @@ class SlotStorage(Protocol):
 
     slot: int
     unit: str
+    root: Path
 
     def prepare(self, settings: WorkerSettings | None) -> SlotState: ...
 
@@ -118,7 +138,11 @@ class SystemdControl(Protocol):
 
     def unmanaged_workers(self) -> tuple[UnmanagedWorker, ...]: ...
 
-    def journal(self, invocation_id: str, byte_limit: int, deadline: Deadline) -> str: ...
+    def public_properties(self, unit: str, invocation_id: str, deadline: Deadline) -> str: ...
+
+    def journal(
+        self, invocation_id: str, byte_limit: int, deadline: Deadline
+    ) -> str | Sequence[str]: ...
 
 
 class _BudgetDeadline:
@@ -178,6 +202,9 @@ class SystemdWorkerLifecycle:
         runtime: SystemdControl,
         authority: IncarnationAuthority,
         wait: Callable[[float], None] = time.sleep,
+        load_redaction_values: Callable[[Path, int], tuple[str, ...]] = (
+            load_slot_redaction_values
+        ),
     ) -> None:
         if tuple(store.slot for store in stores) != tuple(range(1, 9)):
             raise ValueError("lifecycle requires the eight ordered fixed slot stores")
@@ -185,6 +212,7 @@ class SystemdWorkerLifecycle:
         self._runtime = runtime
         self._authority = authority
         self._wait = wait
+        self._load_redaction_values = load_redaction_values
 
     async def start(self, request: LifecycleRequest, deadline: Deadline) -> LifecycleResponse:
         """Replace the current fleet, replaying retained generations before activation."""
@@ -229,30 +257,150 @@ class SystemdWorkerLifecycle:
         """Select exact retained invocation journals without mutating lifecycle state."""
         operation_deadline = _BudgetDeadline(deadline, _REQUEST_SECONDS)
         diagnostic_deadline = _BudgetDeadline(operation_deadline, _DIAGNOSTIC_SECONDS)
-        states: list[SlotState] = []
-        try:
-            for store in self._stores:
-                state = self._store_call(diagnostic_deadline, store.load)
-                if state is None:
-                    continue
-                states.append(state)
-                if state.invocation_id is not None:
-                    self._systemd_call(
-                        diagnostic_deadline,
-                        self._runtime.journal,
-                        state.invocation_id,
-                        _JOURNAL_BYTES,
-                        diagnostic_deadline,
+        acquired = 0
+        emitted = 0
+        reports: list[str] = []
+        results: list[SlotResult] = []
+        withheld = False
+        aggregate_marker_emitted = False
+        for store in self._stores:
+            state, unsafe_state = self._diagnostic_state(store, diagnostic_deadline)
+            if unsafe_state:
+                withheld = True
+                available = max(0, _TOTAL_EMISSION_BYTES - emitted)
+                report = _bounded_text(
+                    _WITHHELD_TEMPLATE.format(slot=store.slot), available, truncated=False
+                )
+                emitted += len(report.encode("utf-8"))
+                reports.append(report)
+                results.append(
+                    SlotResult(
+                        slot=store.slot,
+                        unit=store.unit,
+                        code="diagnostics_withheld",
+                        message="withheld",
                     )
-        except Exception as exc:
-            return self._failure_response(exc, diagnostic_deadline, diagnostic=True)
+                )
+                continue
+            if state is None:
+                continue
+            remaining_acquisition = _TOTAL_ACQUISITION_BYTES - acquired
+            if remaining_acquisition < _PROPERTY_ACQUISITION_BYTES:
+                if not aggregate_marker_emitted:
+                    available = max(0, _TOTAL_EMISSION_BYTES - emitted)
+                    report = _bounded_text(
+                        f"=== slot {state.slot} ===\n{_TRUNCATION_MARKER}",
+                        available,
+                        truncated=False,
+                    )
+                    emitted += len(report.encode("utf-8"))
+                    reports.append(report)
+                    aggregate_marker_emitted = True
+                results.append(_result(state))
+                continue
+            if emitted >= _TOTAL_EMISSION_BYTES:
+                results.append(_result(state))
+                continue
+            slot_withheld = False
+            try:
+                report, used = self._diagnose_slot(
+                    store,
+                    state,
+                    diagnostic_deadline,
+                    acquisition_budget=remaining_acquisition,
+                    emission_budget=_TOTAL_EMISSION_BYTES - emitted,
+                )
+            except Exception:
+                withheld = True
+                slot_withheld = True
+                report = _WITHHELD_TEMPLATE.format(slot=store.slot)
+                used = 0
+            acquired += used
+            available = max(0, _TOTAL_EMISSION_BYTES - emitted)
+            report = _bounded_text(report, available, truncated=False)
+            emitted += len(report.encode("utf-8"))
+            reports.append(report)
+            results.append(_result(state, code="diagnostics_withheld" if slot_withheld else "ok"))
+        diagnostics = "".join(reports)
+        if withheld:
+            return LifecycleResponse(
+                ok=False,
+                code="diagnostics_withheld",
+                message="diagnostics withheld for one or more slots",
+                retry_action="operator_recovery",
+                slots=tuple(results),
+                diagnostics=diagnostics,
+            )
         return LifecycleResponse(
-            ok=False,
-            code="diagnostics_withheld",
-            message="diagnostic text is withheld until safe redaction is available",
-            retry_action="operator_recovery",
-            slots=tuple(_result(state) for state in states),
+            ok=True,
+            code="ok",
+            message="worker diagnostics captured",
+            retry_action="none",
+            slots=tuple(results),
+            diagnostics=diagnostics,
         )
+
+    def _diagnostic_state(
+        self, store: SlotStorage, deadline: Deadline
+    ) -> tuple[SlotState | None, bool]:
+        try:
+            return self._store_call(deadline, store.load), False
+        except Exception:
+            return None, True
+
+    def _diagnose_slot(
+        self,
+        store: SlotStorage,
+        state: SlotState,
+        deadline: Deadline,
+        *,
+        acquisition_budget: int,
+        emission_budget: int,
+    ) -> tuple[str, int]:
+        invocation_id = _require_diagnostic_budget(state, acquisition_budget, emission_budget)
+        secret_values = _validated_redaction_values(
+            self._load_redaction_values(store.root, store.slot)
+        )
+        properties = self._systemd_call(
+            deadline,
+            self._runtime.public_properties,
+            state.unit,
+            invocation_id,
+            deadline,
+        )
+        slot_budget = min(_SLOT_ACQUISITION_BYTES, acquisition_budget)
+        public_text, _, public_truncated = _bounded_chunks(
+            (properties,), _PROPERTY_ACQUISITION_BYTES
+        )
+        public_bytes = _PROPERTY_ACQUISITION_BYTES
+        journal_budget = slot_budget - public_bytes
+        journal_text, journal_bytes, journal_truncated = self._diagnostic_journal(
+            invocation_id, journal_budget, deadline
+        )
+        raw = f"{public_text}Journal:\n{journal_text}"
+        safe = _sanitize_diagnostics(raw, secret_values)
+        report = f"=== slot {state.slot} ===\n{safe}"
+        truncated = any(
+            (public_truncated, journal_truncated, slot_budget < _SLOT_ACQUISITION_BYTES)
+        )
+        emit_limit = min(_SLOT_EMISSION_BYTES, emission_budget)
+        return _bounded_text(report, emit_limit, truncated=truncated), public_bytes + journal_bytes
+
+    def _diagnostic_journal(
+        self, invocation_id: str, byte_limit: int, deadline: Deadline
+    ) -> tuple[str, int, bool]:
+        if byte_limit <= 0:
+            return "", 0, True
+        chunks = self._systemd_call(
+            deadline,
+            self._runtime.journal,
+            invocation_id,
+            byte_limit,
+            deadline,
+        )
+        source = (chunks,) if isinstance(chunks, str) else chunks
+        text, used, truncated = _bounded_chunks(source, byte_limit)
+        return text, used, truncated or used >= byte_limit
 
     async def _replace_current_fleet(self, deadline: Deadline) -> None:
         bound: list[tuple[SlotStorage, SlotState]] = []
@@ -625,6 +773,79 @@ class SystemdWorkerLifecycle:
                 if state is not None:
                     results[store.slot] = _result(state, code=code)
         return tuple(results[slot] for slot in sorted(results))
+
+
+def _bounded_chunks(chunks: Sequence[str], limit: int) -> tuple[str, int, bool]:
+    retained = bytearray()
+    truncated = False
+    for chunk in chunks:
+        encoded = chunk.encode("utf-8")
+        available = max(0, limit - len(retained))
+        retained.extend(encoded[:available])
+        if len(encoded) > available:
+            truncated = True
+            break
+    return retained.decode("utf-8", errors="ignore"), len(retained), truncated
+
+
+def _require_diagnostic_budget(
+    state: SlotState, acquisition_budget: int, emission_budget: int
+) -> str:
+    if state.invocation_id is None:
+        raise StateConflict("slot has no exact invocation for diagnostics")
+    if acquisition_budget <= 0 or emission_budget <= 0:
+        raise StateConflict("slot has no safe diagnostic acquisition budget")
+    return state.invocation_id
+
+
+def _validated_redaction_values(values: tuple[str, ...]) -> tuple[str, ...]:
+    if not values or len(values) > _MAX_REDACTION_VALUES:
+        raise StateConflict("slot has unsafe diagnostic redaction sources")
+    for value in values:
+        if not value or len(value.encode("utf-8")) > _MAX_REDACTION_VALUE_BYTES:
+            raise StateConflict("slot has unsafe diagnostic redaction sources")
+    return values
+
+
+def _sanitize_diagnostics(text: str, secret_values: tuple[str, ...]) -> str:
+    registry = SecretRegistry()
+    scope = object()
+    for value in secret_values:
+        registry.register(value, scope=scope)
+    redacted = text
+    for value in sorted(secret_values, key=len, reverse=True):
+        redacted = redacted.replace(value, "[REDACTED]")
+    redacted = Redactor(registry=registry).redact_text(redacted)
+    redacted = _URL_USERINFO.sub(r"\1", redacted)
+    redacted = _SCHEMELESS_USERINFO.sub("", redacted)
+    redacted = _SECRET_ASSIGNMENT.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", redacted
+    )
+    return _escape_diagnostic_controls(redacted)
+
+
+def _escape_diagnostic_controls(text: str) -> str:
+    escaped: list[str] = []
+    for character in text:
+        value = ord(character)
+        if character == "\n":
+            escaped.append(character)
+        elif value < 32 or 127 <= value < 160:
+            escaped.append(f"\\x{value:02x}")
+        else:
+            escaped.append(character)
+    return "".join(escaped).replace("::", "\\x3a\\x3a")
+
+
+def _bounded_text(text: str, limit: int, *, truncated: bool) -> str:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit and not truncated:
+        return text
+    marker = _TRUNCATION_MARKER.encode()
+    if limit <= len(marker):
+        return ""
+    prefix = encoded[: limit - len(marker) - 1].decode("utf-8", errors="ignore")
+    return prefix.rstrip("\n") + "\n" + _TRUNCATION_MARKER
 
 
 def _require_time(deadline: Deadline) -> float:

@@ -262,6 +262,24 @@ jobs:
           just test-live-tcg
           KDIVE_LIVE_SPINE
 
+      - name: Capture worker lifecycle diagnostics
+        if: failure() || cancelled()
+        run: |
+          set -uo pipefail
+          command_token="kdive-$(tr -d - < /proc/sys/kernel/random/uuid)"
+          printf '::stop-commands::%s\n' "$command_token"
+          sg kdive-live-control -c 'scripts/live-stack/worker-lifecycle.sh diagnostics'
+          diagnostic_status=$?
+          printf '::%s::\n' "$command_token"
+          if ((diagnostic_status != 0)); then
+            echo "worker lifecycle diagnostics were unavailable or withheld" >&2
+          fi
+          exit 0
+
+      - name: Clean up live stack
+        if: always()
+        run: sg kdive-live-control -c 'scripts/live-stack/down.sh'
+
   native:
     name: live_vm (self-hosted KVM)
     # POSITIVE allowlist — NOT `!= 'pull_request'`, which would admit push and fire the
@@ -360,3 +378,21 @@ jobs:
           # native live_vm test imports drgn in-process). /opt/kdive already has drgn + guestfs, so
           # this also needs no `just` on the self-hosted runner.
           "$KDIVE_PYTHON" -m pytest -m "live_vm and not live_vm_tcg" -q
+
+      - name: Capture worker lifecycle diagnostics
+        if: failure() || cancelled()
+        run: |
+          set -uo pipefail
+          command_token="kdive-$(tr -d - < /proc/sys/kernel/random/uuid)"
+          printf '::stop-commands::%s\n' "$command_token"
+          scripts/live-stack/worker-lifecycle.sh diagnostics
+          diagnostic_status=$?
+          printf '::%s::\n' "$command_token"
+          if ((diagnostic_status != 0)); then
+            echo "worker lifecycle diagnostics were unavailable or withheld" >&2
+          fi
+          exit 0
+
+      - name: Clean up live stack
+        if: always()
+        run: scripts/live-stack/down.sh

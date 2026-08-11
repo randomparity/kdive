@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Awaitable
+import os
+from collections.abc import Awaitable, Sequence
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
@@ -27,11 +29,14 @@ from kdive.processes.lifecycle.systemd_worker_runtime import (
     Deadline,
     MonotonicDeadline,
     SystemdConflict,
+    SystemdRuntime,
     SystemdUnavailable,
     UnitObservation,
     UnmanagedWorker,
+    load_slot_redaction_values,
 )
 from kdive.processes.lifecycle.systemd_worker_state import SlotState, TerminationOutcome
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 _BOOT_ID = "01234567-89ab-cdef-0123-456789abcdef"
 _NEXT_BOOT_ID = "fedcba98-7654-3210-fedc-ba9876543210"
@@ -63,6 +68,7 @@ class FakeStore:
     ) -> None:
         self.slot = slot
         self.unit = f"kdive-live-worker@{slot}.service"
+        self.root = Path("/fixed-test-worker-state")
         self.events = events
         self.state = state
         self.environment = state is not None
@@ -74,6 +80,7 @@ class FakeStore:
         )
         self.preparations = 0
         self.load_calls = 0
+        self.load_failure: Exception | None = None
 
     def prepare(self, settings: WorkerSettings | None) -> SlotState:
         assert settings is not None
@@ -96,6 +103,8 @@ class FakeStore:
 
     def load(self) -> SlotState | None:
         self.load_calls += 1
+        if self.load_failure is not None:
+            raise self.load_failure
         return self.state
 
     def persist(self, state: SlotState) -> None:
@@ -146,6 +155,8 @@ class FakeRuntime:
         self.stopped: list[str] = []
         self.resets: list[str] = []
         self.journal_calls: list[tuple[str, int, float]] = []
+        self.journal_chunks: dict[str, tuple[str, ...]] = {}
+        self.public_property_calls: list[tuple[str, str]] = []
         self.stop_budgets: list[float] = []
         self.inactive_checks: list[tuple[str, float]] = []
         self.systemd_deadlines: list[tuple[str, Deadline]] = []
@@ -222,9 +233,14 @@ class FakeRuntime:
     def unmanaged_workers(self) -> tuple[UnmanagedWorker, ...]:
         return self.unmanaged
 
-    def journal(self, invocation_id: str, byte_limit: int, deadline: Deadline) -> str:
+    def public_properties(self, unit: str, invocation_id: str, deadline: Deadline) -> str:
+        assert deadline.remaining() >= 0
+        self.public_property_calls.append((unit, invocation_id))
+        return "ActiveState=active\n"
+
+    def journal(self, invocation_id: str, byte_limit: int, deadline: Deadline) -> tuple[str, ...]:
         self.journal_calls.append((invocation_id, byte_limit, deadline.remaining()))
-        return "untrusted journal text"
+        return self.journal_chunks.get(invocation_id, ("untrusted journal text",))
 
 
 class FakeAuthority:
@@ -344,13 +360,20 @@ def _deadline(clock: FakeClock, seconds: float = 1_000.0) -> MonotonicDeadline:
 
 
 def _coordinator(
-    stores: list[FakeStore], runtime: FakeRuntime, authority: FakeAuthority, clock: FakeClock
+    stores: list[FakeStore],
+    runtime: FakeRuntime,
+    authority: FakeAuthority,
+    clock: FakeClock,
+    *,
+    redaction_sources: dict[int, tuple[str, ...]] | None = None,
 ) -> SystemdWorkerLifecycle:
+    sources = redaction_sources or {}
     return SystemdWorkerLifecycle(
         stores=tuple(stores),
         runtime=runtime,
         authority=authority,
         wait=clock.advance,
+        load_redaction_values=lambda _root, slot: sources.get(slot, ()),
     )
 
 
@@ -857,7 +880,13 @@ def test_status_records_unexpected_exit_without_cleaning_diagnostic_sources() ->
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, events = _fleet(states={1: started})
     runtime.current[started.unit] = _observation(1, "empty", result="exit-code", status=1)
-    coordinator = _coordinator(stores, runtime, authority, clock)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("credential-1",)},
+    )
 
     status = _run(coordinator.status(_deadline(clock)))
 
@@ -872,8 +901,16 @@ def test_status_records_unexpected_exit_without_cleaning_diagnostic_sources() ->
 
     diagnostics = _run(coordinator.diagnostics(_deadline(clock)))
 
-    assert diagnostics.code == "diagnostics_withheld"
-    assert runtime.journal_calls == [(started.invocation_id, 320 * 1024, 30.0)]
+    assert diagnostics.ok
+    assert diagnostics.code == "ok"
+    assert diagnostics.diagnostics is not None
+    assert "ActiveState=active" in diagnostics.diagnostics
+    assert "ControlGroup=" not in diagnostics.diagnostics
+    assert "InvocationID=" not in diagnostics.diagnostics
+    assert "untrusted journal text" in diagnostics.diagnostics
+    assert runtime.journal_calls[0][0] == started.invocation_id
+    assert 0 < runtime.journal_calls[0][1] <= 320 * 1024
+    assert runtime.journal_calls[0][2] == 30.0
     assert stores[0].state == terminated
     assert stores[0].environment and stores[0].credential and stores[0].release
 
@@ -888,11 +925,18 @@ def test_status_records_unexpected_exit_without_cleaning_diagnostic_sources() ->
 def test_diagnostics_uses_one_30_second_acquisition_ceiling_and_never_mutates() -> None:
     states = {slot: _state(slot, SlotPhase.STARTED) for slot in (1, 2)}
     stores, runtime, authority, clock, events = _fleet(states=states)
-    coordinator = _coordinator(stores, runtime, authority, clock)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("credential-1",), 2: ("credential-2",)},
+    )
 
     response = _run(coordinator.diagnostics(_deadline(clock)))
 
-    assert response.code == "diagnostics_withheld"
+    assert response.ok
+    assert response.code == "ok"
     assert [call[0] for call in runtime.journal_calls] == [
         states[1].invocation_id,
         states[2].invocation_id,
@@ -900,3 +944,294 @@ def test_diagnostics_uses_one_30_second_acquisition_ceiling_and_never_mutates() 
     assert all(budget <= 30.0 for _, _, budget in runtime.journal_calls)
     assert events == []
     assert stores[0].state == states[1] and stores[1].state == states[2]
+
+
+@pytest.mark.parametrize("boundary", ("first", "middle", "last"))
+@pytest.mark.parametrize(
+    ("template", "secret", "registered"),
+    (
+        ("credential={secret}", "RETAINED-CREDENTIAL-UNIQUE", True),
+        (
+            "database={secret}",
+            "postgresql://DB-USER:DB-PASSWORD@localhost/kdive",  # pragma: allowlist secret
+            True,
+        ),
+        ("s3={secret}", "OBJECT-STORE-SECRET-UNIQUE", True),
+        ("url=postgresql://{secret}@localhost/kdive", "URL-USER:URL-PASSWORD", False),
+        ("PASSWORD={secret}", "STRUCTURAL-PASSWORD-UNIQUE", False),
+    ),
+)
+def test_diagnostics_redacts_secrets_split_across_journal_chunks(
+    boundary: str, template: str, secret: str, registered: bool
+) -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    offsets = {"first": 1, "middle": len(secret) // 2, "last": len(secret) - 1}
+    secret_offset = offsets[boundary]
+    text = template.format(secret=secret)
+    split = text.index(secret) + secret_offset
+    runtime.journal_chunks[state.invocation_id or ""] = (text[:split], text[split:])
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: (secret,) if registered else ("retained-credential",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    left, right = secret[:secret_offset], secret[secret_offset:]
+    assert secret not in response.diagnostics
+    assert left + right not in response.diagnostics
+    lines = response.diagnostics.splitlines()
+    assert all(
+        secret not in first + second for first, second in zip(lines, lines[1:], strict=False)
+    )
+    if template.startswith("url="):
+        assert "url=postgresql://localhost/kdive" in response.diagnostics
+    else:
+        assert "[REDACTED]" in response.diagnostics
+    assert events == []
+    assert stores[0].state == state
+
+
+def test_diagnostics_applies_structural_and_control_redaction_before_bounding() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    hostile = (
+        "postgresql://struct-user:struct-pass@localhost/kdive "  # pragma: allowlist secret
+        "DATABASE_URL=another-secret PASSWORD=hunter2\n::error::oops\x00\x01"
+    )
+    runtime.journal_chunks[state.invocation_id or ""] = (hostile, "x" * (320 * 1024))
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("retained-credential",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    output = response.diagnostics
+    for secret in ("struct-user", "struct-pass", "another-secret", "hunter2"):
+        assert secret not in output
+    assert "::error::" not in output
+    assert "\x00" not in output and "\x01" not in output
+    assert "\\x00" in output and "\\x01" in output
+    assert output.count("[diagnostics truncated]") == 1
+    assert len(output.encode("utf-8")) <= 256 * 1024
+    assert events == []
+
+
+def test_diagnostics_enforces_aggregate_acquisition_and_emission_limits() -> None:
+    states = {slot: _state(slot, SlotPhase.STARTED) for slot in range(1, 9)}
+    stores, runtime, authority, clock, events = _fleet(states=states)
+    for state in states.values():
+        runtime.journal_chunks[state.invocation_id or ""] = ("x" * (400 * 1024),)
+    sources: dict[int, tuple[str, ...]] = {slot: (f"credential-{slot}",) for slot in states}
+    coordinator = _coordinator(stores, runtime, authority, clock, redaction_sources=sources)
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert len(runtime.journal_calls) == 4
+    assert sum(call[1] + 4096 for call in runtime.journal_calls) <= 1_310_720
+    assert all(call[1] <= 320 * 1024 for call in runtime.journal_calls)
+    assert len(response.diagnostics.encode("utf-8")) <= 1_048_576
+    assert events == []
+    assert all(store.state == states[store.slot] for store in stores)
+
+
+def test_diagnostics_withholds_unsafe_source_without_reading_its_journal() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+
+    def unsafe_source(_root: Path, _slot: int) -> tuple[str, ...]:
+        raise PermissionError("sensitive source path and metadata")
+
+    coordinator = SystemdWorkerLifecycle(
+        stores=tuple(stores),
+        runtime=runtime,
+        authority=authority,
+        wait=clock.advance,
+        load_redaction_values=unsafe_source,
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok
+    assert response.code == "diagnostics_withheld"
+    assert response.diagnostics == "[diagnostics withheld for slot 1]\n"
+    assert "sensitive" not in response.model_dump_json()
+    assert runtime.public_property_calls == []
+    assert runtime.journal_calls == []
+    assert events == []
+    assert stores[0].state == state
+
+
+def test_diagnostics_withholds_unsafe_state_without_exposing_error_detail() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    stores[0].load_failure = ValueError("state path and credential detail")
+    coordinator = _coordinator(stores, runtime, authority, clock)
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok
+    assert response.code == "diagnostics_withheld"
+    assert response.diagnostics == "[diagnostics withheld for slot 1]\n"
+    assert "credential detail" not in response.model_dump_json()
+    assert runtime.journal_calls == []
+    assert events == []
+
+
+def test_diagnostics_withholds_oversized_redaction_value() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: state})
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("s" * 4097,)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok
+    assert response.diagnostics == "[diagnostics withheld for slot 1]\n"
+    assert runtime.journal_calls == []
+    assert events == []
+
+
+def test_diagnostics_removes_overlapping_secret_literals_longest_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    runtime.journal_chunks[state.invocation_id or ""] = ("saw OVERLAP-SUFFIX",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("OVERLAP", "OVERLAP-SUFFIX")},
+    )
+    monkeypatch.setattr(
+        SecretRegistry,
+        "snapshot",
+        lambda _registry: ("OVERLAP", "OVERLAP-SUFFIX"),
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert "OVERLAP" not in response.diagnostics
+    assert "SUFFIX" not in response.diagnostics
+
+
+class _DiagnosticPropertyRunner:
+    def __init__(self, invocation_id: str) -> None:
+        self.invocation_id = invocation_id
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        byte_limit: int,
+        deadline: Deadline | None = None,
+        allow_truncation: bool = False,
+    ) -> str:
+        assert argv[0] == "systemctl"
+        assert byte_limit == 4096
+        assert deadline is not None
+        assert not allow_truncation
+        return (
+            "ActiveState=failed\n"
+            "SubState=failed\n"
+            "Result=exit-code\n"
+            "ExecMainStatus=7\n"
+            "ControlGroup=/system.slice/kdive-live-worker@1.service\n"
+            f"InvocationID={self.invocation_id}\n"
+        )
+
+
+def test_runtime_diagnostic_properties_emit_only_the_public_allowlist() -> None:
+    invocation_id = "1" * 32
+    runtime = SystemdRuntime(_DiagnosticPropertyRunner(invocation_id))
+
+    output = runtime.public_properties(
+        "kdive-live-worker@1.service", invocation_id, _deadline(FakeClock())
+    )
+
+    assert output == ("ActiveState=failed\nSubState=failed\nResult=exit-code\nExecMainStatus=7\n")
+    assert "ControlGroup" not in output and "InvocationID" not in output
+
+
+def _diagnostic_source_tree(tmp_path: Path) -> Path:
+    root = tmp_path / "live-workers"
+    slots = root / "slots"
+    slot = slots / "1"
+    slot.mkdir(parents=True)
+    root.chmod(0o755)
+    slots.chmod(0o755)
+    slot.chmod(0o750)
+    credential = slot / "worker-incarnation.credential"
+    credential.write_text("retained-credential", encoding="utf-8")
+    credential.chmod(0o400)
+    environment = slot / "worker.env"
+    environment.write_text(
+        "AWS_ACCESS_KEY_ID=access-key\n"
+        "AWS_SECRET_ACCESS_KEY=object-secret\n"
+        "KDIVE_API_TOKEN=future-token\n"
+        "KDIVE_DATABASE_URL="
+        "postgresql://worker:password@localhost/kdive\n"  # pragma: allowlist secret
+        "KDIVE_LOG_LEVEL=INFO\n",
+        encoding="utf-8",
+    )
+    environment.chmod(0o600)
+    return root
+
+
+def test_diagnostic_source_loader_returns_only_secret_classified_values(tmp_path: Path) -> None:
+    root = _diagnostic_source_tree(tmp_path)
+
+    values = load_slot_redaction_values(root, 1, expected_uid=os.getuid(), expected_gid=os.getgid())
+
+    assert set(values) == {
+        "retained-credential",
+        "access-key",
+        "object-secret",
+        "future-token",
+        "postgresql://worker:password@localhost/kdive",  # pragma: allowlist secret
+    }
+    assert "INFO" not in values
+
+
+@pytest.mark.parametrize("unsafe_kind", ("symlink", "nonregular", "mode", "owner"))
+def test_diagnostic_source_loader_rejects_unsafe_metadata(tmp_path: Path, unsafe_kind: str) -> None:
+    root = _diagnostic_source_tree(tmp_path)
+    credential = root / "slots/1/worker-incarnation.credential"
+    expected_uid = os.getuid()
+    if unsafe_kind == "symlink":
+        target = tmp_path / "credential-target"
+        target.write_text("retained-credential", encoding="utf-8")
+        target.chmod(0o400)
+        credential.unlink()
+        credential.symlink_to(target)
+    elif unsafe_kind == "nonregular":
+        credential.unlink()
+        credential.mkdir(mode=0o400)
+    elif unsafe_kind == "mode":
+        credential.chmod(0o440)
+    else:
+        expected_uid += 1
+
+    with pytest.raises(PermissionError, match="source is unsafe") as error:
+        load_slot_redaction_values(root, 1, expected_uid=expected_uid, expected_gid=os.getgid())
+
+    assert str(error.value) == "slot diagnostic redaction source is unsafe"
