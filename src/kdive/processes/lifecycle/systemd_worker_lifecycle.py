@@ -8,6 +8,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
+from itertools import chain
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -54,6 +55,9 @@ _SLOT_EMISSION_BYTES = 256 * 1024
 _TOTAL_EMISSION_BYTES = 1_048_576
 _MAX_REDACTION_VALUES = 32
 _MAX_REDACTION_VALUE_BYTES = 4096
+_MAX_FORBIDDEN_SOURCE_BYTES = (
+    _MAX_REDACTION_VALUES * _MAX_REDACTION_VALUE_BYTES + _SLOT_ACQUISITION_BYTES + 128
+)
 _POLL_SECONDS = 0.1
 _TRUNCATION_MARKER = "[diagnostics truncated]\n"
 _AGGREGATE_TRUNCATION_MARKER = "[aggregate diagnostics truncated]\n"
@@ -61,12 +65,11 @@ _WITHHELD_TEMPLATE = "[diagnostics withheld for slot {slot}]\n"
 _URL_USERINFO = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)([^/@\s]+)(@)")
 _SCHEMELESS_USERINFO = re.compile(r"(?<![\w/])([^/:@\s]+:[^/@\s]*)(@)(?=[^/\s]+)")
 _UNTERMINATED_URL_AUTHORITY = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)([^\s/]*)\Z")
+_UNTERMINATED_SCHEMELESS_USERINFO = re.compile(r"(?<![\w/:])([^/:@\s]+:[^/@\s]*)\Z")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b([A-Za-z0-9_-]*(?:password|passwd|token|api[_-]?key|access[_-]?key|secret|"
     r"credential|database_url)[A-Za-z0-9_-]*)(\s*[=:]\s*)([^\r\n]*)"
 )
-_MASK_SENTINELS = ("~", "^", "#", "%", "?")
-
 type _DiagnosticEntry = tuple[SlotStorage, SlotState | None, bool]
 
 
@@ -93,6 +96,22 @@ class _ActivationFailure(RuntimeError):
         super().__init__(str(cause))
         self.cause = cause
         self.cleaned = cleaned
+
+
+class _UnsafeDiagnosticText(RuntimeError):
+    """Known forbidden text could not be excluded from a post-acquisition rendering."""
+
+    def __init__(
+        self,
+        forbidden: tuple[str, ...],
+        *,
+        used: int = 0,
+        aggregate_truncated: bool = False,
+    ) -> None:
+        super().__init__("diagnostic text could not be rendered safely")
+        self.forbidden = forbidden
+        self.used = used
+        self.aggregate_truncated = aggregate_truncated
 
 
 class IncarnationAuthority(Protocol):
@@ -355,6 +374,12 @@ class SystemdWorkerLifecycle:
                 emission_budget=_TOTAL_EMISSION_BYTES - capture.emitted,
                 reserve_aggregate=has_later,
             )
+        except _UnsafeDiagnosticText as exc:
+            capture.acquired += exc.used
+            capture.withheld_slots.add(store.slot)
+            capture.append("")
+            capture.aggregate_truncated = exc.aggregate_truncated
+            return _result(state, code="diagnostics_withheld")
         except Exception:
             capture.withheld_slots.add(store.slot)
             capture.append(_WITHHELD_TEMPLATE.format(slot=store.slot))
@@ -386,6 +411,32 @@ class SystemdWorkerLifecycle:
         secret_values = _validated_redaction_values(
             self._load_redaction_values(store.root, store.slot)
         )
+        try:
+            return self._diagnose_trusted_slot(
+                state,
+                deadline,
+                secret_values=secret_values,
+                invocation_id=invocation_id,
+                acquisition_budget=acquisition_budget,
+                emission_budget=emission_budget,
+                reserve_aggregate=reserve_aggregate,
+            )
+        except _UnsafeDiagnosticText:
+            raise
+        except Exception as exc:
+            raise _UnsafeDiagnosticText(secret_values) from exc
+
+    def _diagnose_trusted_slot(
+        self,
+        state: SlotState,
+        deadline: Deadline,
+        *,
+        secret_values: tuple[str, ...],
+        invocation_id: str,
+        acquisition_budget: int,
+        emission_budget: int,
+        reserve_aggregate: bool,
+    ) -> tuple[str, int, bool]:
         properties = self._systemd_call(
             deadline,
             self._runtime.public_properties,
@@ -402,14 +453,13 @@ class SystemdWorkerLifecycle:
         journal_text, journal_bytes, journal_truncated = self._diagnostic_journal(
             invocation_id, journal_budget, deadline
         )
-        raw = f"{public_text}Journal:\n{journal_text}"
+        raw = f"=== slot {state.slot} ===\n{public_text}Journal:\n{journal_text}"
         acquisition_truncated = any(
             (public_truncated, journal_truncated, slot_budget < _SLOT_ACQUISITION_BYTES)
         )
-        safe, forbidden = _sanitize_diagnostics(
+        report, forbidden = _sanitize_diagnostics(
             raw, secret_values, acquisition_truncated=acquisition_truncated
         )
-        report = f"=== slot {state.slot} ===\n{safe}"
         emit_limit = min(_SLOT_EMISSION_BYTES, emission_budget)
         report = _bounded_text(report, emit_limit, truncated=acquisition_truncated)
         aggregate_truncated = reserve_aggregate and (
@@ -419,7 +469,11 @@ class SystemdWorkerLifecycle:
         if aggregate_truncated:
             report = _aggregate_bounded_text(report, emission_budget)
         if _contains_forbidden(report, forbidden):
-            raise StateConflict("sanitized diagnostics retained a secret value")
+            raise _UnsafeDiagnosticText(
+                forbidden,
+                used=public_bytes + journal_bytes,
+                aggregate_truncated=aggregate_truncated,
+            )
         return report, public_bytes + journal_bytes, aggregate_truncated
 
     def _diagnostic_journal(
@@ -856,18 +910,30 @@ def _sanitize_diagnostics(
     registered = tuple(sorted(registry.snapshot(), key=len, reverse=True))
     structural = _structural_secret_values(text, acquisition_truncated=acquisition_truncated)
     forbidden = tuple(dict.fromkeys((*registered, *structural)))
-    for sentinel in _MASK_SENTINELS:
-        if any(sentinel in value or value in sentinel for value in forbidden):
+    sentinel = _select_mask_sentinel(forbidden)
+    redacted = _render_sanitized_diagnostics(
+        text,
+        registered,
+        sentinel,
+        acquisition_truncated=acquisition_truncated,
+    )
+    return redacted, forbidden
+
+
+def _select_mask_sentinel(forbidden: tuple[str, ...]) -> str:
+    occupied = {character for value in forbidden for character in value}
+    occupied_bytes = 0
+    codepoints = chain((0x2588,), range(0x21, 0x2588), range(0x2589, 0x110000))
+    for codepoint in codepoints:
+        candidate = chr(codepoint)
+        if unicodedata.category(candidate)[0] not in {"L", "N", "P", "S"}:
             continue
-        redacted = _render_sanitized_diagnostics(
-            text,
-            registered,
-            sentinel,
-            acquisition_truncated=acquisition_truncated,
-        )
-        if not _contains_forbidden(redacted, forbidden):
-            return redacted, forbidden
-    raise StateConflict("diagnostics cannot be rendered without reproducing a secret")
+        if candidate not in occupied:
+            return candidate
+        occupied_bytes += len(candidate.encode("utf-8"))
+        if occupied_bytes > _MAX_FORBIDDEN_SOURCE_BYTES:
+            raise AssertionError("bounded forbidden sources cannot occupy the sentinel space")
+    raise StateConflict("diagnostics have no visible redaction sentinel")
 
 
 def _structural_secret_values(text: str, *, acquisition_truncated: bool) -> tuple[str, ...]:
@@ -876,6 +942,8 @@ def _structural_secret_values(text: str, *, acquisition_truncated: bool) -> tupl
     values.extend(match.group(3) for match in _SECRET_ASSIGNMENT.finditer(text))
     if acquisition_truncated and (match := _UNTERMINATED_URL_AUTHORITY.search(text)):
         values.append(match.group(2))
+    if acquisition_truncated and (match := _UNTERMINATED_SCHEMELESS_USERINFO.search(text)):
+        values.append(match.group(1))
     return tuple(value for value in values if value)
 
 
@@ -906,11 +974,17 @@ def _render_sanitized_diagnostics(
             lambda match: f"{match.group(1)}{_mask_bytes(match.group(2), sentinel)}",
             redacted,
         )
+        redacted = _UNTERMINATED_SCHEMELESS_USERINFO.sub(
+            lambda match: _mask_bytes(match.group(1), sentinel),
+            redacted,
+        )
     return _escape_diagnostic_controls(redacted)
 
 
 def _mask_bytes(value: str, sentinel: str) -> str:
-    return sentinel * len(value.encode("utf-8"))
+    value_bytes = len(value.encode("utf-8"))
+    sentinel_bytes = len(sentinel.encode("utf-8"))
+    return sentinel * ((value_bytes + sentinel_bytes - 1) // sentinel_bytes)
 
 
 def _contains_forbidden(text: str, forbidden: tuple[str, ...]) -> bool:

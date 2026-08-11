@@ -1178,6 +1178,45 @@ def test_diagnostics_redaction_marker_cannot_reproduce_a_secret(secret: str) -> 
     assert secret not in response.diagnostics
 
 
+def test_diagnostics_sanitizes_framework_headers_with_registered_values() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    runtime.journal_chunks[state.invocation_id or ""] = ("payload",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("slot",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert "slot" not in response.diagnostics
+    assert "payload" in response.diagnostics
+
+
+@pytest.mark.parametrize("secret", ("diagnostics", "truncated"))
+def test_diagnostics_emits_no_fallback_when_truncation_text_collides(secret: str) -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    runtime.journal_chunks[state.invocation_id or ""] = ("x" * (320 * 1024),)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: (secret,)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok and response.diagnostics is not None
+    assert response.diagnostics == ""
+    assert secret not in response.diagnostics
+
+
 def test_diagnostics_mask_cannot_reproduce_an_unknown_structural_secret() -> None:
     state = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, _ = _fleet(states={1: state})
@@ -1194,6 +1233,26 @@ def test_diagnostics_mask_cannot_reproduce_an_unknown_structural_secret() -> Non
 
     assert response.ok and response.diagnostics is not None
     assert "~" not in response.diagnostics
+
+
+def test_diagnostics_selects_beyond_the_previous_finite_mask_set() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    secret = "█~^#%?"
+    runtime.journal_chunks[state.invocation_id or ""] = (f"literal={secret}",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: (secret,)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert secret not in response.diagnostics
+    assert "!" in response.diagnostics
 
 
 def test_diagnostics_escapes_unicode_format_and_separator_controls() -> None:
@@ -1265,6 +1324,28 @@ def test_diagnostics_masks_unterminated_url_userinfo_beyond_acquisition_guard() 
     assert len(response.diagnostics.encode()) <= 256 * 1024
 
 
+def test_diagnostics_masks_unterminated_schemeless_userinfo_beyond_guard() -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    report_prefix = "=== slot 1 ===\nActiveState=active\nJournal:\n"
+    padding = "x" * (256 * 1024 - len(report_prefix.encode()) - 101)
+    password = "P" * (70 * 1024)
+    runtime.journal_chunks[state.invocation_id or ""] = (f"{padding} user:{password}@host",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("retained",)},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert "P" * 50 not in response.diagnostics
+    assert len(response.diagnostics.encode()) <= 256 * 1024
+
+
 def test_diagnostics_reserves_an_aggregate_truncation_marker() -> None:
     states = {slot: _state(slot, SlotPhase.STARTED) for slot in range(1, 6)}
     stores, runtime, authority, clock, _ = _fleet(states=states)
@@ -1287,6 +1368,29 @@ def test_diagnostics_reserves_an_aggregate_truncation_marker() -> None:
     assert response.diagnostics.endswith("[aggregate diagnostics truncated]\n")
     assert response.diagnostics.count("[aggregate diagnostics truncated]") == 1
     assert len(response.diagnostics.encode()) <= 1_048_576
+
+
+def test_diagnostics_emits_no_fallback_when_aggregate_marker_collides() -> None:
+    states = {slot: _state(slot, SlotPhase.STARTED) for slot in range(1, 6)}
+    stores, runtime, authority, clock, _ = _fleet(states=states)
+    for slot, state in states.items():
+        prefix = f"=== slot {slot} ===\nActiveState=active\nJournal:\n"
+        runtime.journal_chunks[state.invocation_id or ""] = (
+            "x" * (256 * 1024 - len(prefix.encode())),
+        )
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={slot: ("aggregate",) for slot in states},
+    )
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert not response.ok and response.diagnostics is not None
+    assert "aggregate" not in response.model_dump_json()
+    assert len(response.diagnostics.encode()) == 3 * 256 * 1024
 
 
 class _DiagnosticPropertyRunner:
