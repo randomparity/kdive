@@ -45,10 +45,13 @@ For each slot, the witness mints a random generation and 256-bit credential, ato
 their fixed files, derives `local-systemd:<unit>:<generation>`, and places that exact non-secret ID
 in the per-start environment handoff. The unit first runs a root-installed gate wrapper as the slot
 UID; the wrapper loads no application code and cannot `exec` the worker until the witness creates
-its fixed root-owned release marker. The witness starts that gate, durably records the host boot ID
-and systemd invocation ID, then registers the incarnation bound to the unit, generation, boot, and
-invocation. Only after registration commits does it release the wrapper to `exec` the worker;
-worker authentication must return the same incarnation ID.
+its fixed root-owned release marker. The wrapper accepts the marker only when its bounded contents
+equal both the generation in the root-owned environment and systemd's `INVOCATION_ID` for its own
+process. The witness starts that gate, durably records the host boot ID and invocation ID, then
+registers the incarnation bound to the unit, generation, boot, and invocation. Only after
+registration commits does it publish the matching marker and let the wrapper `exec` the worker;
+worker authentication must return the same incarnation ID. The marker remains part of the retained
+generation and is removed only after terminal evidence commits.
 
 A crash before registration leaves either no invocation or an exact gated invocation that the next
 request can adopt without worker code having run. A crash after registration replays the same facts
@@ -67,7 +70,9 @@ boot ID is unreadable or unchanged.
 refuses to activate anything while one exists. It then applies the same evidence-before-cleanup
 flow to every occupied slot in `1..8`, including slots above a reduced count, and starts exactly
 slots `1..count`. Any unresolved termination blocks all new activation. The launcher has no root or
-direct-worker option and reports an outsider without adopting or killing it.
+direct-worker option and reports an outsider without adopting or killing it. Before requesting a
+replacement start, `up.sh` uses `status` to detect an occupied fleet and must successfully print the
+existing bounded `diagnostics` snapshot; diagnostic failure leaves the fleet untouched.
 
 Each request is at most 32 KiB and has a 120-second deadline measured on the service's monotonic
 clock. Stop signals all selected cgroups and gives them 45 seconds within that per-request budget to
@@ -103,7 +108,8 @@ replacement. Force removal remains an operator recovery that may strand fences a
 termination evidence.
 
 The request-scoped witness does not monitor workers continuously. Unexpected exits remain retained
-by systemd and are evidenced on the next lifecycle or diagnostics request. This may delay recovery,
+by systemd and are evidenced by the next `start`, `status`, or `stop` reconciliation. `diagnostics`
+is observational and never writes lifecycle state or database evidence. This may delay recovery,
 but it cannot authorize recovery early.
 
 The design does not protect two trusted local operators from sequentially replacing or stopping

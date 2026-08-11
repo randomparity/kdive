@@ -109,9 +109,12 @@ but is not a supported live worker authority.
 
 The fixed unit starts a root-installed gate wrapper as the slot UID. The wrapper reads only its
 fixed environment and waits for a root-owned release marker in the slot runtime directory; the
-slot UID can read but not create or replace that marker. It imports no checkout or KDIVE code before
-release. After release it removes no state and `exec`s the configured Python worker in the same
-cgroup and systemd invocation.
+slot UID can read but not create or replace that marker. The marker contains exactly the generation
+and invocation ID. The wrapper compares those values with its environment generation and systemd's
+`INVOCATION_ID`; a stale or malformed marker cannot release it. It imports no checkout or KDIVE code
+before release. After release it removes no state and `exec`s the configured Python worker in the
+same cgroup and systemd invocation. The witness retains and later removes the marker with the rest
+of that exact generation only after terminal evidence commits.
 
 ### Start
 
@@ -181,12 +184,17 @@ slots. `status.sh` combines ordinary server/reconciler process health with lifec
 backends. A failed worker stop blocks destructive backend teardown unless the operator explicitly
 chooses the existing force path and accepts stranded fences.
 
+Before `restart_host_processes` asks `start` to replace an occupied managed fleet, it runs
+`diagnostics` and prints the bounded redacted snapshot. Failure to capture a safe snapshot aborts
+bring-up without stopping or resetting the old fleet. This is ordinary launcher ordering under the
+single-flow-per-host contract; it adds no durable report state.
+
 ## Failure diagnostics
 
-`diagnostics` first reconciles terminal worker states without deleting their sources. For each
-current slot it reads only the journal entries for the recorded unit invocation plus a fixed
-allowlist of unit properties. The request schema classifies every worker setting as public or
-secret. Diagnostics replaces the exact retained credential and every delivered secret setting,
+`diagnostics` is observational: it neither changes lifecycle state nor writes database evidence.
+For each current slot it reads only the journal entries for the recorded unit invocation plus a
+fixed allowlist of unit properties. The request schema classifies every worker setting as public
+or secret. Diagnostics replaces the exact retained credential and every delivered secret setting,
 including database and object-store credentials, before emitting text, applies structural
 URL-userinfo and secret-key redaction,
 escapes control characters, and emits at most 256 KiB per slot and 1 MiB per request. Acquisition
@@ -236,7 +244,8 @@ component is unavailable.
    database incarnation must equal the configured ID.
 2. Lifecycle unit tests prove unique credentials and generations, register-before-start,
    gate-before-registration and release-after-registration, exact identity handoff, gated/start
-   adoption, exact boot/cgroup/invocation checks, reboot outcome, mapped outcomes,
+   adoption, stale-marker refusal, exact boot/cgroup/invocation checks, reboot outcome, mapped
+   outcomes,
    evidence-before-cleanup, idempotent registration/termination replay, whole-fleet count
    convergence, unmanaged-worker refusal, partial-start cleanup, bounds, and fail-closed dependency
    behavior. Limit tests use a fake monotonic clock and prove request, stop, diagnostic acquisition,
@@ -247,14 +256,16 @@ component is unavailable.
    release, shared libvirt access, and absence of worker sudo/Docker/control membership.
 4. Script tests prove migration then role bootstrap ordering, role-specific daemon DSNs, removal of
    direct/root worker launch, exact worker counts, lifecycle start/status/stop wiring, and refusal
-   to tear down backends after unresolved evidence.
+   to tear down backends after unresolved evidence. Replacement tests prove diagnostics print
+   before the first stop/reset and a diagnostic failure leaves the occupied fleet untouched.
 5. A disposable-Postgres process proof starts one and several real worker units through the
    lifecycle seam, observes distinct active incarnations and worker-role connections, terminates
    them, and observes exact terminal rows. A systemd-hosted proof exercises the installed units
    where the host supports it.
 6. Workflow tests prove both live jobs reach their existing test commands and run bounded redacted
    diagnostics on failure or cancellation before cleanup. Reporter tests cover bare credentials,
-   every secret request-field class, hostile control text, missing journals, and output bounds.
+   every secret request-field class, hostile control text, missing journals, output bounds, and no
+   lifecycle or database writes.
 7. Focused Python, shell, systemd, Ansible, and workflow checks pass, followed by `just ci`.
 
 ## Rollback
