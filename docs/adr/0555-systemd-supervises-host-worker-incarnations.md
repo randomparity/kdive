@@ -4,8 +4,6 @@
 
 Accepted (2026-08-10)
 
-> **Superseded by [0556](0556-host-workers-use-kvm-provider-authority.md)** (2026-08-12)
-
 ## Context
 
 ADR-0533 requires an authority to register each worker incarnation before startup, deliver its
@@ -89,6 +87,13 @@ The host launcher continues to run server and reconciler as ordinary host proces
 each process its role-specific database DSN. It invokes the existing local runtime-role bootstrap
 after migrations. The worker accounts share only the provisioned session-libvirt socket and the
 provider directories needed by the live topology.
+
+### Amendment (2026-08-12): fixed workers also use distro KVM authority (#1926)
+
+[ADR-0556](0556-host-workers-use-kvm-provider-authority.md) supersedes only the preceding claim
+about shared worker authority. Fixed workers also use the distro's `kvm` group to read
+`root:kvm` host kernels and use `/dev/kvm`; ADR-0555's lifecycle, credential, witness, and cleanup
+decisions remain in force.
 
 Failure diagnostics are deliberately non-transactional. Before teardown, the fixed diagnostics
 request reads only the current worker units. Every allowlisted worker setting is classified public
