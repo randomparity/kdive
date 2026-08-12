@@ -122,7 +122,8 @@ The host processes use separate database roles. The backends above publish on ho
 
 ```bash
 cat > ~/kdive/.kdive-host.env <<'EOF'
-export KDIVE_MIGRATION_DATABASE_URL=postgresql://kdive:kdive@localhost:5432/kdive   # pragma: allowlist secret - local demo only
+migration_login=kdive-migration:kdive-migration-local # pragma: allowlist secret - local demo only
+export KDIVE_MIGRATION_DATABASE_URL="postgresql://${migration_login}@localhost:5432/kdive"
 export KDIVE_SERVER_DATABASE_URL=postgresql://kdive-server-member:kdive-server-local@localhost:5432/kdive   # pragma: allowlist secret - local demo only
 export KDIVE_WORKER_DATABASE_URL=postgresql://kdive-worker-member:kdive-worker-local@localhost:5432/kdive   # pragma: allowlist secret - local demo only
 export KDIVE_RECONCILER_DATABASE_URL=postgresql://kdive-reconciler-member:kdive-reconciler-local@localhost:5432/kdive   # pragma: allowlist secret - local demo only

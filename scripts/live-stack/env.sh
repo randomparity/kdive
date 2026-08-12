@@ -20,8 +20,9 @@ export KDIVE_GRAFANA_PORT="${KDIVE_GRAFANA_PORT:-3000}"
 
 database_host="localhost:${KDIVE_POSTGRES_PORT}/kdive"
 # The following four values are development credentials. # pragma: allowlist secret
-default_migration_url="postgresql://kdive:kdive@${database_host}" # pragma: allowlist secret
-default_server_login="kdive-server-member:kdive-server-local"     # pragma: allowlist secret
+default_migration_login="kdive-migration:kdive-migration-local" # pragma: allowlist secret
+default_migration_url="postgresql://${default_migration_login}@${database_host}"
+default_server_login="kdive-server-member:kdive-server-local" # pragma: allowlist secret
 default_server_url="postgresql://${default_server_login}@${database_host}"
 default_worker_login="kdive-worker-member:kdive-worker-local" # pragma: allowlist secret
 default_worker_url="postgresql://${default_worker_login}@${database_host}"

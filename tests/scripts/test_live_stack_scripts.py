@@ -862,6 +862,30 @@ def test_role_bootstrap_uses_compose_default_only_when_migration_is_implicit(
     assert "KDIVE_MIGRATION_DATABASE_URL=\n" in probe.read_text(encoding="utf-8")
 
 
+def test_host_migrations_default_to_the_compose_migration_owner() -> None:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"KDIVE_DATABASE_URL", "KDIVE_MIGRATION_DATABASE_URL"}
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; printf "%s\\n" "$KDIVE_MIGRATION_DATABASE_URL"',
+            "bash",
+            str(ROOT / "scripts/live-stack/env.sh"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    expected_login = "kdive-migration:kdive-migration-local"  # pragma: allowlist secret
+    assert result.stdout == f"postgresql://{expected_login}@localhost:5432/kdive\n"
+
+
 def _up_role_bootstrap_environment(
     tmp_path: Path, *, migration_url: str | None
 ) -> tuple[subprocess.CompletedProcess[str], str]:
