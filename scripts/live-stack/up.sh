@@ -13,6 +13,13 @@ set -euo pipefail
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/live-stack/lib.sh
 source "${here}/lib.sh"
+if [[ -v KDIVE_MIGRATION_DATABASE_URL ]]; then
+  migration_database_url_was_explicit=1
+  explicit_migration_database_url="$KDIVE_MIGRATION_DATABASE_URL"
+else
+  migration_database_url_was_explicit=0
+  explicit_migration_database_url=""
+fi
 # shellcheck disable=SC1091 # repo-relative env script
 source "${here}/env.sh"
 cd "$repo_root"
@@ -114,7 +121,12 @@ if ! bash "${here}/apply-migrations.sh"; then
 fi
 
 banner "runtime role bootstrap"
-bash "${here}/bootstrap-runtime-roles.sh"
+if [[ $migration_database_url_was_explicit == 1 ]]; then
+  KDIVE_MIGRATION_DATABASE_URL="$explicit_migration_database_url" \
+    bash "${here}/bootstrap-runtime-roles.sh"
+else
+  env -u KDIVE_MIGRATION_DATABASE_URL bash "${here}/bootstrap-runtime-roles.sh"
+fi
 
 if [[ "$skip_libvirt" != "1" ]]; then
   banner "libvirt"

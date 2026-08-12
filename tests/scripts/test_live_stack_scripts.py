@@ -861,6 +861,64 @@ def test_role_bootstrap_uses_compose_default_only_when_migration_is_implicit(
     assert "KDIVE_MIGRATION_DATABASE_URL=\n" in probe.read_text(encoding="utf-8")
 
 
+def _up_role_bootstrap_environment(
+    tmp_path: Path, *, migration_url: str | None
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    tmp_path.mkdir()
+    probe = tmp_path / "bootstrap-environment"
+    bash = tmp_path / "bash"
+    bash.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  */bootstrap-runtime-roles.sh) env > "$KDIVE_BOOTSTRAP_PROBE"; exit 91 ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    bash.chmod(0o755)
+    docker = tmp_path / "docker"
+    docker.write_text(
+        '#!/bin/sh\ncase "$*" in\n  *"ps postgres --format"*) echo healthy ;;\nesac\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    environment = {
+        key: value for key, value in os.environ.items() if key != "KDIVE_MIGRATION_DATABASE_URL"
+    }
+    environment.update(
+        {
+            "PATH": f"{tmp_path}:{environment['PATH']}",
+            "KDIVE_BOOTSTRAP_PROBE": str(probe),
+            "KDIVE_OIDC_IMAGE": "already-built",
+        }
+    )
+    if migration_url is not None:
+        environment["KDIVE_MIGRATION_DATABASE_URL"] = migration_url
+    result = subprocess.run(
+        ["/bin/bash", str(ROOT / "scripts/live-stack/up.sh"), "--skip-obs", "--skip-libvirt"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    return result, probe.read_text(encoding="utf-8")
+
+
+def test_up_preserves_migration_url_provenance_for_role_bootstrap(tmp_path: Path) -> None:
+    implicit_result, implicit_environment = _up_role_bootstrap_environment(
+        tmp_path / "implicit", migration_url=None
+    )
+    assert implicit_result.returncode == 91
+    assert "KDIVE_MIGRATION_DATABASE_URL=" not in implicit_environment
+
+    explicit_url = "postgresql://owner:dummy@db:5432/kdive"  # pragma: allowlist secret
+    explicit_result, explicit_environment = _up_role_bootstrap_environment(
+        tmp_path / "explicit", migration_url=explicit_url
+    )
+    assert explicit_result.returncode == 91
+    assert f"KDIVE_MIGRATION_DATABASE_URL={explicit_url}" in explicit_environment
+
+
 def test_lifecycle_status_preserves_non_ok_response_and_scrubs_other_role_dsns(
     tmp_path: Path,
 ) -> None:
