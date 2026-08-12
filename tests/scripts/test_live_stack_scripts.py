@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -888,7 +889,7 @@ def test_host_migrations_default_to_the_compose_migration_owner() -> None:
 
 def _up_role_bootstrap_environment(
     tmp_path: Path, *, migration_url: str | None
-) -> tuple[subprocess.CompletedProcess[str], str]:
+) -> tuple[subprocess.CompletedProcess[str], str, str]:
     tmp_path.mkdir()
     probe = tmp_path / "bootstrap-environment"
     bash = tmp_path / "bash"
@@ -902,8 +903,10 @@ def _up_role_bootstrap_environment(
     )
     bash.chmod(0o755)
     docker = tmp_path / "docker"
+    docker_probe = tmp_path / "docker-commands"
     docker.write_text(
-        '#!/bin/sh\ncase "$*" in\n  *"ps postgres --format"*) echo healthy ;;\nesac\n',
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> {shlex.quote(str(docker_probe))}\n'
+        'case "$*" in\n  *"ps postgres --format"*) echo healthy ;;\nesac\n',
         encoding="utf-8",
     )
     docker.chmod(0o755)
@@ -926,28 +929,52 @@ def _up_role_bootstrap_environment(
         check=False,
         env=environment,
     )
-    return result, probe.read_text(encoding="utf-8")
+    return (
+        result,
+        probe.read_text(encoding="utf-8"),
+        docker_probe.read_text(encoding="utf-8"),
+    )
 
 
 def test_up_preserves_migration_url_provenance_for_role_bootstrap(tmp_path: Path) -> None:
-    implicit_result, implicit_environment = _up_role_bootstrap_environment(
+    implicit_result, implicit_environment, implicit_docker = _up_role_bootstrap_environment(
         tmp_path / "implicit", migration_url=None
     )
     assert implicit_result.returncode == 91
     assert "KDIVE_MIGRATION_DATABASE_URL=" not in implicit_environment
+    assert "compose exec -T postgres psql --username kdive --dbname kdive" in implicit_docker
+    convergence_sql = (ROOT / "deploy/compose/bootstrap-migration-owner.sql").read_text()
+    assert "FROM pg_class AS c" in convergence_sql
+    assert "FROM pg_proc AS p" in convergence_sql
+    assert 'OWNER TO "kdive-migration"' in convergence_sql
 
     explicit_url = "postgresql://owner:dummy@db:5432/kdive"  # pragma: allowlist secret
-    explicit_result, explicit_environment = _up_role_bootstrap_environment(
+    explicit_result, explicit_environment, explicit_docker = _up_role_bootstrap_environment(
         tmp_path / "explicit", migration_url=explicit_url
     )
     assert explicit_result.returncode == 91
     assert f"KDIVE_MIGRATION_DATABASE_URL={explicit_url}" in explicit_environment
+    assert "compose exec -T postgres psql" not in explicit_docker
 
-    empty_result, empty_environment = _up_role_bootstrap_environment(
+    empty_result, empty_environment, empty_docker = _up_role_bootstrap_environment(
         tmp_path / "empty", migration_url=""
     )
     assert empty_result.returncode == 91
     assert "KDIVE_MIGRATION_DATABASE_URL=\n" in empty_environment
+    assert "compose exec -T postgres psql --username kdive --dbname kdive" in empty_docker
+
+
+def test_active_local_stack_guides_leave_migration_routing_to_up() -> None:
+    walkthrough = (ROOT / "docs/operating/providers/local-libvirt-walkthrough.md").read_text()
+    campaign = (ROOT / "docs/operating/runbooks/mcp-coverage-campaign-rerun.md").read_text()
+
+    assert "export KDIVE_MIGRATION_DATABASE_URL=" not in walkthrough
+    bring_up = campaign.split("### D1 (workstation)", maxsplit=1)[1].split(
+        "### Remote-libvirt", maxsplit=1
+    )[0]
+    assert bring_up.index("scripts/live-stack/up.sh") < bring_up.index(
+        "source scripts/live-stack/env.sh"
+    )
 
 
 def test_role_database_dsns_are_never_env_program_arguments() -> None:

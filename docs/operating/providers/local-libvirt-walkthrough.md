@@ -122,8 +122,6 @@ The host processes use separate database roles. The backends above publish on ho
 
 ```bash
 cat > ~/kdive/.kdive-host.env <<'EOF'
-migration_login=kdive-migration:kdive-migration-local # pragma: allowlist secret - local demo only
-export KDIVE_MIGRATION_DATABASE_URL="postgresql://${migration_login}@localhost:5432/kdive"
 export KDIVE_SERVER_DATABASE_URL=postgresql://kdive-server-member:kdive-server-local@localhost:5432/kdive   # pragma: allowlist secret - local demo only
 export KDIVE_WORKER_DATABASE_URL=postgresql://kdive-worker-member:kdive-worker-local@localhost:5432/kdive   # pragma: allowlist secret - local demo only
 export KDIVE_RECONCILER_DATABASE_URL=postgresql://kdive-reconciler-member:kdive-reconciler-local@localhost:5432/kdive   # pragma: allowlist secret - local demo only
@@ -139,6 +137,11 @@ export KDIVE_PYTHON=$HOME/kdive/.venv/bin/python
 EOF
 source ~/kdive/.kdive-host.env
 ```
+
+Leave `KDIVE_MIGRATION_DATABASE_URL` unset for this local Compose flow. `up.sh` selects the
+host-published migration endpoint and passes Compose's internal endpoint to role bootstrap. An
+explicit external migration endpoint must be reachable at the same address from both the host and
+the one-shot bootstrap container.
 
 Install the fixed host-worker lifecycle once per checkout revision. The witness DSN is delivered
 over stdin, not a command-line argument. This local-only credential matches the runtime-role

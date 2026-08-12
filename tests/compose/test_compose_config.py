@@ -255,7 +255,12 @@ def test_clean_local_database_bootstraps_distinct_exact_login_members() -> None:
     migration_owner = (
         _COMPOSE_FILE.parent / "deploy/compose/bootstrap-migration-owner.sql"
     ).read_text()
-    assert 'CREATE ROLE "kdive-migration" LOGIN' in migration_owner
+    assert 'CREATE ROLE "kdive-migration"' in migration_owner
+    assert 'ALTER ROLE "kdive-migration" LOGIN' in migration_owner
+    assert "WHERE NOT EXISTS" in migration_owner
+    assert "FROM pg_class AS c" in migration_owner
+    assert "FROM pg_proc AS p" in migration_owner
+    assert 'TO "kdive-migration" WITH ADMIN OPTION' in migration_owner
     assert "kdive-migration-local" in migration_owner
     assert bootstrap["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
     assert bootstrap["entrypoint"] == ["/bin/bash", "/bootstrap/bootstrap-runtime-roles.sh"]

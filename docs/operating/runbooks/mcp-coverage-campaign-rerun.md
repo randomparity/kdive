@@ -40,8 +40,9 @@ fetched TLS certs, guest helpers).
 3. Start the host stack **under bash** (env.sh uses `${BASH_SOURCE[0]}`, empty under zsh →
    broken `//.live-build` paths):
    ```
-   set -a; source scripts/live-stack/env.sh; source artifacts/coverage-campaign/d1.env; set +a
+   set -a; source artifacts/coverage-campaign/d1.env; set +a
    scripts/live-stack/up.sh
+   source scripts/live-stack/env.sh
    ```
 
 ### Remote-libvirt → remote host

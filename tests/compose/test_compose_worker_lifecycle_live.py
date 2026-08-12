@@ -240,6 +240,19 @@ def _apply_migrations_when_stable(admin_dsn: str) -> None:
             time.sleep(0.1)
 
 
+def _assert_migration_owner_converged(admin_dsn: str) -> None:
+    with psycopg.connect(admin_dsn) as conn:
+        owners = conn.execute(
+            "SELECT tableowner FROM pg_tables "
+            "WHERE schemaname = 'public' AND tablename IN ('resources', 'schema_migrations') "
+            "UNION ALL "
+            "SELECT pg_get_userbyid(proowner) FROM pg_proc "
+            "WHERE oid = 'public.set_updated_at()'::regprocedure"
+        ).fetchall()
+    assert len(owners) == 3
+    assert {str(row[0]) for row in owners} == {"kdive-migration"}
+
+
 @contextmanager
 def _isolated_stack(tmp_path: Path) -> Iterator[tuple[dict[str, str], str, str]]:
     token = uuid.uuid4().hex[:12]
@@ -254,10 +267,29 @@ def _isolated_stack(tmp_path: Path) -> Iterator[tuple[dict[str, str], str, str]]
     }
     credential_path = tmp_path / f"{project}.credential"
     admin_dsn = f"postgresql://kdive-migration:kdive-migration-local@127.0.0.1:{port}/kdive"  # noqa: E501  # pragma: allowlist secret — isolated local proof
+    legacy_login = "kdive:kdive"  # pragma: allowlist secret — isolated local proof
+    legacy_admin_dsn = f"postgresql://{legacy_login}@127.0.0.1:{port}/kdive"
     try:
         _run(("docker", "build", "--tag", image, "."), env, timeout=600)
         _compose(env, "up", "-d", "--wait", "--wait-timeout", "60", "postgres")
+        _apply_migrations_when_stable(legacy_admin_dsn)
+        _compose(
+            env,
+            "exec",
+            "-T",
+            "postgres",
+            "psql",
+            "--username",
+            "kdive",
+            "--dbname",
+            "kdive",
+            "--set",
+            "ON_ERROR_STOP=1",
+            "--file",
+            "/docker-entrypoint-initdb.d/010-migration-owner.sql",
+        )
         _apply_migrations_when_stable(admin_dsn)
+        _assert_migration_owner_converged(admin_dsn)
         _compose(env, "--profile", "bootstrap", "run", "--rm", "--no-deps", "role-bootstrap")
         yield env, admin_dsn, str(credential_path)
     finally:

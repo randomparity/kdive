@@ -111,6 +111,13 @@ done
   exit 1
 }
 
+if [[ $migration_database_url_was_explicit == 0 || -z "$explicit_migration_database_url" ]]; then
+  banner "local migration-owner convergence"
+  docker compose exec -T postgres \
+    psql --username kdive --dbname kdive --set ON_ERROR_STOP=1 \
+    <deploy/compose/bootstrap-migration-owner.sql
+fi
+
 banner "migrations (host checkout = authoritative)"
 if ! bash "${here}/apply-migrations.sh"; then
   echo >&2
