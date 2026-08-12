@@ -1,18 +1,17 @@
-# Reap orphaned pcap capture volumes — design (#1498)
+# Reclaim orphaned pcap captures — design (#1498)
 
 - **Issue:** [#1498](https://github.com/randomparity/kdive/issues/1498)
-- **ADR:** [0555 — Reap orphaned pcap capture volumes with an owning-job guard](../adr/0555-reap-orphaned-pcap-capture-volumes.md)
+- **ADR:** [0555 — Reclaim orphaned captures from the job row, detaching the filter before the volume](../adr/0555-reap-orphaned-pcap-capture-volumes.md)
 - **Epic:** [#1423](https://github.com/randomparity/kdive/issues/1423) — remote-libvirt parity
 - **Related:** ADR-0094 (host_dump volume reaper), ADR-0385 / ADR-0432 (traffic capture), #1434
 
 ## Problem
 
-A `capture_traffic` job that exhausts its bounded retries leaves its pcap volume on the
-remote host's storage pool with nothing left to reclaim it.
+A `capture_traffic` job that exhausts its bounded retries leaves two things behind on the remote
+host: the pcap volume, and — if the worker died mid-capture — the QEMU `filter-dump` object still
+bound to the live domain.
 
-`RemoteLibvirtTrafficCapture` writes to `kdive-pcap-<system_id>-<job_id>.pcap` inside the
-operator `storage_pool` (`traffic_capture.py:69-71`). Reclamation today has exactly two
-paths, both owned by the job itself:
+Reclamation today has three paths, all inside the owning job:
 
 | path | code | fails when |
 |---|---|---|
@@ -20,179 +19,169 @@ paths, both owned by the job itself:
 | cancel-path reclaim | `capture_traffic.py:352` | the worker dies before it observes the cancel |
 | `prepare` pre-delete of this job's own stale volume | `traffic_capture.py:197-211` | the job never runs again |
 
-`JobState` (`domain/capacity/state.py:171-178`) has no dead-letter state: the retry edge is
-`running → queued`, and exhausting retries lands the job in `failed`, a terminal state. A
-terminal job never re-enters `prepare`, so its volume is never revisited.
+`JobState` has no dead-letter state: `running → queued` is the retry edge and exhaustion lands in
+`failed`, terminal. A terminal job never re-enters `prepare`.
 
-`traffic_capture.py:22-24` already names the intended owner — "A pcap orphaned by a job that
-exhausts its retries is reclaimed by the reconciler's volume reaper (a noted follow-up)".
-This design implements that follow-up.
+**The filter matters as much as the file.** `qom_id = f"kdive-dump-{job.id}"` is attached at
+`capture_traffic.py:333` and removed only in the `finally` at `:350`. A worker killed between
+them leaves it attached permanently — only a retry of that `job_id` would clear it, a different
+capture uses a different `qom_id`, and `repair_leaked_domains` only touches domains whose System
+row is gone.
+
+This is why the pool-listing design first drafted for this issue was abandoned; ADR-0555 records
+the evidence. An attached filter keeps the volume mtime fresh, so an age-based sweep never
+selects the leak; and if the guest idles long enough to be selected, deleting the volume unlinks
+an inode QEMU still holds — space unreclaimed, filter still writing, volume no longer listable.
 
 ## Non-goals
 
-Frozen from the issue charter:
+Frozen from the issue charter, as amended by the authorized rescope:
 
 - No change to local-libvirt traffic capture or any local-libvirt reaper.
-- No change to the capture path (`prepare` / `attach` / `detach` / `fetch` / `reclaim`),
-  beyond retiring the "noted follow-up" sentence in the module docstring.
+- No change to capture *behavior*. The one capture-path edit is moving `capture_qom_id` to
+  `providers/ports/traffic.py` and importing it in the handler instead of inlining the f-string.
 - No change to host_dump volume reaping behavior (ADR-0094).
 - No new agent-facing MCP tool or tool-schema change.
-- No retry or dead-letter policy change in the job queue. Dead-lettering is the precondition
-  this design handles, not the defect it fixes.
+- No retry or dead-letter policy change in the job queue.
+- No schema migration, and no new index.
 
 ## Design
 
-ADR-0555 records the decision and its rejected alternatives. The shape:
-
-### 1. Port — `src/kdive/providers/infra/reaping.py`
+### 1. Shared convention — `src/kdive/providers/ports/traffic.py`
 
 ```python
-class PcapVolume(NamedTuple):
-    name: str
-    system_id: UUID | None
-    job_id: UUID | None
-    mtime_epoch_s: float
-
-class PcapVolumeReaper(Protocol):
-    async def list_pcap_volumes(self) -> list[PcapVolume]: ...
-    async def delete_pcap_volume(self, name: str) -> None: ...
-
-class NullPcapVolumeReaper: ...
+def capture_qom_id(job_id: UUID) -> str:
+    return f"kdive-dump-{job_id}"
 ```
 
-Mirrors `DumpVolume` / `DumpVolumeReaper` / `NullDumpVolumeReaper`, including the idempotent
-delete contract — a volume already gone is not an error, because a live capture's own
-`finally` may remove it between the list and the delete.
+The handler imports it in place of the inline f-string. Both the handler and the reaper must
+produce the identical string; a duplicated literal is the drift this removes. `traffic.py` is the
+right home — it already documents the `qom_id` contract and is importable by both without a
+layering inversion.
 
-`system_id` and `job_id` are `None` when the name does not parse, so an unparseable
-`kdive-pcap-` volume stays age-reapable rather than immortal.
+### 2. Port — `src/kdive/providers/infra/reaping.py`
 
-### 2. Implementation — `src/kdive/providers/remote_libvirt/reaping/pcap_volume.py`
+```python
+class CaptureReaper(Protocol):
+    async def reclaim_capture(self, system_id: UUID, job_id: UUID) -> None: ...
 
-`RemoteLibvirtPcapVolumeReaper`, a sibling of `RemoteLibvirtDumpVolumeReaper`. Reuses the
-reaping package's existing seams unchanged:
-
-- `map_over_fleet` for the list (isolates an unreachable host);
-- `find_over_fleet` for delete-by-name (stops at the host that has the volume; not-found on a
-  host is benign);
-- `volume_mtime_epoch_s` for the `<target>/<timestamps>/<mtime>` parse.
-
-Its own regex parses both UUIDs out of `kdive-pcap-<system_id>-<job_id>.pcap`.
-
-### 3. Sweep — `src/kdive/reconciler/cleanup/provider_reaping.py`
-
-```
-reap_orphaned_pcap_volumes(conn, reaper, grace) -> int
+class NullCaptureReaper: ...
 ```
 
-Per volume, reap only when **both** hold:
+One method, not two: the detach and the delete must happen in that order on one connection, and
+the naming conventions belong to the provider rather than the reconciler.
 
-1. `mtime_epoch_s < now() - grace`, with `now()` read from Postgres (never a Python clock —
-   the DB clock is session-TZ-sensitive and is the reference the dump sweep already uses);
-2. the owning job is not live — no `jobs` row with `id = job_id` in `queued` or `running`.
+### 3. Implementation — `src/kdive/providers/remote_libvirt/reaping/capture.py`
 
-Guard 2 uses a new `is_job_live(conn, job_id)` helper beside `has_active_capture_job` in
-`reconciler/repairs/allocations.py`, reusing that module's existing `_ACTIVE_JOB_STATE_VALUES`
-so the "live" definition cannot drift between the two sweeps.
+`RemoteLibvirtCaptureReaper.reclaim_capture` opens one `qemu+tls://` connection over the existing
+fleet helpers and, in order:
 
-A `job_id` of `None` (unparseable name) skips guard 2 and relies on the age guard alone. Since
-`volume_mtime_epoch_s` reads a timestamp-less document as epoch, such a volume is deleted on
-the first pass; ADR-0555 records why that is accepted.
+1. `object-del` `capture_qom_id(job_id)` on `domain_name_for(system_id)` — tolerating not-found
+   and a missing domain;
+2. delete volume `pcap_volume_name(system_id, job_id)` from the configured `storage_pool` —
+   tolerating not-found.
 
-**Guard 1 is not redundant, and its window has a floor.** Guard 2 keys on the job row, not on
-worker liveness. A `canceled` row precedes the worker's own reclaim by up to a poll interval,
-and `repair_abandoned_jobs` dead-letters a lease-lapsed, attempts-exhausted `running` row to
-`failed` while that worker may still be alive (`DEFAULT_LEASE` is 5 minutes;
-`CAPTURE_MAX_DURATION_S` is 300s). In both windows only the age guard stands between the sweep
-and a live capture's file, so `DEFAULT_PCAP_VOLUME_GRACE` must exceed `CAPTURE_MAX_DURATION_S`
-plus the fetch/trim/store tail.
+Order is load-bearing (ADR-0555). Blocking libvirt calls stay `# pragma: no cover - live_vm`,
+matching `dump_volume.py`.
 
-Per-volume delete failures are caught and logged, then the sweep continues — matching
-`reap_orphaned_dump_volumes`.
+### 4. Sweep — `src/kdive/reconciler/cleanup/provider_reaping.py`
 
-### 4. Wiring
+```
+reap_orphaned_captures(conn, reaper, *, settle, lookback) -> int
+```
+
+```sql
+SELECT id, payload->>'system_id' AS system_id
+FROM jobs
+WHERE kind = 'capture_traffic'
+  AND state = ANY(ARRAY['failed','canceled'])
+  AND updated_at < now() - %(settle)s
+  AND updated_at > now() - %(lookback)s
+```
+
+`succeeded` is excluded: the handler's `finally` runs before it returns and the worker marks the
+row succeeded only after that, so its volume is already reclaimed. A row whose
+`payload->>'system_id'` is absent or unparseable is skipped and logged — there is no volume name
+to reconstruct without it.
+
+Per-row failures are caught and logged, then the sweep continues, matching
+`reap_orphaned_dump_volumes`. Time predicates run in Postgres, never a Python clock.
+
+### 5. Wiring
 
 | file | change |
 |---|---|
-| `providers/remote_libvirt/composition.py` | `build_pcap_volume_reaper(*, secret_registry)` |
-| `providers/assembly/composition.py` | `_pcap_volume_reaper_factories` + `build_reconciler_pcap_volume_reaper`, both mirroring the dump-volume pair and gated on `_remote_libvirt_enabled` |
-| `reconciler/loop.py` | config fields `pcap_volume_reaper` (default `NullPcapVolumeReaper`) and `pcap_volume_grace` (default `DEFAULT_PCAP_VOLUME_GRACE`), plus a `reaped_pcap_volumes` repair-catalog entry |
+| `providers/remote_libvirt/composition.py` | `build_capture_reaper(*, secret_registry)` |
+| `providers/assembly/composition.py` | `_capture_reaper_factories` + `build_reconciler_capture_reaper`, mirroring the dump-volume pair, gated on `_remote_libvirt_enabled` |
+| `reconciler/loop.py` | config fields `capture_reaper` (default `NullCaptureReaper`), `capture_settle` (`DEFAULT_CAPTURE_SETTLE`, 15 min), `capture_lookback` (`DEFAULT_CAPTURE_LOOKBACK`, 24 h), plus a `reaped_captures` repair-catalog entry |
 | `providers/remote_libvirt/lifecycle/traffic_capture.py` | docstring only — replace "a noted follow-up" with the ADR-0555 reference |
-
-`DEFAULT_PCAP_VOLUME_GRACE = timedelta(minutes=30)` is its own constant rather than an alias
-of `DEFAULT_DUMP_VOLUME_GRACE`, so tuning one sweep cannot silently retune the other. 30
-minutes clears the floor above (300s plus tail) with room.
 
 ## Threat model
 
-The change deletes files on a remote host, so it gets a boundary pass even though it adds no
-externally reachable entry point.
+**Boundaries added.** One: the reconciler now issues `object-del` against a running domain and
+`delete` against a pool volume on each configured remote host, over the existing mutual-TLS
+`qemu+tls://` fleet connection (ADR-0077). No new transport, credential, or listener. The
+`object-del` is the genuinely new capability — the reconciler previously reached storage only.
 
-**Boundaries added.** One: the reconciler process now issues `storageVolLookupByName` +
-`delete` against the operator `storage_pool` on each configured remote host, over the
-existing mutual-TLS `qemu+tls://` fleet connection (ADR-0077). No new transport, credential,
-or listener.
+**Boundaries widened.** The reconciler already deletes volumes in this pool via
+`RemoteLibvirtDumpVolumeReaper`; the domain-monitor reach is new.
 
-**Boundaries widened.** None. The reconciler already lists and deletes volumes in this pool
-via `RemoteLibvirtDumpVolumeReaper`.
-
-**Actor model.** The untrusted parties are (a) an MCP agent, which can start a
-`capture_traffic` job and therefore influence *which* `job_id` appears in a volume name, and
-(b) anyone with write access to the remote pool directory, which is the remote QEMU runtime
-user. The design trusts the operator-configured fleet list and the remote host itself; a
-compromised remote hypervisor is out of scope, as it is for every other remote-libvirt port.
+**Actor model.** The untrusted parties are (a) an MCP agent, which can start a `capture_traffic`
+job and so influence which rows exist, and (b) whoever can write the remote pool directory (the
+remote QEMU runtime user). The design trusts the operator-configured fleet list and the remote
+host; a compromised remote hypervisor is out of scope, as for every remote-libvirt port.
 
 **Control per boundary.**
 
 | concern | control |
 |---|---|
-| deleting a live capture's volume | guard 2 — the owning job must not be `queued`/`running`; a concurrent capture has a different `job_id` and its own live row |
-| deleting a volume that is not ours | the `kdive-pcap-` prefix plus the two-UUID regex; a foreign file in the pool never matches and is never listed |
-| path traversal via a volume name | none needed — names come from libvirt's own pool listing and are passed back to `storageVolLookupByName`, not concatenated into a filesystem path. The delete is by libvirt volume name, not by path |
-| an agent naming a volume to force deletion of another | `job_id` is the `jobs.id` primary key assigned by the queue (`capture_traffic.py:326`), not agent input; an agent cannot choose it |
-| deleting the wrong host's volume | the name carries both UUIDs, so a cross-host collision would require the same job to exist on two hosts, which the System→host binding forbids |
-| an unreachable host stalling the sweep | `map_over_fleet` already isolates per-host faults |
+| detaching a live capture's filter | the row must be terminal *and* past `settle`; a live capture's row is `running` |
+| deleting a live capture's volume | same — the sweep names one exact `(system_id, job_id)` pair from a terminal row and cannot name a live one |
+| agent-chosen identifiers | `job_id` is the queue-assigned `jobs.id`, and `system_id` comes from the row's payload, not from a request field the agent controls at reap time |
+| QMP injection via `qom_id` | `capture_qom_id` interpolates a `UUID` object, not a string; the command is built with `json.dumps`, not concatenation |
+| path traversal via the volume name | none needed — the delete is by libvirt volume name in a configured pool, not a filesystem path |
+| an unreachable host stalling the sweep | the existing fleet helpers isolate per-host faults |
+| one bad row starving the rest | per-row try/except with a logged warning |
 
-**Out of scope.** A compromised remote hypervisor that can forge volume names (it already
-owns the pool). Deliberate operator deletion of a live volume. Denial of service by an agent
-starting many captures — bounded by existing job admission, not by this sweep.
+**Out of scope.** A compromised remote hypervisor that can forge volume names or QOM objects (it
+already owns both). Denial of service by an agent starting many captures — bounded by existing
+job admission. The residual in ADR-0555's Consequences: a heartbeat-stopped-but-alive worker may
+still hold the volume past `settle`.
 
 ## Acceptance criteria
 
-Sourced from issue #1498.
+Sourced from issue #1498, criteria 1–3 verbatim.
 
-1. **A pcap volume left by a retry-exhausted `capture_traffic` job is reclaimed.** Test: a
-   volume older than the grace window whose owning job row is `failed` → `delete_pcap_volume`
-   called with that name; sweep returns 1.
-2. **Reclamation does not race a concurrent live capture on the same System.** Tests:
-   - a volume whose owning job is `running` → not deleted, even when older than grace;
-   - a volume whose owning job is `queued` (between retries) → not deleted;
-   - two volumes on one System, one job `failed` and one `running` → exactly the failed
-     job's volume is deleted.
+1. **A pcap left by a retry-exhausted `capture_traffic` job is reclaimed.** A `failed` row older
+   than `settle` and inside `lookback` → `reclaim_capture(system_id, job_id)` called; sweep
+   returns 1.
+2. **Reclamation does not race a concurrent live capture on the same System.** A `running` row is
+   never selected; with two rows on one System, one `failed` and one `running`, only the failed
+   job's pair is reclaimed.
 3. **Unit coverage of both directions**, per criterion 3 of the issue.
 
-Additional cases the design's own guards require:
+From the design's own guards:
 
-4. A volume newer than the grace window is not deleted even when its job is terminal.
-5. A volume whose `job_id` names no row is deleted once past grace (GC'd job row).
-6. An unparseable `kdive-pcap-` name is deleted once past grace, and never consults the job
-   guard.
-7. A `delete_pcap_volume` raising for one volume does not prevent the sweep reaping the rest,
-   and the failure is logged.
-8. An empty volume list short-circuits without querying the Postgres clock.
-8b. `DEFAULT_PCAP_VOLUME_GRACE` exceeds `CAPTURE_MAX_DURATION_S`, asserted directly so a later
-   tuning edit that drops it below the floor reddens rather than silently exposing live
-   captures.
-9. The name parser round-trips `pcap_volume_name(system_id, job_id)` — a property the two
-   modules must agree on, tested against the real producer rather than a copied literal.
-10. `just ci` is green.
+4. A `failed` row newer than `settle` is not selected.
+5. A `failed` row older than `lookback` is not selected.
+6. A `succeeded` row is never selected.
+7. A `canceled` row *is* selected.
+8. A row whose payload carries no usable `system_id` is skipped and logged, not raised.
+9. One row's `reclaim_capture` raising does not prevent the sweep reclaiming the rest, and the
+   failure is logged.
+10. An empty row set short-circuits without calling the reaper.
+11. **The reaper detaches before deleting**, asserted on call order against a fake — this is the
+    unlinked-inode defect and ordering is the whole control.
+12. `reclaim_capture` tolerates a missing filter, a missing volume, and a missing domain.
+13. `capture_qom_id` has exactly one definition: the handler produces the same string the reaper
+    reconstructs, asserted against the real producer rather than a copied literal.
+14. `just ci` is green.
 
 ## Verification
 
-- Unit tests with fakes for the reaper and a real Postgres (testcontainers) for the sweep's
-  job-liveness query, mirroring how `reap_orphaned_dump_volumes` is covered.
-- The blocking libvirt calls in the new reaper stay `# pragma: no cover - live_vm`, matching
-  `dump_volume.py`; orchestration and name parsing are unit-tested.
-- No live proof is claimed. The remote `live_vm` tier (#1424) exists, but exercising a
-  retry-exhausted capture against a real host is not something this change can force
-  deterministically; the guard logic is where the risk is and it is unit-covered.
+- Unit tests with fakes for the reaper; a real Postgres (testcontainers) for the sweep's row
+  selection, mirroring how `reap_orphaned_dump_volumes` is covered.
+- Criterion 11 is an ordering assertion on a recording fake, not a live test.
+- No live proof is claimed. Forcing a worker kill between attach and `finally` against a real
+  host is not deterministically reproducible here; the risk is in the selection and ordering
+  logic, which is unit-covered.
