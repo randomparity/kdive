@@ -237,25 +237,25 @@
 
 - name: Verify workers can access installed Python and provider paths
   ansible.builtin.command: >-
-    /bin/sh -c '/usr/bin/test -x /opt/kdive-live-worker-lifecycle/.venv/bin/python
-    && /usr/bin/test -r {{ live_vm_host_worker_fixture_catalog }}
-    && /usr/bin/test -x {{ live_vm_host_worker_fixture_catalog }}
-    && /usr/bin/test -r {{ live_vm_host_worker_fixture_catalog }}/manifest.yaml
-    && /usr/bin/test -r {{ live_vm_host_worker_fixture_catalog }}/rootfs_catalog.toml
-    && /usr/bin/test -r
+    /bin/sh -c 'test -x /opt/kdive-live-worker-lifecycle/.venv/bin/python
+    && test -r {{ live_vm_host_worker_fixture_catalog }}
+    && test -x {{ live_vm_host_worker_fixture_catalog }}
+    && test -r {{ live_vm_host_worker_fixture_catalog }}/manifest.yaml
+    && test -r {{ live_vm_host_worker_fixture_catalog }}/rootfs_catalog.toml
+    && test -r
     {{ live_vm_host_worker_fixture_catalog }}/profiles/console-ready_ppc64le.yaml
-    && /usr/bin/test -r
+    && test -r
     {{ live_vm_host_worker_fixture_catalog }}/profiles/console-ready_x86_64.yaml
-    && /usr/bin/test -w /var/lib/kdive/rootfs
-    && /usr/bin/test -x /var/lib/kdive/rootfs
-    && /usr/bin/test -w /var/lib/kdive/console
-    && /usr/bin/test -x /var/lib/kdive/console
-    && /usr/bin/test -w /var/lib/kdive/pcap
-    && /usr/bin/test -x /var/lib/kdive/pcap
-    && /usr/bin/test -w /var/lib/kdive/build
-    && /usr/bin/test -x /var/lib/kdive/build
-    && /usr/bin/test -w /var/lib/kdive/install
-    && /usr/bin/test -x /var/lib/kdive/install'
+    && test -w /var/lib/kdive/rootfs
+    && test -x /var/lib/kdive/rootfs
+    && test -w /var/lib/kdive/console
+    && test -x /var/lib/kdive/console
+    && test -w /var/lib/kdive/pcap
+    && test -x /var/lib/kdive/pcap
+    && test -w /var/lib/kdive/build
+    && test -x /var/lib/kdive/build
+    && test -w /var/lib/kdive/install
+    && test -x /var/lib/kdive/install'
   become: true
   become_user: "{{ item }}"
   loop: "{{ live_vm_host_worker_accounts }}"

@@ -382,6 +382,17 @@ def test_ansible_provisions_and_verifies_worker_accessible_fixture_catalog() -> 
     assert "/var/lib/kdive/build" in verify
 
 
+def test_worker_access_verification_uses_the_shell_builtin_test() -> None:
+    verify = _text(VERIFY_TASKS)
+    start = verify.index("- name: Verify workers can access installed Python and provider paths")
+    end = verify.index("- name: Prove the installed socket activates", start)
+    access_check = verify[start:end]
+
+    assert "/bin/sh -c 'test -x" in access_check
+    assert "/usr/bin/test" not in access_check
+    assert "test -w /var/lib/kdive/build" in access_check
+
+
 def test_socket_namespaces_are_traversable_but_not_worker_writable() -> None:
     installer = _text(INSTALLER)
     tasks = _text(MAIN_TASKS)
