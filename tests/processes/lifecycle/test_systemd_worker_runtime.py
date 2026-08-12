@@ -175,6 +175,33 @@ def test_observe_returns_boot_only_evidence_for_inactive_empty_unit(
     )
 
 
+def test_observe_preserves_failed_invocation_after_systemd_releases_cgroup(
+    fake_host: tuple[Path, Path],
+) -> None:
+    failed = (
+        "ActiveState=failed\n"
+        "SubState=failed\n"
+        "Result=exit-code\n"
+        "ExecMainStatus=1\n"
+        "ControlGroup=\n"
+        f"InvocationID={_INVOCATION_ID}\n"
+    )
+
+    observation = _runtime(fake_host, FakeRunner(failed)).observe(_WORKER_UNIT, FakeDeadline(120.0))
+
+    assert observation == UnitObservation(
+        unit=_WORKER_UNIT,
+        boot_id=_BOOT_ID,
+        invocation_id=_INVOCATION_ID,
+        active_state="failed",
+        sub_state="failed",
+        result="exit-code",
+        exec_main_status=1,
+        control_group="",
+        membership="empty",
+    )
+
+
 @pytest.mark.parametrize(
     "output",
     [

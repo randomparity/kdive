@@ -562,9 +562,6 @@ class SystemdRuntime:
             return BootObservation(unit=unit, boot_id=boot_id)
         self._require_complete_properties(properties)
         control_group = properties["ControlGroup"]
-        expected_group = f"{_WORKER_TEMPLATE_SLICE}/{unit}"
-        if control_group != expected_group:
-            raise SystemdConflict(f"systemd ControlGroup does not match fixed unit {unit}")
         invocation_id = properties["InvocationID"]
         if not _INVOCATION_ID.fullmatch(invocation_id):
             raise SystemdConflict("systemd InvocationID is not 32 lowercase hexadecimal bytes")
@@ -574,6 +571,14 @@ class SystemdRuntime:
         exec_main_status = int(status_value, 10)
         if exec_main_status not in range(256):
             raise SystemdConflict("systemd ExecMainStatus is outside 0..255")
+        if control_group:
+            expected_group = f"{_WORKER_TEMPLATE_SLICE}/{unit}"
+            if control_group != expected_group:
+                raise SystemdConflict(f"systemd ControlGroup does not match fixed unit {unit}")
+            membership = self._membership(control_group)
+        else:
+            self._require_released_terminal_identity(properties)
+            membership = "empty"
         return UnitObservation(
             unit=unit,
             boot_id=boot_id,
@@ -583,7 +588,7 @@ class SystemdRuntime:
             result=properties["Result"],
             exec_main_status=exec_main_status,
             control_group=control_group,
-            membership=self._membership(control_group),
+            membership=membership,
         )
 
     def signal_terminate(self, unit: str, deadline: Deadline) -> None:
@@ -817,7 +822,7 @@ class SystemdRuntime:
     @staticmethod
     def _require_complete_properties(properties: dict[str, str]) -> None:
         for key, value in properties.items():
-            if not value:
+            if not value and key != "ControlGroup":
                 raise SystemdUnavailable(f"systemctl show did not return a non-empty {key}")
         for key in _PROPERTIES:
             if key not in properties:
@@ -836,12 +841,22 @@ class SystemdRuntime:
             raise SystemdUnavailable(f"systemctl show did not return {missing[0]}")
         control_group = properties["ControlGroup"]
         invocation_id = properties["InvocationID"]
-        if bool(control_group) != bool(invocation_id):
+        if control_group and not invocation_id:
             raise SystemdConflict("systemctl show returned a partial unit identity")
-        if control_group:
+        if control_group or invocation_id:
             return False
         SystemdRuntime._require_inactive_properties(properties)
         return True
+
+    @staticmethod
+    def _require_released_terminal_identity(properties: dict[str, str]) -> None:
+        terminal = (
+            properties["ActiveState"] == "failed"
+            and properties["SubState"] == "failed"
+            and properties["Result"] != "success"
+        )
+        if not terminal:
+            raise SystemdConflict("systemctl show returned a partial unit identity")
 
     @staticmethod
     def _require_inactive_properties(properties: dict[str, str]) -> None:
