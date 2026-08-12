@@ -49,10 +49,8 @@
   register: live_vm_host_boot_kernels
 
 - name: Make the host kernels kvm-group-readable for the service account
-  # 0640 root:kvm, not 0644: the runner user is in the kvm group (added above), so this is
-  # genuinely group-scoped rather than world-readable — it does not fully undo the distro's
-  # 0600 hardening for every local uid. file+mode reports changed only when the mode/group
-  # actually changes, so a converged re-run is 0-changed (the spec's idempotence bar).
+  # 0640 root:kvm, not 0644: the runner and fixed workers use the distro's KVM provider group,
+  # so this remains group-scoped instead of undoing /boot hardening for every local uid.
   ansible.builtin.file:
     path: "{{ item.path }}"
     group: kvm
@@ -195,7 +193,7 @@
     home: /nonexistent
     shell: /usr/sbin/nologin
     group: "{{ item }}"
-    groups: ["{{ live_vm_host_worker_libvirt_group }}"]
+    groups: ["{{ live_vm_host_worker_libvirt_group }}", kvm]
     append: false
   loop: "{{ live_vm_host_worker_accounts }}"
 

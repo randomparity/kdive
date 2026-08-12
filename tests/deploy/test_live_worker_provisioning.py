@@ -58,7 +58,7 @@ def test_ansible_uses_declarative_account_and_file_modules() -> None:
     ):
         assert module in tasks
     assert "live_vm_host_worker_accounts" in tasks
-    assert 'groups: ["{{ live_vm_host_worker_libvirt_group }}"]' in tasks
+    assert 'groups: ["{{ live_vm_host_worker_libvirt_group }}", kvm]' in tasks
     assert "groups: [sudo" not in tasks
     assert "groups: [docker" not in tasks
 
@@ -98,6 +98,9 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert (
         "_link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python" in source
     )
+    assert "getent group kvm >/dev/null" in source
+    assert '--groups "$libvirt_group,kvm"' in source
+    assert 'usermod -G "$libvirt_group,kvm" "$worker"' in source
 
 
 def test_installer_reports_socket_activation_failure_context() -> None:
@@ -394,6 +397,8 @@ def test_ansible_provisions_and_verifies_worker_accessible_fixture_catalog() -> 
     assert "/opt/kdive-live-worker-lifecycle/.venv/bin/python" in verify
     assert "import guestfs, pathlib, kdive" in verify
     assert "/var/lib/kdive/build" in verify
+    assert "Verify every worker can read every host kernel" in verify
+    assert "Verify every worker can use the KVM device" in verify
 
 
 def test_worker_access_verification_uses_the_shell_builtin_test() -> None:

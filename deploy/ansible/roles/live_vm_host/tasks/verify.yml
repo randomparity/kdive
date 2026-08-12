@@ -87,6 +87,7 @@
   changed_when: false
   failed_when: >-
     live_vm_host_worker_libvirt_group not in live_vm_host_worker_group_results.stdout.split()
+    or 'kvm' not in live_vm_host_worker_group_results.stdout.split()
     or live_vm_host_worker_control_group in live_vm_host_worker_group_results.stdout.split()
     or 'sudo' in live_vm_host_worker_group_results.stdout.split()
     or 'docker' in live_vm_host_worker_group_results.stdout.split()
@@ -256,6 +257,23 @@
     && test -x /var/lib/kdive/build
     && test -w /var/lib/kdive/install
     && test -x /var/lib/kdive/install'
+  become: true
+  become_user: "{{ item }}"
+  loop: "{{ live_vm_host_worker_accounts }}"
+  changed_when: false
+
+- name: Verify every worker can read every host kernel
+  ansible.builtin.command: "/bin/sh -c 'test -r {{ item.1.path }}'"
+  become: true
+  become_user: "{{ item.0 }}"
+  loop: >-
+    {{ live_vm_host_worker_accounts | product(live_vm_host_boot_kernels.files) | list }}
+  loop_control:
+    label: "{{ item.0 }} -> {{ item.1.path }}"
+  changed_when: false
+
+- name: Verify every worker can use the KVM device
+  ansible.builtin.command: "/bin/sh -c 'test -r /dev/kvm && test -w /dev/kvm'"
   become: true
   become_user: "{{ item }}"
   loop: "{{ live_vm_host_worker_accounts }}"

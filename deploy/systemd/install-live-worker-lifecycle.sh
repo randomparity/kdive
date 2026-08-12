@@ -526,6 +526,10 @@ trap cleanup EXIT
 
 getent group "$control_group" >/dev/null || groupadd --system "$control_group"
 getent group "$libvirt_group" >/dev/null || groupadd --system "$libvirt_group"
+getent group kvm >/dev/null || {
+  echo "the required host KVM group is missing" >&2
+  exit 1
+}
 IFS=: read -r _ _ libvirt_group_gid _ < <(getent group "$libvirt_group")
 usermod -a -G "$control_group,$libvirt_group" "$operator"
 
@@ -534,9 +538,9 @@ for slot in {1..8}; do
   getent group "$worker" >/dev/null || groupadd --system "$worker"
   if ! getent passwd "$worker" >/dev/null; then
     useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
-      --gid "$worker" --groups "$libvirt_group" "$worker"
+      --gid "$worker" --groups "$libvirt_group,kvm" "$worker"
   else
-    usermod -G "$libvirt_group" "$worker"
+    usermod -G "$libvirt_group,kvm" "$worker"
   fi
 done
 
