@@ -318,8 +318,9 @@ jobs:
           set -uo pipefail
           command_token="kdive-$(tr -d - < /proc/sys/kernel/random/uuid)"
           printf '::stop-commands::%s\n' "$command_token"
-          sg kdive-live-control -c 'scripts/live-stack/worker-lifecycle.sh diagnostics'
-          diagnostic_status=$?
+          diagnostic_status=0
+          sg kdive-live-control -c \
+            'scripts/live-stack/worker-lifecycle.sh diagnostics' || diagnostic_status=$?
           printf '::%s::\n' "$command_token"
           if ((diagnostic_status != 0)); then
             echo "worker lifecycle diagnostics were unavailable or withheld" >&2
@@ -446,8 +447,8 @@ jobs:
           set -uo pipefail
           command_token="kdive-$(tr -d - < /proc/sys/kernel/random/uuid)"
           printf '::stop-commands::%s\n' "$command_token"
-          scripts/live-stack/worker-lifecycle.sh diagnostics
-          diagnostic_status=$?
+          diagnostic_status=0
+          scripts/live-stack/worker-lifecycle.sh diagnostics || diagnostic_status=$?
           printf '::%s::\n' "$command_token"
           if ((diagnostic_status != 0)); then
             echo "worker lifecycle diagnostics were unavailable or withheld" >&2

@@ -1522,7 +1522,8 @@ class _DiagnosticPropertyRunner:
             "SubState=failed\n"
             "Result=exit-code\n"
             "ExecMainStatus=7\n"
-            "ControlGroup=/system.slice/kdive-live-worker@1.service\n"
+            "ControlGroup=/system.slice/system-kdive\\x2dlive\\x2dworker.slice/"
+            "kdive-live-worker@1.service\n"
             f"InvocationID={self.invocation_id}\n"
         )
 

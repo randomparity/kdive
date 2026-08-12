@@ -29,12 +29,16 @@ from kdive.processes.lifecycle.systemd_worker_runtime import (
 
 _BOOT_ID = "01234567-89ab-cdef-0123-456789abcdef"
 _INVOCATION_ID = "a" * 32
+_WORKER_UNIT = "kdive-live-worker@1.service"
+_WORKER_SLICE = r"/system.slice/system-kdive\x2dlive\x2dworker.slice"
+_CONTROL_GROUP = f"{_WORKER_SLICE}/{_WORKER_UNIT}"
+_CGROUP_EVENTS = f"{_CONTROL_GROUP.removeprefix('/')}/cgroup.events"
 _PROPERTIES = (
     "ActiveState=active\n"
     "SubState=running\n"
     "Result=success\n"
     "ExecMainStatus=0\n"
-    "ControlGroup=/system.slice/kdive-live-worker@1.service\n"
+    f"ControlGroup={_CONTROL_GROUP}\n"
     f"InvocationID={_INVOCATION_ID}\n"
 )
 _INACTIVE_PROPERTIES = (
@@ -120,7 +124,7 @@ def fake_host(tmp_path: Path) -> tuple[Path, Path]:
     boot_id_path.parent.mkdir(parents=True)
     boot_id_path.write_text(f"{_BOOT_ID}\n", encoding="ascii")
     cgroup_root = tmp_path / "sys/fs/cgroup"
-    events = cgroup_root / "system.slice/kdive-live-worker@1.service/cgroup.events"
+    events = cgroup_root / _CGROUP_EVENTS
     events.parent.mkdir(parents=True)
     events.write_text("populated 1\nfrozen 0\n", encoding="ascii")
     return boot_id_path, cgroup_root
@@ -131,14 +135,12 @@ def _runtime(fake_host: tuple[Path, Path], runner: FakeRunner) -> SystemdRuntime
     return SystemdRuntime(runner, boot_id_path=boot_id_path, cgroup_root=cgroup_root)
 
 
-def test_observe_uses_one_fixed_property_query_and_exact_cgroup(
+def test_observe_uses_one_query_and_exact_instantiated_service_cgroup(
     fake_host: tuple[Path, Path],
 ) -> None:
     runner = FakeRunner()
 
-    observation = _runtime(fake_host, runner).observe(
-        "kdive-live-worker@1.service", FakeDeadline(120.0)
-    )
+    observation = _runtime(fake_host, runner).observe(_WORKER_UNIT, FakeDeadline(120.0))
 
     assert isinstance(observation, UnitObservation)
     assert runner.calls == [
@@ -146,17 +148,17 @@ def test_observe_uses_one_fixed_property_query_and_exact_cgroup(
             "systemctl",
             "show",
             "--property=ActiveState,SubState,Result,ExecMainStatus,ControlGroup,InvocationID",
-            "kdive-live-worker@1.service",
+            _WORKER_UNIT,
         )
     ]
-    assert observation.unit == "kdive-live-worker@1.service"
+    assert observation.unit == _WORKER_UNIT
     assert observation.boot_id == _BOOT_ID
     assert observation.invocation_id == _INVOCATION_ID
     assert observation.active_state == "active"
     assert observation.sub_state == "running"
     assert observation.result == "success"
     assert observation.exec_main_status == 0
-    assert observation.control_group == "/system.slice/kdive-live-worker@1.service"
+    assert observation.control_group == _CONTROL_GROUP
     assert observation.membership == "populated"
 
 
@@ -176,9 +178,7 @@ def test_observe_returns_boot_only_evidence_for_inactive_empty_unit(
 @pytest.mark.parametrize(
     "output",
     [
-        _INACTIVE_PROPERTIES.replace(
-            "ControlGroup=\n", "ControlGroup=/system.slice/kdive-live-worker@1.service\n"
-        ),
+        _INACTIVE_PROPERTIES.replace("ControlGroup=\n", f"ControlGroup={_CONTROL_GROUP}\n"),
         _INACTIVE_PROPERTIES.replace("InvocationID=\n", f"InvocationID={_INVOCATION_ID}\n"),
     ],
 )
@@ -204,10 +204,7 @@ def test_observe_requires_every_exact_property(fake_host: tuple[Path, Path]) -> 
         _PROPERTIES + "Description=foreign\n",
         _PROPERTIES.replace("ExecMainStatus=0", "ExecMainStatus=not-an-integer"),
         _PROPERTIES.replace("ExecMainStatus=0", "ExecMainStatus=+1"),
-        _PROPERTIES.replace(
-            "/system.slice/kdive-live-worker@1.service",
-            "/system.slice/kdive-live-worker@2.service",
-        ),
+        _PROPERTIES.replace(_CONTROL_GROUP, f"{_WORKER_SLICE}/kdive-live-worker@2.service"),
     ],
 )
 def test_observe_rejects_ambiguous_or_conflicting_properties(
@@ -237,7 +234,7 @@ def test_observe_reads_recursive_cgroup_membership(
     membership: Literal["populated", "empty", "unknown"],
 ) -> None:
     _, cgroup_root = fake_host
-    path = cgroup_root / "system.slice/kdive-live-worker@1.service/cgroup.events"
+    path = cgroup_root / _CGROUP_EVENTS
     path.write_text(events, encoding="ascii")
 
     observation = _runtime(fake_host, FakeRunner()).observe(
@@ -250,7 +247,7 @@ def test_missing_unreadable_and_oversized_membership_are_unknown(
     fake_host: tuple[Path, Path],
 ) -> None:
     _, cgroup_root = fake_host
-    path = cgroup_root / "system.slice/kdive-live-worker@1.service/cgroup.events"
+    path = cgroup_root / _CGROUP_EVENTS
     path.unlink()
     runtime = _runtime(fake_host, FakeRunner())
     observation = runtime.observe("kdive-live-worker@1.service", FakeDeadline(120.0))
@@ -303,7 +300,7 @@ def test_unmanaged_worker_scan_excludes_only_fixed_unit_cgroups(tmp_path: Path) 
         tmp_path,
         88,
         uid=1001,
-        cgroup="/system.slice/kdive-live-worker@1.service",
+        cgroup=_CONTROL_GROUP,
     )
     _write_process(tmp_path, 99, uid=1002, cgroup="/user.slice/session-1.scope", worker=False)
 
@@ -347,7 +344,7 @@ def test_unmanaged_scan_excludes_relative_launchers_in_fixed_cgroups(
         tmp_path,
         77,
         uid=1000,
-        cgroup="/system.slice/kdive-live-worker@1.service",
+        cgroup=_CONTROL_GROUP,
         launcher=launcher,
     )
 
@@ -379,7 +376,7 @@ def test_unmanaged_scan_excludes_relative_python_paths_in_fixed_cgroups(
         tmp_path,
         77,
         uid=1000,
-        cgroup="/system.slice/kdive-live-worker@1.service",
+        cgroup=_CONTROL_GROUP,
         launcher=launcher,
     )
 
@@ -415,8 +412,8 @@ def test_unmanaged_scan_rejects_lookalike_python_launchers(tmp_path: Path, launc
 @pytest.mark.parametrize(
     "cgroup",
     [
-        "/system.slice/kdive-live-worker@9.service",
-        "/system.slice/kdive-live-worker@1.service/foreign",
+        f"{_WORKER_SLICE}/kdive-live-worker@9.service",
+        f"{_CONTROL_GROUP}/foreign",
         "/user.slice/kdive-live-worker@1.service",
     ],
 )

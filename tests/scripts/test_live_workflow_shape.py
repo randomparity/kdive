@@ -416,6 +416,7 @@ def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str) -> Non
 
     assert diagnostic["if"] == "failure() || cancelled()"
     assert "scripts/live-stack/worker-lifecycle.sh diagnostics" in diagnostic["run"]
+    assert "|| diagnostic_status=$?" in diagnostic["run"]
     assert "::stop-commands::" in diagnostic["run"]
     assert "printf '::%s::" in diagnostic["run"]
     assert "::${" not in diagnostic["run"]

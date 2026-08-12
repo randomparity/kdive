@@ -22,6 +22,10 @@ from kdive.processes.lifecycle.systemd_worker_state import _SLOTS_MODE
 type CgroupMembership = Literal["populated", "empty", "unknown"]
 
 _UNIT = re.compile(r"kdive-live-worker@[1-8]\.service")
+_WORKER_TEMPLATE_SLICE = r"/system.slice/system-kdive\x2dlive\x2dworker.slice"
+_FIXED_WORKER_CGROUP = re.compile(
+    re.escape(_WORKER_TEMPLATE_SLICE.encode("ascii")) + rb"/kdive-live-worker@[1-8]\.service"
+)
 _PYTHON_LAUNCHERS = frozenset((b"python", b"python3", b"python3.14"))
 _INVOCATION_ID = re.compile(r"[0-9a-f]{32}")
 _BOOT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -558,7 +562,7 @@ class SystemdRuntime:
             return BootObservation(unit=unit, boot_id=boot_id)
         self._require_complete_properties(properties)
         control_group = properties["ControlGroup"]
-        expected_group = f"/system.slice/{unit}"
+        expected_group = f"{_WORKER_TEMPLATE_SLICE}/{unit}"
         if control_group != expected_group:
             raise SystemdConflict(f"systemd ControlGroup does not match fixed unit {unit}")
         invocation_id = properties["InvocationID"]
@@ -666,7 +670,7 @@ class SystemdRuntime:
             return None
         except (OSError, ValueError) as exc:
             raise SystemdConflict(f"cannot verify process {process.name} cgroup and UID") from exc
-        if re.fullmatch(rb"/system\.slice/kdive-live-worker@[1-8]\.service", cgroup):
+        if _FIXED_WORKER_CGROUP.fullmatch(cgroup):
             return None
         return UnmanagedWorker(pid=int(process.name), uid=uid)
 
