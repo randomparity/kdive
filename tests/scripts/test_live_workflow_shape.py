@@ -339,6 +339,17 @@ def test_tcg_job_provisions_the_hardcoded_runtime_directories() -> None:
         assert path in joined, f"the tcg job must provision {path}"
 
 
+def test_tcg_runtime_dirs_become_fixed_worker_writable_after_account_install() -> None:
+    _, install = _named_step("tcg", "Install the fixed live-worker lifecycle host contract")
+    run = install["run"]
+
+    for path in ("/var/lib/kdive/console", "/var/lib/kdive/pcap", "/mnt/kdive-rootfs"):
+        assert path in run
+    assert ":kdive-live-libvirt" in run
+    assert "chmod 2770" in run
+    assert "--user=kdive-worker-1 test -w" in " ".join(run.split())
+
+
 # --- app-tier topology: host processes, never containers -------------------------------------
 #
 # The local-libvirt provider is explicitly NOT containerized (Dockerfile header): the compose

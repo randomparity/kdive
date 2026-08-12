@@ -149,6 +149,15 @@ jobs:
           printf '%s\n' "$witness_dsn" | sudo env "PATH=$PATH" \
             deploy/systemd/install-live-worker-lifecycle.sh \
               --operator "$(id -un)" --source "$GITHUB_WORKSPACE"
+          # The group is created by the installer above. These are explicit provider data dirs,
+          # not the protected /var/lib/kdive parent, and every fixed worker must be able to create
+          # overlays, consoles and captures in them. Use the symlink target for rootfs authority.
+          worker_data_dirs=(/var/lib/kdive/console /var/lib/kdive/pcap /mnt/kdive-rootfs)
+          sudo chown "$(id -u):kdive-live-libvirt" "${worker_data_dirs[@]}"
+          sudo chmod 2770 "${worker_data_dirs[@]}"
+          for worker_data_dir in "${worker_data_dirs[@]}"; do
+            sudo --user=kdive-worker-1 test -w "$worker_data_dir"
+          done
 
       - name: Prove systemd worker lifecycle against disposable Postgres
         run: |
