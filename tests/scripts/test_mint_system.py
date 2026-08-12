@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "live-vm" / "mint-system.sh"
 
@@ -51,7 +52,9 @@ def test_dies_when_rootfs_path_missing(tmp_path: Path) -> None:
     assert "KDIVE_LIVE_VM_ROOTFS" in r.stderr
 
 
-def test_waits_for_provision_job_through_gateway(tmp_path: Path) -> None:
+def _run_mint(
+    tmp_path: Path, wait_status: str
+) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]]]:
     package = tmp_path / "kdive" / "mcp"
     package.mkdir(parents=True)
     (package.parent / "__init__.py").write_text("")
@@ -86,7 +89,19 @@ class LiveStackClient:
                 data={"system_id": "system-1"},
             )
         if tool_name == "tools.invoke" and arguments["name"] == "jobs.wait":
-            return SimpleNamespace(status="succeeded")
+            status = os.environ["WAIT_STATUS"]
+            return SimpleNamespace(
+                status=status,
+                error_category=(
+                    "configuration_error" if status in {"error", "failed"} else None
+                ),
+                detail="gateway unavailable" if status == "error" else None,
+                data=(
+                    {"failure_message": "redacted provider failure"}
+                    if status == "failed"
+                    else {}
+                ),
+            )
         if tool_name == "tools.invoke":
             return SimpleNamespace(status="ok")
         if tool_name in {"investigations.open", "jobs.wait", "systems.get"}:
@@ -108,14 +123,28 @@ class LiveStackClient:
             "PATH": os.environ["PATH"],
             "PYTHONPATH": str(tmp_path),
             "CALLS_PATH": str(calls_path),
+            "WAIT_STATUS": wait_status,
             "KDIVE_STACK_BASE_URL": "http://127.0.0.1:8000",
             "KDIVE_TOKEN": "not-a-real-token",
         },
     )
+    calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+    return result, calls
+
+
+def _wait_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        call
+        for call in calls
+        if call["name"] == "tools.invoke" and call["arguments"]["name"] == "jobs.wait"
+    ]
+
+
+def test_waits_for_provision_job_through_gateway(tmp_path: Path) -> None:
+    result, calls = _run_mint(tmp_path, "succeeded")
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == "system-1\n"
-    calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
     gateway_calls = [call for call in calls if call["name"] == "tools.invoke"]
     assert gateway_calls == [
         {
@@ -133,3 +162,32 @@ class LiveStackClient:
             },
         },
     ]
+
+
+def test_fails_immediately_on_job_wait_tool_error(tmp_path: Path) -> None:
+    result, calls = _run_mint(tmp_path, "error")
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "jobs.wait error: configuration_error — gateway unavailable" in result.stderr
+    assert "did not finish in time" not in result.stderr
+    assert len(_wait_calls(calls)) == 1
+
+
+def test_reports_redacted_failed_job_diagnostic(tmp_path: Path) -> None:
+    result, calls = _run_mint(tmp_path, "failed")
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "jobs.wait failed: configuration_error — redacted provider failure" in result.stderr
+    assert "— None" not in result.stderr
+    assert len(_wait_calls(calls)) == 1
+
+
+def test_reports_canceled_job_without_retrying(tmp_path: Path) -> None:
+    result, calls = _run_mint(tmp_path, "canceled")
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "jobs.wait canceled: provision job was canceled" in result.stderr
+    assert len(_wait_calls(calls)) == 1

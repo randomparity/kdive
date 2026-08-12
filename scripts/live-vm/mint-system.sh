@@ -146,11 +146,26 @@ async def main() -> int:
             if env.status == "succeeded":
                 print(system_id)  # the sole stdout line
                 return 0
-            if env.status in {"failed", "canceled"}:
+            if env.status == "error":
                 print(
-                    f"jobs.wait {env.status}: {env.error_category} — {env.detail}",
+                    "jobs.wait error: "
+                    f"{env.error_category or 'unknown_error'} — "
+                    f"{env.detail or 'the tool returned no diagnostic'}",
                     file=sys.stderr,
                 )
+                return 1
+            if env.status == "failed":
+                failure_message = env.data.get("failure_message")
+                if not isinstance(failure_message, str) or not failure_message:
+                    failure_message = env.detail or "provision job failed without a diagnostic"
+                print(
+                    "jobs.wait failed: "
+                    f"{env.error_category or 'unknown_error'} — {failure_message}",
+                    file=sys.stderr,
+                )
+                return 1
+            if env.status == "canceled":
+                print("jobs.wait canceled: provision job was canceled", file=sys.stderr)
                 return 1
         print(f"Provision job {job_id} did not finish in time", file=sys.stderr)
         return 1
