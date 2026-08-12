@@ -194,6 +194,7 @@ def test_installer_is_an_executable_host_contract() -> None:
 
 
 def test_ansible_creates_shared_slots_parent_before_private_children() -> None:
+    installer = _text(INSTALLER)
     tasks = _text(MAIN_TASKS)
     parent_start = tasks.index("- name: Create the shared slots parent")
     child_start = tasks.index("- name: Create root-owned fixed slot directories")
@@ -202,7 +203,8 @@ def test_ansible_creates_shared_slots_parent_before_private_children() -> None:
     assert 'path: "{{ live_vm_host_worker_state_root }}/slots"' in parent
     assert "owner: root" in parent
     assert "group: root" in parent
-    assert 'mode: "0755"' in parent
+    assert 'mode: "0711"' in parent
+    assert 'install -d -o root -g root -m 0711 "$state_root/slots"' in installer
 
 
 def _exercise_source_link_helper(

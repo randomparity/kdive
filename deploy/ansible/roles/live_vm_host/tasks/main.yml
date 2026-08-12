@@ -228,7 +228,7 @@
     state: directory
     owner: root
     group: root
-    mode: "0755"
+    mode: "0711"
 
 - name: Create root-owned fixed slot directories
   ansible.builtin.file:

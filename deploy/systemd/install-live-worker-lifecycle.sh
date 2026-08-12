@@ -505,8 +505,8 @@ done
 
 install -d -o root -g root -m 0755 /usr/local/libexec /etc/kdive
 install -d -o root -g root -m 0700 /etc/kdive/credentials
-install -d -o root -g root -m 0755 \
-  "$state_root" "$state_root/slots" /opt/kdive-live-worker-lifecycle
+install -d -o root -g root -m 0755 "$state_root" /opt/kdive-live-worker-lifecycle
+install -d -o root -g root -m 0711 "$state_root/slots"
 _lock_libvirt_runtime /run/kdive /run/kdive/live-libvirt \
   "$operator_uid" "$libvirt_group_gid" 0 0
 _restore_libvirt_runtime
