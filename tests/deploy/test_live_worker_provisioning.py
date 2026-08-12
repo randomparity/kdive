@@ -96,6 +96,13 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert "/opt/kdive-live-worker-lifecycle/revision" in source
 
 
+def test_installer_reports_socket_activation_failure_context() -> None:
+    source = _text(INSTALLER)
+
+    assert "could not enable the live-worker lifecycle socket" in source
+    assert "systemctl status --no-pager --full kdive-live-worker-lifecycle.socket" in source
+
+
 def test_installer_provisions_the_fixed_worker_fixture_catalog() -> None:
     source = _text(INSTALLER)
     assert "install_fixed_fixture_catalog" in source

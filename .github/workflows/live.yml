@@ -156,7 +156,12 @@ jobs:
           sudo chown "$(id -u):kdive-live-libvirt" "${worker_data_dirs[@]}"
           sudo chmod 2770 "${worker_data_dirs[@]}"
           for worker_data_dir in "${worker_data_dirs[@]}"; do
-            sudo --user=kdive-worker-1 test -w "$worker_data_dir"
+            if ! sudo --user=kdive-worker-1 test -w "$worker_data_dir"; then
+              echo "fixed worker cannot write provider data directory: ${worker_data_dir}" >&2
+              id kdive-worker-1 >&2
+              stat -Lc '%A %u:%g %n' "$worker_data_dir" >&2
+              exit 1
+            fi
           done
 
       - name: Prove systemd worker lifecycle against disposable Postgres

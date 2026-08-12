@@ -348,6 +348,8 @@ def test_tcg_runtime_dirs_become_fixed_worker_writable_after_account_install() -
     assert ":kdive-live-libvirt" in run
     assert "chmod 2770" in run
     assert "--user=kdive-worker-1 test -w" in " ".join(run.split())
+    assert "fixed worker cannot write provider data directory" in run
+    assert "id kdive-worker-1" in run
 
 
 # --- app-tier topology: host processes, never containers -------------------------------------

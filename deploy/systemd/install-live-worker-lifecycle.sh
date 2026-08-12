@@ -596,4 +596,8 @@ if [[ $libvirt_tuple_action == start ]]; then
 fi
 
 systemctl daemon-reload
-systemctl enable --now kdive-live-worker-lifecycle.socket
+if ! systemctl enable --now kdive-live-worker-lifecycle.socket; then
+  echo "could not enable the live-worker lifecycle socket" >&2
+  systemctl status --no-pager --full kdive-live-worker-lifecycle.socket >&2 || :
+  exit 1
+fi
