@@ -39,7 +39,6 @@ def test_live_worker_unit_pins_retained_slot_contract() -> None:
     expected = (
         "User=kdive-worker-%i",
         "SupplementaryGroups=kdive-live-libvirt",
-        "UMask=0007",
         "EnvironmentFile=/var/lib/kdive/live-workers/slots/%i/worker.env",
         "LoadCredential=worker-incarnation:"
         "/var/lib/kdive/live-workers/slots/%i/worker-incarnation.credential",

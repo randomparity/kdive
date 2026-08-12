@@ -1545,19 +1545,22 @@ def test_real_make_overlay_missing_qemu_img_is_missing_dependency(
 
 def test_real_make_overlay_uses_resolved_qemu_img_path(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     calls: list[list[str]] = []
     kwargs_seen: list[dict[str, object]] = []
+    overlay = tmp_path / "overlay.qcow2"
     monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
 
     def _record(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
         kwargs_seen.append(kwargs)
+        Path(args[-1]).write_bytes(b"qcow2")
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(storage_module.subprocess, "run", _record)
 
-    storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
+    storage_module._real_make_overlay("/base.qcow2", str(overlay))
 
     # The full argv must create a qcow2 overlay backed by the qcow2 base: a wrong format flag
     # (e.g. raw backing) would make the guest read the qcow2 header as raw and fail to mount.
@@ -1571,7 +1574,7 @@ def test_real_make_overlay_uses_resolved_qemu_img_path(
         "qcow2",
         "-b",
         "/base.qcow2",
-        "/overlay.qcow2",
+        str(overlay),
     ]
     # Output must be captured as text for the nonzero-return stderr tail, and check must stay
     # False so the function classifies failures itself instead of raising CalledProcessError.
@@ -1579,6 +1582,47 @@ def test_real_make_overlay_uses_resolved_qemu_img_path(
     assert kwargs_seen[0]["text"] is True
     assert kwargs_seen[0]["check"] is False
     assert kwargs_seen[0]["timeout"] == storage_module._QEMU_IMG_TIMEOUT_S
+
+
+def test_real_make_overlay_publishes_group_writable_disk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    overlay = tmp_path / "overlay.qcow2"
+    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+
+    def _create(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        Path(args[-1]).write_bytes(b"qcow2")
+        Path(args[-1]).chmod(0o640)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(storage_module.subprocess, "run", _create)
+
+    storage_module._real_make_overlay("/base.qcow2", str(overlay))
+
+    assert overlay.stat().st_mode & 0o777 == 0o660
+
+
+def test_real_make_overlay_rejects_replaced_path_without_changing_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    overlay = tmp_path / "overlay.qcow2"
+    target = tmp_path / "other-worker-file"
+    target.write_bytes(b"other")
+    target.chmod(0o600)
+    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+
+    def _replace(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        Path(args[-1]).symlink_to(target)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(storage_module.subprocess, "run", _replace)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._real_make_overlay("/base.qcow2", str(overlay))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "failed to publish the per-System rootfs overlay"
+    assert target.stat().st_mode & 0o777 == 0o600
 
 
 def test_real_make_overlay_unresolvable_qemu_img_is_missing_dependency(

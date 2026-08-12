@@ -7,7 +7,6 @@ Wants=network-online.target
 Type=simple
 User=kdive-worker-%i
 SupplementaryGroups=kdive-live-libvirt
-UMask=0007
 EnvironmentFile=/var/lib/kdive/live-workers/slots/%i/worker.env
 LoadCredential=worker-incarnation:/var/lib/kdive/live-workers/slots/%i/worker-incarnation.credential
 ExecStart=/usr/local/libexec/kdive-live-worker-gate %i

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 import subprocess  # noqa: S404 - qemu-img uses fixed argv, no shell  # nosec B404
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -97,6 +99,27 @@ def _real_make_overlay(base: str, overlay: str) -> None:
                 "stderr": result.stderr[-_QEMU_IMG_ERROR_TAIL_CHARS:],
             },
         )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            overlay,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise PermissionError("qemu-img output has unexpected type or owner")
+        os.fchmod(descriptor, 0o660)
+    except OSError as exc:
+        details = _overlay_error_details("publish_overlay", overlay)
+        details["error"] = type(exc).__name__
+        raise CategorizedError(
+            "failed to publish the per-System rootfs overlay",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details=details,
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _run_qemu_img(
