@@ -35,6 +35,7 @@ class _FakeClient:
 
     def __init__(self, result: _FakeResult) -> None:
         self._result = result
+        self.call: tuple[str, dict[str, object]] | None = None
 
     async def __aenter__(self) -> _FakeClient:
         return self
@@ -47,6 +48,7 @@ class _FakeClient:
     ) -> _FakeResult:
         # Mirror fastmcp.Client.call_tool's signature: the harness passes raise_on_error=False
         # so it gets the error result back and does its own typed LiveStackToolError wrapping.
+        self.call = (name, args)
         return self._result
 
 
@@ -80,3 +82,23 @@ def test_call_tool_parses_envelope_when_not_error() -> None:
         assert resp.status == "granted"
 
     asyncio.run(_run())
+
+
+def test_call_tool_forwards_inner_name_argument() -> None:
+    """The gateway tool can receive its own ``name`` argument through the harness."""
+    payload: dict[str, object] = {"object_id": "system-1", "status": "ready"}
+    transport = _FakeClient(_FakeResult(is_error=False, structured_content=payload))
+    client = LiveStackClient(cast(Client, transport))
+
+    async def _run() -> None:
+        await client.call_tool(
+            "tools.invoke",
+            name="systems.get",
+            arguments={"system_id": "system-1"},
+        )
+
+    asyncio.run(_run())
+    assert transport.call == (
+        "tools.invoke",
+        {"name": "systems.get", "arguments": {"system_id": "system-1"}},
+    )

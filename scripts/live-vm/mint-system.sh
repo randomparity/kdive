@@ -128,7 +128,13 @@ async def main() -> int:
             return 1
 
         for _ in range(180):  # poll up to ~15 min (native KVM boot); the tcg deadline is generous
-            env = _scalar(await client.call_tool("systems.get", system_id=system_id))
+            env = _scalar(
+                await client.call_tool(
+                    "tools.invoke",
+                    name="systems.get",
+                    arguments={"system_id": system_id},
+                )
+            )
             # systems.get overloads the envelope's own .status with the System state (spine.py:134
             # awaits env.status == "ready"); the state is NOT under data["status"].
             if env.status == "ready":

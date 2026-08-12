@@ -220,8 +220,8 @@ class LiveStackClient:
             raise RuntimeError(f"resource {uri!r} did not return text content")
         return text
 
-    async def call_tool(self, name: str, **args: object) -> ToolResponse | list[ToolResponse]:
-        """Call ``name`` and parse the structured output into ``ToolResponse``.
+    async def call_tool(self, tool_name: str, **args: object) -> ToolResponse | list[ToolResponse]:
+        """Call ``tool_name`` and parse the structured output into ``ToolResponse``.
 
         Reads ``CallToolResult.structured_content`` — a clean ``dict`` (fastmcp 3.4.0). A
         ``list[ToolResponse]`` tool is wrapped by FastMCP as ``{"result": [<dict>, ...]}``,
@@ -240,12 +240,12 @@ class LiveStackClient:
         ``LiveStackToolError`` wrapping the driver asserts on. Passing it returns the
         ``CallToolResult`` so the ``is_error`` branch below can re-raise the typed error.
         """
-        result = await self._client.call_tool(name, args, raise_on_error=False)
+        result = await self._client.call_tool(tool_name, args, raise_on_error=False)
         if getattr(result, "is_error", False):
-            raise LiveStackToolError(name, _tool_error_text(result))
+            raise LiveStackToolError(tool_name, _tool_error_text(result))
         payload = result.structured_content
         if payload is None:
-            raise RuntimeError(f"tool {name!r} returned no structured content")
+            raise RuntimeError(f"tool {tool_name!r} returned no structured content")
         inner = payload.get("result")
         if list(payload) == ["result"] and isinstance(inner, list):
             return [ToolResponse.model_validate(item) for item in inner]
