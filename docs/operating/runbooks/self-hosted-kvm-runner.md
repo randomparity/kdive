@@ -120,21 +120,23 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
 
 5. **One runner per libvirt host.** `live.yml`'s `native` job runs a pre-job
    reaper that destroys + `undefine --remove-all-storage`s **every** `kdive-*`
-   libvirt domain on the host — across both `qemu:///session` (where this gate's
-   domains live) and `qemu:///system` (legacy leftovers) — to reclaim orphans a
-   crashed/timed-out run leaves, since `docker compose down -v` wipes the DB that
-   tracked them. That match is host-wide, so **do not register a second self-hosted
-   runner against the same libvirt host** — a starting run would reap a peer run's
-   in-flight domains. Scale by giving each runner its own libvirt host (the ppc64le
-   drop-in below is a separate host).
+   libvirt domain on the host — across both the root-published dedicated session
+   endpoint (where this gate's domains live) and `qemu:///system` (legacy leftovers)
+   — to reclaim orphans a crashed/timed-out run leaves, since `docker compose down -v`
+   wipes the DB that tracked them. That match is host-wide, so **do not register a
+   second self-hosted runner against the same libvirt host** — a starting run would
+   reap a peer run's in-flight domains. Scale by giving each runner its own libvirt
+   host (the ppc64le drop-in below is a separate host).
 
-6. **Both families boot under `qemu:///session`.** The `native` job exports
-   `KDIVE_LIBVIRT_URI=qemu:///session` (and `XDG_RUNTIME_DIR=/run/user/<uid>`) before
-   the reaper and the stack bring-up, so QEMU runs as the runner service account. The
-   runner is non-root and has no sudo, so it can neither read `qemu:///system`'s
-   root-owned console log (the root-readback wall, ADR-0223) nor launch a root worker
-   to sidestep it — session mode makes the console runner-readable. `runner.yml`
-   enables linger for the service account so `/run/user/<uid>` persists between jobs.
+6. **Both families boot through the provisioned dedicated session endpoint.** The
+   `native` job uses the checkout's `scripts/live-stack/libvirt-uri.sh` parser to read
+   the exact URI from root-owned `/etc/kdive/live-worker-libvirt.env` as literal data,
+   then exports it before the reaper and stack bring-up. It never sources that file as
+   shell. The runner is non-root and has no sudo, so it can neither read
+   `qemu:///system`'s root-owned console log (the root-readback wall, ADR-0223) nor
+   launch a root worker to sidestep it. The dedicated session daemon makes the console
+   runner-readable, and every fixed worker, direct live test, and cleanup command uses
+   the same daemon.
 
 ## ppc64le runner (drop-in)
 
@@ -206,12 +208,12 @@ the guest under libvirt. On the runner that requires, beyond the tools above:
 
 - **`e2fsprogs`** (`tune2fs`/`mkfs.ext4`) on `PATH` including `/usr/sbin` — a
   `build-fs` dependency for the ext4 repack.
-- **`KDIVE_LIBVIRT_URI=qemu:///session`** so qemu runs as the runner user: the
-  default `qemu:///system` writes a root-owned console log the non-root runner
-  cannot read (the root-readback wall), and its qemu (uid `libvirt-qemu`) cannot
-  traverse the runner-owned build workspace. Session mode sidesteps both; keep
-  `XDG_CONFIG_HOME` short for the QMP socket path (harness-managed via
-  `prepare_session_runtime`).
+- **The root-published dedicated session URI** so qemu runs as the runner user. Load it
+  with the checkout's `scripts/live-stack/libvirt-uri.sh`; the parser validates the
+  root-owned file and treats its one assignment as literal data. The default
+  `qemu:///system` writes a root-owned console log the non-root runner cannot read (the
+  root-readback wall), and its qemu (uid `libvirt-qemu`) cannot traverse the
+  runner-owned build workspace. Session mode sidesteps both.
 
 ### Producing each store (operator)
 
@@ -220,8 +222,10 @@ image; the scripts run no live distro query), and an unset input fails loud:
 
 ```sh
 # Self-hosted warm store (native KVM), run as the runner service account:
-DEBUGINFOD_URLS=<distro-debuginfod> KDIVE_LIBVIRT_URI=qemu:///session \
-  KDIVE_PYTHON=<venv>/bin/python \
+source scripts/live-stack/libvirt-uri.sh
+KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"
+export KDIVE_LIBVIRT_URI
+DEBUGINFOD_URLS=<distro-debuginfod> KDIVE_PYTHON=<venv>/bin/python \
   KDIVE_WARM_STORE_TARGET_NVR=<pinned-kernel-nvr> \
   KDIVE_WARM_STORE_IMAGE=<catalog-rootfs-image> \
   scripts/live-vm/warm-store.sh

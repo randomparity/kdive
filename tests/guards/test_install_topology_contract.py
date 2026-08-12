@@ -19,6 +19,8 @@ _KUBERNETES_DOC = _ROOT / "docs/operating/kubernetes.md"
 _KUBERNETES_RUNBOOK = _ROOT / "docs/operating/runbooks/kubernetes-deploy.md"
 _BUILD_USE_RECOVERY = _ROOT / "docs/operating/runbooks/build-use-recovery.md"
 _LOCAL_LIBVIRT_WALKTHROUGH = _ROOT / "docs/operating/providers/local-libvirt-walkthrough.md"
+_SELF_HOSTED_KVM_RUNNER = _ROOT / "docs/operating/runbooks/self-hosted-kvm-runner.md"
+_LIVE_TESTING_RUNBOOK = _ROOT / "docs/operating/runbooks/live-testing.md"
 _HELM_VALUES = _ROOT / "deploy/helm/kdive/values.yaml"
 
 _DIRECT_HOST_WORKER = re.compile(
@@ -69,6 +71,22 @@ def test_local_libvirt_walkthrough_threads_the_published_uri() -> None:
     assert "export KDIVE_LIBVIRT_URI" in fences
     assert 'host_uri = \\"${KDIVE_LIBVIRT_URI}\\"' in fences
     assert "virsh -c qemu:///system" not in fences
+
+
+def test_hosted_lifecycle_docs_use_the_published_libvirt_uri() -> None:
+    runner = _SELF_HOSTED_KVM_RUNNER.read_text()
+    assert "KDIVE_LIBVIRT_URI=qemu:///session" not in runner
+    assert "source scripts/live-stack/libvirt-uri.sh" in runner
+    assert 'KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"' in runner
+    assert "export KDIVE_LIBVIRT_URI" in runner
+
+    hosted_quirk = (
+        _LIVE_TESTING_RUNBOOK.read_text()
+        .split("## Hard-won quirks", maxsplit=1)[1]
+        .split("- **A long `XDG_CONFIG_HOME`", maxsplit=1)[0]
+    )
+    assert "KDIVE_LIBVIRT_URI=qemu:///session" not in hosted_quirk
+    assert "load_published_libvirt_uri" in hosted_quirk
 
 
 def test_install_documents_the_five_image_commands_and_kubernetes_witness_topology() -> None:

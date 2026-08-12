@@ -483,8 +483,10 @@ worker behind it is visible as a stale log rather than read as a graded process.
 
 - **`qemu:///session` dodges the root-readback wall.** A `qemu:///system`
   domain writes a root-owned console log a non-root runner cannot read back;
-  session mode runs qemu as the invoking user. This is why the self-hosted
-  runner exports `KDIVE_LIBVIRT_URI=qemu:///session` for both boot families.
+  session mode runs qemu as the invoking user. The installed self-hosted lifecycle
+  uses its dedicated session daemon: the workflow calls `load_published_libvirt_uri`
+  from `scripts/live-stack/libvirt-uri.sh` and exports that exact root-published URI
+  for both boot families, rather than selecting the default session daemon.
 - **A long `XDG_CONFIG_HOME` breaks the session-mode QMP socket** (the per-domain
   monitor socket lives under it and hits a 108-byte path limit) — `XDG_RUNTIME_DIR`
   is *not* the lever. The harness redirects it to a short path automatically; the
