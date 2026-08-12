@@ -31,6 +31,43 @@ _fixture_files=(
   profiles/console-ready_x86_64.yaml
 )
 
+_link_system_guestfs_binding() (
+  local venv_python="$1" system_site venv_site source
+  local -a native_modules sources
+  system_site="$(
+    /usr/bin/python3 -c \
+      'import guestfs, pathlib; print(pathlib.Path(guestfs.__file__).resolve().parent)'
+  )" || {
+    echo "system Python cannot import the required guestfs binding" >&2
+    return 1
+  }
+  venv_site="$(
+    "$venv_python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))'
+  )"
+  [[ -d $venv_site && ! -L $venv_site ]] || {
+    echo "lifecycle worker venv site-packages is not a real directory: $venv_site" >&2
+    return 1
+  }
+  shopt -s nullglob
+  native_modules=("$system_site"/libguestfsmod*.so)
+  ((${#native_modules[@]} > 0)) || {
+    echo "system guestfs native module is absent from $system_site" >&2
+    return 1
+  }
+  sources=("$system_site/guestfs.py" "${native_modules[@]}")
+  for source in "${sources[@]}"; do
+    [[ -f $source ]] || {
+      echo "system guestfs binding file is absent: $source" >&2
+      return 1
+    }
+    ln -sfnT -- "$source" "$venv_site/$(basename -- "$source")"
+  done
+  "$venv_python" -c 'import guestfs' || {
+    echo "lifecycle worker venv cannot import the linked guestfs binding" >&2
+    return 1
+  }
+)
+
 _require_real_directory() {
   local path="$1" owner="$2" group="$3" mode="$4"
   if [[ -e $path || -L $path ]]; then
@@ -560,6 +597,7 @@ if [[ $source_root != /opt/kdive ]]; then
 fi
 uv venv --python /usr/bin/python3 /opt/kdive-live-worker-lifecycle/.venv
 uv pip install --python /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive
+_link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python
 chown -R root:root /opt/kdive-live-worker-lifecycle
 chmod 0755 /opt/kdive-live-worker-lifecycle
 

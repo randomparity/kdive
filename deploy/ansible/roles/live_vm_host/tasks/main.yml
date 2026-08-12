@@ -528,6 +528,18 @@
   when: live_vm_host_checkout is changed or live_vm_host_worker_witness_venv is changed
   changed_when: true
 
+- name: Symlink the libguestfs binding into the lifecycle worker venv
+  ansible.builtin.file:
+    src: "{{ item.path }}"
+    dest: >-
+      /opt/kdive-live-worker-lifecycle/.venv/lib/python{{ ansible_python.version.major }}.{{
+      ansible_python.version.minor }}/site-packages/{{ item.path | basename }}
+    state: link
+    force: true
+  loop: "{{ live_vm_host_libguestfs_files.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
 - name: Keep the lifecycle witness environment root-owned
   ansible.builtin.file:
     path: /opt/kdive-live-worker-lifecycle

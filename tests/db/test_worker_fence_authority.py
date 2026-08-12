@@ -139,6 +139,7 @@ _WORKER_SELECT = {
 _WORKER_MUTATIONS = {
     "INSERT": {
         "artifacts",
+        "audit_log",
         "component_uploads",
         "egress_probe_guests",
         "ledger",
@@ -369,6 +370,7 @@ def residual_privilege_role_dsn(pg_conn: psycopg.Connection) -> Iterator[RoleDsn
             "0110_idempotent_worker_termination.sql",
             "0111_restrict_pinned_job_deletion.sql",
             "0112_worker_bootstrap_key_authority.sql",
+            "0113_worker_audit_authority.sql",
         ):
             role_sql = (migrate.SCHEMA_DIR / filename).read_bytes()
             for canonical, isolated in roles.items():

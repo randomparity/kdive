@@ -81,6 +81,7 @@ def test_ansible_installs_witness_venv_in_clean_host_order() -> None:
     assert 'mode: "0755"' in tasks
     assert "dest: /opt/kdive-live-worker-lifecycle/revision" in tasks
     assert 'mode: "0444"' in tasks
+    assert "Symlink the libguestfs binding into the lifecycle worker venv" in tasks
 
 
 def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
@@ -94,6 +95,9 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert "-m 0600" in source
     assert "/etc/kdive/credentials/live-worker-witness.dsn" in source
     assert "/opt/kdive-live-worker-lifecycle/revision" in source
+    assert (
+        "_link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python" in source
+    )
 
 
 def test_installer_reports_socket_activation_failure_context() -> None:
@@ -388,6 +392,7 @@ def test_ansible_provisions_and_verifies_worker_accessible_fixture_catalog() -> 
     assert "live_vm_host_worker_fixture_catalog" in tasks
     assert "Verify workers can access installed Python and provider paths" in verify
     assert "/opt/kdive-live-worker-lifecycle/.venv/bin/python" in verify
+    assert "import guestfs, pathlib, kdive" in verify
     assert "/var/lib/kdive/build" in verify
 
 

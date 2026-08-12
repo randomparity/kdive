@@ -225,7 +225,7 @@
 - name: Verify workers import the installed KDIVE revision
   ansible.builtin.command: >-
     /opt/kdive-live-worker-lifecycle/.venv/bin/python -c
-    'import pathlib, kdive; print(pathlib.Path(kdive.__file__).resolve())'
+    'import guestfs, pathlib, kdive; print(pathlib.Path(kdive.__file__).resolve())'
   become: true
   become_user: "{{ item }}"
   loop: "{{ live_vm_host_worker_accounts }}"
