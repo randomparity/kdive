@@ -176,8 +176,6 @@ class SystemdControl(Protocol):
 
     def stop_retained(self, unit: str, deadline: Deadline) -> None: ...
 
-    def reset(self, unit: str, deadline: Deadline) -> None: ...
-
     def unmanaged_workers(self) -> tuple[UnmanagedWorker, ...]: ...
 
     def public_properties(self, unit: str, invocation_id: str, deadline: Deadline) -> str: ...
@@ -771,7 +769,6 @@ class SystemdWorkerLifecycle:
         if state.phase is not SlotPhase.TERMINATED:
             raise LifecycleConflict("cleanup requires persisted terminal evidence")
         self._systemd_call(deadline, self._runtime.stop_retained, state.unit, deadline)
-        self._systemd_call(deadline, self._runtime.reset, state.unit, deadline)
         self._store_call(deadline, store.cleanup_terminated, state)
 
     async def _register(self, state: SlotState, deadline: Deadline) -> None:

@@ -610,11 +610,6 @@ class SystemdRuntime:
         self._require_unit(unit)
         self._run(("systemctl", "stop", unit), deadline=deadline)
 
-    def reset(self, unit: str, deadline: Deadline) -> None:
-        """Reset one exact retained unit after the post-evidence stop path."""
-        self._require_unit(unit)
-        self._run(("systemctl", "reset-failed", unit), deadline=deadline)
-
     def unmanaged_workers(self) -> tuple[UnmanagedWorker, ...]:
         """List exact worker commands outside the eight fixed unit cgroups."""
         try:

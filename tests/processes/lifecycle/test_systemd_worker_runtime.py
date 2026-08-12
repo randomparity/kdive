@@ -594,17 +594,13 @@ def test_stop_retained_is_a_separate_bounded_operation() -> None:
     assert runner.deadlines == [deadline]
 
 
-def test_start_and_reset_use_only_the_exact_fixed_unit() -> None:
+def test_start_uses_only_the_exact_fixed_unit() -> None:
     runner = FakeRunner()
     runtime = SystemdRuntime(runner)
     deadline = FakeDeadline(120.0)
     runtime.start("kdive-live-worker@2.service", deadline=deadline)
-    runtime.reset("kdive-live-worker@2.service", deadline=deadline)
-    assert runner.calls == [
-        ("systemctl", "start", "kdive-live-worker@2.service"),
-        ("systemctl", "reset-failed", "kdive-live-worker@2.service"),
-    ]
-    assert runner.deadlines == [deadline, deadline]
+    assert runner.calls == [("systemctl", "start", "kdive-live-worker@2.service")]
+    assert runner.deadlines == [deadline]
 
 
 def test_runtime_rejects_caller_selected_or_special_unit_names() -> None:

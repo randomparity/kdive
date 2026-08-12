@@ -227,6 +227,7 @@ class FakeRuntime:
         self.stop_budgets.append(deadline.remaining())
         self.stopped.append(unit)
         self.events.append(f"systemd:stop:{unit}")
+        self.current.pop(unit, None)
 
     def reset(self, unit: str, deadline: Deadline) -> None:
         self.systemd_deadlines.append(("reset", deadline))
@@ -479,16 +480,16 @@ def test_start_reconciles_all_occupied_slots_before_replacement() -> None:
         for index, (operation, _) in enumerate(runtime.systemd_deadlines)
         if operation == "signal-terminate"
     )
-    last_reset = max(
+    last_stop = max(
         index
         for index, (operation, _) in enumerate(runtime.systemd_deadlines)
-        if operation == "reset"
+        if operation == "stop-retained"
     )
     assert (
         len(
             {
                 id(deadline)
-                for _, deadline in runtime.systemd_deadlines[first_signal : last_reset + 1]
+                for _, deadline in runtime.systemd_deadlines[first_signal : last_stop + 1]
             }
         )
         == 1
@@ -567,7 +568,6 @@ def test_pre_release_gate_exit_replays_before_and_after_database_commit(
         "database:terminate-exact-empty-invocation",
         "persist:terminated",
         "systemd:stop:kdive-live-worker@1.service",
-        "systemd:reset:kdive-live-worker@1.service",
         "state:cleanup",
     ]
 
@@ -657,7 +657,6 @@ def test_stop_adopts_active_prepared_gate_without_starting_another_invocation() 
         "database:terminate",
         "persist:terminated",
         "systemd:stop:kdive-live-worker@1.service",
-        "systemd:reset:kdive-live-worker@1.service",
         "state:cleanup",
     ]
     assert runtime.start_counts == {}
@@ -763,7 +762,7 @@ def test_empty_invocation_result_maps_to_terminal_outcome(
     assert stores[0].state is not None and stores[0].state.outcome == outcome
 
 
-def test_stop_commits_evidence_before_reset_and_cleanup() -> None:
+def test_stop_commits_evidence_before_unit_and_state_cleanup() -> None:
     started = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, events = _fleet(states={1: started})
 
@@ -776,15 +775,27 @@ def test_stop_commits_evidence_before_reset_and_cleanup() -> None:
         "database:terminate",
         "persist:terminated",
         "systemd:stop:kdive-live-worker@1.service",
-        "systemd:reset:kdive-live-worker@1.service",
         "state:cleanup",
     ]
     stop_path_deadlines = [
         deadline
         for operation, deadline in runtime.systemd_deadlines
-        if operation in {"observe", "signal-terminate", "stop-retained", "reset"}
+        if operation in {"observe", "signal-terminate", "stop-retained"}
     ]
     assert len({id(deadline) for deadline in stop_path_deadlines}) == 1
+
+
+def test_stop_cleanup_does_not_reset_a_stopped_template_instance() -> None:
+    started = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, events = _fleet(states={1: started})
+
+    response = _run(_coordinator(stores, runtime, authority, clock).stop(_deadline(clock)))
+
+    assert response.ok
+    assert stores[0].state is None
+    assert runtime.stopped == [started.unit]
+    assert runtime.resets == []
+    assert events[-2:] == ["systemd:stop:kdive-live-worker@1.service", "state:cleanup"]
 
 
 def test_stop_signaling_and_observation_share_a_45_second_ceiling() -> None:
@@ -926,7 +937,7 @@ def test_status_records_unexpected_exit_without_cleaning_diagnostic_sources() ->
     assert stopped.ok
     assert stores[0].state is None
     assert runtime.stopped == [started.unit]
-    assert runtime.resets == [started.unit]
+    assert runtime.resets == []
 
 
 def test_diagnostics_uses_one_30_second_acquisition_ceiling_and_never_mutates() -> None:

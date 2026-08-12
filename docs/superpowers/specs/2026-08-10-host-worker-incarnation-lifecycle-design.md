@@ -167,8 +167,9 @@ cleanup. An unreadable or unchanged boot ID never licenses this transition.
 
 `stop` sends SIGTERM to every `gated`, `registered`, or `started` unit cgroup, then gives all
 selected cgroups 45 seconds on the monotonic clock, within the 120-second request budget, to become
-empty. It records each terminal outcome and then stops/resets only the fixed unit and deletes the
-environment, credential, and state after the database confirms the same incarnation is terminated.
+empty. It records each terminal outcome and then stops only the fixed unit, which also resets the
+unit's failed state, and deletes the environment, credential, and state after the database confirms
+the same incarnation is terminated.
 A `prepared` state with positive proof that no invocation was created needs no database termination
 and is discarded before cleanup. Repeating `stop` adopts the same facts.
 
