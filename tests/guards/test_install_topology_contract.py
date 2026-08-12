@@ -18,7 +18,12 @@ _HELM_REFERENCE = _ROOT / "deploy/helm/kdive/README.md"
 _KUBERNETES_DOC = _ROOT / "docs/operating/kubernetes.md"
 _KUBERNETES_RUNBOOK = _ROOT / "docs/operating/runbooks/kubernetes-deploy.md"
 _BUILD_USE_RECOVERY = _ROOT / "docs/operating/runbooks/build-use-recovery.md"
+_LOCAL_LIBVIRT_WALKTHROUGH = _ROOT / "docs/operating/providers/local-libvirt-walkthrough.md"
 _HELM_VALUES = _ROOT / "deploy/helm/kdive/values.yaml"
+
+_DIRECT_HOST_WORKER = re.compile(
+    r"(?:^|\s)(?:\S*/)?python\s+-m\s+kdive\s+worker(?:\s|$)", re.MULTILINE
+)
 
 _IMAGE_COMMAND_INVENTORY = re.compile(
     r"The image runs any of five commands \((?P<commands>[^)]+)\) via `python -m kdive <command>`\."
@@ -34,6 +39,36 @@ def _section(path: Path, start: str, end: str | None = None) -> str:
     if end is not None:
         text = text.split(end, maxsplit=1)[0]
     return " ".join(text.split()).lower()
+
+
+def _shell_fences(path: Path) -> str:
+    source = path.read_text()
+    return "\n".join(
+        match.group("body")
+        for match in re.finditer(
+            r"^```(?:bash|sh|shell|console)\s*$\n(?P<body>.*?)^```\s*$",
+            source,
+            re.MULTILINE | re.DOTALL,
+        )
+    )
+
+
+def test_active_operator_docs_do_not_instruct_direct_host_worker_launches() -> None:
+    offenders = [
+        path.relative_to(_ROOT).as_posix()
+        for path in sorted((_ROOT / "docs/operating").rglob("*.md"))
+        if _DIRECT_HOST_WORKER.search(_shell_fences(path))
+    ]
+    assert offenders == []
+
+
+def test_local_libvirt_walkthrough_threads_the_published_uri() -> None:
+    fences = _shell_fences(_LOCAL_LIBVIRT_WALKTHROUGH)
+    assert "source scripts/live-stack/libvirt-uri.sh" in fences
+    assert 'KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"' in fences
+    assert "export KDIVE_LIBVIRT_URI" in fences
+    assert 'host_uri = \\"${KDIVE_LIBVIRT_URI}\\"' in fences
+    assert "virsh -c qemu:///system" not in fences
 
 
 def test_install_documents_the_five_image_commands_and_kubernetes_witness_topology() -> None:

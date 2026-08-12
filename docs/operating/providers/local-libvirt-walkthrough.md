@@ -11,7 +11,7 @@ booted System; for the provider's reference config see
 > provider — compose is used here only for the **backends** (Postgres, MinIO, OIDC).
 
 > **No `just` required.** `just` is a developer/CI task runner. Everything below uses the
-> packaged commands (`python -m kdive …`) and the `scripts/*.sh` helpers directly, so an operator
+> lifecycle installer, packaged commands, and `scripts/*.sh` helpers directly, so an operator
 > never needs `just` or the dev workflow. The examples assume the repo is checked out and the
 > project virtualenv is at `.venv` (Step 1).
 
@@ -116,13 +116,16 @@ docker compose up -d --wait postgres minio oidc
 docker compose run --rm minio-init
 ```
 
-The host processes read their backend connection from `KDIVE_*` environment variables. The
-backends above publish on host ports, so the **host-process** values are (these mirror the comment
-block at the top of `docker-compose.yml`; note OIDC is published on **8090**):
+The host processes use separate database roles. The backends above publish on host ports, so the
+**host-process** values are (these mirror `scripts/live-stack/env.sh`; note OIDC is published on
+**8090**):
 
 ```bash
 cat > ~/kdive/.kdive-host.env <<'EOF'
-export KDIVE_DATABASE_URL=postgresql://kdive:kdive@localhost:5432/kdive   # pragma: allowlist secret - local demo only
+export KDIVE_MIGRATION_DATABASE_URL=postgresql://kdive:kdive@localhost:5432/kdive   # pragma: allowlist secret - local demo only
+export KDIVE_SERVER_DATABASE_URL=postgresql://kdive-server-member:kdive-server-local@localhost:5432/kdive   # pragma: allowlist secret - local demo only
+export KDIVE_WORKER_DATABASE_URL=postgresql://kdive-worker-member:kdive-worker-local@localhost:5432/kdive   # pragma: allowlist secret - local demo only
+export KDIVE_RECONCILER_DATABASE_URL=postgresql://kdive-reconciler-member:kdive-reconciler-local@localhost:5432/kdive   # pragma: allowlist secret - local demo only
 export KDIVE_OIDC_ISSUER=http://localhost:8090/default
 export KDIVE_OIDC_JWKS_URI=http://localhost:8090/default/jwks
 export KDIVE_OIDC_AUDIENCE=kdive
@@ -136,18 +139,42 @@ EOF
 source ~/kdive/.kdive-host.env
 ```
 
-Apply the schema, then start the three processes (a real deployment runs them under systemd — see
-[systemd](../systemd.md); shown here as plain processes for clarity):
+Install the fixed host-worker lifecycle once per checkout revision. The witness DSN is delivered
+over stdin, not a command-line argument. This local-only credential matches the runtime-role
+bootstrap performed by `up.sh`:
 
 ```bash
-.venv/bin/python -m kdive migrate
-.venv/bin/python -m kdive server     &   # MCP HTTP API
-.venv/bin/python -m kdive worker     &   # runs provision/build/install/capture jobs
-.venv/bin/python -m kdive reconciler &   # drift-repair AND provider discovery
+witness_password=kdive-witness-local # pragma: allowlist secret - local demo only
+witness_dsn="postgresql://kdive-witness-member:${witness_password}@localhost:5432/kdive"
+printf '%s\n' "$witness_dsn" | sudo env "PATH=$PATH" \
+  deploy/systemd/install-live-worker-lifecycle.sh \
+    --operator "$(id -un)" --source "$PWD"
 ```
 
-The **reconciler runs discovery**: it enumerates `qemu:///system`, creates the local-libvirt
-resource row, and probes its vcpus/memory_mb ceiling. It must be running for the resource to exist.
+Bring up the backends, apply migrations, bootstrap the separate runtime roles, and start the
+server, fixed systemd-supervised workers, and reconciler through the supported lifecycle:
+
+```bash
+source ~/kdive/.kdive-host.env
+# Parse the root-published assignment as literal data; do not source that file as shell.
+source scripts/live-stack/libvirt-uri.sh
+KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"
+export KDIVE_LIBVIRT_URI
+scripts/live-stack/up.sh --skip-obs
+scripts/live-stack/status.sh
+```
+
+The installer publishes the dedicated session URI in `/etc/kdive/live-worker-libvirt.env`.
+`up.sh` passes that URI to every fixed worker; do not replace the lifecycle with a direct worker
+process. Stop the stack through the same lifecycle so worker incarnation termination is recorded:
+
+```bash
+scripts/live-stack/down.sh
+```
+
+The **reconciler runs discovery**: it enumerates the published local session URI, creates the
+local-libvirt resource row, and probes its vcpus/memory_mb ceiling. It must be running for the
+resource to exist.
 
 ### Guest-CPU visibility and pinning
 
@@ -162,13 +189,13 @@ EL9/RHEL-family) produces a non-booting System. `systems.get` reports the System
 in `resolved_cpu` — a live reading of the running domain for local Systems (a host-passthrough guest
 resolves to the host CPU; a TCG machine-default the host does not expand reads `null`).
 
-### Worker privilege under `qemu:///system`
+### Why the lifecycle uses a dedicated session URI
 
 Provisioning a System to `ready` works with a **non-root** worker — it never reads the guest
 console. But every **post-boot** plane needs the worker to read files that QEMU/`virtlogd` write as
-`root:0600` under `qemu:///system`, so the worker must run as **root** (or be given group
-read/remove access to the paths below — or use `qemu:///session`, where the worker owns the QEMU
-process and its files). Two seams require it:
+`root:0600` under `qemu:///system`. The supported lifecycle avoids a root worker: its fixed worker
+accounts connect to the published dedicated session daemon, whose QEMU files they can read. Two
+seams explain why falling back to the system daemon is unsupported:
 
 - **Build → boot confirmation.** The boot-readiness preflight tails the guest console log that
   `virtlogd` writes `root:0600` to detect boot-to-multiuser; a non-root worker gets a
@@ -180,8 +207,9 @@ process and its files). Two seams require it:
   core to a `root`-owned temp file; the worker must read and remove it. A non-root worker gets
   `configuration_error` with the same operator-fix guidance (ADR-0223), not an opaque `[Errno 13]`.
 
-So a non-root worker can provision but cannot confirm a boot or capture a host_dump. This is the
-worker-privilege gap tracked in [#699](https://github.com/randomparity/kdive/issues/699);
+So a non-root worker on the system daemon can provision but cannot confirm a boot or capture a
+host_dump. This is the worker-privilege gap tracked in
+[#699](https://github.com/randomparity/kdive/issues/699);
 `scripts/check-local-libvirt.sh` now prints a non-failing advisory when it detects a non-root worker
 under `qemu:///system`, so the constraint is surfaced before a run. The kdump-only note under
 [Declare your inventory](#kdump-capture-prerequisites) is one instance of this broader requirement,
@@ -224,12 +252,14 @@ to point elsewhere).
 
 Start from the minimal, local-only example —
 [`examples/systems-local-libvirt.toml`](examples/systems-local-libvirt.toml). It declares one
-image and one priced cost class for the `qemu:///system` host; the full multi-provider reference
-is `systems.toml.example` at the repo root.
+image and one priced cost class. Replace its generic system URI with the exact published endpoint
+before reconciling; the full multi-provider reference is `systems.toml.example` at the repo root.
 
 ```bash
 mkdir -p ~/.config/kdive
 cp docs/operating/providers/examples/systems-local-libvirt.toml ~/.config/kdive/systems.toml
+sed -i "s|host_uri = \"qemu:///system\"|host_uri = \"${KDIVE_LIBVIRT_URI}\"|" \
+  ~/.config/kdive/systems.toml
 .venv/bin/python -m kdive reconcile-systems --check   # validate only (no DB/S3 writes); exits 0 when valid
 .venv/bin/python -m kdive reconcile-systems           # apply: creates the image and cost class
 ```
@@ -258,9 +288,9 @@ Provisioning the inventory above is enough to provision and boot. **kdump vmcore
 kdump writes `/var/crash/<ts>/vmcore` (booting its crash kernel via `kexec`), then the worker
 force-stops the domain and harvests the core from the qcow2 overlay with libguestfs. Concretely:
 
-- **Run the worker as `root`** (or grant the equivalent group access) — see
-  [Worker privilege under `qemu:///system`](#worker-privilege-under-qemusystem). kdump is one of the
-  several post-boot planes that need it; it is also the natural identity for `kexec` and libguestfs.
+- **Use the fixed lifecycle's dedicated session URI** — see
+  [Why the lifecycle uses a dedicated session URI](#why-the-lifecycle-uses-a-dedicated-session-uri).
+  Do not replace it with a root worker or the system daemon.
 - **Wire `drgn` + `libguestfs` into the worker venv** — `uv sync --group live` pulls `drgn`; the
   system `guestfs` binding is wired separately. **Caveat:** the binding is an ABI-locked system
   package built for the **distro** Python (e.g. 3.12 on Ubuntu 24.04), while `uv` builds the venv
@@ -459,7 +489,8 @@ inventory, but the path is invisible to an agent without host access):
 > `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` (default `10.0`) — see
 > [Cross-architecture guests](../install.md#cross-architecture-guests).
 
-A successful provision yields a running `kdive-<system-id>` domain (`virsh -c qemu:///system list`)
+A successful provision yields a running `kdive-<system-id>` domain
+(`virsh -c "$KDIVE_LIBVIRT_URI" list`)
 and a System in state `ready`. For the deep build → boot → debug steps (the four capture methods
 and the canonical dcache `dhash_entries` verification) follow the
 [four-method live run](../runbooks/four-method-live-run.md) and

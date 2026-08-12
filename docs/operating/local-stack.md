@@ -85,10 +85,8 @@ Run the app tier from the compose reference (builds the image, runs the backends
 docker compose up -d migrate server worker reconciler
 ```
 
-To run the processes directly under a process manager such as systemd instead of compose:
-
-```bash
-python -m kdive server
-python -m kdive worker
-python -m kdive reconciler
-```
+This page uses the container-managed worker lifecycle. Do not substitute direct host process
+commands: a local-libvirt host worker requires an authority-registered incarnation and the
+systemd-delivered credential. For that topology, follow the
+[local-libvirt walkthrough](providers/local-libvirt-walkthrough.md), which installs the fixed
+lifecycle and uses `scripts/live-stack/up.sh`, `status.sh`, and `down.sh`.
