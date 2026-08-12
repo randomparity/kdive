@@ -1126,6 +1126,29 @@ def test_runtime_roles_receive_data_access_without_crossing_fence_authority(
             assert privileges == [(False,)] * 3, (role, sequence)
 
 
+def test_worker_can_append_audit_and_return_only_the_generated_id(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """Worker AuditRecorder gets RETURNING id without read access to audit contents."""
+    worker_login = role_dsn.logins["kdive_worker"]
+    assert pg_conn.execute(
+        "SELECT has_column_privilege(%s, 'public.audit_log', 'id', 'SELECT'), "
+        "has_column_privilege(%s, 'public.audit_log', 'principal', 'SELECT')",
+        (worker_login, worker_login),
+    ).fetchone() == (True, False)
+
+    with psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker:
+        row = worker.execute(
+            "INSERT INTO audit_log "
+            "(principal, project, tool, object_kind, object_id, transition, args_digest) "
+            "VALUES ('worker', 'demo', 'systems.provision', 'system', %s, 'failed', 'digest') "
+            "RETURNING id",
+            (uuid4(),),
+        ).fetchone()
+        assert row is not None
+        assert isinstance(row[0], UUID)
+
+
 @pytest.mark.parametrize(
     "operation",
     [

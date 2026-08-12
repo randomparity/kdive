@@ -2,3 +2,4 @@
 -- Migration 0107 omitted this grant even though provision, install, boot, control, and
 -- artifact handlers record their completed or failed transitions through AuditRecorder.
 GRANT INSERT ON TABLE public.audit_log TO kdive_worker;
+GRANT SELECT (id) ON TABLE public.audit_log TO kdive_worker;
