@@ -32,10 +32,10 @@ Full prerequisites, the external-backend ordering note, and the env-file details
 
 ## Fixed live-worker lifecycle contract
 
-The live-VM workflows use the separate fixed-slot contract from ADR-0555. It installs eight
-retained worker templates, a root socket-activated lifecycle witness, isolated slot accounts, and
-a dedicated group-accessible session-libvirt endpoint. It does not convert the server or
-reconciler into system units.
+The live-VM workflows use the separate fixed-slot contract from ADR-0555 and ADR-0556. It
+installs eight retained worker templates, a root socket-activated lifecycle witness, isolated
+slot accounts, and a dedicated group-accessible session-libvirt endpoint. It does not convert
+the server or reconciler into system units.
 
 On a disposable hosted runner, install the contract after the checkout's `uv sync`. Supply the
 lifecycle-witness member DSN on standard input so it is absent from the installer command line:
@@ -51,9 +51,10 @@ unset witness_dsn
 The installer is idempotent for one checkout on a fresh disposable host. It selects the host
 distro's supported session daemon: Debian-family hosts use monolithic `libvirtd` and
 `libvirt-sock`; Red Hat-family hosts use modular `virtqemud` and `virtqemud-sock`. An unsupported
-distro or missing selected daemon fails before activation. Persistent self-hosted runners receive
-the Debian-family tuple and the equivalent accounts, files, modes, socket, witness environment,
-revision stamp, and session-libvirt resources from the Ubuntu/Debian-only `live_vm_host` role.
+distro, missing selected daemon, or missing distro `kvm` group fails before activation.
+Persistent self-hosted runners receive the Debian-family tuple and the equivalent accounts,
+files, modes, socket, witness environment, revision stamp, and session-libvirt resources from
+the Ubuntu/Debian-only `live_vm_host` role.
 
 The selected non-secret endpoint is published as `KDIVE_LIBVIRT_URI` in the root-owned,
 world-readable `/etc/kdive/live-worker-libvirt.env`. The possible values are:
@@ -79,10 +80,12 @@ rejects symlink or non-directory entries without following them, and restores op
 on every exit. Stale removal rechecks file identity, process state, and the listener while locked;
 any unlink or postcondition failure blocks startup and names the exact paths to inspect.
 
-Only the configured operator belongs to `kdive-live-control`. Worker accounts belong to
-`kdive-live-libvirt` and never to the control, sudo, or Docker groups. The witness credential and
-service configuration are root-only beneath `/etc/kdive`; per-slot state is root-owned beneath
-`/var/lib/kdive/live-workers`.
+Only the configured operator belongs to `kdive-live-control`. Worker accounts keep distinct
+primary groups and receive the two provider supplemental groups `kdive-live-libvirt` and `kvm`;
+they never belong to the control, sudo, or Docker groups. The distro `kvm` authority lets every
+worker read `root:kvm` mode-`0640` host kernels for libguestfs and use `/dev/kvm` without making
+either world-accessible. The witness credential and service configuration are root-only beneath
+`/etc/kdive`; per-slot state is root-owned beneath `/var/lib/kdive/live-workers`.
 
 Adding the operator to `kdive-live-control` does not refresh an already-running process's kernel
 group list. The hosted workflow therefore enters one `sg kdive-live-control` context for its full

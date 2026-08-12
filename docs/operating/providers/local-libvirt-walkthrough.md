@@ -79,8 +79,11 @@ sudo install -d -o "$USER" -m 0755 /var/lib/kdive/install /var/lib/kdive/console
 
 > **Debian/Ubuntu libguestfs notes** (needed for the Step 6 image build, harmless otherwise):
 > - libguestfs builds an appliance from the **host** kernel, which Debian/Ubuntu ship `root:0600`.
->   Make them readable or the appliance fails with `cp: cannot open '/boot/vmlinuz-…'`:
->   `sudo chmod 0644 /boot/vmlinuz-*` (re-apply after a kernel upgrade, or use `dpkg-statoverride`).
+>   The lifecycle contract keeps them `root:kvm` mode `0640` and adds each fixed worker to the
+>   distro's `kvm` group; making them world-readable is unnecessary. The persistent Ansible role
+>   converges this after kernel upgrades. A standalone host must apply the equivalent ownership
+>   and mode before installation or libguestfs fails with
+>   `cp: cannot open '/boot/vmlinuz-…'`.
 > - libguestfs uses `passt` for the appliance's network (needed by `virt-builder --install`). On
 >   Ubuntu 24.04 this can fail with `libguestfs error: passt exited with status 1`. Unloading the
 >   `passt` AppArmor profile (`sudo apparmor_parser -R /etc/apparmor.d/usr.bin.passt`) clears one
@@ -145,7 +148,8 @@ the one-shot bootstrap container.
 
 Install the fixed host-worker lifecycle once per checkout revision. The witness DSN is delivered
 over stdin, not a command-line argument. This local-only credential matches the runtime-role
-bootstrap performed by `up.sh`:
+bootstrap performed by `up.sh`. The installer requires the distro's existing `kvm` group and
+grants each fixed worker that provider authority for the host kernel and `/dev/kvm`:
 
 ```bash
 witness_password=kdive-witness-local # pragma: allowlist secret - local demo only

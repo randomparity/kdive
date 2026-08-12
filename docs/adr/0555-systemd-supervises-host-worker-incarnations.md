@@ -4,6 +4,8 @@
 
 Accepted (2026-08-10)
 
+> **Superseded by [0556](0556-host-workers-use-kvm-provider-authority.md)** (2026-08-12)
+
 ## Context
 
 ADR-0533 requires an authority to register each worker incarnation before startup, deliver its

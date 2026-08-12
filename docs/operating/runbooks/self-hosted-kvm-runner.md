@@ -23,8 +23,8 @@ matching `python3-guestfs` binding (see ADR-0387).
 
 1. `libvirt_stack` (reused) — qemu/libvirt/libguestfs, monolithic `libvirtd` on Ubuntu, KVM assertion.
 2. `libvirt_pool_net` (reused) — the `default` dir pool + network.
-3. `live_vm_host` — the contract delta: service-account groups, the toolchain,
-   `/boot` kernel readability, the persistent venv, both staging dirs
+3. `live_vm_host` — the contract delta: operator and fixed-worker provider groups, the toolchain,
+   `root:kvm` mode-`0640` `/boot` kernel readability, the persistent venv, both staging dirs
    (AppArmor-confined), `enable-linger`, and the two-part host-contract gate.
 4. `github_runner` — the runner asset (checksum-verified), registration, and the
    systemd service (installed stopped).
@@ -137,6 +137,13 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
    launch a root worker to sidestep it. The dedicated session daemon makes the console
    runner-readable, and every fixed worker, direct live test, and cleanup command uses
    the same daemon.
+
+   The fixed workers also use the distro's `kvm` group to read the host kernels that
+   libguestfs uses for its appliance and to read and write `/dev/kvm`. Provisioning keeps
+   each worker's unique primary group, grants only `kdive-live-libvirt` and `kvm` as
+   supplemental provider groups, rejects control/sudo/Docker membership, and verifies
+   both resources for every slot. See
+   [ADR-0556](../../adr/0556-host-workers-use-kvm-provider-authority.md).
 
 ## ppc64le runner (drop-in)
 
