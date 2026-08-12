@@ -18,9 +18,9 @@ if [[ "${KDIVE_LOCAL_ROLE_BOOTSTRAP:-1}" == "0" ]]; then
 fi
 
 if [[ $migration_database_url_was_explicit == 1 ]]; then
-  env -u KDIVE_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+  KDIVE_MIGRATION_DATABASE_URL="$explicit_migration_database_url" \
+    env -u KDIVE_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
     -u KDIVE_WORKER_DATABASE_URL -u KDIVE_RECONCILER_DATABASE_URL \
-    KDIVE_MIGRATION_DATABASE_URL="$explicit_migration_database_url" \
     docker compose run --rm --no-deps role-bootstrap
 else
   env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL \

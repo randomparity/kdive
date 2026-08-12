@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -917,6 +918,26 @@ def test_up_preserves_migration_url_provenance_for_role_bootstrap(tmp_path: Path
     )
     assert explicit_result.returncode == 91
     assert f"KDIVE_MIGRATION_DATABASE_URL={explicit_url}" in explicit_environment
+
+    empty_result, empty_environment = _up_role_bootstrap_environment(
+        tmp_path / "empty", migration_url=""
+    )
+    assert empty_result.returncode == 91
+    assert "KDIVE_MIGRATION_DATABASE_URL=\n" in empty_environment
+
+
+def test_role_database_dsns_are_never_env_program_arguments() -> None:
+    for relative_path in (
+        "scripts/live-stack/apply-migrations.sh",
+        "scripts/live-stack/bootstrap-runtime-roles.sh",
+        "scripts/live-stack/lib.sh",
+        "scripts/live-stack/status.sh",
+        "scripts/live-stack/up.sh",
+    ):
+        logical_lines = (ROOT / relative_path).read_text(encoding="utf-8").replace("\\\n", " ")
+        for line in logical_lines.splitlines():
+            if re.search(r"\benv\b.*DATABASE_URL=", line):
+                pytest.fail(f"database DSN exposed in env argv: {relative_path}: {line.strip()}")
 
 
 def test_lifecycle_status_preserves_non_ok_response_and_scrubs_other_role_dsns(

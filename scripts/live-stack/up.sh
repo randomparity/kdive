@@ -174,8 +174,9 @@ banner "inventory reconcile (register images + upload kernel-config siblings to 
 # down a running stack the daemon would otherwise reconcile on its next loop. The CLI resolves the
 # inventory path itself (`KDIVE_SYSTEMS_TOML`, else the XDG default) and no-ops on an absent file, so
 # no path is recomputed here — a fresh host with no systems.toml is a clean exit-0 pass.
-env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
-  -u KDIVE_WORKER_DATABASE_URL KDIVE_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL}" \
+KDIVE_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL}" \
+  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+  -u KDIVE_WORKER_DATABASE_URL \
   "$py" -m kdive reconcile-systems || {
   echo "inventory reconcile failed; the catalog may be missing images or kernel configs" >&2
   exit 1

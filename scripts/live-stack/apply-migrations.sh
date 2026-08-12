@@ -6,8 +6,7 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${repo_root}/scripts/live-stack/env.sh"
 
 env -u KDIVE_SERVER_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
-  -u KDIVE_RECONCILER_DATABASE_URL KDIVE_DATABASE_URL="${KDIVE_MIGRATION_DATABASE_URL}" \
-  uv run python - <<'PY'
+  -u KDIVE_RECONCILER_DATABASE_URL uv run python - <<'PY'
 import os
 
 import psycopg

@@ -242,11 +242,13 @@ restart_host_processes() {
   local revision
   revision="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?')"
   echo "starting kdive host processes (${worker_count} lifecycle worker(s)) @ ${revision} ..."
-  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
-    -u KDIVE_RECONCILER_DATABASE_URL KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
+  KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
+    env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+    -u KDIVE_RECONCILER_DATABASE_URL \
     setsid nohup "$py" -m kdive server >"${log_dir}/server.log" 2>&1 </dev/null &
-  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
-    -u KDIVE_WORKER_DATABASE_URL KDIVE_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL}" \
+  KDIVE_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL}" \
+    env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+    -u KDIVE_WORKER_DATABASE_URL \
     setsid nohup "$py" -m kdive reconciler >"${log_dir}/reconciler.log" 2>&1 </dev/null &
   "${repo_root}/scripts/live-stack/worker-lifecycle.sh" start "$worker_count"
   DAEMON_COUNT=2
