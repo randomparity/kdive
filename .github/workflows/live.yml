@@ -93,7 +93,7 @@ jobs:
       # exposes nothing that outlives the job. Without it the libguestfs appliance emulates, which
       # this gate's timeout cannot absorb. Session-mode libvirt needs XDG_RUNTIME_DIR to exist, so
       # enable linger the way deploy/ansible/roles/live_vm_host does.
-      - name: Make KVM usable and give the runner a session bus (qemu:///session)
+      - name: Make KVM usable and give the runner a session bus
         run: |
           sudo chmod 0666 /dev/kvm
           sudo loginctl enable-linger "$(id -un)"
@@ -216,13 +216,14 @@ jobs:
               connection.connect("/run/kdive/live-worker-lifecycle.sock")
           PY
 
-          # Session mode (worker-owned QEMU, runner-readable console — ADR-0223), for the same
-          # reason the native job below pins it: under qemu:///system the console log and core are
-          # root-owned and this non-root job could not read them back. It also needs no libvirt
-          # group membership, which a usermod inside the job could not grant anyway. lib.sh
-          # defaults this to qemu:///system, so it must be exported before anything uses libvirt.
+          # Use the exact dedicated session endpoint the root-owned installer published for the
+          # fixed workers. Parse it as literal data; never source the root-owned assignment as shell.
+          # This must precede every libvirt consumer so up, preflight and pytest share one daemon.
+          # shellcheck source=scripts/live-stack/libvirt-uri.sh
+          source scripts/live-stack/libvirt-uri.sh
           export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-          export KDIVE_LIBVIRT_URI="qemu:///session"
+          KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"
+          export KDIVE_LIBVIRT_URI
           # Front-load the HOST contract (libvirt reachable, /dev/kvm usable). build-fs opens
           # libvirt only after minutes of image work, so without this a missing daemon costs a
           # whole run to discover — the same fail-fast rule the tool preflights already follow.
@@ -301,7 +302,14 @@ jobs:
 
       - name: Clean up live stack
         if: always()
-        run: sg kdive-live-control -c 'scripts/live-stack/down.sh'
+        run: |
+          exec sg kdive-live-control -c \
+            'exec /bin/bash -s -e -u -o pipefail' <<'KDIVE_LIVE_CLEANUP'
+          source scripts/live-stack/libvirt-uri.sh
+          KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"
+          export KDIVE_LIBVIRT_URI
+          scripts/live-stack/down.sh
+          KDIVE_LIVE_CLEANUP
 
   native:
     name: live_vm (self-hosted KVM)
@@ -338,26 +346,26 @@ jobs:
           set -euo pipefail
           export PYTHONPATH="${GITHUB_WORKSPACE}/src"
 
-          # Both live_vm families boot under qemu:///session (worker-owned QEMU), NOT qemu:///system.
-          # The runner service account is non-root AND has no sudo, so it can neither read
-          # qemu:///system's root-owned console log (ADR-0223 root-readback wall) nor launch a root
-          # worker to sidestep it — the same wall the warm-store build below already avoids. Session
-          # mode runs QEMU as the runner user (readable console) and is fully provisioned on the box
-          # (ansible enables linger + /run/user/<uid>); the provider's SLIRP user-networking needs no
-          # libvirt bridge, so it is session-native. Set before the reaper + up.sh so every actor —
-          # reaper, worker, mint, preflight, pytest — shares the one URI.
+          # Use the exact dedicated session endpoint published by provisioning for the fixed
+          # workers. Parse it as literal data; never source the root-owned assignment as shell.
+          # Set it before the reaper and warm store so every actor — reaper, worker, mint,
+          # preflight and pytest — shares one daemon.
+          # shellcheck source=scripts/live-stack/libvirt-uri.sh
+          source scripts/live-stack/libvirt-uri.sh
           export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-          export KDIVE_LIBVIRT_URI="qemu:///session"
+          KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"
+          export KDIVE_LIBVIRT_URI
 
           # Pre-job reaper: a run cancelled mid-boot (cancel-in-progress is false, but a crash or
           # timeout still leaves state) must not collide with this run's on-box stand-up. `virsh
           # destroy` only powers off a RUNNING domain; a crash leaves shut-off domain definitions and
           # multi-GB disks that `docker compose down -v` (which wipes the tracking DB) then orphans.
           # So destroy-then-undefine WITH storage removal, tolerant of already-absent/shut-off state.
-          # Sweep session (where this gate's domains live) AND system (legacy leftovers from before
-          # the session move). Assumes a SINGLE runner per libvirt host: the `^kdive-` match is
+          # Sweep the selected session endpoint (where this gate's domains live) AND system
+          # (legacy leftovers from before the session move). Assumes a SINGLE runner per libvirt
+          # host: the `^kdive-` match is
           # host-wide, so a second concurrent runner would reap a peer's in-flight domains (runbook).
-          for uri in qemu:///session qemu:///system; do
+          for uri in "$KDIVE_LIBVIRT_URI" qemu:///system; do
             for dom in $(virsh -c "$uri" list --all --name 2>/dev/null | grep -E '^kdive-'); do
               virsh -c "$uri" destroy "$dom" 2>/dev/null || true
               virsh -c "$uri" undefine --nvram --remove-all-storage "$dom" 2>/dev/null || true
@@ -368,14 +376,14 @@ jobs:
 
           # Throwaway family rootfs from the warm store. Its pins come from a dispatch override
           # else the operator-set repo vars; unset -> warm-store.sh dies loud (deployment-specific,
-          # no sane default). A rebuild boots build-fs under qemu:///session so the customize guest
-          # runs as the runner user (the runbook's warm-store prerequisite — qemu:///system would hit
-          # the root-readback wall for the non-root runner). Capture-then-eval so a failure fails
+          # no sane default). A rebuild boots build-fs through the selected session endpoint so the
+          # customize guest runs as the runner user (qemu:///system would hit the root-readback wall
+          # for the non-root runner). Capture-then-eval so a failure fails
           # HERE with its own die message (set -e does not catch `eval "$(cmd)"` directly).
           export KDIVE_WARM_STORE_TARGET_NVR="${WARM_NVR_INPUT:-${WARM_NVR_VAR}}"
           export KDIVE_WARM_STORE_IMAGE="${WARM_IMAGE_INPUT:-${WARM_IMAGE_VAR}}"
           export DEBUGINFOD_URLS="${DEBUGINFOD_INPUT:-${DEBUGINFOD_VAR}}"
-          warm_wiring="$(KDIVE_LIBVIRT_URI=qemu:///session scripts/live-vm/warm-store.sh)"
+          warm_wiring="$(KDIVE_LIBVIRT_URI="$KDIVE_LIBVIRT_URI" scripts/live-vm/warm-store.sh)"
           eval "$warm_wiring"
           # emit_wiring prints BARE assignments (no `export`), so eval leaves them non-exported;
           # export them here so the child mint-system.sh / preflight / pytest inherit the rootfs path.
@@ -388,9 +396,7 @@ jobs:
           # up.sh sources env.sh in its OWN process; source it here for KDIVE_S3_* + KDIVE_STACK_BASE_URL.
           # shellcheck disable=SC1091
           source scripts/live-stack/env.sh
-          # Re-assert the session URI: lib.sh defaults KDIVE_LIBVIRT_URI un-exported (to system), which
-          # sourcing env.sh does not carry into this shell for the mint/preflight/pytest that follow.
-          export KDIVE_LIBVIRT_URI="qemu:///session"
+          # Keep the published URI exported for mint, preflight and pytest; env.sh honors it.
           KDIVE_LIVE_VM_SYSTEM_ID="$(scripts/live-vm/mint-system.sh)"
           export KDIVE_LIVE_VM_SYSTEM_ID
 
@@ -418,4 +424,9 @@ jobs:
 
       - name: Clean up live stack
         if: always()
-        run: scripts/live-stack/down.sh
+        run: |
+          # shellcheck source=scripts/live-stack/libvirt-uri.sh
+          source scripts/live-stack/libvirt-uri.sh
+          KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"
+          export KDIVE_LIBVIRT_URI
+          scripts/live-stack/down.sh

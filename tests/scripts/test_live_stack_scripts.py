@@ -13,6 +13,7 @@ from kdive.config.external_env import EXTERNAL_ENV_VARS
 
 ROOT = Path(__file__).resolve().parents[2]
 LIFECYCLE = ROOT / "scripts" / "live-stack" / "worker-lifecycle.sh"
+LIBVIRT_URI = ROOT / "scripts" / "live-stack" / "libvirt-uri.sh"
 
 
 def _lifecycle_status(
@@ -736,9 +737,11 @@ def test_up_starts_prometheus_independently_of_grafana() -> None:
 
 def test_lifecycle_wrapper_uses_the_validated_public_uri_and_python_client() -> None:
     text = (ROOT / "scripts/live-stack/worker-lifecycle.sh").read_text()
-    assert "live-worker-libvirt.env" in text
+    parser = LIBVIRT_URI.read_text()
+    assert "live-worker-libvirt.env" in parser
     assert 'source "$LIBVIRT_ENV"' not in text
-    assert "LIBVIRT_SOCKET_URIS" in text
+    assert 'source "${here}/libvirt-uri.sh"' in text
+    assert "LIBVIRT_SOCKET_URIS" in parser
     assert "LifecycleRequest.model_validate" in text
     assert "request_path" in text
     assert "KDIVE_WORKER_DATABASE_URL" in text
@@ -766,8 +769,9 @@ def test_lifecycle_uri_is_parsed_as_literal_data(
     (tmp_path / "env.sh").write_text(
         (ROOT / "scripts/live-stack/env.sh").read_text(), encoding="utf-8"
     )
-    wrapper.write_text(
-        LIFECYCLE.read_text().replace(
+    wrapper.write_text(LIFECYCLE.read_text(), encoding="utf-8")
+    (tmp_path / "libvirt-uri.sh").write_text(
+        LIBVIRT_URI.read_text().replace(
             "readonly LIBVIRT_ENV=/etc/kdive/live-worker-libvirt.env",
             f"readonly LIBVIRT_ENV={tmp_path / 'libvirt.env'}",
         ),
@@ -781,7 +785,7 @@ def test_lifecycle_uri_is_parsed_as_literal_data(
         [
             "bash",
             "-c",
-            'source "$1" && require_exact_file() { :; } && load_libvirt_uri',
+            'source "$1" && require_exact_libvirt_env() { :; } && load_published_libvirt_uri',
             "bash",
             str(wrapper),
         ],
@@ -1009,7 +1013,7 @@ def test_lifecycle_request_construction_hides_oversized_secret_canaries(tmp_path
             'source "$1"\n'
             'uri="$2"\n'
             "require_start_prerequisites() { :; }\n"
-            'load_libvirt_uri() { printf %s "$uri"; }\n'
+            'load_published_libvirt_uri() { printf %s "$uri"; }\n'
             "request start 1",
             "bash",
             str(LIFECYCLE),

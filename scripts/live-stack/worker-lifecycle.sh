@@ -7,15 +7,12 @@ here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${here}/lib.sh"
 # shellcheck disable=SC1091 # repo-relative env script
 source "${here}/env.sh"
+# shellcheck source=scripts/live-stack/libvirt-uri.sh
+source "${here}/libvirt-uri.sh"
 
-readonly LIBVIRT_ENV=/etc/kdive/live-worker-libvirt.env
 readonly LIFECYCLE_SOCKET=/run/kdive/live-worker-lifecycle.sock
 readonly LIFECYCLE_REVISION=/opt/kdive-live-worker-lifecycle/revision
 readonly WORKER_PYTHON=/opt/kdive-live-worker-lifecycle/.venv/bin/python
-readonly LIBVIRT_SOCKET_URIS=(
-  'qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock'
-  'qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock'
-)
 
 usage() {
   echo "usage: scripts/live-stack/worker-lifecycle.sh start COUNT|status|stop|diagnostics" >&2
@@ -28,25 +25,6 @@ require_exact_file() {
     echo "lifecycle prerequisite has untrusted metadata: ${file}" >&2
     return 1
   }
-}
-
-load_libvirt_uri() {
-  local lines uri allowed=0
-  require_exact_file "$LIBVIRT_ENV" 644 || return 1
-  mapfile -t lines <"$LIBVIRT_ENV"
-  ((${#lines[@]} == 1)) && [[ "${lines[0]}" == KDIVE_LIBVIRT_URI=* ]] || {
-    echo "${LIBVIRT_ENV} must contain exactly one KDIVE_LIBVIRT_URI assignment" >&2
-    return 1
-  }
-  uri="${lines[0]#KDIVE_LIBVIRT_URI=}"
-  for candidate in "${LIBVIRT_SOCKET_URIS[@]}"; do
-    [[ "$uri" == "$candidate" ]] && allowed=1
-  done
-  ((allowed)) || {
-    echo "${LIBVIRT_ENV} contains an unsupported session libvirt URI" >&2
-    return 1
-  }
-  printf '%s' "$uri"
 }
 
 require_start_prerequisites() {
@@ -188,7 +166,7 @@ request() {
   local operation="$1" count="${2:-}" libvirt_uri=""
   if [[ "$operation" == start ]]; then
     require_start_prerequisites || return 1
-    libvirt_uri="$(load_libvirt_uri)" || return 1
+    libvirt_uri="$(load_published_libvirt_uri)" || return 1
   fi
   env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
     -u KDIVE_RECONCILER_DATABASE_URL KDIVE_LIFECYCLE_OPERATION="$operation" \

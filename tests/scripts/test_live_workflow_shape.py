@@ -172,20 +172,31 @@ def test_tcg_input_default_and_schedule_fallback_agree() -> None:
     assert _tcg_image_input_default() == _tcg_image_run_fallback()
 
 
-def test_native_block_boots_provisioned_family_under_session() -> None:
-    # The non-root, no-sudo runner cannot read qemu:///system's root-owned console log (ADR-0223);
-    # the provisioned family must boot under qemu:///session (worker-owned QEMU) so console-reading
-    # tests pass. A regression to qemu:///system would silently re-break every such test.
-    steps = _load(_LIVE)["jobs"]["native"]["steps"]
-    run = next(s["run"] for s in steps if "run" in s)
-    # Scope to KDIVE_LIBVIRT_URI assignments: the reaper legitimately sweeps qemu:///system too
-    # (legacy leftovers), so a blanket qemu:///system search would false-positive on the reaper.
-    uri_assignments = [ln for ln in run.splitlines() if "KDIVE_LIBVIRT_URI=" in ln]
-    assert uri_assignments, "the native block must set KDIVE_LIBVIRT_URI"
-    assert all("qemu:///session" in ln for ln in uri_assignments), (
-        "the provisioned family must boot under qemu:///session, not qemu:///system "
-        "(the non-root, no-sudo runner cannot read a root-owned console log — ADR-0223)"
+@pytest.mark.parametrize("job", ("tcg", "native"))
+def test_live_job_loads_the_provisioned_libvirt_uri_without_hardcoding(job: str) -> None:
+    runs = _job_run_blocks(job)
+    assert "load_published_libvirt_uri" in runs
+    assert "scripts/live-stack/libvirt-uri.sh" in runs
+    parser = (_ROOT / "scripts/live-stack/libvirt-uri.sh").read_text()
+    assert "readonly LIBVIRT_ENV=/etc/kdive/live-worker-libvirt.env" in parser
+    assert 'KDIVE_LIBVIRT_URI="qemu:///session"' not in runs
+    assert "KDIVE_LIBVIRT_URI=qemu:///session" not in runs
+
+
+@pytest.mark.parametrize("job", ("tcg", "native"))
+def test_live_job_propagates_the_published_uri_through_spine_and_cleanup(job: str) -> None:
+    steps = _load(_LIVE)["jobs"][job]["steps"]
+    test_run = next(
+        step["run"]
+        for step in steps
+        if "run" in step and ("test-live-tcg" in step["run"] or "not live_vm_tcg" in step["run"])
     )
+    cleanup = next(step["run"] for step in steps if step.get("name") == "Clean up live stack")
+    loader = 'KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"'
+    assert loader in test_run
+    assert loader in cleanup
+    assert "export KDIVE_LIBVIRT_URI" in test_run
+    assert "export KDIVE_LIBVIRT_URI" in cleanup
 
 
 def test_tcg_job_makes_the_host_kernel_readable_for_supermin() -> None:
@@ -283,13 +294,10 @@ def test_tcg_job_installs_the_libvirt_daemon_not_just_the_headers() -> None:
         assert pkg in joined, f"the tcg job must install {pkg}"
 
 
-def test_tcg_job_pins_the_session_libvirt_uri() -> None:
-    """Session mode, as the native job uses: worker-owned QEMU with a readable console (ADR-0223).
-
-    It also sidesteps libvirt group membership, which a `usermod` inside a job cannot grant to the
-    already-running shell.
-    """
-    assert 'KDIVE_LIBVIRT_URI="qemu:///session"' in _tcg_spine()
+def test_tcg_job_uses_the_published_session_libvirt_uri() -> None:
+    """Every actor must use the same dedicated session daemon as the fixed workers."""
+    assert 'KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"' in _tcg_spine()
+    assert "export KDIVE_LIBVIRT_URI" in _tcg_spine()
 
 
 def test_tcg_job_preflights_the_host_before_staging() -> None:
