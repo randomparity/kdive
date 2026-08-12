@@ -40,7 +40,7 @@ ln -f -- "$KDIVE_LIVE_VM_ROOTFS" "$staged_rootfs" 2>/dev/null ||
   cp -f --reflink=auto -- "$KDIVE_LIVE_VM_ROOTFS" "$staged_rootfs" ||
   die "cannot stage the warm rootfs into the provider root ${rootfs_dir}"
 
-# 2. allocate -> provision (from the warm rootfs) -> poll systems.get until ready -> print the id.
+# 2. allocate -> provision (from the warm rootfs) -> wait for its job -> print the ready System id.
 #    Uses the shipped kdive.mcp.dev_harness LiveStackClient (the client scripts/live-debug.py drives),
 #    following the spine sequence (tests/integration/live_stack/spine.py): the System id is
 #    data["system_id"] on systems.provision (object_id there is the provisioning JOB id). All progress
@@ -74,7 +74,11 @@ async def main() -> int:
     # LiveStackClient is an async context manager (dev_harness); it must be entered before any
     # call_tool, else fastmcp raises "Client is not connected".
     async with LiveStackClient.over_http(base, token) as client:
-        await client.call_tool("investigations.open", project=project, title="live-vm-mint")
+        await client.call_tool(
+            "tools.invoke",
+            name="investigations.open",
+            arguments={"project": project, "title": "live-vm-mint"},
+        )
         alloc = _scalar(
             await client.call_tool(
                 "allocations.request",
@@ -126,25 +130,29 @@ async def main() -> int:
         if not system_id:
             print("systems.provision returned no data.system_id", file=sys.stderr)
             return 1
+        job_id = prov.object_id
+        if not job_id:
+            print("systems.provision returned no provisioning job id", file=sys.stderr)
+            return 1
 
-        for _ in range(180):  # poll up to ~15 min (native KVM boot); the tcg deadline is generous
+        for _ in range(15):  # jobs.wait holds at most 60s, for a total provision budget of 15 min
             env = _scalar(
                 await client.call_tool(
                     "tools.invoke",
-                    name="systems.get",
-                    arguments={"system_id": system_id},
+                    name="jobs.wait",
+                    arguments={"job_id": job_id, "timeout_s": 60.0},
                 )
             )
-            # systems.get overloads the envelope's own .status with the System state (spine.py:134
-            # awaits env.status == "ready"); the state is NOT under data["status"].
-            if env.status == "ready":
+            if env.status == "succeeded":
                 print(system_id)  # the sole stdout line
                 return 0
-            if env.status in {"error", "failed"}:
-                print(f"systems.get {env.status}: {env.error_category} — {env.detail}", file=sys.stderr)
+            if env.status in {"failed", "canceled"}:
+                print(
+                    f"jobs.wait {env.status}: {env.error_category} — {env.detail}",
+                    file=sys.stderr,
+                )
                 return 1
-            await asyncio.sleep(5)
-        print(f"System {system_id} did not reach ready in time", file=sys.stderr)
+        print(f"Provision job {job_id} did not finish in time", file=sys.stderr)
         return 1
 
 

@@ -51,7 +51,7 @@ def test_dies_when_rootfs_path_missing(tmp_path: Path) -> None:
     assert "KDIVE_LIVE_VM_ROOTFS" in r.stderr
 
 
-def test_polls_system_status_through_gateway(tmp_path: Path) -> None:
+def test_waits_for_provision_job_through_gateway(tmp_path: Path) -> None:
     package = tmp_path / "kdive" / "mcp"
     package.mkdir(parents=True)
     (package.parent / "__init__.py").write_text("")
@@ -80,11 +80,17 @@ class LiveStackClient:
         if tool_name == "allocations.request":
             return SimpleNamespace(status="ok", object_id="allocation-1")
         if tool_name == "systems.provision":
-            return SimpleNamespace(status="ok", data={"system_id": "system-1"})
+            return SimpleNamespace(
+                status="ok",
+                object_id="provision-job-1",
+                data={"system_id": "system-1"},
+            )
+        if tool_name == "tools.invoke" and arguments["name"] == "jobs.wait":
+            return SimpleNamespace(status="succeeded")
         if tool_name == "tools.invoke":
-            return SimpleNamespace(status="ready")
-        if tool_name == "systems.get":
-            raise AssertionError("systems.get is not directly exposed by the gateway profile")
+            return SimpleNamespace(status="ok")
+        if tool_name in {"investigations.open", "jobs.wait", "systems.get"}:
+            raise AssertionError(f"{tool_name} is not directly exposed by the gateway profile")
         return SimpleNamespace(status="ok")
 """
     )
@@ -96,6 +102,7 @@ class LiveStackClient:
         [sys.executable, "-c", embedded, str(tmp_path / "rootfs.qcow2")],
         capture_output=True,
         text=True,
+        timeout=5,
         cwd=tmp_path,
         env={
             "PATH": os.environ["PATH"],
@@ -109,7 +116,20 @@ class LiveStackClient:
     assert result.returncode == 0, result.stderr
     assert result.stdout == "system-1\n"
     calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
-    assert calls[-1] == {
-        "name": "tools.invoke",
-        "arguments": {"name": "systems.get", "arguments": {"system_id": "system-1"}},
-    }
+    gateway_calls = [call for call in calls if call["name"] == "tools.invoke"]
+    assert gateway_calls == [
+        {
+            "name": "tools.invoke",
+            "arguments": {
+                "name": "investigations.open",
+                "arguments": {"project": "demo", "title": "live-vm-mint"},
+            },
+        },
+        {
+            "name": "tools.invoke",
+            "arguments": {
+                "name": "jobs.wait",
+                "arguments": {"job_id": "provision-job-1", "timeout_s": 60.0},
+            },
+        },
+    ]

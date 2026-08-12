@@ -146,6 +146,7 @@ _WORKER_MUTATIONS = {
         "rootfs_fetch_leases",
         "run_steps",
         "snapshots",
+        "system_bootstrap_keys",
         "upload_manifests",
     },
     "UPDATE": {
@@ -367,6 +368,7 @@ def residual_privilege_role_dsn(pg_conn: psycopg.Connection) -> Iterator[RoleDsn
             "0109_kubernetes_credential_envelopes.sql",
             "0110_idempotent_worker_termination.sql",
             "0111_restrict_pinned_job_deletion.sql",
+            "0112_worker_bootstrap_key_authority.sql",
         ):
             role_sql = (migrate.SCHEMA_DIR / filename).read_bytes()
             for canonical, isolated in roles.items():
