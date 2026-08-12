@@ -52,11 +52,17 @@ if ! "${repo_root}/scripts/check-local-libvirt.sh"; then
 fi
 
 banner "migrate (idempotent)"
-"${py[@]}" -m kdive migrate
+KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL" \
+  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+  -u KDIVE_WORKER_DATABASE_URL -u KDIVE_RECONCILER_DATABASE_URL \
+  "${py[@]}" -m kdive migrate
 
 banner "seed (funding rows commit before resource discovery)"
 seed_rc=0
-if ! "${py[@]}" -m kdive seed-project \
+if ! KDIVE_DATABASE_URL="$KDIVE_SERVER_DATABASE_URL" \
+  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+  -u KDIVE_WORKER_DATABASE_URL -u KDIVE_RECONCILER_DATABASE_URL \
+  "${py[@]}" -m kdive seed-project \
   --project "$PROJECT" \
   --limit-kcu "$LIMIT_KCU" \
   --max-concurrent-allocations "$MAX_ALLOC" \
@@ -65,7 +71,10 @@ if ! "${py[@]}" -m kdive seed-project \
 fi
 
 banner "verify (the hard funding gate)"
-"${py[@]}" -m kdive verify-project --project "$PROJECT"
+KDIVE_DATABASE_URL="$KDIVE_SERVER_DATABASE_URL" \
+  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+  -u KDIVE_WORKER_DATABASE_URL -u KDIVE_RECONCILER_DATABASE_URL \
+  "${py[@]}" -m kdive verify-project --project "$PROJECT"
 
 if [[ "$seed_rc" -ne 0 ]]; then
   echo "WARN: seed-project exited non-zero but the funding rows verified — its resource-discovery" >&2

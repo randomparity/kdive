@@ -30,7 +30,13 @@ def _uv_stub_body(calllog: Path) -> str:
     `uv run python -m kdive <cmd>` management calls; it prints a token to stdout on success.
     """
     return (
-        f'echo "$@" >> "{calllog}"\n'
+        f'printf "db=%s migration=%s server=%s worker=%s reconciler=%s :: %s\\n" '
+        '"${KDIVE_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_MIGRATION_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_SERVER_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_WORKER_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_RECONCILER_DATABASE_URL:-<missing>}" '
+        f'"$*" >> "{calllog}"\n'
         'case "$*" in\n'
         '  *"-m kdive verify-project"*) [ -n "${VERIFY_FAIL:-}" ] && exit 1 ; exit 0 ;;\n'
         '  *"-m kdive seed-project"*) [ -n "${SEED_FAIL:-}" ] && exit 1 ; exit 0 ;;\n'
@@ -87,6 +93,35 @@ def test_happy_path_migrates_seeds_verifies_and_mints(tmp_path: Path) -> None:
     assert 'project arg: "demo"' in result.stdout
     assert "expires in 30d" in result.stdout  # TTL rendered human-readable, not "720h"
     assert "export KDIVE_TOKEN=FAKETOKEN" in result.stdout
+
+
+def test_database_commands_receive_only_their_required_role_dsn(tmp_path: Path) -> None:
+    _bindir, env = _healthy_env(tmp_path)
+    env.update(
+        {
+            "KDIVE_MIGRATION_DATABASE_URL": "migration-dsn",
+            "KDIVE_SERVER_DATABASE_URL": "server-dsn",
+            "KDIVE_WORKER_DATABASE_URL": "worker-canary",
+            "KDIVE_RECONCILER_DATABASE_URL": "reconciler-canary",
+        }
+    )
+
+    result = _run(env)
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "uv.log").read_text().splitlines()
+    migrate = next(line for line in calls if "-m kdive migrate" in line)
+    seed = next(line for line in calls if "-m kdive seed-project" in line)
+    verify = next(line for line in calls if "-m kdive verify-project" in line)
+    assert migrate.startswith(
+        "db=migration-dsn migration=<missing> server=<missing> "
+        "worker=<missing> reconciler=<missing> ::"
+    )
+    for command in (seed, verify):
+        assert command.startswith(
+            "db=server-dsn migration=<missing> server=<missing> "
+            "worker=<missing> reconciler=<missing> ::"
+        )
 
 
 def test_project_override_threads_one_name(tmp_path: Path) -> None:
