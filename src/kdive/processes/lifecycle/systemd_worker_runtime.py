@@ -850,12 +850,18 @@ class SystemdRuntime:
 
     @staticmethod
     def _require_released_terminal_identity(properties: dict[str, str]) -> None:
-        terminal = (
+        failed = (
             properties["ActiveState"] == "failed"
             and properties["SubState"] == "failed"
             and properties["Result"] != "success"
         )
-        if not terminal:
+        remain_after_exit = (
+            properties["ActiveState"] == "active"
+            and properties["SubState"] == "exited"
+            and properties["Result"] == "success"
+            and properties["ExecMainStatus"] == "0"
+        )
+        if not failed and not remain_after_exit:
             raise SystemdConflict("systemctl show returned a partial unit identity")
 
     @staticmethod

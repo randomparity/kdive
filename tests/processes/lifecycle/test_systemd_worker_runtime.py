@@ -202,6 +202,33 @@ def test_observe_preserves_failed_invocation_after_systemd_releases_cgroup(
     )
 
 
+def test_observe_preserves_remain_after_exit_invocation_after_cgroup_empties(
+    fake_host: tuple[Path, Path],
+) -> None:
+    exited = (
+        "ActiveState=active\n"
+        "SubState=exited\n"
+        "Result=success\n"
+        "ExecMainStatus=0\n"
+        "ControlGroup=\n"
+        f"InvocationID={_INVOCATION_ID}\n"
+    )
+
+    observation = _runtime(fake_host, FakeRunner(exited)).observe(_WORKER_UNIT, FakeDeadline(120.0))
+
+    assert observation == UnitObservation(
+        unit=_WORKER_UNIT,
+        boot_id=_BOOT_ID,
+        invocation_id=_INVOCATION_ID,
+        active_state="active",
+        sub_state="exited",
+        result="success",
+        exec_main_status=0,
+        control_group="",
+        membership="empty",
+    )
+
+
 @pytest.mark.parametrize(
     "output",
     [
