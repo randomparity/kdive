@@ -638,7 +638,9 @@ import sys
 os.unlink(sys.argv[1])
 with socket.socket(socket.AF_UNIX) as replacement:
     replacement.bind(sys.argv[1])
-os.chmod(sys.argv[1], 0o770)
+# Make the replacement observably different even on filesystems that immediately reuse the
+# unlinked socket inode. The cleanup identity includes authority as well as device and inode.
+os.chmod(sys.argv[1], 0o750)
 """
     command = r"""
 source "$1"
