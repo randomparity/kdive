@@ -454,6 +454,38 @@ def test_real_socketpair_completes_send_half_close_read_eof(tmp_path: Path) -> N
     assert lifecycle.operations == ["status"]
 
 
+def test_real_socketpair_preserves_start_secrets_for_authenticated_server(tmp_path: Path) -> None:
+    server, client = socket.socketpair()
+    lifecycle = FakeLifecycle()
+    thread = threading.Thread(
+        target=lambda: serve_one(
+            server,
+            expected_uid=os.getuid(),
+            lock_path=tmp_path / "control.lock",
+            build_lifecycle=lambda _deadline: lifecycle,
+        )
+    )
+    thread.start()
+
+    response = request_one(client, LifecycleRequest.model_validate(start_payload()))
+
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert response.ok
+    assert len(lifecycle.requests) == 1
+    settings = lifecycle.requests[0].settings
+    assert settings is not None
+    assert (
+        settings.worker_database_url.get_secret_value()
+        == "postgresql://worker:password@db/kdive"  # pragma: allowlist secret
+    )
+    assert settings.aws_access_key_id.get_secret_value() == "access-key"
+    assert (
+        settings.aws_secret_access_key.get_secret_value()
+        == "secret-key"  # pragma: allowlist secret
+    )
+
+
 def test_second_socket_instance_reaches_host_lock_and_returns_busy(tmp_path: Path) -> None:
     entered = threading.Event()
     release = threading.Event()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
@@ -175,6 +176,17 @@ class LifecycleRequest(BaseModel):
         if self.operation == "start" and (self.worker_count is None or self.settings is None):
             raise ValueError("start requires worker_count and settings")
         return self
+
+    def to_wire_bytes(self) -> bytes:
+        """Serialize secrets only for the peer-authenticated local control wire."""
+        payload = self.model_dump(mode="json")
+        if self.settings is not None:
+            settings = self.settings.model_dump(mode="json")
+            for name in ("worker_database_url", "aws_access_key_id", "aws_secret_access_key"):
+                secret = getattr(self.settings, name)
+                settings[name] = secret.get_secret_value()
+            payload["settings"] = settings
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 class SlotResult(BaseModel):

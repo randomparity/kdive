@@ -306,7 +306,7 @@ def serve_one(
 
 def request_one(connection: SocketLike, request: LifecycleRequest) -> LifecycleResponse:
     """Send one request, half-close, and require one bounded response followed by EOF."""
-    frame = request.model_dump_json().encode("utf-8")
+    frame = request.to_wire_bytes()
     if len(frame) > MAX_REQUEST_BYTES:
         raise ProtocolRejected("lifecycle request exceeds its byte limit")
     deadline = MonotonicDeadline.after(_REQUEST_SECONDS)
