@@ -150,6 +150,27 @@ jobs:
             deploy/systemd/install-live-worker-lifecycle.sh \
               --operator "$(id -un)" --source "$GITHUB_WORKSPACE"
 
+      - name: Prove systemd worker lifecycle against disposable Postgres
+        run: |
+          set -euo pipefail
+          exec sg kdive-live-control -c \
+            'exec /bin/bash -s -e -u -o pipefail' <<'KDIVE_SYSTEMD_PROOF'
+          export KDIVE_KERNEL_SRC
+          KDIVE_KERNEL_SRC="$(
+            scripts/fetch-kernel-tree.sh /var/lib/kdive/build/systemd-proof-linux
+          )"
+          scripts/live-stack/up.sh --reset-db --skip-obs --skip-libvirt
+          # shellcheck disable=SC1091
+          source scripts/live-stack/env.sh
+          KDIVE_RUN_SYSTEMD_WORKER_PROOF=1 uv run python -m pytest \
+            tests/live_vm/test_systemd_worker_lifecycle.py \
+            -m live_vm --strict-markers -q
+          KDIVE_SYSTEMD_PROOF
+
+      - name: Clean up lifecycle proof stack
+        if: success()
+        run: sg kdive-live-control -c 'scripts/live-stack/down.sh'
+
       # libguestfs publishes no PyPI wheel, so the system binding is symlinked into the venv
       # exactly as live_vm_host does. Debian installs it into the version-agnostic
       # /usr/lib/python3/dist-packages as guestfs.py plus libguestfsmod.cpython-<abi>.so — both
@@ -229,7 +250,9 @@ jobs:
           # restart_host_processes reads KDIVE_KERNEL_SRC when it forks the worker and otherwise
           # defaults it to ${HOME}/src/linux, which no hosted runner has.
           export KDIVE_KERNEL_SRC
-          KDIVE_KERNEL_SRC="$(scripts/fetch-kernel-tree.sh)"
+          KDIVE_KERNEL_SRC="$(
+            scripts/fetch-kernel-tree.sh /var/lib/kdive/build/systemd-proof-linux
+          )"
 
           # App tier as HOST PROCESSES, exactly as the native job runs it — never as compose
           # services. The local-libvirt provider this gate exercises is deliberately NOT
@@ -241,10 +264,10 @@ jobs:
           # while a compose `server` is configured iss=http://oidc:8080/default and JWTVerifier
           # rejects it with a 401 that looks like an auth bug rather than a topology one.
           # up.sh owns the whole bring-up (backends + bucket, migrations, libvirt, host processes,
-          # inventory reconcile), so it replaces `just stack-up` outright. WORKER_AS_ROOT=0 keeps
-          # the worker as the runner user so its session domain and console log stay readable
-          # (ADR-0223); --skip-obs drops the prometheus/grafana this gate never reads.
-          KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-obs
+          # inventory reconcile), so it replaces `just stack-up` outright. The fixed systemd
+          # worker accounts use the operator-owned session libvirt socket; --skip-obs drops the
+          # prometheus/grafana this gate never reads.
+          scripts/live-stack/up.sh --skip-obs
 
           # up.sh sources env.sh in its OWN process; source it here for the KDIVE_STACK_BASE_URL /
           # _OIDC_ISSUER / _DATABASE_URL / _S3_* / AWS_* minioadmin the suite reads. Sourcing it
@@ -358,10 +381,10 @@ jobs:
           # export them here so the child mint-system.sh / preflight / pytest inherit the rootfs path.
           export KDIVE_LIVE_VM_ROOTFS KDIVE_LIVE_VM_BZIMAGE KDIVE_LIVE_VM_VMLINUX
 
-          # Provisioned family on the box: bring up the stack, then mint one System. The worker runs
-          # non-root (KDIVE_WORKER_AS_ROOT=0, so up.sh takes no sudo path); it inherits the session
-          # URI exported above, so its provisioned domain and console log are runner-owned/readable.
-          KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-obs
+          # Provisioned family on the box: bring up the stack, then mint one System. The fixed
+          # systemd worker accounts use the operator-owned session libvirt socket, so the domain
+          # and console log remain runner-owned/readable.
+          scripts/live-stack/up.sh --skip-obs
           # up.sh sources env.sh in its OWN process; source it here for KDIVE_S3_* + KDIVE_STACK_BASE_URL.
           # shellcheck disable=SC1091
           source scripts/live-stack/env.sh

@@ -98,6 +98,16 @@
   changed_when: false
   failed_when: live_vm_host_worker_primary_group_results.stdout != item
 
+- name: Verify every fixed worker is a real isolated no-login account
+  ansible.builtin.command: "getent passwd {{ item }}"
+  loop: "{{ live_vm_host_worker_accounts }}"
+  register: live_vm_host_worker_passwd_results
+  changed_when: false
+  failed_when: >-
+    live_vm_host_worker_passwd_results.stdout.split(':')[0] != item
+    or live_vm_host_worker_passwd_results.stdout.split(':')[5] != '/nonexistent'
+    or live_vm_host_worker_passwd_results.stdout.split(':')[6] != '/usr/sbin/nologin'
+
 - name: Read the control group's configured membership
   ansible.builtin.getent:
     database: group
@@ -132,7 +142,10 @@
 
 - name: Check the lifecycle socket enabled state
   ansible.builtin.assert:
-    that: live_vm_host_worker_socket_service.status.UnitFileState == "enabled"
+    that:
+      - live_vm_host_worker_socket_service.status.UnitFileState == "enabled"
+      - live_vm_host_worker_socket_service.status.ActiveState == "active"
+      - live_vm_host_worker_socket_service.status.SubState == "listening"
 
 - name: Inspect the root-only lifecycle files
   ansible.builtin.stat:
@@ -209,16 +222,70 @@
   become_user: kdive-worker-1
   changed_when: false
 
+- name: Verify workers import the installed KDIVE revision
+  ansible.builtin.command: >-
+    /opt/kdive-live-worker-lifecycle/.venv/bin/python -c
+    'import pathlib, kdive; print(pathlib.Path(kdive.__file__).resolve())'
+  become: true
+  become_user: "{{ item }}"
+  loop: "{{ live_vm_host_worker_accounts }}"
+  register: live_vm_host_worker_import_results
+  changed_when: false
+  failed_when: >-
+    not live_vm_host_worker_import_results.stdout.startswith(
+    '/opt/kdive-live-worker-lifecycle/.venv/')
+
 - name: Verify workers can access installed Python and provider paths
   ansible.builtin.command: >-
     /bin/sh -c '/usr/bin/test -x /opt/kdive-live-worker-lifecycle/.venv/bin/python
     && /usr/bin/test -r {{ live_vm_host_worker_fixture_catalog }}
     && /usr/bin/test -x {{ live_vm_host_worker_fixture_catalog }}
+    && /usr/bin/test -r {{ live_vm_host_worker_fixture_catalog }}/manifest.yaml
+    && /usr/bin/test -r {{ live_vm_host_worker_fixture_catalog }}/rootfs_catalog.toml
+    && /usr/bin/test -r
+    {{ live_vm_host_worker_fixture_catalog }}/profiles/console-ready_ppc64le.yaml
+    && /usr/bin/test -r
+    {{ live_vm_host_worker_fixture_catalog }}/profiles/console-ready_x86_64.yaml
+    && /usr/bin/test -w /var/lib/kdive/rootfs
+    && /usr/bin/test -x /var/lib/kdive/rootfs
+    && /usr/bin/test -w /var/lib/kdive/console
+    && /usr/bin/test -x /var/lib/kdive/console
+    && /usr/bin/test -w /var/lib/kdive/pcap
+    && /usr/bin/test -x /var/lib/kdive/pcap
     && /usr/bin/test -w /var/lib/kdive/build
-    && /usr/bin/test -x /var/lib/kdive/build'
+    && /usr/bin/test -x /var/lib/kdive/build
+    && /usr/bin/test -w /var/lib/kdive/install
+    && /usr/bin/test -x /var/lib/kdive/install'
   become: true
   become_user: "{{ item }}"
   loop: "{{ live_vm_host_worker_accounts }}"
+  changed_when: false
+
+- name: Prove the installed socket activates a bounded status request
+  ansible.builtin.command: ./scripts/live-stack/worker-lifecycle.sh status
+  args:
+    chdir: "{{ live_vm_venv }}"
+  become: true
+  become_user: "{{ github_runner_user }}"
+  register: live_vm_host_worker_status_request
+  changed_when: false
+  failed_when: >-
+    live_vm_host_worker_status_request.rc != 0
+    or '"ok":true' not in live_vm_host_worker_status_request.stdout
+
+- name: Prove the host request lock returns the bounded busy result
+  ansible.builtin.shell: |
+    set -euo pipefail
+    exec 9>/run/lock/kdive-live-worker-lifecycle.lock
+    flock -n 9
+    set +e
+    runuser -u {{ github_runner_user | quote }} -- \
+      {{ live_vm_venv | quote }}/scripts/live-stack/worker-lifecycle.sh status
+    request_status=$?
+    set -e
+    test "$request_status" -eq 3
+  args:
+    executable: /bin/bash
   changed_when: false
 
 - name: Verify the selected session libvirtd process is live
@@ -281,37 +348,39 @@
   changed_when: false
   failed_when: live_vm_host_worker_own_replace.rc == 0
 
-- name: Prove each slot account cannot traverse its sibling slot
+- name: Prove each slot account cannot traverse any sibling slot
   ansible.builtin.command: >-
-    /usr/bin/test ! -x {{ live_vm_host_worker_state_root }}/slots/{{ (slot_index + 1) % 8 + 1 }}
+    /usr/bin/test ! -x {{ live_vm_host_worker_state_root }}/slots/{{ item.1 }}
   become: true
-  become_user: "{{ item }}"
-  loop: "{{ live_vm_host_worker_accounts }}"
+  become_user: "{{ item.0 }}"
+  loop: "{{ query('nested', live_vm_host_worker_accounts, range(1, 9) | list) }}"
   loop_control:
-    index_var: slot_index
+    label: "{{ item.0 }} -> slot {{ item.1 }}"
+  when: (item.0 | regex_replace('^kdive-worker-', '') | int) != item.1
   changed_when: false
 
-- name: Prove each slot account cannot read its sibling marker
+- name: Prove each slot account cannot read any sibling marker
   ansible.builtin.command: >-
-    /usr/bin/test ! -r {{ live_vm_host_worker_state_root }}/slots/{{
-    (slot_index + 1) % 8 + 1 }}/permission-probe
+    /usr/bin/test ! -r {{ live_vm_host_worker_state_root }}/slots/{{ item.1 }}/permission-probe
   become: true
-  become_user: "{{ item }}"
-  loop: "{{ live_vm_host_worker_accounts }}"
+  become_user: "{{ item.0 }}"
+  loop: "{{ query('nested', live_vm_host_worker_accounts, range(1, 9) | list) }}"
   loop_control:
-    index_var: slot_index
+    label: "{{ item.0 }} -> slot {{ item.1 }}"
+  when: (item.0 | regex_replace('^kdive-worker-', '') | int) != item.1
   changed_when: false
 
-- name: Prove each slot account cannot replace its sibling marker
+- name: Prove each slot account cannot replace any sibling marker
   ansible.builtin.command: >-
-    /usr/bin/mv /tmp/kdive-live-worker-{{ item }}-permission-probe
-    {{ live_vm_host_worker_state_root }}/slots/{{ (slot_index + 1) % 8 + 1 }}/permission-probe
+    /usr/bin/mv /tmp/kdive-live-worker-{{ item.0 }}-permission-probe
+    {{ live_vm_host_worker_state_root }}/slots/{{ item.1 }}/permission-probe
   become: true
-  become_user: "{{ item }}"
-  loop: "{{ live_vm_host_worker_accounts }}"
+  become_user: "{{ item.0 }}"
+  loop: "{{ query('nested', live_vm_host_worker_accounts, range(1, 9) | list) }}"
   loop_control:
-    index_var: slot_index
+    label: "{{ item.0 }} -> slot {{ item.1 }}"
   register: live_vm_host_worker_sibling_replace
+  when: (item.0 | regex_replace('^kdive-worker-', '') | int) != item.1
   changed_when: false
   failed_when: live_vm_host_worker_sibling_replace.rc == 0
 

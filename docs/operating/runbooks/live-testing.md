@@ -313,17 +313,16 @@ Traps this run hit, in the order they bite:
 
 **2026-07-24 run** (merged `main`, all daemons build-stamped identically): reuse,
 isolation, and close coupling passed; reclaim failed. The reconciler runs as the
-invoking user while the worker runs as root, so the stat-based co-location probe
+invoking user while the worker ran under an older privileged launcher, so the stat-based probe
 admitted a pass that could not unlink the root-owned staged base — the object was
 deleted but the base and its row leaked, with no TTL backstop (#1522, fixed by
 ADR-0442). Re-run after that fix: all four arms pass, reclaim drains object, base,
 staging dir, row, and marker with no reconciler warnings.
 
-The split-user layout is not a misconfiguration — `scripts/live-stack/lib.sh`
-deliberately runs the worker as root for install-staging and VM ops while the
-server and reconciler run as the invoking user. Any future work that has one
-daemon touch another's files must account for it, and a stack whose daemons all
-share a uid (compose, Helm) will not reproduce this class of defect.
+The supported split-user layout now runs every worker through its fixed no-login account and
+systemd unit while server and reconciler run as the operator. Shared provider directories are
+provisioned explicitly; a stack whose daemons all share a uid (Compose or Helm) will not reproduce
+permission defects at that boundary.
 
 ### Fetch-lock contention (needs two workers)
 
@@ -355,7 +354,7 @@ KDIVE_WORKER_COUNT=2 scripts/live-stack/up.sh
 
 Values above 8 are refused, and the refusal is a hard bring-up failure rather than
 a clamp. The ceiling is `MAX_WORKER_COUNT` in `scripts/live-stack/lib.sh`; every
-worker is a root process with its own database pool and aux health port, so the
+worker is a distinct fixed systemd unit with its own database pool and aux health port, so the
 bound guards against a transposition typo forking thousands of them. This arm
 needs 2.
 
@@ -367,18 +366,13 @@ old procedure did:
 scripts/live-stack/status.sh
 ```
 
-The `=== build stamps ===` header must read `2 worker process(es) live`, and both
-worker rows must carry the same build stamp. That count comes from the same
-matcher bring-up asserts against: it resolves `KDIVE_PYTHON` and is scoped to this
-checkout, so it does not count a worker left running from another worktree — which
-is how an operator otherwise gets two rows on a stack that started one worker and
-then drives the whole arm against serialized execution. (Bring-up now fails rather
-than exiting 0 on the wrong count, so reaching this step at all is a good sign;
-read it anyway, since it also catches a stack that lost a worker afterwards.)
+The `=== worker lifecycle ===` section must report slots 1 and 2 as `started`, with units
+`kdive-live-worker@1.service` and `kdive-live-worker@2.service`. That is the lifecycle witness's
+retained view, so it cannot count an unmanaged worker from another checkout. Bring-up refuses an
+unmanaged `kdive worker` process rather than adopting it.
 
 The second worker binds its aux health listener on `:9470` rather than
-the worker default `:9465`, and writes `worker-root-2.log` (or `worker-2.log`
-under `KDIVE_WORKER_AS_ROOT=0`) beside the first worker's log. Leave
+the worker default `:9465`; its logs belong to its exact retained systemd invocation. Leave
 `KDIVE_HEALTH_BIND_ADDR` unset: an explicit value applies to every process, so it
 cannot coexist with more than one worker, and bring-up refuses the combination
 rather than starting workers that die on an exclusive bind.

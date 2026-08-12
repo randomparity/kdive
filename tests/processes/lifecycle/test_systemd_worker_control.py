@@ -34,7 +34,7 @@ from kdive.processes.lifecycle.systemd_worker_control import (
     service_configuration,
 )
 from kdive.processes.lifecycle.systemd_worker_runtime import Deadline
-from tests.processes.lifecycle.test_systemd_worker_contract import start_payload
+from tests.processes.lifecycle.systemd_worker_support import start_payload
 
 
 class FakeClock:

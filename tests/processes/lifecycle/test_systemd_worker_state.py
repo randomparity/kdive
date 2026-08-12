@@ -13,7 +13,7 @@ import pytest
 import kdive.processes.lifecycle.systemd_worker_state as worker_state
 from kdive.processes.lifecycle.systemd_worker_contract import LifecycleRequest, SlotPhase
 from kdive.processes.lifecycle.systemd_worker_state import SlotState, SlotStore, StateConflict
-from tests.processes.lifecycle.test_systemd_worker_contract import start_payload
+from tests.processes.lifecycle.systemd_worker_support import start_payload
 
 
 @pytest.fixture

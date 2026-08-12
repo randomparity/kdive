@@ -224,6 +224,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "Docker as a failure.",
     ),
     ExternalEnvVar(
+        "KDIVE_RUN_SYSTEMD_WORKER_PROOF",
+        "test",
+        None,
+        "Set to 1 to run the installed systemd worker-incarnation proof against the current "
+        "live-stack Compose PostgreSQL flow; when set, missing or wrong host prerequisites fail "
+        "instead of skipping.",
+    ),
+    ExternalEnvVar(
         "KDIVE_IMAGE",
         "test",
         None,
@@ -492,6 +500,81 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "How many fixed lifecycle-worker slots `scripts/live-stack/worker-lifecycle.sh` starts. "
         "A worker runs one job at a time, so this is the local stack's job-concurrency knob. "
         "Values above 8 are refused before a lifecycle request is sent.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_ACCEPTED_LANES",
+        "script",
+        "default",
+        "Comma-separated worker lanes `env.sh` passes into each fixed worker lifecycle request.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_WORKER_OPERATOR_UID",
+        "script",
+        None,
+        "Provisioner-managed numeric uid authorizing the sole lifecycle socket operator; the "
+        "root service refuses requests when it is absent or invalid.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_WORKER_STATE_ROOT",
+        "script",
+        "/var/lib/kdive/live-workers",
+        "Root-owned fixed-slot state directory used by the lifecycle service and worker gate.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_WORKER_PYTHON",
+        "script",
+        "/opt/kdive-live-worker-lifecycle/.venv/bin/python",
+        "Lifecycle-generated handoff naming the installed Python executable that the worker gate "
+        "executes; operators do not set it directly.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_WORKER_SOURCE_ROOT",
+        "script",
+        None,
+        "Lifecycle-generated worker environment value carrying the validated absolute kernel "
+        "source root from the current start request; operators set KDIVE_KERNEL_SRC instead.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIFECYCLE_EXPECTED_SLOTS",
+        "script",
+        None,
+        "Internal status-check count set by live-stack bring-up after start; unset omits the "
+        "started-slot count assertion.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIFECYCLE_OPERATION",
+        "script",
+        None,
+        "Internal request-construction handoff derived from the worker-lifecycle.sh command; "
+        "operators use start, status, stop, or diagnostics arguments instead.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIFECYCLE_COUNT",
+        "script",
+        None,
+        "Internal request-construction handoff carrying start's validated slot count; it is empty "
+        "for non-start operations.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIFECYCLE_LIBVIRT_URI",
+        "script",
+        None,
+        "Internal request-construction handoff carrying the validated published session URI on "
+        "start; it is empty for non-start operations.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_SOURCE_ROOT",
+        "script",
+        None,
+        "Internal request-construction handoff from KDIVE_KERNEL_SRC to the worker source-root "
+        "setting; start fails when it is not an existing absolute directory.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_EXPECTED_SLOTS",
+        "script",
+        None,
+        "Internal status-response assertion handoff copied from KDIVE_LIFECYCLE_EXPECTED_SLOTS; "
+        "unset or empty disables the assertion.",
     ),
     ExternalEnvVar(
         "KDIVE_LOCAL_ROLE_BOOTSTRAP",

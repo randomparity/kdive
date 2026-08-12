@@ -6,9 +6,10 @@ The suite drives the full kdive spine over the real MCP HTTP transport against a
 [ADR-0042](../../adr/0042-live-stack-e2e-mcp-http.md) for the decision and
 [`docs/archive/plans/m1.2-implementation.md`](../../archive/plans/m1.2-implementation.md) for the epic.
 
-The `server`, `worker`, and `reconciler` run **on the host** (not in containers) against
-the `docker-compose.yml` backends, so qemu disk-image and kernel-tree paths resolve where
-`libvirtd` runs. Containerizing them is a deferred follow-on (ADR-0042 §2).
+The `server` and `reconciler` run as ordinary operator-owned host processes. Workers run in the
+fixed `kdive-live-worker@1..8.service` units through the installed lifecycle socket. All use the
+`docker-compose.yml` backends, so qemu disk-image and kernel-tree paths resolve on the libvirt
+host. The supported worker path has no direct-process fallback (ADR-0555).
 
 For the **remote** `qemu+tls://` variant — driving the spine against a host the worker tier does
 not share a filesystem with — see [remote-live-stack.md](remote-live-stack.md); it reuses this
@@ -35,11 +36,35 @@ deployment (the production-shaped path), see
   documented in the
   [four-method runbook §4b](four-method-live-run.md#wire-the-worker-venv-drgn--libguestfs).
   `scripts/check-local-libvirt.sh` flags the gap with the fix.
-- The install-staging directory (`KDIVE_INSTALL_STAGING`, default `/var/lib/kdive/install`) and the
-  console-log directory (`/var/lib/kdive/console`) must be prepared for the worker user (and the
-  `qemu` user under `qemu:///system`) — a one-time host step needed for **every** local install/boot.
-  See [four-method runbook §4b](four-method-live-run.md#prepare-the-worker-host-directories-install-staging--console);
-  `scripts/check-local-libvirt.sh` flags an unwritable staging directory with the fix.
+- The fixed systemd worker contract must be installed. Persistent self-hosted runners get it from
+  `deploy/ansible/roles/live_vm_host`; apply the runner playbook with the revision to install:
+
+  ```bash
+  ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with 'ansible-core==2.21.1' \
+    ansible-playbook deploy/ansible/playbooks/runner.yml \
+    -i deploy/ansible/inventory/hosts.yml --limit <runner> \
+    -e "live_vm_repo_version=$(git rev-parse HEAD)"
+  ```
+
+  A disposable hosted runner uses `deploy/systemd/install-live-worker-lifecycle.sh` after `uv
+  sync`, passing the witness-member DSN only on standard input. That installer is the hosted-only
+  provisioning step; persistent hosts use Ansible so accounts, directories, socket DAC, installed
+  revision, and verification stay converged.
+
+  ```bash
+  witness_password=kdive-witness-local # pragma: allowlist secret — disposable local flow
+  witness_dsn="postgresql://kdive-witness-member:${witness_password}@localhost:5432/kdive"
+  printf '%s\n' "$witness_dsn" | sudo env "PATH=$PATH" \
+    deploy/systemd/install-live-worker-lifecycle.sh \
+      --operator "$(id -un)" --source "$PWD"
+  ```
+
+  This root installation is part of disposable-host provisioning, before the operator runs the
+  stack. The live-stack commands themselves remain non-root socket clients.
+- The installed contract publishes one explicit operator-owned session URI:
+  `qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock` on the Debian-family
+  runner (`virtqemud-sock` is selected on the modular-daemon family). Use the published value from
+  `/etc/kdive/live-worker-libvirt.env`; worker accounts must not fall back to `qemu:///system`.
 - The VM fixtures built (below).
 - If you run a **published** kdive image from `ghcr.io/randomparity/kdive` rather than a
   locally built one, verify its signature first. The release workflow cosign-signs each
@@ -123,7 +148,10 @@ code bug. The `KDIVE_S3_*` vars carry only the endpoint, bucket, and region.
 
 | var | value | consumed by |
 |-----|-------|-------------|
-| `KDIVE_DATABASE_URL` | `postgresql://kdive:kdive@localhost:5432/kdive` | `db/pool.py` | <!-- pragma: allowlist secret — local dev only -->
+| `KDIVE_MIGRATION_DATABASE_URL` | migration-owner member DSN | migration and role bootstrap only |
+| `KDIVE_SERVER_DATABASE_URL` | server-member DSN, member only of `kdive_server` | server |
+| `KDIVE_WORKER_DATABASE_URL` | worker-member DSN, member only of `kdive_worker` | fixed workers |
+| `KDIVE_RECONCILER_DATABASE_URL` | reconciler-member DSN, member only of `kdive_reconciler` | reconciler |
 | `KDIVE_OIDC_ISSUER` | `http://localhost:8090/default` | `mcp/auth.py` |
 | `KDIVE_OIDC_JWKS_URI` | `http://localhost:8090/default/jwks` | `mcp/auth.py` |
 | `KDIVE_OIDC_AUDIENCE` | `kdive` | `mcp/auth.py` |
@@ -132,6 +160,10 @@ code bug. The `KDIVE_S3_*` vars carry only the endpoint, bucket, and region.
 | `KDIVE_S3_REGION` | `us-east-1` | `store/objectstore.py` |
 | `AWS_ACCESS_KEY_ID` | `minioadmin` | boto3 default chain |
 | `AWS_SECRET_ACCESS_KEY` | `minioadmin` | boto3 default chain |
+
+The root lifecycle service separately reads the witness-member DSN from
+`/etc/kdive/credentials/live-worker-witness.dsn`; that login is member only of
+`kdive_lifecycle_witness` and is never delivered to a worker or operator request.
 
 Installed-package deployments usually write these defaults to `/etc/kdive/local.env` and
 source that file before running commands:
@@ -154,7 +186,7 @@ python -m kdive build-fs --image fedora-kdive-ready-44 \
   --workspace ~/.local/share/kdive/build/images
 export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2
 # checks out the pinned kernel source tree; prints the checkout path on stdout
-export KDIVE_KERNEL_SRC="$(bash scripts/fetch-kernel-tree.sh)"
+export KDIVE_KERNEL_SRC="$(bash scripts/fetch-kernel-tree.sh /var/lib/kdive/build/linux)"
 ```
 
 The kernel-tree fetch helper lives under `scripts` (the `fetch-kernel-tree.sh` fixture script);
@@ -191,20 +223,39 @@ From a source checkout, run the convenience wrapper:
 scripts/live-stack/up.sh
 ```
 
-These host processes have no supervisor — nothing restarts them if they exit, unlike the systemd
-units and the compose and Helm surfaces. Each waits up to ten seconds at start for its first
-database connection and exits if it cannot get one, so `up.sh` waits past that budget and fails
-if any of the three is gone by the end of it. A bring-up that reports success has three daemons
-that have already cleared their database check. If it fails, read `.live-stack-logs/*.log` at the
-repo root (or `$KDIVE_STACK_LOG_DIR` when set — the failure names the path it used):
+Systemd retains each exact worker invocation, while server and reconciler remain ordinary host
+processes. Each process waits up to ten seconds at start for its first database connection and
+exits if it cannot get one, so `up.sh` waits past that budget and fails if either ordinary daemon
+exits or the requested worker slots do not report `started`. If it fails, read
+`.live-stack-logs/*.log` for server/reconciler and run
+`scripts/live-stack/worker-lifecycle.sh diagnostics` for the retained worker invocations:
 `no database connection within` there means the backend was unreachable, or its
 credentials or database name are wrong. Recovery is re-running `up.sh` once the backend answers.
 
-`up.sh` is idempotent and also ensures the backends and libvirt are up; for a no-VM, no-sudo
-API-only loop use `KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-libvirt`. It also runs
+`up.sh` is idempotent and also ensures the backends and libvirt are up; a no-VM API-only loop uses
+`scripts/live-stack/up.sh --skip-libvirt` through the same installed worker units. It also runs
 one synchronous `reconcile-systems` pass before starting the host processes, so a completed `up.sh`
 guarantees the catalog is populated and every on-disk `<name>.config` sibling is uploaded with
 `kernel_config_key` set (ADR-0336) — rather than waiting for the reconciler daemon's next loop.
+
+Use the lifecycle scripts as one supported host flow:
+
+```bash
+scripts/live-stack/up.sh
+scripts/live-stack/status.sh
+scripts/live-stack/down.sh
+```
+
+Serialize the complete interval from `up` through `down`: one live-stack flow owns one host. The
+socket's request lock only rejects overlapping requests; it is not a cross-flow lease. A later
+`start` replaces the current fleet and `stop` targets that fleet.
+
+Every lifecycle request has a 120-second monotonic deadline; worker stop uses 45 seconds within
+that budget. Diagnostics has a 30-second acquisition budget, reads at most 320 KiB per slot and
+1.25 MiB total, and emits at most 256 KiB per slot and 1 MiB total with a truncation marker. A
+database or systemd failure retains the exact unit, invocation, state, credential, and active
+incarnation row. Restore the named dependency, inspect `status` or `diagnostics`, and retry the
+same `stop`; do not remove the retained files to make the command pass.
 
 Installed package — migrate and seed on the host, then run the app tier from the compose
 reference ([`deploy/compose/README.md`](../../../deploy/compose/README.md)):
@@ -342,10 +393,11 @@ scripts/live-stack/down.sh --force  # also SIGKILL host processes left after the
 scripts/live-stack/down.sh --wipe   # full reset: drop DB/MinIO volumes AND reap kdive-* domains/overlays
 ```
 
-`down.sh --force` is the supported recovery when a worker remains inside a long-running job after
-the normal SIGTERM grace period. It ends every matched kdive host process, including workers with
-in-flight jobs. Those jobs are abandoned; another worker may reclaim each after its lease lapses,
-spending one of its bounded attempts. Bring-up and plain teardown remain graceful-only.
+`down.sh --force` is an operator recovery when graceful lifecycle stop cannot converge. It can end
+remaining host processes, but it cannot publish exact worker termination evidence. The retained
+database incarnation and any artifact fences may therefore be stranded until an operator repairs
+or explicitly reconciles them. Prefer restoring the failed dependency and retrying plain
+`down.sh`; force recovery trades cleanup for lost evidence.
 
 `down.sh --wipe` drops the Postgres and MinIO volumes and reaps all `kdive-*` libvirt domains
 and their overlay disks, so the next `up.sh` starts from a clean schema and an empty bucket.
