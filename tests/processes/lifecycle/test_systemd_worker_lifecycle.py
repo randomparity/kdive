@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import SecretStr
 
+import kdive.processes.lifecycle.systemd_worker_lifecycle as lifecycle_module
 import kdive.processes.lifecycle.systemd_worker_runtime as runtime_module
 import kdive.processes.lifecycle.systemd_worker_state as state_module
 from kdive.processes.lifecycle.systemd_worker_contract import (
@@ -1315,6 +1316,51 @@ def test_diagnostics_retries_a_sentinel_that_collides_after_control_escaping() -
     assert occupied not in response.diagnostics
     assert "x3a" not in response.diagnostics
     assert ";" in response.diagnostics
+
+
+def test_diagnostics_bounds_render_attempts_for_near_limit_structural_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state(1, SlotPhase.STARTED)
+    stores, runtime, authority, clock, _ = _fleet(states={1: state})
+    padding = "x" * (256 * 1024 - 100)
+    runtime.journal_chunks[state.invocation_id or ""] = (f"{padding}\nPASSWORD=slot",)
+    coordinator = _coordinator(
+        stores,
+        runtime,
+        authority,
+        clock,
+        redaction_sources={1: ("retained",)},
+    )
+    real_render = lifecycle_module._render_sanitized_diagnostics
+    attempts = 0
+
+    def bounded_render(
+        text: str,
+        registered: tuple[str, ...],
+        sentinel: str,
+        *,
+        acquisition_truncated: bool,
+    ) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts > 2:
+            raise AssertionError("diagnostic sanitizer exceeded two full render attempts")
+        return real_render(
+            text,
+            registered,
+            sentinel,
+            acquisition_truncated=acquisition_truncated,
+        )
+
+    monkeypatch.setattr(lifecycle_module, "_render_sanitized_diagnostics", bounded_render)
+
+    response = _run(coordinator.diagnostics(_deadline(clock)))
+
+    assert response.ok and response.diagnostics is not None
+    assert attempts == 1
+    assert "slot" not in response.diagnostics
+    assert len(response.diagnostics.encode()) <= 256 * 1024
 
 
 def test_diagnostics_escapes_unicode_format_and_separator_controls() -> None:

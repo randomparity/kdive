@@ -924,10 +924,25 @@ def _sanitize_diagnostics(
     registered = tuple(sorted(registry.snapshot(), key=len, reverse=True))
     structural = _structural_secret_values(text, acquisition_truncated=acquisition_truncated)
     forbidden = tuple(dict.fromkeys((*registered, *structural)))
-    for sentinel in _mask_sentinels(forbidden):
+    literals = tuple(sorted(forbidden, key=len, reverse=True))
+    sentinels = _mask_sentinels(forbidden)
+    sentinel = next(sentinels, None)
+    if sentinel is None:
+        raise StateConflict("diagnostics have no safe visible redaction sentinel")
+    redacted = _render_sanitized_diagnostics(
+        text,
+        literals,
+        sentinel,
+        acquisition_truncated=acquisition_truncated,
+    )
+    if not _contains_forbidden(redacted, forbidden):
+        return redacted, forbidden
+    # Only ':' changes under destination escaping. Retry that candidate once; any other
+    # collision is candidate-independent and must fail closed without another full render.
+    if sentinel == ":" and (sentinel := next(sentinels, None)) is not None:
         redacted = _render_sanitized_diagnostics(
             text,
-            registered,
+            literals,
             sentinel,
             acquisition_truncated=acquisition_truncated,
         )
@@ -967,13 +982,13 @@ def _structural_secret_values(text: str, *, acquisition_truncated: bool) -> tupl
 
 def _render_sanitized_diagnostics(
     text: str,
-    registered: tuple[str, ...],
+    literals: tuple[str, ...],
     sentinel: str,
     *,
     acquisition_truncated: bool,
 ) -> str:
     redacted = text
-    for value in registered:
+    for value in literals:
         redacted = redacted.replace(value, _mask_bytes(value, sentinel))
     redacted = _URL_USERINFO.sub(
         lambda match: f"{match.group(1)}{_mask_bytes(match.group(2), sentinel)}{match.group(3)}",
