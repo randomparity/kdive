@@ -1625,6 +1625,114 @@ def test_real_make_overlay_rejects_replaced_path_without_changing_target(
     assert target.stat().st_mode & 0o777 == 0o600
 
 
+def test_prepare_overlay_recreates_after_publication_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    overlay = tmp_path / "overlay.qcow2"
+    create_calls = 0
+    publish_calls = 0
+    real_fchmod = storage_module.os.fchmod
+    monkeypatch.setattr(storage_module, "overlay_path", lambda _system_id: str(overlay))
+    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+
+    def _create(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        nonlocal create_calls
+        create_calls += 1
+        Path(args[-1]).write_bytes(b"qcow2")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    def _publish(descriptor: int, mode: int) -> None:
+        nonlocal publish_calls
+        publish_calls += 1
+        if publish_calls == 1:
+            raise PermissionError("synthetic publication failure")
+        real_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(storage_module.subprocess, "run", _create)
+    monkeypatch.setattr(storage_module.os, "fchmod", _publish)
+    files = ProvisioningFiles()
+
+    with pytest.raises(CategorizedError):
+        files.prepare_overlay(_SYS, base="/base.qcow2", disk_gb=None)
+
+    assert not overlay.exists()
+    assert files.prepare_overlay(_SYS, base="/base.qcow2", disk_gb=None).created is True
+    assert create_calls == 2
+
+
+def test_real_make_overlay_rejects_non_regular_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    overlay = tmp_path / "overlay.qcow2"
+    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+
+    def _create_fifo(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        storage_module.os.mkfifo(args[-1], 0o660)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(storage_module.subprocess, "run", _create_fifo)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._real_make_overlay("/base.qcow2", str(overlay))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert not overlay.exists()
+
+
+def test_real_make_overlay_rejects_output_not_owned_by_worker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    overlay = tmp_path / "overlay.qcow2"
+    actual_uid = storage_module.os.geteuid()
+    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(storage_module.os, "geteuid", lambda: actual_uid + 1)
+
+    def _create(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        Path(args[-1]).write_bytes(b"qcow2")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(storage_module.subprocess, "run", _create)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._real_make_overlay("/base.qcow2", str(overlay))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert not overlay.exists()
+
+
+def test_real_make_overlay_preserves_publication_error_when_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    overlay = tmp_path / "overlay.qcow2"
+    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+
+    def _create(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        Path(args[-1]).write_bytes(b"qcow2")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    def _fail_publish(_descriptor: int, _mode: int) -> None:
+        raise PermissionError("publish")
+
+    def _fail_cleanup(_path: str) -> None:
+        raise PermissionError("cleanup")
+
+    monkeypatch.setattr(storage_module.subprocess, "run", _create)
+    monkeypatch.setattr(storage_module.os, "fchmod", _fail_publish)
+    monkeypatch.setattr(storage_module.os, "unlink", _fail_cleanup)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._real_make_overlay("/base.qcow2", str(overlay))
+
+    assert str(caught.value) == "failed to publish the per-System rootfs overlay"
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {
+        "op": "publish_overlay",
+        "overlay": "overlay.qcow2",
+        "error": "PermissionError",
+        "cleanup_error": "PermissionError",
+    }
+
+
 def test_real_make_overlay_unresolvable_qemu_img_is_missing_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

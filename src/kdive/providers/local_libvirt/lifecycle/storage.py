@@ -99,6 +99,11 @@ def _real_make_overlay(base: str, overlay: str) -> None:
                 "stderr": result.stderr[-_QEMU_IMG_ERROR_TAIL_CHARS:],
             },
         )
+    _publish_created_overlay(overlay)
+
+
+def _publish_created_overlay(overlay: str) -> None:
+    """Make the exact qemu-img output writable by its inherited provider group."""
     descriptor: int | None = None
     try:
         descriptor = os.open(
@@ -112,6 +117,12 @@ def _real_make_overlay(base: str, overlay: str) -> None:
     except OSError as exc:
         details = _overlay_error_details("publish_overlay", overlay)
         details["error"] = type(exc).__name__
+        try:
+            os.unlink(overlay)
+        except FileNotFoundError:
+            pass
+        except OSError as cleanup_exc:
+            details["cleanup_error"] = type(cleanup_exc).__name__
         raise CategorizedError(
             "failed to publish the per-System rootfs overlay",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,

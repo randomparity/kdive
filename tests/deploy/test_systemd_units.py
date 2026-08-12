@@ -50,6 +50,7 @@ def test_live_worker_unit_pins_retained_slot_contract() -> None:
     )
     for directive in expected:
         assert directive in text
+    assert "\nUMask=" not in text
 
 
 def test_live_lifecycle_socket_accepts_two_root_control_connections() -> None:
