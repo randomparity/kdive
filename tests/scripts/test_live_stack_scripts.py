@@ -657,6 +657,12 @@ def test_live_stack_env_exports_required_defaults() -> None:
         assert f"export {name}=" in env
 
 
+def test_live_stack_rootfs_default_reaches_child_processes() -> None:
+    result = _lib("bash -c 'printf %s \"${KDIVE_ROOTFS_DIR-unset}\"'")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "/var/lib/kdive/rootfs"
+
+
 def test_client_urls_derive_from_the_configurable_ports() -> None:
     # The port var must be the SINGLE source of truth: the client-facing DSN/endpoint defaults must
     # reference the port var, not a second hardcoded literal that could silently drift from compose.

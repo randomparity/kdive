@@ -258,11 +258,29 @@ def test_hosted_job_installs_fixed_lifecycle_contract_after_uv_sync() -> None:
 
 def test_hosted_spine_enters_refreshed_control_group_and_probes_socket() -> None:
     spine = _tcg_spine()
-    assert "sg kdive-live-libvirt" in spine
-    assert "sg kdive-live-control" in spine
-    assert "id -G" in spine and "kdive-live-control" in spine
+    assert "sudo --preserve-env" in spine
+    assert '--user="$operator_name" --group=kdive-live-control' in " ".join(spine.split())
+    assert "id -G" in spine
+    assert "kdive-live-control" in spine and "kdive-live-libvirt" in spine
     assert "live-worker-lifecycle.sock" in spine
     assert ".connect(" in spine
+
+
+@pytest.mark.parametrize(
+    ("step_name", "job"),
+    (
+        ("Prove systemd worker lifecycle against disposable Postgres", "tcg"),
+        ("Run the live_vm_tcg spine (stage -> up -> preflight -> test, one shell)", "tcg"),
+    ),
+)
+def test_hosted_tcg_shell_reinitializes_all_operator_groups_once(step_name: str, job: str) -> None:
+    _, step = _named_step(job, step_name)
+    run = step["run"]
+    assert "sudo --preserve-env" in run
+    assert '--user="$operator_name" --group=kdive-live-control' in " ".join(run.split())
+    assert "kdive-live-control" in run and "kdive-live-libvirt" in run
+    assert "sg kdive-live-libvirt" not in run
+    assert "sg kdive-live-control" not in run
 
 
 def test_tcg_job_links_the_guestfs_binding_into_the_venv_and_proves_it_imports() -> None:
@@ -481,4 +499,7 @@ def test_native_job_resolves_the_kernel_tree_before_the_app_tier_starts() -> Non
 def test_hosted_lifecycle_proof_refreshes_control_and_libvirt_groups() -> None:
     _, proof = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
     run = proof["run"]
-    assert run.index("sg kdive-live-libvirt") < run.index("sg kdive-live-control")
+    assert "sudo --preserve-env" in run
+    assert '--user="$operator_name" --group=kdive-live-control' in " ".join(run.split())
+    assert "id -G" in run
+    assert "kdive-live-control" in run and "kdive-live-libvirt" in run

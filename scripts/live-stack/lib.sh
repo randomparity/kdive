@@ -19,7 +19,7 @@ KDIVE_BACKEND_SERVICES=(postgres minio minio-init oidc)
 # stores per-System qcow2 overlays under KDIVE_ROOTFS_DIR. It uses user-mode SLIRP networking
 # and qemu-img overlays — NO libvirt network or storage pool is involved.
 KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
-KDIVE_ROOTFS_DIR="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}"
+export KDIVE_ROOTFS_DIR="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}"
 
 # Arches for which grafana publishes no upstream manifest (ADR-0356 accept-gap, #1261); it ships
 # amd64 + arm64 only. On a listed arch, up.sh skips grafana and brings prometheus (which does
