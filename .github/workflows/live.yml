@@ -153,8 +153,9 @@ jobs:
       - name: Prove systemd worker lifecycle against disposable Postgres
         run: |
           set -euo pipefail
-          exec sg kdive-live-control -c \
-            'exec /bin/bash -s -e -u -o pipefail' <<'KDIVE_SYSTEMD_PROOF'
+          exec sg kdive-live-libvirt -c \
+            'exec sg kdive-live-control -c "exec /bin/bash -s -e -u -o pipefail"' \
+            <<'KDIVE_SYSTEMD_PROOF'
           export KDIVE_KERNEL_SRC
           KDIVE_KERNEL_SRC="$(
             scripts/fetch-kernel-tree.sh /var/lib/kdive/build/systemd-proof-linux
@@ -200,9 +201,11 @@ jobs:
         run: |
           set -euo pipefail
           # The installer updates /etc/group after this job process starts. Enter one refreshed
-          # group context for the whole hosted spine; sg preserves the configured operator uid.
-          exec sg kdive-live-control -c \
-            'exec /bin/bash -s -e -u -o pipefail' <<'KDIVE_LIVE_SPINE'
+          # group contexts for the whole hosted spine; the outer context adds catalog access and
+          # the inner context makes lifecycle control primary while preserving the operator uid.
+          exec sg kdive-live-libvirt -c \
+            'exec sg kdive-live-control -c "exec /bin/bash -s -e -u -o pipefail"' \
+            <<'KDIVE_LIVE_SPINE'
 
           control_gid="$(getent group kdive-live-control | cut -d: -f3)"
           case " $(id -G) " in
@@ -388,6 +391,12 @@ jobs:
           # emit_wiring prints BARE assignments (no `export`), so eval leaves them non-exported;
           # export them here so the child mint-system.sh / preflight / pytest inherit the rootfs path.
           export KDIVE_LIVE_VM_ROOTFS KDIVE_LIVE_VM_BZIMAGE KDIVE_LIVE_VM_VMLINUX
+
+          # Fixed workers require one real, worker-traversable kernel source tree at startup.
+          export KDIVE_KERNEL_SRC
+          KDIVE_KERNEL_SRC="$(
+            scripts/fetch-kernel-tree.sh /var/lib/kdive/build/native-live-linux
+          )"
 
           # Provisioned family on the box: bring up the stack, then mint one System. The fixed
           # systemd worker accounts use the operator-owned session libvirt socket, so the domain

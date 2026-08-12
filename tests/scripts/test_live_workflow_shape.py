@@ -258,6 +258,7 @@ def test_hosted_job_installs_fixed_lifecycle_contract_after_uv_sync() -> None:
 
 def test_hosted_spine_enters_refreshed_control_group_and_probes_socket() -> None:
     spine = _tcg_spine()
+    assert "sg kdive-live-libvirt" in spine
     assert "sg kdive-live-control" in spine
     assert "id -G" in spine and "kdive-live-control" in spine
     assert "live-worker-lifecycle.sock" in spine
@@ -467,3 +468,17 @@ def test_tcg_job_resolves_the_kernel_tree_before_the_app_tier_starts() -> None:
         "KDIVE_KERNEL_SRC must be resolved before up.sh forks the worker, which captures it"
     )
     assert "fetch-kernel-tree.sh /var/lib/kdive/build/" in spine
+
+
+def test_native_job_resolves_the_kernel_tree_before_the_app_tier_starts() -> None:
+    native = _job_run_blocks("native")
+    assert native.index("fetch-kernel-tree.sh") < native.index("scripts/live-stack/up.sh"), (
+        "KDIVE_KERNEL_SRC must be resolved before native up.sh forks the fixed worker"
+    )
+    assert "fetch-kernel-tree.sh /var/lib/kdive/build/" in native
+
+
+def test_hosted_lifecycle_proof_refreshes_control_and_libvirt_groups() -> None:
+    _, proof = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
+    run = proof["run"]
+    assert run.index("sg kdive-live-libvirt") < run.index("sg kdive-live-control")
