@@ -16,7 +16,8 @@ paths, both owned by the job itself:
 
 | path | code | fails when |
 |---|---|---|
-| handler `finally` reclaim | `jobs/handlers/control/capture_traffic.py` | the worker dies before `finally` runs |
+| handler `finally` reclaim around store | `capture_traffic.py:392` | the worker dies before `finally` runs |
+| cancel-path reclaim | `capture_traffic.py:352` | the worker dies before it observes the cancel |
 | `prepare` pre-delete of this job's own stale volume | `traffic_capture.py:197-211` | the job never runs again |
 
 `JobState` (`domain/capacity/state.py:171-178`) has no dead-letter state: the retry edge is
@@ -94,7 +95,17 @@ Guard 2 uses a new `is_job_live(conn, job_id)` helper beside `has_active_capture
 `reconciler/repairs/allocations.py`, reusing that module's existing `_ACTIVE_JOB_STATE_VALUES`
 so the "live" definition cannot drift between the two sweeps.
 
-A `job_id` of `None` (unparseable name) skips guard 2 and relies on the age guard alone.
+A `job_id` of `None` (unparseable name) skips guard 2 and relies on the age guard alone. Since
+`volume_mtime_epoch_s` reads a timestamp-less document as epoch, such a volume is deleted on
+the first pass; ADR-0555 records why that is accepted.
+
+**Guard 1 is not redundant, and its window has a floor.** Guard 2 keys on the job row, not on
+worker liveness. A `canceled` row precedes the worker's own reclaim by up to a poll interval,
+and `repair_abandoned_jobs` dead-letters a lease-lapsed, attempts-exhausted `running` row to
+`failed` while that worker may still be alive (`DEFAULT_LEASE` is 5 minutes;
+`CAPTURE_MAX_DURATION_S` is 300s). In both windows only the age guard stands between the sweep
+and a live capture's file, so `DEFAULT_PCAP_VOLUME_GRACE` must exceed `CAPTURE_MAX_DURATION_S`
+plus the fetch/trim/store tail.
 
 Per-volume delete failures are caught and logged, then the sweep continues — matching
 `reap_orphaned_dump_volumes`.
@@ -109,7 +120,8 @@ Per-volume delete failures are caught and logged, then the sweep continues — m
 | `providers/remote_libvirt/lifecycle/traffic_capture.py` | docstring only — replace "a noted follow-up" with the ADR-0555 reference |
 
 `DEFAULT_PCAP_VOLUME_GRACE = timedelta(minutes=30)` is its own constant rather than an alias
-of `DEFAULT_DUMP_VOLUME_GRACE`, so tuning one sweep cannot silently retune the other.
+of `DEFAULT_DUMP_VOLUME_GRACE`, so tuning one sweep cannot silently retune the other. 30
+minutes clears the floor above (300s plus tail) with room.
 
 ## Threat model
 
@@ -168,6 +180,9 @@ Additional cases the design's own guards require:
 7. A `delete_pcap_volume` raising for one volume does not prevent the sweep reaping the rest,
    and the failure is logged.
 8. An empty volume list short-circuits without querying the Postgres clock.
+8b. `DEFAULT_PCAP_VOLUME_GRACE` exceeds `CAPTURE_MAX_DURATION_S`, asserted directly so a later
+   tuning edit that drops it below the floor reddens rather than silently exposing live
+   captures.
 9. The name parser round-trips `pcap_volume_name(system_id, job_id)` — a property the two
    modules must agree on, tested against the real producer rather than a copied literal.
 10. `just ci` is green.
