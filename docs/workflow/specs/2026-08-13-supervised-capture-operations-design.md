@@ -41,12 +41,16 @@ Migration `0112_capture_operation_supervision.sql` adds:
   quiescence evidence; database-clock timestamps. `(job_id, job_attempt)` is unique.
 - `jobs.current_capture_operation_id`, nullable, with a foreign key to `capture_operations`. A
   database function links it only when the row is still the exact running attempt owned by the
-  authenticated worker. Recycle and a later charged attempt clear the link.
+  authenticated worker. A later attempt cannot be charged while any operation for that job lacks
+  complete exit evidence; only then may claim clear the prior current link.
 - `capture_cutovers`: one generation per supported provider kind, with state (`draining`,
   `complete`), start time, database-clock cutoff, and separate operation-quiescent and
   publication-closed flags. #1951 writes only the operation flag; #1952 owns the publication flag.
 - `capture_cutover_workers`: the immutable set of active protocol-2 incarnations captured when a
   generation starts and the durable termination observation for each.
+- `capture_cutover_resources`: the immutable set of every Resource of the provider kind present
+  when the claim bar is installed, plus every Resource resolved from an already-running legacy
+  capture attempt; each row records its required transport observation.
 
 All worker writes use security-definer functions that derive the incarnation from the credential,
 lock the worker incarnation and job attempt, validate state transitions, and expose no direct
@@ -65,6 +69,11 @@ Repeated exact writes are idempotent. A conflicting identity or backward transit
 `running` write is observability, not authority: a released gate with a still-`gated` row remains
 recoverable because every non-`exited` state is treated as possibly mutating.
 
+The capture-aware claim function skips a queued or lapsed `capture_traffic` row while any prior
+operation for that job is not `exited` with complete process and provider evidence. It does not
+consume an attempt or clear the link. Recovery completes the prior operation; a later claim then
+charges and links normally. Other job kinds retain the existing claim behavior.
+
 ## Launch and data flow
 
 The handler validates the BPF expression before launch and snapshots the Run, System, Resource,
@@ -75,15 +84,18 @@ The launcher creates a private attempt directory beneath the configured KDIVE ru
 writes a canonical JSON request with mode 0600, creates a gate pipe, and starts:
 
 ```
-python -m kdive capture-operation --request <path> --gate-fd <fd>
+python -m kdive capture-operation --launch-token <token> --gate-fd <fd>
 ```
 
-Arguments are fixed tokens, never a shell command. The request schema accepts only the two wired
-provider kinds, UUID identities, the snaplen and byte/window bounds already validated by the job
-payload, and the snapshotted domain and Resource identity. The child's first application action is
-the blocking one-byte gate read. Only after release does it open the request without following
-symlinks, verify directory ownership, file mode, digest, and schema, and assemble the provider.
-Gate EOF exits without opening attacker-controlled input or crossing a provider boundary.
+The child's cwd is the attempt directory and the request basename is the literal `request.json`.
+Arguments are fixed flags plus the database-generated token and inherited gate fd, never a shell
+command; no path or tenant-controlled value appears in argv. The request schema accepts only the
+two wired provider kinds, UUID identities, the snaplen and byte/window bounds already validated by
+the job payload, and the snapshotted domain and Resource identity. The child's first application
+action is the blocking one-byte gate read. Only after release does it open `request.json` relative
+to a verified directory fd without following symlinks, verify ownership, modes, digest, and
+schema, and assemble the provider. Gate EOF exits without opening request input or crossing a
+provider boundary.
 
 Before spawn, the launcher creates and links one `launching` row for the exact charged attempt.
 That transaction also persists a random 256-bit launch token. The fixed argv carries the token and
@@ -104,8 +116,15 @@ waits for process exit, performs the provider quiescence probe, durably acknowle
 only then reads the result. BPF trimming and the existing artifact path stay in the handler.
 
 The child never receives the object store, worker incarnation credential, or authority to update
-the job. Its provider configuration comes from the same environment and Resource binding used by
-normal provider assembly. Packet data never enters argv, logs, JSON, or the database.
+the job. The launcher constructs an environment allowlist containing only locale, Python runtime
+keys required to execute the installed package, and provider settings required by the selected
+local or remote adapter. It excludes every database URL, object-store setting, OIDC value,
+lifecycle credential, worker credential path/value, telemetry exporter credential, and unrelated
+provider configuration. Remote private-key settings remain file references governed by existing
+provider file permissions; key bytes never enter the environment. Tests seed every forbidden
+class in the parent and prove it absent in the child while both adapters still assemble. Packet
+data never enters argv, logs, JSON, or the database.
+
 The executable may create threads required by Python or libvirt but may not spawn descendant
 processes. A guard scans its owned module and provider-capture call graph for subprocess,
 `multiprocessing`, `fork`, and `posix_spawn` use. A future provider that needs helpers must first
@@ -122,8 +141,7 @@ same operation-cancel path.
 Cancellation validates host instance, boot id, and start ticks, opens or uses a pidfd, sends
 `SIGTERM` to that exact child, and waits five seconds on the supervisor's monotonic clock. If the
 exact child remains, it sends `SIGKILL` and waits five more seconds. These are per cancellation
-request,
-not per job flow. Exceeding either bound leaves `cancel_requested`; the consequence is that
+request, not per job flow. Exceeding either bound leaves `cancel_requested`; the consequence is that
 reclamation and result use remain barred. Recovery is an automatic scan on worker startup on the
 same host, or an operator restart after restoring `/proc` visibility. The scan handles:
 
@@ -140,6 +158,14 @@ same host, or an operator restart after restoring `/proc` visibility. The scan h
   durably finished;
 - host-instance mismatch, PID identity mismatch, unreadable `/proc`, or unreachable provider:
   retain the row without acknowledgment and report the reason.
+
+Same-owner pre-release failure has one explicit abort protocol. If spawn fails, the owner closes
+both gate ends and atomically records `exited/aborted_before_spawn`; no process identity is
+required because `create_subprocess_exec` returned no child. If PID stat or pidfd acquisition
+fails after spawn, it closes the release writer, awaits the child, performs the complete launch-
+token absence scan, and records `exited/aborted_before_identity`. If that final database write
+fails, durable `launching` remains and startup recovery repeats the token scan. No path records an
+abort merely because cleanup was requested.
 
 Recovery ownership follows the worker incarnation's authority binding. A local replacement may
 inspect `/proc` only on the configured host instance; a changed boot id is positive evidence that
@@ -171,16 +197,23 @@ and database observation time. It records no host address or credential.
 
 Fence protocol advances from 2 to 3. The claim function continues to admit protocol-2 workers for
 non-capture kinds, but a `capture_traffic` claim requires protocol 3 once a provider-kind cutover
-enters `draining`. Starting a generation takes a database advisory lock, persists the exact active
-protocol-2 incarnation set, and installs the bar in the same transaction. This order means a
-legacy worker is either in the set or cannot obtain a later capture claim.
+enters `draining`. Starting a generation takes the same database advisory lock used by capture
+claim, installs the bar, and persists two immutable membership sets in one transaction: every
+active protocol-2 incarnation, and every Resource of the provider kind then present plus Resources
+resolved from already-running legacy capture jobs. This order means a legacy worker is either in
+the set or cannot obtain a later capture claim. A Resource created after the bar cannot receive a
+legacy capture claim and is outside this historical generation. A Resource removed after
+membership remains required; an explicit terminal Resource observation may satisfy it only when
+durable provider lifecycle evidence proves the endpoint cannot retain capture state.
 
 The existing lifecycle authority remains the source of exact worker termination. The cutover
 observer copies only durable terminated facts; absence, lease expiry, Pod name reuse, and a stopped
 Compose process without its lifecycle acknowledgment do not count. For local-libvirt, operation
 quiescence requires every recorded worker terminated and each host's supervised-operation scan
 complete. For remote-libvirt it additionally requires a fresh transport observation for every
-affected Resource. Failures retain `draining` and name the missing incarnation or Resource.
+immutable `capture_cutover_resources` row. Completion is a database `NOT EXISTS` predicate over
+missing worker and Resource observations. Failures retain `draining` and name the missing
+incarnation or Resource.
 
 When all operation observations are complete, one transaction sets
 `operation_quiescent = true`. The generation becomes `complete` only when #1952's
@@ -221,7 +254,7 @@ precedence over consuming either success or failure output.
 - The child causes local or remote hypervisor mutation. Existing provider configuration,
   Resource binding, TLS identity, and provider-specific QOM naming remain the controls.
 - A replacement worker signals an OS process. Exact boot id, start ticks, pidfd use, and process
-  group ownership prevent PID reuse or attacker-chosen process targeting.
+  identity checks prevent PID reuse or attacker-chosen process targeting.
 - Deployment automation advances cutover state. Existing lifecycle-witness or Compose lifecycle
   authority supplies termination evidence; worker credentials cannot synthesize it.
 
@@ -245,15 +278,23 @@ worker or captured network plane and are outside this issue's reachable boundary
 
 ## Verification
 
-Unit and database tests fault every boundary: child exits before identity read, after spawn before
-link, after link before release, after release before `running`, during each provider method,
+Unit and database tests fault every boundary: before spawn, after spawn before identity
+registration, after identity registration before release, after release before `running`, during
+each provider method,
 during TERM and KILL, after process exit before probe, and after probe before acknowledgment.
 Tests replace the child with a real gated helper process so breaking the release ordering makes
 the test fail.
 
+Launch tests pin the exact argv, cwd, `request.json` basename, and environment allowlist. They
+cover spawn failure, `/proc` stat failure, pidfd failure, gate cleanup failure, and database failure
+after cleanup. Each verifies that no provider marker can be created and that recovery reaches only
+the stated terminal outcome.
+
 Database concurrency tests prove one operation per `(job_id, attempt)`, exact-attempt transition
 fencing, protocol-2 capture claim exclusion with unrelated claims still admitted, immutable drain
-membership, and atomic final cutoff sampling with a job admitted during drain. Provider tests
+worker/Resource membership, and atomic final cutoff sampling with a job admitted and a Resource
+created during drain. A retry/cancellation race proves claim does not charge or hide a prior
+unacknowledged operation. Provider tests
 prove local and remote probes reconnect independently and refuse to acknowledge QOM presence or
 an unreachable endpoint. Each provider's gated real-stack test delays an accepted monitor command,
 kills the client, and proves the independent probe cannot acknowledge before definitive completion
