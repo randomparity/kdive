@@ -126,10 +126,50 @@ def test_remote_executor_rejects_oversized_provider_result(tmp_path: Path) -> No
     assert not (tmp_path / "capture.pcap").exists()
 
 
+def test_remote_executor_observes_exact_bound_after_final_poll_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request()
+    capturer = _FakeCapturer(data=b"x" * request.max_bytes)
+    interval_elapsed = False
+
+    def captured_size(_destination: str) -> int:
+        capturer.calls.append("captured_size")
+        return request.max_bytes if interval_elapsed else 0
+
+    def sleep(_seconds: float) -> None:
+        nonlocal interval_elapsed
+        capturer.calls.append("sleep")
+        interval_elapsed = True
+
+    monkeypatch.setattr(capturer, "captured_size", captured_size)
+
+    result = RemoteCaptureExecutor(capturer=capturer, sleep=sleep).execute(request, tmp_path)
+
+    assert result.truncated is True
+    assert result.size_bytes == request.max_bytes
+    assert capturer.calls == [
+        "prepare",
+        "attach",
+        "sleep",
+        "captured_size",
+        "detach",
+        "fetch",
+        "reclaim",
+    ]
+
+
 class _Domain:
-    def __init__(self, *, present: bool = False, unordered: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        present: bool = False,
+        unordered: bool = False,
+        members: list[object] | None = None,
+    ) -> None:
         self.present = present
         self.unordered = unordered
+        self.members = members
         self.commands: list[dict[str, object]] = []
 
     def qemuMonitorCommand(self, raw: str, flags: int) -> str:  # noqa: N802
@@ -138,9 +178,12 @@ class _Domain:
         self.commands.append(command)
         if command["execute"] == "object-del":
             raise libvirt.libvirtError("object not found")
-        response: dict[str, object] = {
-            "return": [{"name": "kdive-dump-job"}] if self.present else []
-        }
+        returned_members = (
+            [{"name": "kdive-dump-job", "type": "child<filter-dump>"}]
+            if self.present
+            else self.members or []
+        )
+        response: dict[str, object] = {"return": returned_members}
         if not self.unordered:
             response["id"] = command["id"]
         return json.dumps(response)
@@ -172,7 +215,7 @@ class _ConnectionContext:
 
 def test_remote_quiescence_opens_independent_resource_bound_tls_connection() -> None:
     resource_id = uuid4()
-    domain = _Domain()
+    domain = _Domain(members=[{"name": "unrelated-object", "type": "child<filter-dump>"}])
     connections: list[_Connection] = []
 
     def connection() -> _ConnectionContext:
@@ -190,6 +233,34 @@ def test_remote_quiescence_opens_independent_resource_bound_tls_connection() -> 
     assert [command["execute"] for command in domain.commands] == ["object-del", "qom-list"]
     assert domain.commands[1]["arguments"] == {"path": "/objects"}
     assert evidence.resource_id == resource_id
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        [{}],
+        [{"name": 7, "type": "child<filter-dump>"}],
+        [{"name": None, "type": "child<filter-dump>"}],
+        [{"name": "other", "type": 7}],
+        [{"name": "other", "type": None}],
+        [{"name": "other"}],
+        [{"type": "child<filter-dump>"}],
+        [
+            {"name": "valid-first", "type": "child<filter-dump>"},
+            {},
+        ],
+    ],
+)
+def test_remote_quiescence_rejects_malformed_qom_members(members: list[object]) -> None:
+    resource_id = uuid4()
+    domain = _Domain(members=members)
+    probe = RemoteLibvirtCaptureQuiescence(
+        resource_id=resource_id,
+        connection=lambda: _ConnectionContext(_Connection(domain)),
+    )
+
+    with pytest.raises(CategorizedError, match="inconclusive shape"):
+        probe.prove_absent(resource_id, "kdive-remote", "kdive-dump-job")
 
 
 def test_remote_fresh_probe_waits_for_prior_accepted_monitor_mutation() -> None:

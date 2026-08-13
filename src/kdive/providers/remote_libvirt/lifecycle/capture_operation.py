@@ -129,10 +129,10 @@ class RemoteCaptureExecutor:
             )
             truncated = False
             for _ in range(request.max_polls):
+                self._sleep(_POLL_INTERVAL_SECONDS)
                 if self._capturer.captured_size(destination) >= request.max_bytes:
                     truncated = True
                     break
-                self._sleep(_POLL_INTERVAL_SECONDS)
         finally:
             self._capturer.detach(request.domain_name, qom_id=qom_id)
         return self._capturer.fetch(destination, max_bytes=request.max_bytes), truncated
@@ -238,14 +238,22 @@ class RemoteLibvirtCaptureQuiescence:
                 "remote capture QOM query returned an inconclusive shape",
                 category=ErrorCategory.CONTROL_FAILURE,
             )
+        member_names: list[str] = []
         for item in members:
-            if not isinstance(item, dict):
+            name = item.get("name") if isinstance(item, dict) else None
+            member_type = item.get("type") if isinstance(item, dict) else None
+            if (
+                not isinstance(item, dict)
+                or not isinstance(name, str)
+                or not isinstance(member_type, str)
+            ):
                 raise CategorizedError(
                     "remote capture QOM query returned an inconclusive shape",
                     category=ErrorCategory.CONTROL_FAILURE,
                 )
-            if item.get("name") == qom_id:
-                raise CategorizedError(
-                    "remote capture QOM object is still present",
-                    category=ErrorCategory.CONTROL_FAILURE,
-                )
+            member_names.append(name)
+        if qom_id in member_names:
+            raise CategorizedError(
+                "remote capture QOM object is still present",
+                category=ErrorCategory.CONTROL_FAILURE,
+            )

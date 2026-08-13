@@ -133,6 +133,39 @@ def test_local_executor_rejects_oversized_provider_result(tmp_path: Path) -> Non
     assert not (tmp_path / "capture.pcap").exists()
 
 
+def test_local_executor_observes_exact_bound_after_final_poll_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request().model_copy(update={"max_polls": 1})
+    capturer = _FakeCapturer(data=b"x" * request.max_bytes)
+    interval_elapsed = False
+
+    def captured_size(_destination: str) -> int:
+        capturer.calls.append("captured_size")
+        return request.max_bytes if interval_elapsed else 0
+
+    def sleep(_seconds: float) -> None:
+        nonlocal interval_elapsed
+        capturer.calls.append("sleep")
+        interval_elapsed = True
+
+    monkeypatch.setattr(capturer, "captured_size", captured_size)
+
+    result = LocalCaptureExecutor(capturer=capturer, sleep=sleep).execute(request, tmp_path)
+
+    assert result.truncated is True
+    assert result.size_bytes == request.max_bytes
+    assert capturer.calls == [
+        "prepare",
+        "attach",
+        "sleep",
+        "captured_size",
+        "detach",
+        "fetch",
+        "reclaim",
+    ]
+
+
 class _ProbeDomain:
     pass
 
@@ -151,14 +184,16 @@ class _ProbeConnection:
         return 0
 
 
-def _ordered_monitor(present: bool = False):
+def _ordered_monitor(present: bool = False, *, members: list[object] | None = None):
     def monitor(domain: object, raw: str, flags: int) -> str:
         del domain, flags
         command = json.loads(raw)
         if command["execute"] == "object-del":
             raise libvirt.libvirtError("DeviceNotFound")
-        members = [{"name": "kdive-dump-job"}] if present else []
-        return json.dumps({"return": members, "id": command["id"]})
+        returned_members = (
+            [{"name": "kdive-dump-job", "type": "child<filter-dump>"}] if present else members or []
+        )
+        return json.dumps({"return": returned_members, "id": command["id"]})
 
     return monitor
 
@@ -176,7 +211,9 @@ def test_local_quiescence_reconnects_detaches_and_queries_exact_qom_id() -> None
     evidence = LocalLibvirtCaptureQuiescence(
         resource_id=resource_id,
         connect=connect,
-        monitor=_ordered_monitor(),
+        monitor=_ordered_monitor(
+            members=[{"name": "unrelated-object", "type": "child<filter-dump>"}]
+        ),
     ).prove_absent(resource_id, "kdive-local", "kdive-dump-job")
 
     assert len(opened) == 1
@@ -184,6 +221,34 @@ def test_local_quiescence_reconnects_detaches_and_queries_exact_qom_id() -> None
     assert evidence.result == "absent"
     assert evidence.qom_id == "kdive-dump-job"
     assert events == ["lookup:kdive-local"]
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        [{}],
+        [{"name": 7, "type": "child<filter-dump>"}],
+        [{"name": None, "type": "child<filter-dump>"}],
+        [{"name": "other", "type": 7}],
+        [{"name": "other", "type": None}],
+        [{"name": "other"}],
+        [{"type": "child<filter-dump>"}],
+        [
+            {"name": "valid-first", "type": "child<filter-dump>"},
+            {},
+        ],
+    ],
+)
+def test_local_quiescence_rejects_malformed_qom_members(members: list[object]) -> None:
+    resource_id = uuid4()
+    probe = LocalLibvirtCaptureQuiescence(
+        resource_id=resource_id,
+        connect=lambda: _ProbeConnection([]),
+        monitor=_ordered_monitor(members=members),
+    )
+
+    with pytest.raises(CategorizedError, match="inconclusive shape"):
+        probe.prove_absent(resource_id, "kdive-local", "kdive-dump-job")
 
 
 def test_local_fresh_probe_waits_for_prior_accepted_monitor_mutation() -> None:
