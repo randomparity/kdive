@@ -43,10 +43,9 @@ Migration `0112_capture_operation_supervision.sql` adds:
   database function links it only when the row is still the exact running attempt owned by the
   authenticated worker. A later attempt cannot be charged while any operation for that job lacks
   complete exit evidence; only then may claim clear the prior current link.
-- `capture_cutover`: a singleton row containing protocol 3, `operation_quiescent`,
-  `publication_closed`, aggregate `complete`, and database-clock `cutoff_at`. Migration 0112 writes
-  only operation quiescence and the cutoff; #1952 owns publication closure and the transaction that
-  makes `complete` true when both inputs exist.
+- `capture_operation_cutoff`: a singleton row containing protocol 3, `operation_quiescent`, and
+  database-clock `cutoff_at`. Migration 0112 owns only this operation evidence. #1952 owns its
+  publication-closure schema and the later combined-completion contract consumed by #1946.
 
 All worker writes use security-definer functions that derive the incarnation from the credential,
 lock the worker incarnation and job attempt, validate state transitions, and expose no direct
@@ -135,16 +134,16 @@ provider file permissions; key bytes never enter the environment. Tests seed eve
 class in the parent and prove it absent in the child while both adapters still assemble. Packet
 data never enters argv, logs, JSON, or the database.
 
-The executable is single-task after exec: neither descendant processes nor new threads are
-permitted. Its bootstrap imports the small seccomp binding, installs a filter denying `fork`,
-`vfork`, `clone`, `clone3`, `execve`, and `execveat`, and then performs the blocking gate read as
-its first operation that can open input or reach a provider. Provider modules load only after
-release under that filter and must operate synchronously in the one task. An attempted task or
-process creation fails with `EPERM` and becomes an infrastructure failure. The filter covers
-Python, dependencies, and native libraries rather than relying on a source scan. Runtime local and
-remote provider tests observe `/proc/<pid>/task` and the child tree through every phase and invoke
-each denied syscall in helper mode on x86_64 and ppc64le. A provider needing another task must
-first adopt a kernel-owned containment decision.
+The executable is a single-process boundary after exec: threads are permitted, but descendant
+processes are not. Its bootstrap installs a seccomp filter that denies `fork`, `vfork`, `execve`,
+and `execveat`; permits legacy `clone` only with the complete required `CLONE_THREAD` flag set; and
+returns `ENOSYS` for `clone3` so libc falls back to the inspectable legacy thread-creation call.
+It then performs the blocking gate read as its first operation that can open input or reach a
+provider. Provider modules load only after release. A process-creation attempt fails with `EPERM`
+and becomes an infrastructure failure. Runtime local and remote tests exercise a provider thread,
+observe the child process tree through every phase, and invoke each denied process-creation path
+in helper mode on x86_64 and ppc64le. A provider needing a subprocess requires a different
+kernel-owned containment decision.
 
 ## Cancellation and recovery
 
@@ -236,11 +235,10 @@ then takes each residual job fence and idempotently moves the row from `running`
 and heartbeat without charging an attempt or changing queued jobs. A row whose owner lacks exact
 termination aborts the transaction. It then rechecks the complete registered and running-job
 population and installs protocol-3-only registration,
-authentication, and capture claim functions. It inserts `capture_cutover` with
-`operation_quiescent = true`, `publication_closed = false`, `complete = false`, and
-`cutoff_at = clock_timestamp()` in the same transaction. There is no drain state for a stale
-binary to join. A job admitted while the service is stopped remains queued and is claimed only by
-a protocol-3 worker after restart.
+authentication, and capture claim functions. It inserts `capture_operation_cutoff` with
+`operation_quiescent = true` and `cutoff_at = clock_timestamp()` in the same transaction. There is
+no drain state for a stale binary to join. A job admitted while the service is stopped remains
+queued and is claimed only by a protocol-3 worker after restart.
 
 Every process restart registers a fresh immutable incarnation. A protocol-2 restart that registers
 before the cutoff bar appears in the locked population recheck and blocks unless terminated. A
@@ -248,19 +246,18 @@ restart racing after the bar is rejected at registration before it can authentic
 Local, Compose, and Kubernetes use their existing authority-specific fresh incarnation identities;
 none may reactivate a terminated row.
 
-Historical capture rows with no operation link are covered only when
-`jobs.created_at <= capture_cutover.cutoff_at` and aggregate `complete` is true; later rows require
-attempt-linked evidence. The cutoff alone does not authorize #1946 selection or remove provider
-state. Existing pre-release in-flight capture work is canceled by the offline transaction after
-owner termination and is not resumed or preserved. If an assertion fails, the migration rolls back
-and names each blocking incarnation or job; the recovery action is to complete the supported
-lifecycle stop and rerun migration. A residual running row with a positively terminated owner
-needs no separate reconciler pass.
+Historical capture rows with no operation link are bounded by
+`jobs.created_at <= capture_operation_cutoff.cutoff_at`, but the cutoff alone does not authorize
+#1946 selection or remove provider state. #1952 defines publication closure and the combined
+completion evidence that #1946 must additionally require. Existing pre-release in-flight capture
+work is canceled by the offline transaction after owner termination and is not resumed or
+preserved. If an assertion fails, the migration rolls back and names each blocking incarnation or
+job; the recovery action is to complete the supported lifecycle stop and rerun migration. A
+residual running row with a positively terminated owner needs no separate reconciler pass.
 
 Helm and Compose upgrade documentation makes the offline stop a required step and refuses an
-in-place rolling upgrade across protocol 2 to 3. Fresh installations create an operation-quiescent
-singleton with `publication_closed = false` and `complete = false`; #1952's initialization closes
-publication and aggregate completion.
+in-place rolling upgrade across protocol 2 to 3. Fresh installations create only the
+operation-quiescent cutoff; #1952 later installs publication and combined-completion state.
 
 ## Error handling and observability
 
@@ -330,10 +327,11 @@ prove any protocol-2 incarnation
 without exact lifecycle termination, including a lapsed worker with a terminal job and live
 provider thread, aborts the whole migration, while a fully stopped deployment
 atomically records an operation-quiescent database-clock cutoff without aggregate completion. They
-also prove #1946 remains barred until a simulated #1952 closure completes the row. An abruptly
+also prove the migration exposes no publication or aggregate-completion schema owned by #1952. An
+abruptly
 stopped worker's residual running capture is idempotently canceled only after termination proof.
 Queued work remains unchanged and is claimed only after restart by protocol 3. A fresh database
-asserts the exact protocol, operation-quiescent, publication-closed, complete, and cutoff fields;
+asserts the exact protocol, operation-quiescent, and cutoff fields;
 the canceled row assertion pins null error category, bounded reason, cleared worker/lease/heartbeat,
 and unchanged attempt. Rolling protocol-2 registration and authentication are rejected. A
 retry/cancellation race proves claim does not charge or hide a prior unacknowledged operation.

@@ -20,15 +20,16 @@ libvirt/QMP, pytest, Helm/Compose deployment documentation.
   standard-library `os.pidfd_open`/`signal.pidfd_send_signal` surfaces available on Python 3.14.
 - Child argv is exactly `python -m kdive capture-operation --launch-token <token> --gate-fd <fd>`;
   cwd is the private attempt directory and request basename is `request.json`.
-- The child is single-task after exec. Before the gate read, install a filter denying `fork`,
-  `vfork`, `clone`, `clone3`, `execve`, and `execveat`; provider imports occur after release.
+- The child is single-process after exec. Before the gate read, deny `fork`, `vfork`, `execve`,
+  and `execveat`; allow legacy `clone` only with `CLONE_THREAD`; return `ENOSYS` for `clone3` so
+  libc falls back to inspectable legacy thread creation. Provider imports occur after release.
 - Gate-release authority check is `SELECT 1` on the lock session immediately before the write;
   recurring probes run every 250 ms with one-second client and statement timeouts.
 - TERM and KILL waits are five seconds each on the monotonic clock, per cancellation request.
 - Protocol cutover is offline and unconditional: no online drain, compatibility generation, or
   legacy-work preservation. Every protocol-2 incarnation needs exact lifecycle termination.
-- #1951 writes `operation_quiescent` and `cutoff_at`; #1952 owns `publication_closed` and
-  aggregate `complete`. #1946 may not select historical rows until aggregate completion.
+- #1951 writes only `operation_quiescent` and `cutoff_at`; #1952 owns publication closure and the
+  combined-completion schema. #1946 may not select historical rows until both issues' evidence.
 - No MCP tool/schema change. Packet bytes and credentials never enter argv, JSON logs, or Postgres.
 - Run focused tests during TDD, then `just ci`. Live local/remote proofs remain gated and are
   reported separately rather than treated as passing when fixtures are absent.
@@ -74,7 +75,7 @@ Steps:
 
 Acceptance: one current operation per charged attempt; no later attempt while prior evidence is
 incomplete; recovery cannot cross authority scope; the offline transaction rejects every unsafe
-legacy state and leaves aggregate completion false.
+legacy state and creates no publication or combined-completion schema owned by #1952.
 
 ## Task 2: Implement the gated Linux child boundary
 
@@ -101,18 +102,20 @@ Steps:
    timeout, token scan, unreadable `/proc`, result bounds, modes, symlinks, and malformed JSON.
 3. Implement private directories/files with directory-fd-relative `O_NOFOLLOW` opens, canonical
    digests, allowlisted environment, launch-token recovery, pidfd signaling, and bounded waits.
-4. Implement the pre-gate seccomp filter and tests that every denied syscall returns `EPERM` and
-   `/proc/<pid>/task` remains a singleton on x86_64 and ppc64le. The ppc64le arm uses the native
-   POWER carrier documented by `docs/operating/runbooks/power-host-bringup.md`: after that runbook's
+4. Implement the pre-gate seccomp filter and tests that process creation returns `EPERM`, thread
+   creation succeeds, and the child process tree has no descendants on x86_64 and ppc64le. The
+   ppc64le arm uses the native POWER carrier documented by
+   `docs/operating/runbooks/power-host-bringup.md`: after that runbook's
    environment setup, run `uv run python -m pytest
    tests/jobs/capture_operations/test_sandbox.py -q`. Success means all six denied syscalls return
-   `EPERM` and the task directory stays singleton. This is a required release proof; if no native
-   POWER host is available, report the arm unavailable and do not claim cross-platform completion.
+   `EPERM`, a provider thread runs, and the child tree stays empty. This is a required release
+   proof; if no native POWER host is available, report the arm unavailable and do not claim
+   cross-platform completion.
 5. Run `uv run python -m pytest tests/jobs/capture_operations -q`, `just lint`, and `just type`;
    expect green. Commit `feat(jobs): add gated capture child boundary`.
 
 Acceptance: provider/request input is unreachable before release; an identity-less launch remains
-discoverable; exact-child cancellation is PID-reuse safe; the child cannot create another task.
+discoverable; exact-child cancellation is PID-reuse safe; the child cannot create descendants.
 
 ## Task 3: Move provider execution and quiescence behind the boundary
 
@@ -134,7 +137,7 @@ Steps:
 1. Add red unit tests that probes reconnect, detach idempotently, query the exact QOM id, reject
    presence/unreachable/unordered transports, and redact details.
 2. Add red child integration tests for each provider fake covering every provider-method failure,
-   result bounds, detach/reclaim, and no descendant tasks.
+   result bounds, detach/reclaim, and no descendant processes.
 3. Implement synchronous child executors and independent quiescence probes without sharing code
    across provider families beyond the port models.
 4. Add gated local and remote real-stack tests delaying an accepted monitor mutation, killing the
@@ -229,7 +232,7 @@ Steps:
    workers; a post-migration failure leaves protocol 3 installed and workers stopped. The only
    post-migration rollback is `pg_restore --clean --if-exists` of the named backup followed by the
    prior image/chart; never start a protocol-2 worker against the migrated database.
-6. Update all three runbooks with these exact commands and state that #1952 still gates aggregate
+6. Update all three runbooks with these exact commands and state that #1952 still gates combined
    historical coverage.
 7. Run focused deployment tests, `just test-compose-lifecycle`, `just lint-shell`,
    `just lint-ansible`, `just test-ansible`, `just docs-links`, `just docs-paths`, and
@@ -241,7 +244,7 @@ Steps:
 
 Acceptance: no protocol-2 worker can register, authenticate, claim, or survive into the cutoff;
 residual running legacy captures are canceled only after positive owner termination; fresh and
-upgrade installs leave aggregate completion false for #1952.
+upgrade installs do not create publication or combined-completion schema owned by #1952.
 
 ## Requirement map
 
