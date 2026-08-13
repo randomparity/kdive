@@ -101,7 +101,12 @@ Steps:
 3. Implement private directories/files with directory-fd-relative `O_NOFOLLOW` opens, canonical
    digests, allowlisted environment, launch-token recovery, pidfd signaling, and bounded waits.
 4. Implement the pre-gate seccomp filter and tests that every denied syscall returns `EPERM` and
-   `/proc/<pid>/task` remains a singleton on x86_64 and ppc64le.
+   `/proc/<pid>/task` remains a singleton on x86_64 and ppc64le. The ppc64le arm uses the native
+   POWER carrier documented by `docs/operating/runbooks/power-host-bringup.md`: after that runbook's
+   environment setup, run `uv run python -m pytest
+   tests/jobs/capture_operations/test_sandbox.py -q`. Success means all six denied syscalls return
+   `EPERM` and the task directory stays singleton. This is a required release proof; if no native
+   POWER host is available, report the arm unavailable and do not claim cross-platform completion.
 5. Run `uv run python -m pytest tests/jobs/capture_operations -q`, `just lint`, and `just type`;
    expect green. Commit `feat(jobs): add gated capture child boundary`.
 
@@ -173,22 +178,40 @@ unchanged.
 
 Files:
 
-- Modify Helm and Compose worker lifecycle deployment/runbook files selected by existing upgrade
-  seams, plus `docs/operating/runbooks/live-testing.md` if the live invocation changes.
-- Add shell/render/migration guards in matching test modules.
+- Create `scripts/live-stack/cutover-capture-protocol.sh` for the host-process/Compose path.
+- Create `scripts/cutover-capture-protocol-helm.sh` for Helm deployments.
+- Modify `deploy/helm/kdive/templates/job-migrate.yaml` so migration does not race a worker rollout,
+  and document the replacing upgrade in `deploy/helm/kdive/README.md` and
+  `docs/operating/runbooks/kubernetes-deploy.md`.
+- Modify `scripts/live-stack/README.md`; add shell/shape guards in
+  `tests/scripts/test_live_stack_scripts.py`, `tests/scripts/test_live_workflow_shape.py`,
+  `tests/helm/test_helm_render.py`, and `tests/helm/test_helm_upgrade_config.py`.
 - Flip ADR-0558 to Accepted only in the final implementation commit.
 
 Steps:
 
-1. Add red tests that upgrades require stopping all workers, refuse rolling protocol 2→3, surface
-   exact blocking incarnation/job diagnostics, and permit fresh protocol-3 installations.
-2. Implement the offline stop/migrate/restart sequencing using existing lifecycle authorities; do
-   not add a compatibility flag or alternate online path.
-3. Update operator docs with the exact stop, migration, recovery, and restart commands and state
-   that #1952 still gates aggregate historical coverage.
-4. Run focused deployment tests, `just lint-shell`, `just lint-ansible`, `just test-ansible`,
+1. Add red tests that both cutover scripts stop all workers, refuse rolling protocol 2→3, preserve
+   the original replica count, surface exact blocking incarnation/job diagnostics, and permit a
+   fresh protocol-3 installation.
+2. Implement the local sequence as `stop_daemons` → verify every recorded protocol-2 host PID is
+   absent → `pg_dump --format=custom` → `python -m kdive migrate` →
+   `restart_host_processes`. A failed termination precondition or migration leaves workers stopped
+   and prints the exact recovery command; the script never calls `down.sh` or wipes backends.
+3. Implement the Helm sequence with explicit `RELEASE`, `NAMESPACE`, values file, and backup path:
+   read `.Values.worker.replicas`, `kubectl scale statefulset/${RELEASE}-worker --replicas=0`, wait
+   for every worker pod deletion/finalizer termination witness, run `pg_dump --format=custom`, then
+   run `helm upgrade` with the target image and original replica count. The migration hook acquires
+   the global cutover lock and refuses any live protocol-2 incarnation before installing protocol
+   3. Do not add a compatibility flag or alternate rolling path.
+4. Make failures operationally explicit: a precondition failure leaves the old schema and stopped
+   workers; a post-migration failure leaves protocol 3 installed and workers stopped. The only
+   post-migration rollback is `pg_restore --clean --if-exists` of the named backup followed by the
+   prior image/chart; never start a protocol-2 worker against the migrated database.
+5. Update both runbooks with these exact commands and state that #1952 still gates aggregate
+   historical coverage.
+6. Run focused deployment tests, `just lint-shell`, `just lint-ansible`, `just test-ansible`,
    `just docs-links`, `just docs-paths`, and `just adr-status-check`.
-5. Set ADR-0558 to Accepted, run `just ci`, verify `git status --porcelain` is empty after staging,
+7. Set ADR-0558 to Accepted, run `just ci`, verify `git status --porcelain` is empty after staging,
    and commit `feat(deploy): enforce capture protocol cutover`.
 
 Acceptance: no protocol-2 worker can register, authenticate, claim, or survive into the cutoff;
