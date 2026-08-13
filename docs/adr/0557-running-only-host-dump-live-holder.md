@@ -24,9 +24,11 @@ requested `runs.system_id`. It treats only a `running` `capture_vmcore` job as a
 A missing or malformed payload identity does not match and cannot abort the whole sweep.
 
 A queued job is not a live holder because no worker has begun its provider operation. When it
-is claimed, its state becomes `running` before provider capture proceeds, so the guard applies
-during the period in which the deterministic volume may be created, written, or downloaded.
-The existing ADR-0094 mtime grace remains the independent guard for a newly changed volume.
+is claimed, its state becomes `running` before provider capture proceeds, so a sweep that samples
+the job after that transition skips deletion. The state check and provider deletion are not one
+atomic operation, however: a claim can occur between them. #1955 owns the shared coordination
+needed to close that pre-existing residual race. The existing ADR-0094 mtime grace remains the
+independent guard for a newly changed volume.
 
 ## Consequences
 
@@ -35,6 +37,9 @@ The existing ADR-0094 mtime grace remains the independent guard for a newly chan
 - A permanently queued capture cannot pin an old orphaned volume.
 - Correctness depends on the existing queue contract that a worker records `running` before it
   performs provider work. This change adds no new job state or clock.
+- The guard remains a state sample rather than an exclusion boundary. It fixes the shipped
+  always-false predicate and protects captures already running when sampled, but it does not make
+  a queued-to-running transition atomic with deletion; #1955 tracks that coordination.
 - The query adds a join to `runs` on its primary key for each old volume considered by the
   sweep.
 - The text comparison does not use the UUID index for the join, but the query first narrows to

@@ -19,9 +19,10 @@ remain bound query values.
 
 The query does not treat `queued` as active. Queue admission is intent to run, not evidence of
 a provider operation, and a queued row has no terminal age bound. Once claimed, the existing
-queue transition to `running` precedes handler execution; at that point the live-holder guard
-protects the volume. The existing 30-minute, database-clock-referenced mtime grace continues to
-cover fresh volumes independently.
+queue transition to `running` precedes handler execution; a sweep sampling after that transition
+skips the volume. The check and delete remain separate operations, so #1955 owns the shared
+coordination needed to close a claim-between-check-and-delete race. The existing 30-minute,
+database-clock-referenced mtime grace continues to cover fresh volumes independently.
 
 No public interface changes. The function's docstring will say `running` rather than
 `non-terminal`, keeping its internal contract aligned with the query.
