@@ -376,7 +376,7 @@ async def _has_live_system(
 
 
 async def has_active_capture_job(conn: AsyncConnection, system_id: UUID) -> bool:
-    """True if ``system_id`` has a running Run-addressed capture job (#1945)."""
+    """True if ``system_id`` has a running Run-addressed capture job (ADR-0557)."""
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT 1 FROM jobs j "

@@ -1132,7 +1132,7 @@ async def _seed_capture_job(
 
 
 def test_active_capture_job_resolves_system_through_run(migrated_url: str) -> None:
-    """A running Run-addressed capture is a live holder for its bound System (#1945)."""
+    """A running Run-addressed capture is a live holder for its bound System (ADR-0557)."""
 
     async def _run() -> None:
         async with await connect(migrated_url) as conn:
@@ -1214,7 +1214,7 @@ def test_does_not_reap_a_volume_with_an_active_capture_job(migrated_url: str) ->
 
 
 def test_reaps_a_volume_with_a_queued_capture_job(migrated_url: str) -> None:
-    """Queued work has not started provider capture and cannot pin an old volume (#1945)."""
+    """Queued work has not started provider capture and cannot pin an old volume (ADR-0557)."""
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
@@ -1234,7 +1234,7 @@ def test_reaps_a_volume_with_a_queued_capture_job(migrated_url: str) -> None:
 
 
 def test_malformed_capture_payload_does_not_abort_reaping(migrated_url: str) -> None:
-    """A malformed Run identity is a non-match, not a sweep-wide database error (#1945)."""
+    """A malformed Run identity is a non-match, not a sweep-wide database error (ADR-0557)."""
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
