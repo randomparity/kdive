@@ -195,3 +195,25 @@ def test_local_libvirt_emitted_once() -> None:
     assert res.stdout.count("\n  KDIVE_LOCAL_LIBVIRT_ENABLED:") == 1, (
         "KDIVE_LOCAL_LIBVIRT_ENABLED rendered more than once (range + explicit?)"
     )
+
+
+def test_protocol_cutover_requires_explicit_helm_authority_inputs() -> None:
+    script = Path(__file__).resolve().parents[2] / "scripts/cutover-capture-protocol-helm.sh"
+    result = subprocess.run([str(script)], capture_output=True, text=True, check=False)
+    assert result.returncode == 2
+    assert "RELEASE NAMESPACE VALUES_FILE BACKUP_PATH TARGET_IMAGE" in result.stderr
+
+
+def test_protocol_cutover_preserves_original_worker_replicas() -> None:
+    text = (
+        Path(__file__).resolve().parents[2] / "scripts/cutover-capture-protocol-helm.sh"
+    ).read_text()
+    assert "helm get values" in text
+    assert "worker.replicas" in text
+    assert '"statefulset/${release}-worker"' in text
+    assert "--replicas=0" in text
+    assert '--set-string "worker.replicas=${worker_replicas}"' in text
+    assert '"${repo_root}/deploy/helm/kdive"' in text
+    assert "capture_operation_cutoff" in text
+    assert "cutover_state=unknown" in text
+    assert "--reuse-values" not in text

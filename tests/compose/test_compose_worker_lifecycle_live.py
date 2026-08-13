@@ -17,7 +17,7 @@ from typing import LiteralString, cast
 import psycopg
 import pytest
 
-from kdive.db.migrate import apply_migrations
+from kdive.db.migrate import apply_migrations, discover_migrations
 from kdive.processes.lifecycle import compose_worker_lifecycle as lifecycle_module
 from kdive.processes.lifecycle.compose_worker_lifecycle import ComposeWorkerLifecycle
 from kdive.processes.lifecycle.docker_death_api import WorkerLifecycleGate
@@ -226,13 +226,30 @@ def _cleanup_isolated_stack(
     raise ExceptionGroup("isolated Compose cleanup failed", errors)
 
 
-def _apply_migrations_when_stable(admin_dsn: str) -> None:
+def _apply_migrations_when_stable(admin_dsn: str, *, through: str | None = None) -> None:
     """Cross the official Postgres image's temporary init-server restart."""
     deadline = time.monotonic() + 30
     while True:
         try:
             with psycopg.connect(admin_dsn, autocommit=True) as conn:
-                apply_migrations(conn)
+                if through is None:
+                    apply_migrations(conn)
+                else:
+                    with conn.transaction():
+                        conn.execute(
+                            "CREATE TABLE schema_migrations (version text PRIMARY KEY, "
+                            "filename text NOT NULL, checksum text NOT NULL, "
+                            "applied_at timestamptz NOT NULL DEFAULT now())"
+                        )
+                        for migration in discover_migrations():
+                            conn.execute(migration.sql.encode())
+                            conn.execute(
+                                "INSERT INTO schema_migrations (version, filename, checksum) "
+                                "VALUES (%s, %s, %s)",
+                                (migration.version, migration.filename, migration.checksum),
+                            )
+                            if migration.version == through:
+                                break
             return
         except psycopg.OperationalError:
             if time.monotonic() >= deadline:
@@ -241,7 +258,9 @@ def _apply_migrations_when_stable(admin_dsn: str) -> None:
 
 
 @contextmanager
-def _isolated_stack(tmp_path: Path) -> Iterator[tuple[dict[str, str], str, str]]:
+def _isolated_stack(
+    tmp_path: Path, *, through: str | None = None
+) -> Iterator[tuple[dict[str, str], str, str]]:
     token = uuid.uuid4().hex[:12]
     project = f"kdive-lifecycle-proof-{token}"
     image = f"kdive-lifecycle-proof:{token}"
@@ -257,7 +276,7 @@ def _isolated_stack(tmp_path: Path) -> Iterator[tuple[dict[str, str], str, str]]
     try:
         _run(("docker", "build", "--tag", image, "."), env, timeout=600)
         _compose(env, "up", "-d", "--wait", "--wait-timeout", "60", "postgres")
-        _apply_migrations_when_stable(admin_dsn)
+        _apply_migrations_when_stable(admin_dsn, through=through)
         _compose(env, "--profile", "bootstrap", "run", "--rm", "--no-deps", "role-bootstrap")
         yield env, admin_dsn, str(credential_path)
     finally:
@@ -500,7 +519,13 @@ def test_migration_application_retries_postgres_init_restart(
     assert applied == [stable_connection]
 
 
-def _gate(project: str, witness_dsn: str, credential_path: Path) -> WorkerLifecycleGate:
+def _gate(
+    project: str,
+    witness_dsn: str,
+    credential_path: Path,
+    *,
+    protocol: int = CURRENT_WORKER_FENCE_PROTOCOL,
+) -> WorkerLifecycleGate:
     async def register(holder: str, container_id: str, credential_hash: bytes) -> None:
         conn = await psycopg.AsyncConnection.connect(witness_dsn)
         try:
@@ -510,7 +535,7 @@ def _gate(project: str, witness_dsn: str, credential_path: Path) -> WorkerLifecy
                 "docker",
                 {"container_id": container_id},
                 credential_hash,
-                CURRENT_WORKER_FENCE_PROTOCOL,
+                protocol,
             )
         finally:
             await conn.close()
@@ -540,10 +565,14 @@ def _gate(project: str, witness_dsn: str, credential_path: Path) -> WorkerLifecy
 
 
 def _managed_lifecycle(
-    env: dict[str, str], witness_dsn: str, credential_path: Path
+    env: dict[str, str],
+    witness_dsn: str,
+    credential_path: Path,
+    *,
+    protocol: int = CURRENT_WORKER_FENCE_PROTOCOL,
 ) -> tuple[ComposeWorkerLifecycle, WorkerLifecycleGate]:
     project = env["COMPOSE_PROJECT_NAME"]
-    gate = _gate(project, witness_dsn, credential_path)
+    gate = _gate(project, witness_dsn, credential_path, protocol=protocol)
 
     def command(argv: tuple[str, ...], extra_env: dict[str, str] | None) -> str:
         assert argv[:2] == ("docker", "compose")
@@ -647,3 +676,82 @@ def test_compose_worker_lifecycle_preserves_exact_docker_and_database_evidence(
         _run(("docker", "rm", "--force", bypassed_id), env)
         with pytest.raises(RuntimeError, match="retained worker credential"):
             asyncio.run(lifecycle.down(volumes=True))
+
+
+def test_compose_capture_protocol_cutover_uses_exact_termination_and_backup(
+    tmp_path: Path,
+) -> None:
+    if os.environ.get("KDIVE_RUN_COMPOSE_LIFECYCLE_PROOF") != "1":
+        pytest.skip("set KDIVE_RUN_COMPOSE_LIFECYCLE_PROOF=1 for the isolated Docker proof")
+    with _isolated_stack(tmp_path, through="0111") as (env, admin_dsn, credential_name):
+        credential_path = Path(credential_name)
+        witness_dsn = (
+            admin_dsn.replace(
+                "kdive-migration:kdive-migration-local",
+                "kdive-witness-member:kdive-witness-local",
+            )
+            + "?connect_timeout=2"
+        )
+        lifecycle, _gate_v2 = _managed_lifecycle(env, witness_dsn, credential_path, protocol=2)
+        asyncio.run(lifecycle.recreate())
+        old_id = _compose(env, "--profile", "managed-worker", "ps", "--all", "-q", "worker").strip()
+        old_row = _incarnation_row(admin_dsn, old_id)
+        assert old_row is not None
+        old_holder = old_row[0]
+        job_id = uuid.uuid4()
+        with psycopg.connect(admin_dsn) as conn:
+            conn.execute(
+                "INSERT INTO jobs (id, kind, state, attempt, max_attempts, worker_id, "
+                "lease_expires_at, heartbeat_at, authorizing, dedup_key) VALUES "
+                "(%s, 'capture_traffic', 'running', 1, 3, %s, now(), now(), "
+                "'{}'::jsonb, %s)",
+                (job_id, old_holder, f"cutover-{job_id}"),
+            )
+
+        asyncio.run(lifecycle.down())
+        _compose(env, "up", "-d", "--wait", "--wait-timeout", "60", "postgres")
+        assert _incarnation_row(admin_dsn, old_id) == (old_holder, "terminated", "killed")
+
+        backup = tmp_path / "pre-protocol-3.dump"
+        postgres_id = _compose(env, "ps", "-q", "postgres").strip()
+        with backup.open("wb") as output:
+            subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    postgres_id,
+                    "pg_dump",
+                    "--format=custom",
+                    "--username=kdive",
+                    "kdive",
+                ],
+                check=True,
+                stdout=output,
+                stderr=subprocess.PIPE,
+            )
+        assert backup.stat().st_size > 0
+        _apply_migrations_when_stable(admin_dsn)
+        with psycopg.connect(admin_dsn) as conn:
+            assert conn.execute(
+                "SELECT protocol, operation_quiescent FROM capture_operation_cutoff"
+            ).fetchone() == (3, True)
+            assert conn.execute(
+                "SELECT state, worker_id, failure_context FROM jobs WHERE id = %s", (job_id,)
+            ).fetchone() == (
+                "canceled",
+                None,
+                {"reason": "offline_capture_protocol_cutover"},
+            )
+
+        lifecycle_v3, _gate_v3 = _managed_lifecycle(env, witness_dsn, credential_path)
+        asyncio.run(lifecycle_v3.recreate())
+        replacement_id = _compose(
+            env, "--profile", "managed-worker", "ps", "--all", "-q", "worker"
+        ).strip()
+        with psycopg.connect(admin_dsn) as conn:
+            assert conn.execute(
+                "SELECT fence_protocol, state FROM worker_incarnations "
+                "WHERE authority_binding = %s::jsonb",
+                (f'{{"container_id":"{replacement_id}"}}',),
+            ).fetchone() == (3, "active")
+        asyncio.run(lifecycle_v3.down())

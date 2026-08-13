@@ -851,10 +851,38 @@ def test_client_urls_derive_from_the_configurable_ports() -> None:
 
 
 def test_live_stack_scripts_are_strict_bash() -> None:
-    for name in ("env.sh", "apply-migrations.sh", "up.sh", "down.sh", "status.sh"):
+    for name in (
+        "env.sh",
+        "apply-migrations.sh",
+        "cutover-capture-protocol.sh",
+        "up.sh",
+        "down.sh",
+        "status.sh",
+    ):
         text = (ROOT / "scripts/live-stack" / name).read_text()
         assert text.startswith("#!/usr/bin/env bash\n"), f"{name}: missing bash shebang"
         assert "\nset -euo pipefail\n" in text, f"{name}: missing 'set -euo pipefail'"
+
+
+def test_host_cutover_stops_verifies_backs_up_migrates_then_restarts() -> None:
+    text = (ROOT / "scripts/live-stack/cutover-capture-protocol.sh").read_text()
+    ordered = (
+        "stop_daemons",
+        "force_stop_daemons",
+        "terminate-local-cutover",
+        "pg_dump --format=custom",
+        '"$py" -m kdive migrate',
+        "restart_host_processes",
+    )
+    positions: list[int] = []
+    cursor = text.index("trap recovery EXIT")
+    for token in ordered:
+        cursor = text.index(token, cursor)
+        positions.append(cursor)
+    assert positions == sorted(positions)
+    assert "down.sh" not in text
+    assert "--wipe" not in text
+    assert "pg_restore --clean --if-exists" in text
 
 
 def test_restart_host_processes_starts_all_three() -> None:

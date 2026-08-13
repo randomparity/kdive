@@ -58,6 +58,29 @@ It captures live replica counts, proves every KDIVE workload is stopped for migr
 workers only after the target-image witness is ready. Do not use a rolling upgrade or an old image
 after the migration.
 
+**The protocol-3 release carrying migration 0112 has its own unconditional replacing path.** Do
+not use the generic staged procedure or a normal rolling upgrade for this boundary. Export the
+explicit migration-owner DSN and pass the Helm release, namespace, target values file, new backup
+path, and exact tagged or digest-pinned target image:
+
+```bash
+export KDIVE_MIGRATION_DATABASE_URL='postgresql://migration-owner@db.example/kdive'
+export TARGET_IMAGE='ghcr.io/randomparity/kdive:<target-tag>'
+scripts/cutover-capture-protocol-helm.sh \
+  kdive kdive-system kdive-values.yaml \
+  /var/backups/kdive-before-protocol-3.dump \
+  "$TARGET_IMAGE"
+```
+
+The script retains the installed `worker.replicas`, scales the worker StatefulSet to zero, waits
+for every Pod finalizer and exact lifecycle-witness termination row, takes a custom-format backup,
+and runs the hooked target upgrade with the original replica count. The migration hook completes
+before Helm applies the target worker template, so migration cannot race the rollout. Failures
+leave workers at zero. After migration, never start a protocol-2 image; rollback means
+`pg_restore --clean --if-exists` from the named backup followed by the prior chart and image.
+Migration 0112 records operation quiescence only; #1952 still gates publication closure and
+combined historical-capture coverage.
+
 ### Worker capacity: one in-flight job per dispatch lane (ADR-0550)
 
 A worker replica now runs **one in-flight job per accepted dispatch lane — two by default**, where

@@ -103,3 +103,26 @@ def test_examples_scripts_are_covered_by_the_shell_gate() -> None:
     lint_shell = justfile.split("lint-shell:", 1)[1].split("\n\n", 1)[0]
 
     assert "examples" in lint_shell
+
+
+def test_compose_cutover_uses_supported_lifecycle_and_preserves_volumes() -> None:
+    root = Path(__file__).resolve().parents[2]
+    text = (root / "scripts" / "cutover-capture-protocol-compose.sh").read_text()
+    ordered = (
+        "just compose-stop",
+        "worker_incarnations",
+        "pg_dump --format=custom",
+        "docker compose run --rm migrate",
+        "just compose-up",
+    )
+    positions: list[int] = []
+    cursor = text.index("trap recovery EXIT")
+    for token in ordered:
+        cursor = text.index(token, cursor)
+        positions.append(cursor)
+    assert positions == sorted(positions)
+    assert "--volumes" not in text
+    assert "compose-down" not in text
+    assert "KDIVE_IMAGE" in text
+    assert "RAISE EXCEPTION 'Compose protocol cutover still has active worker incarnations:" in text
+    assert "authority_kind <> 'docker'" in text

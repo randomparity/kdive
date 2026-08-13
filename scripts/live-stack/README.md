@@ -18,9 +18,31 @@ the `!` prefix in the agent or directly in a shell.
 | `down.sh` | stop host processes + backends, **keep** state |
 | `down.sh --wipe` | full reset: drop DB/MinIO volumes AND reap `kdive-*` domains + overlays |
 | `status.sh` | read-only health of every layer |
+| `cutover-capture-protocol.sh BACKUP` | stop all host processes, prove legacy local-worker death, back up Postgres, install protocol 3, and restart |
 
 No-VM, no-sudo dev loop (just poke the MCP API against backends):
 `KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-libvirt`.
+
+### Protocol-3 replacing cutover
+
+Do not run a rolling protocol-2-to-3 upgrade. Keep the Compose backends running and use the
+dedicated host-process authority path with a new backup filename:
+
+```bash
+scripts/live-stack/cutover-capture-protocol.sh /var/backups/kdive-before-protocol-3.dump
+```
+
+The script calls `stop_daemons`, verifies every recorded protocol-2 local incarnation with its
+retained host, boot ID, PID, and start ticks, persists exact termination through the lifecycle
+authority, creates a custom-format `pg_dump`, migrates, and calls `restart_host_processes`. It
+never calls `down.sh` and never removes a backend, volume, domain, or artifact. A failed
+precondition or migration leaves workers stopped and the old schema in force. A failure after the
+migration leaves protocol 3 installed and workers stopped.
+
+After migration 0112, never start a protocol-2 worker. The only rollback is the command the script
+prints—`pg_restore --clean --if-exists` from the named backup—followed by deployment of the prior
+binary. Protocol 3 records operation quiescence only; #1952 still gates publication closure and
+combined historical-capture coverage.
 
 ## Backends only — `just stack-up` (no sudo)
 

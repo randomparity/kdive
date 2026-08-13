@@ -119,6 +119,32 @@ local role bootstrap before the operator-side lifecycle wrapper registers the cu
 bootstrap resets fixed local development passwords and restores the intended runtime-role
 memberships.
 
+### Protocol-3 capture cutover
+
+Migration 0112 is an unconditional replacing cutover, not a rolling worker-fence upgrade. Supply
+both a new custom-format backup path and the exact target image:
+
+```bash
+export TARGET_IMAGE='ghcr.io/randomparity/kdive:<target-tag>'
+scripts/cutover-capture-protocol-compose.sh \
+  /var/backups/kdive-before-protocol-3.dump \
+  "$TARGET_IMAGE"
+```
+
+The script runs `just compose-stop`, restarts only Postgres, requires the exact
+`compose_worker_lifecycle` termination rows, runs `pg_dump --format=custom`, executes the target
+image's one-shot `migrate` service, and runs `just compose-up` with that same image. It does not
+use `compose-down`, `--volumes`, or raw worker lifecycle commands, so the named database, artifact,
+build, and install volumes remain attached to the Compose project. A fresh database with no legacy
+workers is accepted and receives protocol 3 directly.
+
+A precondition or migration failure leaves workers stopped and the old schema authoritative. A
+post-migration failure leaves protocol 3 installed and workers stopped. Never restart a protocol-2
+image against that database. The only post-migration rollback is the exact
+`pg_restore --clean --if-exists` command printed by the script, followed by the prior image.
+Migration 0112 records operation quiescence only; #1952 still gates publication closure and
+combined historical-capture coverage.
+
 `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` disables local mutation. An externally provisioned Compose-derived
 deployment must supply an equivalent stop-old, migrate, provision credentials and memberships, and
 start gate outside this reference workflow. Verify that every current worker has registered its

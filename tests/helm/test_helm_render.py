@@ -649,9 +649,18 @@ def test_bundled_with_ack_uses_post_install_migrate() -> None:
     assert "post-install" in res.stdout
 
 
+def test_bundled_upgrade_migrates_before_workload_rollout() -> None:
+    jobs = _jobs_by_name("bundledBackends=true", "demoAcknowledged=true")
+    phase = jobs["migrate"]["phase"]
+    assert phase is not None
+    assert "post-install" in phase
+    assert "pre-upgrade" in phase
+    assert "post-upgrade" not in phase
+
+
 def test_bundled_runtime_role_bootstrap_runs_after_migration() -> None:
     jobs = _jobs_by_name("bundledBackends=true", "demoAcknowledged=true")
-    assert jobs["migrate"]["phase"] == "post-install,post-upgrade"
+    assert jobs["migrate"]["phase"] == "post-install,pre-upgrade"
     script = jobs["migrate"]["args"][0]
     assert script.index("python -m kdive migrate") < script.index("GRANT {} TO {}")
 

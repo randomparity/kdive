@@ -8,7 +8,7 @@ metadata:
     {{- if .Values.bundledBackends }}
     # Demo path: the bundled Postgres subchart is created with the release's normal
     # resources, after pre-install hooks. Run migrate post-install so the DB exists.
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": post-install,pre-upgrade
     {{- else }}
     # Production path: external backends pre-exist, so migrate before app rollout.
     "helm.sh/hook": pre-install,pre-upgrade

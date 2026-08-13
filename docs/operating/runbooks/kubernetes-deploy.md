@@ -156,12 +156,44 @@ A `helm upgrade` runs single-responsibility Jobs, so each failure names exactly 
 | Job | Hook phase | Fails when |
 |-----|-----------|------------|
 | `<release>-kdive-validate-systems` | `pre-install`/`pre-upgrade`, weight `-10` | the mounted `systems.toml` is malformed/invalid (fail-fast — aborts the upgrade before migrate) |
-| `<release>-kdive-migrate` | `pre-*` external / `post-*` bundled, weight `0` | a SQL schema migration actually fails |
+| `<release>-kdive-migrate` | `pre-*` external; `post-install` and `pre-upgrade` bundled, weight `0` | a SQL schema migration actually fails |
 
-The validate Job renders only when `systems.configMapName` is set. Migrations are forward-only and
-must be backward-compatible (ADR-0015), so a rollback is image-only.
+The validate Job renders only when `systems.configMapName` is set. Except for the explicitly
+replacing protocol-3 boundary below, migrations are forward-only and backward-compatible
+(ADR-0015), so a rollback is image-only.
 
 ### Staged worker-fence upgrade
+
+#### Protocol-3 capture cutover (migration 0112)
+
+Migration 0112 does not use the generic staged sequence below. It is an unconditional replacing
+cutover with no rolling, compatibility, or protocol-2 restart path. Use the repository script with
+all authority inputs explicit:
+
+```bash
+export KDIVE_MIGRATION_DATABASE_URL='postgresql://migration-owner@db.example/kdive'
+export TARGET_IMAGE='ghcr.io/randomparity/kdive:<target-tag>'
+scripts/cutover-capture-protocol-helm.sh \
+  kdive kdive-system kdive-values.yaml \
+  /var/backups/kdive-before-protocol-3.dump \
+  "$TARGET_IMAGE"
+```
+
+The script reads the installed `worker.replicas`, scales
+`statefulset/<release>-kdive-worker` to zero, waits for deletion and finalizer completion of every
+old worker Pod, verifies the lifecycle authority's exact namespace/name/UID termination rows,
+creates a `pg_dump --format=custom` backup, and runs the target-image Helm upgrade with the saved
+replica count. The migration hook runs before workload rollout on both external and bundled
+upgrade paths. Migration 0112 holds the global capture-protocol lock and names every blocking
+incarnation or capture job before it installs protocol 3.
+
+A precondition or migration failure leaves the old schema and zero workers. A later failure leaves
+protocol 3 installed and zero workers. Never start a protocol-2 image after migration. The only
+post-migration rollback is the script's exact `pg_restore --clean --if-exists` command followed by
+the prior chart and image. The cutoff is operation-quiescent evidence only: #1952 still gates
+publication closure and combined historical-capture coverage.
+
+The remaining staged procedure applies to other worker-fence releases.
 
 Use this procedure for a release carrying the worker-fence protocol. It is stop-old-first and
 forward-only: do not restore an old worker image, force-delete a Pod, remove a finalizer, or
@@ -1105,7 +1137,7 @@ put all four `demoCredentials.postgresql.serverPassword`,
 `demoCredentials.postgresql.workerPassword`,
 `demoCredentials.postgresql.reconcilerPassword`, and
 `demoCredentials.postgresql.lifecycleWitnessPassword` values in `$TARGET_VALUES` before this stage.
-Its post-upgrade hook migrates and resets those role passwords. On external backends, rotate the
+Its pre-upgrade hook migrates and resets those role passwords. On external backends, rotate the
 four database role credentials and referenced Secrets only after this all-zero migration succeeds.
 
 ```bash
@@ -1139,7 +1171,7 @@ also skips the external ConfigMap hook.
 
 #### Stage 5 — Correct target credential content
 
-For bundled backends, Stage 4's post-upgrade hook has already reset the four runtime-role passwords
+For bundled backends, Stage 4's pre-upgrade hook has already reset the four runtime-role passwords
 from the target `demoCredentials` values. For external backends, complete the deployment-specific
 database-role and same-reference Secret-content rotation now. Confirm every target Secret key is
 ready before continuing; this runbook does not invent commands for an external secret manager.
