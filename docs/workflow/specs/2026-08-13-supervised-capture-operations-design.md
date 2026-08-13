@@ -226,10 +226,14 @@ stop path rather than killing an unrecorded process.
 Migration 0112 fails before any schema mutation unless every `worker_incarnations` row with
 protocol below 3 has exact durable lifecycle-authority termination and a valid immutable authority
 binding. This is the complete registered legacy population, independent of heartbeat, lease, and
-job state. A `capture_traffic` job still `running` under one of those incarnations is an additional
-consistency failure, not an alternative proof. Worker registration and cutoff acquire the same
+job state. A `capture_traffic` job still `running` under one of those incarnations is finalized
+offline only after its exact owner's termination is verified. Worker registration and cutoff
+acquire the same
 global capture-protocol advisory lock. The cutoff transaction first persists minimum protocol 3,
-then rechecks the complete registered population and installs protocol-3-only registration,
+then takes each residual job fence and idempotently moves the row from `running` to `canceled` with
+`ErrorCategory.CANCELED`, clearing lease ownership without charging an attempt or changing queued
+jobs. A row whose owner lacks exact termination aborts the transaction. It then rechecks the
+complete registered and running-job population and installs protocol-3-only registration,
 authentication, and capture claim functions. It inserts `capture_cutover` with
 `operation_quiescent = true`, `publication_closed = false`, `complete = false`, and
 `cutoff_at = clock_timestamp()` in the same transaction. There is no drain state for a stale
@@ -245,14 +249,16 @@ none may reactivate a terminated row.
 Historical capture rows with no operation link are covered only when
 `jobs.created_at <= capture_cutover.cutoff_at` and aggregate `complete` is true; later rows require
 attempt-linked evidence. The cutoff alone does not authorize #1946 selection or remove provider
-state. Existing
-pre-release in-flight capture work is canceled by stopping the old deployment and is not resumed
-or preserved. If the assertions fail, the migration rolls back and names each blocking incarnation
-or job; the recovery action is to complete the supported lifecycle stop and rerun migration.
+state. Existing pre-release in-flight capture work is canceled by the offline transaction after
+owner termination and is not resumed or preserved. If an assertion fails, the migration rolls back
+and names each blocking incarnation or job; the recovery action is to complete the supported
+lifecycle stop and rerun migration. A residual running row with a positively terminated owner
+needs no separate reconciler pass.
 
 Helm and Compose upgrade documentation makes the offline stop a required step and refuses an
-in-place rolling upgrade across protocol 2 to 3. Fresh installations create only the completed
-singleton and never exercise a legacy path.
+in-place rolling upgrade across protocol 2 to 3. Fresh installations create an operation-quiescent
+singleton with `publication_closed = false` and `complete = false`; #1952's initialization closes
+publication and aggregate completion.
 
 ## Error handling and observability
 
@@ -322,9 +328,11 @@ prove any protocol-2 incarnation
 without exact lifecycle termination, including a lapsed worker with a terminal job and live
 provider thread, aborts the whole migration, while a fully stopped deployment
 atomically records an operation-quiescent database-clock cutoff without aggregate completion. They
-also prove #1946 remains barred until a simulated #1952 closure completes the row. Queued work
-admitted before cutoff is
-claimed only after restart by protocol 3 and that rolling protocol-2 authentication is rejected. A
+also prove #1946 remains barred until a simulated #1952 closure completes the row. An abruptly
+stopped worker's residual running capture is idempotently canceled only after termination proof.
+Queued work remains unchanged and is claimed only after restart by protocol 3. A fresh database
+asserts the exact protocol, operation-quiescent, publication-closed, complete, and cutoff fields;
+rolling protocol-2 registration and authentication are rejected. A
 retry/cancellation race proves claim does not charge or hide a prior unacknowledged operation.
 Provider tests prove local and remote probes reconnect independently and refuse to acknowledge QOM
 presence or an unreachable endpoint. Each provider's gated real-stack test delays an accepted

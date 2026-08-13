@@ -94,8 +94,10 @@ cutover while any protocol-2 worker incarnation remains active or any protocol-2
 has no exact lifecycle-authority termination record. The population is every registered
 incarnation whose fence protocol is below 3, independent of heartbeat, lease, or job state; an
 ambiguous or missing authority binding also fails. A running protocol-2-owned capture job remains
-an additional consistency failure, not termination evidence. The cutoff transaction rechecks the
-complete population under the worker-incarnation fence, then atomically records the singleton as
+eligible for offline cancellation only after its exact owning incarnation's termination is
+verified. The cutoff transaction acquires the job fence, idempotently moves each such row to
+`canceled` with the existing cancellation category, then rechecks the complete worker and job
+population under the worker-incarnation fence. It then atomically records the singleton as
 operation-quiescent with a `clock_timestamp()` cutoff. Aggregate completion remains false until
 #1952 records publication closure. New workers require protocol 3 at registration, authentication,
 and claim, so a stale
@@ -125,6 +127,8 @@ that registered before the bar appears in the locked recheck and must already be
   being maintained.
 - Heartbeats, leases, and job states never satisfy the cutover fence. A protocol-2 incarnation
   without exact lifecycle termination blocks migration even when its job is already terminal.
+- After owner termination is proven, offline cutover cancels residual running legacy capture rows;
+  it never resumes them or changes queued jobs.
 - The cutoff is operation-quiescent evidence only. Historical reclamation remains barred until
   #1952 records publication closure and atomically completes the aggregate cutover.
 - The result spool contains sensitive packet data and must be mode 0600 in a mode-0700
