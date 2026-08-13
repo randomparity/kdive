@@ -946,6 +946,230 @@ def test_worker_authority_loss_waits_for_stalled_put_cleanup(
     assert outcome == ("running", None)
 
 
+def _stall_async_call(monkeypatch, target: object, name: str, arrived, release) -> None:
+    original = getattr(target, name)
+
+    async def stalled(*args: object, **kwargs: object):
+        arrived.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(target, name, stalled)
+
+
+@pytest.mark.parametrize(
+    ("authority", "stage"),
+    [
+        ("heartbeat", "claim"),
+        ("heartbeat", "audit"),
+        ("stop", "claim"),
+        ("stop", "audit"),
+    ],
+)
+def test_worker_authority_loss_during_registration_compensates_stored_object(
+    migrated_url: str,
+    monkeypatch,
+    tmp_path: Path,
+    authority: str,
+    stage: str,
+) -> None:
+    store = _CleanupStallingStore()
+    capturer = _FakeCapturer(tmp_path)
+    credential = SecretStr("capture-registration-cancel")
+
+    async def _go():
+        stage_arrived = asyncio.Event()
+        release_stage = asyncio.Event()
+        if stage == "claim":
+            _stall_async_call(
+                monkeypatch, capture_traffic.ARTIFACTS, "claim", stage_arrived, release_stage
+            )
+        else:
+            _stall_async_call(
+                monkeypatch, capture_traffic.audit, "record", stage_arrived, release_stage
+            )
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4, open=False) as pool:
+            await pool.open()
+            run_id, _ = await _seed_ready_run(pool)
+            job = _job(run_id)
+            await _insert_job(pool, job, JobState.RUNNING)
+            resolver = provider_resolver(traffic_capturer=capturer)
+            monkeypatch.setattr(
+                capture_traffic,
+                "run_capture_loop",
+                _LoopSpy(capture_traffic.LoopResult(truncated=False, canceled=False)),
+            )
+
+            async def handler(conn, supplied_job):
+                return await capture_traffic.capture_traffic_handler(
+                    conn,
+                    supplied_job,
+                    resolver=resolver,
+                    artifact_store=cast(ObjectStore, store),
+                    supervisor=cast(Any, _PublicationSupervisor(capturer)),
+                )
+
+            worker = Worker(
+                pool,
+                HandlerRegistry(),
+                worker_id="worker-a",
+                incarnation_credential=credential,
+                secret_registry=SecretRegistry(),
+                config=WorkerConfig(
+                    accepted_lanes=(dispatch_lane_for_kind(JobKind.CAPTURE_TRAFFIC),)
+                ),
+            )
+            stop = asyncio.Event()
+            worker._stop_event = stop
+
+            async def heartbeat(*args: object) -> None:
+                await stage_arrived.wait()
+                if authority == "stop":
+                    await asyncio.Event().wait()
+
+            monkeypatch.setattr(worker, "_heartbeat_loop", heartbeat)
+            dispatch = asyncio.create_task(worker._dispatch(job, handler))
+            await asyncio.wait_for(stage_arrived.wait(), timeout=5)
+            if authority == "stop":
+                stop.set()
+            try:
+                async with asyncio.timeout(5):
+                    while not store.delete_started.is_set():
+                        assert not dispatch.done(), "dispatch returned before compensation"
+                        await asyncio.sleep(0)
+                assert not dispatch.done()
+            finally:
+                store.release_delete.set()
+            await asyncio.wait_for(dispatch, timeout=5)
+            async with pool.connection() as conn:
+                outcome = await (
+                    await conn.execute(
+                        "SELECT state, result_ref FROM jobs WHERE id = %s", (job.id,)
+                    )
+                ).fetchone()
+            return (
+                run_id,
+                job,
+                outcome,
+                await _artifact_rows(pool, run_id),
+                await _audit_rows(pool, run_id),
+            )
+
+    run_id, job, outcome, artifacts, audits = asyncio.run(_go())
+    key = f"local/runs/{run_id}/pcap-{job.id}"
+    assert artifacts == []
+    assert audits == []
+    assert store.objects == {}
+    assert store.deleted_versions == [(key, "test-version")]
+    assert outcome == ("running", None)
+
+
+def test_repeated_cancellation_during_registration_cleanup_is_drained(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
+    store = _CleanupStallingStore()
+    capturer = _FakeCapturer(tmp_path)
+
+    async def _go():
+        audit_arrived = asyncio.Event()
+        never_release_audit = asyncio.Event()
+        _stall_async_call(
+            monkeypatch,
+            capture_traffic.audit,
+            "record",
+            audit_arrived,
+            never_release_audit,
+        )
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            run_id, _ = await _seed_ready_run(pool)
+            job = _job(run_id)
+            await _insert_job(pool, job, JobState.RUNNING)
+            task = asyncio.create_task(
+                _run_probing(pool, store, capturer, job, monkeypatch=monkeypatch)
+            )
+            await asyncio.wait_for(audit_arrived.wait(), timeout=5)
+            task.cancel()
+            try:
+                async with asyncio.timeout(5):
+                    while not store.delete_started.is_set():
+                        assert not task.done(), "handler returned before compensation"
+                        await asyncio.sleep(0)
+                task.cancel()
+                await asyncio.sleep(0)
+                assert not task.done()
+            finally:
+                store.release_delete.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return run_id, job, await _artifact_rows(pool, run_id)
+
+    run_id, job, artifacts = asyncio.run(_go())
+    key = f"local/runs/{run_id}/pcap-{job.id}"
+    assert artifacts == []
+    assert store.objects == {}
+    assert store.deleted_versions == [(key, "test-version")]
+
+
+def test_registration_cleanup_failure_preserves_cancellation_and_redacts_log(
+    migrated_url: str,
+    monkeypatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _CleanupStallingStore()
+    store.release_delete.set()
+    capturer = _FakeCapturer(tmp_path)
+
+    async def _go():
+        claim_arrived = asyncio.Event()
+        never_release_claim = asyncio.Event()
+
+        async def failing_discard(
+            _store: ObjectStore,
+            written: list[StoredArtifact],
+            *,
+            still_unregistered: object,
+        ) -> None:
+            del still_unregistered
+            for stored in written:
+                store.delete_version(stored.key, stored.version_id)
+            raise RuntimeError("sensitive cleanup backend output")
+
+        _stall_async_call(
+            monkeypatch,
+            capture_traffic.ARTIFACTS,
+            "claim",
+            claim_arrived,
+            never_release_claim,
+        )
+        monkeypatch.setattr(capture_traffic, "discard_unregistered_objects", failing_discard)
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            run_id, _ = await _seed_ready_run(pool)
+            job = _job(run_id)
+            await _insert_job(pool, job, JobState.RUNNING)
+            task = asyncio.create_task(
+                _run_probing(pool, store, capturer, job, monkeypatch=monkeypatch)
+            )
+            await asyncio.wait_for(claim_arrived.wait(), timeout=5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return run_id, job, await _artifact_rows(pool, run_id)
+
+    caplog.set_level(logging.WARNING, logger="kdive.jobs.handlers.control.capture_traffic")
+    run_id, job, artifacts = asyncio.run(_go())
+    key = f"local/runs/{run_id}/pcap-{job.id}"
+    messages = [record.getMessage() for record in caplog.records]
+    assert artifacts == []
+    assert store.objects == {}
+    assert store.deleted_versions == [(key, "test-version")]
+    assert any("RuntimeError" in message for message in messages)
+    assert all("sensitive cleanup backend output" not in message for message in messages)
+
+
 def test_cancel_during_put_discards_the_unregistered_object(
     migrated_url: str, monkeypatch, tmp_path: Path
 ) -> None:
@@ -1074,6 +1298,23 @@ class _StallingStore(_FakeStore):
         self.release_first_put.wait(timeout=30)
 
     def delete_version(self, key: str, version_id: str) -> None:
+        self.deleted_versions.append((key, version_id))
+        self.objects.pop(key, None)
+
+
+class _CleanupStallingStore(_FakeStore):
+    """Park the compensating delete so tests prove dispatch waits for registration cleanup."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.delete_started = threading.Event()
+        self.release_delete = threading.Event()
+        self.deleted_versions: list[tuple[str, str]] = []
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.delete_started.set()
+        if not self.release_delete.wait(timeout=30):
+            raise TimeoutError("test did not release the compensating delete")
         self.deleted_versions.append((key, version_id))
         self.objects.pop(key, None)
 

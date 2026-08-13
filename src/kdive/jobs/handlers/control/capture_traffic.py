@@ -234,6 +234,17 @@ async def _discard_canceled_put(
             type(error).__name__,
         )
         return
+    await _discard_stored_after_cancellation(conn, store, run_id, job_id, stored)
+
+
+async def _discard_stored_after_cancellation(
+    conn: AsyncConnection,
+    store: ObjectStore,
+    run_id: UUID,
+    job_id: UUID,
+    stored: StoredArtifact,
+) -> None:
+    """Drain the row-fenced compensation while preserving the caller's cancellation."""
     discard_task = asyncio.create_task(
         discard_unregistered_objects(
             store,
@@ -245,54 +256,23 @@ async def _discard_canceled_put(
         await _finish_task_after_cancellation(discard_task)
     except Exception as error:
         _log.warning(
-            "canceled capture PUT cleanup for job %s failed (%s)",
+            "canceled capture object cleanup for job %s failed (%s)",
             job_id,
             type(error).__name__,
         )
 
 
-async def _store_capture(
-    conn: AsyncConnection, store: ObjectStore, job: Job, run_id: UUID, project: str, data: bytes
+async def _register_stored_capture(
+    conn: AsyncConnection,
+    store: ObjectStore,
+    job: Job,
+    *,
+    run_id: UUID,
+    project: str,
+    object_key: str,
+    stored: StoredArtifact,
 ) -> UUID | None:
-    """Store the pcap and register its row; ``None`` if the job was canceled.
-
-    Three phases, so the per-Run advisory lock never spans the object-store PUT (ADR-0519):
-    a locked guard read (tx 2), the unlocked PUT, then a locked re-read plus the row insert
-    and audit (tx 3). Both locked phases are short and purely database work, so a slow or
-    retrying object store no longer bounds how long this Run is serialized.
-
-    Insert-if-absent on the object key keeps an at-least-once retry from duplicating the row.
-    The first phase's probe short-circuits the *sequential* retry before it writes anything, so
-    the common case never overwrites the stored object out from under a committed row. It does
-    not close the concurrent case: two attempts of one job can both pass phase 1 and both PUT
-    (the lease can lapse mid-job, ``jobs/worker.py``), and whichever PUT lands last leaves the
-    other's row describing bytes the object no longer holds. When this attempt wrote and then
-    found a peer's row, :func:`~kdive.artifacts.etag_repair.reconcile_row_etag` stats the object
-    and re-points the row at what it actually holds — stats it rather than assuming this
-    attempt's own etag, because landing last in the store and last at the lock are independent.
-    """
-    name = f"pcap-{job.id}"
-    object_key = artifact_key(_TENANT, _OWNER_KIND, str(run_id), name)
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
-        if await _job_canceled(conn, job.id):
-            return None
-        existing = await _existing_artifact_row(conn, run_id, object_key)
-    if existing is not None:
-        return existing.id
-
-    put_task = asyncio.create_task(asyncio.to_thread(_put_artifact, store, run_id, name, data))
-    put_completed = asyncio.Event()
-    put_task.add_done_callback(lambda _task: put_completed.set())
-    try:
-        await put_completed.wait()
-    except asyncio.CancelledError as cancellation:
-        current = asyncio.current_task()
-        assert current is not None
-        current.uncancel()
-        await _discard_canceled_put(conn, store, run_id, job.id, put_task)
-        raise cancellation
-    stored = put_task.result()
-
+    """Register or reconcile one completed PUT through the existing publication path."""
     try:
         async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
             canceled = await _job_canceled(conn, job.id)
@@ -345,6 +325,66 @@ async def _store_capture(
         still_unregistered=lambda key: _key_unregistered(conn, run_id, key),
     )
     return None
+
+
+async def _store_capture(
+    conn: AsyncConnection, store: ObjectStore, job: Job, run_id: UUID, project: str, data: bytes
+) -> UUID | None:
+    """Store the pcap and register its row; ``None`` if the job was canceled.
+
+    Three phases, so the per-Run advisory lock never spans the object-store PUT (ADR-0519):
+    a locked guard read (tx 2), the unlocked PUT, then a locked re-read plus the row insert
+    and audit (tx 3). Both locked phases are short and purely database work, so a slow or
+    retrying object store no longer bounds how long this Run is serialized.
+
+    Insert-if-absent on the object key keeps an at-least-once retry from duplicating the row.
+    The first phase's probe short-circuits the *sequential* retry before it writes anything, so
+    the common case never overwrites the stored object out from under a committed row. It does
+    not close the concurrent case: two attempts of one job can both pass phase 1 and both PUT
+    (the lease can lapse mid-job, ``jobs/worker.py``), and whichever PUT lands last leaves the
+    other's row describing bytes the object no longer holds. When this attempt wrote and then
+    found a peer's row, :func:`~kdive.artifacts.etag_repair.reconcile_row_etag` stats the object
+    and re-points the row at what it actually holds — stats it rather than assuming this
+    attempt's own etag, because landing last in the store and last at the lock are independent.
+    """
+    name = f"pcap-{job.id}"
+    object_key = artifact_key(_TENANT, _OWNER_KIND, str(run_id), name)
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
+        if await _job_canceled(conn, job.id):
+            return None
+        existing = await _existing_artifact_row(conn, run_id, object_key)
+    if existing is not None:
+        return existing.id
+
+    put_task = asyncio.create_task(asyncio.to_thread(_put_artifact, store, run_id, name, data))
+    put_completed = asyncio.Event()
+    put_task.add_done_callback(lambda _task: put_completed.set())
+    try:
+        await put_completed.wait()
+    except asyncio.CancelledError as cancellation:
+        current = asyncio.current_task()
+        assert current is not None
+        current.uncancel()
+        await _discard_canceled_put(conn, store, run_id, job.id, put_task)
+        raise cancellation
+    stored = put_task.result()
+
+    try:
+        return await _register_stored_capture(
+            conn,
+            store,
+            job,
+            run_id=run_id,
+            project=project,
+            object_key=object_key,
+            stored=stored,
+        )
+    except asyncio.CancelledError as cancellation:
+        current = asyncio.current_task()
+        assert current is not None
+        current.uncancel()
+        await _discard_stored_after_cancellation(conn, store, run_id, job.id, stored)
+        raise cancellation
 
 
 def _unlink_quietly(path: Path) -> None:
