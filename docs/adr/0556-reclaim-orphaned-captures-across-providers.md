@@ -73,6 +73,16 @@ partitioned live worker retains it and cannot race the reaper. If the fence is u
 row is deferred without consuming a provider call. This positive ownership boundary, rather
 than the settle duration, prevents state from being created after an absence-tolerant reap.
 
+The lock-owning connection is also the provider operation's cancellation authority. Provider
+capture work runs behind a terminable operation boundary supervised alongside that connection.
+Connection loss starts cancellation immediately and the supervisor must terminate the provider
+operation before recording cancellation complete. The reaper may acquire the advisory lock
+after connection loss, but it must not call the provider or write completion until it observes
+that positive cancellation-complete record for the selected attempt. Async task cancellation,
+reacquiring a new database connection, or a timeout without termination acknowledgment does not
+satisfy the fence: blocking libvirt or filesystem work could otherwise continue after the lock
+was released. If cancellation cannot be confirmed, the row remains deferred and observable.
+
 Remote-libvirt binds the reaper to the row's Resource using ADR-0187 and deletes the named
 libvirt storage volume. It does not fan out through the fleet reaper bundle. Local-libvirt
 detaches from the local domain and removes the pcap at the shared runtime-path convention.
@@ -100,8 +110,9 @@ default is chosen and documented with #1946 because a lapsed lease means a dead 
 worker and provides no derived upper bound. Settle is therefore a pacing heuristic, not a
 safety fence. A terminal job's worker may still be alive after the duration, but its ownership
 fence prevents reclamation from pre-empting its late write or fetch. A wedged worker that keeps
-its database session open also keeps its host state; existing worker/connection recovery must
-release that session before the reaper can proceed.
+its database session open also keeps its host state. Session loss cancels its provider operation;
+reaping waits for positive termination acknowledgment rather than treating lock release alone as
+proof that the worker stopped.
 
 ## Consequences
 
@@ -119,8 +130,12 @@ release that session before the reaper can proceed.
   a degraded provider from monopolizing every pass; it also means recovery waits until that
   row's deadline, when the reconciler automatically makes it eligible again.
 - Each active capture holds one database session for its ownership fence across the provider
-  operation. This consumes one pool connection per concurrent capture and makes database-session
-  loss a capture-fencing event; #1946 must bound and test that resource use.
+  operation. This consumes one pool connection per concurrent capture. Database-session loss
+  cancels the terminable provider operation and delays reaping until termination is acknowledged;
+  #1946 must bound and test both resource use and cancellation latency.
+- A provider operation that cannot be terminated safely cannot implement this capture lifecycle.
+  Failing closed may retain host state longer, but it cannot publish new state after a reaper has
+  marked the attempt complete.
 - A row whose Run was never bound, whose ownership chain was removed, or whose provider kind
   has no registered reaper is not an eligible candidate. Selection does not guess a host,
   domain, or path, and an ineligible row cannot consume the batch or starve eligible work.

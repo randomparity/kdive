@@ -42,6 +42,8 @@ guard defect is owned by #1945 and ADR-0094, not this decision.
    mask a successful capture or its artifact.
 9. Every capture attempt clears prior completion before it can recreate provider state.
 10. A per-job advisory ownership fence serializes provider-state creation and reaping.
+11. Loss of the lock-owning session terminates provider work, and reaping waits for positive
+    cancellation completion for that attempt.
 
 ## Components
 
@@ -87,8 +89,16 @@ The capture handler holds a session-level per-job advisory ownership fence from 
 clears prior completion until provider detach and destination reclaim finish. The sweep takes
 the same fence before a provider call and holds it through the completion write. An unavailable
 fence defers the row. Process death releases the fence; a live delayed worker cannot create
-state after an absence-tolerant reap. The implementation bounds one held database connection
-per concurrent capture and tests connection-loss fencing.
+state after an absence-tolerant reap.
+
+Provider work runs behind a terminable operation boundary supervised with the lock-owning
+connection. Connection loss immediately cancels and terminates that work. Lock availability is
+necessary but insufficient for reaping: the sweep also requires a positive cancellation-complete
+record for the selected attempt before it touches provider state or writes completion. A timeout,
+async cancellation request, or replacement database connection is not confirmation. Failure to
+confirm termination defers the row and emits an owner-keyed failure. The implementation bounds
+one held database connection per concurrent capture and tests connection loss before attach,
+during attach, while writing, during detach, and before the completion write.
 
 The sweep never invents missing ownership or provider wiring. Each provider failure is logged
 with `(system_id, job_id)`. A pass reports attempted, reclaimed, skipped, and failed counts
@@ -106,8 +116,8 @@ The settle limit's full contract is:
 #1946 chooses and documents the concrete default with its configuration field because no
 heartbeat-derived upper bound exists for a dead or wedged worker. The duration is pacing, not
 the safety fence: the per-job advisory ownership fence prevents reclamation while a live worker
-still owns provider state. A wedged worker with a live database session delays reclamation until
-connection recovery releases it.
+still owns provider state. A wedged worker with a live database session delays reclamation;
+session loss triggers termination, and the reaper waits for its positive acknowledgment.
 
 ### Remote-libvirt implementation (#1947)
 
@@ -147,6 +157,10 @@ semantics. It must prove:
   provider state while holding the ownership fence; a later failure remains eligible.
 - **Terminal worker is still alive:** its ownership fence defers reaping; it cannot create
   provider state after an absence-tolerant completion write.
+- **Lock-owning database session is lost:** the supervisor terminates provider work; the sweep
+  defers until cancellation completion for that attempt is recorded.
+- **Cancellation cannot be confirmed:** no provider reap or completion write occurs; the row
+  remains observable and retryable rather than risking post-reap publication.
 - **Provider unavailable:** the row remains unresolved, the failure is logged with its owner
   ids, and a later pass retries after persisted bounded backoff without starving later rows.
 - **Filter, domain, or destination already absent:** provider reclaim treats absence as
@@ -163,9 +177,11 @@ The implementation entries prove the design at their natural boundaries:
 
 - real payload fixtures prove Run-addressed selection;
 - database tests prove settle, marker convergence, provider-kind filtering, deterministic
-  bounded draining, missing ownership, and per-row isolation;
+  bounded draining, missing ownership, per-row isolation, and the cancellation-complete gate;
 - recording fakes prove detach-before-remove for both providers;
 - provider tests prove tolerant absence, binding, destination naming, and surfaced errors;
+- fault tests drop the lock-owning connection at each provider lifecycle boundary and prove
+  termination precedes any reaper call or completion write;
 - injected reclaim failure proves L3 recovery stays non-masking;
 - `just ci` is the repository-wide gate after every entry.
 
