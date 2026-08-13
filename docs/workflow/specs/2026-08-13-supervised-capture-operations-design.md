@@ -231,8 +231,9 @@ offline only after its exact owner's termination is verified. Worker registratio
 acquire the same
 global capture-protocol advisory lock. The cutoff transaction first persists minimum protocol 3,
 then takes each residual job fence and idempotently moves the row from `running` to `canceled` with
-`ErrorCategory.CANCELED`, clearing lease ownership without charging an attempt or changing queued
-jobs. A row whose owner lacks exact termination aborts the transaction. It then rechecks the
+`JobState.CANCELED`, `error_category = NULL`, and
+`failure_context = {"reason": "offline_capture_protocol_cutover"}`. It clears worker id, lease,
+and heartbeat without charging an attempt or changing queued jobs. A row whose owner lacks exact termination aborts the transaction. It then rechecks the
 complete registered and running-job population and installs protocol-3-only registration,
 authentication, and capture claim functions. It inserts `capture_cutover` with
 `operation_quiescent = true`, `publication_closed = false`, `complete = false`, and
@@ -332,7 +333,8 @@ also prove #1946 remains barred until a simulated #1952 closure completes the ro
 stopped worker's residual running capture is idempotently canceled only after termination proof.
 Queued work remains unchanged and is claimed only after restart by protocol 3. A fresh database
 asserts the exact protocol, operation-quiescent, publication-closed, complete, and cutoff fields;
-rolling protocol-2 registration and authentication are rejected. A
+the canceled row assertion pins null error category, bounded reason, cleared worker/lease/heartbeat,
+and unchanged attempt. Rolling protocol-2 registration and authentication are rejected. A
 retry/cancellation race proves claim does not charge or hide a prior unacknowledged operation.
 Provider tests prove local and remote probes reconnect independently and refuse to acknowledge QOM
 presence or an unreachable endpoint. Each provider's gated real-stack test delays an accepted
