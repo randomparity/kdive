@@ -110,6 +110,15 @@ which the supervisor retries the barrier and refresh. The convergence guarantee 
 conditional on the owning provider becoming reachable again. Safety does not fall back to an
 inference when evidence is unavailable.
 
+Pre-migration rows cross an explicit rollout fence; a missing attempt link is never termination
+evidence. Before enabling the sweep, the deployment stops old workers, prevents new old-version
+workers from joining, and records the cutover only after every worker host attests that no
+pre-cutover capture child remains. Remote Resources also complete the same monitor barrier and
+pool refresh used by normal cancellation. The migration then links each legacy capture row to a
+synthetic attempt UUID whose quiescence acknowledgment cites that cutover. If any worker host or
+remote Resource cannot be positively drained, the sweep remains disabled for its provider kind
+and reports the unmet cutover; operators restore reachability or finish draining, then retry.
+
 Remote-libvirt binds the reaper to the row's Resource using ADR-0187 and deletes the named
 libvirt storage volume. It does not fan out through the fleet reaper bundle. Local-libvirt
 detaches from the local domain and removes the pcap at the shared runtime-path convention.
@@ -170,6 +179,10 @@ proof that the worker stopped.
 - Eventual reclamation requires the owning provider to become reachable. A permanently lost
   remote host leaves its rows deferred permanently; this is the fail-closed residual of choosing
   cancellation over post-reap publication risk.
+- First deployment is a coordinated worker cutover, not an online schema-only rollout. Historical
+  draining begins only after old capture producers are positively absent and remote transports are
+  quiescent. This delays cleanup but prevents a legacy worker from publishing after a synthetic
+  acknowledgment.
 - A row whose Run was never bound, whose ownership chain was removed, or whose provider kind
   has no registered reaper is not an eligible candidate. Selection does not guess a host,
   domain, or path, and an ineligible row cannot consume the batch or starve eligible work.

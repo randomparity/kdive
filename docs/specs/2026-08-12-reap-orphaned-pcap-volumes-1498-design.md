@@ -121,6 +121,14 @@ supersession, connection loss, and supervisor loss before attach, during attach,
 during detach, and before completion. When the remote provider is unreachable, restoring
 reachability is the recovery action; eventual reclamation is conditional on it.
 
+Legacy rows use a coordinated rollout fence. The deployment stops old workers and prevents
+old-version workers from rejoining. Each worker host positively attests that no pre-cutover
+capture child remains; each remote Resource completes the monitor barrier and pool refresh. Only
+then does migration link legacy capture rows to synthetic attempt UUIDs carrying that cutover's
+quiescence acknowledgment and enable their provider-kind sweep. Missing links never count as
+termination. An incomplete host or Resource drain keeps that kind disabled and observable until
+operators restore reachability or finish the worker drain.
+
 The sweep never invents missing ownership or provider wiring. Each provider failure is logged
 with `(system_id, job_id)`. A pass reports attempted, reclaimed, skipped, and failed counts
 through the reconciler's existing observability path. Idle means no eligible unmarked row
@@ -198,6 +206,8 @@ semantics. It must prove:
 - **Ownership chain missing or provider unregistered:** the row is ineligible and cannot
   consume the batch; lifecycle integrity checks own diagnosis of the broken chain.
 - **Historical backlog:** the batch limit drains it across passes without a lookback cutoff.
+- **Legacy rollout not quiescent:** the affected provider-kind sweep remains disabled; operators
+  finish stopping old workers or restore remote reachability, then retry the cutover.
 
 ## Verification
 
@@ -212,6 +222,8 @@ The implementation entries prove the design at their natural boundaries:
   termination precedes any reaper call or completion write;
 - recovery tests kill the operation supervisor after termination but before acknowledgment and
   prove its replacement can establish exit plus transport quiescence for local and remote;
+- rollout tests prove a missing worker-host attestation or remote barrier keeps legacy sweeping
+  disabled, while a completed cutover creates synthetic linked attempts before draining;
 - injected reclaim failure proves L3 recovery stays non-masking;
 - `just ci` is the repository-wide gate after every entry.
 
