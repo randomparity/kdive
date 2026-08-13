@@ -112,6 +112,23 @@ to a verified directory fd without following symlinks, verify ownership, modes, 
 schema, and assemble the provider. Gate EOF exits without opening request input or crossing a
 provider boundary.
 
+The pre-filter interpreter/loader interval is an explicit trusted host prerequisite rather than a
+claimed kernel boundary. Deployment records a SHA-256 manifest of the exact Python executable and
+the executable ELF dependency closure resolved without environment-controlled search paths. Each
+launch recomputes that fingerprint and fails before spawn on drift. `kdive/__init__.py` is inert;
+its public version attribute is lazy, so resolving `kdive.capture_bootstrap` executes no version,
+metadata, subprocess, or provider import. An isolated import-trace test pins the allowed bootstrap
+module set. The gate fd is non-inheritable except for the exact spawned bootstrap and every other
+descriptor is closed.
+
+After the bootstrap reports successful filter installation, the supervisor enumerates the
+dedicated child process group and `/proc/<pid>/task` twice around a scheduler yield. Both complete
+enumerations must contain only the registered pid and its initial task before identity may commit
+or the gate may release. Any extra or unreadable member aborts launch and kills the process group.
+The attested immutable startup plus this observed-empty handoff is the trusted premise; after the
+handoff, the filter enforces no new descendant process. Exact pidfd absence therefore proves the
+complete mutation boundary, not arbitrary unapproved interpreter startup.
+
 Before spawn, the launcher creates and links one `launching` row for the exact charged attempt.
 That transaction also persists a random 256-bit launch token. The fixed argv carries the token and
 gate fd but no request path, tenant-controlled value, packet data, provider endpoint, or secret;
@@ -154,7 +171,8 @@ observe the child process tree through every phase, and invoke each process-crea
 mode on x86_64 and ppc64le. The matrix covers zero flags, `CLONE_VM` without the complete mask, the
 complete mask with normal pthread flags, extra flags, direct raw syscalls, `clone3` returning
 `ENOSYS`, sanitized loader environment, no task/process creation during trusted bootstrap, denial
-of later exec, and a real provider thread falling back successfully. Filter setup failure exits
+of later exec, fingerprint drift, import-trace drift, single/double-enumeration races, unreadable
+group/task state, and a real provider thread falling back successfully. Filter setup failure exits
 before release or provider mutation. A
 provider needing a subprocess requires a different
 kernel-owned containment decision.

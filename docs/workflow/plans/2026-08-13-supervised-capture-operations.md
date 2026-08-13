@@ -25,6 +25,9 @@ libvirt/QMP, pytest, Helm/Compose deployment documentation.
   `CLONE_VM | CLONE_SIGHAND | CLONE_THREAD`; return `ENOSYS` for every `clone3` so libc falls back
   to inspectable legacy thread creation. Fail closed on unsupported audit architectures or ABIs.
   Provider imports occur after release.
+- The trusted pre-filter bootstrap requires an approved SHA-256 manifest of the exact interpreter
+  and executable ELF dependency closure. Drift fails startup. Before identity commit, two complete
+  process-group/task enumerations around a scheduler yield must each contain only the child.
 - Gate-release authority check is `SELECT 1` on the lock session immediately before the write;
   recurring probes run every 250 ms with one-second client and statement timeouts.
 - TERM and KILL waits are five seconds each on the monotonic clock, per cancellation request.
@@ -87,6 +90,7 @@ Files:
   `child.py`, and `launcher.py`.
 - Create `src/kdive/capture_bootstrap.py` with no imports outside the standard library and sandbox
   module before filter installation.
+- Modify `src/kdive/__init__.py` to make `__version__` lazy without eager package initialization.
 - Modify `src/kdive/__main__.py` to add the internal `capture-operation` process verb.
 - Create matching tests under `tests/jobs/capture_operations/`.
 
@@ -104,7 +108,8 @@ Steps:
    launcher and interpreter argv/cwd are exact, and forbidden parent environment variables are
    absent. Confirm red.
 2. Add red fault tests for spawn, stat, pidfd, identity-write, release-write, TERM timeout, KILL
-   timeout, token scan, unreadable `/proc`, result bounds, modes, symlinks, and malformed JSON.
+   timeout, token scan, interpreter/ELF fingerprint drift, import-trace drift, process-group races,
+   unreadable `/proc`, result bounds, modes, symlinks, and malformed JSON.
 3. Implement private directories/files with directory-fd-relative `O_NOFOLLOW` opens, canonical
    digests, allowlisted environment, launch-token recovery, pidfd signaling, and bounded waits.
 4. Implement the pre-gate filter. Test that process creation
@@ -117,8 +122,9 @@ Steps:
    `vfork`, both exec calls, and clone flag sets missing any required thread bit; `ENOSYS` from
    every `clone3`; success from the complete thread mask with ordinary and extra pthread flags;
    successful real provider-thread fallback; and an empty child process tree. The same matrix
-   covers raw syscalls, unsupported audit/ABI refusal, sanitized loader environment, absence of
-   tasks/processes before filter installation, denial of later exec, and filter failure before
+   covers raw syscalls, unsupported audit/ABI refusal, sanitized loader environment, an inert
+   package initializer, exact bootstrap import trace, attested interpreter/dependency closure,
+   double complete process-group/task enumeration, denial of later exec, and filter failure before
    release. Record the command result. This is a required release proof; if no native
    POWER host is available, report the arm unavailable and do not claim cross-platform completion.
 5. Run `uv run python -m pytest tests/jobs/capture_operations -q`, `just lint`, and `just type`;

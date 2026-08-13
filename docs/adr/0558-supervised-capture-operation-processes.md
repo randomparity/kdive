@@ -27,7 +27,11 @@ The bootstrap imports only the in-tree sandbox module, installs the containment 
 reads the gate. Request input, provider modules, configuration assembly, and external endpoints
 remain unreachable until both filter installation and release. The trusted interpreter/loader
 startup before filter installation receives no tenant input or provider configuration and is
-tested to remain one process and one task. After that minimal
+admitted only when its interpreter and executable ELF dependency-closure fingerprint matches the
+deployment's approved manifest. After filter installation, the supervisor performs two complete
+process-group and task enumerations around a scheduler yield; any extra member aborts launch and
+kills the whole group. The verified empty group plus the installed filter closes the trusted
+bootstrap interval before durable identity or release. After that minimal
 bootstrap, the blocking one-byte gate read is the first action that opens request input, imports or
 assembles provider code, or can reach a provider boundary. Gate EOF is a mandatory no-mutation
 exit.
