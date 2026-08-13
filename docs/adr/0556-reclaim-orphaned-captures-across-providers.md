@@ -74,14 +74,21 @@ row is deferred without consuming a provider call. This positive ownership bound
 than the settle duration, prevents state from being created after an absence-tolerant reap.
 
 The lock-owning connection is also the provider operation's cancellation authority. Provider
-capture work runs behind a terminable operation boundary supervised alongside that connection.
-Connection loss starts cancellation immediately and the supervisor must terminate the provider
-operation before recording cancellation complete. The reaper may acquire the advisory lock
-after connection loss, but it must not call the provider or write completion until it observes
-that positive cancellation-complete record for the selected attempt. Async task cancellation,
-reacquiring a new database connection, or a timeout without termination acknowledgment does not
-satisfy the fence: blocking libvirt or filesystem work could otherwise continue after the lock
-was released. If cancellation cannot be confirmed, the row remains deferred and observable.
+capture work runs behind a separately supervised, attempt-identified operation boundary whose
+exit state remains queryable after the handler, lock-owning session, or worker disappears.
+Connection loss starts cancellation immediately. Cancellation completes only after that boundary
+has exited and its provider-specific adapter confirms transport quiescence: no request issued by
+the attempt can still publish capture state. Process exit alone is insufficient for a remote
+libvirt request that may still be executing server-side.
+
+The durable operation supervisor, not the disappearing handler, records cancellation complete.
+If it dies after terminating work but before recording the result, its replacement recovers the
+attempt identity, re-observes boundary exit and provider-transport quiescence, and records the
+same idempotent acknowledgment. The reaper may acquire the advisory lock after connection loss,
+but it must not call the provider or write completion until it observes that acknowledgment for
+the selected attempt. Async task cancellation, a replacement database connection, or timeout
+without the two positive observations does not satisfy the fence. If either observation cannot
+be confirmed, the row remains deferred and observable.
 
 Remote-libvirt binds the reaper to the row's Resource using ADR-0187 and deletes the named
 libvirt storage volume. It does not fan out through the fleet reaper bundle. Local-libvirt
@@ -136,6 +143,10 @@ proof that the worker stopped.
 - A provider operation that cannot be terminated safely cannot implement this capture lifecycle.
   Failing closed may retain host state longer, but it cannot publish new state after a reaper has
   marked the attempt complete.
+- The durable operation supervisor becomes part of the worker deployment and recovery contract.
+  It retains attempt identity and exit evidence across handler failure, and provider adapters own
+  the stronger transport-quiescence proof. A supervisor replacement repeats observation rather
+  than trusting a missing acknowledgment as evidence of continued work.
 - A row whose Run was never bound, whose ownership chain was removed, or whose provider kind
   has no registered reaper is not an eligible candidate. Selection does not guess a host,
   domain, or path, and an ineligible row cannot consume the batch or starve eligible work.

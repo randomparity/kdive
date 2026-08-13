@@ -91,14 +91,20 @@ the same fence before a provider call and holds it through the completion write.
 fence defers the row. Process death releases the fence; a live delayed worker cannot create
 state after an absence-tolerant reap.
 
-Provider work runs behind a terminable operation boundary supervised with the lock-owning
-connection. Connection loss immediately cancels and terminates that work. Lock availability is
-necessary but insufficient for reaping: the sweep also requires a positive cancellation-complete
-record for the selected attempt before it touches provider state or writes completion. A timeout,
-async cancellation request, or replacement database connection is not confirmation. Failure to
-confirm termination defers the row and emits an owner-keyed failure. The implementation bounds
-one held database connection per concurrent capture and tests connection loss before attach,
-during attach, while writing, during detach, and before the completion write.
+Provider work runs behind a separately supervised, attempt-identified operation boundary.
+Connection loss immediately cancels that work. Cancellation completes only after the boundary
+has exited and the provider adapter confirms transport quiescence, including that no remote
+libvirt request remains able to publish state. The durable supervisor records the acknowledgment;
+a replacement supervisor recovers the attempt identity and repeats both observations if the
+first supervisor died before writing it.
+
+Lock availability is necessary but insufficient for reaping: the sweep also requires that
+positive acknowledgment for the selected attempt before it touches provider state or writes
+completion. A timeout, async cancellation request, process exit without transport quiescence, or
+replacement database connection is not confirmation. Failure to confirm defers the row and emits
+an owner-keyed failure. The implementation bounds one held database connection per concurrent
+capture and tests connection loss and supervisor loss before attach, during attach, while
+writing, during detach, and before the completion write.
 
 The sweep never invents missing ownership or provider wiring. Each provider failure is logged
 with `(system_id, job_id)`. A pass reports attempted, reclaimed, skipped, and failed counts
@@ -159,6 +165,8 @@ semantics. It must prove:
   provider state after an absence-tolerant completion write.
 - **Lock-owning database session is lost:** the supervisor terminates provider work; the sweep
   defers until cancellation completion for that attempt is recorded.
+- **Supervisor dies after termination but before acknowledgment:** its replacement recovers the
+  attempt, re-observes boundary exit and provider-transport quiescence, then records completion.
 - **Cancellation cannot be confirmed:** no provider reap or completion write occurs; the row
   remains observable and retryable rather than risking post-reap publication.
 - **Provider unavailable:** the row remains unresolved, the failure is logged with its owner
@@ -182,6 +190,8 @@ The implementation entries prove the design at their natural boundaries:
 - provider tests prove tolerant absence, binding, destination naming, and surfaced errors;
 - fault tests drop the lock-owning connection at each provider lifecycle boundary and prove
   termination precedes any reaper call or completion write;
+- recovery tests kill the operation supervisor after termination but before acknowledgment and
+  prove its replacement can establish exit plus transport quiescence for local and remote;
 - injected reclaim failure proves L3 recovery stays non-masking;
 - `just ci` is the repository-wide gate after every entry.
 
