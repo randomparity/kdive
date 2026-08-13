@@ -35,9 +35,9 @@ Migration `0112_capture_operation_supervision.sql` adds:
 
 - `capture_operations`: UUID primary key; `job_id`; positive `job_attempt`; exact
   `worker_incarnation`; `provider_kind`; `resource_id`; `system_id`; `domain_name`; request digest;
-  Linux `boot_id`, `pid`, `start_ticks`, and `process_group`; state (`gated`, `running`,
-  `cancel_requested`, `exited`); exit outcome/code; bounded JSON quiescence evidence; database-clock
-  timestamps. `(job_id, job_attempt)` is unique.
+  authority-derived `host_instance`; Linux `boot_id`, `pid`, and `start_ticks`; state
+  (`launching`, `gated`, `running`, `cancel_requested`, `exited`); exit outcome/code; bounded JSON
+  quiescence evidence; database-clock timestamps. `(job_id, job_attempt)` is unique.
 - `jobs.current_capture_operation_id`, nullable, with a foreign key to `capture_operations`. A
   database function links it only when the row is still the exact running attempt owned by the
   authenticated worker. Recycle and a later charged attempt clear the link.
@@ -55,9 +55,9 @@ deadlines, and evidence, never request or packet data.
 The operation transition table is:
 
 ```
-gated -> running -> exited
-   |         |
-   +-------> cancel_requested -> exited
+launching -> gated -> running -> exited
+    |          |         |
+    +----------+-------> cancel_requested -> exited
 ```
 
 Repeated exact writes are idempotent. A conflicting identity or backward transition fails. The
@@ -83,11 +83,13 @@ payload, and the snapshotted domain and Resource identity. The child verifies di
 file mode, request digest, and schema before provider assembly. Invalid input exits before reading
 the release byte.
 
-Immediately after spawn, the launcher reads the host boot id and the child's `/proc/<pid>/stat`
-start ticks and opens a pidfd. It calls the link function with that exact identity. A failed link
-closes the gate without writing; EOF makes the child exit before provider mutation. A committed
-link permits exactly one release byte. The parent then marks `running`; failure of that follow-up
-write triggers cancellation because durable `gated` is deliberately recoverable as live.
+Before spawn, the launcher creates and links one `launching` row for the exact charged attempt.
+Immediately after spawn, it reads the authority-derived host instance, host boot id, and the
+child's `/proc/<pid>/stat` start ticks and opens a pidfd. It advances the row to `gated` with that
+exact identity. A failed transition closes the gate without writing; EOF makes the child exit
+before provider mutation. A committed identity permits exactly one release byte. The parent then
+marks `running`; failure of that follow-up write triggers cancellation because durable `gated` is
+deliberately recoverable as live.
 
 After release the child reconstructs the local or Resource-bound remote `TrafficCapturer`, then
 runs prepare, attach, bounded size polling, detach, bounded fetch, and reclaim. It writes raw pcap
@@ -99,6 +101,10 @@ only then reads the result. BPF trimming and the existing artifact path stay in 
 The child never receives the object store, worker incarnation credential, or authority to update
 the job. Its provider configuration comes from the same environment and Resource binding used by
 normal provider assembly. Packet data never enters argv, logs, JSON, or the database.
+The executable may create threads required by Python or libvirt but may not spawn descendant
+processes. A guard scans its owned module and provider-capture call graph for subprocess,
+`multiprocessing`, `fork`, and `posix_spawn` use. A future provider that needs helpers must first
+adopt a kernel-owned process-tree containment decision.
 
 ## Cancellation and recovery
 
@@ -108,21 +114,31 @@ handler also probes the lock-owning session while the child runs; any connection
 loss of authority. An explicit canceled job, process stop, or Python task cancellation uses the
 same operation-cancel path.
 
-Cancellation validates boot id and start ticks, opens or uses a pidfd, sends `SIGTERM` to the
-child's process group, and waits five seconds on the supervisor's monotonic clock. If the exact
-group remains, it sends `SIGKILL` and waits five more seconds. These are per cancellation request,
+Cancellation validates host instance, boot id, and start ticks, opens or uses a pidfd, sends
+`SIGTERM` to that exact child, and waits five seconds on the supervisor's monotonic clock. If the
+exact child remains, it sends `SIGKILL` and waits five more seconds. These are per cancellation request,
 not per job flow. Exceeding either bound leaves `cancel_requested`; the consequence is that
 reclamation and result use remain barred. Recovery is an automatic scan on worker startup on the
 same host, or an operator restart after restoring `/proc` visibility. The scan handles:
 
-- no durable row: gate EOF prevented mutation; reap the private empty attempt directory;
+- `launching` with a live owner: the owner must register identity or close the gate;
+- `launching` with a durably terminated owner: every gate writer is closed, so record
+  `aborted_before_identity` and close it without a provider call;
 - `gated` with a live identity: cancel it, because release may have raced the state write;
 - `gated`, `running`, or `cancel_requested` with an absent identity: run the provider probe;
 - a live identity owned by a dead or different incarnation: cancel it and probe;
 - `exited` with complete evidence: no provider call; clean the spool only when its consumer has
   durably finished;
-- boot-id mismatch, PID identity mismatch, unreadable `/proc`, or unreachable provider: retain the
+- host-instance mismatch, PID identity mismatch, unreadable `/proc`, or unreachable provider: retain the
   row without acknowledgment and report the reason.
+
+Recovery ownership follows the worker incarnation's authority binding. A local replacement may
+inspect `/proc` only on the configured host instance; a changed boot id is positive evidence that
+the prior process cannot survive. Docker and Kubernetes use the existing lifecycle authority's
+exact container identity or Pod UID termination to prove the entire isolated boundary exited when
+no same-boundary replacement exists. A permanently lost local host without process visibility,
+reboot evidence, or authority termination remains fail-closed. Restoring one of those evidence
+paths is the operator recovery action; remote-libvirt reachability by itself is insufficient.
 
 The provider probe runs only after exact process absence. Both implementations issue an
 idempotent detach for `kdive-dump-<job_id>` over a fresh libvirt connection, followed by a QMP

@@ -27,23 +27,32 @@ one-byte gate. It may parse and assemble its provider before the gate, but it ma
 `prepare`, `attach`, `captured_size`, `detach`, `fetch`, or `reclaim` until it reads the release
 byte. Gate EOF is a mandatory no-mutation exit.
 
-The parent records `(boot_id, pid, start_ticks)` plus the job id, charged attempt, worker
-incarnation, provider kind, and request identity in a durable `capture_operations` row, and links
-that row to the charged job attempt in the same transaction. Only that committed link permits the
-parent to release the gate. The child is started in a new process group. Signals are sent through
-a pidfd after rechecking boot id and start ticks, so PID reuse cannot redirect cancellation.
+Before spawning, the parent creates a durable `launching` operation and links it to the exact
+running job attempt in one transaction. A unique `(job_id, job_attempt)` constraint makes that
+link the attempt's only current operation. It then starts the gated child and advances the row to
+`gated` with `(host_instance, boot_id, pid, start_ticks)` plus the worker incarnation, provider
+kind, and request identity. Only that committed exact identity permits release. Signals are sent
+to the one child through a pidfd after rechecking boot id and start ticks, so PID reuse cannot
+redirect cancellation.
 
-The operation states are `gated`, `running`, `cancel_requested`, and `exited`. Transitions are
-monotonic and fenced by the exact job attempt and worker credential. A release may occur before
-the `running` write; recovery therefore treats both `gated` and `running` as possibly mutating and
-terminates either. The child writes its bounded result to a supervisor-owned, mode-0600 spool
-path and exits. Neither a result file nor a child exit alone is quiescence evidence.
+The operation states are `launching`, `gated`, `running`, `cancel_requested`, and `exited`.
+Transitions are monotonic and fenced by the exact job attempt and worker credential. If the
+launcher dies while `launching`, exact worker-incarnation termination closes every inherited gate
+writer; gate EOF proves that an unregistered child could not cross the mutation boundary. A live
+launch owner must instead finish identity registration or close its gate before the row can exit.
+A release may occur before the `running` write; recovery therefore treats both `gated` and
+`running` as possibly mutating and terminates either. The child writes its bounded result to a
+supervisor-owned, mode-0600 spool path and exits. Neither a result file nor a child exit alone is
+quiescence evidence.
 
 The lock-owning capture connection holds the per-job session advisory fence for the provider
 phase. Job cancellation, failed heartbeat ownership, connection loss, handler cancellation, or
-worker shutdown requests operation cancellation. Cancellation sends `SIGTERM`, waits up to five
-seconds on the supervisor's monotonic clock for this one process group, then sends `SIGKILL` and
-waits up to five more seconds. Exceeding either interval leaves the row in `cancel_requested`;
+worker shutdown requests operation cancellation. Cancellation sends `SIGTERM` through the pidfd,
+waits up to five seconds on the supervisor's monotonic clock for the exact child, then sends
+`SIGKILL` through the pidfd and waits up to five more seconds. The capture-operation executable is
+a single-process boundary and may create threads but no descendant processes; a provider that
+needs a helper process cannot implement this lifecycle without a new containment decision.
+Exceeding either interval leaves the row in `cancel_requested`;
 recovery repeats identity observation and cancellation. The recovery action is the next worker
 startup on that host or an operator restart after restoring host process visibility.
 
@@ -53,6 +62,16 @@ a new independently assembled TLS transport bound to the attempt's Resource and 
 QOM object absent. An unreachable provider, an identity mismatch, or an inconclusive probe leaves
 the operation unacknowledged. Replacements repeat observation; they never translate missing
 evidence into success.
+
+Recovery is authority-bound. The operation records the immutable host boundary from the worker
+incarnation: local workers use a configured host identity plus boot id, Docker workers use the
+Compose-owned container identity, and Kubernetes workers use the Pod UID. A live-boundary
+replacement must run on that boundary to inspect `/proc`. Durable container or Pod termination
+from the existing lifecycle authority instead proves every process in that isolated boundary is
+gone; a changed boot id proves the prior local process cannot remain. Provider quiescence is still
+probed afterwards. A lost local host with neither reboot or termination evidence nor process
+visibility remains fail-closed until the operator restores that evidence; remote provider
+reachability alone cannot substitute for worker-host process absence.
 
 Worker fence protocol 3 is the only protocol allowed to claim `capture_traffic` after this
 migration. Other job kinds retain their current claim behavior. A provider-kind cutover begins by
@@ -68,7 +87,7 @@ every claim.
 
 - Capture provider calls become terminable at an OS process boundary without changing the MCP
   contract or artifact-publication behavior owned by #1952.
-- Linux `/proc`, pidfds, process groups, a private spool directory, and provider reassembly become
+- Linux `/proc`, pidfds, a private spool directory, and provider reassembly become
   part of the worker-host contract on both x86_64 and ppc64le.
 - Each active capture holds one database session and one child process. Cancellation has a
   ten-second total local wait bound before it becomes recoverable pending work.
@@ -79,6 +98,12 @@ every claim.
 - The result spool contains sensitive packet data and must be mode 0600 in a mode-0700
   supervisor-owned directory; stale files are removed only after the durable operation is
   terminal and publication no longer needs them.
+- A permanently lost local host without authority termination or reboot evidence retains its
+  operations unacknowledged. The operator must restore host visibility or supply the existing
+  lifecycle authority's exact termination evidence; a database override is not accepted.
+- Capture providers used in this lifecycle may create threads but not descendant processes. That
+  restriction is held by keeping subprocess APIs out of the child call graph and by a guard test;
+  a provider needing helpers requires a different kernel-owned containment design.
 
 ## Considered & rejected
 
@@ -97,3 +122,7 @@ every claim.
 - **Sample the historical cutoff when draining starts.** A legacy worker can claim a job during
   the drain and mutate after that early sample. Sampling only in the completion transaction
   covers every job the legacy population could have admitted.
+- **Defer supervision and leave reclamation disabled.** This avoids the process, schema, and
+  rollout machinery, but #1946 could not enable historical reclamation and attached capture
+  filters would continue writing without an outside owner. That does not meet #1951 or accepted
+  ADR-0556's dependency for the current work.
