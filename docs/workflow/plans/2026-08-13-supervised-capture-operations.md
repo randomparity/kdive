@@ -92,6 +92,9 @@ Files:
 - Create `src/kdive/native/capture_launcher.c` and `scripts/build-capture-launcher.sh`; modify the
   `just setup`/guard path, `Dockerfile`, and `deploy/ansible/roles/libvirt_stack/` to install the
   target-native launcher on both supported architectures.
+- Modify `docs/operating/runbooks/power-host-bringup.md` to install the compiler/binutils
+  prerequisites and build, verify, and identify the current checkout's native launcher before its
+  sandbox proof.
 - Modify `src/kdive/__main__.py` to add the internal `capture-operation` process verb.
 - Create matching tests under `tests/jobs/capture_operations/`.
 
@@ -117,8 +120,10 @@ Steps:
    returns `EPERM`, thread
    creation succeeds, and the child process tree has no descendants on x86_64 and ppc64le. The
    ppc64le arm uses the native POWER carrier documented by
-   `docs/operating/runbooks/power-host-bringup.md`: after that runbook's
-   environment setup, run `uv run python -m pytest
+   `docs/operating/runbooks/power-host-bringup.md`: after its clean-host package setup, run
+   `just build-capture-launcher`, verify the installed artifact's recorded source hash equals the
+   current `src/kdive/native/capture_launcher.c` hash, run `just native-launcher-check`, then run
+   `uv run python -m pytest
    tests/jobs/capture_operations/test_sandbox.py -q`. Success requires `EPERM` from `fork`,
    `vfork`, both exec calls, and clone flag sets missing any required thread bit; `ENOSYS` from
    every `clone3`; success from the complete thread mask with ordinary and extra pthread flags;
@@ -130,7 +135,8 @@ Steps:
    `_start`/no build-id, adding only the target-specific syscall assembly for x86_64 or ppc64le.
    Add a `just native-launcher-check` CI guard using
    `readelf` to reject `PT_INTERP`, `DT_NEEDED`, constructor sections, and unexpected symbols in
-   the actually installed artifact. This is a required release proof; if no native
+   the actually installed artifact. Record the build hash and both command results. This is a
+   required release proof; if no native
    POWER host is available, report the arm unavailable and do not claim cross-platform completion.
 5. Run `uv run python -m pytest tests/jobs/capture_operations -q`, `just lint`, and `just type`;
    expect green. Commit `feat(jobs): add gated capture child boundary`.
