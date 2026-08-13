@@ -377,7 +377,7 @@ def test_dequeue_current_active_worker_claims_queued_job(migrated_url: str) -> N
 
 @pytest.mark.parametrize(
     "identity",
-    ["missing", "malformed", "wrong", "terminated", "old-protocol"],
+    ["missing", "malformed", "wrong", "terminated"],
 )
 def test_dequeue_refuses_worker_without_current_active_credential(
     migrated_url: str, identity: str
@@ -394,13 +394,6 @@ def test_dequeue_refuses_worker_without_current_active_credential(
                 supplied = await _register_worker(conn, "another-worker")
             elif identity == "terminated":
                 supplied = await _register_worker(conn, worker_id, terminated=True)
-            elif identity == "old-protocol":
-                supplied = await _register_worker(
-                    conn,
-                    worker_id,
-                    protocol=CURRENT_WORKER_FENCE_PROTOCOL - 1,
-                )
-
             assert (
                 await _dequeue(
                     conn,

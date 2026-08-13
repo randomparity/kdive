@@ -226,6 +226,10 @@ async def dequeue(
     database function derives the incarnation from its hash and claims only when it is active,
     matches ``worker_id``, and uses the fixed current fence protocol.
 
+    A ``capture_traffic`` retry remains ineligible while any prior supervised operation lacks
+    complete process-absence and provider-quiescence evidence. Refusal does not charge an attempt
+    or clear the current operation link; startup recovery must acknowledge that operation first.
+
     ``lease`` is one PostgreSQL interval applied to ``clock_timestamp()`` captured by the database
     after the blocking incarnation fence and immediately before this claim. The computed deadline
     must be after that reference and no more than one hour later. SQLSTATE ``22023`` is raised
@@ -273,7 +277,13 @@ async def count_claimable(
             "SELECT count(*) FROM jobs "
             "WHERE (state = %s OR (state = %s AND lease_expires_at < now())) "
             "  AND attempt < max_attempts "
-            "  AND dispatch_lane = ANY(%s::text[])",
+            "  AND dispatch_lane = ANY(%s::text[]) "
+            "  AND (kind <> 'capture_traffic' OR NOT EXISTS ("
+            "      SELECT 1 FROM capture_operations "
+            "      WHERE job_id = jobs.id "
+            "        AND (state <> 'exited' OR NOT process_absent "
+            "             OR provider_quiescence = '{}'::jsonb)"
+            "  ))",
             (JobState.QUEUED.value, JobState.RUNNING.value, list(accepted_lanes)),
         )
         row = await cur.fetchone()
