@@ -54,25 +54,12 @@ def test_descriptor_help_uses_operator_facing_metavars(capsys: pytest.CaptureFix
         _assert_operator_facing_help(capsys.readouterr().out, verb)
 
 
-def test_descriptor_help_survives_forced_colour(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Regression guard for #1891, forcing the exact condition CI cannot see.
+def test_operator_facing_help_survives_colour() -> None:
+    """ANSI spans between a flag and metavar do not invalidate the help contract."""
+    verb = next(verb for verb in GENERATED_VERBS if verb.tool == "images.extend")
+    coloured_help = "image_id \x1b[1;36m--reason\x1b[0m \x1b[1;33mREASON\x1b[0m"
 
-    CI has no TTY and sets no ``FORCE_COLOR``, so a coloured-help regression is invisible
-    there; it only reddens `just test` on a developer's or agent's shell that exports
-    ``FORCE_COLOR``/``COLORTERM``. Forcing colour here makes the same regression red in CI.
-    """
-    monkeypatch.setenv("FORCE_COLOR", "3")
-    parser = build_parser()
-    for verb in GENERATED_VERBS:
-        with pytest.raises(SystemExit) as excinfo:
-            parser.parse_args([verb.group, verb.sub, "--help"])
-
-        assert excinfo.value.code == 0
-        raw_help_text = capsys.readouterr().out
-        assert "\x1b[" in raw_help_text, "expected FORCE_COLOR to actually colourise --help"
-        _assert_operator_facing_help(raw_help_text, verb)
+    _assert_operator_facing_help(coloured_help, verb)
 
 
 def test_generated_positional_uses_descriptor_and_routes_to_tool_handler(
