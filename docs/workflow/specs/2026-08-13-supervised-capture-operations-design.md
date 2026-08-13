@@ -228,13 +228,14 @@ protocol below 3 has exact durable lifecycle-authority termination and a valid i
 binding. This is the complete registered legacy population, independent of heartbeat, lease, and
 job state. A `capture_traffic` job still `running` under one of those incarnations is finalized
 offline only after its exact owner's termination is verified. Worker registration and cutoff
-acquire the same
-global capture-protocol advisory lock. The cutoff transaction first persists minimum protocol 3,
+acquire the same global capture-protocol advisory lock. The cutoff transaction first persists
+minimum protocol 3,
 then takes each residual job fence and idempotently moves the row from `running` to `canceled` with
 `JobState.CANCELED`, `error_category = NULL`, and
 `failure_context = {"reason": "offline_capture_protocol_cutover"}`. It clears worker id, lease,
-and heartbeat without charging an attempt or changing queued jobs. A row whose owner lacks exact termination aborts the transaction. It then rechecks the
-complete registered and running-job population and installs protocol-3-only registration,
+and heartbeat without charging an attempt or changing queued jobs. A row whose owner lacks exact
+termination aborts the transaction. It then rechecks the complete registered and running-job
+population and installs protocol-3-only registration,
 authentication, and capture claim functions. It inserts `capture_cutover` with
 `operation_quiescent = true`, `publication_closed = false`, `complete = false`, and
 `cutoff_at = clock_timestamp()` in the same transaction. There is no drain state for a stale
