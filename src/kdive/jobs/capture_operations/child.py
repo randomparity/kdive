@@ -7,10 +7,14 @@ import stat
 from contextlib import suppress
 from hashlib import sha256
 
+from kdive.jobs.capture_operations.protocol import CaptureRequest
+
 _REQUEST_NAME = "request.json"
 _REQUEST_DIGEST_NAME = "request.sha256"
+_CONFIGURATION_NAME = "configuration.json"
 _RESULT_NAME = "result.json"
 _MAX_REQUEST_BYTES = 16_384
+_MAX_CONFIGURATION_BYTES = 16_384
 
 
 def _read_bounded(fd: int, maximum: int) -> bytes:
@@ -72,6 +76,22 @@ def _open_attempt_directory() -> int:
     return os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
 
 
+def read_capture_inputs(directory_fd: int) -> tuple[CaptureRequest, bytes | None]:
+    """Read the attested request and optional opaque Task 3 configuration after release."""
+    request_bytes = _read_private_file(directory_fd, _REQUEST_NAME, _MAX_REQUEST_BYTES)
+    expected_digest = _read_private_file(directory_fd, _REQUEST_DIGEST_NAME, 65)
+    if expected_digest != (sha256(request_bytes).hexdigest() + "\n").encode():
+        raise ValueError("capture request digest does not match its spool attestation")
+    request = CaptureRequest.from_canonical_json(request_bytes)
+    try:
+        configuration = _read_private_file(
+            directory_fd, _CONFIGURATION_NAME, _MAX_CONFIGURATION_BYTES
+        )
+    except FileNotFoundError:
+        configuration = None
+    return request, configuration
+
+
 def run_capture_child(launch_token: str, gate_fd: int) -> int:
     """Validate the released request and write a bounded placeholder result.
 
@@ -86,13 +106,10 @@ def run_capture_child(launch_token: str, gate_fd: int) -> int:
     directory_fd = _open_attempt_directory()
     try:
         from kdive.domain.errors import ErrorCategory
-        from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
+        from kdive.jobs.capture_operations.protocol import CaptureResult
 
-        request_bytes = _read_private_file(directory_fd, _REQUEST_NAME, _MAX_REQUEST_BYTES)
-        expected_digest = _read_private_file(directory_fd, _REQUEST_DIGEST_NAME, 65)
-        if expected_digest != (sha256(request_bytes).hexdigest() + "\n").encode():
-            raise ValueError("capture request digest does not match its spool attestation")
-        CaptureRequest.from_canonical_json(request_bytes)
+        request, configuration = read_capture_inputs(directory_fd)
+        del request, configuration
         result = CaptureResult(
             outcome="failure",
             size_bytes=0,

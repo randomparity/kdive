@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 
 from kdive.jobs.capture_operations import linux_identity
-from kdive.jobs.capture_operations.linux_identity import LinuxIdentity, scan_launch_token
+from kdive.jobs.capture_operations.linux_identity import (
+    HostIdentityMismatch,
+    LinuxIdentity,
+    scan_launch_token,
+)
 
 
 def _proc_tree(root: Path, pid: int, *, start_ticks: int = 4242) -> None:
@@ -28,7 +32,9 @@ def test_linux_identity_reads_boot_pid_and_exact_start_ticks(
     _proc_tree(tmp_path, 123)
     monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
 
-    assert LinuxIdentity.read(123) == LinuxIdentity(boot_id="boot-a", pid=123, start_ticks=4242)
+    assert LinuxIdentity.read(123, host_instance="host-a") == LinuxIdentity(
+        host_instance="host-a", boot_id="boot-a", pid=123, start_ticks=4242
+    )
 
 
 def test_linux_identity_absence_includes_pid_reuse(
@@ -36,9 +42,20 @@ def test_linux_identity_absence_includes_pid_reuse(
 ) -> None:
     _proc_tree(tmp_path, 123, start_ticks=99)
     monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
-    identity = LinuxIdentity(boot_id="boot-a", pid=123, start_ticks=98)
+    identity = LinuxIdentity(host_instance="host-a", boot_id="boot-a", pid=123, start_ticks=98)
 
-    assert identity.is_absent()
+    assert identity.is_absent(current_host_instance="host-a")
+
+
+def test_linux_identity_host_mismatch_is_inconclusive_not_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _proc_tree(tmp_path, 123)
+    monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
+    identity = LinuxIdentity.read(123, host_instance="host-a")
+
+    with pytest.raises(HostIdentityMismatch, match="host-a.*host-b"):
+        identity.is_absent(current_host_instance="host-b")
 
 
 def test_linux_identity_refuses_unreadable_or_malformed_proc(
@@ -49,7 +66,7 @@ def test_linux_identity_refuses_unreadable_or_malformed_proc(
     (tmp_path / "123/stat").write_text("malformed")
 
     with pytest.raises(RuntimeError, match="/proc/123/stat"):
-        LinuxIdentity.read(123)
+        LinuxIdentity.read(123, host_instance="host-a")
 
 
 def test_pidfd_open_rechecks_identity_and_signal_uses_pidfd(
@@ -64,15 +81,15 @@ def test_pidfd_open_rechecks_identity_and_signal_uses_pidfd(
         "pidfd_send_signal",
         lambda fd, sig, _info=None, _flags=0: sent.append((fd, sig)),
     )
-    identity = LinuxIdentity.read(123)
+    identity = LinuxIdentity.read(123, host_instance="host-a")
 
-    assert identity.open_pidfd() == 17
+    assert identity.open_pidfd(current_host_instance="host-a") == 17
     identity.signal(17, signal.SIGTERM)
     assert sent == [(17, signal.SIGTERM)]
 
 
 def test_pidfd_open_surfaces_disappearance_as_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    identity = LinuxIdentity(boot_id="boot-a", pid=123, start_ticks=42)
+    identity = LinuxIdentity(host_instance="host-a", boot_id="boot-a", pid=123, start_ticks=42)
     monkeypatch.setattr(
         linux_identity.os,
         "pidfd_open",
@@ -80,7 +97,23 @@ def test_pidfd_open_surfaces_disappearance_as_absent(monkeypatch: pytest.MonkeyP
     )
 
     with pytest.raises(ProcessLookupError):
-        identity.open_pidfd()
+        identity.open_pidfd(current_host_instance="host-a")
+
+
+def test_pidfd_open_refuses_cross_host_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    identity = LinuxIdentity(host_instance="host-a", boot_id="boot-a", pid=123, start_ticks=42)
+    opened = False
+
+    def _pidfd_open(_pid: int, _flags: int = 0) -> int:
+        nonlocal opened
+        opened = True
+        return 17
+
+    monkeypatch.setattr(linux_identity.os, "pidfd_open", _pidfd_open)
+
+    with pytest.raises(HostIdentityMismatch, match="host-a.*host-b"):
+        identity.open_pidfd(current_host_instance="host-b")
+    assert not opened
 
 
 def test_launch_token_scan_finds_only_exact_executable_and_token(
@@ -96,8 +129,8 @@ def test_launch_token_scan_finds_only_exact_executable_and_token(
     )
     monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
 
-    assert scan_launch_token(token, interpreter=interpreter) == (
-        LinuxIdentity(boot_id="boot-a", pid=123, start_ticks=4242),
+    assert scan_launch_token(token, interpreter=interpreter, host_instance="host-a") == (
+        LinuxIdentity(host_instance="host-a", boot_id="boot-a", pid=123, start_ticks=4242),
     )
 
 
@@ -115,4 +148,4 @@ def test_launch_token_scan_refuses_incomplete_proc_enumeration(
     )
 
     with pytest.raises(RuntimeError, match="complete launch-token scan"):
-        scan_launch_token("a" * 64, interpreter=interpreter)
+        scan_launch_token("a" * 64, interpreter=interpreter, host_instance="host-a")

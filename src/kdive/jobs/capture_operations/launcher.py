@@ -25,19 +25,8 @@ _DEFAULT_MANIFEST = Path("/usr/share/kdive/capture-bootstrap-manifest.json")
 _HANDSHAKE_TIMEOUT_SECONDS = 5.0
 _SIGNAL_WAIT_SECONDS = 5.0
 _MAX_RESULT_BYTES = 65_536
-_PROVIDER_ENVIRONMENT = {
-    "local-libvirt": frozenset({"KDIVE_LIBVIRT_URI"}),
-    "remote-libvirt": frozenset(
-        {
-            "KDIVE_REMOTE_LIBVIRT_STORAGE_POOL",
-            "KDIVE_REMOTE_LIBVIRT_NETWORK",
-            "KDIVE_REMOTE_LIBVIRT_MACHINE",
-        }
-    ),
-}
-_COMMON_ENVIRONMENT = frozenset(
-    {"LANG", "LC_ALL", "LC_CTYPE", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"}
-)
+_BOOTSTRAP_ENVIRONMENT = frozenset({"LANG", "LC_ALL", "LC_CTYPE", "TZ"})
+_MAX_CONFIGURATION_BYTES = 16_384
 _ARCHITECTURES = {"amd64": "x86_64", "x86_64": "x86_64", "ppc64le": "ppc64le"}
 _MANIFEST_KEYS = {
     "schema_version",
@@ -201,6 +190,32 @@ def _write_request(directory_fd: int, request: CaptureRequest) -> None:
     os.fsync(directory_fd)
 
 
+def _write_configuration(attempt_dir: Path, configuration: bytes) -> None:
+    if not configuration or len(configuration) > _MAX_CONFIGURATION_BYTES:
+        raise ValueError("capture configuration must contain 1..16384 bytes")
+    directory_fd = os.open(attempt_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(directory_fd)
+        if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise PermissionError("capture attempt directory must be owner-owned mode 0700")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+        fd = os.open("configuration.json", flags, 0o600, dir_fd=directory_fd)
+        try:
+            offset = 0
+            while offset < len(configuration):
+                offset += os.write(fd, configuration[offset:])
+            os.fsync(fd)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                os.unlink("configuration.json", dir_fd=directory_fd)
+            raise
+        finally:
+            os.close(fd)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _process_group_members(process_group: int, proc_root: Path = Path("/proc")) -> set[int]:
     members: set[int] = set()
     try:
@@ -268,7 +283,6 @@ class LaunchedCapture:
     identity: LinuxIdentity
     pidfd: int
     gate_fd: int
-    child_gate_fd: int
     attempt_dir: Path
     argv: tuple[str, ...]
     environment: Mapping[str, str]
@@ -291,6 +305,12 @@ class LaunchedCapture:
         os.close(self.gate_fd)
         self._released = True
         self.gate_fd = -1
+
+    def stage_configuration(self, configuration: bytes) -> None:
+        """Stage opaque Task 3 configuration for access only after this gate releases."""
+        if self._released or self._closed:
+            raise RuntimeError("capture configuration gate is no longer writable")
+        _write_configuration(self.attempt_dir, configuration)
 
     async def wait_process(self) -> int:
         """Wait for the exact launched process and close its retained pidfd once absent."""
@@ -366,9 +386,10 @@ class GatedCaptureLauncher:
         self._environment = dict(os.environ if environment is None else environment)
         self._expected_manifest_uid = expected_manifest_uid
 
-    def _child_environment(self, provider_kind: str) -> dict[str, str]:
-        allowed = _COMMON_ENVIRONMENT | _PROVIDER_ENVIRONMENT[provider_kind]
-        environment = {key: value for key, value in self._environment.items() if key in allowed}
+    def _child_environment(self) -> dict[str, str]:
+        environment = {
+            key: value for key, value in self._environment.items() if key in _BOOTSTRAP_ENVIRONMENT
+        }
         source_root = Path(__file__).parents[3]
         package_paths = [str(source_root), *site.getsitepackages()]
         environment["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(package_paths))
@@ -436,11 +457,12 @@ class GatedCaptureLauncher:
             "--gate-fd",
             str(gate_read),
         )
+        environment = self._child_environment()
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=attempt_dir,
-                env=self._child_environment(request.provider_kind),
+                env=environment,
                 pass_fds=(gate_read,),
                 start_new_session=True,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -460,8 +482,8 @@ class GatedCaptureLauncher:
             )
             if handshake != b"F":
                 raise RuntimeError("capture child returned an invalid filter handshake")
-            identity = LinuxIdentity.read(process.pid)
-            pidfd = identity.open_pidfd()
+            identity = LinuxIdentity.read(process.pid, host_instance=operation.host_instance)
+            pidfd = identity.open_pidfd(current_host_instance=operation.host_instance)
             expected = {process.pid}
             for _ in range(2):
                 if _process_group_members(process.pid) != expected:
@@ -482,8 +504,7 @@ class GatedCaptureLauncher:
             identity=identity,
             pidfd=pidfd,
             gate_fd=gate_write,
-            child_gate_fd=gate_read,
             attempt_dir=attempt_dir,
             argv=argv,
-            environment=self._child_environment(request.provider_kind),
+            environment=environment,
         )

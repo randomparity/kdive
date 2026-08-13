@@ -11,6 +11,16 @@ from pathlib import Path
 _PROC_ROOT = Path("/proc")
 
 
+class HostIdentityMismatch(RuntimeError):
+    """The observer is not on the durable worker-host boundary."""
+
+
+def _validate_host_instance(host_instance: str) -> str:
+    if not 1 <= len(host_instance.encode()) <= 512:
+        raise ValueError("host instance must contain 1..512 bytes")
+    return host_instance
+
+
 def _read_cmdline(path: Path) -> bytes:
     return path.read_bytes()
 
@@ -32,17 +42,19 @@ def _matches_capture_bootstrap(argv: list[bytes], token: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class LinuxIdentity:
-    """One exact process in one Linux boot, identified by `/proc` start ticks."""
+    """One exact process on one authority-bound host and Linux boot."""
 
+    host_instance: str
     boot_id: str
     pid: int
     start_ticks: int
 
     @classmethod
-    def read(cls, pid: int) -> LinuxIdentity:
-        """Read an exact process identity from the boot id and `/proc/<pid>/stat`."""
+    def read(cls, pid: int, *, host_instance: str) -> LinuxIdentity:
+        """Read an exact process identity on the supplied Task 1 host boundary."""
         if pid <= 0:
             raise ValueError("pid must be positive")
+        stable_host = _validate_host_instance(host_instance)
         try:
             boot_id = (_PROC_ROOT / "sys/kernel/random/boot_id").read_text().strip()
             stat_line = (_PROC_ROOT / str(pid) / "stat").read_text().strip()
@@ -58,10 +70,23 @@ class LinuxIdentity:
             raise RuntimeError(f"malformed /proc/{pid}/stat start ticks") from error
         if start_ticks < 0:
             raise RuntimeError(f"malformed /proc/{pid}/stat start ticks")
-        return cls(boot_id=boot_id, pid=pid, start_ticks=start_ticks)
+        return cls(
+            host_instance=stable_host,
+            boot_id=boot_id,
+            pid=pid,
+            start_ticks=start_ticks,
+        )
 
-    def open_pidfd(self) -> int:
+    def _require_host(self, current_host_instance: str) -> None:
+        current = _validate_host_instance(current_host_instance)
+        if current != self.host_instance:
+            raise HostIdentityMismatch(
+                f"durable host {self.host_instance} does not match observer host {current}"
+            )
+
+    def open_pidfd(self, *, current_host_instance: str) -> int:
         """Open a pidfd and recheck boot/start ticks to close the observation race."""
+        self._require_host(current_host_instance)
         try:
             pidfd = os.pidfd_open(self.pid, 0)
         except OSError as error:
@@ -69,7 +94,7 @@ class LinuxIdentity:
                 raise ProcessLookupError(errno.ESRCH, f"process {self.pid} is absent") from error
             raise
         try:
-            if LinuxIdentity.read(self.pid) != self:
+            if LinuxIdentity.read(self.pid, host_instance=current_host_instance) != self:
                 raise ProcessLookupError(errno.ESRCH, f"process {self.pid} identity changed")
         except BaseException:
             os.close(pidfd)
@@ -80,16 +105,21 @@ class LinuxIdentity:
         """Signal this exact process through its already-open pidfd."""
         signal.pidfd_send_signal(pidfd, int(sig), None, 0)
 
-    def is_absent(self) -> bool:
-        """Return true when the boot changed, the PID vanished, or the PID was reused."""
+    def is_absent(self, *, current_host_instance: str) -> bool:
+        """Return true for same-host absence; refuse to infer across host boundaries."""
+        self._require_host(current_host_instance)
         try:
-            return LinuxIdentity.read(self.pid) != self
+            return LinuxIdentity.read(self.pid, host_instance=current_host_instance) != self
         except ProcessLookupError:
             return True
 
 
 def scan_launch_token(
-    launch_token: str, *, interpreter: Path, expected_uid: int | None = None
+    launch_token: str,
+    *,
+    interpreter: Path,
+    host_instance: str,
+    expected_uid: int | None = None,
 ) -> tuple[LinuxIdentity, ...]:
     """Completely enumerate `/proc` for pre-registration children carrying one exact token.
 
@@ -100,6 +130,7 @@ def scan_launch_token(
         character not in "0123456789abcdef" for character in launch_token
     ):
         raise ValueError("launch token must be 64 lowercase hexadecimal characters")
+    stable_host = _validate_host_instance(host_instance)
     owner = os.geteuid() if expected_uid is None else expected_uid
     executable = interpreter.resolve(strict=True)
     try:
@@ -123,7 +154,7 @@ def scan_launch_token(
             continue
         try:
             observed_executable = (entry / "exe").resolve(strict=True)
-            identity = LinuxIdentity.read(int(entry.name))
+            identity = LinuxIdentity.read(int(entry.name), host_instance=stable_host)
         except FileNotFoundError:
             continue
         except OSError as error:

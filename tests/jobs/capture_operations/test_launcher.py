@@ -94,6 +94,8 @@ def test_real_child_is_gated_and_has_exact_process_contract(
     request = _request()
     operation = _operation(request)
     monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://forbidden")
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu:///forbidden-before-release")
+    monkeypatch.setenv("KDIVE_REMOTE_LIBVIRT_MACHINE", "forbidden-before-release")
     monkeypatch.setenv("LD_PRELOAD", "/forbidden/loader.so")
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
@@ -119,11 +121,14 @@ def test_real_child_is_gated_and_has_exact_process_contract(
                 b"--launch-token",
                 b"a" * 64,
                 b"--gate-fd",
-                str(child.child_gate_fd).encode(),
+                child.argv[-1].encode(),
             ]
+            assert not hasattr(child, "child_gate_fd")
             assert Path(f"/proc/{child.identity.pid}/cwd").resolve() == child.attempt_dir.resolve()
             environ = Path(f"/proc/{child.identity.pid}/environ").read_bytes().split(b"\0")
             assert not any(item.startswith(b"KDIVE_DATABASE_URL=") for item in environ)
+            assert not any(item.startswith(b"KDIVE_LIBVIRT_URI=") for item in environ)
+            assert not any(item.startswith(b"KDIVE_REMOTE_LIBVIRT_MACHINE=") for item in environ)
             assert not any(item.startswith(b"LD_PRELOAD=") for item in environ)
             assert launcher_module._process_group_members(child.identity.pid) == {
                 child.identity.pid
@@ -139,6 +144,29 @@ def test_real_child_is_gated_and_has_exact_process_contract(
             assert (child.attempt_dir / "result.json").exists()
         finally:
             await child.cancel()
+
+    asyncio.run(_run())
+
+
+def test_provider_configuration_uses_post_filter_spool_seam(tmp_path: Path, manifest: Path) -> None:
+    request = _request()
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+
+    async def _run() -> None:
+        child = await launcher.launch(request, _operation(request))
+        configuration = b'{"uri":"qemu:///system"}\n'
+        assert not (child.attempt_dir / "configuration.json").exists()
+        child.stage_configuration(configuration)
+        configuration_path = child.attempt_dir / "configuration.json"
+        assert configuration_path.read_bytes() == configuration
+        assert configuration_path.stat().st_mode & 0o777 == 0o600
+        child.release()
+        assert (await child.wait()).reason == "provider_execution_not_installed"
 
     asyncio.run(_run())
 
@@ -344,13 +372,17 @@ def test_post_spawn_attestation_faults_abort_before_release(
         monkeypatch.setattr(
             launcher_module.LinuxIdentity,
             "read",
-            lambda _pid: (_ for _ in ()).throw(RuntimeError("stat fault")),
+            lambda _pid, *, host_instance: (_ for _ in ()).throw(
+                RuntimeError(f"stat fault on {host_instance}")
+            ),
         )
     elif fault == "pidfd":
         monkeypatch.setattr(
             launcher_module.LinuxIdentity,
             "open_pidfd",
-            lambda _self: (_ for _ in ()).throw(OSError("pidfd fault")),
+            lambda _self, *, current_host_instance: (_ for _ in ()).throw(
+                OSError(f"pidfd fault on {current_host_instance}")
+            ),
         )
     else:
         monkeypatch.setattr(
@@ -371,7 +403,6 @@ def test_release_write_fault_does_not_mark_gate_released(monkeypatch: pytest.Mon
         identity=object(),  # ty: ignore[invalid-argument-type] - release never reads it
         pidfd=-1,
         gate_fd=write_fd,
-        child_gate_fd=read_fd,
         attempt_dir=Path("/unused"),
         argv=(),
         environment={},
@@ -403,7 +434,6 @@ def test_cancel_uses_term_then_kill_and_preserves_timeout(
         identity=_Identity(),  # ty: ignore[invalid-argument-type] - narrow cancellation fake
         pidfd=99,
         gate_fd=-1,
-        child_gate_fd=10,
         attempt_dir=Path("/unused"),
         argv=(),
         environment={},

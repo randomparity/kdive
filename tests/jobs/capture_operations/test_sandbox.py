@@ -87,6 +87,40 @@ def test_filter_denies_vfork_execveat_and_clone_missing_thread_bits() -> None:
 
 
 @pytest.mark.skipif(platform.system() != "Linux", reason="seccomp is Linux-only")
+def test_filter_enforces_complete_raw_clone_flag_matrix() -> None:
+    result = _sandbox_probe(
+        "import ctypes, platform, time\n"
+        "libc = ctypes.CDLL(None, use_errno=True)\n"
+        "clone_number = {'x86_64': 56, 'ppc64le': 120}[platform.machine()]\n"
+        "vm, sighand, thread = 0x100, 0x800, 0x10000\n"
+        "required = vm | sighand | thread\n"
+        "normal = required | 0x200 | 0x400 | 0x40000\n"
+        "denied = []\n"
+        "for missing in (vm, sighand, thread):\n"
+        "    ctypes.set_errno(0)\n"
+        "    rc = libc.syscall(clone_number, normal & ~missing, 0, 0, 0, 0)\n"
+        "    denied.append((rc, ctypes.get_errno()))\n"
+        "CALLBACK = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)\n"
+        "finish = ctypes.cast(libc.getpid, CALLBACK)\n"
+        "libc.clone.restype = ctypes.c_int\n"
+        "stacks = []\n"
+        "results = []\n"
+        "for flags in (normal, normal | 0x400000):\n"
+        "    stack = ctypes.create_string_buffer(1024 * 1024)\n"
+        "    stacks.append(stack)\n"
+        "    stack_top = ctypes.c_void_p(ctypes.addressof(stack) + len(stack))\n"
+        "    ctypes.set_errno(0)\n"
+        "    rc = libc.clone(finish, stack_top, flags, None)\n"
+        "    results.append((rc, ctypes.get_errno()))\n"
+        "time.sleep(0.05)\n"
+        "print(denied, [rc > 0 for rc, _ in results])\n"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[(-1, 1), (-1, 1), (-1, 1)] [True, True]"
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="seccomp is Linux-only")
 def test_filter_refuses_unsupported_architecture(monkeypatch: pytest.MonkeyPatch) -> None:
     from kdive.jobs.capture_operations import sandbox
 
