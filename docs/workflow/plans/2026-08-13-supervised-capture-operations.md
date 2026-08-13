@@ -137,9 +137,14 @@ Steps:
 3. Implement synchronous child executors and independent quiescence probes without sharing code
    across provider families beyond the port models.
 4. Add gated local and remote real-stack tests delaying an accepted monitor mutation, killing the
-   child, and proving the new connection cannot acknowledge early.
-5. Run the focused unit tests; run `just test-live` and the remote live recipe only when fixtures
-   are present, reporting skips as unavailable rather than proof. Run `just lint` and `just type`.
+   child, and proving the new connection cannot acknowledge early. Name the remote carrier
+   `tests/integration/test_remote_capture_operation_quiescence_live.py::test_remote_capture_\
+operation_waits_for_fresh_monitor_ordering` and mark it `live_vm_remote`.
+5. Run the focused unit tests; run `just test-live` and `just test-live-remote` only when fixtures
+   are present. The latter must collect and execute the named `live_vm_remote` carrier; a skip is
+   reported as unavailable rather than proof. The HTTP `just test-live-stack-remote` tier is not
+   required because this criterion exercises the direct-provider boundary. Run `just lint` and
+   `just type`.
 6. Commit `feat(providers): prove capture operation quiescence`.
 
 Acceptance: each real provider has a falsifiable cross-connection ordering proof and cannot emit
@@ -178,41 +183,55 @@ unchanged.
 
 Files:
 
-- Create `scripts/live-stack/cutover-capture-protocol.sh` for the host-process/Compose path.
+- Create `scripts/live-stack/cutover-capture-protocol.sh` for the host-process path.
+- Create `scripts/cutover-capture-protocol-compose.sh` for Compose deployments.
 - Create `scripts/cutover-capture-protocol-helm.sh` for Helm deployments.
 - Modify `deploy/helm/kdive/templates/job-migrate.yaml` so migration does not race a worker rollout,
   and document the replacing upgrade in `deploy/helm/kdive/README.md` and
   `docs/operating/runbooks/kubernetes-deploy.md`.
 - Modify `scripts/live-stack/README.md`; add shell/shape guards in
   `tests/scripts/test_live_stack_scripts.py`, `tests/scripts/test_live_workflow_shape.py`,
-  `tests/helm/test_helm_render.py`, and `tests/helm/test_helm_upgrade_config.py`.
+  `tests/compose/test_compose_lifecycle_recipe.py`,
+  `tests/compose/test_compose_worker_lifecycle_live.py`, `tests/helm/test_helm_render.py`, and
+  `tests/helm/test_helm_upgrade_config.py`. Update `docs/operating/docker-compose.md` for the
+  Compose route.
 - Flip ADR-0558 to Accepted only in the final implementation commit.
 
 Steps:
 
-1. Add red tests that both cutover scripts stop all workers, refuse rolling protocol 2→3, preserve
-   the original replica count, surface exact blocking incarnation/job diagnostics, and permit a
-   fresh protocol-3 installation.
+1. Add red tests that all three cutover scripts stop all workers, refuse rolling protocol 2→3,
+   preserve the original replica count, surface exact blocking incarnation/job diagnostics, and
+   permit a fresh protocol-3 installation.
 2. Implement the local sequence as `stop_daemons` → verify every recorded protocol-2 host PID is
-   absent → `pg_dump --format=custom` → `python -m kdive migrate` →
-   `restart_host_processes`. A failed termination precondition or migration leaves workers stopped
+   reaped by its owning shell and record exact local lifecycle termination →
+   `pg_dump --format=custom` → `python -m kdive migrate` → `restart_host_processes`. Mere PID
+   absence is not evidence. A failed termination precondition or migration leaves workers stopped
    and prints the exact recovery command; the script never calls `down.sh` or wipes backends.
-3. Implement the Helm sequence with explicit `RELEASE`, `NAMESPACE`, values file, and backup path:
+3. Implement the Compose sequence as `just compose-stop` → require
+   `compose_worker_lifecycle`'s exact container-incarnation termination rows →
+   `pg_dump --format=custom` → run the one-shot `migrate` service → `just compose-up`. Preserve
+   named volumes and route all lifecycle actions through the existing authority. Run
+   `just test-compose-lifecycle`; its live proof must exercise the cutover and exact Docker/database
+   evidence, not only render the command shape.
+4. Implement the Helm sequence with explicit `RELEASE`, `NAMESPACE`, values file, and backup path:
    read `.Values.worker.replicas`, `kubectl scale statefulset/${RELEASE}-worker --replicas=0`, wait
    for every worker pod deletion/finalizer termination witness, run `pg_dump --format=custom`, then
    run `helm upgrade` with the target image and original replica count. The migration hook acquires
    the global cutover lock and refuses any live protocol-2 incarnation before installing protocol
    3. Do not add a compatibility flag or alternate rolling path.
-4. Make failures operationally explicit: a precondition failure leaves the old schema and stopped
+5. Make failures operationally explicit: a precondition failure leaves the old schema and stopped
    workers; a post-migration failure leaves protocol 3 installed and workers stopped. The only
    post-migration rollback is `pg_restore --clean --if-exists` of the named backup followed by the
    prior image/chart; never start a protocol-2 worker against the migrated database.
-5. Update both runbooks with these exact commands and state that #1952 still gates aggregate
+6. Update all three runbooks with these exact commands and state that #1952 still gates aggregate
    historical coverage.
-6. Run focused deployment tests, `just lint-shell`, `just lint-ansible`, `just test-ansible`,
-   `just docs-links`, `just docs-paths`, and `just adr-status-check`.
-7. Set ADR-0558 to Accepted, run `just ci`, verify `git status --porcelain` is empty after staging,
-   and commit `feat(deploy): enforce capture protocol cutover`.
+7. Run focused deployment tests, `just test-compose-lifecycle`, `just lint-shell`,
+   `just lint-ansible`, `just test-ansible`, `just docs-links`, `just docs-paths`, and
+   `just adr-status-check`.
+8. Set ADR-0558 to Accepted and run `just ci`. Before committing, inspect
+   `git status --porcelain` and require only intended staged files with no untracked artifacts;
+   commit `feat(deploy): enforce capture protocol cutover`, then require
+   `git status --porcelain` to be empty.
 
 Acceptance: no protocol-2 worker can register, authenticate, claim, or survive into the cutoff;
 residual running legacy captures are canceled only after positive owner termination; fresh and
