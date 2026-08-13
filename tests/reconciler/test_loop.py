@@ -27,6 +27,7 @@ from kdive.reconciler.loop import (
     ReconcileReport,
     reconcile_once,
 )
+from kdive.reconciler.repairs.allocations import has_active_capture_job
 from kdive.reconciler.repairs.debug_sessions import repair_dead_sessions
 from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
 from kdive.reconciler.repairs.systems import repair_orphaned_systems
@@ -1108,19 +1109,38 @@ def test_null_dump_volume_reaper_is_a_dump_volume_reaper() -> None:
     asyncio.run(_run())
 
 
-async def _seed_capture_job(conn: psycopg.AsyncConnection, system_id: UUID, *, state: str) -> None:
+async def _seed_capture_job(
+    conn: psycopg.AsyncConnection,
+    system_id: UUID,
+    *,
+    state: str,
+    payload_run_id: str | None = None,
+) -> None:
     from psycopg.types.json import Jsonb
 
+    run_id = payload_run_id or str(await seed_run(conn, system_id))
     await conn.execute(
         "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, authorizing, dedup_key) "
         "VALUES ('capture_vmcore', %s, %s, 0, 5, %s, %s)",
         (
-            Jsonb({"system_id": str(system_id), "method": "host_dump"}),
+            Jsonb({"run_id": run_id, "method": "host_dump"}),
             state,
             Jsonb({"principal": "p", "agent_session": None, "project": "proj"}),
             f"{system_id}:capture_vmcore:host_dump:{state}",
         ),
     )
+
+
+def test_active_capture_job_resolves_system_through_run(migrated_url: str) -> None:
+    """A running Run-addressed capture is a live holder for its bound System (ADR-0557)."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as conn:
+            system_id = await seed_system(conn, system_state=SystemState.CRASHED)
+            await _seed_capture_job(conn, system_id, state="running")
+            assert await has_active_capture_job(conn, system_id) is True
+
+    asyncio.run(_run())
 
 
 async def _seed_now_epoch(conn: psycopg.AsyncConnection) -> float:
@@ -1189,6 +1209,52 @@ def test_does_not_reap_a_volume_with_an_active_capture_job(migrated_url: str) ->
             )
         assert count == 0
         assert reaper.deleted == []  # live-holder guard #2 (active capture job)
+
+    asyncio.run(_run())
+
+
+def test_reaps_a_volume_with_a_queued_capture_job(migrated_url: str) -> None:
+    """Queued work has not started provider capture and cannot pin an old volume (ADR-0557)."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed, system_state=SystemState.CRASHED)
+            await _seed_capture_job(seed, system_id, state="queued")
+            now_epoch = await _seed_now_epoch(seed)
+        reaper = _FakeDumpVolumeReaper(_vol(system_id, age_s=3600, now_epoch=now_epoch))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool,
+                lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
+            )
+        assert count == 1
+        assert reaper.deleted == [f"kdive-host-dump-{system_id}.kdump"]
+
+    asyncio.run(_run())
+
+
+def test_malformed_capture_payload_does_not_abort_reaping(migrated_url: str) -> None:
+    """A malformed Run identity is a non-match, not a sweep-wide database error (ADR-0557)."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed, system_state=SystemState.CRASHED)
+            await seed_run(seed, system_id)
+            await _seed_capture_job(
+                seed,
+                system_id,
+                state="running",
+                payload_run_id="not-a-uuid",
+            )
+            now_epoch = await _seed_now_epoch(seed)
+        reaper = _FakeDumpVolumeReaper(_vol(system_id, age_s=3600, now_epoch=now_epoch))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool,
+                lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
+            )
+        assert count == 1
+        assert reaper.deleted == [f"kdive-host-dump-{system_id}.kdump"]
 
     asyncio.run(_run())
 

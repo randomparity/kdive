@@ -51,6 +51,7 @@ _TERMINAL_ALLOCATION_STATE_VALUES = tuple(state.value for state in _TERMINAL_ALL
 _ACTIVE_JOB_STATES = (JobState.QUEUED, JobState.RUNNING)
 _CAPTURE_VMCORE_JOB_KIND_VALUE = JobKind.CAPTURE_VMCORE.value
 _ACTIVE_JOB_STATE_VALUES = tuple(state.value for state in _ACTIVE_JOB_STATES)
+_RUNNING_JOB_STATE_VALUE = JobState.RUNNING.value
 
 _ACTIVE_ALLOCATION_STATE_VALUE = AllocationState.ACTIVE.value
 _DETACHED_DEBUG_SESSION_STATE_VALUE = DebugSessionState.DETACHED.value
@@ -375,15 +376,16 @@ async def _has_live_system(
 
 
 async def has_active_capture_job(conn: AsyncConnection, system_id: UUID) -> bool:
-    """True if ``system_id`` has a non-terminal ``capture_vmcore`` job."""
+    """True if ``system_id`` has a running Run-addressed capture job (ADR-0557)."""
     async with conn.cursor() as cur:
         await cur.execute(
-            "SELECT 1 FROM jobs "
-            "WHERE kind = %s AND state = ANY(%s) AND payload->>'system_id' = %s LIMIT 1",
+            "SELECT 1 FROM jobs j "
+            "JOIN runs r ON r.id::text = j.payload->>'run_id' "
+            "WHERE j.kind = %s AND j.state = %s AND r.system_id = %s LIMIT 1",
             (
                 _CAPTURE_VMCORE_JOB_KIND_VALUE,
-                list(_ACTIVE_JOB_STATE_VALUES),
-                str(system_id),
+                _RUNNING_JOB_STATE_VALUE,
+                system_id,
             ),
         )
         return await cur.fetchone() is not None
