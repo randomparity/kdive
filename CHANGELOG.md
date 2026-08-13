@@ -943,6 +943,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update prepull guard + script for digest-pinned images; add ADR-0554 Considered & rejected
 - Compose down passes all profiles and surfaces non-empty stderr (#1916)
 - Resolve active capture jobs through runs
+- Make CLI colour regression deterministic
 
 ### Build
 
