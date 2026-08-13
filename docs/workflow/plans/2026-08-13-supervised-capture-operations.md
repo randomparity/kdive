@@ -96,10 +96,14 @@ Files:
   resolves the real interpreter and its `PT_INTERP`/`DT_NEEDED` closure using absolute system
   loader paths with loader-affecting environment removed, hashes every file, records architecture,
   and writes `/usr/share/kdive/capture-bootstrap-manifest.json` atomically.
-- Modify `just setup`, `Dockerfile`, `deploy/ansible/roles/libvirt_stack/`, and
-  `docs/operating/runbooks/power-host-bringup.md` to generate the manifest after installing the
-  final target-native interpreter/runtime. Compose and Helm consume the manifest already baked
-  into that same application image; host processes consume the Ansible/setup-installed manifest.
+- Add unprivileged `just build-capture-bootstrap-manifest` to stage and verify the manifest for the
+  explicitly selected worker interpreter without touching `/usr`. Add explicit privileged
+  `just install-capture-bootstrap-manifest` for operators; it atomically installs the staged bytes
+  root-owned mode 0644 and verifies byte identity. Keep `just setup` unprivileged and limited to
+  the staged guard. Modify `Dockerfile`, `deploy/ansible/roles/libvirt_stack/`, and
+  `docs/operating/runbooks/power-host-bringup.md` to generate then install the manifest only after
+  the final target-native interpreter/runtime. Compose and Helm consume the manifest baked into
+  that same application image; host processes consume the explicit operator/Ansible installation.
 - Modify `src/kdive/__main__.py` to add the internal `capture-operation` process verb.
 - Create matching tests under `tests/jobs/capture_operations/`.
 
@@ -138,7 +142,8 @@ Steps:
    package initializer, exact bootstrap import trace, attested interpreter/dependency closure,
    double complete process-group/task enumeration, denial of later exec, and filter failure before
    release. Add image/render/Ansible guards proving the deployed manifest matches the deployed
-   interpreter on x86_64 and ppc64le, including atomic coordinated refresh and stale-manifest
+   interpreter on x86_64 and ppc64le, including unprivileged install refusal, wrong-interpreter
+   generation, atomic coordinated refresh, final root ownership/byte equality, and stale-manifest
    readiness failure. Record the command result. This is a required release proof; if no native
    POWER host is available, report the arm unavailable and do not claim cross-platform completion.
 5. Run `uv run python -m pytest tests/jobs/capture_operations -q`, `just lint`, and `just type`;
