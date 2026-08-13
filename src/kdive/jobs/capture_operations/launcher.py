@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from kdive.jobs.capture_operations.bootstrap_elf import runtime_elf_closure
-from kdive.jobs.capture_operations.linux_identity import LinuxIdentity
+from kdive.jobs.capture_operations.linux_identity import LinuxIdentity, scan_launch_token
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
 from kdive.jobs.capture_operations.repository import CaptureOperation
 
@@ -279,6 +279,167 @@ def _task_members(pid: int, proc_root: Path = Path("/proc")) -> set[int]:
         raise RuntimeError(f"cannot enumerate /proc/{pid}/task during capture handoff") from error
 
 
+type _ProcessHandle = tuple[LinuxIdentity, int]
+
+
+def _attest_process_members(
+    members: set[int],
+    *,
+    host_instance: str,
+    existing: dict[int, _ProcessHandle],
+) -> dict[int, _ProcessHandle]:
+    """Open every exact process pidfd before the caller signals any member."""
+    handles = dict(existing)
+    opened: list[int] = []
+    try:
+        for pid in sorted(members):
+            if pid in handles:
+                continue
+            identity = LinuxIdentity.read(pid, host_instance=host_instance)
+            pidfd = identity.open_pidfd(current_host_instance=host_instance)
+            handles[pid] = (identity, pidfd)
+            opened.append(pidfd)
+    except BaseException:
+        for pidfd in opened:
+            os.close(pidfd)
+        raise
+    return handles
+
+
+async def _pidfd_ready(pidfd: int) -> None:
+    loop = asyncio.get_running_loop()
+    ready = loop.create_future()
+
+    def _mark_ready() -> None:
+        if not ready.done():
+            ready.set_result(None)
+
+    loop.add_reader(pidfd, _mark_ready)
+    try:
+        await ready
+    finally:
+        loop.remove_reader(pidfd)
+
+
+def _close_process_handles(handles: Mapping[int, _ProcessHandle]) -> None:
+    for _identity, pidfd in handles.values():
+        os.close(pidfd)
+
+
+async def _signal_and_wait_exact(
+    handles: dict[int, _ProcessHandle], process: asyncio.subprocess.Process
+) -> None:
+    """SIGKILL exact pidfds and await every member plus the leader for five seconds total."""
+    for identity, pidfd in handles.values():
+        with suppress(ProcessLookupError):
+            identity.signal(pidfd, signal.SIGKILL)
+    waits = [_pidfd_ready(pidfd) for _identity, pidfd in handles.values()]
+    waits.append(process.wait())
+    try:
+        await asyncio.wait_for(asyncio.gather(*waits), timeout=_SIGNAL_WAIT_SECONDS)
+    except TimeoutError as error:
+        raise RuntimeError("capture launch cleanup exceeded 5 seconds") from error
+
+
+async def _complete_token_scan(
+    launch_token: str, *, interpreter: Path, host_instance: str
+) -> tuple[LinuxIdentity, ...]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                scan_launch_token,
+                launch_token,
+                interpreter=interpreter,
+                host_instance=host_instance,
+            ),
+            timeout=_SIGNAL_WAIT_SECONDS,
+        )
+    except TimeoutError as error:
+        raise RuntimeError("complete launch-token scan exceeded 5 seconds") from error
+
+
+async def _token_recovery_handles(
+    launch_token: str,
+    *,
+    interpreter: Path,
+    host_instance: str,
+    existing: dict[int, _ProcessHandle],
+) -> dict[int, _ProcessHandle]:
+    matches = await _complete_token_scan(
+        launch_token, interpreter=interpreter, host_instance=host_instance
+    )
+    handles = dict(existing)
+    opened: list[int] = []
+    try:
+        for identity in matches:
+            prior = handles.get(identity.pid)
+            if prior is not None and prior[0] == identity:
+                continue
+            if prior is not None:
+                raise RuntimeError("launch-token recovery observed a reused process identity")
+            try:
+                pidfd = identity.open_pidfd(current_host_instance=host_instance)
+            except ProcessLookupError:
+                continue
+            handles[identity.pid] = (identity, pidfd)
+            opened.append(pidfd)
+    except BaseException:
+        for pidfd in opened:
+            os.close(pidfd)
+        raise
+    return handles
+
+
+async def _cleanup_failed_launch(
+    process: asyncio.subprocess.Process,
+    *,
+    launch_token: str,
+    interpreter: Path,
+    host_instance: str,
+    leader: _ProcessHandle | None,
+    process_members: set[int] | None,
+) -> None:
+    """Boundedly terminate only exact attested members; never signal a numeric PID."""
+    handles = {leader[0].pid: leader} if leader is not None else {}
+    used_token_recovery = leader is None
+    try:
+        if process_members is not None:
+            try:
+                handles = _attest_process_members(
+                    process_members,
+                    host_instance=host_instance,
+                    existing=handles,
+                )
+            except ProcessLookupError:
+                used_token_recovery = True
+        if used_token_recovery:
+            handles = await _token_recovery_handles(
+                launch_token,
+                interpreter=interpreter,
+                host_instance=host_instance,
+                existing=handles,
+            )
+        await _signal_and_wait_exact(handles, process)
+        _close_process_handles(handles)
+        handles = {}
+        if used_token_recovery:
+            remaining = await _complete_token_scan(
+                launch_token,
+                interpreter=interpreter,
+                host_instance=host_instance,
+            )
+            if remaining:
+                raise RuntimeError("complete launch-token scan still finds capture children")
+    finally:
+        if handles:
+            _close_process_handles(handles)
+        if process.returncode is None:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=_SIGNAL_WAIT_SECONDS)
+            except TimeoutError as error:
+                raise RuntimeError("capture launch gate-EOF cleanup exceeded 5 seconds") from error
+
+
 def _read_result(attempt_dir: Path) -> CaptureResult:
     directory_fd = os.open(attempt_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
@@ -507,7 +668,9 @@ class GatedCaptureLauncher:
             raise
         os.close(gate_read)
         assert process.stdout is not None
+        identity: LinuxIdentity | None = None
         pidfd: int | None = None
+        process_members: set[int] | None = None
         try:
             handshake = await asyncio.wait_for(
                 process.stdout.readexactly(1), timeout=_HANDSHAKE_TIMEOUT_SECONDS
@@ -518,19 +681,29 @@ class GatedCaptureLauncher:
             pidfd = identity.open_pidfd(current_host_instance=operation.host_instance)
             expected = {process.pid}
             for _ in range(2):
-                if _process_group_members(process.pid) != expected:
+                process_members = _process_group_members(process.pid)
+                task_members = _task_members(process.pid)
+                if process_members != expected:
                     raise RuntimeError("capture child process group was not empty at handoff")
-                if _task_members(process.pid) != expected:
+                if task_members != expected:
                     raise RuntimeError("capture child task set was not empty at handoff")
                 await asyncio.sleep(0)
-        except BaseException:
+        except BaseException as launch_error:
             os.close(gate_write)
-            if pidfd is not None:
-                os.close(pidfd)
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            await process.wait()
+            leader = (identity, pidfd) if identity is not None and pidfd is not None else None
+            try:
+                await _cleanup_failed_launch(
+                    process,
+                    launch_token=operation.launch_token,
+                    interpreter=interpreter,
+                    host_instance=operation.host_instance,
+                    leader=leader,
+                    process_members=process_members,
+                )
+            except BaseException as cleanup_error:
+                raise cleanup_error from launch_error
             raise
+        assert identity is not None and pidfd is not None
         return LaunchedCapture(
             process=process,
             identity=identity,

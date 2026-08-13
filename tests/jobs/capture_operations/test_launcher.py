@@ -15,6 +15,7 @@ from uuid import uuid4
 import pytest
 
 from kdive.jobs.capture_operations import launcher as launcher_module
+from kdive.jobs.capture_operations import linux_identity as linux_identity_module
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher, LaunchedCapture
 from kdive.jobs.capture_operations.protocol import CaptureRequest
 from kdive.jobs.capture_operations.repository import CaptureOperation
@@ -388,12 +389,163 @@ def test_post_spawn_attestation_faults_abort_before_release(
         monkeypatch.setattr(
             launcher_module,
             "_process_group_members",
-            lambda pid: {pid, pid + 1},
+            lambda pid: {pid, 2_147_483_647},
         )
 
     with pytest.raises((OSError, RuntimeError), match=fault.replace("-", " ")):
         asyncio.run(launcher.launch(request, operation))
     assert not (tmp_path / "runtime" / str(operation.id) / "result.json").exists()
+
+
+def test_stale_post_spawn_numeric_identity_never_signals_unrelated_group(
+    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request()
+    operation = _operation(request)
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+    unrelated = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    unrelated_pidfd = os.pidfd_open(unrelated.pid)
+    numeric_signals: list[tuple[str, int, int]] = []
+    scan_calls: list[str] = []
+
+    class _StaleIdentity:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        @classmethod
+        def read(cls, pid: int, *, host_instance: str) -> _StaleIdentity:
+            del host_instance
+            return cls(pid)
+
+        def open_pidfd(self, *, current_host_instance: str) -> int:
+            del current_host_instance
+            raise ProcessLookupError("leader numeric identity became stale")
+
+    def _scan(*args: object, **kwargs: object) -> tuple[linux_identity_module.LinuxIdentity, ...]:
+        scan_calls.append("scan")
+        return linux_identity_module.scan_launch_token(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(launcher_module, "LinuxIdentity", _StaleIdentity)
+    monkeypatch.setattr(launcher_module, "scan_launch_token", _scan, raising=False)
+    monkeypatch.setattr(
+        launcher_module.os,
+        "killpg",
+        lambda pid, sig: numeric_signals.append(("killpg", pid, sig)),
+    )
+    monkeypatch.setattr(
+        launcher_module.os,
+        "kill",
+        lambda pid, sig: numeric_signals.append(("kill", pid, sig)),
+    )
+    try:
+        with pytest.raises(ProcessLookupError, match="stale"):
+            asyncio.run(launcher.launch(request, operation))
+        assert scan_calls
+        assert numeric_signals == []
+        assert unrelated.poll() is None
+    finally:
+        signal.pidfd_send_signal(unrelated_pidfd, signal.SIGKILL)
+        os.close(unrelated_pidfd)
+        unrelated.wait(timeout=5)
+
+
+def test_exact_process_members_are_all_attested_before_any_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, int]] = []
+
+    class _Identity:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        @classmethod
+        def read(cls, pid: int, *, host_instance: str) -> _Identity:
+            assert host_instance == "host-a"
+            events.append(("read", pid))
+            return cls(pid)
+
+        def open_pidfd(self, *, current_host_instance: str) -> int:
+            assert current_host_instance == "host-a"
+            events.append(("open", self.pid))
+            return os.open(os.devnull, os.O_RDONLY)
+
+        def signal(self, _pidfd: int, _sig: int) -> None:
+            events.append(("signal", self.pid))
+
+    leader = _Identity(10)
+    leader_fd = os.open(os.devnull, os.O_RDONLY)
+    monkeypatch.setattr(launcher_module, "LinuxIdentity", _Identity)
+    handles = launcher_module._attest_process_members(
+        {10, 20, 30},
+        host_instance="host-a",
+        existing={10: (leader, leader_fd)},  # ty: ignore[invalid-argument-type] - identity fake
+    )
+    try:
+        for identity, pidfd in handles.values():
+            identity.signal(pidfd, signal.SIGKILL)
+        first_signal = next(index for index, event in enumerate(events) if event[0] == "signal")
+        assert events[:first_signal] == [
+            ("read", 20),
+            ("open", 20),
+            ("read", 30),
+            ("open", 30),
+        ]
+        assert events[first_signal:] == [("signal", 10), ("signal", 20), ("signal", 30)]
+    finally:
+        launcher_module._close_process_handles(handles)
+
+
+def test_unreadable_token_recovery_scan_fails_closed_without_numeric_signal(
+    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request()
+    operation = _operation(request)
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+    numeric_signals: list[tuple[int, int]] = []
+
+    class _UnavailableIdentity:
+        @classmethod
+        def read(cls, _pid: int, *, host_instance: str) -> _UnavailableIdentity:
+            del host_instance
+            return cls()
+
+        def open_pidfd(self, *, current_host_instance: str) -> int:
+            del current_host_instance
+            raise ProcessLookupError("identity unavailable")
+
+    monkeypatch.setattr(launcher_module, "LinuxIdentity", _UnavailableIdentity)
+    monkeypatch.setattr(
+        launcher_module,
+        "scan_launch_token",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("unreadable token scan")),
+    )
+    monkeypatch.setattr(
+        launcher_module.os,
+        "killpg",
+        lambda pid, sig: numeric_signals.append((pid, sig)),
+    )
+    monkeypatch.setattr(
+        launcher_module.os,
+        "kill",
+        lambda pid, sig: numeric_signals.append((pid, sig)),
+    )
+
+    with pytest.raises(RuntimeError, match="unreadable token scan"):
+        asyncio.run(launcher.launch(request, operation))
+    assert numeric_signals == []
 
 
 def test_release_write_fault_does_not_mark_gate_released(monkeypatch: pytest.MonkeyPatch) -> None:
