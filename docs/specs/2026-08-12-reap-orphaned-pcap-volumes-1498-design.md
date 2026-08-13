@@ -91,10 +91,17 @@ the same fence before a provider call and holds it through the completion write.
 fence defers the row. Process death releases the fence; a live delayed worker cannot create
 state after an absence-tolerant reap.
 
-Before mutation, the worker stores an operation row with job id, queue attempt, a new attempt
-UUID, worker-host identity, host boot id, and child-process start identity. A worker-host
-supervisor outside the job handler launches one child for that attempt under compare-and-set
-ownership. Connection loss makes it terminate the child. Exact child exit is recoverable from a
+Before mutation, the worker stores a non-runnable operation row with job id, queue attempt, a new
+attempt UUID, and worker-host identity. Under the per-job fence it atomically makes that UUID the
+job's `current_capture_attempt_id`. The sweep gates only on the linked attempt; an older attempt
+can finish recovery but cannot satisfy or block the current generation.
+
+A worker-host supervisor launches one child blocked on a private inherited start gate. It CASes
+the host boot id and exact process-start identity from `planned` to `armed`, then CASes `armed` to
+`running` and releases the child. The child performs no provider mutation before release. A crash
+before launch leaves no child; a crash after launch but before release leaves a blocked child that
+the replacement terminates using the recorded identity. A superseded attempt is terminated
+without release. Connection loss terminates the current child. Exact exit is recoverable from a
 wait result or the stored boot/process-start identity; PID absence alone is not evidence.
 
 For local-libvirt, exact child exit establishes quiescence because that child alone owns provider
@@ -105,13 +112,14 @@ make the filter and volume observable. A replacement supervisor recovers the ope
 repeats these observations after handler, worker, or prior-supervisor failure.
 
 Lock availability is necessary but insufficient for reaping: the sweep also requires that
-positive acknowledgment for the selected attempt before it touches provider state or writes
-completion. A timeout, async cancellation request, process exit without transport quiescence, or
-replacement database connection is not confirmation. Failure to confirm defers the row and emits
-an owner-keyed failure. The implementation bounds one held database connection per concurrent
-capture and tests connection loss and supervisor loss before attach, during attach, while
-writing, during detach, and before the completion write. When the remote provider is unreachable,
-restoring reachability is the recovery action; eventual reclamation is conditional on it.
+positive acknowledgment for the job's linked current attempt before it touches provider state or
+writes completion. A timeout, async cancellation request, process exit without transport
+quiescence, or acknowledgment from a superseded attempt is not confirmation. Failure to confirm
+defers the row and emits an owner-keyed failure. The implementation bounds one held database
+connection per concurrent capture and tests every launch handshake transition, attempt
+supersession, connection loss, and supervisor loss before attach, during attach, while writing,
+during detach, and before completion. When the remote provider is unreachable, restoring
+reachability is the recovery action; eventual reclamation is conditional on it.
 
 The sweep never invents missing ownership or provider wiring. Each provider failure is logged
 with `(system_id, job_id)`. A pass reports attempted, reclaimed, skipped, and failed counts
@@ -167,7 +175,10 @@ semantics. It must prove:
 - **Worker dies with a filter attached:** abandonment makes the row terminal; after settle,
   the reaper detaches and removes the destination.
 - **Job retries after earlier cleanup:** the new attempt clears completion before creating
-  provider state while holding the ownership fence; a later failure remains eligible.
+  provider state and becomes the job's current attempt while holding the ownership fence; a
+  later failure remains eligible and the prior acknowledgment cannot satisfy it.
+- **Supervisor dies during child launch:** a pre-launch crash leaves no child; a post-launch,
+  pre-release crash leaves a blocked child that its replacement terminates before mutation.
 - **Terminal worker is still alive:** its ownership fence defers reaping; it cannot create
   provider state after an absence-tolerant completion write.
 - **Lock-owning database session is lost:** the supervisor terminates provider work; the sweep

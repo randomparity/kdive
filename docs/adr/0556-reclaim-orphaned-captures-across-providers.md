@@ -74,11 +74,18 @@ row is deferred without consuming a provider call. This positive ownership bound
 than the settle duration, prevents state from being created after an absence-tolerant reap.
 
 The lock-owning connection is also the provider operation's cancellation authority. Before any
-provider mutation, the worker writes a durable operation record containing the job id, queue
-attempt number, a new attempt UUID, worker-host identity, host boot id, and child-process start
-identity. It then runs capture work in a child process on that worker host. The supervisor is a
-worker-host service outside the job handler; only the supervisor launches or signals that child.
-An attempt UUID has one child owner, enforced by the operation row's compare-and-set state.
+provider mutation, the worker creates a non-runnable operation row containing the job id, queue
+attempt number, a new attempt UUID, and worker-host identity. Under the per-job fence it also
+sets the job's `current_capture_attempt_id` to that UUID. That link is the single authority for
+which attempt may create provider state and which cancellation acknowledgment gates reaping.
+
+The worker-host supervisor launches the child blocked on a private inherited start gate, records
+the host boot id and exact process-start identity with a compare-and-set from `planned` to
+`armed`, then releases the gate with a compare-and-set from `armed` to `running`. The child
+checks that release before any provider mutation. If the supervisor dies before arming, no child
+exists; if it dies after launch but before release, a replacement terminates the still-blocked
+child and records exit. A child whose attempt is no longer the job's current link is terminated
+without being released. An attempt UUID has one child owner, enforced by the operation row state.
 
 Connection loss tells the supervisor to terminate the child. Child-exit evidence is either a
 wait result held by the supervisor or proof from the recorded host boot id and process-start
@@ -95,11 +102,13 @@ client connection or child exit without both remote observations is insufficient
 
 The durable supervisor records cancellation complete for the attempt UUID after exit and
 quiescence. The reaper may acquire the advisory lock after connection loss, but it must not call
-the provider or write completion until that exact acknowledgment exists. If the remote host is
-unreachable, the row remains deferred and observable; restoring reachability is the recovery
-action, after which the supervisor retries the barrier and refresh. The convergence guarantee is
-therefore conditional on the owning provider becoming reachable again. Safety does not fall back
-to an inference when evidence is unavailable.
+the provider or write completion until the job's current attempt link names that UUID and its
+exact acknowledgment exists. Superseded operation rows finish recovery and retain their audit
+evidence, but cannot satisfy or block the current link. If the remote host is unreachable, the
+current row remains deferred and observable; restoring reachability is the recovery action, after
+which the supervisor retries the barrier and refresh. The convergence guarantee is therefore
+conditional on the owning provider becoming reachable again. Safety does not fall back to an
+inference when evidence is unavailable.
 
 Remote-libvirt binds the reaper to the row's Resource using ADR-0187 and deletes the named
 libvirt storage volume. It does not fan out through the fleet reaper bundle. Local-libvirt
