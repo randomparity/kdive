@@ -39,9 +39,10 @@ Files:
 
 - Create `src/kdive/db/schema/0112_capture_operation_supervision.sql`.
 - Create `src/kdive/jobs/capture_operations/repository.py` and package initializer.
-- Modify `src/kdive/services/runs/worker_incarnations.py`, `src/kdive/jobs/queue.py`, and
-  `src/kdive/db/schema/0106_worker_fence_protocol_claim.sql` only through migration replacements,
-  never by editing applied migrations.
+- Modify `src/kdive/services/runs/worker_incarnations.py` and `src/kdive/jobs/queue.py`.
+- Read `src/kdive/db/schema/0106_worker_fence_protocol_claim.sql` as an immutable reference only;
+  migration 0112 uses `CREATE OR REPLACE` for its registration and claim functions. Fresh-install
+  and 0106→0112 upgrade tests must reach the same final schema.
 - Create `tests/jobs/test_capture_operation_repository.py` and
   `tests/jobs/test_capture_operation_cutover.py`.
 
@@ -195,6 +196,9 @@ Files:
   `tests/compose/test_compose_worker_lifecycle_live.py`, `tests/helm/test_helm_render.py`, and
   `tests/helm/test_helm_upgrade_config.py`. Update `docs/operating/docker-compose.md` for the
   Compose route.
+- Modify `src/kdive/processes/lifecycle/worker_incarnation.py` and its matching tests so the local
+  cutover persists exact `LocalWorkerDeathVerifier` evidence through the security-definer
+  lifecycle authority.
 - Flip ADR-0558 to Accepted only in the final implementation commit.
 
 Steps:
@@ -203,10 +207,12 @@ Steps:
    preserve the original replica count, surface exact blocking incarnation/job diagnostics, and
    permit a fresh protocol-3 installation.
 2. Implement the local sequence as `stop_daemons` → verify every recorded protocol-2 host PID is
-   reaped by its owning shell and record exact local lifecycle termination →
+   absent with `LocalWorkerDeathVerifier` using its retained host, boot ID, PID, and start ticks,
+   then persist exact local lifecycle termination through the security-definer authority →
    `pg_dump --format=custom` → `python -m kdive migrate` → `restart_host_processes`. Mere PID
    absence is not evidence. A failed termination precondition or migration leaves workers stopped
-   and prints the exact recovery command; the script never calls `down.sh` or wipes backends.
+   and prints the exact recovery command; the script never calls `down.sh` or wipes backends. Add
+   a live host-process cutover test covering PID reuse and unreadable `/proc` refusal.
 3. Implement the Compose sequence as `just compose-stop` → require
    `compose_worker_lifecycle`'s exact container-incarnation termination rows →
    `pg_dump --format=custom` → run the one-shot `migrate` service → `just compose-up`. Preserve
