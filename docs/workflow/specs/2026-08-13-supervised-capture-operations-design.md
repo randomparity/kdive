@@ -79,9 +79,10 @@ python -m kdive capture-operation --request <path> --gate-fd <fd>
 
 Arguments are fixed tokens, never a shell command. The request schema accepts only the two wired
 provider kinds, UUID identities, the snaplen and byte/window bounds already validated by the job
-payload, and the snapshotted domain and Resource identity. The child verifies directory ownership,
-file mode, request digest, and schema before provider assembly. Invalid input exits before reading
-the release byte.
+payload, and the snapshotted domain and Resource identity. The child's first application action is
+the blocking one-byte gate read. Only after release does it open the request without following
+symlinks, verify directory ownership, file mode, digest, and schema, and assemble the provider.
+Gate EOF exits without opening attacker-controlled input or crossing a provider boundary.
 
 Before spawn, the launcher creates and links one `launching` row for the exact charged attempt.
 Immediately after spawn, it reads the authority-derived host instance, host boot id, and the
@@ -122,8 +123,9 @@ reclamation and result use remain barred. Recovery is an automatic scan on worke
 same host, or an operator restart after restoring `/proc` visibility. The scan handles:
 
 - `launching` with a live owner: the owner must register identity or close the gate;
-- `launching` with a durably terminated owner: every gate writer is closed, so record
-  `aborted_before_identity` and close it without a provider call;
+- `launching` with a durably terminated owner: every gate writer is closed; record
+  `aborted_before_identity` only after authority evidence proves the entire worker container/Pod
+  boundary terminated or a same-host observer proves no process retains the gate;
 - `gated` with a live identity: cancel it, because release may have raced the state write;
 - `gated`, `running`, or `cancel_requested` with an absent identity: run the provider probe;
 - a live identity owned by a dead or different incarnation: cancel it and probe;
@@ -142,10 +144,14 @@ paths is the operator recovery action; remote-libvirt reachability by itself is 
 
 The provider probe runs only after exact process absence. Both implementations issue an
 idempotent detach for `kdive-dump-<job_id>` over a fresh libvirt connection, followed by a QMP
-query that proves that id is absent. Local uses the configured local URI. Remote derives the
-Resource-bound configuration and opens a new TLS connection; the old child's exited process can no
-longer own a transport. The evidence records provider kind, Resource, domain, QOM id, probe result,
-and database observation time. It records no host address or credential.
+query that proves that id is absent. QEMU serializes monitor commands, so the new query is an
+ordering barrier after any `object-add` or `object-del` already accepted from the terminated
+client; an adapter unable to establish that ordering cannot acknowledge quiescence. Local uses the
+configured local URI. Remote derives the Resource-bound configuration and opens a new TLS
+connection; the old child's exited process can no longer own a transport. A concurrency test holds
+an earlier fake monitor command in flight and proves the fresh absence query cannot return first.
+The evidence records provider kind, Resource, domain, QOM id, probe result, and database
+observation time. It records no host address or credential.
 
 ## Legacy cutover
 

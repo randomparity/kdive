@@ -23,9 +23,9 @@ database-clock cutoff was sampled.
 
 Each capture provider phase runs in a fresh Linux child process started with
 `asyncio.create_subprocess_exec`. The child receives a validated request file and an inherited
-one-byte gate. It may parse and assemble its provider before the gate, but it may not call
-`prepare`, `attach`, `captured_size`, `detach`, `fetch`, or `reclaim` until it reads the release
-byte. Gate EOF is a mandatory no-mutation exit.
+one-byte gate. Its first application action is a blocking one-byte read: request-file open,
+parsing, provider assembly, and every provider call occur only after the release byte. Gate EOF is
+a mandatory no-mutation exit.
 
 Before spawning, the parent creates a durable `launching` operation and links it to the exact
 running job attempt in one transaction. A unique `(job_id, job_attempt)` constraint makes that
@@ -38,8 +38,10 @@ redirect cancellation.
 The operation states are `launching`, `gated`, `running`, `cancel_requested`, and `exited`.
 Transitions are monotonic and fenced by the exact job attempt and worker credential. If the
 launcher dies while `launching`, exact worker-incarnation termination closes every inherited gate
-writer; gate EOF proves that an unregistered child could not cross the mutation boundary. A live
-launch owner must instead finish identity registration or close its gate before the row can exit.
+writer; gate EOF proves that an unregistered child could not cross the mutation boundary. The row
+still cannot become `exited` until the authority proves the entire worker boundary terminated or a
+same-boundary observer proves no child retains the gate. A live launch owner must instead finish
+identity registration or close its gate before the row can exit.
 A release may occur before the `running` write; recovery therefore treats both `gated` and
 `running` as possibly mutating and terminates either. The child writes its bounded result to a
 supervisor-owned, mode-0600 spool path and exits. Neither a result file nor a child exit alone is
@@ -56,12 +58,16 @@ Exceeding either interval leaves the row in `cancel_requested`;
 recovery repeats identity observation and cancellation. The recovery action is the next worker
 startup on that host or an operator restart after restoring host process visibility.
 
-Positive exit requires both exact process absence and a provider probe after that absence.
-Local-libvirt reconnects locally and proves the attempt's QOM object absent. Remote-libvirt opens
-a new independently assembled TLS transport bound to the attempt's Resource and proves the same
-QOM object absent. An unreachable provider, an identity mismatch, or an inconclusive probe leaves
-the operation unacknowledged. Replacements repeat observation; they never translate missing
-evidence into success.
+Positive exit requires both exact process absence and a provider ordering barrier after that
+absence. QEMU monitor commands are serialized by the monitor: a query issued on a fresh libvirt
+connection is processed only after any earlier accepted `object-add` or `object-del` command from
+the terminated client. Local-libvirt reconnects locally, crosses that barrier, and proves the
+attempt's QOM object absent. Remote-libvirt opens a new independently assembled TLS transport
+bound to the attempt's Resource, crosses the same QEMU monitor barrier, and proves the QOM object
+absent. Tests hold an earlier fake monitor command in flight and require the fresh query to wait
+before it can acknowledge absence. An unreachable provider, an identity mismatch, an unordered
+transport, or an inconclusive probe leaves the operation unacknowledged. Replacements repeat
+observation; they never translate missing evidence into success.
 
 Recovery is authority-bound. The operation records the immutable host boundary from the worker
 incarnation: local workers use a configured host identity plus boot id, Docker workers use the
