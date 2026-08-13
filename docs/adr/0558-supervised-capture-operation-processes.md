@@ -91,8 +91,13 @@ reachability alone cannot substitute for worker-host process absence.
 Worker fence protocol 3 is the only protocol allowed to claim `capture_traffic` after this
 migration. The deployment is stopped before migration. The migration refuses to establish the
 cutover while any protocol-2 worker incarnation remains active or any protocol-2-owned capture job
-remains running. It then atomically records the singleton cutover as complete with a
-`clock_timestamp()` cutoff. New workers require protocol 3 at authentication and claim, so a stale
+has no exact lifecycle-authority termination record. The population is every registered
+incarnation whose fence protocol is below 3, independent of heartbeat, lease, or job state; an
+ambiguous or missing authority binding also fails. A running protocol-2-owned capture job remains
+an additional consistency failure, not termination evidence. The cutoff transaction rechecks the
+complete population under the worker-incarnation fence, then atomically records the singleton as
+complete with a `clock_timestamp()` cutoff. New workers require protocol 3 at authentication and
+claim, so a stale
 binary cannot rejoin. There is no draining generation, compatibility state, or preservation of
 legacy work. This pre-release rollout decision supersedes ADR-0556 only where that record requires
 a positive online legacy-worker drain; ADR-0556's attempt quiescence and historical-row cutoff
@@ -111,6 +116,8 @@ requirements otherwise remain.
 - The rollout is an offline breaking cutover. Operators stop every worker and record its lifecycle
   termination before migration; stale or in-flight legacy state makes migration fail instead of
   being maintained.
+- Heartbeats, leases, and job states never satisfy the cutover fence. A protocol-2 incarnation
+  without exact lifecycle termination blocks migration even when its job is already terminal.
 - The result spool contains sensitive packet data and must be mode 0600 in a mode-0700
   supervisor-owned directory; stale files are removed only after the durable operation is
   terminal and publication no longer needs them.

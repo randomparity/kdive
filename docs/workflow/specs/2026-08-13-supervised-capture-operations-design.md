@@ -221,11 +221,13 @@ worker deployment before applying migration 0112. Existing Compose and Kubernete
 authorities record exact termination as they do today; local operators must use the same lifecycle
 stop path rather than killing an unrecorded process.
 
-Migration 0112 fails before any schema mutation when a `worker_incarnations` row with protocol
-below 3 remains `active`, or a `capture_traffic` job remains `running` under such an incarnation.
-Lease expiry, terminal job state, and worker absence are not substitutes for lifecycle termination.
-After those assertions, the migration installs protocol-3-only capture claim and authentication
-functions and inserts the singleton `capture_cutover` row with `complete = true` and
+Migration 0112 fails before any schema mutation unless every `worker_incarnations` row with
+protocol below 3 has exact durable lifecycle-authority termination and a valid immutable authority
+binding. This is the complete registered legacy population, independent of heartbeat, lease, and
+job state. A `capture_traffic` job still `running` under one of those incarnations is an additional
+consistency failure, not an alternative proof. Under the same worker-incarnation advisory fence,
+the cutoff transaction rechecks that complete population, installs protocol-3-only capture claim
+and authentication functions, and inserts the singleton `capture_cutover` with `complete = true` and
 `cutoff_at = clock_timestamp()` in the same transaction. There is no drain state for a stale
 binary to join. A job admitted while the service is stopped remains queued and is claimed only by
 a protocol-3 worker after restart.
@@ -304,8 +306,9 @@ after cleanup. Each verifies that no provider marker can be created and that rec
 the stated terminal outcome.
 
 Database concurrency tests prove one operation per `(job_id, attempt)`, exact-attempt transition
-fencing, and protocol-3-only capture claims. Migration tests prove any unterminated protocol-2
-incarnation or its running capture job aborts the whole migration, while a fully stopped deployment
+fencing, and protocol-3-only capture claims. Migration tests prove any protocol-2 incarnation
+without exact lifecycle termination, including a lapsed worker with a terminal job and live
+provider thread, aborts the whole migration, while a fully stopped deployment
 atomically records a database-clock cutoff. They also prove queued work admitted before cutoff is
 claimed only after restart by protocol 3 and that rolling protocol-2 authentication is rejected. A
 retry/cancellation race proves claim does not charge or hide a prior unacknowledged operation.
