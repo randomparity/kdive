@@ -11,7 +11,7 @@
 Every orphaned `capture_traffic` filter and destination has a durable owner outside the
 leaking job. Reconciliation works for local-libvirt and remote-libvirt, detaches before it
 removes, drains historical state in bounded passes, and records completion so an idle
-deployment performs no repeated capture-reclamation work.
+deployment performs no repeated capture-reclamation work for eligible rows.
 
 ## Scope
 
@@ -32,7 +32,8 @@ guard defect is owned by #1945 and ADR-0094, not this decision.
    Allocation, and Resource; the sweep never reads a nonexistent payload `system_id`.
 4. Resource-kind filtering prevents one provider's row from reaching another provider's
    reaper.
-5. A persisted marker removes a completed row from future passes. There is no lookback.
+5. A persisted marker removes a resolved row from future passes. There is no lookback;
+   provider calls are at-least-once and idempotent across a crash before the marker write.
 6. A bounded batch size paces the initial historical backlog.
 7. One candidate failure does not starve the pass and remains retryable.
 8. Cleanup residue from a `succeeded` job remains owned without making best-effort reclaim
@@ -67,14 +68,17 @@ jobs j
 ```
 
 It selects eligible, unmarked rows older than the configured settle duration using the
-database clock, orders them deterministically, and limits each pass. A successful provider
-call and marker write form one logical candidate outcome: if the provider succeeds but the
-marker write does not, the next pass repeats an idempotent reclaim. If provider reclaim
-fails, no marker is written.
+database clock, orders them deterministically, and limits each pass. Eligibility requires a
+resolvable ownership chain and a registered reaper for the Resource kind, so an invalid row
+cannot consume the batch or starve reclaimable work. A successful provider call and marker
+write form one logical candidate outcome: if the provider succeeds but the marker write does
+not, the next pass repeats an idempotent reclaim. If provider reclaim fails, no marker is
+written.
 
-Missing ownership or provider wiring is logged and skipped without inventing a target.
-Each provider failure is logged with `(system_id, job_id)`. A pass reports attempted,
-reclaimed, skipped, and failed counts through the reconciler's existing observability path.
+The sweep never invents missing ownership or provider wiring. Each provider failure is logged
+with `(system_id, job_id)`. A pass reports attempted, reclaimed, skipped, and failed counts
+through the reconciler's existing observability path. Idle means no eligible unmarked row
+remains; lifecycle integrity checks retain ownership of malformed durable chains.
 
 The settle limit's full contract is:
 
@@ -105,14 +109,15 @@ at that path. Those choices may not weaken detach-before-remove or reap-once con
 
 ### Succeeded-row residue (#1949)
 
-Both providers keep reclaim non-masking. #1949 chooses the smaller persistence mechanism
-that lets the sweep own a failed best-effort reclaim: either record the failure explicitly
-or make success rows candidates under a marker lifecycle that does not revisit captures
-whose reclaim succeeded. The chosen mechanism is recorded with that entry and must prove:
+Both providers keep reclaim non-masking. The migration treats pre-existing `succeeded` rows as
+unknown and drains them once because no historical cleanup result exists. Captures completed
+after migration record immediate cleanup success so the sweep selects only failed best-effort
+reclaim. #1949 chooses the marker representation and provider-to-job write path for those
+semantics. It must prove:
 
 - injected reclaim failure leaves the job successful and its artifact visible;
 - both providers later reclaim the residue;
-- a capture whose reclaim succeeded is not revisited.
+- a post-migration capture whose reclaim succeeded is not revisited.
 
 ## Failure and recovery
 
@@ -124,8 +129,8 @@ whose reclaim succeeded. The chosen mechanism is recorded with that entry and mu
   success and the row is marked.
 - **Provider succeeds but marker write fails:** the next pass repeats the idempotent provider
   reclaim, then retries the marker.
-- **Ownership chain missing:** the sweep logs and skips because it cannot safely select a
-  provider, domain, or destination.
+- **Ownership chain missing or provider unregistered:** the row is ineligible and cannot
+  consume the batch; lifecycle integrity checks own diagnosis of the broken chain.
 - **Historical backlog:** the batch limit drains it across passes without a lookback cutoff.
 
 ## Verification
@@ -150,7 +155,8 @@ uses the existing native `live_vm` tier when #1948's reachability decision permi
    worker-killed `capture_traffic` job is eventually reclaimed on both providers.
 2. Any still-attached filter is detached before its destination is removed.
 3. A concurrent live capture on the same System is never targeted.
-4. A reclaimed row is absent from the next pass; an idle deployment does zero work.
+4. A resolved row is absent from the next pass; a crash before its marker may repeat the
+   idempotent call, and an idle deployment with no eligible unmarked rows does zero work.
 5. A backlog larger than the batch bound drains over multiple passes.
 6. One provider or row failure does not starve other candidates.
 7. A successful capture remains successful when its immediate reclaim fails, and later

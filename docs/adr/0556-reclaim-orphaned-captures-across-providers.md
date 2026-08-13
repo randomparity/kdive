@@ -1,4 +1,4 @@
-# 0556 — Reclaim orphaned captures across providers exactly once
+# 0556 — Reclaim orphaned captures across providers to convergence
 
 ## Status
 
@@ -38,14 +38,18 @@ rather than safe to guess.
 ## Decision
 
 We will reclaim orphaned traffic-capture state from persisted job ownership, across every
-provider that implements traffic capture, and persist completion so each row is reaped once.
+provider that implements traffic capture, and persist completion so each resolved row leaves
+the candidate set after one successful attempt.
 
 The provider-agnostic sweep selects capture rows only after a settle window, resolves the
 bound System and Resource through the Run, filters by Resource kind, and dispatches an
 `OrphanedCapture` to that kind's `CaptureReaper`. It processes a bounded number of candidates
 per pass so the historical backlog introduced at deployment drains over multiple passes.
 There is no lookback cutoff. A persisted reap-once marker removes completed rows from later
-passes, so an idle deployment performs no capture-reclamation work.
+passes. Provider cleanup and the database write cannot share a transaction: a crash after
+provider success but before the marker write repeats an already-effective call. Reapers are
+therefore idempotent and tolerate absent state. The guarantee is at-least-once attempts with a
+convergent effect, not exactly-once execution.
 
 The shared port contract carries the provider kind, Resource identity, stored-or-derived
 domain name, System id, and job id needed to name only the owning capture. The handler and
@@ -61,11 +65,14 @@ The local implementation must first establish that the process performing reconc
 can reach that worker-owned path; #1948 owns whether that is a colocated reconciler reaper or
 a worker-side execution of the same port contract.
 
-The sweep owns all three leak classes, including residue from a `succeeded` job. Best-effort
-reclaim remains non-masking: cleanup failure must not turn a successful capture into a failed
-job or hide its artifact. #1949 owns the smaller persistence detail that makes such failure
-selectable—recording the failed reclaim or widening candidate selection—but it must preserve
-both that non-masking rule and the reap-once convergence rule.
+The sweep owns all three leak classes, including residue from a `succeeded` job. Existing
+`succeeded` capture rows predate the marker, so they enter the paced historical drain once;
+there is no durable evidence that distinguishes an already-removed destination from residue.
+For captures completed after the migration, the in-job cleanup path records successful cleanup
+and leaves only a failed best-effort reclaim eligible. Cleanup failure must not turn a
+successful capture into a failed job or hide its artifact. #1949 owns the schema and write-path
+mechanics for that outcome, but not whether historical success is covered or whether future
+successful cleanup is revisited.
 
 Candidate selection uses the database reference clock. The settle duration is an operator
 configuration stated as a duration in seconds per terminal job row, measured from the job's
@@ -79,22 +86,25 @@ worker and provides no derived upper bound.
 - Local-libvirt and remote-libvirt share one ownership and ordering contract while retaining
   provider-specific destination removal.
 - Detach-before-remove prevents QEMU from continuing to write an unlinked destination.
-- The marker adds a migration and one completion write per reclaimed capture row. This is
+- The marker adds a migration and one completion write per resolved capture row. This is
   intentional write traffic on the jobs table; it replaces both repeated no-op connections
   and permanent abandonment by a lookback.
-- The first deployment exposes the full historical backlog. Per-pass bounding limits work,
-  but draining may take several reconciler intervals and progress must remain observable in
-  per-pass counts and per-row failure logs.
+- The first deployment exposes the full historical backlog, including successful captures
+  whose destination is probably already absent. Per-pass bounding limits work, but draining
+  may take several reconciler intervals and progress must remain observable in per-pass counts
+  and per-row failure logs.
 - A row whose Run was never bound, whose ownership chain was removed, or whose provider kind
-  has no reaper cannot be reclaimed safely. It is skipped and logged; the sweep does not guess
-  a host, domain, or path.
+  has no registered reaper is not an eligible candidate. Selection does not guess a host,
+  domain, or path, and an ineligible row cannot consume the batch or starve eligible work.
+  The idle-convergence claim applies when no eligible unmarked row remains; ownership-integrity
+  diagnosis stays with existing lifecycle repair rather than becoming a second capture sweep.
 - The row-keyed design cannot discover a capture destination whose job row is absent. Jobs are
   retained by current schema policy, so this is accepted as a narrower blind spot than scanning
   every provider's storage namespace.
-- #1948 must settle local path reachability before implementation. #1949 must settle how a
-  failed best-effort reclaim becomes selectable. These choices may refine mechanics but may
-  not weaken cross-provider ownership, detach-before-remove, succeeded-residue coverage, or
-  reap-once convergence.
+- #1948 must settle local path reachability before implementation. #1949 must settle the
+  marker and write-path mechanics for immediate cleanup outcomes. These choices may refine
+  mechanics but may not weaken cross-provider ownership, detach-before-remove,
+  succeeded-residue coverage, or reap-once convergence.
 
 ## Considered & rejected
 
