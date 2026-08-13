@@ -550,6 +550,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Decompose capture cancellation prerequisites
 - Close capture reaper enablement gaps
 - Order legacy capture cutover
+- Design the host-dump live-holder bound
+- Accept the host-dump live-holder bound
+- Record the host-dump transition race
 
 ### Fixed
 
@@ -939,6 +942,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Embed bind address in variable default, not template prefix
 - Update prepull guard + script for digest-pinned images; add ADR-0554 Considered & rejected
 - Compose down passes all profiles and surfaces non-empty stderr (#1916)
+- Resolve active capture jobs through runs
 
 ### Build
 
