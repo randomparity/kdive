@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import shutil
 import struct
 import threading
@@ -24,6 +25,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+from pydantic import SecretStr
 
 from kdive.artifacts.storage import (
     ArtifactWriteRequest,
@@ -36,11 +38,14 @@ from kdive.db.repositories import ArtifactClaimConflict
 from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import Job, JobKind, dispatch_lane_for_kind
 from kdive.jobs.handlers.control import capture_traffic
+from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.provider_context import clear_provider_kind, take_provider_kind
+from kdive.jobs.worker import Worker, WorkerConfig
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.audit import args_digest
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
 from tests.clock import STORE_MTIME
 from tests.integration._seed import seed_granted_allocation, seed_running_run, seed_system
@@ -801,6 +806,146 @@ def test_put_artifact_holds_no_advisory_lock(
     assert len(rows) == 1
 
 
+def test_cancel_during_stalled_put_waits_then_discards_exact_object(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
+    store = _StallingStore()
+    capturer = _FakeCapturer(tmp_path)
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            run_id, _ = await _seed_ready_run(pool)
+            job = _job(run_id)
+            await _insert_job(pool, job, JobState.RUNNING)
+            task = asyncio.create_task(
+                _run_probing(pool, store, capturer, job, monkeypatch=monkeypatch)
+            )
+            assert await asyncio.to_thread(store.first_put_arrived.wait, 30)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            store.release_first_put.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return run_id, job, await _artifact_rows(pool, run_id)
+
+    run_id, job, rows = asyncio.run(_go())
+    key = f"local/runs/{run_id}/pcap-{job.id}"
+    assert store.objects == {}
+    assert store.deleted_versions == [(key, "test-version")]
+    assert rows == []
+
+
+def test_canceled_stalled_put_failure_preserves_cancellation_and_redacts_log(
+    migrated_url: str, monkeypatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    class _FailingStallingStore(_StallingStore):
+        def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+            self.first_put_arrived.set()
+            self.release_first_put.wait(timeout=30)
+            raise RuntimeError("sensitive backend output")
+
+    store = _FailingStallingStore()
+    capturer = _FakeCapturer(tmp_path)
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            run_id, _ = await _seed_ready_run(pool)
+            job = _job(run_id)
+            await _insert_job(pool, job, JobState.RUNNING)
+            task = asyncio.create_task(
+                _run_probing(pool, store, capturer, job, monkeypatch=monkeypatch)
+            )
+            assert await asyncio.to_thread(store.first_put_arrived.wait, 30)
+            task.cancel()
+            store.release_first_put.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return await _artifact_rows(pool, run_id)
+
+    caplog.set_level(logging.WARNING, logger="kdive.jobs.handlers.control.capture_traffic")
+    assert asyncio.run(_go()) == []
+    assert store.objects == {}
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("RuntimeError" in message for message in messages)
+    assert all("sensitive backend output" not in message for message in messages)
+
+
+@pytest.mark.parametrize("authority", ["heartbeat", "stop"])
+def test_worker_authority_loss_waits_for_stalled_put_cleanup(
+    migrated_url: str, monkeypatch, tmp_path: Path, authority: str
+) -> None:
+    store = _StallingStore()
+    capturer = _FakeCapturer(tmp_path)
+    credential = SecretStr("capture-put-cancel")
+
+    async def _go():
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4, open=False) as pool:
+            await pool.open()
+            run_id, _ = await _seed_ready_run(pool)
+            job = _job(run_id)
+            await _insert_job(pool, job, JobState.RUNNING)
+            resolver = provider_resolver(traffic_capturer=capturer)
+            monkeypatch.setattr(
+                capture_traffic,
+                "run_capture_loop",
+                _LoopSpy(capture_traffic.LoopResult(truncated=False, canceled=False)),
+            )
+
+            async def handler(conn, supplied_job):
+                return await capture_traffic.capture_traffic_handler(
+                    conn,
+                    supplied_job,
+                    resolver=resolver,
+                    artifact_store=cast(ObjectStore, store),
+                    supervisor=cast(Any, _PublicationSupervisor(capturer)),
+                )
+
+            worker = Worker(
+                pool,
+                HandlerRegistry(),
+                worker_id="worker-a",
+                incarnation_credential=credential,
+                secret_registry=SecretRegistry(),
+                config=WorkerConfig(
+                    accepted_lanes=(dispatch_lane_for_kind(JobKind.CAPTURE_TRAFFIC),)
+                ),
+            )
+            stop = asyncio.Event()
+            worker._stop_event = stop
+
+            async def heartbeat(*args: object) -> None:
+                assert await asyncio.to_thread(store.first_put_arrived.wait, 30)
+                if authority == "stop":
+                    await asyncio.Event().wait()
+
+            monkeypatch.setattr(worker, "_heartbeat_loop", heartbeat)
+            dispatch = asyncio.create_task(worker._dispatch(job, handler))
+            assert await asyncio.to_thread(store.first_put_arrived.wait, 30)
+            if authority == "stop":
+                stop.set()
+            await asyncio.sleep(0)
+            assert not dispatch.done()
+            store.release_first_put.set()
+            await asyncio.wait_for(dispatch, timeout=5)
+            async with pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        "SELECT state, result_ref FROM jobs WHERE id = %s", (job.id,)
+                    )
+                ).fetchone()
+            return run_id, job, row, await _artifact_rows(pool, run_id)
+
+    run_id, job, outcome, rows = asyncio.run(_go())
+    key = f"local/runs/{run_id}/pcap-{job.id}"
+    assert store.objects == {}
+    assert store.deleted_versions == [(key, "test-version")]
+    assert rows == []
+    assert outcome == ("running", None)
+
+
 def test_cancel_during_put_discards_the_unregistered_object(
     migrated_url: str, monkeypatch, tmp_path: Path
 ) -> None:
@@ -909,6 +1054,7 @@ class _StallingStore(_FakeStore):
         self.release_first_put = threading.Event()
         self._park_after_write = park_after_write
         self._stalled = False
+        self.deleted_versions: list[tuple[str, str]] = []
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         park = not self._stalled
@@ -926,6 +1072,10 @@ class _StallingStore(_FakeStore):
     def _arrive_and_wait(self) -> None:
         self.first_put_arrived.set()
         self.release_first_put.wait(timeout=30)
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.deleted_versions.append((key, version_id))
+        self.objects.pop(key, None)
 
 
 async def _run_attempt(pool, store, capturer, job, *, monkeypatch=None):

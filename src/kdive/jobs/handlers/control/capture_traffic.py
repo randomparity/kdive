@@ -204,6 +204,53 @@ def _put_artifact(store: ObjectStore, run_id: UUID, name: str, data: bytes) -> S
     )
 
 
+async def _finish_task_after_cancellation[T](task: asyncio.Task[T]) -> T:
+    """Drain an owned task without propagating caller cancellation into it."""
+    current = asyncio.current_task()
+    assert current is not None
+    completed = asyncio.Event()
+    task.add_done_callback(lambda _task: completed.set())
+    while not completed.is_set():
+        try:
+            await completed.wait()
+        except asyncio.CancelledError:
+            current.uncancel()
+    return task.result()
+
+
+async def _discard_canceled_put(
+    conn: AsyncConnection,
+    store: ObjectStore,
+    run_id: UUID,
+    job_id: UUID,
+    put_task: asyncio.Task[StoredArtifact],
+) -> None:
+    try:
+        stored = await _finish_task_after_cancellation(put_task)
+    except Exception as error:
+        _log.warning(
+            "canceled capture PUT for job %s failed before cleanup (%s)",
+            job_id,
+            type(error).__name__,
+        )
+        return
+    discard_task = asyncio.create_task(
+        discard_unregistered_objects(
+            store,
+            [stored],
+            still_unregistered=lambda key: _key_unregistered(conn, run_id, key),
+        )
+    )
+    try:
+        await _finish_task_after_cancellation(discard_task)
+    except Exception as error:
+        _log.warning(
+            "canceled capture PUT cleanup for job %s failed (%s)",
+            job_id,
+            type(error).__name__,
+        )
+
+
 async def _store_capture(
     conn: AsyncConnection, store: ObjectStore, job: Job, run_id: UUID, project: str, data: bytes
 ) -> UUID | None:
@@ -233,7 +280,18 @@ async def _store_capture(
     if existing is not None:
         return existing.id
 
-    stored = await asyncio.to_thread(_put_artifact, store, run_id, name, data)
+    put_task = asyncio.create_task(asyncio.to_thread(_put_artifact, store, run_id, name, data))
+    put_completed = asyncio.Event()
+    put_task.add_done_callback(lambda _task: put_completed.set())
+    try:
+        await put_completed.wait()
+    except asyncio.CancelledError as cancellation:
+        current = asyncio.current_task()
+        assert current is not None
+        current.uncancel()
+        await _discard_canceled_put(conn, store, run_id, job.id, put_task)
+        raise cancellation
+    stored = put_task.result()
 
     try:
         async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
