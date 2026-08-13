@@ -22,10 +22,14 @@ may reject stale workers and in-flight legacy capture work instead of maintainin
 ## Decision
 
 Each capture provider phase runs in a fresh Linux child process started with
-`asyncio.create_subprocess_exec`. The child receives a validated request file and an inherited
-one-byte gate. Its first application action is a blocking one-byte read: request-file open,
-parsing, provider assembly, and every provider call occur only after the release byte. Gate EOF is
-a mandatory no-mutation exit.
+`asyncio.create_subprocess_exec` through a small native launcher. Before any Python bootstrap, the
+launcher installs the containment filter and uses one fd-bound `execveat(AT_EMPTY_PATH)` to enter
+the interpreter; that executable fd is close-on-exec, and ordinary path exec is never allowed.
+Python starts with `-S` and a fixed package path so site hooks cannot run in the one-exec window,
+then immediately installs a stacked filter that denies every later exec. After that minimal
+bootstrap, the blocking one-byte gate read is the first action that opens request input, imports or
+assembles provider code, or can reach a provider boundary. Gate EOF is a mandatory no-mutation
+exit.
 
 Before spawning, the parent creates a durable `launching` operation and links it to the exact
 running job attempt in one transaction. A unique `(job_id, job_attempt)` constraint makes that
@@ -59,12 +63,12 @@ waits up to five seconds on the supervisor's monotonic clock for the exact child
 `SIGKILL` through the pidfd and waits up to five more seconds. The capture-operation executable is
 a single-process boundary and may create threads but no descendant processes; a provider that
 needs a helper process cannot implement this lifecycle without a new containment decision.
-Before the blocking gate read, the child installs a seccomp filter; the gate is the first action
-that can open request input or reach provider code, rather than the literal first bootstrap action.
-The filter fails closed unless the audit architecture and syscall ABI are the supported x86_64 or
-ppc64le form. It denies `fork`, `vfork`, `execve`, and `execveat`; returns `ENOSYS` for `clone3` so
-libc falls back to legacy `clone`; and allows `clone` only when its flags contain
-`CLONE_VM | CLONE_SIGHAND | CLONE_THREAD`. All other `clone` calls return `EPERM`.
+The native filter fails closed unless the audit architecture and syscall ABI are the supported
+x86_64 or ppc64le form. It denies `fork`, `vfork`, and `execve`; permits `execveat` only for the
+inherited interpreter fd with `AT_EMPTY_PATH`; returns `ENOSYS` for `clone3`; and allows `clone`
+only when its flags contain `CLONE_VM | CLONE_SIGHAND | CLONE_THREAD`. All other `clone` calls
+return `EPERM`. The first Python action stacks the same policy with `execveat` denied
+unconditionally before it reads the gate.
 Exceeding either interval leaves the row in `cancel_requested`;
 recovery repeats identity observation and cancellation. The recovery action is the next worker
 startup on that host or an operator restart after restoring host process visibility.
