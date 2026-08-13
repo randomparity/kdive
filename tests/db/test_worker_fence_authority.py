@@ -1557,6 +1557,12 @@ def test_migration_upgrade_resets_guarded_function_matrix(
             "kdive_worker"
         },
         "recover_capture_operation(bytea,uuid,boolean,jsonb,text,integer)": {"kdive_worker"},
+        "capture_authenticated_worker(bytea)": set(),
+        "capture_create_or_replay_operation("
+        "text,uuid,integer,text,uuid,uuid,text,text,text)": set(),
+        "capture_launch_abort_evidence_valid(capture_operations,jsonb)": set(),
+        "capture_recovery_authorized(worker_incarnations,worker_incarnations)": set(),
+        "capture_recovery_context(bytea,uuid)": set(),
         "read_kubernetes_credential_envelope(text,jsonb)": {"kdive_lifecycle_witness"},
         "acknowledge_kubernetes_credential_envelope(text,jsonb)": {"kdive_lifecycle_witness"},
     }

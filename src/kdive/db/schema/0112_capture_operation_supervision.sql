@@ -251,6 +251,201 @@ RETURN CASE p_authority_kind
     ELSE NULL
 END;
 
+CREATE FUNCTION public.capture_authenticated_worker(p_credential_hash bytea)
+RETURNS SETOF public.worker_incarnations
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_incarnation text;
+BEGIN
+    SELECT w.incarnation INTO v_incarnation
+    FROM public.worker_incarnations AS w
+    WHERE w.credential_hash = p_credential_hash;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended('kdive:worker-incarnation:' || v_incarnation, 1803)
+    );
+    RETURN QUERY
+    SELECT w.*
+    FROM public.worker_incarnations AS w
+    WHERE w.incarnation = v_incarnation
+      AND w.credential_hash = p_credential_hash
+      AND w.state = 'active'
+      AND w.fence_protocol = 3
+    FOR UPDATE;
+END
+$$;
+
+CREATE FUNCTION public.capture_create_or_replay_operation(
+    p_worker_incarnation text,
+    p_job_id uuid,
+    p_job_attempt integer,
+    p_provider_kind text,
+    p_resource_id uuid,
+    p_system_id uuid,
+    p_domain_name text,
+    p_request_digest text,
+    p_host_instance text
+) RETURNS SETOF public.capture_operations
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_operation public.capture_operations%ROWTYPE;
+BEGIN
+    INSERT INTO public.capture_operations (
+        job_id, job_attempt, worker_incarnation, provider_kind, resource_id, system_id,
+        domain_name, request_digest, launch_token, host_instance
+    ) VALUES (
+        p_job_id, p_job_attempt, p_worker_incarnation, p_provider_kind, p_resource_id, p_system_id,
+        p_domain_name, p_request_digest,
+        encode(
+            sha256(convert_to(gen_random_uuid()::text || gen_random_uuid()::text, 'UTF8')),
+            'hex'
+        ),
+        p_host_instance
+    ) ON CONFLICT (job_id, job_attempt) DO NOTHING
+    RETURNING * INTO v_operation;
+    IF NOT FOUND THEN
+        SELECT o.* INTO v_operation
+        FROM public.capture_operations AS o
+        WHERE o.job_id = p_job_id
+          AND o.job_attempt = p_job_attempt
+          AND o.worker_incarnation = p_worker_incarnation
+          AND o.provider_kind = p_provider_kind
+          AND o.resource_id = p_resource_id
+          AND o.system_id = p_system_id
+          AND o.domain_name = p_domain_name
+          AND o.request_digest = p_request_digest
+        FOR UPDATE;
+        IF NOT FOUND THEN
+            RETURN;
+        END IF;
+    END IF;
+    RETURN NEXT v_operation;
+END
+$$;
+
+CREATE FUNCTION public.capture_launch_abort_evidence_valid(
+    p_operation public.capture_operations,
+    p_evidence jsonb
+) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path = ''
+RETURN jsonb_typeof(p_evidence) = 'object'
+   AND (p_evidence ->> 'evidence_kind') = 'closed_gate_boundary_token_scan_v1'
+   AND (p_evidence -> 'gate_closed') = 'true'::jsonb
+   AND (p_evidence -> 'boundary_scan_complete') = 'true'::jsonb
+   AND (p_evidence -> 'boundary_processes_absent') = 'true'::jsonb
+   AND jsonb_typeof(p_evidence -> 'host_instance') = 'string'
+   AND (p_evidence ->> 'host_instance') = p_operation.host_instance
+   AND jsonb_typeof(p_evidence -> 'launch_token') = 'string'
+   AND (p_evidence ->> 'launch_token') = p_operation.launch_token
+   AND (p_evidence -> 'launch_token_absent') = 'true'::jsonb;
+
+CREATE FUNCTION public.capture_recovery_authorized(
+    p_owner public.worker_incarnations,
+    p_replacement public.worker_incarnations
+) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path = ''
+RETURN p_owner.state = 'terminated'
+   AND p_owner.terminated_at IS NOT NULL
+   AND p_owner.outcome IS NOT NULL
+   AND p_owner.authority_kind = p_replacement.authority_kind
+   AND (
+       public.capture_worker_host_instance(
+           p_owner.authority_kind, p_owner.authority_binding
+       ) = public.capture_worker_host_instance(
+           p_replacement.authority_kind, p_replacement.authority_binding
+       )
+       OR (
+           public.capture_worker_authority_scope(
+               p_owner.authority_kind, p_owner.authority_binding
+           ) IS NOT NULL
+           AND public.capture_worker_authority_scope(
+               p_owner.authority_kind, p_owner.authority_binding
+           ) = public.capture_worker_authority_scope(
+               p_replacement.authority_kind, p_replacement.authority_binding
+           )
+       )
+   );
+
+CREATE FUNCTION public.capture_recovery_context(
+    p_credential_hash bytea,
+    p_operation_id uuid
+) RETURNS TABLE (
+    owner public.worker_incarnations,
+    replacement public.worker_incarnations,
+    operation public.capture_operations
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_owner_id text;
+    v_replacement_id text;
+    v_owner public.worker_incarnations%ROWTYPE;
+    v_replacement public.worker_incarnations%ROWTYPE;
+    v_operation public.capture_operations%ROWTYPE;
+BEGIN
+    SELECT w.incarnation INTO v_replacement_id
+    FROM public.worker_incarnations AS w
+    WHERE w.credential_hash = p_credential_hash;
+    SELECT o.worker_incarnation INTO v_owner_id
+    FROM public.capture_operations AS o
+    WHERE o.id = p_operation_id;
+    IF v_replacement_id IS NULL OR v_owner_id IS NULL THEN
+        RETURN;
+    END IF;
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            'kdive:worker-incarnation:' || least(v_owner_id, v_replacement_id), 1803
+        )
+    );
+    IF v_owner_id <> v_replacement_id THEN
+        PERFORM pg_advisory_xact_lock(
+            hashtextextended(
+                'kdive:worker-incarnation:' || greatest(v_owner_id, v_replacement_id), 1803
+            )
+        );
+    END IF;
+    SELECT w.* INTO v_replacement
+    FROM public.worker_incarnations AS w
+    WHERE w.incarnation = v_replacement_id
+      AND w.credential_hash = p_credential_hash
+      AND w.state = 'active'
+      AND w.fence_protocol = 3
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+    SELECT w.* INTO v_owner FROM public.worker_incarnations AS w
+    WHERE w.incarnation = v_owner_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended('kdive:capture-operation:' || p_operation_id::text, 1951)
+    );
+    SELECT o.* INTO v_operation FROM public.capture_operations AS o
+    WHERE o.id = p_operation_id AND o.worker_incarnation = v_owner.incarnation
+    FOR UPDATE;
+    IF FOUND THEN
+        RETURN QUERY SELECT v_owner, v_replacement, v_operation;
+    END IF;
+END
+$$;
+
 CREATE FUNCTION public.enforce_capture_protocol_floor()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -406,21 +601,7 @@ BEGIN
         RAISE EXCEPTION 'capture operation launch facts are invalid' USING ERRCODE = '22023';
     END IF;
     SELECT w.* INTO v_worker
-    FROM public.worker_incarnations AS w
-    WHERE w.credential_hash = p_credential_hash;
-    IF NOT FOUND THEN
-        RETURN;
-    END IF;
-    PERFORM pg_advisory_xact_lock(
-        hashtextextended('kdive:worker-incarnation:' || v_worker.incarnation, 1803)
-    );
-    SELECT w.* INTO v_worker
-    FROM public.worker_incarnations AS w
-    WHERE w.incarnation = v_worker.incarnation
-      AND w.credential_hash = p_credential_hash
-      AND w.state = 'active'
-      AND w.fence_protocol = 3
-    FOR UPDATE;
+    FROM public.capture_authenticated_worker(p_credential_hash) AS w;
     IF NOT FOUND THEN
         RETURN;
     END IF;
@@ -453,35 +634,13 @@ BEGIN
         RETURN;
     END IF;
 
-    INSERT INTO public.capture_operations (
-        job_id, job_attempt, worker_incarnation, provider_kind, resource_id, system_id,
-        domain_name, request_digest, launch_token, host_instance
-    ) VALUES (
-        p_job_id, p_job_attempt, v_worker.incarnation, p_provider_kind, p_resource_id, p_system_id,
-        p_domain_name,
-        p_request_digest,
-        encode(
-            sha256(convert_to(gen_random_uuid()::text || gen_random_uuid()::text, 'UTF8')),
-            'hex'
-        ),
-        v_host_instance
-    ) ON CONFLICT (job_id, job_attempt) DO NOTHING
-    RETURNING * INTO v_operation;
+    SELECT o.* INTO v_operation
+    FROM public.capture_create_or_replay_operation(
+        v_worker.incarnation, p_job_id, p_job_attempt, p_provider_kind, p_resource_id,
+        p_system_id, p_domain_name, p_request_digest, v_host_instance
+    ) AS o;
     IF NOT FOUND THEN
-        SELECT o.* INTO v_operation
-        FROM public.capture_operations AS o
-        WHERE o.job_id = p_job_id
-          AND o.job_attempt = p_job_attempt
-          AND o.worker_incarnation = v_worker.incarnation
-          AND o.provider_kind = p_provider_kind
-          AND o.resource_id = p_resource_id
-          AND o.system_id = p_system_id
-          AND o.domain_name = p_domain_name
-          AND o.request_digest = p_request_digest
-        FOR UPDATE;
-        IF NOT FOUND THEN
-            RETURN;
-        END IF;
+        RETURN;
     END IF;
     UPDATE public.jobs
     SET current_capture_operation_id = v_operation.id
@@ -737,14 +896,15 @@ BEGIN
     IF NOT FOUND THEN
         RETURN;
     END IF;
-    IF v_operation.state = 'launching' AND (
-        p_exit_outcome NOT IN ('aborted_before_spawn', 'aborted_before_identity')
-        OR (
-            p_exit_outcome = 'aborted_before_identity'
-            AND (p_provider_quiescence ->> 'launch_token_absent') IS DISTINCT FROM 'true'
-        )
-    ) THEN
-        RETURN;
+    IF v_operation.state = 'launching' THEN
+        IF p_exit_outcome = 'aborted_before_identity'
+           AND NOT coalesce(public.capture_launch_abort_evidence_valid(
+               v_operation, p_provider_quiescence
+           ), false) THEN
+            RETURN;
+        ELSIF p_exit_outcome NOT IN ('aborted_before_spawn', 'aborted_before_identity') THEN
+            RETURN;
+        END IF;
     ELSIF v_operation.state NOT IN (
         'launching', 'gated', 'running', 'cancel_requested', 'exited'
     ) THEN
@@ -786,14 +946,10 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-    v_owner_id text;
-    v_first_lock text;
-    v_second_lock text;
+    v_context record;
     v_replacement public.worker_incarnations%ROWTYPE;
     v_owner public.worker_incarnations%ROWTYPE;
     v_operation public.capture_operations%ROWTYPE;
-    v_same_boundary boolean;
-    v_same_successor_scope boolean;
 BEGIN
     IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
         RAISE EXCEPTION 'worker authority is required' USING ERRCODE = '42501';
@@ -809,77 +965,22 @@ BEGIN
         RAISE EXCEPTION 'capture operation recovery evidence is incomplete'
             USING ERRCODE = '22023';
     END IF;
-    SELECT w.* INTO v_replacement
-    FROM public.worker_incarnations AS w
-    WHERE w.credential_hash = p_credential_hash;
-    SELECT worker_incarnation INTO v_owner_id
-    FROM public.capture_operations
-    WHERE id = p_operation_id;
-    IF v_replacement.incarnation IS NULL OR v_owner_id IS NULL THEN
-        RETURN;
-    END IF;
-    v_first_lock := least(v_owner_id, v_replacement.incarnation);
-    v_second_lock := greatest(v_owner_id, v_replacement.incarnation);
-    PERFORM pg_advisory_xact_lock(
-        hashtextextended('kdive:worker-incarnation:' || v_first_lock, 1803)
-    );
-    IF v_second_lock <> v_first_lock THEN
-        PERFORM pg_advisory_xact_lock(
-            hashtextextended('kdive:worker-incarnation:' || v_second_lock, 1803)
-        );
-    END IF;
-    SELECT w.* INTO v_replacement
-    FROM public.worker_incarnations AS w
-    WHERE w.incarnation = v_replacement.incarnation
-      AND w.credential_hash = p_credential_hash
-      AND w.state = 'active'
-      AND w.fence_protocol = 3
-    FOR UPDATE;
+    SELECT context.owner, context.replacement, context.operation INTO v_context
+    FROM public.capture_recovery_context(p_credential_hash, p_operation_id) AS context;
     IF NOT FOUND THEN
         RETURN;
     END IF;
-    SELECT w.* INTO v_owner
-    FROM public.worker_incarnations AS w
-    WHERE w.incarnation = v_owner_id
-    FOR UPDATE;
-    IF NOT FOUND THEN
-        RETURN;
-    END IF;
-    PERFORM pg_advisory_xact_lock(
-        hashtextextended('kdive:capture-operation:' || p_operation_id::text, 1951)
-    );
-    SELECT * INTO v_operation
-    FROM public.capture_operations
-    WHERE id = p_operation_id AND worker_incarnation = v_owner.incarnation
-    FOR UPDATE;
-    IF NOT FOUND THEN
-        RETURN;
-    END IF;
-
-    v_same_boundary := v_owner.authority_kind = v_replacement.authority_kind
-        AND public.capture_worker_host_instance(
-            v_owner.authority_kind, v_owner.authority_binding
-        ) = public.capture_worker_host_instance(
-            v_replacement.authority_kind, v_replacement.authority_binding
-        );
-    v_same_successor_scope := v_owner.state = 'terminated'
-        AND v_owner.terminated_at IS NOT NULL
-        AND v_owner.outcome IS NOT NULL
-        AND v_owner.authority_kind = v_replacement.authority_kind
-        AND public.capture_worker_authority_scope(
-            v_owner.authority_kind, v_owner.authority_binding
-        ) IS NOT NULL
-        AND public.capture_worker_authority_scope(
-            v_owner.authority_kind, v_owner.authority_binding
-        ) = public.capture_worker_authority_scope(
-            v_replacement.authority_kind, v_replacement.authority_binding
-        );
-    IF NOT coalesce(v_same_boundary OR v_same_successor_scope, false) THEN
+    v_owner := v_context.owner;
+    v_replacement := v_context.replacement;
+    v_operation := v_context.operation;
+    IF NOT coalesce(public.capture_recovery_authorized(v_owner, v_replacement), false) THEN
         RETURN;
     END IF;
     IF v_operation.state = 'launching' AND (
         p_exit_outcome <> 'aborted_before_identity'
-        OR (p_provider_quiescence ->> 'launch_token_absent') IS DISTINCT FROM 'true'
+        OR NOT coalesce(public.capture_launch_abort_evidence_valid(
+            v_operation, p_provider_quiescence
+        ), false)
     ) THEN
         RETURN;
     END IF;
@@ -1326,6 +1427,15 @@ FROM kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness;
 REVOKE ALL ON FUNCTION
     public.capture_worker_host_instance(text, jsonb),
     public.capture_worker_authority_scope(text, jsonb),
+    public.capture_authenticated_worker(bytea),
+    public.capture_create_or_replay_operation(
+        text, uuid, integer, text, uuid, uuid, text, text, text
+    ),
+    public.capture_launch_abort_evidence_valid(public.capture_operations, jsonb),
+    public.capture_recovery_authorized(
+        public.worker_incarnations, public.worker_incarnations
+    ),
+    public.capture_recovery_context(bytea, uuid),
     public.enforce_current_capture_operation_link(),
     public.enforce_capture_protocol_floor(),
     public.create_capture_operation(bytea, uuid, integer, text, uuid, uuid, text, text),

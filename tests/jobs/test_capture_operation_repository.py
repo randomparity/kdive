@@ -15,6 +15,7 @@ from pydantic import SecretStr
 from kdive.db import migrate
 from kdive.jobs import queue
 from kdive.jobs.capture_operations.repository import (
+    CaptureOperation,
     CaptureOperationIdentity,
     CaptureOperationSnapshot,
     RecoveryEvidence,
@@ -115,6 +116,25 @@ async def _register(
             Jsonb(binding or {"host": "host-a"}),
             _hash(credential),
         ),
+    )
+
+
+def _launch_abort_evidence(operation: CaptureOperation, **changes: object) -> RecoveryEvidence:
+    provider_quiescence: dict[str, object] = {
+        "evidence_kind": "closed_gate_boundary_token_scan_v1",
+        "gate_closed": True,
+        "boundary_scan_complete": True,
+        "boundary_processes_absent": True,
+        "host_instance": operation.host_instance,
+        "launch_token": operation.launch_token,
+        "launch_token_absent": True,
+    }
+    provider_quiescence.update(changes)
+    return RecoveryEvidence(
+        process_absent=True,
+        provider_quiescence=provider_quiescence,
+        exit_outcome="aborted_before_identity",
+        exit_code=None,
     )
 
 
@@ -236,7 +256,7 @@ def test_conflicting_or_non_owner_transitions_fail_closed(migrated_url: str) -> 
             {"host": "host-a"},
             {"host": "host-a"},
             False,
-            True,
+            False,
         ),
         (
             "local",
@@ -331,6 +351,118 @@ def test_recovery_is_derived_from_durable_authority_scope(
                         replacement, replacement_credential, operation.id, evidence
                     )
         finally:
+            await replacement.close()
+            await admin.close()
+
+    asyncio.run(_run())
+
+
+def test_owner_launch_abort_requires_evidence_bound_to_operation(migrated_url: str) -> None:
+    async def _run() -> None:
+        admin = await connect(migrated_url)
+        worker = await _as_role(migrated_url, "kdive_worker")
+        credential = SecretStr("launch-owner")
+        try:
+            await _register(admin, "local:launch-owner", credential)
+
+            incomplete_job, incomplete_snapshot = await _seed_job(
+                admin, "local:launch-owner", credential
+            )
+            incomplete = await create_launching(
+                worker, credential, incomplete_job, 1, incomplete_snapshot
+            )
+            with pytest.raises(ValueError, match="capture operation transition was refused"):
+                await acknowledge_exit(
+                    worker,
+                    credential,
+                    incomplete.id,
+                    RecoveryEvidence(
+                        process_absent=True,
+                        provider_quiescence={"launch_token_absent": True},
+                        exit_outcome="aborted_before_identity",
+                        exit_code=None,
+                    ),
+                )
+
+            mismatch_job, mismatch_snapshot = await _seed_job(
+                admin, "local:launch-owner", credential
+            )
+            mismatch = await create_launching(
+                worker, credential, mismatch_job, 1, mismatch_snapshot
+            )
+            with pytest.raises(ValueError, match="capture operation transition was refused"):
+                await acknowledge_exit(
+                    worker,
+                    credential,
+                    mismatch.id,
+                    _launch_abort_evidence(mismatch, launch_token="0" * 64),
+                )
+
+            accepted_job, accepted_snapshot = await _seed_job(
+                admin, "local:launch-owner", credential
+            )
+            accepted = await create_launching(
+                worker, credential, accepted_job, 1, accepted_snapshot
+            )
+            exited = await acknowledge_exit(
+                worker, credential, accepted.id, _launch_abort_evidence(accepted)
+            )
+            assert exited.state == "exited"
+        finally:
+            await worker.close()
+            await admin.close()
+
+    asyncio.run(_run())
+
+
+def test_recovered_launch_abort_requires_evidence_bound_to_operation(migrated_url: str) -> None:
+    async def _run() -> None:
+        admin = await connect(migrated_url)
+        replacement = await _as_role(migrated_url, "kdive_worker")
+        owner = await _as_role(migrated_url, "kdive_worker")
+        owner_credential = SecretStr("launch-old-owner")
+        replacement_credential = SecretStr("launch-replacement")
+        try:
+            await _register(admin, "local:launch-old", owner_credential)
+            await _register(admin, "local:launch-new", replacement_credential)
+            jobs = [await _seed_job(admin, "local:launch-old", owner_credential) for _ in range(3)]
+            operations = [
+                await create_launching(owner, owner_credential, job_id, 1, snapshot)
+                for job_id, snapshot in jobs
+            ]
+            await admin.execute(
+                "UPDATE worker_incarnations SET state = 'terminated', outcome = 'killed', "
+                "terminated_at = clock_timestamp() WHERE incarnation = 'local:launch-old'"
+            )
+
+            with pytest.raises(PermissionError, match="capture operation recovery was refused"):
+                await recover_operation(
+                    replacement,
+                    replacement_credential,
+                    operations[0].id,
+                    RecoveryEvidence(
+                        process_absent=True,
+                        provider_quiescence={"launch_token_absent": True},
+                        exit_outcome="aborted_before_identity",
+                        exit_code=None,
+                    ),
+                )
+            with pytest.raises(PermissionError, match="capture operation recovery was refused"):
+                await recover_operation(
+                    replacement,
+                    replacement_credential,
+                    operations[1].id,
+                    _launch_abort_evidence(operations[1], host_instance="other-host"),
+                )
+            exited = await recover_operation(
+                replacement,
+                replacement_credential,
+                operations[2].id,
+                _launch_abort_evidence(operations[2]),
+            )
+            assert exited.state == "exited"
+        finally:
+            await owner.close()
             await replacement.close()
             await admin.close()
 
