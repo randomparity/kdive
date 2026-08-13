@@ -29,19 +29,24 @@ a mandatory no-mutation exit.
 
 Before spawning, the parent creates a durable `launching` operation and links it to the exact
 running job attempt in one transaction. A unique `(job_id, job_attempt)` constraint makes that
-link the attempt's only current operation. It then starts the gated child and advances the row to
-`gated` with `(host_instance, boot_id, pid, start_ticks)` plus the worker incarnation, provider
-kind, and request identity. Only that committed exact identity permits release. Signals are sent
-to the one child through a pidfd after rechecking boot id and start ticks, so PID reuse cannot
-redirect cancellation.
+link the attempt's only current operation. The row also persists a random 256-bit launch token
+before spawn. The fixed child argv carries that token while request paths and tenant-controlled
+values do not. It then starts the gated child and advances the row to `gated` with
+`(host_instance, boot_id, pid, start_ticks)` plus the worker incarnation, provider kind, and
+request identity. Only that committed exact identity permits release. Signals are sent to the one
+child through a pidfd after rechecking boot id and start ticks, so PID reuse cannot redirect
+cancellation.
 
 The operation states are `launching`, `gated`, `running`, `cancel_requested`, and `exited`.
 Transitions are monotonic and fenced by the exact job attempt and worker credential. If the
 launcher dies while `launching`, exact worker-incarnation termination closes every inherited gate
 writer; gate EOF proves that an unregistered child could not cross the mutation boundary. The row
 still cannot become `exited` until the authority proves the entire worker boundary terminated or a
-same-boundary observer proves no child retains the gate. A live launch owner must instead finish
-identity registration or close its gate before the row can exit.
+same-boundary observer enumerates `/proc` for the exact worker uid and fixed capture-operation
+executable carrying the durable launch token, terminates every match, and proves the token absent
+on a second complete enumeration. A live launch owner must instead finish identity registration
+or close its gate before the row can exit. The token is identity only for this pre-registration
+recovery; after `gated`, pidfd plus boot id and start ticks is authoritative.
 A release may occur before the `running` write; recovery therefore treats both `gated` and
 `running` as possibly mutating and terminates either. The child writes its bounded result to a
 supervisor-owned, mode-0600 spool path and exits. Neither a result file nor a child exit alone is

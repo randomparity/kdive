@@ -35,7 +35,8 @@ Migration `0112_capture_operation_supervision.sql` adds:
 
 - `capture_operations`: UUID primary key; `job_id`; positive `job_attempt`; exact
   `worker_incarnation`; `provider_kind`; `resource_id`; `system_id`; `domain_name`; request digest;
-  authority-derived `host_instance`; Linux `boot_id`, `pid`, and `start_ticks`; state
+  random 256-bit `launch_token`; authority-derived `host_instance`; Linux `boot_id`, `pid`, and
+  `start_ticks`; state
   (`launching`, `gated`, `running`, `cancel_requested`, `exited`); exit outcome/code; bounded JSON
   quiescence evidence; database-clock timestamps. `(job_id, job_attempt)` is unique.
 - `jobs.current_capture_operation_id`, nullable, with a foreign key to `capture_operations`. A
@@ -85,6 +86,9 @@ symlinks, verify directory ownership, file mode, digest, and schema, and assembl
 Gate EOF exits without opening attacker-controlled input or crossing a provider boundary.
 
 Before spawn, the launcher creates and links one `launching` row for the exact charged attempt.
+That transaction also persists a random 256-bit launch token. The fixed argv carries the token and
+gate fd but no request path, tenant-controlled value, packet data, provider endpoint, or secret;
+the child derives its request path from its supervisor-owned current directory after gate release.
 Immediately after spawn, it reads the authority-derived host instance, host boot id, and the
 child's `/proc/<pid>/stat` start ticks and opens a pidfd. It advances the row to `gated` with that
 exact identity. A failed transition closes the gate without writing; EOF makes the child exit
@@ -117,7 +121,8 @@ same operation-cancel path.
 
 Cancellation validates host instance, boot id, and start ticks, opens or uses a pidfd, sends
 `SIGTERM` to that exact child, and waits five seconds on the supervisor's monotonic clock. If the
-exact child remains, it sends `SIGKILL` and waits five more seconds. These are per cancellation request,
+exact child remains, it sends `SIGKILL` and waits five more seconds. These are per cancellation
+request,
 not per job flow. Exceeding either bound leaves `cancel_requested`; the consequence is that
 reclamation and result use remain barred. Recovery is an automatic scan on worker startup on the
 same host, or an operator restart after restoring `/proc` visibility. The scan handles:
@@ -125,14 +130,16 @@ same host, or an operator restart after restoring `/proc` visibility. The scan h
 - `launching` with a live owner: the owner must register identity or close the gate;
 - `launching` with a durably terminated owner: every gate writer is closed; record
   `aborted_before_identity` only after authority evidence proves the entire worker container/Pod
-  boundary terminated or a same-host observer proves no process retains the gate;
+  boundary terminated or a same-host observer enumerates `/proc` for the worker uid, exact
+  capture-operation executable, and durable launch token, terminates every match, and proves the
+  token absent on a second complete enumeration;
 - `gated` with a live identity: cancel it, because release may have raced the state write;
 - `gated`, `running`, or `cancel_requested` with an absent identity: run the provider probe;
 - a live identity owned by a dead or different incarnation: cancel it and probe;
 - `exited` with complete evidence: no provider call; clean the spool only when its consumer has
   durably finished;
-- host-instance mismatch, PID identity mismatch, unreadable `/proc`, or unreachable provider: retain the
-  row without acknowledgment and report the reason.
+- host-instance mismatch, PID identity mismatch, unreadable `/proc`, or unreachable provider:
+  retain the row without acknowledgment and report the reason.
 
 Recovery ownership follows the worker incarnation's authority binding. A local replacement may
 inspect `/proc` only on the configured host instance; a changed boot id is positive evidence that
@@ -141,6 +148,9 @@ exact container identity or Pod UID termination to prove the entire isolated bou
 no same-boundary replacement exists. A permanently lost local host without process visibility,
 reboot evidence, or authority termination remains fail-closed. Restoring one of those evidence
 paths is the operator recovery action; remote-libvirt reachability by itself is insufficient.
+The launch token is not used after exact PID registration. Its only purpose is recovering the
+spawn-to-registration interval, where pidfd identity does not yet exist. A scan refuses to conclude
+absence if any `/proc` entry becomes unreadable during enumeration; the next recovery pass retries.
 
 The provider probe runs only after exact process absence. Both implementations issue an
 idempotent detach for `kdive-dump-<job_id>` over a fresh libvirt connection, followed by a QMP
