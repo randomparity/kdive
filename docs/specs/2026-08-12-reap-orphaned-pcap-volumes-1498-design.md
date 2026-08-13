@@ -91,12 +91,18 @@ the same fence before a provider call and holds it through the completion write.
 fence defers the row. Process death releases the fence; a live delayed worker cannot create
 state after an absence-tolerant reap.
 
-Provider work runs behind a separately supervised, attempt-identified operation boundary.
-Connection loss immediately cancels that work. Cancellation completes only after the boundary
-has exited and the provider adapter confirms transport quiescence, including that no remote
-libvirt request remains able to publish state. The durable supervisor records the acknowledgment;
-a replacement supervisor recovers the attempt identity and repeats both observations if the
-first supervisor died before writing it.
+Before mutation, the worker stores an operation row with job id, queue attempt, a new attempt
+UUID, worker-host identity, host boot id, and child-process start identity. A worker-host
+supervisor outside the job handler launches one child for that attempt under compare-and-set
+ownership. Connection loss makes it terminate the child. Exact child exit is recoverable from a
+wait result or the stored boot/process-start identity; PID absence alone is not evidence.
+
+For local-libvirt, exact child exit establishes quiescence because that child alone owns provider
+calls and pcap writing. For remote-libvirt, the supervisor then reconnects, runs a synchronous
+QEMU monitor query through libvirt as a domain-command barrier, and refreshes the configured
+storage pool. Only the returned barrier and refresh acknowledge that earlier work is complete and
+make the filter and volume observable. A replacement supervisor recovers the operation row and
+repeats these observations after handler, worker, or prior-supervisor failure.
 
 Lock availability is necessary but insufficient for reaping: the sweep also requires that
 positive acknowledgment for the selected attempt before it touches provider state or writes
@@ -104,7 +110,8 @@ completion. A timeout, async cancellation request, process exit without transpor
 replacement database connection is not confirmation. Failure to confirm defers the row and emits
 an owner-keyed failure. The implementation bounds one held database connection per concurrent
 capture and tests connection loss and supervisor loss before attach, during attach, while
-writing, during detach, and before the completion write.
+writing, during detach, and before the completion write. When the remote provider is unreachable,
+restoring reachability is the recovery action; eventual reclamation is conditional on it.
 
 The sweep never invents missing ownership or provider wiring. Each provider failure is logged
 with `(system_id, job_id)`. A pass reports attempted, reclaimed, skipped, and failed counts
@@ -166,11 +173,13 @@ semantics. It must prove:
 - **Lock-owning database session is lost:** the supervisor terminates provider work; the sweep
   defers until cancellation completion for that attempt is recorded.
 - **Supervisor dies after termination but before acknowledgment:** its replacement recovers the
-  attempt, re-observes boundary exit and provider-transport quiescence, then records completion.
+  operation row, proves exact child exit, reruns the remote barrier/refresh when applicable, and
+  then records completion.
 - **Cancellation cannot be confirmed:** no provider reap or completion write occurs; the row
   remains observable and retryable rather than risking post-reap publication.
 - **Provider unavailable:** the row remains unresolved, the failure is logged with its owner
   ids, and a later pass retries after persisted bounded backoff without starving later rows.
+  A permanently unreachable provider is an explicit fail-closed exception to eventual reclaim.
 - **Filter, domain, or destination already absent:** provider reclaim treats absence as
   success and the row is marked.
 - **Provider succeeds but marker write fails:** the next pass repeats the idempotent provider
@@ -202,7 +211,8 @@ uses the existing native `live_vm` tier when #1948's reachability decision permi
 ## Acceptance criteria
 
 1. A pcap left by a retry-exhausted, canceled, succeeded-with-reclaim-failure, or
-   worker-killed `capture_traffic` job is eventually reclaimed on both providers.
+   worker-killed `capture_traffic` job is eventually reclaimed on both providers once its owning
+   provider is reachable.
 2. Any still-attached filter is detached before its destination is removed.
 3. A concurrent live capture on the same System is never targeted.
 4. A resolved row is absent from the next pass; a crash before its marker may repeat the

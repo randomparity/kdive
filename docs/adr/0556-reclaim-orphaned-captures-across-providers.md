@@ -73,22 +73,33 @@ partitioned live worker retains it and cannot race the reaper. If the fence is u
 row is deferred without consuming a provider call. This positive ownership boundary, rather
 than the settle duration, prevents state from being created after an absence-tolerant reap.
 
-The lock-owning connection is also the provider operation's cancellation authority. Provider
-capture work runs behind a separately supervised, attempt-identified operation boundary whose
-exit state remains queryable after the handler, lock-owning session, or worker disappears.
-Connection loss starts cancellation immediately. Cancellation completes only after that boundary
-has exited and its provider-specific adapter confirms transport quiescence: no request issued by
-the attempt can still publish capture state. Process exit alone is insufficient for a remote
-libvirt request that may still be executing server-side.
+The lock-owning connection is also the provider operation's cancellation authority. Before any
+provider mutation, the worker writes a durable operation record containing the job id, queue
+attempt number, a new attempt UUID, worker-host identity, host boot id, and child-process start
+identity. It then runs capture work in a child process on that worker host. The supervisor is a
+worker-host service outside the job handler; only the supervisor launches or signals that child.
+An attempt UUID has one child owner, enforced by the operation row's compare-and-set state.
 
-The durable operation supervisor, not the disappearing handler, records cancellation complete.
-If it dies after terminating work but before recording the result, its replacement recovers the
-attempt identity, re-observes boundary exit and provider-transport quiescence, and records the
-same idempotent acknowledgment. The reaper may acquire the advisory lock after connection loss,
-but it must not call the provider or write completion until it observes that acknowledgment for
-the selected attempt. Async task cancellation, a replacement database connection, or timeout
-without the two positive observations does not satisfy the fence. If either observation cannot
-be confirmed, the row remains deferred and observable.
+Connection loss tells the supervisor to terminate the child. Child-exit evidence is either a
+wait result held by the supervisor or proof from the recorded host boot id and process-start
+identity that the exact process no longer exists; a PID alone is not identity. A replacement
+supervisor recovers non-terminal operation rows and repeats that observation, so handler,
+worker-process, or supervisor loss does not erase the attempt.
+
+Local-libvirt quiescence is the confirmed exit of that child: no other process owns the local
+provider calls or pcap writer. Remote-libvirt additionally reconnects to the bound host, issues a
+synchronous QEMU monitor query through libvirt as a barrier for earlier commands on that domain,
+and refreshes the configured storage pool before it acknowledges quiescence. Those returned
+operations make the exact filter and volume observable before the reaper removes them. A closed
+client connection or child exit without both remote observations is insufficient.
+
+The durable supervisor records cancellation complete for the attempt UUID after exit and
+quiescence. The reaper may acquire the advisory lock after connection loss, but it must not call
+the provider or write completion until that exact acknowledgment exists. If the remote host is
+unreachable, the row remains deferred and observable; restoring reachability is the recovery
+action, after which the supervisor retries the barrier and refresh. The convergence guarantee is
+therefore conditional on the owning provider becoming reachable again. Safety does not fall back
+to an inference when evidence is unavailable.
 
 Remote-libvirt binds the reaper to the row's Resource using ADR-0187 and deletes the named
 libvirt storage volume. It does not fan out through the fleet reaper bundle. Local-libvirt
@@ -145,8 +156,11 @@ proof that the worker stopped.
   marked the attempt complete.
 - The durable operation supervisor becomes part of the worker deployment and recovery contract.
   It retains attempt identity and exit evidence across handler failure, and provider adapters own
-  the stronger transport-quiescence proof. A supervisor replacement repeats observation rather
-  than trusting a missing acknowledgment as evidence of continued work.
+  the stated quiescence probes. A supervisor replacement repeats observation rather than trusting
+  a missing acknowledgment as evidence of continued work.
+- Eventual reclamation requires the owning provider to become reachable. A permanently lost
+  remote host leaves its rows deferred permanently; this is the fail-closed residual of choosing
+  cancellation over post-reap publication risk.
 - A row whose Run was never bound, whose ownership chain was removed, or whose provider kind
   has no registered reaper is not an eligible candidate. Selection does not guess a host,
   domain, or path, and an ineligible row cannot consume the batch or starve eligible work.
