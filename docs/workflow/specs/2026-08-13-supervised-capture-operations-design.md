@@ -62,12 +62,16 @@ The operation transition table is:
 ```
 launching -> gated -> running -> exited
     |          |         |
-    +----------+-------> cancel_requested -> exited
+    |          +---------+-------> cancel_requested -> exited
+    +---------------------------> exited (pre-release abort only)
 ```
 
 Repeated exact writes are idempotent. A conflicting identity or backward transition fails. The
 `running` write is observability, not authority: a released gate with a still-`gated` row remains
 recoverable because every non-`exited` state is treated as possibly mutating.
+`launching -> exited` accepts only `aborted_before_spawn` with no child identity, or
+`aborted_before_identity` with closed-gate and complete boundary/token-absence evidence. The
+database rejects either outcome after identity registration or gate release.
 
 The capture-aware claim function skips a queued or lapsed `capture_traffic` row while any prior
 operation for that job is not `exited` with complete process and provider evidence. It does not
@@ -126,17 +130,29 @@ class in the parent and prove it absent in the child while both adapters still a
 data never enters argv, logs, JSON, or the database.
 
 The executable may create threads required by Python or libvirt but may not spawn descendant
-processes. A guard scans its owned module and provider-capture call graph for subprocess,
-`multiprocessing`, `fork`, and `posix_spawn` use. A future provider that needs helpers must first
-adopt a kernel-owned process-tree containment decision.
+processes. After Python and provider libraries load but before gate release, the child installs a
+seccomp filter denying `fork`, `vfork`, `clone` without `CLONE_THREAD`, `clone3`, and `execveat`;
+the already-execed process needs no further `execve`. An attempted descendant creation fails with
+`EPERM` and becomes an infrastructure failure. The filter covers Python, dependencies, and native
+libraries rather than relying on a source scan. Runtime local and remote provider tests observe
+the child task tree through every phase and deliberately invoke each denied syscall in a helper
+mode. A future provider needing a helper process must first adopt a kernel-owned process-tree
+containment decision.
 
 ## Cancellation and recovery
 
 The worker dispatch loop races the handler against the heartbeat loop for capture jobs. A
-heartbeat returning false or raising cancels the handler and waits for its cleanup. The capture
-handler also probes the lock-owning session while the child runs; any connection exception is
-loss of authority. An explicit canceled job, process stop, or Python task cancellation uses the
-same operation-cancel path.
+heartbeat returning false or raising cancels the handler and waits for its cleanup. Immediately
+before gate release, the handler executes `SELECT 1` on the session holding the per-job advisory
+lock and requires the server response. After release it repeats that round trip every 250
+milliseconds, measured per probe on the supervisor monotonic clock, with a one-second client-side
+timeout and a one-second PostgreSQL `statement_timeout`. These are per active operation, not a
+whole job-flow budget. A false/error/timeout means authority is lost; the consequence is immediate
+operation cancellation and barred result/reclamation use. Recovery is the durable startup scan,
+and the operator action after an exhausted cancellation is restoring host visibility and
+restarting the worker. An explicit canceled job, process stop, or Python task cancellation uses
+the same operation-cancel path. The gate release and pre-release round trip execute in one event-
+loop critical section with no await between the successful response and the one-byte write.
 
 Cancellation validates host instance, boot id, and start ticks, opens or uses a pidfd, sends
 `SIGTERM` to that exact child, and waits five seconds on the supervisor's monotonic clock. If the
@@ -294,12 +310,15 @@ Database concurrency tests prove one operation per `(job_id, attempt)`, exact-at
 fencing, protocol-2 capture claim exclusion with unrelated claims still admitted, immutable drain
 worker/Resource membership, and atomic final cutoff sampling with a job admitted and a Resource
 created during drain. A retry/cancellation race proves claim does not charge or hide a prior
-unacknowledged operation. Provider tests
-prove local and remote probes reconnect independently and refuse to acknowledge QOM presence or
+unacknowledged operation. Provider tests prove local and remote probes reconnect independently
+and refuse to acknowledge QOM presence or
 an unreachable endpoint. Each provider's gated real-stack test delays an accepted monitor command,
 kills the client, and proves the independent probe cannot acknowledge before definitive completion
-or cancellation. Worker tests prove heartbeat false/error and lock-session failure both terminate
-the child before dispatch returns.
+or cancellation. Worker tests cover heartbeat false/error and lock-session loss before release,
+immediately after release, on a stalled half-open probe, and racing a successful probe. A
+responsive child is absent before dispatch returns. A child surviving both five-second waits
+leaves `cancel_requested` with result and reclamation barred before dispatch returns, then startup
+recovery supplies the eventual exit proof.
 
 The x86_64 host runs focused tests and `just ci`. Architecture-neutral database and process tests
 also run in the declared ppc64le CI target. The existing gated local and remote live tiers gain a
