@@ -49,8 +49,9 @@ async def reconcile_row_etag(
 
     A no-op when the row already agrees with the object, when the object is gone, or when the
     stat fails — in each case the row is left exactly as the caller found it, which is no worse
-    than not having tried. A failed stat is logged rather than raised: the caller is returning a
-    real result (or raising its own guard's error) and a metadata repair must not displace it.
+    than not having tried. A failed stat is logged by exception class without external message or
+    traceback, rather than raised: the caller is returning a real result (or raising its own
+    guard's error) and a metadata repair must not displace it.
 
     Call **after** the caller's advisory lock is released.
 
@@ -67,13 +68,13 @@ async def reconcile_row_etag(
             return
         async with conn.transaction():
             await conn.execute(_REFRESH_ETAG_SQL, (head.etag, row_id))
-    except Exception:  # noqa: BLE001 - advisory repair must not mask the caller outcome
+    except Exception as error:  # noqa: BLE001 - advisory repair must not mask caller outcome
         _log.warning(
-            "reconciling etag for %s failed; leaving artifacts row %s describing etag %s",
+            "reconciling etag for %s failed; leaving artifacts row %s describing etag %s (%s)",
             object_key,
             row_id,
             row_etag,
-            exc_info=True,
+            type(error).__name__,
         )
         return
     _log.info(

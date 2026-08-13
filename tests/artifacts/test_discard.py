@@ -33,6 +33,7 @@ class _RecordingStore:
         etags: dict[str, str] | None = None,
         version_ids: dict[str, str] | None = None,
         fails_on: frozenset[str] = frozenset(),
+        head_fails_on: frozenset[str] = frozenset(),
     ) -> None:
         self.etags = {} if etags is None else dict(etags)
         self.version_ids = {} if version_ids is None else dict(version_ids)
@@ -41,9 +42,12 @@ class _RecordingStore:
         self.deleted_versions: list[tuple[str, str]] = []
         self.events: list[str] = []
         self._fails_on = fails_on
+        self._head_fails_on = head_fails_on
 
     def head(self, key: str) -> HeadResult | None:
         self.events.append("head")
+        if key in self._head_fails_on:
+            raise RuntimeError("sensitive HEAD backend output")
         if key not in self.etags:
             return None
         return HeadResult(
@@ -171,6 +175,9 @@ def test_a_faulting_key_does_not_strand_the_rest(caplog) -> None:
     assert store.deleted == ["a/1", "a/3"]
     # The orphan the fault leaves behind is named in the log, since nothing else will find it.
     assert any("a/2" in record.getMessage() for record in caplog.records)
+    assert any("CategorizedError" in record.getMessage() for record in caplog.records)
+    assert all("delete_object failed" not in record.getMessage() for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 def test_a_fault_never_raises_into_the_caller() -> None:
@@ -198,3 +205,21 @@ def test_a_row_probe_fault_never_raises_into_the_caller(caplog) -> None:
 
     assert store.attempted == []
     assert any("a/1" in record.getMessage() for record in caplog.records)
+    assert any("RuntimeError" in record.getMessage() for record in caplog.records)
+    assert all("artifacts lookup failed" not in record.getMessage() for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_a_head_fault_is_type_only_and_never_raises_into_the_caller(caplog) -> None:
+    store = _RecordingStore({"a/1": "etag-1"}, head_fails_on=frozenset({"a/1"}))
+
+    with caplog.at_level(logging.WARNING, logger="kdive.artifacts.discard"):
+        _discard(store, [_written("a/1", "etag-1")])
+
+    assert store.attempted == []
+    assert any("a/1" in record.getMessage() for record in caplog.records)
+    assert any("RuntimeError" in record.getMessage() for record in caplog.records)
+    assert all(
+        "sensitive HEAD backend output" not in record.getMessage() for record in caplog.records
+    )
+    assert all(record.exc_info is None for record in caplog.records)

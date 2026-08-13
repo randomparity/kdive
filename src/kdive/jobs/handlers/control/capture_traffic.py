@@ -262,6 +262,37 @@ async def _discard_stored_after_cancellation(
         )
 
 
+async def _reconcile_stored_capture(
+    conn: AsyncConnection,
+    store: ObjectStore,
+    *,
+    row_id: UUID,
+    object_key: str,
+    row_etag: str,
+) -> None:
+    """Finish peer-row reconciliation before propagating caller cancellation."""
+    reconcile_task = asyncio.create_task(
+        reconcile_row_etag(
+            conn,
+            store,
+            row_id=row_id,
+            object_key=object_key,
+            row_etag=row_etag,
+        )
+    )
+    completed = asyncio.Event()
+    reconcile_task.add_done_callback(lambda _task: completed.set())
+    try:
+        await completed.wait()
+    except asyncio.CancelledError as cancellation:
+        current = asyncio.current_task()
+        assert current is not None
+        current.uncancel()
+        await _finish_task_after_cancellation(reconcile_task)
+        raise cancellation
+    reconcile_task.result()
+
+
 async def _register_stored_capture(
     conn: AsyncConnection,
     store: ObjectStore,
@@ -310,8 +341,12 @@ async def _register_stored_capture(
         # this attempt may have been first to write and last to take the lock — so the repair
         # stats the object rather than assuming this attempt's etag. Outside the lock: it is
         # store I/O.
-        await reconcile_row_etag(
-            conn, store, row_id=existing.id, object_key=object_key, row_etag=existing.etag
+        await _reconcile_stored_capture(
+            conn,
+            store,
+            row_id=existing.id,
+            object_key=object_key,
+            row_etag=existing.etag,
         )
         return None if canceled else existing.id
     # The cancel landed while the object was in flight. Reclaim is row-driven, so the object
