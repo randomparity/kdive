@@ -60,9 +60,18 @@ QOM object before removing the destination and must tolerate an already-missing 
 domain, or destination. One row's failure is logged with `(system_id, job_id)` and does not
 stop the rest of the pass. The persisted reap state carries a database-clock retry deadline;
 failure advances that deadline beyond both its prior value and the current database time with
-bounded backoff. Selection orders eligible rows by retry deadline and then job update time.
-Untouched rows therefore sort ahead of a just-failed row even if its backoff expires before the
-next pass, so persistent old failures cannot starve later candidates.
+bounded backoff. Selection orders first by an explicit untouched-row discriminator, then by
+retry deadline and job update time; it does not depend on a database's NULL ordering. Untouched
+rows therefore sort ahead of a just-failed row even if its backoff expires before the next pass,
+so persistent old failures cannot starve later candidates.
+
+Provider-state creation and reaping share a per-job Postgres advisory ownership fence. A worker
+holds that session-level fence from before it clears prior completion until after detach and
+destination reclaim. The reaper acquires the same fence before it inspects or removes state and
+holds it through the completion write. Process death releases the worker's fence; a paused or
+partitioned live worker retains it and cannot race the reaper. If the fence is unavailable, the
+row is deferred without consuming a provider call. This positive ownership boundary, rather
+than the settle duration, prevents state from being created after an absence-tolerant reap.
 
 Remote-libvirt binds the reaper to the row's Resource using ADR-0187 and deletes the named
 libvirt storage volume. It does not fan out through the fleet reaper bundle. Local-libvirt
@@ -79,9 +88,9 @@ and leaves only a failed best-effort reclaim eligible. Cleanup failure must not 
 successful capture into a failed job or hide its artifact. #1949 owns the schema and write-path
 mechanics for that outcome, but not whether historical success is covered or whether future
 successful cleanup is revisited. Every capture attempt clears prior completion before it can
-attach the filter or create the destination. A crash after clearing but before creation yields
-an eligible idempotent no-op; clearing after creation would leave a retry-created orphan hidden
-behind the previous attempt's marker.
+attach the filter or create the destination, while holding the ownership fence. A crash after
+clearing but before creation yields an eligible idempotent no-op; clearing after creation would
+leave a retry-created orphan hidden behind the previous attempt's marker.
 
 Candidate selection uses the database reference clock. The settle duration is an operator
 configuration stated as a duration in seconds per terminal job row, measured from the job's
@@ -89,10 +98,10 @@ database-maintained `updated_at`. Before it expires the row is skipped; after it
 row can be reclaimed. A later pass is the recovery action for a failed attempt. The concrete
 default is chosen and documented with #1946 because a lapsed lease means a dead or wedged
 worker and provides no derived upper bound. Settle is therefore a pacing heuristic, not a
-safety fence. A terminal job's worker may still be alive after the duration; reclamation can
-detach its filter or remove its temporary destination while that worker is still writing or
-fetching. The resulting terminal job has already lost its reliable owner, and this design
-accepts that cleanup can pre-empt its late work rather than retain host state indefinitely.
+safety fence. A terminal job's worker may still be alive after the duration, but its ownership
+fence prevents reclamation from pre-empting its late write or fetch. A wedged worker that keeps
+its database session open also keeps its host state; existing worker/connection recovery must
+release that session before the reaper can proceed.
 
 ## Consequences
 
@@ -109,6 +118,9 @@ accepts that cleanup can pre-empt its late work rather than retain host state in
 - Retry deadlines add one database-clock scheduling write after a failed attempt. Backoff keeps
   a degraded provider from monopolizing every pass; it also means recovery waits until that
   row's deadline, when the reconciler automatically makes it eligible again.
+- Each active capture holds one database session for its ownership fence across the provider
+  operation. This consumes one pool connection per concurrent capture and makes database-session
+  loss a capture-fencing event; #1946 must bound and test that resource use.
 - A row whose Run was never bound, whose ownership chain was removed, or whose provider kind
   has no registered reaper is not an eligible candidate. Selection does not guess a host,
   domain, or path, and an ineligible row cannot consume the batch or starve eligible work.

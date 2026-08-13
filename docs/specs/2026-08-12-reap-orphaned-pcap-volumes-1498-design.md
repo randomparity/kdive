@@ -41,6 +41,7 @@ guard defect is owned by #1945 and ADR-0094, not this decision.
 8. Cleanup residue from a `succeeded` job remains owned without making best-effort reclaim
    mask a successful capture or its artifact.
 9. Every capture attempt clears prior completion before it can recreate provider state.
+10. A per-job advisory ownership fence serializes provider-state creation and reaping.
 
 ## Components
 
@@ -77,9 +78,17 @@ cannot consume the batch or starve reclaimable work. A successful provider call 
 write form one logical candidate outcome: if the provider succeeds but the marker write does
 not, the next pass repeats an idempotent reclaim. If provider reclaim fails, persisted state
 records a bounded backoff deadline rather than completion. Selection ignores retries whose
-deadline has not arrived and orders eligible rows by retry deadline, then job update time. A
-failure advances its deadline beyond its prior value and the current database time, so
-untouched rows sort ahead of it even when backoff expires before the next pass.
+deadline has not arrived and orders by an explicit untouched-row discriminator, then retry
+deadline and job update time. A failure advances its deadline beyond its prior value and the
+current database time, so untouched rows sort ahead even when backoff expires before the next
+pass.
+
+The capture handler holds a session-level per-job advisory ownership fence from before it
+clears prior completion until provider detach and destination reclaim finish. The sweep takes
+the same fence before a provider call and holds it through the completion write. An unavailable
+fence defers the row. Process death releases the fence; a live delayed worker cannot create
+state after an absence-tolerant reap. The implementation bounds one held database connection
+per concurrent capture and tests connection-loss fencing.
 
 The sweep never invents missing ownership or provider wiring. Each provider failure is logged
 with `(system_id, job_id)`. A pass reports attempted, reclaimed, skipped, and failed counts
@@ -95,10 +104,10 @@ The settle limit's full contract is:
 - recovery after a failed dispatch: it remains unmarked and a later reconciler pass retries.
 
 #1946 chooses and documents the concrete default with its configuration field because no
-heartbeat-derived upper bound exists for a dead or wedged worker. The duration is not a safety
-fence: a terminal job's worker may survive beyond it, and reclamation may pre-empt that late
-worker's write or fetch. The design accepts loss of that already-terminal attempt rather than
-retaining its host state indefinitely.
+heartbeat-derived upper bound exists for a dead or wedged worker. The duration is pacing, not
+the safety fence: the per-job advisory ownership fence prevents reclamation while a live worker
+still owns provider state. A wedged worker with a live database session delays reclamation until
+connection recovery releases it.
 
 ### Remote-libvirt implementation (#1947)
 
@@ -135,7 +144,9 @@ semantics. It must prove:
 - **Worker dies with a filter attached:** abandonment makes the row terminal; after settle,
   the reaper detaches and removes the destination.
 - **Job retries after earlier cleanup:** the new attempt clears completion before creating
-  provider state; a later failure remains eligible.
+  provider state while holding the ownership fence; a later failure remains eligible.
+- **Terminal worker is still alive:** its ownership fence defers reaping; it cannot create
+  provider state after an absence-tolerant completion write.
 - **Provider unavailable:** the row remains unresolved, the failure is logged with its owner
   ids, and a later pass retries after persisted bounded backoff without starving later rows.
 - **Filter, domain, or destination already absent:** provider reclaim treats absence as
