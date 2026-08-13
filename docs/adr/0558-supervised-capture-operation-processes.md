@@ -70,9 +70,13 @@ the terminated client. Local-libvirt reconnects locally, crosses that barrier, a
 attempt's QOM object absent. Remote-libvirt opens a new independently assembled TLS transport
 bound to the attempt's Resource, crosses the same QEMU monitor barrier, and proves the QOM object
 absent. Tests hold an earlier fake monitor command in flight and require the fresh query to wait
-before it can acknowledge absence. An unreachable provider, an identity mismatch, an unordered
-transport, or an inconclusive probe leaves the operation unacknowledged. Replacements repeat
-observation; they never translate missing evidence into success.
+before it can acknowledge absence. The gated local and remote `live_vm` suites also delay an
+actual monitor mutation at its acceptance boundary, terminate the supervised client, and prove
+the independent connection cannot acknowledge absence until that mutation definitively completes
+or is canceled. The fake is deterministic unit coverage, not evidence for real transport
+ordering. An unreachable provider, an identity mismatch, an unordered transport, or an
+inconclusive probe leaves the operation unacknowledged. Replacements repeat observation; they
+never translate missing evidence into success.
 
 Recovery is authority-bound. The operation records the immutable host boundary from the worker
 incarnation: local workers use a configured host identity plus boot id, Docker workers use the
@@ -115,6 +119,9 @@ every claim.
 - Capture providers used in this lifecycle may create threads but not descendant processes. That
   restriction is held by keeping subprocess APIs out of the child call graph and by a guard test;
   a provider needing helpers requires a different kernel-owned containment design.
+- The cross-connection monitor barrier is a live-provider requirement. A provider cannot ship this
+  lifecycle based only on a fake; its gated suite must kill a client with an accepted mutation in
+  flight and prove the independent absence observation is ordered afterwards.
 
 ## Considered & rejected
 

@@ -160,8 +160,12 @@ client; an adapter unable to establish that ordering cannot acknowledge quiescen
 configured local URI. Remote derives the Resource-bound configuration and opens a new TLS
 connection; the old child's exited process can no longer own a transport. A concurrency test holds
 an earlier fake monitor command in flight and proves the fresh absence query cannot return first.
-The evidence records provider kind, Resource, domain, QOM id, probe result, and database
-observation time. It records no host address or credential.
+The local and remote gated `live_vm` suites repeat the fault against real libvirt and QEMU: a test
+hook delays an accepted monitor mutation, the supervisor terminates that client, and the fresh
+connection must not acknowledge absence before the mutation definitively completes or is
+canceled. The fake supplies deterministic unit coverage but cannot satisfy either provider's
+quiescence criterion. The evidence records provider kind, Resource, domain, QOM id, probe result,
+and database observation time. It records no host address or credential.
 
 ## Legacy cutover
 
@@ -251,8 +255,10 @@ Database concurrency tests prove one operation per `(job_id, attempt)`, exact-at
 fencing, protocol-2 capture claim exclusion with unrelated claims still admitted, immutable drain
 membership, and atomic final cutoff sampling with a job admitted during drain. Provider tests
 prove local and remote probes reconnect independently and refuse to acknowledge QOM presence or
-an unreachable endpoint. Worker tests prove heartbeat false/error and lock-session failure both
-terminate the child before dispatch returns.
+an unreachable endpoint. Each provider's gated real-stack test delays an accepted monitor command,
+kills the client, and proves the independent probe cannot acknowledge before definitive completion
+or cancellation. Worker tests prove heartbeat false/error and lock-session failure both terminate
+the child before dispatch returns.
 
 The x86_64 host runs focused tests and `just ci`. Architecture-neutral database and process tests
 also run in the declared ppc64le CI target. The existing gated local and remote live tiers gain a
