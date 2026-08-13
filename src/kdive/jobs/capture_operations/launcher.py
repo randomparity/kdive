@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+from kdive.jobs.capture_operations.bootstrap_elf import runtime_elf_closure
 from kdive.jobs.capture_operations.linux_identity import LinuxIdentity
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
 from kdive.jobs.capture_operations.repository import CaptureOperation
@@ -42,6 +43,13 @@ _FINGERPRINT_KINDS = {
     "bootstrap-python",
     "bootstrap-extension",
 }
+_ELF_FINGERPRINT_KINDS = {
+    "python-interpreter",
+    "elf-interpreter",
+    "elf-dependency",
+    "bootstrap-extension",
+}
+_ELF_ROOT_KINDS = {"python-interpreter", "bootstrap-extension"}
 
 
 def _sha256(path: Path) -> str:
@@ -71,6 +79,7 @@ def _validate_manifest_shape(payload: object, raw: bytes) -> dict[str, Any]:
     ):
         raise RuntimeError("capture bootstrap manifest has malformed trace data")
     seen: set[str] = set()
+    ordered_paths: list[str] = []
     for entry in files:
         if not isinstance(entry, dict) or set(entry) != {"kind", "path", "sha256"}:
             raise RuntimeError("capture bootstrap manifest fingerprint entry is malformed")
@@ -88,7 +97,40 @@ def _validate_manifest_shape(payload: object, raw: bytes) -> dict[str, Any]:
         ):
             raise RuntimeError("capture bootstrap manifest fingerprint entry is malformed")
         seen.add(candidate)
+        ordered_paths.append(candidate)
+    if ordered_paths != sorted(ordered_paths):
+        raise RuntimeError("capture bootstrap manifest fingerprint paths are not sorted")
     return manifest
+
+
+def _verified_manifest_paths(files: list[object]) -> list[tuple[str, Path, str]]:
+    verified: list[tuple[str, Path, str]] = []
+    for raw_entry in files:
+        assert isinstance(raw_entry, dict)
+        entry = cast(dict[str, object], raw_entry)
+        kind = entry["kind"]
+        expected = entry["sha256"]
+        assert isinstance(kind, str) and isinstance(expected, str)
+        candidate = Path(str(entry["path"]))
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as error:
+            raise RuntimeError(
+                f"capture bootstrap fingerprint path unavailable: {candidate}"
+            ) from error
+        if resolved != candidate:
+            raise RuntimeError(f"capture bootstrap fingerprint path is a symlink: {candidate}")
+        verified.append((kind, resolved, expected))
+    return verified
+
+
+def _verify_runtime_elf_paths(files: list[tuple[str, Path, str]]) -> None:
+    expected = {path for kind, path, _digest in files if kind in _ELF_FINGERPRINT_KINDS}
+    roots = [path for kind, path, _digest in files if kind in _ELF_ROOT_KINDS]
+    closure, interpreters = runtime_elf_closure(roots, required_libraries=("libseccomp.so.2",))
+    selected = closure | interpreters
+    if selected != expected:
+        raise RuntimeError("capture bootstrap runtime ELF closure drift")
 
 
 def _verify_manifest(path: Path, interpreter: Path, expected_uid: int) -> dict[str, Any]:
@@ -117,20 +159,10 @@ def _verify_manifest(path: Path, interpreter: Path, expected_uid: int) -> dict[s
         raise RuntimeError("capture bootstrap manifest interpreter drift")
     files = payload.get("files")
     assert isinstance(files, list)
-    for entry in files:
-        assert isinstance(entry, dict)
-        candidate = Path(str(entry.get("path", "")))
-        expected = entry.get("sha256")
-        assert isinstance(expected, str)
-        try:
-            resolved = candidate.resolve(strict=True)
-            if resolved != candidate:
-                raise RuntimeError(f"capture bootstrap fingerprint path is a symlink: {candidate}")
-            actual = _sha256(resolved)
-        except OSError as error:
-            raise RuntimeError(
-                f"capture bootstrap fingerprint path unavailable: {candidate}"
-            ) from error
+    verified_files = _verified_manifest_paths(cast(list[object], files))
+    _verify_runtime_elf_paths(verified_files)
+    for _kind, candidate, expected in verified_files:
+        actual = _sha256(candidate)
         if actual != expected:
             raise RuntimeError(f"capture bootstrap fingerprint drift: {candidate}")
     modules = payload.get("bootstrap_modules")

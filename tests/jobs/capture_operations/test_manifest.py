@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-import importlib.util
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
+
+from kdive.jobs.capture_operations import bootstrap_elf
+from kdive.jobs.capture_operations import launcher as launcher_module
+from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
 
 _ROOT = Path(__file__).parents[3]
 _SCRIPT = _ROOT / "scripts/build-capture-bootstrap-manifest.py"
@@ -21,14 +24,6 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(_SCRIPT), *args], text=True, capture_output=True, check=False
     )
-
-
-def _builder_module() -> Any:
-    spec = importlib.util.spec_from_file_location("capture_manifest_builder", _SCRIPT)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _compile_runpath_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -79,18 +74,157 @@ def _compile_runpath_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     return executable, selected.resolve(), unused.resolve()
 
 
+def _compile_choice_library(destination: Path, choice: int) -> None:
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("C compiler is required for the ELF hwcaps fixture")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source = destination.parent / f"choice-{choice}.c"
+    source.write_text(f"int choice(void) {{ return {choice}; }}\n")
+    subprocess.run(
+        [
+            compiler,
+            "-fPIC",
+            "-shared",
+            "-Wl,-soname,libkdive-choice.so.1",
+            "-o",
+            str(destination),
+            str(source),
+        ],
+        check=True,
+        env={"PATH": os.environ["PATH"], "LC_ALL": "C"},
+    )
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _fixture_manifest(interpreter: Path) -> dict[str, object]:
+    closure, interpreters = bootstrap_elf.runtime_elf_closure(
+        [interpreter], required_libraries=("libseccomp.so.2",)
+    )
+    entries = []
+    for path in sorted(closure | interpreters, key=str):
+        if path == interpreter.resolve():
+            kind = "python-interpreter"
+        elif path in interpreters:
+            kind = "elf-interpreter"
+        else:
+            kind = "elf-dependency"
+        entries.append({"kind": kind, "path": str(path), "sha256": _digest(path)})
+    return {
+        "schema_version": 1,
+        "architecture": {"amd64": "x86_64"}.get(os.uname().machine, os.uname().machine),
+        "interpreter": str(interpreter.resolve()),
+        "bootstrap_modules": [
+            "kdive",
+            "kdive.capture_bootstrap",
+            "kdive.jobs",
+            "kdive.jobs.capture_operations",
+            "kdive.jobs.capture_operations.sandbox",
+        ],
+        "files": entries,
+    }
+
+
+def _write_manifest(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+    path.chmod(0o644)
+
+
 def test_elf_closure_hashes_runtime_runpath_selection_not_competing_soname(
     tmp_path: Path,
 ) -> None:
-    builder = _builder_module()
     executable, selected, unused = _compile_runpath_fixture(tmp_path)
 
-    closure, _interpreters = builder._elf_closure([executable])
-    hashes = {path: builder._sha256(path) for path in closure}
+    closure, _interpreters = bootstrap_elf.runtime_elf_closure([executable])
+    hashes = {path: _digest(path) for path in closure}
 
     assert selected in hashes
-    assert hashes[selected] == builder._sha256(selected)
+    assert hashes[selected] == _digest(selected)
     assert unused not in hashes
+
+
+def test_runtime_verifier_rejects_new_higher_priority_hwcaps_selection(tmp_path: Path) -> None:
+    executable, selected, _unused = _compile_runpath_fixture(tmp_path)
+    payload = _fixture_manifest(executable)
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(manifest, payload)
+    manifest_bytes = manifest.read_bytes()
+    manifest_inode = manifest.stat().st_ino
+    verify_capture_bootstrap_manifest(manifest, executable, expected_uid=os.getuid())
+    assert manifest.read_bytes() == manifest_bytes
+    assert manifest.stat().st_ino == manifest_inode
+    base_digest = _digest(selected)
+
+    loader = bootstrap_elf.elf_interpreter(executable)
+    assert loader is not None
+    help_result = subprocess.run(
+        [str(loader), "--help"],
+        env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    supported = next(
+        (
+            line.strip().split()[0]
+            for line in help_result.stdout.splitlines()
+            if "(supported, searched)" in line
+        ),
+        None,
+    )
+    if supported is None:
+        pytest.skip("runtime loader exposes no supported glibc-hwcaps directory")
+    hwcaps = selected.parent / "glibc-hwcaps" / supported / selected.name
+    _compile_choice_library(hwcaps, 9)
+
+    assert _digest(selected) == base_digest
+    with pytest.raises(RuntimeError, match="closure drift"):
+        verify_capture_bootstrap_manifest(manifest, executable, expected_uid=os.getuid())
+    assert manifest.read_bytes() == manifest_bytes
+    assert manifest.stat().st_ino == manifest_inode
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra", "reordered"])
+def test_runtime_verifier_rejects_nonexact_or_reordered_file_sets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    output = tmp_path / "manifest.json"
+    built = _run(
+        "build",
+        "--interpreter",
+        sys.executable,
+        "--source-root",
+        str(_ROOT / "src"),
+        "--output",
+        str(output),
+    )
+    assert built.returncode == 0, built.stderr
+    payload = json.loads(output.read_text())
+    files = payload["files"]
+    if mutation == "missing":
+        files.remove(next(entry for entry in files if entry["kind"] == "elf-dependency"))
+        expected = "closure drift"
+    elif mutation == "extra":
+        extra = tmp_path / "unused-elf"
+        shutil.copy2(sys.executable, extra)
+        files.append({"kind": "elf-dependency", "path": str(extra), "sha256": _digest(extra)})
+        files.sort(key=lambda entry: entry["path"])
+        expected = "closure drift"
+    else:
+        files.reverse()
+        expected = "sorted"
+    _write_manifest(output, payload)
+    monkeypatch.setattr(
+        launcher_module,
+        "_sha256",
+        lambda _path: (_ for _ in ()).throw(AssertionError("hash ran before path-set proof")),
+    )
+
+    with pytest.raises(RuntimeError, match=expected):
+        verify_capture_bootstrap_manifest(output, Path(sys.executable), expected_uid=os.getuid())
 
 
 @pytest.mark.parametrize(
@@ -102,14 +236,11 @@ def test_elf_closure_hashes_runtime_runpath_selection_not_competing_soname(
     ],
 )
 def test_loader_list_parser_fails_closed_on_untrusted_output(output: str) -> None:
-    builder = _builder_module()
-
     with pytest.raises(RuntimeError, match="loader trace"):
-        builder._parse_loader_list(output)
+        bootstrap_elf.parse_loader_list(output)
 
 
 def test_loader_list_parser_refuses_ambiguity_and_output_overflow(tmp_path: Path) -> None:
-    builder = _builder_module()
     first = tmp_path / "first.so"
     second = tmp_path / "second.so"
     first.write_bytes(b"first")
@@ -117,9 +248,9 @@ def test_loader_list_parser_refuses_ambiguity_and_output_overflow(tmp_path: Path
     ambiguous = f"libsame.so.1 => {first} (0x1234)\nlibsame.so.1 => {second} (0x5678)\n"
 
     with pytest.raises(RuntimeError, match="ambiguous"):
-        builder._parse_loader_list(ambiguous)
+        bootstrap_elf.parse_loader_list(ambiguous)
     with pytest.raises(RuntimeError, match="1048576"):
-        builder._parse_loader_list("x" * 1_048_577)
+        bootstrap_elf.parse_loader_list("x" * 1_048_577)
 
 
 def test_builder_records_real_interpreter_arch_and_absolute_dependency_closure(
