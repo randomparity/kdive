@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -131,9 +132,12 @@ def test_real_child_is_gated_and_has_exact_process_contract(
             assert not any(item.startswith(b"KDIVE_LIBVIRT_URI=") for item in environ)
             assert not any(item.startswith(b"KDIVE_REMOTE_LIBVIRT_MACHINE=") for item in environ)
             assert not any(item.startswith(b"LD_PRELOAD=") for item in environ)
-            assert launcher_module._process_group_members(child.identity.pid) == {
-                child.identity.pid
-            }
+            assert set(
+                launcher_module._process_group_members(
+                    child.identity.pid,
+                    host_instance=operation.host_instance,
+                )
+            ) == {child.identity.pid}
             children = Path(
                 f"/proc/{child.identity.pid}/task/{child.identity.pid}/children"
             ).read_text()
@@ -386,11 +390,20 @@ def test_post_spawn_attestation_faults_abort_before_release(
             ),
         )
     else:
-        monkeypatch.setattr(
-            launcher_module,
-            "_process_group_members",
-            lambda pid: {pid, 2_147_483_647},
-        )
+        group_scans = 0
+
+        def _extra_member(pid: int, *, host_instance: str) -> dict[int, object]:
+            nonlocal group_scans
+            group_scans += 1
+            if group_scans == 3:
+                return {}
+            identity = launcher_module.LinuxIdentity.read(pid, host_instance=host_instance)
+            if group_scans == 1:
+                impossible = replace(identity, pid=2_147_483_647)
+                return {pid: identity, impossible.pid: impossible}
+            return {pid: identity}
+
+        monkeypatch.setattr(launcher_module, "_process_group_members", _extra_member)
 
     with pytest.raises((OSError, RuntimeError), match=fault.replace("-", " ")):
         asyncio.run(launcher.launch(request, operation))
@@ -466,12 +479,6 @@ def test_exact_process_members_are_all_attested_before_any_signal(
         def __init__(self, pid: int) -> None:
             self.pid = pid
 
-        @classmethod
-        def read(cls, pid: int, *, host_instance: str) -> _Identity:
-            assert host_instance == "host-a"
-            events.append(("read", pid))
-            return cls(pid)
-
         def open_pidfd(self, *, current_host_instance: str) -> int:
             assert current_host_instance == "host-a"
             events.append(("open", self.pid))
@@ -481,10 +488,18 @@ def test_exact_process_members_are_all_attested_before_any_signal(
             events.append(("signal", self.pid))
 
     leader = _Identity(10)
+    members = {pid: _Identity(pid) for pid in (10, 20, 30)}
+    members[10] = leader
     leader_fd = os.open(os.devnull, os.O_RDONLY)
     monkeypatch.setattr(launcher_module, "LinuxIdentity", _Identity)
+    monkeypatch.setattr(
+        launcher_module,
+        "_read_process_group_member",
+        lambda pid, **_kwargs: events.append(("revalidate", pid)) or members[pid],
+    )
     handles = launcher_module._attest_process_members(
-        {10, 20, 30},
+        members,  # ty: ignore[invalid-argument-type] - identity fakes
+        process_group=10,
         host_instance="host-a",
         existing={10: (leader, leader_fd)},  # ty: ignore[invalid-argument-type] - identity fake
     )
@@ -493,14 +508,141 @@ def test_exact_process_members_are_all_attested_before_any_signal(
             identity.signal(pidfd, signal.SIGKILL)
         first_signal = next(index for index, event in enumerate(events) if event[0] == "signal")
         assert events[:first_signal] == [
-            ("read", 20),
             ("open", 20),
-            ("read", 30),
+            ("revalidate", 20),
             ("open", 30),
+            ("revalidate", 30),
         ]
         assert events[first_signal:] == [("signal", 10), ("signal", 20), ("signal", 30)]
     finally:
         launcher_module._close_process_handles(handles)
+
+
+def test_extra_member_pid_reuse_never_signals_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signaled: list[tuple[int, str]] = []
+    group_scans: list[str] = []
+    token_scans: list[str] = []
+
+    def _ready_pidfd() -> int:
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        return read_fd
+
+    class _Identity:
+        def __init__(self, pid: int, generation: str) -> None:
+            self.pid = pid
+            self.generation = generation
+
+        @classmethod
+        def read(cls, pid: int, *, host_instance: str) -> _Identity:
+            assert host_instance == "host-a"
+            return replacement if pid == 20 else leader
+
+        def open_pidfd(self, *, current_host_instance: str) -> int:
+            assert current_host_instance == "host-a"
+            return _ready_pidfd()
+
+        def signal(self, _pidfd: int, _sig: int) -> None:
+            signaled.append((self.pid, self.generation))
+
+    class _Process:
+        pid = 10
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    leader = _Identity(10, "leader")
+    observed = _Identity(20, "observed")
+    replacement = _Identity(20, "replacement")
+
+    def _group_scan(*_args: object, **_kwargs: object) -> dict[int, _Identity]:
+        group_scans.append("group")
+        return {10: leader, 20: replacement}
+
+    def _token_scan(*_args: object, **_kwargs: object) -> tuple[()]:
+        token_scans.append("token")
+        return ()
+
+    monkeypatch.setattr(launcher_module, "LinuxIdentity", _Identity)
+    monkeypatch.setattr(launcher_module, "_process_group_members", _group_scan)
+    monkeypatch.setattr(
+        launcher_module,
+        "_read_process_group_member",
+        lambda *_args, **_kwargs: replacement,
+        raising=False,
+    )
+    monkeypatch.setattr(launcher_module, "scan_launch_token", _token_scan)
+
+    with pytest.raises(ProcessLookupError, match="reused"):
+        asyncio.run(
+            launcher_module._cleanup_failed_launch(
+                _Process(),  # ty: ignore[invalid-argument-type] - exact cleanup process fake
+                launch_token="a" * 64,
+                interpreter=Path(sys.executable),
+                host_instance="host-a",
+                leader=(leader, _ready_pidfd()),  # ty: ignore[invalid-argument-type] - identity fake
+                process_members={10: leader, 20: observed},  # ty: ignore[invalid-argument-type]
+            )
+        )
+
+    assert signaled == []
+    assert group_scans == ["group"]
+    assert token_scans == ["token"]
+
+
+def test_process_group_recovery_scan_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Identity:
+        def __init__(self, pid: int, generation: str) -> None:
+            self.pid = pid
+            self.generation = generation
+
+        def open_pidfd(self, *, current_host_instance: str) -> int:
+            assert current_host_instance == "host-a"
+            read_fd, write_fd = os.pipe()
+            os.close(write_fd)
+            return read_fd
+
+        def signal(self, _pidfd: int, _sig: int) -> None:
+            pass
+
+    class _Process:
+        pid = 10
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    leader = _Identity(10, "leader")
+    observed = _Identity(20, "observed")
+    replacement = _Identity(20, "replacement")
+
+    def _slow_group_scan(*_args: object, **_kwargs: object) -> dict[int, _Identity]:
+        time.sleep(0.05)
+        return {10: leader}
+
+    monkeypatch.setattr(launcher_module, "_SIGNAL_WAIT_SECONDS", 0.001)
+    monkeypatch.setattr(launcher_module, "_process_group_members", _slow_group_scan)
+    monkeypatch.setattr(
+        launcher_module,
+        "_read_process_group_member",
+        lambda *_args, **_kwargs: replacement,
+    )
+    monkeypatch.setattr(launcher_module, "scan_launch_token", lambda *_args, **_kwargs: ())
+
+    with pytest.raises(RuntimeError, match="process-group scan exceeded"):
+        asyncio.run(
+            launcher_module._cleanup_failed_launch(
+                _Process(),  # ty: ignore[invalid-argument-type] - exact cleanup process fake
+                launch_token="a" * 64,
+                interpreter=Path(sys.executable),
+                host_instance="host-a",
+                leader=(leader, leader.open_pidfd(current_host_instance="host-a")),  # ty: ignore[invalid-argument-type]
+                process_members={10: leader, 20: observed},  # ty: ignore[invalid-argument-type]
+            )
+        )
 
 
 def test_unreadable_token_recovery_scan_fails_closed_without_numeric_signal(
@@ -610,6 +752,38 @@ def test_process_group_enumeration_fails_closed_on_unreadable_proc(tmp_path: Pat
     stat_path.chmod(0)
     try:
         with pytest.raises(RuntimeError, match="cannot read"):
-            launcher_module._process_group_members(123, tmp_path)
+            launcher_module._process_group_members(
+                123,
+                tmp_path,
+                host_instance="host-a",
+            )
     finally:
         stat_path.chmod(0o600)
+
+
+def test_process_group_enumeration_binds_observed_start_ticks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = tmp_path / "123"
+    process.mkdir()
+    fields = ["S", "1", "123", *(["0"] * 16), "42"]
+    (process / "stat").write_text(f"123 (capture) {' '.join(fields)}\n")
+    replacement = linux_identity_module.LinuxIdentity(
+        host_instance="host-a",
+        boot_id="boot-a",
+        pid=123,
+        start_ticks=99,
+    )
+    monkeypatch.setattr(
+        launcher_module.LinuxIdentity,
+        "read",
+        lambda _pid, *, host_instance: replacement,
+    )
+
+    with pytest.raises(ProcessLookupError, match="reused"):
+        launcher_module._process_group_members(
+            123,
+            tmp_path,
+            host_instance="host-a",
+        )

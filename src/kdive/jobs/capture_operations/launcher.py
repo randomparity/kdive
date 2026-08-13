@@ -248,8 +248,72 @@ def _write_configuration(attempt_dir: Path, configuration: bytes) -> None:
         os.close(directory_fd)
 
 
-def _process_group_members(process_group: int, proc_root: Path = Path("/proc")) -> set[int]:
-    members: set[int] = set()
+class _ProcessMembershipChanged(ProcessLookupError):
+    """A sampled process-group member vanished, moved, or reused its PID."""
+
+
+def _parse_process_stat(pid: int, stat_line: str) -> tuple[int, int]:
+    closing = stat_line.rfind(")")
+    fields = stat_line[closing + 2 :].split() if closing > 1 else []
+    if len(fields) <= 19:
+        raise RuntimeError(f"malformed /proc/{pid}/stat during capture handoff")
+    try:
+        process_group = int(fields[2])
+        start_ticks = int(fields[19])
+    except ValueError as error:
+        raise RuntimeError(f"malformed /proc/{pid}/stat during capture handoff") from error
+    if start_ticks < 0:
+        raise RuntimeError(f"malformed /proc/{pid}/stat during capture handoff")
+    return process_group, start_ticks
+
+
+def _identity_from_group_stat(
+    pid: int,
+    stat_line: str,
+    *,
+    process_group: int,
+    host_instance: str,
+) -> LinuxIdentity | None:
+    observed_group, observed_start = _parse_process_stat(pid, stat_line)
+    if observed_group != process_group:
+        return None
+    try:
+        identity = LinuxIdentity.read(pid, host_instance=host_instance)
+    except ProcessLookupError as error:
+        raise _ProcessMembershipChanged(f"process-group member {pid} vanished") from error
+    if identity.start_ticks != observed_start:
+        raise _ProcessMembershipChanged(f"process-group member {pid} reused its identity")
+    return identity
+
+
+def _read_process_group_member(
+    pid: int,
+    *,
+    process_group: int,
+    host_instance: str,
+    proc_root: Path = Path("/proc"),
+) -> LinuxIdentity | None:
+    try:
+        stat_line = (proc_root / str(pid) / "stat").read_text()
+    except FileNotFoundError as error:
+        raise _ProcessMembershipChanged(f"process-group member {pid} vanished") from error
+    except OSError as error:
+        raise RuntimeError(f"cannot read /proc/{pid}/stat during capture handoff") from error
+    return _identity_from_group_stat(
+        pid,
+        stat_line,
+        process_group=process_group,
+        host_instance=host_instance,
+    )
+
+
+def _process_group_members(
+    process_group: int,
+    proc_root: Path = Path("/proc"),
+    *,
+    host_instance: str,
+) -> dict[int, LinuxIdentity]:
+    members: dict[int, LinuxIdentity] = {}
     try:
         entries = list(proc_root.iterdir())
     except OSError as error:
@@ -263,12 +327,15 @@ def _process_group_members(process_group: int, proc_root: Path = Path("/proc")) 
             continue
         except OSError as error:
             raise RuntimeError(f"cannot read {entry}/stat during capture handoff") from error
-        closing = stat_line.rfind(")")
-        fields = stat_line[closing + 2 :].split() if closing > 1 else []
-        if len(fields) < 3:
-            raise RuntimeError(f"malformed {entry}/stat during capture handoff")
-        if int(fields[2]) == process_group:
-            members.add(int(entry.name))
+        pid = int(entry.name)
+        identity = _identity_from_group_stat(
+            pid,
+            stat_line,
+            process_group=process_group,
+            host_instance=host_instance,
+        )
+        if identity is not None:
+            members[pid] = identity
     return members
 
 
@@ -283,22 +350,41 @@ type _ProcessHandle = tuple[LinuxIdentity, int]
 
 
 def _attest_process_members(
-    members: set[int],
+    members: Mapping[int, LinuxIdentity],
     *,
+    process_group: int,
     host_instance: str,
     existing: dict[int, _ProcessHandle],
 ) -> dict[int, _ProcessHandle]:
-    """Open every exact process pidfd before the caller signals any member."""
+    """Open and revalidate every observed member before any member is signaled."""
     handles = dict(existing)
     opened: list[int] = []
     try:
-        for pid in sorted(members):
-            if pid in handles:
+        for pid, observed in sorted(members.items()):
+            prior = handles.get(pid)
+            if prior is not None:
+                if prior[0] != observed:
+                    raise _ProcessMembershipChanged(
+                        f"process-group member {pid} reused its identity"
+                    )
                 continue
-            identity = LinuxIdentity.read(pid, host_instance=host_instance)
-            pidfd = identity.open_pidfd(current_host_instance=host_instance)
-            handles[pid] = (identity, pidfd)
-            opened.append(pidfd)
+            try:
+                pidfd = observed.open_pidfd(current_host_instance=host_instance)
+                opened.append(pidfd)
+                current = _read_process_group_member(
+                    pid,
+                    process_group=process_group,
+                    host_instance=host_instance,
+                )
+            except ProcessLookupError as error:
+                raise _ProcessMembershipChanged(
+                    f"process-group member {pid} changed before cleanup"
+                ) from error
+            if current != observed:
+                raise _ProcessMembershipChanged(
+                    f"process-group member {pid} changed before cleanup"
+                )
+            handles[pid] = (observed, pidfd)
     except BaseException:
         for pidfd in opened:
             os.close(pidfd)
@@ -358,20 +444,48 @@ async def _complete_token_scan(
         raise RuntimeError("complete launch-token scan exceeded 5 seconds") from error
 
 
+async def _complete_process_group_scan(
+    process_group: int,
+    *,
+    host_instance: str,
+) -> dict[int, LinuxIdentity]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _process_group_members,
+                process_group,
+                host_instance=host_instance,
+            ),
+            timeout=_SIGNAL_WAIT_SECONDS,
+        )
+    except TimeoutError as error:
+        raise RuntimeError("complete process-group scan exceeded 5 seconds") from error
+
+
 async def _token_recovery_handles(
     launch_token: str,
     *,
     interpreter: Path,
     host_instance: str,
     existing: dict[int, _ProcessHandle],
+    observed: Mapping[int, LinuxIdentity],
+    matches: tuple[LinuxIdentity, ...] | None = None,
 ) -> dict[int, _ProcessHandle]:
-    matches = await _complete_token_scan(
-        launch_token, interpreter=interpreter, host_instance=host_instance
-    )
+    if matches is None:
+        matches = await _complete_token_scan(
+            launch_token,
+            interpreter=interpreter,
+            host_instance=host_instance,
+        )
     handles = dict(existing)
     opened: list[int] = []
     try:
         for identity in matches:
+            prior_observation = observed.get(identity.pid)
+            if prior_observation is not None and prior_observation != identity:
+                raise _ProcessMembershipChanged(
+                    f"launch-token recovery observed reused pid {identity.pid}"
+                )
             prior = handles.get(identity.pid)
             if prior is not None and prior[0] == identity:
                 continue
@@ -397,39 +511,76 @@ async def _cleanup_failed_launch(
     interpreter: Path,
     host_instance: str,
     leader: _ProcessHandle | None,
-    process_members: set[int] | None,
+    process_members: Mapping[int, LinuxIdentity] | None,
+    force_recovery: bool = False,
 ) -> None:
     """Boundedly terminate only exact attested members; never signal a numeric PID."""
     handles = {leader[0].pid: leader} if leader is not None else {}
-    used_token_recovery = leader is None
+    observed = dict(process_members or {})
+    recover_group = force_recovery
+    used_recovery = leader is None or recover_group
     try:
         if process_members is not None:
             try:
                 handles = _attest_process_members(
                     process_members,
+                    process_group=process.pid,
                     host_instance=host_instance,
                     existing=handles,
                 )
-            except ProcessLookupError:
-                used_token_recovery = True
-        if used_token_recovery:
+            except _ProcessMembershipChanged:
+                recover_group = True
+                used_recovery = True
+        if recover_group:
+            recovered_members = await _complete_process_group_scan(
+                process.pid,
+                host_instance=host_instance,
+            )
+            token_matches = await _complete_token_scan(
+                launch_token,
+                interpreter=interpreter,
+                host_instance=host_instance,
+            )
+            for pid, identity in recovered_members.items():
+                prior_observation = observed.get(pid)
+                if prior_observation is not None and prior_observation != identity:
+                    raise _ProcessMembershipChanged(
+                        f"process-group recovery observed reused pid {pid}"
+                    )
+            handles = _attest_process_members(
+                recovered_members,
+                process_group=process.pid,
+                host_instance=host_instance,
+                existing=handles,
+            )
+        if used_recovery:
             handles = await _token_recovery_handles(
                 launch_token,
                 interpreter=interpreter,
                 host_instance=host_instance,
                 existing=handles,
+                observed=observed,
+                matches=token_matches if recover_group else None,
             )
         await _signal_and_wait_exact(handles, process)
         _close_process_handles(handles)
         handles = {}
-        if used_token_recovery:
+        if used_recovery:
             remaining = await _complete_token_scan(
                 launch_token,
                 interpreter=interpreter,
                 host_instance=host_instance,
             )
+            remaining_group: Mapping[int, LinuxIdentity] = {}
+            if recover_group:
+                remaining_group = await _complete_process_group_scan(
+                    process.pid,
+                    host_instance=host_instance,
+                )
             if remaining:
                 raise RuntimeError("complete launch-token scan still finds capture children")
+            if remaining_group:
+                raise RuntimeError("complete process-group scan still finds capture children")
     finally:
         if handles:
             _close_process_handles(handles)
@@ -670,7 +821,7 @@ class GatedCaptureLauncher:
         assert process.stdout is not None
         identity: LinuxIdentity | None = None
         pidfd: int | None = None
-        process_members: set[int] | None = None
+        process_members: dict[int, LinuxIdentity] | None = None
         try:
             handshake = await asyncio.wait_for(
                 process.stdout.readexactly(1), timeout=_HANDSHAKE_TIMEOUT_SECONDS
@@ -681,9 +832,12 @@ class GatedCaptureLauncher:
             pidfd = identity.open_pidfd(current_host_instance=operation.host_instance)
             expected = {process.pid}
             for _ in range(2):
-                process_members = _process_group_members(process.pid)
+                process_members = _process_group_members(
+                    process.pid,
+                    host_instance=operation.host_instance,
+                )
                 task_members = _task_members(process.pid)
-                if process_members != expected:
+                if set(process_members) != expected:
                     raise RuntimeError("capture child process group was not empty at handoff")
                 if task_members != expected:
                     raise RuntimeError("capture child task set was not empty at handoff")
@@ -699,6 +853,7 @@ class GatedCaptureLauncher:
                     host_instance=operation.host_instance,
                     leader=leader,
                     process_members=process_members,
+                    force_recovery=isinstance(launch_error, _ProcessMembershipChanged),
                 )
             except BaseException as cleanup_error:
                 raise cleanup_error from launch_error
