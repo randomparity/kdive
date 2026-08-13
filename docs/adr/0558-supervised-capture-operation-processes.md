@@ -15,9 +15,9 @@ acknowledgment is not that proof.
 
 The launch boundary has a second race: a process started before its exact identity is durable can
 outlive its worker without leaving enough evidence for a replacement to find and terminate it.
-The rollout also contains historical workers that do not produce attempt evidence, so historical
-reclamation needs a positive fence proving those workers were drained and barred before a
-database-clock cutoff was sampled.
+KDIVE remains pre-release with no customers. The operator therefore requires an unconditional
+offline cutover rather than compatibility machinery for historical workers. The new deployment
+may reject stale workers and in-flight legacy capture work instead of maintaining either.
 
 ## Decision
 
@@ -89,14 +89,14 @@ visibility remains fail-closed until the operator restores that evidence; remote
 reachability alone cannot substitute for worker-host process absence.
 
 Worker fence protocol 3 is the only protocol allowed to claim `capture_traffic` after this
-migration. Other job kinds retain their current claim behavior. A provider-kind cutover begins by
-atomically barring protocol-2 capture claims and recording the active legacy incarnations that
-could have claimed that kind. Completion requires durable termination of every recorded
-incarnation plus successful provider quiescence observations, and then writes the generation's
-completion and `clock_timestamp()` cutoff in one transaction. Jobs admitted while workers drain
-are no later than that final database-clock sample and are therefore covered. A worker cannot
-rejoin after the bar because the claim function checks the protocol and cutover generation on
-every claim.
+migration. The deployment is stopped before migration. The migration refuses to establish the
+cutover while any protocol-2 worker incarnation remains active or any protocol-2-owned capture job
+remains running. It then atomically records the singleton cutover as complete with a
+`clock_timestamp()` cutoff. New workers require protocol 3 at authentication and claim, so a stale
+binary cannot rejoin. There is no draining generation, compatibility state, or preservation of
+legacy work. This pre-release rollout decision supersedes ADR-0556 only where that record requires
+a positive online legacy-worker drain; ADR-0556's attempt quiescence and historical-row cutoff
+requirements otherwise remain.
 
 ## Consequences
 
@@ -108,8 +108,9 @@ every claim.
   ten-second total local wait bound before it becomes recoverable pending work.
 - A provider outage fails closed: an exited child may remain without quiescence acknowledgment
   until an independent probe succeeds.
-- The rollout is coordinated. Protocol-2 workers may finish unrelated work, but cannot claim new
-  capture jobs after the cutover bar.
+- The rollout is an offline breaking cutover. Operators stop every worker and record its lifecycle
+  termination before migration; stale or in-flight legacy state makes migration fail instead of
+  being maintained.
 - The result spool contains sensitive packet data and must be mode 0600 in a mode-0700
   supervisor-owned directory; stale files are removed only after the durable operation is
   terminal and publication no longer needs them.
@@ -137,9 +138,9 @@ every claim.
   request left no filter, and lock release says nothing about a thread or orphan process.
 - **Use PID alone.** PID reuse can make a replacement signal an unrelated process. Boot id,
   process start ticks, and pidfd signaling bind the observation to one exact process.
-- **Sample the historical cutoff when draining starts.** A legacy worker can claim a job during
-  the drain and mutate after that early sample. Sampling only in the completion transaction
-  covers every job the legacy population could have admitted.
+- **Maintain an online legacy drain.** With no customers and no released compatibility contract,
+  generation membership, host scans, and per-Resource observations preserve state nobody relies
+  on. An offline stop plus fail-loud migration supplies the pre-release fence with less surface.
 - **Defer supervision and leave reclamation disabled.** This avoids the process, schema, and
   rollout machinery, but #1946 could not enable historical reclamation and attached capture
   filters would continue writing without an outside owner. That does not meet #1951 or accepted

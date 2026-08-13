@@ -10,7 +10,7 @@ This change gives each charged `capture_traffic` attempt a durable, terminable p
 identity. Provider mutation cannot start until the identity is linked durably to the job attempt;
 loss of either job heartbeat ownership or the session holding the operation fence starts
 cancellation; replacement workers can recover every launch state and prove process and provider
-quiescence. It also installs the positive protocol-2 worker cutover record ADR-0556 requires before
+quiescence. It also installs the unconditional offline protocol-3 cutover required before
 historical capture reclamation can begin.
 
 Artifact publication fencing remains #1952. Candidate selection and reclamation remain #1946;
@@ -43,17 +43,8 @@ Migration `0112_capture_operation_supervision.sql` adds:
   database function links it only when the row is still the exact running attempt owned by the
   authenticated worker. A later attempt cannot be charged while any operation for that job lacks
   complete exit evidence; only then may claim clear the prior current link.
-- `capture_cutovers`: one generation per supported provider kind, with state (`draining`,
-  `complete`), start time, database-clock cutoff, and separate operation-quiescent and
-  publication-closed flags. #1951 writes only the operation flag; #1952 owns the publication flag.
-- `capture_cutover_workers`: the immutable set of active protocol-2 incarnations captured when a
-  generation starts and the durable termination observation for each.
-- `capture_cutover_mutations`: the immutable `(resource_id, system_id, domain_name, job_id,
-  qom_id)` set resolved from every legacy `capture_traffic` job running when the claim bar is
-  installed; each row records its exact provider-absence observation.
-- `capture_cutover_hosts`: every distinct immutable worker authority boundary represented by the
-  captured legacy incarnations; each row records its supervised-operation scan result and the
-  authority-backed termination or same-boundary visibility evidence supporting it.
+- `capture_cutover`: a singleton row containing protocol 3, completion, and the database-clock
+  `cutoff_at`. It is inserted only by the offline migration after its legacy-state assertions pass.
 
 All worker writes use security-definer functions that derive the incarnation from the credential,
 lock the worker incarnation and job attempt, validate state transitions, and expose no direct
@@ -223,50 +214,39 @@ canceled. The fake supplies deterministic unit coverage but cannot satisfy eithe
 quiescence criterion. The evidence records provider kind, Resource, domain, QOM id, probe result,
 and database observation time. It records no host address or credential.
 
-## Legacy cutover
+## Unconditional pre-release cutover
 
-Fence protocol advances from 2 to 3. The claim function continues to admit protocol-2 workers for
-non-capture kinds, but a `capture_traffic` claim requires protocol 3 once a provider-kind cutover
-enters `draining`. Starting a generation takes the same database advisory lock used by capture
-claim, installs the bar, and persists three immutable membership sets in one transaction: every
-active protocol-2 incarnation, every exact `(Resource, System, domain, job, QOM id)` mutation
-resolved from a legacy capture job running at that instant, and every distinct authority-bound host
-named by those incarnations. This order means a legacy worker is either in the set or cannot obtain
-a later capture claim. A job or Resource admitted after the bar cannot acquire a legacy capture
-mutation and is outside this generation. A removed Resource or System remains represented by its
-frozen mutation row; lifecycle evidence may satisfy it only when it proves the endpoint or domain
-cannot retain that named QOM object.
+Fence protocol advances from 2 to 3 with no compatibility period. The operator stops the whole
+worker deployment before applying migration 0112. Existing Compose and Kubernetes lifecycle
+authorities record exact termination as they do today; local operators must use the same lifecycle
+stop path rather than killing an unrecorded process.
 
-The existing lifecycle authority remains the source of exact worker termination. The cutover
-observer copies only durable terminated facts; absence, lease expiry, Pod name reuse, and a stopped
-Compose process without its lifecycle acknowledgment do not count. For local-libvirt, operation
-quiescence requires every recorded worker terminated and each host's supervised-operation scan
-complete. Both providers require a fresh, independently connected absence proof for every
-immutable `capture_cutover_mutations` row; remote binds each connection to the row's Resource.
-Completion is a database `NOT EXISTS` predicate over missing worker, host-scan, and exact mutation
-observations. Failures retain `draining` and name the missing incarnation, host boundary, or
-mutation identity.
+Migration 0112 fails before any schema mutation when a `worker_incarnations` row with protocol
+below 3 remains `active`, or a `capture_traffic` job remains `running` under such an incarnation.
+Lease expiry, terminal job state, and worker absence are not substitutes for lifecycle termination.
+After those assertions, the migration installs protocol-3-only capture claim and authentication
+functions and inserts the singleton `capture_cutover` row with `complete = true` and
+`cutoff_at = clock_timestamp()` in the same transaction. There is no drain state for a stale
+binary to join. A job admitted while the service is stopped remains queued and is claimed only by
+a protocol-3 worker after restart.
 
-When all operation observations are complete, one transaction sets
-`operation_quiescent = true`. The generation becomes `complete` only when #1952's
-`publication_closed` is also true; that completion transaction samples `clock_timestamp()` into
-`cutoff_at`. A capture admitted at any time during drain is no later than that cutoff. The future
-#1946 predicate may accept a missing attempt link only when provider kind matches a complete
-generation and `jobs.created_at <= cutoff_at`.
+Historical capture rows with no operation link are covered exactly when
+`jobs.created_at <= capture_cutover.cutoff_at`; later rows require attempt-linked evidence. The
+cutoff authorizes later #1946 selection but does not itself remove provider state. Existing
+pre-release in-flight capture work is canceled by stopping the old deployment and is not resumed
+or preserved. If the assertions fail, the migration rolls back and names each blocking incarnation
+or job; the recovery action is to complete the supported lifecycle stop and rerun migration.
 
-The operator surfaces are idempotent internal CLI commands used by deployment automation:
-`capture-cutover begin`, `capture-cutover observe`, and `capture-cutover status`. `begin` and
-`observe` are external writes but operate only on durable KDIVE coordination rows. Helm and
-Compose rollout scripts call them around the existing worker drain/termination workflow. They do
-not terminate workers themselves.
+Helm and Compose upgrade documentation makes the offline stop a required step and refuses an
+in-place rolling upgrade across protocol 2 to 3. Fresh installations create only the completed
+singleton and never exercise a legacy path.
 
 ## Error handling and observability
 
 Every log names operation id, job id, attempt, state, and a reason code, but never packet bytes,
 request JSON, remote addresses, or credentials. Metrics count gated launches, released launches,
 cancellation reasons, TERM/KILL escalation, recovery outcomes, probe failures, and cutover
-remaining workers/resources. Database-clock timestamps make durable ordering independent of host
-clock skew.
+assertion failures. Database-clock timestamps make durable ordering independent of host clock skew.
 
 A child failure becomes the same `CategorizedError` the provider would have raised in-process.
 Failure serialization is an allowlist of category, terminal flag, reason, and redacted details;
@@ -287,8 +267,9 @@ precedence over consuming either success or failure output.
   Resource binding, TLS identity, and provider-specific QOM naming remain the controls.
 - A replacement worker signals an OS process. Exact boot id, start ticks, pidfd use, and process
   identity checks prevent PID reuse or attacker-chosen process targeting.
-- Deployment automation advances cutover state. Existing lifecycle-witness or Compose lifecycle
-  authority supplies termination evidence; worker credentials cannot synthesize it.
+- Deployment automation performs an offline cutover. Existing lifecycle-witness or Compose
+  lifecycle authority supplies termination evidence; worker credentials cannot synthesize it,
+  and the migration refuses any un-terminated protocol-2 incarnation.
 
 Trusted actors are the host operator, lifecycle authority, Postgres, and the configured libvirt
 endpoint. Authenticated tenants are not trusted to select paths, commands, provider endpoints, or
@@ -312,8 +293,8 @@ worker or captured network plane and are outside this issue's reachable boundary
 
 Unit and database tests fault every boundary: before spawn, after spawn before identity
 registration, after identity registration before release, after release before `running`, during
-each provider method,
-during TERM and KILL, after process exit before probe, and after probe before acknowledgment.
+each provider method, during TERM and KILL, after process exit before probe, and after probe before
+acknowledgment.
 Tests replace the child with a real gated helper process so breaking the release ordering makes
 the test fail.
 
@@ -323,15 +304,16 @@ after cleanup. Each verifies that no provider marker can be created and that rec
 the stated terminal outcome.
 
 Database concurrency tests prove one operation per `(job_id, attempt)`, exact-attempt transition
-fencing, protocol-2 capture claim exclusion with unrelated claims still admitted, immutable drain
-worker/host/mutation membership, and atomic final cutoff sampling with jobs and Resources admitted
-during drain. Multi-domain and multi-job cases, a removed System, partial observation, and an
-unreachable domain cannot complete cutover. A retry/cancellation race proves claim does not charge
-or hide a prior unacknowledged operation. Provider tests prove local and remote probes reconnect independently
-and refuse to acknowledge QOM presence or an unreachable endpoint. Each provider's gated
-real-stack test delays an accepted monitor command,
-kills the client, and proves the independent probe cannot acknowledge before definitive completion
-or cancellation. Worker tests cover heartbeat false/error and lock-session loss before release,
+fencing, and protocol-3-only capture claims. Migration tests prove any unterminated protocol-2
+incarnation or its running capture job aborts the whole migration, while a fully stopped deployment
+atomically records a database-clock cutoff. They also prove queued work admitted before cutoff is
+claimed only after restart by protocol 3 and that rolling protocol-2 authentication is rejected. A
+retry/cancellation race proves claim does not charge or hide a prior unacknowledged operation.
+Provider tests prove local and remote probes reconnect independently and refuse to acknowledge QOM
+presence or an unreachable endpoint. Each provider's gated real-stack test delays an accepted
+monitor command, kills the client, and proves the independent probe cannot acknowledge before
+definitive completion or cancellation. Worker tests cover heartbeat false/error and lock-session
+loss before release,
 immediately after release, on a stalled half-open probe, and racing a successful probe. A
 responsive child is absent before dispatch returns. A child surviving both five-second waits
 leaves `cancel_requested` with result and reclamation barred before dispatch returns, then startup
