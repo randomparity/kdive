@@ -91,6 +91,15 @@ Files:
 - Create `src/kdive/capture_bootstrap.py` with no imports outside the standard library and sandbox
   module before filter installation.
 - Modify `src/kdive/__init__.py` to make `__version__` lazy without eager package initialization.
+- Create `scripts/build-capture-bootstrap-manifest.py` and schema
+  `src/kdive/jobs/capture_operations/bootstrap_manifest.schema.json`. The deterministic builder
+  resolves the real interpreter and its `PT_INTERP`/`DT_NEEDED` closure using absolute system
+  loader paths with loader-affecting environment removed, hashes every file, records architecture,
+  and writes `/usr/share/kdive/capture-bootstrap-manifest.json` atomically.
+- Modify `just setup`, `Dockerfile`, `deploy/ansible/roles/libvirt_stack/`, and
+  `docs/operating/runbooks/power-host-bringup.md` to generate the manifest after installing the
+  final target-native interpreter/runtime. Compose and Helm consume the manifest already baked
+  into that same application image; host processes consume the Ansible/setup-installed manifest.
 - Modify `src/kdive/__main__.py` to add the internal `capture-operation` process verb.
 - Create matching tests under `tests/jobs/capture_operations/`.
 
@@ -112,6 +121,9 @@ Steps:
    unreadable `/proc`, result bounds, modes, symlinks, and malformed JSON.
 3. Implement private directories/files with directory-fd-relative `O_NOFOLLOW` opens, canonical
    digests, allowlisted environment, launch-token recovery, pidfd signaling, and bounded waits.
+   Workers only verify the root-owned/image-owned manifest and cannot create, approve, or rewrite
+   it. An intentional Python/loader/library update must rebuild the manifest in the same image or
+   provisioning run before workers restart; mismatched deployment fails readiness.
 4. Implement the pre-gate filter. Test that process creation
    returns `EPERM`, thread
    creation succeeds, and the child process tree has no descendants on x86_64 and ppc64le. The
@@ -125,7 +137,9 @@ Steps:
    covers raw syscalls, unsupported audit/ABI refusal, sanitized loader environment, an inert
    package initializer, exact bootstrap import trace, attested interpreter/dependency closure,
    double complete process-group/task enumeration, denial of later exec, and filter failure before
-   release. Record the command result. This is a required release proof; if no native
+   release. Add image/render/Ansible guards proving the deployed manifest matches the deployed
+   interpreter on x86_64 and ppc64le, including atomic coordinated refresh and stale-manifest
+   readiness failure. Record the command result. This is a required release proof; if no native
    POWER host is available, report the arm unavailable and do not claim cross-platform completion.
 5. Run `uv run python -m pytest tests/jobs/capture_operations -q`, `just lint`, and `just type`;
    expect green. Commit `feat(jobs): add gated capture child boundary`.
