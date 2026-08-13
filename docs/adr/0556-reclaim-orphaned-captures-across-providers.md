@@ -37,9 +37,11 @@ rather than safe to guess.
 
 ## Decision
 
-We will reclaim orphaned traffic-capture state from persisted job ownership, across every
-provider that implements traffic capture, and persist completion so each resolved row leaves
-the candidate set after one successful attempt.
+We will reclaim orphaned traffic-capture state from persisted job ownership for the two
+providers that currently implement it, local-libvirt and remote-libvirt, and persist completion
+so each resolved row leaves the candidate set after one successful attempt. A future provider's
+capture-reclamation contract requires its own decision rather than inheriting support from a
+capability flag alone.
 
 The provider-agnostic sweep selects capture rows only after a settle window, resolves the
 bound System and Resource through the Run, filters by Resource kind, and dispatches an
@@ -56,7 +58,10 @@ domain name, System id, and job id needed to name only the owning capture. The h
 all reapers use one `capture_qom_id(job_id)` convention. A provider reaper must detach that
 QOM object before removing the destination and must tolerate an already-missing filter,
 domain, or destination. One row's failure is logged with `(system_id, job_id)` and does not
-stop the rest of the pass; the failed row remains eligible for a later pass.
+stop the rest of the pass. The persisted reap state carries a database-clock retry deadline;
+failure advances that deadline with bounded backoff. Candidate ordering considers only rows
+whose deadline has arrived, so persistently failing old rows cannot occupy every bounded batch
+or starve later candidates.
 
 Remote-libvirt binds the reaper to the row's Resource using ADR-0187 and deletes the named
 libvirt storage volume. It does not fan out through the fleet reaper bundle. Local-libvirt
@@ -79,7 +84,11 @@ configuration stated as a duration in seconds per terminal job row, measured fro
 database-maintained `updated_at`. Before it expires the row is skipped; after it expires the
 row can be reclaimed. A later pass is the recovery action for a failed attempt. The concrete
 default is chosen and documented with #1946 because a lapsed lease means a dead or wedged
-worker and provides no derived upper bound.
+worker and provides no derived upper bound. Settle is therefore a pacing heuristic, not a
+safety fence. A terminal job's worker may still be alive after the duration; reclamation can
+detach its filter or remove its temporary destination while that worker is still writing or
+fetching. The resulting terminal job has already lost its reliable owner, and this design
+accepts that cleanup can pre-empt its late work rather than retain host state indefinitely.
 
 ## Consequences
 
@@ -93,6 +102,9 @@ worker and provides no derived upper bound.
   whose destination is probably already absent. Per-pass bounding limits work, but draining
   may take several reconciler intervals and progress must remain observable in per-pass counts
   and per-row failure logs.
+- Retry deadlines add one database-clock scheduling write after a failed attempt. Backoff keeps
+  a degraded provider from monopolizing every pass; it also means recovery waits until that
+  row's deadline, when the reconciler automatically makes it eligible again.
 - A row whose Run was never bound, whose ownership chain was removed, or whose provider kind
   has no registered reaper is not an eligible candidate. Selection does not guess a host,
   domain, or path, and an ineligible row cannot consume the batch or starve eligible work.

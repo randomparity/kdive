@@ -17,7 +17,8 @@ deployment performs no repeated capture-reclamation work for eligible rows.
 
 This design owns the shared `capture_qom_id`, a provider-neutral `CaptureReaper` port, the
 reap-once marker and candidate sweep, provider implementations for local-libvirt and
-remote-libvirt, and the persistence needed to recover residue from best-effort reclaim.
+remote-libvirt, and the persistence needed to recover residue from best-effort reclaim. A
+future provider does not inherit reaper support merely by advertising traffic capture.
 
 It does not change capture duration, polling, fetch, trim, artifact storage, job retry or
 dead-letter policy, MCP tools, or agent-facing schemas. It does not add capture reapers for
@@ -35,7 +36,8 @@ guard defect is owned by #1945 and ADR-0094, not this decision.
 5. A persisted marker removes a resolved row from future passes. There is no lookback;
    provider calls are at-least-once and idempotent across a crash before the marker write.
 6. A bounded batch size paces the initial historical backlog.
-7. One candidate failure does not starve the pass and remains retryable.
+7. One candidate failure does not starve the pass and remains retryable after a persisted,
+   database-clock backoff deadline.
 8. Cleanup residue from a `succeeded` job remains owned without making best-effort reclaim
    mask a successful capture or its artifact.
 
@@ -72,8 +74,9 @@ database clock, orders them deterministically, and limits each pass. Eligibility
 resolvable ownership chain and a registered reaper for the Resource kind, so an invalid row
 cannot consume the batch or starve reclaimable work. A successful provider call and marker
 write form one logical candidate outcome: if the provider succeeds but the marker write does
-not, the next pass repeats an idempotent reclaim. If provider reclaim fails, no marker is
-written.
+not, the next pass repeats an idempotent reclaim. If provider reclaim fails, persisted state
+records a bounded backoff deadline rather than completion. Selection ignores retries whose
+deadline has not arrived, so an oldest persistent failure cannot monopolize every batch.
 
 The sweep never invents missing ownership or provider wiring. Each provider failure is logged
 with `(system_id, job_id)`. A pass reports attempted, reclaimed, skipped, and failed counts
@@ -89,7 +92,10 @@ The settle limit's full contract is:
 - recovery after a failed dispatch: it remains unmarked and a later reconciler pass retries.
 
 #1946 chooses and documents the concrete default with its configuration field because no
-heartbeat-derived upper bound exists for a dead or wedged worker.
+heartbeat-derived upper bound exists for a dead or wedged worker. The duration is not a safety
+fence: a terminal job's worker may survive beyond it, and reclamation may pre-empt that late
+worker's write or fetch. The design accepts loss of that already-terminal attempt rather than
+retaining its host state indefinitely.
 
 ### Remote-libvirt implementation (#1947)
 
@@ -123,8 +129,8 @@ semantics. It must prove:
 
 - **Worker dies with a filter attached:** abandonment makes the row terminal; after settle,
   the reaper detaches and removes the destination.
-- **Provider unavailable:** the row remains unmarked, the failure is logged with its owner
-  ids, and a later pass retries.
+- **Provider unavailable:** the row remains unresolved, the failure is logged with its owner
+  ids, and a later pass retries after persisted bounded backoff without starving later rows.
 - **Filter, domain, or destination already absent:** provider reclaim treats absence as
   success and the row is marked.
 - **Provider succeeds but marker write fails:** the next pass repeats the idempotent provider
