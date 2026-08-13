@@ -20,6 +20,7 @@ from kdive.jobs.capture_operations import linux_identity as linux_identity_modul
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher, LaunchedCapture
 from kdive.jobs.capture_operations.protocol import CaptureRequest
 from kdive.jobs.capture_operations.repository import CaptureOperation
+from kdive.providers.ports.traffic import LocalCaptureConfiguration
 
 _ROOT = Path(__file__).parents[3]
 _MANIFEST_BUILDER = _ROOT / "scripts/build-capture-bootstrap-manifest.py"
@@ -145,7 +146,7 @@ def test_real_child_is_gated_and_has_exact_process_contract(
 
             child.release()
             result = await child.wait()
-            assert result.reason == "provider_execution_not_installed"
+            assert result.reason == "provider_execution_failed"
             assert (child.attempt_dir / "result.json").exists()
         finally:
             await child.cancel()
@@ -164,14 +165,17 @@ def test_provider_configuration_uses_post_filter_spool_seam(tmp_path: Path, mani
 
     async def _run() -> None:
         child = await launcher.launch(request, _operation(request))
-        configuration = b'{"uri":"qemu:///system"}\n'
+        configuration = LocalCaptureConfiguration(
+            resource_id=request.resource_id,
+            uri="qemu:///system",
+        ).to_canonical_json()
         assert not (child.attempt_dir / "configuration.json").exists()
         child.stage_configuration(configuration)
         configuration_path = child.attempt_dir / "configuration.json"
         assert configuration_path.read_bytes() == configuration
         assert configuration_path.stat().st_mode & 0o777 == 0o600
         child.release()
-        assert (await child.wait()).reason == "provider_execution_not_installed"
+        assert (await child.wait()).reason == "provider_execution_failed"
 
     asyncio.run(_run())
 

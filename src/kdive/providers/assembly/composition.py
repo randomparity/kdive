@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from psycopg_pool import AsyncConnectionPool
+from pydantic import ValidationError
 
 import kdive.config as config
 from kdive.config.core_settings import FAULT_INJECT, LOCAL_LIBVIRT_ENABLED
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.images.rootfs.stage_volume import StageVolumeDeps
 from kdive.observability.console_telemetry import ConsoleTelemetry
@@ -38,6 +40,12 @@ from kdive.providers.infra.reaping import (
     OwnedDomain,
 )
 from kdive.providers.local_libvirt import composition as local_composition
+from kdive.providers.ports.traffic import (
+    CaptureExecutionRequest,
+    LocalCaptureConfiguration,
+    RemoteCaptureConfiguration,
+    TrafficCaptureExecutor,
+)
 from kdive.providers.remote_libvirt import composition as remote_composition
 from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -50,6 +58,32 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 type _ConsoleHostingFactory = Callable[[], Awaitable["ConsoleHosting | None"]]
+
+
+def build_capture_executor(
+    request: CaptureExecutionRequest, configuration_bytes: bytes | None
+) -> TrafficCaptureExecutor:
+    """Validate released configuration and dispatch to one concrete provider composition."""
+    if configuration_bytes is None:
+        raise CategorizedError(
+            "capture provider configuration is absent",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    try:
+        if request.provider_kind == "local-libvirt":
+            configuration = LocalCaptureConfiguration.from_canonical_json(configuration_bytes)
+            if configuration.resource_id != request.resource_id:
+                raise ValueError("local capture configuration Resource does not match request")
+            return local_composition.build_capture_executor(configuration)
+        configuration = RemoteCaptureConfiguration.from_canonical_json(configuration_bytes)
+        if configuration.resource_id != request.resource_id:
+            raise ValueError("remote capture configuration Resource does not match request")
+        return remote_composition.build_capture_executor(configuration)
+    except (ValidationError, ValueError) as error:
+        raise CategorizedError(
+            "capture provider configuration is invalid or mismatched",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        ) from error
 
 
 class _UnconfiguredObjectStore:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from uuid import UUID
 
 import psycopg
@@ -49,14 +50,17 @@ from kdive.providers.infra.console_hosting import (
     RunningSystems,
 )
 from kdive.providers.infra.reaping import DumpVolumeReaper, InfraReaper
+from kdive.providers.ports.traffic import RemoteCaptureConfiguration
 from kdive.providers.remote_libvirt import stage_volume
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
+    TlsCertRefs,
     is_remote_libvirt_configured,
     remote_config_for_resource,
     unbound_remote_config,
 )
 from kdive.providers.remote_libvirt.connection.staged_volumes import probe_staged_volumes
+from kdive.providers.remote_libvirt.connection.transport import remote_connection
 from kdive.providers.remote_libvirt.connection.transport_reset import RemoteLibvirtTransportResetter
 from kdive.providers.remote_libvirt.console.collector import ConsoleCollector, ConsoleStream
 from kdive.providers.remote_libvirt.console.read import build_remote_console_reader
@@ -70,12 +74,19 @@ from kdive.providers.remote_libvirt.debug.introspect import (
     RemoteLibvirtLiveIntrospect,
     RemoteLibvirtVmcoreIntrospect,
 )
+from kdive.providers.remote_libvirt.lifecycle.capture_operation import (
+    RemoteCaptureExecutor,
+    RemoteLibvirtCaptureQuiescence,
+)
 from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl
 from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall
 from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtProvisioning
 from kdive.providers.remote_libvirt.lifecycle.snapshot import RemoteLibvirtSnapshotter
-from kdive.providers.remote_libvirt.lifecycle.traffic_capture import RemoteLibvirtTrafficCapture
+from kdive.providers.remote_libvirt.lifecycle.traffic_capture import (
+    RemoteLibvirtTrafficCapture,
+    open_libvirt_capture,
+)
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.reaping.domains import RemoteLibvirtInfraReaper
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
@@ -90,7 +101,12 @@ from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
 from kdive.providers.shared.debug_common.gdbmi.policy.hostpolicy import allow_acl_remote
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
+from kdive.security.secrets.secrets import (
+    FileRefBackend,
+    SecretBackend,
+    secret_backend_from_env,
+    secrets_root_from_env,
+)
 from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
 from kdive.store.objectstore import ObjectStore
 
@@ -98,6 +114,73 @@ _POOL = "remote-libvirt"
 # Reuses seeded `local`; a remote seed row would be DDL beyond migration 0020.
 _COST_CLASS = "local"
 RunningSystemsFactory = Callable[[AsyncConnectionPool], RunningSystems]
+
+
+def capture_operation_configuration(resource_id: UUID, resource_name: str) -> bytes:
+    """Snapshot one Resource's exact TLS references without reading worker database state."""
+    resolved = remote_config_for_resource(resource_name)
+    return RemoteCaptureConfiguration(
+        resource_id=resource_id,
+        uri=resolved.uri,
+        client_cert_ref=resolved.cert_refs.client_cert_ref,
+        client_key_ref=resolved.cert_refs.client_key_ref,
+        ca_cert_ref=resolved.cert_refs.ca_cert_ref,
+        secrets_root=str(secrets_root_from_env()),
+        storage_pool=resolved.storage_pool,
+    ).to_canonical_json()
+
+
+def _capture_remote_config(configuration: RemoteCaptureConfiguration) -> RemoteLibvirtConfig:
+    return RemoteLibvirtConfig(
+        uri=configuration.uri,
+        cert_refs=TlsCertRefs(
+            client_cert_ref=configuration.client_cert_ref,
+            client_key_ref=configuration.client_key_ref,
+            ca_cert_ref=configuration.ca_cert_ref,
+        ),
+        concurrent_allocation_cap=1,
+        storage_pool=configuration.storage_pool,
+    )
+
+
+def _capture_secret_backend(
+    configuration: RemoteCaptureConfiguration, registry: SecretRegistry
+) -> FileRefBackend:
+    return FileRefBackend(Path(configuration.secrets_root), registry)
+
+
+def build_capture_executor(
+    configuration: RemoteCaptureConfiguration,
+) -> RemoteCaptureExecutor:
+    """Reconstruct the remote executor from released exact Resource configuration."""
+    registry = SecretRegistry()
+    resolved = _capture_remote_config(configuration)
+    capturer = RemoteLibvirtTrafficCapture(
+        secret_registry=registry,
+        config_factory=lambda: resolved,
+        secret_backend_factory=lambda: _capture_secret_backend(configuration, registry),
+    )
+    return RemoteCaptureExecutor(capturer=capturer)
+
+
+def build_capture_quiescence(
+    configuration: RemoteCaptureConfiguration,
+) -> RemoteLibvirtCaptureQuiescence:
+    """Build a fresh independently assembled TLS absence probe for one Resource."""
+    registry = SecretRegistry()
+    resolved = _capture_remote_config(configuration)
+
+    def connection():  # noqa: ANN202 - inferred generic context-manager specialization
+        return remote_connection(
+            resolved,
+            _capture_secret_backend(configuration, registry),
+            open_connection=open_libvirt_capture,
+        )
+
+    return RemoteLibvirtCaptureQuiescence(
+        resource_id=configuration.resource_id,
+        connection=connection,
+    )
 
 
 def _component_sources() -> ComponentSourceCapabilities:

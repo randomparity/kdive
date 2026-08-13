@@ -6,8 +6,11 @@ import os
 import stat
 from contextlib import suppress
 from hashlib import sha256
+from pathlib import Path
 
-from kdive.jobs.capture_operations.protocol import CaptureRequest
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
+from kdive.providers.assembly.composition import build_capture_executor
 
 _REQUEST_NAME = "request.json"
 _REQUEST_DIGEST_NAME = "request.sha256"
@@ -93,11 +96,7 @@ def read_capture_inputs(directory_fd: int) -> tuple[CaptureRequest, bytes | None
 
 
 def run_capture_child(launch_token: str, gate_fd: int) -> int:
-    """Validate the released request and write a bounded placeholder result.
-
-    Task 3 replaces the placeholder with provider execution. Keeping this post-release path real
-    lets Task 2 prove request/spool containment without crossing a provider boundary early.
-    """
+    """Validate released inputs, execute one provider phase, and write its bounded result."""
     invalid_character = any(character not in "0123456789abcdef" for character in launch_token)
     if len(launch_token) != 64 or invalid_character:
         raise ValueError("launch token must be 64 lowercase hexadecimal characters")
@@ -105,20 +104,35 @@ def run_capture_child(launch_token: str, gate_fd: int) -> int:
         os.close(gate_fd)
     directory_fd = _open_attempt_directory()
     try:
-        from kdive.domain.errors import ErrorCategory
-        from kdive.jobs.capture_operations.protocol import CaptureResult
-
         request, configuration = read_capture_inputs(directory_fd)
-        del request, configuration
-        result = CaptureResult(
-            outcome="failure",
-            size_bytes=0,
-            truncated=False,
-            error_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            terminal=False,
-            reason="provider_execution_not_installed",
-            details={"phase": "capture_child"},
-        )
+        try:
+            executor = build_capture_executor(request, configuration)
+            execution = executor.execute(request, Path.cwd())
+            result = CaptureResult(
+                outcome="truncated" if execution.truncated else "success",
+                size_bytes=execution.size_bytes,
+                truncated=execution.truncated,
+            )
+        except CategorizedError as error:
+            result = CaptureResult(
+                outcome="failure",
+                size_bytes=0,
+                truncated=False,
+                error_category=error.category,
+                terminal=error.terminal,
+                reason="provider_execution_failed",
+                details={"phase": "provider_execution"},
+            )
+        except Exception:
+            result = CaptureResult(
+                outcome="failure",
+                size_bytes=0,
+                truncated=False,
+                error_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                terminal=False,
+                reason="provider_execution_failed",
+                details={"phase": "provider_execution"},
+            )
         _write_private_result(directory_fd, result.to_canonical_json())
     finally:
         os.close(directory_fd)
