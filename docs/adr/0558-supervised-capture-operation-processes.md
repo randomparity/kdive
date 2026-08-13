@@ -96,12 +96,19 @@ incarnation whose fence protocol is below 3, independent of heartbeat, lease, or
 ambiguous or missing authority binding also fails. A running protocol-2-owned capture job remains
 an additional consistency failure, not termination evidence. The cutoff transaction rechecks the
 complete population under the worker-incarnation fence, then atomically records the singleton as
-complete with a `clock_timestamp()` cutoff. New workers require protocol 3 at authentication and
-claim, so a stale
+operation-quiescent with a `clock_timestamp()` cutoff. Aggregate completion remains false until
+#1952 records publication closure. New workers require protocol 3 at registration, authentication,
+and claim, so a stale
 binary cannot rejoin. There is no draining generation, compatibility state, or preservation of
 legacy work. This pre-release rollout decision supersedes ADR-0556 only where that record requires
 a positive online legacy-worker drain; ADR-0556's attempt quiescence and historical-row cutoff
 requirements otherwise remain.
+
+Worker registration and cutoff share a global capture-protocol advisory lock. The cutoff
+transaction first installs a durable minimum protocol of 3, then rechecks every registered legacy
+incarnation and its authority termination under that lock before sampling the cutoff. Any restart
+must register a fresh immutable incarnation; protocol 2 is rejected after the bar, while a restart
+that registered before the bar appears in the locked recheck and must already be terminated.
 
 ## Consequences
 
@@ -118,6 +125,8 @@ requirements otherwise remain.
   being maintained.
 - Heartbeats, leases, and job states never satisfy the cutover fence. A protocol-2 incarnation
   without exact lifecycle termination blocks migration even when its job is already terminal.
+- The cutoff is operation-quiescent evidence only. Historical reclamation remains barred until
+  #1952 records publication closure and atomically completes the aggregate cutover.
 - The result spool contains sensitive packet data and must be mode 0600 in a mode-0700
   supervisor-owned directory; stale files are removed only after the durable operation is
   terminal and publication no longer needs them.

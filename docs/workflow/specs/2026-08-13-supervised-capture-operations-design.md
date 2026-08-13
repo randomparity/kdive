@@ -43,8 +43,10 @@ Migration `0112_capture_operation_supervision.sql` adds:
   database function links it only when the row is still the exact running attempt owned by the
   authenticated worker. A later attempt cannot be charged while any operation for that job lacks
   complete exit evidence; only then may claim clear the prior current link.
-- `capture_cutover`: a singleton row containing protocol 3, completion, and the database-clock
-  `cutoff_at`. It is inserted only by the offline migration after its legacy-state assertions pass.
+- `capture_cutover`: a singleton row containing protocol 3, `operation_quiescent`,
+  `publication_closed`, aggregate `complete`, and database-clock `cutoff_at`. Migration 0112 writes
+  only operation quiescence and the cutoff; #1952 owns publication closure and the transaction that
+  makes `complete` true when both inputs exist.
 
 All worker writes use security-definer functions that derive the incarnation from the credential,
 lock the worker incarnation and job attempt, validate state transitions, and expose no direct
@@ -225,16 +227,25 @@ Migration 0112 fails before any schema mutation unless every `worker_incarnation
 protocol below 3 has exact durable lifecycle-authority termination and a valid immutable authority
 binding. This is the complete registered legacy population, independent of heartbeat, lease, and
 job state. A `capture_traffic` job still `running` under one of those incarnations is an additional
-consistency failure, not an alternative proof. Under the same worker-incarnation advisory fence,
-the cutoff transaction rechecks that complete population, installs protocol-3-only capture claim
-and authentication functions, and inserts the singleton `capture_cutover` with `complete = true` and
+consistency failure, not an alternative proof. Worker registration and cutoff acquire the same
+global capture-protocol advisory lock. The cutoff transaction first persists minimum protocol 3,
+then rechecks the complete registered population and installs protocol-3-only registration,
+authentication, and capture claim functions. It inserts `capture_cutover` with
+`operation_quiescent = true`, `publication_closed = false`, `complete = false`, and
 `cutoff_at = clock_timestamp()` in the same transaction. There is no drain state for a stale
 binary to join. A job admitted while the service is stopped remains queued and is claimed only by
 a protocol-3 worker after restart.
 
-Historical capture rows with no operation link are covered exactly when
-`jobs.created_at <= capture_cutover.cutoff_at`; later rows require attempt-linked evidence. The
-cutoff authorizes later #1946 selection but does not itself remove provider state. Existing
+Every process restart registers a fresh immutable incarnation. A protocol-2 restart that registers
+before the cutoff bar appears in the locked population recheck and blocks unless terminated. A
+restart racing after the bar is rejected at registration before it can authenticate or claim.
+Local, Compose, and Kubernetes use their existing authority-specific fresh incarnation identities;
+none may reactivate a terminated row.
+
+Historical capture rows with no operation link are covered only when
+`jobs.created_at <= capture_cutover.cutoff_at` and aggregate `complete` is true; later rows require
+attempt-linked evidence. The cutoff alone does not authorize #1946 selection or remove provider
+state. Existing
 pre-release in-flight capture work is canceled by stopping the old deployment and is not resumed
 or preserved. If the assertions fail, the migration rolls back and names each blocking incarnation
 or job; the recovery action is to complete the supported lifecycle stop and rerun migration.
@@ -306,10 +317,13 @@ after cleanup. Each verifies that no provider marker can be created and that rec
 the stated terminal outcome.
 
 Database concurrency tests prove one operation per `(job_id, attempt)`, exact-attempt transition
-fencing, and protocol-3-only capture claims. Migration tests prove any protocol-2 incarnation
+fencing, and protocol-3-only registration, authentication, and capture claims. Migration tests
+prove any protocol-2 incarnation
 without exact lifecycle termination, including a lapsed worker with a terminal job and live
 provider thread, aborts the whole migration, while a fully stopped deployment
-atomically records a database-clock cutoff. They also prove queued work admitted before cutoff is
+atomically records an operation-quiescent database-clock cutoff without aggregate completion. They
+also prove #1946 remains barred until a simulated #1952 closure completes the row. Queued work
+admitted before cutoff is
 claimed only after restart by protocol 3 and that rolling protocol-2 authentication is rejected. A
 retry/cancellation race proves claim does not charge or hide a prior unacknowledged operation.
 Provider tests prove local and remote probes reconnect independently and refuse to acknowledge QOM
