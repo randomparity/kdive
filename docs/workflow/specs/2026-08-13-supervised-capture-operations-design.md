@@ -48,9 +48,9 @@ Migration `0112_capture_operation_supervision.sql` adds:
   publication-closed flags. #1951 writes only the operation flag; #1952 owns the publication flag.
 - `capture_cutover_workers`: the immutable set of active protocol-2 incarnations captured when a
   generation starts and the durable termination observation for each.
-- `capture_cutover_resources`: the immutable set of every Resource of the provider kind present
-  when the claim bar is installed, plus every Resource resolved from an already-running legacy
-  capture attempt; each row records its required transport observation.
+- `capture_cutover_mutations`: the immutable `(resource_id, system_id, domain_name, job_id,
+  qom_id)` set resolved from every legacy `capture_traffic` job running when the claim bar is
+  installed; each row records its exact provider-absence observation.
 - `capture_cutover_hosts`: every distinct immutable worker authority boundary represented by the
   captured legacy incarnations; each row records its supervised-operation scan result and the
   authority-backed termination or same-boundary visibility evidence supporting it.
@@ -60,14 +60,15 @@ lock the worker incarnation and job attempt, validate state transitions, and exp
 table mutation to the worker role. Reconciler-readable views expose only identities, states,
 deadlines, and evidence, never request or packet data.
 
-Owner functions require the operation's exact active incarnation. Separate recovery functions
-require an authenticated replacement whose immutable authority binding names the same local host,
-Compose container boundary, or Kubernetes workload boundary. They acquire the old and replacement
-incarnation locks in lexical order plus the operation lock, refuse a live old owner unless the
-replacement has same-boundary `/proc` visibility, and require exact lifecycle termination or
-same-boundary process-absence evidence before acknowledging exit. Cross-host, cross-container,
-cross-workload, stale-credential, and caller-supplied evidence all fail closed. Repeated recovery
-by the same authorized replacement is idempotent.
+Owner functions require the operation's exact active incarnation. Live-boundary recovery requires
+an authenticated replacement whose immutable binding names the same local host, Compose container,
+or Kubernetes Pod UID and that has same-boundary `/proc` visibility. Terminated-boundary recovery
+instead accepts a successor in the same configured Compose project/service/ordinal or Kubernetes
+namespace/StatefulSet/ordinal scope only after the lifecycle authority has durably terminated the
+exact old container identity or Pod UID. The scope comes from authority registration, never worker
+input. Recovery acquires old and replacement incarnation locks in lexical order plus the operation
+lock. Cross-host, cross-deployment, cross-ordinal, live-old-boundary, stale-credential, and caller-
+supplied evidence all fail closed. Repeated recovery by one authorized successor is idempotent.
 
 The operation transition table is:
 
@@ -228,22 +229,23 @@ Fence protocol advances from 2 to 3. The claim function continues to admit proto
 non-capture kinds, but a `capture_traffic` claim requires protocol 3 once a provider-kind cutover
 enters `draining`. Starting a generation takes the same database advisory lock used by capture
 claim, installs the bar, and persists three immutable membership sets in one transaction: every
-active protocol-2 incarnation, and every Resource of the provider kind then present plus Resources
-resolved from already-running legacy capture jobs, and every distinct authority-bound host named
-by those incarnations. This order means a legacy worker is either in
-the set or cannot obtain a later capture claim. A Resource created after the bar cannot receive a
-legacy capture claim and is outside this historical generation. A Resource removed after
-membership remains required; an explicit terminal Resource observation may satisfy it only when
-durable provider lifecycle evidence proves the endpoint cannot retain capture state.
+active protocol-2 incarnation, every exact `(Resource, System, domain, job, QOM id)` mutation
+resolved from a legacy capture job running at that instant, and every distinct authority-bound host
+named by those incarnations. This order means a legacy worker is either in the set or cannot obtain
+a later capture claim. A job or Resource admitted after the bar cannot acquire a legacy capture
+mutation and is outside this generation. A removed Resource or System remains represented by its
+frozen mutation row; lifecycle evidence may satisfy it only when it proves the endpoint or domain
+cannot retain that named QOM object.
 
 The existing lifecycle authority remains the source of exact worker termination. The cutover
 observer copies only durable terminated facts; absence, lease expiry, Pod name reuse, and a stopped
 Compose process without its lifecycle acknowledgment do not count. For local-libvirt, operation
 quiescence requires every recorded worker terminated and each host's supervised-operation scan
-complete. For remote-libvirt it additionally requires a fresh transport observation for every
-immutable `capture_cutover_resources` row. Completion is a database `NOT EXISTS` predicate over
-missing worker, host-scan, and Resource observations. Failures retain `draining` and name the
-missing incarnation, host boundary, or Resource.
+complete. Both providers require a fresh, independently connected absence proof for every
+immutable `capture_cutover_mutations` row; remote binds each connection to the row's Resource.
+Completion is a database `NOT EXISTS` predicate over missing worker, host-scan, and exact mutation
+observations. Failures retain `draining` and name the missing incarnation, host boundary, or
+mutation identity.
 
 When all operation observations are complete, one transaction sets
 `operation_quiescent = true`. The generation becomes `complete` only when #1952's
@@ -322,11 +324,12 @@ the stated terminal outcome.
 
 Database concurrency tests prove one operation per `(job_id, attempt)`, exact-attempt transition
 fencing, protocol-2 capture claim exclusion with unrelated claims still admitted, immutable drain
-worker/Resource membership, and atomic final cutoff sampling with a job admitted and a Resource
-created during drain. A retry/cancellation race proves claim does not charge or hide a prior
-unacknowledged operation. Provider tests prove local and remote probes reconnect independently
-and refuse to acknowledge QOM presence or
-an unreachable endpoint. Each provider's gated real-stack test delays an accepted monitor command,
+worker/host/mutation membership, and atomic final cutoff sampling with jobs and Resources admitted
+during drain. Multi-domain and multi-job cases, a removed System, partial observation, and an
+unreachable domain cannot complete cutover. A retry/cancellation race proves claim does not charge
+or hide a prior unacknowledged operation. Provider tests prove local and remote probes reconnect independently
+and refuse to acknowledge QOM presence or an unreachable endpoint. Each provider's gated
+real-stack test delays an accepted monitor command,
 kills the client, and proves the independent probe cannot acknowledge before definitive completion
 or cancellation. Worker tests cover heartbeat false/error and lock-session loss before release,
 immediately after release, on a stalled half-open probe, and racing a successful probe. A
