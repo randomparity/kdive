@@ -73,51 +73,28 @@ partitioned live worker retains it and cannot race the reaper. If the fence is u
 row is deferred without consuming a provider call. This positive ownership boundary, rather
 than the settle duration, prevents state from being created after an absence-tolerant reap.
 
-The lock-owning connection is also the provider operation's cancellation authority. Before any
-provider mutation, the worker creates a non-runnable operation row containing the job id, queue
-attempt number, a new attempt UUID, and worker-host identity. Under the per-job fence it also
-sets the job's `current_capture_attempt_id` to that UUID. That link is the single authority for
-which attempt may create provider state and which cancellation acknowledgment gates reaping.
+The lock-owning connection is also the provider operation's cancellation authority. Loss of that
+session must initiate termination of the current durable capture attempt. Lock release alone is
+not evidence that provider mutation stopped: the reaper remains closed until durable evidence
+proves the authoritative attempt can no longer mutate provider state. Older or superseded
+attempts cannot satisfy that gate. #1951 owns the operation state machine, recoverable launch and
+supervision protocol, provider-specific quiescence evidence, cancellation bounds, and positive
+legacy-worker rollout fence needed to make this contract falsifiable.
 
-The worker-host supervisor launches the child blocked on a private inherited start gate, records
-the host boot id and exact process-start identity with a compare-and-set from `planned` to
-`armed`, then releases the gate with a compare-and-set from `armed` to `running`. The child
-checks that release before any provider mutation. If the supervisor dies before arming, no child
-exists; if it dies after launch but before release, a replacement terminates the still-blocked
-child and records exit. A child whose attempt is no longer the job's current link is terminated
-without being released. An attempt UUID has one child owner, enforced by the operation row state.
+Artifact publication is part of the same ownership boundary. Object-store upload and database
+metadata registration must not commit after the authoritative attempt loses its fence, and a
+cancellation acknowledgment is incomplete while either can still commit. Cancellation removes
+any unregistered object before acknowledgment; a registered artifact remains governed by its
+durable metadata. #1952 owns the publication state machine, commit barrier, rollback ordering,
+and fault proofs. It depends on #1951 because publication must name the supervised attempt whose
+termination evidence it extends.
 
-Connection loss tells the supervisor to terminate the child. Child-exit evidence is either a
-wait result held by the supervisor or proof from the recorded host boot id and process-start
-identity that the exact process no longer exists; a PID alone is not identity. A replacement
-supervisor recovers non-terminal operation rows and repeats that observation, so handler,
-worker-process, or supervisor loss does not erase the attempt.
-
-Local-libvirt quiescence is the confirmed exit of that child: no other process owns the local
-provider calls or pcap writer. Remote-libvirt additionally reconnects to the bound host, issues a
-synchronous QEMU monitor query through libvirt as a barrier for earlier commands on that domain,
-and refreshes the configured storage pool before it acknowledges quiescence. Those returned
-operations make the exact filter and volume observable before the reaper removes them. A closed
-client connection or child exit without both remote observations is insufficient.
-
-The durable supervisor records cancellation complete for the attempt UUID after exit and
-quiescence. The reaper may acquire the advisory lock after connection loss, but it must not call
-the provider or write completion until the job's current attempt link names that UUID and its
-exact acknowledgment exists. Superseded operation rows finish recovery and retain their audit
-evidence, but cannot satisfy or block the current link. If the remote host is unreachable, the
-current row remains deferred and observable; restoring reachability is the recovery action, after
-which the supervisor retries the barrier and refresh. The convergence guarantee is therefore
-conditional on the owning provider becoming reachable again. Safety does not fall back to an
-inference when evidence is unavailable.
-
-Pre-migration rows cross an explicit rollout fence; a missing attempt link is never termination
-evidence. Before enabling the sweep, the deployment stops old workers, prevents new old-version
-workers from joining, and records the cutover only after every worker host attests that no
-pre-cutover capture child remains. Remote Resources also complete the same monitor barrier and
-pool refresh used by normal cancellation. The migration then links each legacy capture row to a
-synthetic attempt UUID whose quiescence acknowledgment cites that cutover. If any worker host or
-remote Resource cannot be positively drained, the sweep remains disabled for its provider kind
-and reports the unmet cutover; operators restore reachability or finish draining, then retry.
+#1946 may enable capture reclamation only after #1951 and #1952 land. Its sweep requires positive
+quiescence and publication-closure evidence for the job's authoritative attempt before the first
+provider call or completion write. Pre-migration rows cross #1951's positive rollout fence; a
+missing attempt link or acknowledgment is never inferred as safety. When evidence cannot be
+established, the row remains deferred and observable. Eventual convergence is therefore
+conditional on the owning provider becoming reachable and the prerequisite protocols completing.
 
 Remote-libvirt binds the reaper to the row's Resource using ADR-0187 and deletes the named
 libvirt storage volume. It does not fan out through the fleet reaper bundle. Local-libvirt
@@ -168,7 +145,7 @@ proof that the worker stopped.
 - Each active capture holds one database session for its ownership fence across the provider
   operation. This consumes one pool connection per concurrent capture. Database-session loss
   cancels the terminable provider operation and delays reaping until termination is acknowledged;
-  #1946 must bound and test both resource use and cancellation latency.
+  #1951 must bound and test both resource use and cancellation latency.
 - A provider operation that cannot be terminated safely cannot implement this capture lifecycle.
   Failing closed may retain host state longer, but it cannot publish new state after a reaper has
   marked the attempt complete.
@@ -179,6 +156,8 @@ proof that the worker stopped.
 - Eventual reclamation requires the owning provider to become reachable. A permanently lost
   remote host leaves its rows deferred permanently; this is the fail-closed residual of choosing
   cancellation over post-reap publication risk.
+- Artifact publication becomes a fenced attempt phase. #1952 must prove that cancellation either
+  prevents its commit or removes an unregistered object before acknowledging termination.
 - First deployment is a coordinated worker cutover, not an online schema-only rollout. Historical
   draining begins only after old capture producers are positively absent and remote transports are
   quiescent. This delays cleanup but prevents a legacy worker from publishing after a synthetic
@@ -191,7 +170,9 @@ proof that the worker stopped.
 - The row-keyed design cannot discover a capture destination whose job row is absent. Jobs are
   retained by current schema policy, so this is accepted as a narrower blind spot than scanning
   every provider's storage namespace.
-- #1948 must settle local path reachability before implementation. #1949 must settle the
+- #1951 must establish operation quiescence and the rollout fence, and #1952 must establish
+  publication closure, before #1946 enables reaping. #1948 must settle local path reachability
+  before implementation. #1949 must settle the
   marker and write-path mechanics for immediate cleanup outcomes. These choices may refine
   mechanics but may not weaken cross-provider ownership, detach-before-remove,
   succeeded-residue coverage, or reap-once convergence.

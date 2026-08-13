@@ -3,8 +3,8 @@
 - **Supersedes:** the remote-only #1498 design previously stored at this path
 - **Architecture:** [ADR-0556](../adr/0556-reclaim-orphaned-captures-across-providers.md)
 - **Epic:** [#1943](https://github.com/randomparity/kdive/issues/1943)
-- **Implementation entries:** #1946 (spine), #1947 (remote), #1948 (local), #1949
-  (succeeded-row residue)
+- **Implementation entries:** #1951 (operation supervision), #1952 (publication fencing),
+  #1946 (spine), #1947 (remote), #1948 (local), #1949 (succeeded-row residue)
 
 ## Outcome
 
@@ -20,10 +20,11 @@ reap-once marker and candidate sweep, provider implementations for local-libvirt
 remote-libvirt, and the persistence needed to recover residue from best-effort reclaim. A
 future provider does not inherit reaper support merely by advertising traffic capture.
 
-It does not change capture duration, polling, fetch, trim, artifact storage, job retry or
-dead-letter policy, MCP tools, or agent-facing schemas. It does not add capture reapers for
-provider families that do not implement traffic capture. The independent `capture_vmcore`
-guard defect is owned by #1945 and ADR-0094, not this decision.
+It does not change capture duration, polling, fetch, trim, artifact contents, job retry or
+dead-letter policy, MCP tools, or agent-facing schemas. #1952 changes publication ordering but
+not the artifact an agent receives. It does not add capture reapers for provider families that
+do not implement traffic capture. The independent `capture_vmcore` guard defect is owned by
+#1945 and ADR-0094, not this decision.
 
 ## Invariants
 
@@ -44,6 +45,8 @@ guard defect is owned by #1945 and ADR-0094, not this decision.
 10. A per-job advisory ownership fence serializes provider-state creation and reaping.
 11. Loss of the lock-owning session terminates provider work, and reaping waits for positive
     cancellation completion for that attempt.
+12. Cancellation completion also proves that object-store and metadata publication can no
+    longer commit for that attempt.
 
 ## Components
 
@@ -91,43 +94,32 @@ the same fence before a provider call and holds it through the completion write.
 fence defers the row. Process death releases the fence; a live delayed worker cannot create
 state after an absence-tolerant reap.
 
-Before mutation, the worker stores a non-runnable operation row with job id, queue attempt, a new
-attempt UUID, and worker-host identity. Under the per-job fence it atomically makes that UUID the
-job's `current_capture_attempt_id`. The sweep gates only on the linked attempt; an older attempt
-can finish recovery but cannot satisfy or block the current generation.
+### Operation supervision prerequisite (#1951)
 
-A worker-host supervisor launches one child blocked on a private inherited start gate. It CASes
-the host boot id and exact process-start identity from `planned` to `armed`, then CASes `armed` to
-`running` and releases the child. The child performs no provider mutation before release. A crash
-before launch leaves no child; a crash after launch but before release leaves a blocked child that
-the replacement terminates using the recorded identity. A superseded attempt is terminated
-without release. Connection loss terminates the current child. Exact exit is recoverable from a
-wait result or the stored boot/process-start identity; PID absence alone is not evidence.
+#1951 introduces one durable authoritative operation identity per queue attempt. It must make
+provider mutation impossible until exact operation identity is recoverable, terminate the current
+operation when its lock-owning session is lost, survive worker and supervisor replacement, and
+produce provider-specific positive quiescence evidence. It also owns the coordinated legacy-worker
+rollout fence. The detailed launch state machine and quiescence probes belong to #1951's governed
+design; this record fixes their externally observable safety contract rather than preselecting a
+launcher protocol.
 
-For local-libvirt, exact child exit establishes quiescence because that child alone owns provider
-calls and pcap writing. For remote-libvirt, the supervisor then reconnects, runs a synchronous
-QEMU monitor query through libvirt as a domain-command barrier, and refreshes the configured
-storage pool. Only the returned barrier and refresh acknowledge that earlier work is complete and
-make the filter and volume observable. A replacement supervisor recovers the operation row and
-repeats these observations after handler, worker, or prior-supervisor failure.
+### Publication-fencing prerequisite (#1952)
 
-Lock availability is necessary but insufficient for reaping: the sweep also requires that
-positive acknowledgment for the job's linked current attempt before it touches provider state or
-writes completion. A timeout, async cancellation request, process exit without transport
-quiescence, or acknowledgment from a superseded attempt is not confirmation. Failure to confirm
-defers the row and emits an owner-keyed failure. The implementation bounds one held database
-connection per concurrent capture and tests every launch handshake transition, attempt
-supersession, connection loss, and supervisor loss before attach, during attach, while writing,
-during detach, and before completion. When the remote provider is unreachable, restoring
-reachability is the recovery action; eventual reclamation is conditional on it.
+#1952 makes object upload and metadata registration phases of the authoritative supervised
+attempt. Publication may commit only while the attempt remains current and fenced. Cancellation
+must prevent a later commit or remove an unregistered object before it acknowledges completion.
+The detailed commit and rollback ordering belongs to #1952's governed design and depends on the
+attempt identity supplied by #1951.
 
-Legacy rows use a coordinated rollout fence. The deployment stops old workers and prevents
-old-version workers from rejoining. Each worker host positively attests that no pre-cutover
-capture child remains; each remote Resource completes the monitor barrier and pool refresh. Only
-then does migration link legacy capture rows to synthetic attempt UUIDs carrying that cutover's
-quiescence acknowledgment and enable their provider-kind sweep. Missing links never count as
-termination. An incomplete host or Resource drain keeps that kind disabled and observable until
-operators restore reachability or finish the worker drain.
+Lock availability is necessary but insufficient for reaping. #1946 requires positive evidence
+that the authoritative attempt is quiescent and that its publication phase can no longer commit
+before it calls a provider or writes completion. Evidence from a superseded attempt, a missing
+link, process disappearance alone, or an asynchronous cancellation request is insufficient.
+Failure to establish either prerequisite defers the row and emits an owner-keyed failure. The
+capture sweep remains disabled until #1951's positive legacy rollout fence and #1952's publication
+contract are deployed. Restoring provider reachability or completing the rollout is the recovery
+action; eventual reclamation is conditional on them.
 
 The sweep never invents missing ownership or provider wiring. Each provider failure is logged
 with `(system_id, job_id)`. A pass reports attempted, reclaimed, skipped, and failed counts
@@ -185,15 +177,18 @@ semantics. It must prove:
 - **Job retries after earlier cleanup:** the new attempt clears completion before creating
   provider state and becomes the job's current attempt while holding the ownership fence; a
   later failure remains eligible and the prior acknowledgment cannot satisfy it.
-- **Supervisor dies during child launch:** a pre-launch crash leaves no child; a post-launch,
-  pre-release crash leaves a blocked child that its replacement terminates before mutation.
+- **Operation supervisor or launcher fails:** #1951's durable state machine recovers the exact
+  attempt and either proves it never became mutable or terminates it before acknowledging
+  quiescence.
 - **Terminal worker is still alive:** its ownership fence defers reaping; it cannot create
   provider state after an absence-tolerant completion write.
 - **Lock-owning database session is lost:** the supervisor terminates provider work; the sweep
   defers until cancellation completion for that attempt is recorded.
-- **Supervisor dies after termination but before acknowledgment:** its replacement recovers the
-  operation row, proves exact child exit, reruns the remote barrier/refresh when applicable, and
-  then records completion.
+- **Publication is in flight when ownership is lost:** #1952 prevents its commit or removes the
+  unregistered object before cancellation completion; the sweep remains deferred until then.
+- **Supervisor dies after termination but before acknowledgment:** #1951 requires its replacement
+  to recover the attempt and reproduce the provider-specific positive quiescence evidence before
+  recording completion.
 - **Cancellation cannot be confirmed:** no provider reap or completion write occurs; the row
   remains observable and retryable rather than risking post-reap publication.
 - **Provider unavailable:** the row remains unresolved, the failure is logged with its owner
@@ -220,10 +215,10 @@ The implementation entries prove the design at their natural boundaries:
 - provider tests prove tolerant absence, binding, destination naming, and surfaced errors;
 - fault tests drop the lock-owning connection at each provider lifecycle boundary and prove
   termination precedes any reaper call or completion write;
-- recovery tests kill the operation supervisor after termination but before acknowledgment and
-  prove its replacement can establish exit plus transport quiescence for local and remote;
-- rollout tests prove a missing worker-host attestation or remote barrier keeps legacy sweeping
-  disabled, while a completed cutover creates synthetic linked attempts before draining;
+- #1951 fault and recovery tests prove every launch state, session-loss cancellation,
+  provider-specific quiescence, supervisor replacement, and the positive legacy rollout fence;
+- #1952 fault tests prove every upload, metadata, cancellation, cleanup, and acknowledgment
+  boundary leaves neither a late artifact nor an unregistered object;
 - injected reclaim failure proves L3 recovery stays non-masking;
 - `just ci` is the repository-wide gate after every entry.
 
