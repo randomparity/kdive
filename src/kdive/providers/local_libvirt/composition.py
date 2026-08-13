@@ -58,7 +58,7 @@ from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.ports.traffic import LocalCaptureConfiguration
+from kdive.providers.ports.traffic import LocalCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     real_module_debuginfo_resolver,
@@ -254,4 +254,10 @@ def build_runtime(
         # Host-side filter-dump traffic capture (ADR-0385, #1258). Matches
         # ``support.supports_traffic_capture``.
         traffic_capturer=traffic_capturer,
+        traffic_capture_operation=TrafficCaptureOperationPorts(
+            configuration=capture_operation_configuration,
+            quiescence=lambda raw: build_capture_quiescence(
+                LocalCaptureConfiguration.from_canonical_json(raw)
+            ),
+        ),
     )

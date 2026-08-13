@@ -38,7 +38,7 @@ from kdive.providers.ports.retrieve import (
     Retriever,
     VmcoreIntrospector,
 )
-from kdive.providers.ports.traffic import TrafficCapturer
+from kdive.providers.ports.traffic import TrafficCaptureOperationPorts, TrafficCapturer
 from kdive.serialization import JsonValue
 
 type DiscoveryRegistrar = Callable[[AsyncConnectionPool], Awaitable[None]]
@@ -173,6 +173,7 @@ class ProviderRuntime:
     # Host-side traffic capture port (ADR-0385); ``None`` when unsupported (kept consistent with
     # ``support.supports_traffic_capture is False``).
     traffic_capturer: TrafficCapturer | None = None
+    traffic_capture_operation: TrafficCaptureOperationPorts | None = None
 
     def __post_init__(self) -> None:
         _require_capability_port_parity(

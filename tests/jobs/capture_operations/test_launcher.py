@@ -278,6 +278,35 @@ def test_result_reader_rejects_symlink_and_oversize(tmp_path: Path, manifest: Pa
     asyncio.run(_run())
 
 
+def test_capture_reader_is_private_bounded_and_no_follow(tmp_path: Path, manifest: Path) -> None:
+    request = _request()
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+
+    async def _run() -> None:
+        child = await launcher.launch(request, _operation(request))
+        child.release()
+        await child.wait_process()
+        capture = child.attempt_dir / "capture.pcap"
+        capture.write_bytes(b"pcap")
+        capture.chmod(0o600)
+        assert child.read_capture(4) == b"pcap"
+        with pytest.raises(ValueError, match="exceeds 3 bytes"):
+            child.read_capture(3)
+        capture.unlink()
+        target = tmp_path / "outside.pcap"
+        target.write_bytes(b"pcap")
+        capture.symlink_to(target)
+        with pytest.raises(OSError):
+            child.read_capture(4)
+
+    asyncio.run(_run())
+
+
 @pytest.mark.parametrize("payload", [b"x" * 65_537, b"{not-json\n"])
 def test_result_reader_rejects_oversize_and_malformed_json(
     tmp_path: Path, manifest: Path, payload: bytes

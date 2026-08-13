@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from opentelemetry import metrics
+from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
+import kdive.config as config
+from kdive.config.core_settings import BUILD_WORKSPACE
+from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
+from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
 from kdive.jobs.handlers import image_build, systems
 from kdive.jobs.handlers.artifacts import vmcore
 from kdive.jobs.handlers.console import console_rotate
@@ -28,6 +34,36 @@ class WorkerHandlerAssembly:
     incarnation_credential: SecretStr
     secret_registry: SecretRegistry
     object_stores: ObjectStoreAssembly
+    capture_supervisor: CaptureOperationSupervisor
+
+
+def build_worker_handler_assembly(
+    *,
+    secret_registry: SecretRegistry,
+    incarnation_credential: SecretStr,
+    provider_composition: ProviderComposition | None = None,
+    pool: AsyncConnectionPool | None = None,
+) -> WorkerHandlerAssembly:
+    """Assemble provider/store/supervision dependencies once for startup and handlers."""
+    stores = build_object_store_assembly()
+    composition = provider_composition or ProviderComposition(
+        secret_registry=secret_registry, object_store=stores.store
+    )
+    resolver = composition.build_provider_resolver()
+    supervisor = CaptureOperationSupervisor(
+        launcher=GatedCaptureLauncher(
+            runtime_root=Path(config.require(BUILD_WORKSPACE)) / "capture-operations"
+        ),
+        credential=incarnation_credential,
+        pool=pool,
+    )
+    return WorkerHandlerAssembly(
+        resolver=resolver,
+        incarnation_credential=incarnation_credential,
+        secret_registry=composition.secret_registry,
+        object_stores=stores,
+        capture_supervisor=supervisor,
+    )
 
 
 def build_handler_registry(
@@ -35,20 +71,18 @@ def build_handler_registry(
     secret_registry: SecretRegistry,
     incarnation_credential: SecretStr,
     provider_composition: ProviderComposition | None = None,
+    pool: AsyncConnectionPool | None = None,
+    assembly: WorkerHandlerAssembly | None = None,
 ) -> HandlerRegistry:
     """Build the worker's `HandlerRegistry` from provider-aware handler registrars."""
-    stores = build_object_store_assembly()
-    composition = provider_composition or ProviderComposition(
-        secret_registry=secret_registry, object_store=stores.store
-    )
     registry = HandlerRegistry()
-    assembly = WorkerHandlerAssembly(
-        resolver=composition.build_provider_resolver(),
+    resolved = assembly or build_worker_handler_assembly(
+        secret_registry=secret_registry,
         incarnation_credential=incarnation_credential,
-        secret_registry=composition.secret_registry,
-        object_stores=stores,
+        provider_composition=provider_composition,
+        pool=pool,
     )
-    register_all_handlers(registry, assembly)
+    register_all_handlers(registry, resolved)
     return registry
 
 
@@ -91,6 +125,7 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
         registry,
         resolver=assembly.resolver,
         artifact_store=assembly.object_stores.store,
+        supervisor=assembly.capture_supervisor,
     )
 
     from kdive.jobs.handlers.control import watch_for_crash

@@ -446,6 +446,118 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION public.list_capture_recovery_candidates(p_credential_hash bytea)
+RETURNS TABLE (
+    id uuid,
+    job_id uuid,
+    job_attempt integer,
+    worker_incarnation text,
+    provider_kind text,
+    resource_id uuid,
+    system_id uuid,
+    domain_name text,
+    launch_token text,
+    host_instance text,
+    boot_id text,
+    pid integer,
+    start_ticks bigint,
+    state text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_operation public.capture_operations%ROWTYPE;
+    v_owner public.worker_incarnations%ROWTYPE;
+    v_replacement public.worker_incarnations%ROWTYPE;
+    v_replacement_id text;
+    v_worker_id text;
+BEGIN
+    IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
+        RAISE EXCEPTION 'worker authority is required' USING ERRCODE = '42501';
+    END IF;
+    IF p_credential_hash IS NULL OR octet_length(p_credential_hash) <> 32 THEN
+        RETURN;
+    END IF;
+    SELECT w.* INTO v_replacement
+    FROM public.worker_incarnations AS w
+    WHERE w.credential_hash = p_credential_hash
+      AND w.state = 'active'
+      AND w.fence_protocol = 3;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+    v_replacement_id := v_replacement.incarnation;
+    FOR v_worker_id IN
+        SELECT candidate.incarnation
+        FROM (
+            SELECT v_replacement_id AS incarnation
+            UNION
+            SELECT o.worker_incarnation
+            FROM public.capture_operations AS o
+            JOIN public.worker_incarnations AS owner
+              ON owner.incarnation = o.worker_incarnation
+            WHERE o.state <> 'exited'
+              AND public.capture_recovery_authorized(owner, v_replacement)
+        ) AS candidate
+        ORDER BY candidate.incarnation
+    LOOP
+        PERFORM pg_advisory_xact_lock(
+            hashtextextended('kdive:worker-incarnation:' || v_worker_id, 1803)
+        );
+    END LOOP;
+    SELECT w.* INTO v_replacement
+    FROM public.worker_incarnations AS w
+    WHERE w.incarnation = v_replacement_id
+      AND w.credential_hash = p_credential_hash
+      AND w.state = 'active'
+      AND w.fence_protocol = 3
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+    FOR v_operation IN
+        SELECT o.*
+        FROM public.capture_operations AS o
+        JOIN public.worker_incarnations AS owner ON owner.incarnation = o.worker_incarnation
+        WHERE o.state <> 'exited'
+          AND public.capture_recovery_authorized(owner, v_replacement)
+        ORDER BY o.id
+    LOOP
+        PERFORM pg_advisory_xact_lock(
+            hashtextextended('kdive:capture-operation:' || v_operation.id::text, 1951)
+        );
+        SELECT o.* INTO v_operation
+        FROM public.capture_operations AS o
+        WHERE o.id = v_operation.id
+        FOR UPDATE;
+        SELECT w.* INTO v_owner
+        FROM public.worker_incarnations AS w
+        WHERE w.incarnation = v_operation.worker_incarnation
+        FOR UPDATE;
+        IF v_operation.state <> 'exited'
+           AND coalesce(public.capture_recovery_authorized(v_owner, v_replacement), false) THEN
+            RETURN QUERY SELECT
+                v_operation.id,
+                v_operation.job_id,
+                v_operation.job_attempt,
+                v_operation.worker_incarnation,
+                v_operation.provider_kind,
+                v_operation.resource_id,
+                v_operation.system_id,
+                v_operation.domain_name,
+                CASE WHEN v_operation.state = 'launching' THEN v_operation.launch_token END,
+                v_operation.host_instance,
+                v_operation.boot_id,
+                v_operation.pid,
+                v_operation.start_ticks,
+                v_operation.state;
+        END IF;
+    END LOOP;
+END
+$$;
+
 CREATE FUNCTION public.enforce_capture_protocol_floor()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1436,6 +1548,7 @@ REVOKE ALL ON FUNCTION
         public.worker_incarnations, public.worker_incarnations
     ),
     public.capture_recovery_context(bytea, uuid),
+    public.list_capture_recovery_candidates(bytea),
     public.enforce_current_capture_operation_link(),
     public.enforce_capture_protocol_floor(),
     public.create_capture_operation(bytea, uuid, integer, text, uuid, uuid, text, text),
@@ -1452,7 +1565,8 @@ GRANT EXECUTE ON FUNCTION
     public.mark_capture_operation_running(bytea, uuid),
     public.request_capture_operation_cancel(bytea, uuid),
     public.acknowledge_capture_operation_exit(bytea, uuid, boolean, jsonb, text, integer),
-    public.recover_capture_operation(bytea, uuid, boolean, jsonb, text, integer)
+    public.recover_capture_operation(bytea, uuid, boolean, jsonb, text, integer),
+    public.list_capture_recovery_candidates(bytea)
 TO kdive_worker;
 
 GRANT SELECT (

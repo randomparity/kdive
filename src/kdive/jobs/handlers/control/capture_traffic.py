@@ -1,16 +1,8 @@
-"""Worker handler for the `capture_traffic` job (ADR-0385/0432, #1258/#1434).
+"""Worker handler for supervised ``capture_traffic`` jobs (ADR-0385/0432/0558).
 
-Runs a host-side packet capture on a ready guest's data-plane netdev for a bounded window and
-stores the pcap as a Run-owned SENSITIVE artifact. The provider port owns the file side of the
-capture (prepare/attach/size/detach/fetch/reclaim), provider-dispatched so this handler is
-provider-agnostic: local-libvirt writes a worker-readable pcap, remote-libvirt writes on the remote
-host and streams it back over ``qemu+tls`` (ADR-0432). This handler owns the size-poll and the
-cooperative cancel-check (a plain async read of the job row on the autocommit dispatch connection),
-so nothing crosses the synchronous libvirt thread boundary. An optional BPF ``capture_filter`` is
-applied after capture with ``tcpdump -r/-w`` (validated by ``tcpdump -d``), on the worker. The pcap
-is bounded by ``max_bytes``, fetched to memory whole, and stored via ``put_artifact`` (that read
-also serves the ADR-0223 readback-wall check and the telemetry count); the host-side pcap is
-reclaimed on every exit path.
+The handler freezes provider/publication facts under the Run lock, validates and later trims an
+optional BPF filter, delegates provider mutation to the durable capture-operation supervisor, and
+keeps the existing Run-owned SENSITIVE artifact publication path unchanged.
 """
 
 from __future__ import annotations
@@ -35,17 +27,26 @@ from kdive.artifacts.pcap_count import count_pcap_packets
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ARTIFACTS, JOBS, RUNS, SYSTEMS, ArtifactClaimConflict
+from kdive.db.repositories import (
+    ALLOCATIONS,
+    ARTIFACTS,
+    JOBS,
+    RESOURCES,
+    RUNS,
+    SYSTEMS,
+    ArtifactClaimConflict,
+)
 from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.jobs.capture_operations.protocol import CaptureRequest
+from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor, CaptureSnapshot
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import CaptureTrafficPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports.traffic import TrafficCapturer
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.artifacts.bpf_filter import trim_pcap, validate_bpf
@@ -99,13 +100,6 @@ async def run_capture_loop(
     return LoopResult(truncated=False, canceled=False)
 
 
-class _Snapshot(NamedTuple):
-    system_id: UUID
-    domain_name: str
-    project: str
-    capturer: TrafficCapturer
-
-
 def _changed_state_error(run_id: UUID) -> CategorizedError:
     return CategorizedError(
         "run's system left the ready local-libvirt state during traffic capture",
@@ -114,7 +108,9 @@ def _changed_state_error(run_id: UUID) -> CategorizedError:
     )
 
 
-async def _snapshot(conn: AsyncConnection, run_id: UUID, resolver: ProviderResolver) -> _Snapshot:
+async def _snapshot(
+    conn: AsyncConnection, run_id: UUID, resolver: ProviderResolver
+) -> CaptureSnapshot:
     """Under the per-Run lock (tx 1): verify Run→System is READY+local and resolve the capturer."""
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
         run = await RUNS.get(conn, run_id)
@@ -122,6 +118,12 @@ async def _snapshot(conn: AsyncConnection, run_id: UUID, resolver: ProviderResol
             raise _changed_state_error(run_id)
         system = await SYSTEMS.get(conn, run.system_id)
         if system is None or system.state is not SystemState.READY:
+            raise _changed_state_error(run_id)
+        allocation = await ALLOCATIONS.get(conn, system.allocation_id)
+        if allocation is None or allocation.resource_id is None:
+            raise _changed_state_error(run_id)
+        resource = await RESOURCES.get(conn, allocation.resource_id)
+        if resource is None:
             raise _changed_state_error(run_id)
         binding = await resolver.binding_for_system(conn, system.id)
         set_provider_kind(binding.kind.value)
@@ -136,11 +138,26 @@ async def _snapshot(conn: AsyncConnection, run_id: UUID, resolver: ProviderResol
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"reason": "traffic_capture_unsupported"},
             )
-        return _Snapshot(
+        operation_ports = binding.runtime.traffic_capture_operation
+        if operation_ports is None or binding.kind.value not in {
+            "local-libvirt",
+            "remote-libvirt",
+        }:
+            raise CategorizedError(
+                "provider does not support supervised traffic capture",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"reason": "traffic_capture_supervision_unsupported"},
+            )
+        return CaptureSnapshot(
+            provider_kind=binding.kind.value,
+            resource_id=resource.id,
             system_id=system.id,
             domain_name=system.domain_name or domain_name_for(system.id),
+            resource_name=binding.resource_name or resource.name or "",
             project=run.project,
-            capturer=capturer,
+            write_remediation=capturer.write_remediation,
+            configuration=lambda: operation_ports.configuration(resource.id),
+            quiescence=operation_ports.quiescence,
         )
 
 
@@ -302,6 +319,7 @@ async def capture_traffic_handler(
     *,
     resolver: ProviderResolver,
     artifact_store: ObjectStore,
+    supervisor: CaptureOperationSupervisor,
 ) -> str | None:
     """Capture host-side guest traffic into a Run-owned pcap; return its artifact id.
 
@@ -319,87 +337,60 @@ async def capture_traffic_handler(
     if payload.capture_filter:
         await asyncio.to_thread(validate_bpf, payload.capture_filter)
 
-    qom_id = f"kdive-dump-{job.id}"
-    capturer = snapshot.capturer
-    # The provider prepares its own destination (local: the QEMU-writable pcap dir; remote: a swept
-    # storage-pool path) and returns the opaque dest token threaded through attach/size/fetch.
-    dest = await asyncio.to_thread(capturer.prepare, snapshot.system_id, job.id)
-
-    max_polls = max(1, math.ceil(payload.duration_s / POLL_INTERVAL_SECONDS))
-
-    async def _stat() -> int:
-        return await asyncio.to_thread(capturer.captured_size, dest)
-
-    await asyncio.to_thread(
-        capturer.attach,
-        snapshot.domain_name,
-        qom_id=qom_id,
-        dest_path=dest,
+    request = CaptureRequest(
+        job_id=job.id,
+        provider_kind=snapshot.provider_kind,
+        resource_id=snapshot.resource_id,
+        system_id=snapshot.system_id,
+        domain_name=snapshot.domain_name,
         snaplen=payload.snaplen,
+        max_bytes=payload.max_bytes,
+        max_polls=max(1, math.ceil(payload.duration_s / POLL_INTERVAL_SECONDS)),
     )
-    try:
-        result = await run_capture_loop(
-            stat=_stat,
-            sleep=asyncio.sleep,
-            canceled=lambda: _job_canceled(conn, job.id),
-            max_bytes=payload.max_bytes,
-            max_polls=max_polls,
-        )
-    finally:
-        await asyncio.to_thread(capturer.detach, snapshot.domain_name, qom_id=qom_id)
-
-    if result.canceled:
-        await asyncio.to_thread(capturer.reclaim, dest)
+    data = await supervisor.execute(conn, job, snapshot, request)
+    if data is None:
         return None
-
-    # The host-side pcap is always reclaimed — a fetch/trim/store failure must not leak it.
-    try:
-        # The bounded fetch also performs the ADR-0223 readback-wall check (raises on it).
-        data = await asyncio.to_thread(capturer.fetch, dest, max_bytes=payload.max_bytes)
-        # A successful capture writes the 24-byte libpcap header immediately, so a missing or short
-        # raw file means the hypervisor could not write it (dir not QEMU-writable/labeled, or the
-        # remote storage pool rejected the file) — a config failure, NOT a valid zero-packet capture
-        # (which is exactly the 24-byte header).
-        if len(data) < _PCAP_HEADER_LEN:
-            raise CategorizedError(
-                "traffic capture produced no readable pcap",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={
-                    "reason": "pcap_not_written",
-                    "bytes": len(data),
-                    "remediation": capturer.write_remediation,
-                },
-            )
-        if payload.capture_filter:
-            data = await asyncio.to_thread(_trim_on_worker, data, payload.capture_filter)
-
-        packets = count_pcap_packets(data)
-        _log.info(
-            "capture_traffic job %s: %d bytes, %d packets, truncated=%s, filtered=%s",
-            job.id,
-            len(data),
-            packets,
-            result.truncated,
-            bool(payload.capture_filter),
+    if len(data) < _PCAP_HEADER_LEN:
+        raise CategorizedError(
+            "traffic capture produced no readable pcap",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "reason": "pcap_not_written",
+                "bytes": len(data),
+                "remediation": snapshot.write_remediation,
+            },
         )
-        if len(data) <= _PCAP_HEADER_LEN:
-            _log.info("capture_traffic job %s captured no packets (header-only pcap)", job.id)
-
-        artifact_id = await _store_capture(
-            conn, artifact_store, job, run_id, snapshot.project, data
-        )
-    finally:
-        await asyncio.to_thread(capturer.reclaim, dest)
+    if payload.capture_filter:
+        data = await asyncio.to_thread(_trim_on_worker, data, payload.capture_filter)
+    packets = count_pcap_packets(data)
+    _log.info(
+        "capture_traffic job %s: %d bytes, %d packets, filtered=%s",
+        job.id,
+        len(data),
+        packets,
+        bool(payload.capture_filter),
+    )
+    if len(data) <= _PCAP_HEADER_LEN:
+        _log.info("capture_traffic job %s captured no packets (header-only pcap)", job.id)
+    artifact_id = await _store_capture(conn, artifact_store, job, run_id, snapshot.project, data)
     return None if artifact_id is None else str(artifact_id)
 
 
 def register_handlers(
-    registry: HandlerRegistry, *, resolver: ProviderResolver, artifact_store: ObjectStore
+    registry: HandlerRegistry,
+    *,
+    resolver: ProviderResolver,
+    artifact_store: ObjectStore,
+    supervisor: CaptureOperationSupervisor,
 ) -> None:
     """Bind the ``capture_traffic`` job handler with its provider + store deps (no redaction)."""
     registry.register(
         JobKind.CAPTURE_TRAFFIC,
         lambda conn, job: capture_traffic_handler(
-            conn, job, resolver=resolver, artifact_store=artifact_store
+            conn,
+            job,
+            resolver=resolver,
+            artifact_store=artifact_store,
+            supervisor=supervisor,
         ),
     )

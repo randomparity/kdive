@@ -728,6 +728,40 @@ def _read_result(attempt_dir: Path) -> CaptureResult:
     return CaptureResult.from_canonical_json(data)
 
 
+def _read_capture(attempt_dir: Path, maximum: int) -> bytes:
+    if maximum < 1:
+        raise ValueError("capture read maximum must be positive")
+    directory_fd = os.open(attempt_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        fd = os.open(
+            "capture.pcap", os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory_fd
+        )
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise PermissionError("capture pcap is not a regular file")
+            if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise PermissionError("capture pcap must be owner-owned mode 0600")
+            if metadata.st_size > maximum:
+                raise ValueError(f"capture pcap exceeds {maximum} bytes")
+            chunks: list[bytes] = []
+            remaining = maximum + 1
+            while remaining:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+            if len(data) > maximum:
+                raise ValueError(f"capture pcap exceeds {maximum} bytes")
+            return data
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+
+
 @dataclass(slots=True)
 class LaunchedCapture:
     """A filter-attested child stopped at its one-byte provider gate."""
@@ -782,6 +816,10 @@ class LaunchedCapture:
     def read_result(self) -> CaptureResult:
         """Read the bounded private result using a directory-relative no-follow open."""
         return _read_result(self.attempt_dir)
+
+    def read_capture(self, maximum: int) -> bytes:
+        """Read the private pcap only after the supervisor has acknowledged quiescence."""
+        return _read_capture(self.attempt_dir, maximum)
 
     async def _wait_bounded(self, seconds: float) -> bool:
         if self.process.returncode is not None:

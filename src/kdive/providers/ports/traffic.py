@@ -11,6 +11,7 @@ protocol models, not transport or probe implementations.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, Protocol, Self
@@ -161,6 +162,14 @@ class TrafficCaptureQuiescence(Protocol):
     def prove_absent(
         self, resource_id: UUID, domain_name: str, qom_id: str
     ) -> QuiescenceEvidence: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TrafficCaptureOperationPorts:
+    """Provider-neutral factories used by worker supervision and startup recovery."""
+
+    configuration: Callable[[UUID], bytes]
+    quiescence: Callable[[bytes], TrafficCaptureQuiescence]
 
 
 class TrafficCapturer(Protocol):

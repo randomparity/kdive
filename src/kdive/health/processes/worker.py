@@ -25,10 +25,14 @@ def build_worker_probe(
     *,
     postgres_ping: Callable[[], Awaitable[None]],
     object_store_factory: Callable[[], _Pingable],
+    capture_manifest_verifier: Callable[[], None] | None = None,
+    capture_recovery_ready: Callable[[], bool] | None = None,
 ) -> HealthProbe:
     return HealthProbe(
         checks=build_worker_checks(
             postgres_ping=postgres_ping,
             object_store_factory=object_store_factory,
+            capture_manifest_verifier=capture_manifest_verifier,
+            capture_recovery_ready=capture_recovery_ready,
         )
     )

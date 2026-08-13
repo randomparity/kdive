@@ -50,7 +50,7 @@ from kdive.providers.infra.console_hosting import (
     RunningSystems,
 )
 from kdive.providers.infra.reaping import DumpVolumeReaper, InfraReaper
-from kdive.providers.ports.traffic import RemoteCaptureConfiguration
+from kdive.providers.ports.traffic import RemoteCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.remote_libvirt import stage_volume
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
@@ -118,7 +118,10 @@ RunningSystemsFactory = Callable[[AsyncConnectionPool], RunningSystems]
 
 def capture_operation_configuration(resource_id: UUID, resource_name: str) -> bytes:
     """Snapshot one Resource's exact TLS references without reading worker database state."""
-    resolved = remote_config_for_resource(resource_name)
+    return _capture_operation_configuration(resource_id, remote_config_for_resource(resource_name))
+
+
+def _capture_operation_configuration(resource_id: UUID, resolved: RemoteLibvirtConfig) -> bytes:
     return RemoteCaptureConfiguration(
         resource_id=resource_id,
         uri=resolved.uri,
@@ -488,6 +491,14 @@ def build_runtime(
         # prepare/attach/size/detach/fetch/reclaim primitives provider-agnostically.
         traffic_capturer=RemoteLibvirtTrafficCapture.from_env(
             secret_registry=secret_registry, config_factory=config_factory
+        ),
+        traffic_capture_operation=TrafficCaptureOperationPorts(
+            configuration=lambda resource_id: _capture_operation_configuration(
+                resource_id, config_factory()
+            ),
+            quiescence=lambda raw: build_capture_quiescence(
+                RemoteCaptureConfiguration.from_canonical_json(raw)
+            ),
         ),
         # The remote base image is partitioned and boots via in-guest GRUB, which already carries
         # the correct root=UUID=… (inherited by the install helper's grubby --copy-default). The

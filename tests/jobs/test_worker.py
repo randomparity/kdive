@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -722,6 +722,98 @@ def test_heartbeat_error_does_not_crash_dispatch(
             assert records and records[0].exc_info is not None
 
     caplog.set_level(logging.WARNING, logger="kdive.jobs.worker")
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("heartbeat_error", [False, True])
+def test_capture_dispatch_cancels_handler_when_heartbeat_authority_ends(
+    monkeypatch: pytest.MonkeyPatch, heartbeat_error: bool
+) -> None:
+    async def _run() -> None:
+        worker = _worker(_unopened_pool(), HandlerRegistry(), worker_id="w1")
+        job = Job(
+            id=uuid4(),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            kind=JobKind.CAPTURE_TRAFFIC,
+            payload={},
+            state=JobState.RUNNING,
+            attempt=1,
+            max_attempts=3,
+            worker_id="w1",
+            authorizing=_AUTHORIZING.model_dump(),
+            dedup_key="capture-authority",
+        )
+        started = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        async def run_handler(*args: object) -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        async def heartbeat(*args: object) -> None:
+            await started.wait()
+            if heartbeat_error:
+                raise RuntimeError("heartbeat error")
+
+        async def handler(*args: object) -> None:
+            return None
+
+        monkeypatch.setattr(worker, "_run_handler", run_handler)
+        monkeypatch.setattr(worker, "_heartbeat_loop", heartbeat)
+        await asyncio.wait_for(worker._dispatch(job, handler), timeout=1)
+        assert cleaned.is_set()
+
+    asyncio.run(_run())
+
+
+def test_worker_stop_cancels_capture_handler_but_keeps_other_jobs_draining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> None:
+        worker = _worker(_unopened_pool(), HandlerRegistry(), worker_id="w1")
+        stop = asyncio.Event()
+        worker._stop_event = stop
+        cleaned = asyncio.Event()
+        started = asyncio.Event()
+        capture = Job(
+            id=uuid4(),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            kind=JobKind.CAPTURE_TRAFFIC,
+            payload={},
+            state=JobState.RUNNING,
+            attempt=1,
+            max_attempts=3,
+            worker_id="w1",
+            authorizing=_AUTHORIZING.model_dump(),
+            dedup_key="capture-stop",
+        )
+
+        async def run_handler(*args: object) -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        async def heartbeat(*args: object) -> None:
+            await asyncio.Event().wait()
+
+        async def handler(*args: object) -> None:
+            return None
+
+        monkeypatch.setattr(worker, "_run_handler", run_handler)
+        monkeypatch.setattr(worker, "_heartbeat_loop", heartbeat)
+        task = asyncio.create_task(worker._dispatch(capture, handler))
+        await started.wait()
+        stop.set()
+        await asyncio.wait_for(task, timeout=1)
+        assert cleaned.is_set()
+
     asyncio.run(_run())
 
 

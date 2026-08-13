@@ -212,13 +212,56 @@ class _LoopSpy:
         return self.result
 
 
+class _PublicationSupervisor:
+    """Keep these tests focused on the unchanged provider-to-publication contract."""
+
+    def __init__(self, capturer: _FakeCapturer) -> None:
+        self._capturer = capturer
+
+    async def execute(self, conn, job, snapshot, request):
+        qom_id = f"kdive-dump-{job.id}"
+        dest = await asyncio.to_thread(self._capturer.prepare, snapshot.system_id, job.id)
+
+        async def stat() -> int:
+            return await asyncio.to_thread(self._capturer.captured_size, dest)
+
+        await asyncio.to_thread(
+            self._capturer.attach,
+            snapshot.domain_name,
+            qom_id=qom_id,
+            dest_path=dest,
+            snaplen=request.snaplen,
+        )
+        try:
+            result = await capture_traffic.run_capture_loop(
+                stat=stat,
+                sleep=asyncio.sleep,
+                canceled=lambda: capture_traffic._job_canceled(conn, job.id),
+                max_bytes=request.max_bytes,
+                max_polls=request.max_polls,
+            )
+        finally:
+            await asyncio.to_thread(self._capturer.detach, snapshot.domain_name, qom_id=qom_id)
+        if result.canceled:
+            await asyncio.to_thread(self._capturer.reclaim, dest)
+            return None
+        try:
+            return await asyncio.to_thread(self._capturer.fetch, dest, max_bytes=request.max_bytes)
+        finally:
+            await asyncio.to_thread(self._capturer.reclaim, dest)
+
+
 async def _run_with_spy(pool, store, capturer, job, *, loop_spy, monkeypatch):
     """Drive the handler with a stubbed loop; the capturer owns its own dest path (no patching)."""
     resolver = provider_resolver(traffic_capturer=capturer)
     monkeypatch.setattr(capture_traffic, "run_capture_loop", loop_spy)
     async with pool.connection() as conn:
         return await capture_traffic.capture_traffic_handler(
-            conn, job, resolver=resolver, artifact_store=cast(ObjectStore, store)
+            conn,
+            job,
+            resolver=resolver,
+            artifact_store=cast(ObjectStore, store),
+            supervisor=cast(Any, _PublicationSupervisor(capturer)),
         )
 
 
@@ -435,6 +478,7 @@ def test_unsupported_provider_pins_message(migrated_url: str, monkeypatch) -> No
                         _job(run_id),
                         resolver=resolver,
                         artifact_store=cast(ObjectStore, _FakeStore()),
+                        supervisor=cast(Any, object()),
                     )
                 return excinfo.value
 
@@ -715,7 +759,11 @@ async def _run_probing(pool, store, capturer, job, *, monkeypatch):
         store.backend_pid = conn.info.backend_pid
         try:
             return await capture_traffic.capture_traffic_handler(
-                conn, job, resolver=resolver, artifact_store=cast(ObjectStore, store)
+                conn,
+                job,
+                resolver=resolver,
+                artifact_store=cast(ObjectStore, store),
+                supervisor=cast(Any, _PublicationSupervisor(capturer)),
             )
         finally:
             await conn.set_autocommit(False)
@@ -887,7 +935,11 @@ async def _run_attempt(pool, store, capturer, job, *, monkeypatch=None):
         await conn.set_autocommit(True)
         try:
             return await capture_traffic.capture_traffic_handler(
-                conn, job, resolver=resolver, artifact_store=cast(ObjectStore, store)
+                conn,
+                job,
+                resolver=resolver,
+                artifact_store=cast(ObjectStore, store),
+                supervisor=cast(Any, _PublicationSupervisor(capturer)),
             )
         finally:
             await conn.set_autocommit(False)

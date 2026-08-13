@@ -21,6 +21,7 @@ from kdive.jobs.capture_operations.repository import (
     RecoveryEvidence,
     acknowledge_exit,
     create_launching,
+    list_recovery_candidates,
     mark_running,
     record_identity,
     recover_operation,
@@ -351,6 +352,95 @@ def test_recovery_is_derived_from_durable_authority_scope(
                         replacement, replacement_credential, operation.id, evidence
                     )
         finally:
+            await replacement.close()
+            await admin.close()
+
+    asyncio.run(_run())
+
+
+def test_recovery_candidates_are_credential_fenced_and_bounded(migrated_url: str) -> None:
+    async def _run() -> None:
+        admin = await connect(migrated_url)
+        replacement = await _as_role(migrated_url, "kdive_worker")
+        owner = await _as_role(migrated_url, "kdive_worker")
+        owner_credential = SecretStr("candidate-owner")
+        replacement_credential = SecretStr("candidate-replacement")
+        other_credential = SecretStr("candidate-other")
+        stale_credential = SecretStr("candidate-stale")
+        try:
+            await _register(admin, "local:candidate-owner", owner_credential)
+            await _register(admin, "local:candidate-replacement", replacement_credential)
+            await _register(
+                admin,
+                "local:candidate-other",
+                other_credential,
+                binding={"host": "host-b"},
+            )
+            await _register(admin, "local:candidate-stale", stale_credential)
+            job_id, snapshot = await _seed_job(admin, "local:candidate-owner", owner_credential)
+            operation = await create_launching(owner, owner_credential, job_id, 1, snapshot)
+            await admin.execute(
+                "UPDATE worker_incarnations SET state = 'terminated', outcome = 'killed', "
+                "terminated_at = clock_timestamp() "
+                "WHERE incarnation IN ('local:candidate-owner', 'local:candidate-stale')"
+            )
+
+            candidates = await list_recovery_candidates(replacement, replacement_credential)
+            assert len(candidates) == 1
+            candidate = candidates[0]
+            assert candidate.id == operation.id
+            assert candidate.launch_token == operation.launch_token
+            assert candidate.state == "launching"
+            assert not hasattr(candidate, "request_digest")
+
+            assert await list_recovery_candidates(replacement, other_credential) == ()
+            assert await list_recovery_candidates(replacement, stale_credential) == ()
+            with pytest.raises(errors.InsufficientPrivilege):
+                await replacement.execute("SELECT id FROM capture_operations")
+        finally:
+            await owner.close()
+            await replacement.close()
+            await admin.close()
+
+    asyncio.run(_run())
+
+
+def test_recovery_candidate_is_revalidated_after_discovery_race(migrated_url: str) -> None:
+    async def _run() -> None:
+        admin = await connect(migrated_url)
+        replacement = await _as_role(migrated_url, "kdive_worker")
+        owner = await _as_role(migrated_url, "kdive_worker")
+        owner_credential = SecretStr("candidate-race-owner")
+        replacement_credential = SecretStr("candidate-race-replacement")
+        try:
+            await _register(admin, "local:candidate-race-owner", owner_credential)
+            await _register(admin, "local:candidate-race-new", replacement_credential)
+            job_id, snapshot = await _seed_job(
+                admin, "local:candidate-race-owner", owner_credential
+            )
+            operation = await create_launching(owner, owner_credential, job_id, 1, snapshot)
+            await admin.execute(
+                "UPDATE worker_incarnations SET state = 'terminated', outcome = 'killed', "
+                "terminated_at = clock_timestamp() "
+                "WHERE incarnation = 'local:candidate-race-owner'"
+            )
+            assert (await list_recovery_candidates(replacement, replacement_credential))[
+                0
+            ].id == operation.id
+
+            await admin.execute(
+                "UPDATE worker_incarnations SET state = 'active', outcome = NULL, "
+                "terminated_at = NULL WHERE incarnation = 'local:candidate-race-owner'"
+            )
+            with pytest.raises(PermissionError, match="capture operation recovery was refused"):
+                await recover_operation(
+                    replacement,
+                    replacement_credential,
+                    operation.id,
+                    _launch_abort_evidence(operation),
+                )
+        finally:
+            await owner.close()
             await replacement.close()
             await admin.close()
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -41,6 +42,7 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     events: list[str] = []
     secret_registry = SecretRegistry()
     handler_registry = object()
+    handler_assembly = SimpleNamespace(resolver=object())
 
     class _ConnectionContext:
         async def __aenter__(self) -> object:
@@ -67,7 +69,11 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     monkeypatch.setattr("kdive.health.processes.server.build_postgres_ping", lambda value: value)
     monkeypatch.setattr(
         "kdive.health.processes.worker.build_worker_probe",
-        lambda **kw: {"postgres_ping": kw["postgres_ping"], "store": kw["object_store_factory"]},
+        lambda **kw: {
+            "postgres_ping": kw["postgres_ping"],
+            "store": kw["object_store_factory"],
+            "capture_manifest_verifier": kw["capture_manifest_verifier"],
+        },
     )
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: "store")
     monkeypatch.setattr(
@@ -76,8 +82,30 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
             handler_registry
             if kw["secret_registry"] is secret_registry
             and kw["incarnation_credential"] is incarnation_credential
+            and kw["assembly"] is handler_assembly
             else None
         ),
+    )
+    monkeypatch.setattr(
+        "kdive.jobs.assembly.build_worker_handler_assembly",
+        lambda **kw: handler_assembly,
+    )
+
+    async def recover(
+        recovery_pool: object,
+        resolver: object,
+        host_identity: str,
+        credential: SecretStr,
+    ) -> object:
+        assert recovery_pool is pool
+        assert resolver is handler_assembly.resolver
+        assert host_identity == "a" * 64
+        assert credential is incarnation_credential
+        events.append("recover")
+        return SimpleNamespace(pending=0)
+
+    monkeypatch.setattr(
+        "kdive.jobs.capture_operations.supervisor.recover_capture_operations", recover
     )
 
     class _Worker:
@@ -121,6 +149,7 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
         body = cast(Callable[[object, object, object], Awaitable[None]], kwargs["body"])
         built_probe = probe_builder(pool)
         assert built_probe["postgres_ping"] is pool
+        assert callable(built_probe["capture_manifest_verifier"])
         store = cast(Callable[[], str], built_probe["store"])
         assert store() == "store"
 
@@ -141,7 +170,7 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
 
     asyncio.run(run_worker(secret_registry, _telemetry()))
 
-    assert events == ["authenticate", "init", "run"]
+    assert events == ["authenticate", "recover", "init", "run"]
     assert secret_registry.snapshot() == frozenset({"authority-delivered-credential"})
 
 

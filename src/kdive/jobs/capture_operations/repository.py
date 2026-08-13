@@ -80,6 +80,26 @@ class CaptureOperation:
     updated_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class CaptureRecoveryCandidate:
+    """Bounded durable identity exposed only to an authority-eligible replacement."""
+
+    id: UUID
+    job_id: UUID
+    job_attempt: int
+    worker_incarnation: str
+    provider_kind: CaptureProviderKind
+    resource_id: UUID
+    system_id: UUID
+    domain_name: str
+    launch_token: str | None
+    host_instance: str
+    boot_id: str | None
+    pid: int | None
+    start_ticks: int | None
+    state: CaptureOperationState
+
+
 def _record(row: Mapping[str, Any]) -> CaptureOperation:
     return CaptureOperation(
         id=cast(UUID, row["id"]),
@@ -248,4 +268,39 @@ async def recover_operation(
         ),
         refused="capture operation recovery was refused",
         error=PermissionError,
+    )
+
+
+async def list_recovery_candidates(
+    conn: AsyncConnection, replacement_credential: SecretStr
+) -> tuple[CaptureRecoveryCandidate, ...]:
+    """List only nonterminal operations this credential may potentially recover.
+
+    Candidate discovery does not authorize recovery. The final recovery write revalidates the
+    durable authority and evidence while holding the same incarnation and operation fences.
+    """
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cursor:
+        await cursor.execute(
+            "SELECT * FROM public.list_capture_recovery_candidates(sha256(convert_to(%s, 'UTF8')))",
+            (replacement_credential.get_secret_value(),),
+        )
+        rows = await cursor.fetchall()
+    return tuple(
+        CaptureRecoveryCandidate(
+            id=cast(UUID, row["id"]),
+            job_id=cast(UUID, row["job_id"]),
+            job_attempt=cast(int, row["job_attempt"]),
+            worker_incarnation=cast(str, row["worker_incarnation"]),
+            provider_kind=cast(CaptureProviderKind, row["provider_kind"]),
+            resource_id=cast(UUID, row["resource_id"]),
+            system_id=cast(UUID, row["system_id"]),
+            domain_name=cast(str, row["domain_name"]),
+            launch_token=cast(str | None, row["launch_token"]),
+            host_instance=cast(str, row["host_instance"]),
+            boot_id=cast(str | None, row["boot_id"]),
+            pid=cast(int | None, row["pid"]),
+            start_ticks=cast(int | None, row["start_ticks"]),
+            state=cast(CaptureOperationState, row["state"]),
+        )
+        for row in rows
     )
