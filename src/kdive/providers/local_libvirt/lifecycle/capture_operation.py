@@ -242,7 +242,9 @@ class LocalLibvirtCaptureQuiescence:
             if (
                 not isinstance(item, dict)
                 or not isinstance(name, str)
+                or not name
                 or not isinstance(member_type, str)
+                or not member_type
             ):
                 raise CategorizedError(
                     "local capture QOM query returned an inconclusive shape",

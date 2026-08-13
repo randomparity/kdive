@@ -241,8 +241,10 @@ def test_remote_quiescence_opens_independent_resource_bound_tls_connection() -> 
         [{}],
         [{"name": 7, "type": "child<filter-dump>"}],
         [{"name": None, "type": "child<filter-dump>"}],
+        [{"name": "", "type": "child<filter-dump>"}],
         [{"name": "other", "type": 7}],
         [{"name": "other", "type": None}],
+        [{"name": "other", "type": ""}],
         [{"name": "other"}],
         [{"type": "child<filter-dump>"}],
         [

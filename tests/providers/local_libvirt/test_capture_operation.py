@@ -229,8 +229,10 @@ def test_local_quiescence_reconnects_detaches_and_queries_exact_qom_id() -> None
         [{}],
         [{"name": 7, "type": "child<filter-dump>"}],
         [{"name": None, "type": "child<filter-dump>"}],
+        [{"name": "", "type": "child<filter-dump>"}],
         [{"name": "other", "type": 7}],
         [{"name": "other", "type": None}],
+        [{"name": "other", "type": ""}],
         [{"name": "other"}],
         [{"type": "child<filter-dump>"}],
         [

@@ -245,7 +245,9 @@ class RemoteLibvirtCaptureQuiescence:
             if (
                 not isinstance(item, dict)
                 or not isinstance(name, str)
+                or not name
                 or not isinstance(member_type, str)
+                or not member_type
             ):
                 raise CategorizedError(
                     "remote capture QOM query returned an inconclusive shape",
