@@ -51,11 +51,23 @@ Migration `0112_capture_operation_supervision.sql` adds:
 - `capture_cutover_resources`: the immutable set of every Resource of the provider kind present
   when the claim bar is installed, plus every Resource resolved from an already-running legacy
   capture attempt; each row records its required transport observation.
+- `capture_cutover_hosts`: every distinct immutable worker authority boundary represented by the
+  captured legacy incarnations; each row records its supervised-operation scan result and the
+  authority-backed termination or same-boundary visibility evidence supporting it.
 
 All worker writes use security-definer functions that derive the incarnation from the credential,
 lock the worker incarnation and job attempt, validate state transitions, and expose no direct
 table mutation to the worker role. Reconciler-readable views expose only identities, states,
 deadlines, and evidence, never request or packet data.
+
+Owner functions require the operation's exact active incarnation. Separate recovery functions
+require an authenticated replacement whose immutable authority binding names the same local host,
+Compose container boundary, or Kubernetes workload boundary. They acquire the old and replacement
+incarnation locks in lexical order plus the operation lock, refuse a live old owner unless the
+replacement has same-boundary `/proc` visibility, and require exact lifecycle termination or
+same-boundary process-absence evidence before acknowledging exit. Cross-host, cross-container,
+cross-workload, stale-credential, and caller-supplied evidence all fail closed. Repeated recovery
+by the same authorized replacement is idempotent.
 
 The operation transition table is:
 
@@ -129,15 +141,16 @@ provider file permissions; key bytes never enter the environment. Tests seed eve
 class in the parent and prove it absent in the child while both adapters still assemble. Packet
 data never enters argv, logs, JSON, or the database.
 
-The executable may create threads required by Python or libvirt but may not spawn descendant
-processes. After Python and provider libraries load but before gate release, the child installs a
-seccomp filter denying `fork`, `vfork`, `clone` without `CLONE_THREAD`, `clone3`, and `execveat`;
-the already-execed process needs no further `execve`. An attempted descendant creation fails with
-`EPERM` and becomes an infrastructure failure. The filter covers Python, dependencies, and native
-libraries rather than relying on a source scan. Runtime local and remote provider tests observe
-the child task tree through every phase and deliberately invoke each denied syscall in a helper
-mode. A future provider needing a helper process must first adopt a kernel-owned process-tree
-containment decision.
+The executable is single-task after exec: neither descendant processes nor new threads are
+permitted. Its bootstrap imports the small seccomp binding, installs a filter denying `fork`,
+`vfork`, `clone`, `clone3`, `execve`, and `execveat`, and then performs the blocking gate read as
+its first operation that can open input or reach a provider. Provider modules load only after
+release under that filter and must operate synchronously in the one task. An attempted task or
+process creation fails with `EPERM` and becomes an infrastructure failure. The filter covers
+Python, dependencies, and native libraries rather than relying on a source scan. Runtime local and
+remote provider tests observe `/proc/<pid>/task` and the child tree through every phase and invoke
+each denied syscall in helper mode on x86_64 and ppc64le. A provider needing another task must
+first adopt a kernel-owned containment decision.
 
 ## Cancellation and recovery
 
@@ -214,9 +227,10 @@ and database observation time. It records no host address or credential.
 Fence protocol advances from 2 to 3. The claim function continues to admit protocol-2 workers for
 non-capture kinds, but a `capture_traffic` claim requires protocol 3 once a provider-kind cutover
 enters `draining`. Starting a generation takes the same database advisory lock used by capture
-claim, installs the bar, and persists two immutable membership sets in one transaction: every
+claim, installs the bar, and persists three immutable membership sets in one transaction: every
 active protocol-2 incarnation, and every Resource of the provider kind then present plus Resources
-resolved from already-running legacy capture jobs. This order means a legacy worker is either in
+resolved from already-running legacy capture jobs, and every distinct authority-bound host named
+by those incarnations. This order means a legacy worker is either in
 the set or cannot obtain a later capture claim. A Resource created after the bar cannot receive a
 legacy capture claim and is outside this historical generation. A Resource removed after
 membership remains required; an explicit terminal Resource observation may satisfy it only when
@@ -228,8 +242,8 @@ Compose process without its lifecycle acknowledgment do not count. For local-lib
 quiescence requires every recorded worker terminated and each host's supervised-operation scan
 complete. For remote-libvirt it additionally requires a fresh transport observation for every
 immutable `capture_cutover_resources` row. Completion is a database `NOT EXISTS` predicate over
-missing worker and Resource observations. Failures retain `draining` and name the missing
-incarnation or Resource.
+missing worker, host-scan, and Resource observations. Failures retain `draining` and name the
+missing incarnation, host boundary, or Resource.
 
 When all operation observations are complete, one transaction sets
 `operation_quiescent = true`. The generation becomes `complete` only when #1952's
