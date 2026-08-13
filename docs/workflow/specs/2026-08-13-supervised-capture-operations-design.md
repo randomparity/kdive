@@ -97,11 +97,14 @@ interpreter as a close-on-exec executable fd, and starts:
 kdive-capture-launcher --python-fd <fd> --gate-fd <fd> --launch-token <token>
 ```
 
-The native launcher installs containment before dynamic runtime startup, then uses fd-bound
-`execveat(AT_EMPTY_PATH)` for fixed interpreter argv
+The static, freestanding, syscall-only native launcher installs a seccomp user-notification filter
+before dynamic runtime startup and passes the listener to the supervisor over the inherited
+control socket. It then requests fd-bound `execveat(AT_EMPTY_PATH)` for fixed interpreter argv
 `python -S -m kdive capture-operation --launch-token <token> --gate-fd <fd>`. The executable fd is
-`O_CLOEXEC`; `-S` plus a supervisor-fixed package path prevents site hooks in the one allowed exec
-window. The PID is unchanged across exec. The child's cwd is the attempt directory and the request
+`O_CLOEXEC`. The supervisor validates the notification's pid, executable device/inode, fd flags,
+empty path, and `AT_EMPTY_PATH`, atomically consumes the operation's only exec authorization, and
+continues that syscall. It rejects every later exec notification; closing the listener fails exec
+closed. The PID is unchanged across exec. The child's cwd is the attempt directory and the request
 basename is the literal `request.json`. Arguments are fixed flags plus the database-generated
 token and inherited fds, never a shell command; no tenant-controlled value appears in argv. The
 request schema accepts only the
@@ -143,21 +146,23 @@ class in the parent and prove it absent in the child while both adapters still a
 data never enters argv, logs, JSON, or the database.
 
 The executable is a single-process boundary from native-launcher entry: threads are permitted, but
-descendant processes are not. The launcher installs a seccomp filter that fails closed on any audit
-architecture or syscall ABI other than the supported x86_64 and ppc64le forms. It denies `fork`,
-`vfork`, and `execve`; permits its one `execveat` iff the dirfd is the inherited interpreter fd and
-flags equal `AT_EMPTY_PATH`; permits legacy `clone` iff
+descendant processes are not. The launcher has no ELF interpreter, dynamic dependencies,
+constructors, or libc startup, and installs a seccomp filter that fails closed on any audit
+architecture or syscall ABI other than the supported x86_64 and ppc64le forms. It denies `fork`
+and `vfork`; notifies on every `execve` and `execveat`; permits legacy `clone` iff
 `(flags & (CLONE_VM | CLONE_SIGHAND | CLONE_THREAD))` equals that complete mask; and returns
 `ENOSYS` for every `clone3` so libc falls back to the inspectable legacy thread-creation call.
-The first Python module action stacks a filter denying `execveat` unconditionally and then reads
-the gate. Provider modules load only after release. A process-creation attempt fails with `EPERM`
+The supervisor consumes the one exec authorization before continuing it and returns `EPERM` for
+all later notifications from every thread until exact process exit. Python then reads the gate;
+provider modules load only after release. A process-creation attempt fails with `EPERM`
 and becomes an infrastructure failure. Runtime local and remote tests exercise a provider thread,
 observe the child process tree through every phase, and invoke each process-creation path in helper
 mode on x86_64 and ppc64le. The matrix covers zero flags, `CLONE_VM` without the complete mask, the
 complete mask with normal pthread flags, extra flags, direct raw syscalls, `clone3` returning
-`ENOSYS`, native-launcher fd/flag mismatch, attempted bootstrap process creation, closure of the
-interpreter fd across exec, denial of every later exec, and a real provider thread falling back
-successfully. Either filter installation failure exits before release or provider mutation. A
+`ENOSYS`, native-launcher identity/argument mismatch, notification-listener closure, attempted
+bootstrap process creation, fd-number reuse, denial of later exec from main and bootstrap threads,
+and a real provider thread falling back successfully. Filter/listener setup failure exits before
+release or provider mutation. A
 provider needing a subprocess requires a different
 kernel-owned containment decision.
 
