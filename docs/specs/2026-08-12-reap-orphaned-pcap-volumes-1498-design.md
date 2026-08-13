@@ -59,6 +59,8 @@ of formatting the QOM id inline.
 protocol, and `NullCaptureReaper`. The value carries Resource identity and kind,
 `domain_name`, `system_id`, and `job_id`; it does not carry a client-supplied destination.
 Provider implementations derive destinations through their existing naming functions.
+`NullCaptureReaper` is disabled wiring, not a successful no-op: candidate selection treats a
+kind backed by it as unregistered, and it cannot cause a completion-marker write.
 
 ### Marker and sweep (#1946)
 
@@ -116,10 +118,23 @@ Lock availability is necessary but insufficient for reaping. #1946 requires posi
 that the authoritative attempt is quiescent and that its publication phase can no longer commit
 before it calls a provider or writes completion. Evidence from a superseded attempt, a missing
 link, process disappearance alone, or an asynchronous cancellation request is insufficient.
-Failure to establish either prerequisite defers the row and emits an owner-keyed failure. The
-capture sweep remains disabled until #1951's positive legacy rollout fence and #1952's publication
-contract are deployed. Restoring provider reachability or completing the rollout is the recovery
-action; eventual reclamation is conditional on them.
+Failure to establish either prerequisite defers the row and emits an owner-keyed failure.
+
+Historical rows use a durable alternative to attempt-linked evidence. The rollout records one
+cutover generation per provider kind with a database-clock cutoff and separate positive
+operation-quiescent and publication-closed acknowledgments. Completion requires every worker host
+for the kind to be drained and, for remote libvirt, every affected Resource to complete its
+transport observation. #1946 may dispatch a missing-link row only when its Resource kind matches
+a complete cutover generation and its database `created_at` is no later than the cutoff. A
+missing-link row after that cutoff remains deferred. Tests use rows on both sides of the cutoff
+and incomplete acknowledgments to prove the distinction.
+
+The capture sweep remains disabled until #1951's rollout fence and #1952's publication contract
+are deployed. It also remains disabled per provider kind while that kind uses
+`NullCaptureReaper`; #1947 enables remote-libvirt and #1948 enables local-libvirt when each
+registers its concrete implementation. Restoring provider reachability, completing the rollout,
+or installing the concrete provider reaper is the recovery action. Eventual reclamation is
+conditional on them.
 
 The sweep never invents missing ownership or provider wiring. Each provider failure is logged
 with `(system_id, job_id)`. A pass reports attempted, reclaimed, skipped, and failed counts
@@ -203,6 +218,8 @@ semantics. It must prove:
 - **Historical backlog:** the batch limit drains it across passes without a lookback cutoff.
 - **Legacy rollout not quiescent:** the affected provider-kind sweep remains disabled; operators
   finish stopping old workers or restore remote reachability, then retry the cutover.
+- **Provider kind has only null wiring:** the row remains unmarked and observable; installing and
+  registering #1947 or #1948 enables that kind.
 
 ## Verification
 
@@ -210,7 +227,8 @@ The implementation entries prove the design at their natural boundaries:
 
 - real payload fixtures prove Run-addressed selection;
 - database tests prove settle, marker convergence, provider-kind filtering, deterministic
-  bounded draining, missing ownership, per-row isolation, and the cancellation-complete gate;
+  bounded draining, missing ownership, per-row isolation, the cancellation-complete gate, both
+  sides of the legacy cutoff, and that null wiring cannot mark completion;
 - recording fakes prove detach-before-remove for both providers;
 - provider tests prove tolerant absence, binding, destination naming, and surfaced errors;
 - fault tests drop the lock-owning connection at each provider lifecycle boundary and prove

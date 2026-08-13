@@ -89,12 +89,22 @@ durable metadata. #1952 owns the publication state machine, commit barrier, roll
 and fault proofs. It depends on #1951 because publication must name the supervised attempt whose
 termination evidence it extends.
 
-#1946 may enable capture reclamation only after #1951 and #1952 land. Its sweep requires positive
-quiescence and publication-closure evidence for the job's authoritative attempt before the first
-provider call or completion write. Pre-migration rows cross #1951's positive rollout fence; a
-missing attempt link or acknowledgment is never inferred as safety. When evidence cannot be
-established, the row remains deferred and observable. Eventual convergence is therefore
-conditional on the owning provider becoming reachable and the prerequisite protocols completing.
+#1946 may ship the sweep after #1951 and #1952 land, but leaves each provider kind disabled until
+its concrete #1947 or #1948 reaper is registered. `NullCaptureReaper` is disabled wiring: it is
+never eligible for dispatch and cannot produce a completion marker. For a post-cutover row, the
+sweep requires positive quiescence and publication-closure evidence for the job's authoritative
+attempt before the first provider call or completion write.
+
+Pre-cutover rows use an explicit alternative evidence path because they have no supervised
+attempt. The rollout records a durable cutover generation per provider kind, a database-clock
+cutoff, and aggregate operation-quiescent and publication-closed acknowledgments. The aggregate
+becomes complete only after every worker host for that kind is positively drained and, for remote
+libvirt, every affected Resource completes its transport observation. A row is covered only when
+its Resource kind matches and its database `created_at` is no later than that cutoff. A missing
+attempt link is accepted only for such a covered row; it remains fail-closed after the cutoff.
+#1946 evaluates this predicate before dispatch. When either evidence path cannot be established,
+the row remains deferred and observable. Eventual convergence is therefore conditional on the
+owning provider becoming reachable and the prerequisite protocols completing.
 
 Remote-libvirt binds the reaper to the row's Resource using ADR-0187 and deletes the named
 libvirt storage volume. It does not fan out through the fleet reaper bundle. Local-libvirt
@@ -171,8 +181,9 @@ proof that the worker stopped.
   retained by current schema policy, so this is accepted as a narrower blind spot than scanning
   every provider's storage namespace.
 - #1951 must establish operation quiescence and the rollout fence, and #1952 must establish
-  publication closure, before #1946 enables reaping. #1948 must settle local path reachability
-  before implementation. #1949 must settle the
+  publication closure, before #1946 ships the disabled sweep. #1947 and #1948 each enable only
+  their concrete provider kind; null wiring never marks completion. #1948 must also settle local
+  path reachability before implementation. #1949 must settle the
   marker and write-path mechanics for immediate cleanup outcomes. These choices may refine
   mechanics but may not weaken cross-provider ownership, detach-before-remove,
   succeeded-residue coverage, or reap-once convergence.
