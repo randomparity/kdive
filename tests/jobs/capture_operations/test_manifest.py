@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,6 +21,105 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(_SCRIPT), *args], text=True, capture_output=True, check=False
     )
+
+
+def _builder_module() -> Any:
+    spec = importlib.util.spec_from_file_location("capture_manifest_builder", _SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _compile_runpath_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("C compiler is required for the ELF RUNPATH fixture")
+    selected_dir = tmp_path / "selected"
+    unused_dir = tmp_path / "unused"
+    selected_dir.mkdir()
+    unused_dir.mkdir()
+    source = tmp_path / "choice.c"
+    source.write_text("int choice(void) { return CHOICE; }\n")
+    selected = selected_dir / "libkdive-choice.so.1"
+    unused = unused_dir / "libkdive-choice.so.1"
+    for destination, choice in ((selected, "7"), (unused, "9")):
+        subprocess.run(
+            [
+                compiler,
+                "-fPIC",
+                "-shared",
+                f"-DCHOICE={choice}",
+                "-Wl,-soname,libkdive-choice.so.1",
+                "-o",
+                str(destination),
+                str(source),
+            ],
+            check=True,
+            env={"PATH": os.environ["PATH"], "LC_ALL": "C"},
+        )
+    main_source = tmp_path / "main.c"
+    main_source.write_text(
+        "extern int choice(void);\nint main(void) { return choice() == 7 ? 0 : 1; }\n"
+    )
+    executable = tmp_path / "runpath-probe"
+    subprocess.run(
+        [
+            compiler,
+            str(main_source),
+            f"-L{unused_dir}",
+            "-l:libkdive-choice.so.1",
+            "-Wl,-rpath,$ORIGIN/selected",
+            "-o",
+            str(executable),
+        ],
+        check=True,
+        env={"PATH": os.environ["PATH"], "LC_ALL": "C"},
+    )
+    return executable, selected.resolve(), unused.resolve()
+
+
+def test_elf_closure_hashes_runtime_runpath_selection_not_competing_soname(
+    tmp_path: Path,
+) -> None:
+    builder = _builder_module()
+    executable, selected, unused = _compile_runpath_fixture(tmp_path)
+
+    closure, _interpreters = builder._elf_closure([executable])
+    hashes = {path: builder._sha256(path) for path in closure}
+
+    assert selected in hashes
+    assert hashes[selected] == builder._sha256(selected)
+    assert unused not in hashes
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "libbad.so.1 => ../../attacker/libbad.so.1 (0x1234)\n",
+        "libbad.so.1 => not found\n",
+        "unexpected loader diagnostic\n",
+    ],
+)
+def test_loader_list_parser_fails_closed_on_untrusted_output(output: str) -> None:
+    builder = _builder_module()
+
+    with pytest.raises(RuntimeError, match="loader trace"):
+        builder._parse_loader_list(output)
+
+
+def test_loader_list_parser_refuses_ambiguity_and_output_overflow(tmp_path: Path) -> None:
+    builder = _builder_module()
+    first = tmp_path / "first.so"
+    second = tmp_path / "second.so"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    ambiguous = f"libsame.so.1 => {first} (0x1234)\nlibsame.so.1 => {second} (0x5678)\n"
+
+    with pytest.raises(RuntimeError, match="ambiguous"):
+        builder._parse_loader_list(ambiguous)
+    with pytest.raises(RuntimeError, match="1048576"):
+        builder._parse_loader_list("x" * 1_048_577)
 
 
 def test_builder_records_real_interpreter_arch_and_absolute_dependency_closure(
