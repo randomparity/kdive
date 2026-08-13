@@ -135,14 +135,19 @@ class in the parent and prove it absent in the child while both adapters still a
 data never enters argv, logs, JSON, or the database.
 
 The executable is a single-process boundary after exec: threads are permitted, but descendant
-processes are not. Its bootstrap installs a seccomp filter that denies `fork`, `vfork`, `execve`,
-and `execveat`; permits legacy `clone` only with the complete required `CLONE_THREAD` flag set; and
-returns `ENOSYS` for `clone3` so libc falls back to the inspectable legacy thread-creation call.
+processes are not. Its bootstrap installs a seccomp filter that fails closed on any audit
+architecture or syscall ABI other than the supported x86_64 and ppc64le forms. It denies `fork`,
+`vfork`, `execve`, and `execveat`; permits legacy `clone` iff
+`(flags & (CLONE_VM | CLONE_SIGHAND | CLONE_THREAD))` equals that complete mask; and returns
+`ENOSYS` for every `clone3` so libc falls back to the inspectable legacy thread-creation call.
 It then performs the blocking gate read as its first operation that can open input or reach a
 provider. Provider modules load only after release. A process-creation attempt fails with `EPERM`
 and becomes an infrastructure failure. Runtime local and remote tests exercise a provider thread,
-observe the child process tree through every phase, and invoke each denied process-creation path
-in helper mode on x86_64 and ppc64le. A provider needing a subprocess requires a different
+observe the child process tree through every phase, and invoke each process-creation path in helper
+mode on x86_64 and ppc64le. The matrix covers zero flags, `CLONE_VM` without the complete mask, the
+complete mask with normal pthread flags, extra flags, direct raw syscalls, `clone3` returning
+`ENOSYS`, and a real provider thread falling back successfully. Filter installation failure exits
+before release or provider mutation. A provider needing a subprocess requires a different
 kernel-owned containment decision.
 
 ## Cancellation and recovery

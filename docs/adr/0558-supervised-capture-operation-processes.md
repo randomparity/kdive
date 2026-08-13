@@ -59,6 +59,12 @@ waits up to five seconds on the supervisor's monotonic clock for the exact child
 `SIGKILL` through the pidfd and waits up to five more seconds. The capture-operation executable is
 a single-process boundary and may create threads but no descendant processes; a provider that
 needs a helper process cannot implement this lifecycle without a new containment decision.
+Before the blocking gate read, the child installs a seccomp filter; the gate is the first action
+that can open request input or reach provider code, rather than the literal first bootstrap action.
+The filter fails closed unless the audit architecture and syscall ABI are the supported x86_64 or
+ppc64le form. It denies `fork`, `vfork`, `execve`, and `execveat`; returns `ENOSYS` for `clone3` so
+libc falls back to legacy `clone`; and allows `clone` only when its flags contain
+`CLONE_VM | CLONE_SIGHAND | CLONE_THREAD`. All other `clone` calls return `EPERM`.
 Exceeding either interval leaves the row in `cancel_requested`;
 recovery repeats identity observation and cancellation. The recovery action is the next worker
 startup on that host or an operator restart after restoring host process visibility.
@@ -137,9 +143,11 @@ that registered before the bar appears in the locked recheck and must already be
 - A permanently lost local host without authority termination or reboot evidence retains its
   operations unacknowledged. The operator must restore host visibility or supply the existing
   lifecycle authority's exact termination evidence; a database override is not accepted.
-- Capture providers used in this lifecycle may create threads but not descendant processes. That
-  restriction is held by keeping subprocess APIs out of the child call graph and by a guard test;
-  a provider needing helpers requires a different kernel-owned containment design.
+- Capture providers used in this lifecycle may create threads but not descendant processes. The
+  pre-gate seccomp policy enforces that boundary across Python and native libraries; source guards
+  are defense in depth only. Filter installation failure exits through the closed gate before
+  provider mutation. A provider needing helpers requires a different kernel-owned containment
+  design.
 - The cross-connection monitor barrier is a live-provider requirement. A provider cannot ship this
   lifecycle based only on a fake; its gated suite must kill a client with an accepted mutation in
   flight and prove the independent absence observation is ordered afterwards.

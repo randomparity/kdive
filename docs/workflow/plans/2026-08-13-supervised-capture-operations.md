@@ -21,8 +21,10 @@ libvirt/QMP, pytest, Helm/Compose deployment documentation.
 - Child argv is exactly `python -m kdive capture-operation --launch-token <token> --gate-fd <fd>`;
   cwd is the private attempt directory and request basename is `request.json`.
 - The child is single-process after exec. Before the gate read, deny `fork`, `vfork`, `execve`,
-  and `execveat`; allow legacy `clone` only with `CLONE_THREAD`; return `ENOSYS` for `clone3` so
-  libc falls back to inspectable legacy thread creation. Provider imports occur after release.
+  and `execveat`; allow legacy `clone` only when its flags contain
+  `CLONE_VM | CLONE_SIGHAND | CLONE_THREAD`; return `ENOSYS` for every `clone3` so libc falls back
+  to inspectable legacy thread creation. Fail closed on unsupported audit architectures or ABIs.
+  Provider imports occur after release.
 - Gate-release authority check is `SELECT 1` on the lock session immediately before the write;
   recurring probes run every 250 ms with one-second client and statement timeouts.
 - TERM and KILL waits are five seconds each on the monotonic clock, per cancellation request.
@@ -107,10 +109,13 @@ Steps:
    ppc64le arm uses the native POWER carrier documented by
    `docs/operating/runbooks/power-host-bringup.md`: after that runbook's
    environment setup, run `uv run python -m pytest
-   tests/jobs/capture_operations/test_sandbox.py -q`. Success means all six denied syscalls return
-   `EPERM`, a provider thread runs, and the child tree stays empty. This is a required release
-   proof; if no native POWER host is available, report the arm unavailable and do not claim
-   cross-platform completion.
+   tests/jobs/capture_operations/test_sandbox.py -q`. Success requires `EPERM` from `fork`,
+   `vfork`, both exec calls, and clone flag sets missing any required thread bit; `ENOSYS` from
+   every `clone3`; success from the complete thread mask with ordinary and extra pthread flags;
+   successful real provider-thread fallback; and an empty child process tree. The same matrix
+   covers raw syscalls, unsupported audit/ABI refusal, and filter-installation failure before
+   release. This is a required release proof; if no native POWER host is available, report the arm
+   unavailable and do not claim cross-platform completion.
 5. Run `uv run python -m pytest tests/jobs/capture_operations -q`, `just lint`, and `just type`;
    expect green. Commit `feat(jobs): add gated capture child boundary`.
 
