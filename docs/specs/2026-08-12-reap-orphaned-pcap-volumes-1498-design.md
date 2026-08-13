@@ -40,6 +40,7 @@ guard defect is owned by #1945 and ADR-0094, not this decision.
    database-clock backoff deadline.
 8. Cleanup residue from a `succeeded` job remains owned without making best-effort reclaim
    mask a successful capture or its artifact.
+9. Every capture attempt clears prior completion before it can recreate provider state.
 
 ## Components
 
@@ -76,7 +77,9 @@ cannot consume the batch or starve reclaimable work. A successful provider call 
 write form one logical candidate outcome: if the provider succeeds but the marker write does
 not, the next pass repeats an idempotent reclaim. If provider reclaim fails, persisted state
 records a bounded backoff deadline rather than completion. Selection ignores retries whose
-deadline has not arrived, so an oldest persistent failure cannot monopolize every batch.
+deadline has not arrived and orders eligible rows by retry deadline, then job update time. A
+failure advances its deadline beyond its prior value and the current database time, so
+untouched rows sort ahead of it even when backoff expires before the next pass.
 
 The sweep never invents missing ownership or provider wiring. Each provider failure is logged
 with `(system_id, job_id)`. A pass reports attempted, reclaimed, skipped, and failed counts
@@ -123,12 +126,16 @@ semantics. It must prove:
 
 - injected reclaim failure leaves the job successful and its artifact visible;
 - both providers later reclaim the residue;
-- a post-migration capture whose reclaim succeeded is not revisited.
+- a post-migration capture whose reclaim succeeded is not revisited unless that job retries;
+- every retry clears prior completion before attach or destination creation, so a later worker
+  death cannot hide new provider state behind an earlier attempt's marker.
 
 ## Failure and recovery
 
 - **Worker dies with a filter attached:** abandonment makes the row terminal; after settle,
   the reaper detaches and removes the destination.
+- **Job retries after earlier cleanup:** the new attempt clears completion before creating
+  provider state; a later failure remains eligible.
 - **Provider unavailable:** the row remains unresolved, the failure is logged with its owner
   ids, and a later pass retries after persisted bounded backoff without starving later rows.
 - **Filter, domain, or destination already absent:** provider reclaim treats absence as

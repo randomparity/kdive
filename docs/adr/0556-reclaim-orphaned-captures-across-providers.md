@@ -59,9 +59,10 @@ all reapers use one `capture_qom_id(job_id)` convention. A provider reaper must 
 QOM object before removing the destination and must tolerate an already-missing filter,
 domain, or destination. One row's failure is logged with `(system_id, job_id)` and does not
 stop the rest of the pass. The persisted reap state carries a database-clock retry deadline;
-failure advances that deadline with bounded backoff. Candidate ordering considers only rows
-whose deadline has arrived, so persistently failing old rows cannot occupy every bounded batch
-or starve later candidates.
+failure advances that deadline beyond both its prior value and the current database time with
+bounded backoff. Selection orders eligible rows by retry deadline and then job update time.
+Untouched rows therefore sort ahead of a just-failed row even if its backoff expires before the
+next pass, so persistent old failures cannot starve later candidates.
 
 Remote-libvirt binds the reaper to the row's Resource using ADR-0187 and deletes the named
 libvirt storage volume. It does not fan out through the fleet reaper bundle. Local-libvirt
@@ -77,7 +78,10 @@ For captures completed after the migration, the in-job cleanup path records succ
 and leaves only a failed best-effort reclaim eligible. Cleanup failure must not turn a
 successful capture into a failed job or hide its artifact. #1949 owns the schema and write-path
 mechanics for that outcome, but not whether historical success is covered or whether future
-successful cleanup is revisited.
+successful cleanup is revisited. Every capture attempt clears prior completion before it can
+attach the filter or create the destination. A crash after clearing but before creation yields
+an eligible idempotent no-op; clearing after creation would leave a retry-created orphan hidden
+behind the previous attempt's marker.
 
 Candidate selection uses the database reference clock. The settle duration is an operator
 configuration stated as a duration in seconds per terminal job row, measured from the job's
