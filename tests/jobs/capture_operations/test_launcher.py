@@ -645,6 +645,71 @@ def test_process_group_recovery_scan_is_bounded(monkeypatch: pytest.MonkeyPatch)
         )
 
 
+def test_recovery_acquisition_failure_closes_each_owned_pidfd_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[int] = []
+
+    class _Identity:
+        def __init__(self, pid: int, pidfd: int | None) -> None:
+            self.pid = pid
+            self.pidfd = pidfd
+
+        def open_pidfd(self, *, current_host_instance: str) -> int:
+            assert current_host_instance == "host-a"
+            if self.pidfd is None:
+                raise RuntimeError("token pidfd fault")
+            return self.pidfd
+
+        def signal(self, _pidfd: int, _sig: int) -> None:
+            raise AssertionError("acquisition failure must precede signaling")
+
+    class _Process:
+        pid = 10
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    leader = _Identity(10, 101)
+    recovered = _Identity(20, 202)
+    token_failure = _Identity(30, None)
+
+    async def _group_scan(*_args: object, **_kwargs: object) -> dict[int, _Identity]:
+        return {10: leader, 20: recovered}
+
+    async def _token_scan(*_args: object, **_kwargs: object) -> tuple[_Identity, ...]:
+        return (token_failure,)
+
+    monkeypatch.setattr(launcher_module, "_complete_process_group_scan", _group_scan)
+    monkeypatch.setattr(launcher_module, "_complete_token_scan", _token_scan)
+    monkeypatch.setattr(
+        launcher_module,
+        "_read_process_group_member",
+        lambda pid, **_kwargs: recovered if pid == 20 else leader,
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "_close_process_handles",
+        lambda handles: closed.extend(pidfd for _identity, pidfd in handles.values()),
+    )
+
+    with pytest.raises(RuntimeError, match="token pidfd fault"):
+        asyncio.run(
+            launcher_module._cleanup_failed_launch(
+                _Process(),  # ty: ignore[invalid-argument-type] - exact cleanup process fake
+                launch_token="a" * 64,
+                interpreter=Path(sys.executable),
+                host_instance="host-a",
+                leader=(leader, 101),  # ty: ignore[invalid-argument-type] - identity fake
+                process_members={10: leader},  # ty: ignore[invalid-argument-type]
+                force_recovery=True,
+            )
+        )
+
+    assert closed == [202, 101]
+
+
 def test_unreadable_token_recovery_scan_fails_closed_without_numeric_signal(
     tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

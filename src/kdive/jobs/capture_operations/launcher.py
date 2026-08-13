@@ -581,32 +581,38 @@ async def _acquire_recovery_handles(
     observed: Mapping[int, LinuxIdentity],
     recover_group: bool,
 ) -> dict[int, _ProcessHandle]:
+    caller_owned = set(handles)
     token_matches: tuple[LinuxIdentity, ...] | None = None
-    if recover_group:
-        recovered_members = await _complete_process_group_scan(
-            process_group,
-            host_instance=host_instance,
-        )
-        token_matches = await _complete_token_scan(
+    try:
+        if recover_group:
+            recovered_members = await _complete_process_group_scan(
+                process_group,
+                host_instance=host_instance,
+            )
+            token_matches = await _complete_token_scan(
+                launch_token,
+                interpreter=interpreter,
+                host_instance=host_instance,
+            )
+            _verify_recovered_members(recovered_members, observed)
+            handles = _attest_process_members(
+                recovered_members,
+                process_group=process_group,
+                host_instance=host_instance,
+                existing=handles,
+            )
+        return await _token_recovery_handles(
             launch_token,
             interpreter=interpreter,
             host_instance=host_instance,
-        )
-        _verify_recovered_members(recovered_members, observed)
-        handles = _attest_process_members(
-            recovered_members,
-            process_group=process_group,
-            host_instance=host_instance,
             existing=handles,
+            observed=observed,
+            matches=token_matches,
         )
-    return await _token_recovery_handles(
-        launch_token,
-        interpreter=interpreter,
-        host_instance=host_instance,
-        existing=handles,
-        observed=observed,
-        matches=token_matches,
-    )
+    except BaseException:
+        helper_owned = {pid: handle for pid, handle in handles.items() if pid not in caller_owned}
+        _close_process_handles(helper_owned)
+        raise
 
 
 async def _confirm_launch_absence(
