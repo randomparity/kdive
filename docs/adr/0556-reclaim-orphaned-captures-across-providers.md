@@ -96,12 +96,16 @@ sweep requires positive quiescence and publication-closure evidence for the job'
 attempt before the first provider call or completion write.
 
 Pre-cutover rows use an explicit alternative evidence path because they have no supervised
-attempt. The rollout records a durable cutover generation per provider kind, a database-clock
-cutoff, and aggregate operation-quiescent and publication-closed acknowledgments. The aggregate
-becomes complete only after every worker host for that kind is positively drained and, for remote
-libvirt, every affected Resource completes its transport observation. A row is covered only when
-its Resource kind matches and its database `created_at` is no later than that cutoff. A missing
-attempt link is accepted only for such a covered row; it remains fail-closed after the cutoff.
+attempt. The rollout records a durable cutover generation per provider kind and aggregate
+operation-quiescent and publication-closed acknowledgments. The aggregate becomes complete only
+after every legacy worker host for that kind is positively drained and prevented from rejoining
+and, for remote libvirt, every affected Resource completes its transport observation. Completion
+then samples the database-clock cutoff and commits the cutoff with the complete generation in one
+transaction. A job admitted during the drain is therefore covered if a legacy worker could have
+claimed it; a supervised attempt remains governed by its stronger attempt-linked evidence. A row
+is covered only when its Resource kind matches and its database `created_at` is no later than that
+cutoff. A missing attempt link is accepted only for such a covered row; it remains fail-closed
+after the cutoff.
 #1946 evaluates this predicate before dispatch. When either evidence path cannot be established,
 the row remains deferred and observable. Eventual convergence is therefore conditional on the
 owning provider becoming reachable and the prerequisite protocols completing.

@@ -121,13 +121,16 @@ link, process disappearance alone, or an asynchronous cancellation request is in
 Failure to establish either prerequisite defers the row and emits an owner-keyed failure.
 
 Historical rows use a durable alternative to attempt-linked evidence. The rollout records one
-cutover generation per provider kind with a database-clock cutoff and separate positive
-operation-quiescent and publication-closed acknowledgments. Completion requires every worker host
-for the kind to be drained and, for remote libvirt, every affected Resource to complete its
-transport observation. #1946 may dispatch a missing-link row only when its Resource kind matches
-a complete cutover generation and its database `created_at` is no later than the cutoff. A
-missing-link row after that cutoff remains deferred. Tests use rows on both sides of the cutoff
-and incomplete acknowledgments to prove the distinction.
+cutover generation per provider kind with separate positive operation-quiescent and
+publication-closed acknowledgments. Completion requires every legacy worker host for the kind to
+be drained and barred from rejoining and, for remote libvirt, every affected Resource to complete
+its transport observation. Only then does one transaction sample the database clock and commit
+that cutoff with the complete generation. A job admitted during the drain is covered if a legacy
+worker could have claimed it; a supervised attempt still uses attempt-linked evidence. #1946 may
+dispatch a missing-link row only when its Resource kind matches a complete cutover generation and
+its database `created_at` is no later than the cutoff. A missing-link row after that cutoff remains
+deferred. Tests admit a job during the drain, use rows on both sides of the cutoff, and withhold
+individual acknowledgments to prove the ordering and distinction.
 
 The capture sweep remains disabled until #1951's rollout fence and #1952's publication contract
 are deployed. It also remains disabled per provider kind while that kind uses
@@ -234,7 +237,8 @@ The implementation entries prove the design at their natural boundaries:
 - fault tests drop the lock-owning connection at each provider lifecycle boundary and prove
   termination precedes any reaper call or completion write;
 - #1951 fault and recovery tests prove every launch state, session-loss cancellation,
-  provider-specific quiescence, supervisor replacement, and the positive legacy rollout fence;
+  provider-specific quiescence, supervisor replacement, and the positive legacy rollout fence,
+  including a job admitted while legacy workers drain;
 - #1952 fault tests prove every upload, metadata, cancellation, cleanup, and acknowledgment
   boundary leaves neither a late artifact nor an unregistered object;
 - injected reclaim failure proves L3 recovery stays non-masking;
