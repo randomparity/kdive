@@ -4,6 +4,8 @@
 
 Accepted (2026-08-12)
 
+> **Superseded by [0556](0556-reclaim-orphaned-captures-across-providers.md)** (2026-08-12)
+
 ## Context
 
 `RemoteLibvirtTrafficCapture` (ADR-0432, #1434) writes each capture to a storage volume on the
