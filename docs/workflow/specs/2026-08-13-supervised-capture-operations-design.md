@@ -90,27 +90,22 @@ provider kind, and domain under the existing Run lock. It then acquires the per-
 advisory operation fence on its dedicated autocommit connection.
 
 The launcher creates a private attempt directory beneath the configured KDIVE runtime data root,
-writes a canonical JSON request with mode 0600, creates a gate pipe, opens the configured Python
-interpreter as a close-on-exec executable fd, and starts:
+writes a canonical JSON request with mode 0600, creates a gate pipe, and starts:
 
 ```
-kdive-capture-launcher --python-fd <fd> --gate-fd <fd> --launch-token <token>
+python -S -m kdive.capture_bootstrap --launch-token <token> --gate-fd <fd>
 ```
 
-The static, freestanding, syscall-only native launcher installs a seccomp user-notification filter
-before dynamic runtime startup and passes the listener to the supervisor over the inherited
-control socket. It then requests fd-bound `execveat(AT_EMPTY_PATH)` for fixed interpreter argv
-`python -S -m kdive capture-operation --launch-token <token> --gate-fd <fd>`. The executable fd is
-`O_CLOEXEC`. The supervisor validates the notification's pid, executable device/inode, fd flags,
-empty path, and `AT_EMPTY_PATH`, atomically consumes the operation's only exec authorization, and
-continues that syscall. It rejects every later exec notification; closing the listener fails exec
-closed. The PID is unchanged across exec. The child's cwd is the attempt directory and the request
+The fixed `-S` bootstrap runs with loader-affecting variables removed and a supervisor-fixed
+package path. It imports only the in-tree sandbox bootstrap, installs the filter, and then reads
+the gate; request and provider modules are not imported. The child's cwd is the attempt directory
+and the request
 basename is the literal `request.json`. Arguments are fixed flags plus the database-generated
 token and inherited fds, never a shell command; no tenant-controlled value appears in argv. The
 request schema accepts only the
 two wired provider kinds, UUID identities, the snaplen and byte/window bounds already validated by
-the job payload, and the snapshotted domain and Resource identity. After the native and Python
-filters are installed, the blocking gate read is the first action that can open request input,
+the job payload, and the snapshotted domain and Resource identity. After the filter is installed,
+the blocking gate read is the first action that can open request input,
 import or assemble provider code, or reach a provider boundary. Only after release does it open
 `request.json` relative
 to a verified directory fd without following symlinks, verify ownership, modes, digest, and
@@ -145,24 +140,22 @@ provider file permissions; key bytes never enter the environment. Tests seed eve
 class in the parent and prove it absent in the child while both adapters still assemble. Packet
 data never enters argv, logs, JSON, or the database.
 
-The executable is a single-process boundary from native-launcher entry: threads are permitted, but
-descendant processes are not. The launcher has no ELF interpreter, dynamic dependencies,
-constructors, or libc startup, and installs a seccomp filter that fails closed on any audit
-architecture or syscall ABI other than the supported x86_64 and ppc64le forms. It denies `fork`
-and `vfork`; notifies on every `execve` and `execveat`; permits legacy `clone` iff
+The executable is a single-process mutation boundary after its minimal trusted bootstrap: threads
+are permitted, but descendant processes are not. The bootstrap installs a filter that fails closed
+on any audit
+architecture or syscall ABI other than the supported x86_64 and ppc64le forms. It denies `fork`,
+`vfork`, `execve`, and `execveat`; permits legacy `clone` iff
 `(flags & (CLONE_VM | CLONE_SIGHAND | CLONE_THREAD))` equals that complete mask; and returns
 `ENOSYS` for every `clone3` so libc falls back to the inspectable legacy thread-creation call.
-The supervisor consumes the one exec authorization before continuing it and returns `EPERM` for
-all later notifications from every thread until exact process exit. Python then reads the gate;
-provider modules load only after release. A process-creation attempt fails with `EPERM`
+Python then reads the gate; provider modules load only after release. A process-creation attempt
+fails with `EPERM`
 and becomes an infrastructure failure. Runtime local and remote tests exercise a provider thread,
 observe the child process tree through every phase, and invoke each process-creation path in helper
 mode on x86_64 and ppc64le. The matrix covers zero flags, `CLONE_VM` without the complete mask, the
 complete mask with normal pthread flags, extra flags, direct raw syscalls, `clone3` returning
-`ENOSYS`, native-launcher identity/argument mismatch, notification-listener closure, attempted
-bootstrap process creation, fd-number reuse, denial of later exec from main and bootstrap threads,
-and a real provider thread falling back successfully. Filter/listener setup failure exits before
-release or provider mutation. A
+`ENOSYS`, sanitized loader environment, no task/process creation during trusted bootstrap, denial
+of later exec, and a real provider thread falling back successfully. Filter setup failure exits
+before release or provider mutation. A
 provider needing a subprocess requires a different
 kernel-owned containment decision.
 

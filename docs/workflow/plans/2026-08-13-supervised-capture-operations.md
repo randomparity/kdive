@@ -9,23 +9,19 @@ provider ordering/absence probe. Security-definer database functions fence opera
 recovery, retries, and the offline protocol cutover. Local and remote libvirt share the operation
 protocol but retain separate execution assembly and live ordering proofs.
 
-Tech stack: Python 3.14, a small C launcher, psycopg/PostgreSQL migrations, asyncio
-subprocess/pidfd, Linux seccomp, libvirt/QMP, pytest, Helm/Compose deployment documentation.
+Tech stack: Python 3.14, psycopg/PostgreSQL migrations, asyncio subprocess/pidfd, Linux seccomp,
+libvirt/QMP, pytest, Helm/Compose deployment documentation.
 
 ## Global constraints
 
 - Branch `feat/supervise-capture-operations-1951`; base `main`.
 - Effective targets are x86_64 and ppc64le; the x86_64 host is included.
-- No new library dependency: use classic seccomp BPF/user notification in a freestanding,
-  syscall-only C launcher, plus standard-library pidfd surfaces. The existing C toolchain builds
-  one target-native static artifact per supported architecture.
-- Parent argv is the installed launcher with fixed interpreter/gate fds and launch token. It uses
-  one fd-bound exec for exact argv
-  `python -S -m kdive capture-operation --launch-token <token> --gate-fd <fd>`; cwd is the private
+- No new dependency: use classic seccomp BPF through `ctypes` plus standard-library pidfd surfaces.
+- Child argv is exactly
+  `python -S -m kdive.capture_bootstrap --launch-token <token> --gate-fd <fd>`; cwd is the private
   attempt directory and request basename is `request.json`.
-- The child is single-process from native-launcher entry. Deny `fork` and `vfork`; notify the
-  supervisor on every exec and authorize exactly the validated first interpreter exec before
-  denying all later notifications across threads. Allow legacy `clone` only when its flags contain
+- The child is a single-process mutation boundary after a fixed, sanitized bootstrap. Deny `fork`,
+  `vfork`, `execve`, and `execveat`. Allow legacy `clone` only when its flags contain
   `CLONE_VM | CLONE_SIGHAND | CLONE_THREAD`; return `ENOSYS` for every `clone3` so libc falls back
   to inspectable legacy thread creation. Fail closed on unsupported audit architectures or ABIs.
   Provider imports occur after release.
@@ -89,12 +85,8 @@ Files:
 
 - Create `src/kdive/jobs/capture_operations/protocol.py`, `linux_identity.py`, `sandbox.py`,
   `child.py`, and `launcher.py`.
-- Create `src/kdive/native/capture_launcher.c` and `scripts/build-capture-launcher.sh`; modify the
-  `just setup`/guard path, `Dockerfile`, and `deploy/ansible/roles/libvirt_stack/` to install the
-  target-native launcher on both supported architectures.
-- Modify `docs/operating/runbooks/power-host-bringup.md` to install the compiler/binutils
-  prerequisites and build, verify, and identify the current checkout's native launcher before its
-  sandbox proof.
+- Create `src/kdive/capture_bootstrap.py` with no imports outside the standard library and sandbox
+  module before filter installation.
 - Modify `src/kdive/__main__.py` to add the internal `capture-operation` process verb.
 - Create matching tests under `tests/jobs/capture_operations/`.
 
@@ -103,7 +95,6 @@ Interfaces:
 - `CaptureRequest` and `CaptureResult` strict Pydantic models with canonical JSON helpers.
 - `LinuxIdentity.read(pid)`, `open_pidfd()`, `signal()`, and `is_absent()`.
 - `GatedCaptureLauncher.launch(request, operation) -> LaunchedCapture`.
-- `ExecNotificationSupervisor.authorize_first(listener_fd, pidfd, interpreter_stat) -> None`.
 - `LaunchedCapture.release()`, `wait()`, and `cancel()`.
 - `run_capture_child(launch_token: str, gate_fd: int) -> int`.
 
@@ -116,27 +107,19 @@ Steps:
    timeout, token scan, unreadable `/proc`, result bounds, modes, symlinks, and malformed JSON.
 3. Implement private directories/files with directory-fd-relative `O_NOFOLLOW` opens, canonical
    digests, allowlisted environment, launch-token recovery, pidfd signaling, and bounded waits.
-4. Implement the native filter and supervisor notification loop. Test that process creation
+4. Implement the pre-gate filter. Test that process creation
    returns `EPERM`, thread
    creation succeeds, and the child process tree has no descendants on x86_64 and ppc64le. The
    ppc64le arm uses the native POWER carrier documented by
-   `docs/operating/runbooks/power-host-bringup.md`: after its clean-host package setup, run
-   `just build-capture-launcher`, verify the installed artifact's recorded source hash equals the
-   current `src/kdive/native/capture_launcher.c` hash, run `just native-launcher-check`, then run
+   `docs/operating/runbooks/power-host-bringup.md`: after its environment setup, run
    `uv run python -m pytest
    tests/jobs/capture_operations/test_sandbox.py -q`. Success requires `EPERM` from `fork`,
    `vfork`, both exec calls, and clone flag sets missing any required thread bit; `ENOSYS` from
    every `clone3`; success from the complete thread mask with ordinary and extra pthread flags;
    successful real provider-thread fallback; and an empty child process tree. The same matrix
-   covers raw syscalls, unsupported audit/ABI refusal, exact first-exec identity/arguments,
-   fd-number reuse, listener closure, later exec from main/bootstrap threads, attempted bootstrap
-   fork, and filter/listener failures before release. Build the launcher with
-   `-nostdlib -static -fno-stack-protector -fno-asynchronous-unwind-tables` and linker entry
-   `_start`/no build-id, adding only the target-specific syscall assembly for x86_64 or ppc64le.
-   Add a `just native-launcher-check` CI guard using
-   `readelf` to reject `PT_INTERP`, `DT_NEEDED`, constructor sections, and unexpected symbols in
-   the actually installed artifact. Record the build hash and both command results. This is a
-   required release proof; if no native
+   covers raw syscalls, unsupported audit/ABI refusal, sanitized loader environment, absence of
+   tasks/processes before filter installation, denial of later exec, and filter failure before
+   release. Record the command result. This is a required release proof; if no native
    POWER host is available, report the arm unavailable and do not claim cross-platform completion.
 5. Run `uv run python -m pytest tests/jobs/capture_operations -q`, `just lint`, and `just type`;
    expect green. Commit `feat(jobs): add gated capture child boundary`.

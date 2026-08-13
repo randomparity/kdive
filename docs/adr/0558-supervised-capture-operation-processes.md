@@ -22,12 +22,12 @@ may reject stale workers and in-flight legacy capture work instead of maintainin
 ## Decision
 
 Each capture provider phase runs in a fresh Linux child process started with
-`asyncio.create_subprocess_exec` through a static, freestanding, syscall-only native launcher.
-Before any dynamic runtime exists, the launcher installs a seccomp user-notification filter and
-passes its listener fd to the supervisor over an inherited socket. The supervisor validates the
-notification's pid and interpreter fd identity, continues exactly the first
-`execveat(AT_EMPTY_PATH)`, and rejects every later exec notification. A closed listener also fails
-exec closed. Python starts with `-S` and a fixed package path. After that minimal
+`asyncio.create_subprocess_exec` as a fixed `python -S` bootstrap with a sanitized environment.
+The bootstrap imports only the in-tree sandbox module, installs the containment filter, and then
+reads the gate. Request input, provider modules, configuration assembly, and external endpoints
+remain unreachable until both filter installation and release. The trusted interpreter/loader
+startup before filter installation receives no tenant input or provider configuration and is
+tested to remain one process and one task. After that minimal
 bootstrap, the blocking one-byte gate read is the first action that opens request input, imports or
 assembles provider code, or can reach a provider boundary. Gate EOF is a mandatory no-mutation
 exit.
@@ -64,14 +64,11 @@ waits up to five seconds on the supervisor's monotonic clock for the exact child
 `SIGKILL` through the pidfd and waits up to five more seconds. The capture-operation executable is
 a single-process boundary and may create threads but no descendant processes; a provider that
 needs a helper process cannot implement this lifecycle without a new containment decision.
-The native filter fails closed unless the audit architecture and syscall ABI are the supported
-x86_64 or ppc64le form. It denies `fork` and `vfork`; sends every `execve` and `execveat` to the
-listener; returns `ENOSYS` for `clone3`; and allows `clone` only when its flags contain
-`CLONE_VM | CLONE_SIGHAND | CLONE_THREAD`. All other `clone` calls return `EPERM`. The supervisor
-authorizes one notification only when pid, executable device/inode, fd flags, empty path, and
-`AT_EMPTY_PATH` match the launch record. It consumes that authorization before continuing the
-syscall and answers every subsequent notification with `EPERM`, across all threads, until exact
-process exit.
+The bootstrap filter fails closed unless the audit architecture and syscall ABI are the supported
+x86_64 or ppc64le form. It denies `fork`, `vfork`, `execve`, and `execveat`; returns `ENOSYS` for
+`clone3`; and allows `clone` only when its flags contain
+`CLONE_VM | CLONE_SIGHAND | CLONE_THREAD`. All other `clone` calls return `EPERM`. Filter
+installation failure closes the gate path and exits before request or provider access.
 Exceeding either interval leaves the row in `cancel_requested`;
 recovery repeats identity observation and cancellation. The recovery action is the next worker
 startup on that host or an operator restart after restoring host process visibility.
