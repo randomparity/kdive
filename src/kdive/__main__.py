@@ -213,6 +213,40 @@ def _handle_stage_volume(
     run_stage_volume(args)
 
 
+def _add_capture_operation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--launch-token", required=True, help=argparse.SUPPRESS)
+    parser.add_argument("--gate-fd", required=True, type=int, help=argparse.SUPPRESS)
+
+
+def _handle_capture_operation(
+    args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
+) -> None:
+    """Re-exec the fixed `-S` bootstrap; the production launcher invokes it directly."""
+    del secret_registry, telemetry
+    import os
+    import site
+    from pathlib import Path
+
+    interpreter = str(Path(sys.executable).resolve(strict=True))
+    argv = [
+        interpreter,
+        "-S",
+        "-m",
+        "kdive.capture_bootstrap",
+        "--launch-token",
+        args.launch_token,
+        "--gate-fd",
+        str(args.gate_fd),
+    ]
+    allowed_locale = {"LANG", "LC_ALL", "LC_CTYPE", "TZ"}
+    environment = {key: value for key, value in os.environ.items() if key in allowed_locale}
+    source_root = Path(__file__).parent.parent
+    environment["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
+    environment["PYTHONPATH"] = os.pathsep.join([str(source_root), *site.getsitepackages()])
+    os.set_inheritable(args.gate_fd, True)
+    os.execve(interpreter, argv, environment)
+
+
 def _add_reconcile_systems_arguments(parser: argparse.ArgumentParser) -> None:
     from pathlib import Path
 
@@ -299,6 +333,12 @@ _COMMANDS: tuple[_Command, ...] = (
         "upload a built qcow2 to a remote-libvirt pool and capture its kernel config",
         _handle_stage_volume,
         custom_register=add_stage_volume_parser,
+    ),
+    _Command(
+        "capture-operation",
+        argparse.SUPPRESS,
+        _handle_capture_operation,
+        add_arguments=_add_capture_operation_arguments,
     ),
     _Command(
         "reconcile-systems",

@@ -84,3 +84,45 @@
       - libvirt_stack_virt_host_validate.stdout is search('/dev/kvm.? exists\s*:\s*PASS')
     fail_msg: "KVM not usable on {{ inventory_hostname }}:\n{{ libvirt_stack_virt_host_validate.stdout }}"
     success_msg: "KVM acceleration and /dev/kvm present."
+
+- name: Install capture bootstrap attestation after the final worker runtime
+  when: libvirt_stack_capture_manifest_interpreter | length > 0
+  block:
+    - name: Require the final target-native interpreter and source root together
+      ansible.builtin.assert:
+        that:
+          - libvirt_stack_capture_manifest_source_root | length > 0
+          - libvirt_stack_capture_manifest_interpreter is abs
+          - libvirt_stack_capture_manifest_source_root is abs
+        fail_msg: >-
+          Set both libvirt_stack_capture_manifest_interpreter and
+          libvirt_stack_capture_manifest_source_root after the final worker runtime exists.
+
+    - name: Build capture bootstrap manifest with target-native interpreter
+      ansible.builtin.command:
+        argv:
+          - "{{ libvirt_stack_capture_manifest_interpreter }}"
+          - "{{ libvirt_stack_capture_manifest_source_root }}/../scripts/build-capture-bootstrap-manifest.py"
+          - build
+          - --interpreter
+          - "{{ libvirt_stack_capture_manifest_interpreter }}"
+          - --source-root
+          - "{{ libvirt_stack_capture_manifest_source_root }}"
+          - --output
+          - "{{ libvirt_stack_capture_manifest_staged }}"
+      register: libvirt_stack_capture_manifest_build
+      changed_when: libvirt_stack_capture_manifest_build.stdout == 'changed'
+
+    - name: Install root-owned capture bootstrap manifest
+      ansible.builtin.command:
+        argv:
+          - "{{ libvirt_stack_capture_manifest_interpreter }}"
+          - "{{ libvirt_stack_capture_manifest_source_root }}/../scripts/build-capture-bootstrap-manifest.py"
+          - install
+          - --staged
+          - "{{ libvirt_stack_capture_manifest_staged }}"
+          - --destination
+          - "{{ libvirt_stack_capture_manifest_destination }}"
+      become: true
+      register: libvirt_stack_capture_manifest_install
+      changed_when: libvirt_stack_capture_manifest_install.stdout == 'changed'

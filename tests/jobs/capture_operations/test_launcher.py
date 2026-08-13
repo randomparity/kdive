@@ -1,0 +1,433 @@
+"""Real-process and fault tests for the gated child launcher (ADR-0558)."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import signal
+import subprocess
+import sys
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+
+from kdive.jobs.capture_operations import launcher as launcher_module
+from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher, LaunchedCapture
+from kdive.jobs.capture_operations.protocol import CaptureRequest
+from kdive.jobs.capture_operations.repository import CaptureOperation
+
+_ROOT = Path(__file__).parents[3]
+_MANIFEST_BUILDER = _ROOT / "scripts/build-capture-bootstrap-manifest.py"
+
+
+def _request() -> CaptureRequest:
+    return CaptureRequest(
+        job_id=uuid4(),
+        provider_kind="local-libvirt",
+        resource_id=uuid4(),
+        system_id=uuid4(),
+        domain_name="kdive-test-domain",
+        snaplen=128,
+        max_bytes=1_048_576,
+        max_polls=1,
+    )
+
+
+def _operation(request: CaptureRequest) -> CaptureOperation:
+    now = datetime.now(UTC)
+    return CaptureOperation(
+        id=uuid4(),
+        job_id=request.job_id,
+        job_attempt=1,
+        worker_incarnation="test-worker",
+        provider_kind=request.provider_kind,
+        resource_id=request.resource_id,
+        system_id=request.system_id,
+        domain_name=request.domain_name,
+        request_digest=request.digest,
+        launch_token="a" * 64,
+        host_instance="test-host",
+        boot_id=None,
+        pid=None,
+        start_ticks=None,
+        state="launching",
+        exit_outcome=None,
+        exit_code=None,
+        process_absent=False,
+        provider_quiescence={},
+        recovered_by=None,
+        created_at=now,
+        identity_recorded_at=None,
+        running_at=None,
+        cancel_requested_at=None,
+        exited_at=None,
+        updated_at=now,
+    )
+
+
+@pytest.fixture
+def manifest(tmp_path: Path) -> Path:
+    destination = tmp_path / "capture-bootstrap-manifest.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(_MANIFEST_BUILDER),
+            "build",
+            "--interpreter",
+            sys.executable,
+            "--source-root",
+            str(_ROOT / "src"),
+            "--output",
+            str(destination),
+        ],
+        check=True,
+    )
+    return destination
+
+
+def test_real_child_is_gated_and_has_exact_process_contract(
+    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request()
+    operation = _operation(request)
+    monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://forbidden")
+    monkeypatch.setenv("LD_PRELOAD", "/forbidden/loader.so")
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+
+    async def _run() -> None:
+        child = await launcher.launch(request, operation)
+        try:
+            assert not (child.attempt_dir / "result.json").exists()
+            assert os.stat(child.attempt_dir).st_mode & 0o777 == 0o700
+            assert os.stat(child.attempt_dir / "request.json").st_mode & 0o777 == 0o600
+            assert os.stat(child.attempt_dir / "request.sha256").st_mode & 0o777 == 0o600
+
+            argv = (Path(f"/proc/{child.identity.pid}/cmdline").read_bytes()).split(b"\0")[:-1]
+            assert argv == [
+                os.fsencode(str(Path(sys.executable).resolve())),
+                b"-S",
+                b"-m",
+                b"kdive.capture_bootstrap",
+                b"--launch-token",
+                b"a" * 64,
+                b"--gate-fd",
+                str(child.child_gate_fd).encode(),
+            ]
+            assert Path(f"/proc/{child.identity.pid}/cwd").resolve() == child.attempt_dir.resolve()
+            environ = Path(f"/proc/{child.identity.pid}/environ").read_bytes().split(b"\0")
+            assert not any(item.startswith(b"KDIVE_DATABASE_URL=") for item in environ)
+            assert not any(item.startswith(b"LD_PRELOAD=") for item in environ)
+            assert launcher_module._process_group_members(child.identity.pid) == {
+                child.identity.pid
+            }
+            children = Path(
+                f"/proc/{child.identity.pid}/task/{child.identity.pid}/children"
+            ).read_text()
+            assert children.strip() == ""
+
+            child.release()
+            result = await child.wait()
+            assert result.reason == "provider_execution_not_installed"
+            assert (child.attempt_dir / "result.json").exists()
+        finally:
+            await child.cancel()
+
+    asyncio.run(_run())
+
+
+def test_gate_eof_exits_without_opening_request(tmp_path: Path, manifest: Path) -> None:
+    request = _request()
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+
+    async def _run() -> None:
+        child = await launcher.launch(request, _operation(request))
+        os.chmod(child.attempt_dir / "request.json", 0)
+        assert await child.cancel()
+        assert child.returncode == 0
+        assert not (child.attempt_dir / "result.json").exists()
+
+    asyncio.run(_run())
+
+
+def test_request_digest_mismatch_fails_before_spawn(tmp_path: Path, manifest: Path) -> None:
+    request = _request()
+    operation = _operation(request)
+    operation = replace(operation, request_digest="0" * 64)
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+
+    with pytest.raises(ValueError, match="request digest"):
+        asyncio.run(launcher.launch(request, operation))
+    assert not (tmp_path / "runtime" / str(operation.id)).exists()
+
+
+def test_spool_refuses_symlink_attempt_directory(tmp_path: Path, manifest: Path) -> None:
+    request = _request()
+    operation = _operation(request)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    (runtime / str(operation.id)).symlink_to(tmp_path)
+    launcher = GatedCaptureLauncher(
+        runtime_root=runtime,
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+
+    with pytest.raises(FileExistsError):
+        asyncio.run(launcher.launch(request, operation))
+
+
+def test_manifest_mode_and_fingerprint_drift_fail_before_spawn(
+    tmp_path: Path, manifest: Path
+) -> None:
+    request = _request()
+    operation = _operation(request)
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+    os.chmod(manifest, 0o600)
+    with pytest.raises(PermissionError, match="0644"):
+        asyncio.run(launcher.launch(request, operation))
+
+    os.chmod(manifest, 0o644)
+    data = manifest.read_text()
+    manifest.write_text(data.replace('"sha256":"', '"sha256":"0', 1))
+    with pytest.raises(RuntimeError, match="fingerprint"):
+        asyncio.run(launcher.launch(request, operation))
+
+
+def test_result_reader_rejects_symlink_and_oversize(tmp_path: Path, manifest: Path) -> None:
+    request = _request()
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+
+    async def _run() -> None:
+        child = await launcher.launch(request, _operation(request))
+        child.release()
+        await child.wait_process()
+        result = child.attempt_dir / "result.json"
+        result.unlink()
+        target = tmp_path / "large.json"
+        target.write_bytes(b"x" * 65_537)
+        result.symlink_to(target)
+        with pytest.raises(OSError):
+            child.read_result()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("payload", [b"x" * 65_537, b"{not-json\n"])
+def test_result_reader_rejects_oversize_and_malformed_json(
+    tmp_path: Path, manifest: Path, payload: bytes
+) -> None:
+    request = _request()
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+
+    async def _run() -> None:
+        child = await launcher.launch(request, _operation(request))
+        child.release()
+        await child.wait_process()
+        result = child.attempt_dir / "result.json"
+        result.write_bytes(payload)
+        os.chmod(result, 0o600)
+        with pytest.raises(ValueError):
+            child.read_result()
+
+    asyncio.run(_run())
+
+
+def test_identity_write_failure_keeps_provider_gate_closed(tmp_path: Path, manifest: Path) -> None:
+    request = _request()
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+
+    async def _run() -> None:
+        child = await launcher.launch(request, _operation(request))
+        try:
+            raise RuntimeError("identity-write fault")
+        except RuntimeError:
+            assert await child.cancel()
+        assert not (child.attempt_dir / "result.json").exists()
+
+    asyncio.run(_run())
+
+
+def test_child_rejects_request_digest_drift_after_release(tmp_path: Path, manifest: Path) -> None:
+    request = _request()
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+
+    async def _run() -> None:
+        child = await launcher.launch(request, _operation(request))
+        changed = request.model_copy(update={"domain_name": "changed-after-launch"})
+        (child.attempt_dir / "request.json").write_bytes(changed.to_canonical_json())
+        os.chmod(child.attempt_dir / "request.json", 0o600)
+        child.release()
+        assert await child.wait_process() != 0
+        assert not (child.attempt_dir / "result.json").exists()
+
+    asyncio.run(_run())
+
+
+def test_spawn_failure_closes_gate_and_never_releases(
+    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request()
+    operation = _operation(request)
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+
+    async def _fail_spawn(*_args: object, **_kwargs: object) -> None:
+        raise OSError("spawn fault")
+
+    monkeypatch.setattr(launcher_module.asyncio, "create_subprocess_exec", _fail_spawn)
+    with pytest.raises(OSError, match="spawn fault"):
+        asyncio.run(launcher.launch(request, operation))
+    assert not (tmp_path / "runtime" / str(operation.id) / "result.json").exists()
+
+
+@pytest.mark.parametrize("fault", ["stat", "pidfd", "process-group"])
+def test_post_spawn_attestation_faults_abort_before_release(
+    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    request = _request()
+    operation = _operation(request)
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+    if fault == "stat":
+        monkeypatch.setattr(
+            launcher_module.LinuxIdentity,
+            "read",
+            lambda _pid: (_ for _ in ()).throw(RuntimeError("stat fault")),
+        )
+    elif fault == "pidfd":
+        monkeypatch.setattr(
+            launcher_module.LinuxIdentity,
+            "open_pidfd",
+            lambda _self: (_ for _ in ()).throw(OSError("pidfd fault")),
+        )
+    else:
+        monkeypatch.setattr(
+            launcher_module,
+            "_process_group_members",
+            lambda pid: {pid, pid + 1},
+        )
+
+    with pytest.raises((OSError, RuntimeError), match=fault.replace("-", " ")):
+        asyncio.run(launcher.launch(request, operation))
+    assert not (tmp_path / "runtime" / str(operation.id) / "result.json").exists()
+
+
+def test_release_write_fault_does_not_mark_gate_released(monkeypatch: pytest.MonkeyPatch) -> None:
+    read_fd, write_fd = os.pipe()
+    child = LaunchedCapture(
+        process=object(),  # ty: ignore[invalid-argument-type] - release never reads it
+        identity=object(),  # ty: ignore[invalid-argument-type] - release never reads it
+        pidfd=-1,
+        gate_fd=write_fd,
+        child_gate_fd=read_fd,
+        attempt_dir=Path("/unused"),
+        argv=(),
+        environment={},
+    )
+    monkeypatch.setattr(launcher_module.os, "write", lambda _fd, _data: 0)
+    try:
+        with pytest.raises(RuntimeError, match="incomplete"):
+            child.release()
+        assert not child._released
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_cancel_uses_term_then_kill_and_preserves_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals: list[int] = []
+
+    class _Identity:
+        def signal(self, _pidfd: int, sig: int) -> None:
+            signals.append(sig)
+
+    class _Process:
+        returncode = None
+
+    child = LaunchedCapture(
+        process=_Process(),  # ty: ignore[invalid-argument-type] - narrow cancellation fake
+        identity=_Identity(),  # ty: ignore[invalid-argument-type] - narrow cancellation fake
+        pidfd=99,
+        gate_fd=-1,
+        child_gate_fd=10,
+        attempt_dir=Path("/unused"),
+        argv=(),
+        environment={},
+        _released=True,
+    )
+    waits = iter((False, False))
+
+    async def _timeout(_self: LaunchedCapture, seconds: float) -> bool:
+        assert seconds == 5.0
+        return next(waits)
+
+    monkeypatch.setattr(LaunchedCapture, "_wait_bounded", _timeout)
+    assert not asyncio.run(child.cancel())
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_process_group_enumeration_fails_closed_on_unreadable_proc(tmp_path: Path) -> None:
+    process = tmp_path / "123"
+    process.mkdir()
+    stat_path = process / "stat"
+    stat_path.write_text("123 (capture) S 1 123 1")
+    stat_path.chmod(0)
+    try:
+        with pytest.raises(RuntimeError, match="cannot read"):
+            launcher_module._process_group_members(123, tmp_path)
+    finally:
+        stat_path.chmod(0o600)

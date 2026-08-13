@@ -8,8 +8,19 @@ default:
     @just --list
 
 # One-command first-time setup: check host deps, sync the venv, install hooks.
-setup: check-deps sync install-hooks
+setup: check-deps sync build-capture-bootstrap-manifest install-hooks
     @echo "Development environment is ready."
+
+# Stage and verify attestation for the explicitly selected worker interpreter. This is
+# intentionally unprivileged and never writes /usr; operators install in a separate step.
+build-capture-bootstrap-manifest interpreter=".venv/bin/python" output="build/capture-bootstrap-manifest.json":
+    {{interpreter}} scripts/build-capture-bootstrap-manifest.py build --interpreter {{interpreter}} --source-root src --output {{output}}
+    {{interpreter}} scripts/build-capture-bootstrap-manifest.py verify --interpreter {{interpreter}} --source-root src --manifest {{output}}
+
+# Privileged operator action. The script requires euid 0, installs atomically as root:root mode
+# 0644, and verifies byte identity with the already-staged manifest.
+install-capture-bootstrap-manifest staged="build/capture-bootstrap-manifest.json" destination="/usr/share/kdive/capture-bootstrap-manifest.json":
+    .venv/bin/python scripts/build-capture-bootstrap-manifest.py install --staged {{staged}} --destination {{destination}}
 
 # Report missing host packages with distro-specific install hints. Report-only in CI / when piped;
 # at an interactive terminal it offers a [y/N] install per tier (pass -y to install unattended).

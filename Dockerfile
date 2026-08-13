@@ -86,7 +86,7 @@ FROM python:3.14.6-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae0
 # compile a kernel on the shipped image.
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      gcc make binutils gdb libvirt-clients openssh-client \
+      gcc make binutils gdb libvirt-clients openssh-client libseccomp2 \
       libelf1 libdw1 zlib1g \
       flex bison bc git rsync xz-utils libssl-dev libelf-dev \
     && if [ "${TARGETARCH}" = "ppc64le" ]; then \
@@ -96,6 +96,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app/src /app/src
+COPY --from=builder /app/scripts/build-capture-bootstrap-manifest.py /usr/local/libexec/build-capture-bootstrap-manifest.py
 # Put the venv on PATH before verification so the bare `drgn` check resolves.
 # PYTHONPATH backs the editable project install at the copied src path.
 ENV PATH=/opt/venv/bin:$PATH PYTHONPATH=/app/src \
@@ -108,6 +109,14 @@ RUN drgn --version && gdb --version && virsh --version && gcc --version && make 
 RUN flex --version && bison --version && bc --version \
     && git --version && rsync --version && xz --version \
     && test -f /usr/include/openssl/ssl.h && test -f /usr/include/libelf.h
+# Build only after the final target-native interpreter, shared libraries, venv, and source are in
+# place. Installation is a separate privileged action and verifies the installed bytes.
+RUN /opt/venv/bin/python /usr/local/libexec/build-capture-bootstrap-manifest.py build \
+      --interpreter /opt/venv/bin/python --source-root /app/src \
+      --output /tmp/capture-bootstrap-manifest.json \
+    && /opt/venv/bin/python /usr/local/libexec/build-capture-bootstrap-manifest.py install \
+      --staged /tmp/capture-bootstrap-manifest.json \
+      --destination /usr/share/kdive/capture-bootstrap-manifest.json
 # Fixed non-root uid 10001 (k8s runAsNonRoot convention) so compose/Helm can chown the
 # mounted writable volumes to a known owner. --no-log-init avoids a sparse lastlog
 # allocation for the high uid; not --system (that caps the uid below SYS_UID_MAX).

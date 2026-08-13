@@ -56,7 +56,7 @@ def _git(*args: str) -> str | None:
 def _from_baked() -> VersionInfo | None:
     try:
         from kdive import (
-            _buildinfo,  # ty: ignore[unresolved-import]  # only present in built artifacts
+            _buildinfo,  # only present in built artifacts
         )
     except ImportError:
         return None
