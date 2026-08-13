@@ -37,6 +37,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_categ
 from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, Job, JobKind, dispatch_lane_for_kind
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
+from kdive.jobs.capture_operations.supervisor import capture_authority_scope
 from kdive.jobs.models import HandlerRegistry, JobHandler
 from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
 from kdive.jobs.worker_telemetry import JobSpan, WorkerTelemetry
@@ -363,23 +364,27 @@ class Worker:
         heartbeat: asyncio.Task[None],
     ) -> None:
         """Cancel a capture handler as soon as heartbeat or process authority ends."""
-        handler_task = asyncio.create_task(self._run_handler(job, handler, span))
         stop_task = (
             asyncio.create_task(self._stop_event.wait()) if self._stop_event is not None else None
         )
         authority_tasks = {heartbeat}
         if stop_task is not None:
             authority_tasks.add(stop_task)
+        authority_lost = asyncio.Event()
+        for task in authority_tasks:
+            task.add_done_callback(lambda _task: authority_lost.set())
+        with capture_authority_scope(authority_lost):
+            handler_task = asyncio.create_task(self._invoke_handler(job, handler))
         try:
             done, _pending = await asyncio.wait(
                 {handler_task, *authority_tasks}, return_when=asyncio.FIRST_COMPLETED
             )
-            if handler_task in done:
-                await handler_task
-                return
-            handler_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await handler_task
+            if done & authority_tasks:
+                handler_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await handler_task
+            else:
+                await self._finalize_handler(job, span, handler_task)
             if heartbeat in done:
                 with contextlib.suppress(Exception):
                     heartbeat.result()
@@ -392,14 +397,24 @@ class Worker:
                     task.cancel()
             await asyncio.gather(*authority_tasks, return_exceptions=True)
 
+    async def _invoke_handler(self, job: Job, handler: JobHandler) -> str | None:
+        """Run only handler work; capture authority is adjudicated before finalization."""
+        async with self._pool.connection() as conn:
+            await conn.set_autocommit(True)
+            try:
+                return await handler(conn, job)
+            finally:
+                await conn.set_autocommit(False)
+
     async def _run_handler(self, job: Job, handler: JobHandler, span: JobSpan) -> None:
+        handler_task = asyncio.create_task(self._invoke_handler(job, handler))
+        await self._finalize_handler(job, span, handler_task)
+
+    async def _finalize_handler(
+        self, job: Job, span: JobSpan, handler_task: asyncio.Task[str | None]
+    ) -> None:
         try:
-            async with self._pool.connection() as conn:
-                await conn.set_autocommit(True)
-                try:
-                    result_ref = await handler(conn, job)
-                finally:
-                    await conn.set_autocommit(False)
+            result_ref = await handler_task
         except Exception as exc:  # noqa: BLE001 - the worker turns any handler failure into a dead-letter/requeue
             span.set_outcome("error")
             category = _failure_category(exc)

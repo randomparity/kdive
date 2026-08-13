@@ -8,8 +8,9 @@ import logging
 import os
 import signal
 import sys
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -47,6 +48,9 @@ LOCK_PROBE_TIMEOUT_SECONDS = 1.0
 _STATEMENT_TIMEOUT_MILLISECONDS = 1000
 _SIGNAL_WAIT_SECONDS = 5.0
 _log = logging.getLogger(__name__)
+_CAPTURE_AUTHORITY_LOST: ContextVar[asyncio.Event | None] = ContextVar(
+    "capture_authority_lost", default=None
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +61,6 @@ class CaptureSnapshot:
     resource_id: UUID
     system_id: UUID
     domain_name: str
-    resource_name: str
     project: str
     write_remediation: str
     configuration: Callable[[], bytes]
@@ -66,6 +69,26 @@ class CaptureSnapshot:
 
 class CaptureAuthorityLost(RuntimeError):
     """The heartbeat or lock-owning session stopped authorizing provider work."""
+
+
+@contextmanager
+def capture_authority_scope(lost: asyncio.Event) -> Iterator[None]:
+    """Bind worker heartbeat/stop authority to one capture handler task."""
+    token = _CAPTURE_AUTHORITY_LOST.set(lost)
+    try:
+        yield
+    finally:
+        _CAPTURE_AUTHORITY_LOST.reset(token)
+
+
+async def require_capture_authority() -> None:
+    """Yield once so tied authority callbacks run, then reject lost worker authority."""
+    lost = _CAPTURE_AUTHORITY_LOST.get()
+    if lost is None:
+        return
+    await asyncio.sleep(0)
+    if lost.is_set():
+        raise CaptureAuthorityLost("capture worker authority ended")
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,10 +267,15 @@ class CaptureOperationSupervisor:
             done, _pending = await asyncio.wait(
                 {process, authority}, return_when=asyncio.FIRST_COMPLETED
             )
-            if process in done:
-                return process.result()
-            await authority
-            raise AssertionError("lock monitor returned without losing authority")
+            if authority in done:
+                await authority
+                raise AssertionError("lock monitor returned without losing authority")
+            await asyncio.sleep(0)
+            if authority.done():
+                await authority
+                raise AssertionError("lock monitor returned without losing authority")
+            await require_capture_authority()
+            return process.result()
         finally:
             for task in (process, authority):
                 if not task.done():

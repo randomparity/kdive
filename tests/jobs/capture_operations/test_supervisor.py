@@ -209,7 +209,6 @@ def _snapshot(request: CaptureRequest, events: list[str]) -> CaptureSnapshot:
         resource_id=request.resource_id,
         system_id=request.system_id,
         domain_name=request.domain_name,
-        resource_name="local",
         project="proj",
         write_remediation="fix permissions",
         configuration=lambda: b"configuration",
@@ -396,6 +395,61 @@ def test_recurring_lock_loss_after_release_cancels_and_bars_result(
 
     assert "release" in events
     assert "cancel" in events
+    assert "result" not in events
+
+
+def test_tied_process_exit_and_lock_loss_prioritizes_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kdive.jobs.capture_operations import supervisor as supervisor_module
+
+    async def run() -> list[str]:
+        events: list[str] = []
+        rendezvous = asyncio.Event()
+        arrivals = 0
+
+        async def arrive() -> None:
+            nonlocal arrivals
+            arrivals += 1
+            if arrivals == 2:
+                rendezvous.set()
+            await rendezvous.wait()
+
+        job = _job()
+        request = _request(job)
+        operation = _operation(job, request)
+        launched = _Launched(
+            events,
+            CaptureResult(outcome="success", size_bytes=4, truncated=False),
+        )
+
+        async def process_exit() -> int:
+            await arrive()
+            launched.returncode = 0
+            events.append("absent")
+            return 0
+
+        async def authority_loss(conn: object) -> None:
+            del conn
+            await arrive()
+            raise supervisor_module.CaptureAuthorityLost("tied lock loss")
+
+        monkeypatch.setattr(launched, "wait_process", process_exit)
+        monkeypatch.setattr(supervisor_module, "_monitor_lock_session", authority_loss)
+        _patch_repository(monkeypatch, operation, events)
+        supervisor = CaptureOperationSupervisor(
+            launcher=_typed_launcher(launched),
+            credential=SecretStr("credential"),
+        )
+
+        with pytest.raises(CategorizedError):
+            await supervisor.execute(
+                _typed_connection(events), job, _snapshot(request, events), request
+            )
+        return events
+
+    events = asyncio.run(run())
+    assert "cancel_requested" in events
     assert "result" not in events
 
 

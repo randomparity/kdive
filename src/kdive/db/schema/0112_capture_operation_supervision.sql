@@ -446,30 +446,13 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION public.list_capture_recovery_candidates(p_credential_hash bytea)
-RETURNS TABLE (
-    id uuid,
-    job_id uuid,
-    job_attempt integer,
-    worker_incarnation text,
-    provider_kind text,
-    resource_id uuid,
-    system_id uuid,
-    domain_name text,
-    launch_token text,
-    host_instance text,
-    boot_id text,
-    pid integer,
-    start_ticks bigint,
-    state text
-)
+CREATE FUNCTION public.capture_recovery_candidate_replacement(p_credential_hash bytea)
+RETURNS SETOF public.worker_incarnations
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-    v_operation public.capture_operations%ROWTYPE;
-    v_owner public.worker_incarnations%ROWTYPE;
     v_replacement public.worker_incarnations%ROWTYPE;
     v_replacement_id text;
     v_worker_id text;
@@ -514,6 +497,43 @@ BEGIN
       AND w.state = 'active'
       AND w.fence_protocol = 3
     FOR UPDATE;
+    IF FOUND THEN
+        RETURN NEXT v_replacement;
+    END IF;
+END
+$$;
+
+CREATE FUNCTION public.list_capture_recovery_candidates(p_credential_hash bytea)
+RETURNS TABLE (
+    id uuid,
+    job_id uuid,
+    job_attempt integer,
+    worker_incarnation text,
+    provider_kind text,
+    resource_id uuid,
+    system_id uuid,
+    domain_name text,
+    launch_token text,
+    host_instance text,
+    boot_id text,
+    pid integer,
+    start_ticks bigint,
+    state text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_operation public.capture_operations%ROWTYPE;
+    v_owner public.worker_incarnations%ROWTYPE;
+    v_replacement public.worker_incarnations%ROWTYPE;
+BEGIN
+    IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
+        RAISE EXCEPTION 'worker authority is required' USING ERRCODE = '42501';
+    END IF;
+    SELECT replacement.* INTO v_replacement
+    FROM public.capture_recovery_candidate_replacement(p_credential_hash) AS replacement;
     IF NOT FOUND THEN
         RETURN;
     END IF;
@@ -1548,6 +1568,7 @@ REVOKE ALL ON FUNCTION
         public.worker_incarnations, public.worker_incarnations
     ),
     public.capture_recovery_context(bytea, uuid),
+    public.capture_recovery_candidate_replacement(bytea),
     public.list_capture_recovery_candidates(bytea),
     public.enforce_current_capture_operation_link(),
     public.enforce_capture_protocol_floor(),

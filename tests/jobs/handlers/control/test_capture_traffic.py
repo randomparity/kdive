@@ -13,7 +13,11 @@ import pytest
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.capture_operations.protocol import CaptureRequest
-from kdive.jobs.capture_operations.supervisor import CaptureSnapshot
+from kdive.jobs.capture_operations.supervisor import (
+    CaptureAuthorityLost,
+    CaptureSnapshot,
+    capture_authority_scope,
+)
 from kdive.jobs.handlers.control import capture_traffic
 from kdive.jobs.handlers.control.capture_traffic import (
     POLL_INTERVAL_SECONDS,
@@ -97,7 +101,6 @@ def test_handler_delegates_provider_phase_to_supervisor_without_publication_chan
             resource_id=uuid4(),
             system_id=uuid4(),
             domain_name="guest",
-            resource_name="local",
             project="proj",
             write_remediation="fix permissions",
             configuration=lambda: b"config",
@@ -134,3 +137,66 @@ def test_handler_delegates_provider_phase_to_supervisor_without_publication_chan
         assert request.resource_id == snapshot.resource_id
 
     asyncio.run(_run_handler())
+
+
+def test_handler_does_not_publish_when_worker_authority_ends_with_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run_handler() -> list[str]:
+        authority_lost = asyncio.Event()
+        events: list[str] = []
+        run_id = uuid4()
+        job = Job(
+            id=uuid4(),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            kind=JobKind.CAPTURE_TRAFFIC,
+            payload={
+                "run_id": str(run_id),
+                "duration_s": 1,
+                "max_bytes": 1_048_576,
+                "snaplen": 128,
+            },
+            state=JobState.RUNNING,
+            attempt=1,
+            max_attempts=3,
+            worker_id="worker-a",
+            authorizing={"principal": "p", "agent_session": None, "project": "proj"},
+            dedup_key="capture-authority-publication",
+        )
+        snapshot = CaptureSnapshot(
+            provider_kind="local-libvirt",
+            resource_id=uuid4(),
+            system_id=uuid4(),
+            domain_name="guest",
+            project="proj",
+            write_remediation="fix permissions",
+            configuration=lambda: b"config",
+            quiescence=cast(Any, lambda _config: SimpleNamespace()),
+        )
+
+        async def snapshot_run(*args: object) -> CaptureSnapshot:
+            return snapshot
+
+        class _Supervisor:
+            async def execute(self, *args: object) -> bytes:
+                authority_lost.set()
+                return b"x" * 24
+
+        async def store(*args: object) -> object:
+            events.append("published")
+            return uuid4()
+
+        monkeypatch.setattr(capture_traffic, "_snapshot", snapshot_run)
+        monkeypatch.setattr(capture_traffic, "_store_capture", store)
+        with capture_authority_scope(authority_lost), pytest.raises(CaptureAuthorityLost):
+            await capture_traffic.capture_traffic_handler(
+                cast(Any, SimpleNamespace()),
+                job,
+                resolver=cast(Any, SimpleNamespace()),
+                artifact_store=cast(Any, SimpleNamespace()),
+                supervisor=cast(Any, _Supervisor()),
+            )
+        return events
+
+    assert asyncio.run(_run_handler()) == []

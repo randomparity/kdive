@@ -447,6 +447,39 @@ def test_recovery_candidate_is_revalidated_after_discovery_race(migrated_url: st
     asyncio.run(_run())
 
 
+def test_recovery_candidate_helper_is_private_and_sql_functions_fit_limit(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        admin = await connect(migrated_url)
+        try:
+            rows = await (
+                await admin.execute(
+                    "SELECT p.proname, pg_get_functiondef(p.oid) "
+                    "FROM pg_proc AS p JOIN pg_namespace AS n ON n.oid = p.pronamespace "
+                    "WHERE n.nspname = 'public' AND p.proname IN ("
+                    "'capture_recovery_candidate_replacement', "
+                    "'list_capture_recovery_candidates') ORDER BY p.proname"
+                )
+            ).fetchall()
+            assert [row[0] for row in rows] == [
+                "capture_recovery_candidate_replacement",
+                "list_capture_recovery_candidates",
+            ]
+            assert all(len(definition.splitlines()) <= 100 for _, definition in rows)
+            privilege = await (
+                await admin.execute(
+                    "SELECT has_function_privilege('kdive_worker', "
+                    "'public.capture_recovery_candidate_replacement(bytea)', 'EXECUTE')"
+                )
+            ).fetchone()
+            assert privilege == (False,)
+        finally:
+            await admin.close()
+
+    asyncio.run(_run())
+
+
 def test_owner_launch_abort_requires_evidence_bound_to_operation(migrated_url: str) -> None:
     async def _run() -> None:
         admin = await connect(migrated_url)
@@ -607,6 +640,88 @@ def test_capture_retry_is_not_charged_until_prior_evidence_is_complete(
             assert claimed.attempt == 2
         finally:
             await worker.close()
+            await admin.close()
+
+    asyncio.run(_run())
+
+
+def test_queued_retry_race_keeps_attempt_and_link_until_exit_evidence_commits(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        admin = await connect(migrated_url)
+        owner = await _as_role(migrated_url, "kdive_worker")
+        claimant = await _as_role(migrated_url, "kdive_worker")
+        owner_id = "local:retry-race-owner"
+        claimant_id = "local:retry-race-claimant"
+        owner_credential = SecretStr("retry-race-owner")
+        claimant_credential = SecretStr("retry-race-claimant")
+        try:
+            await _register(admin, owner_id, owner_credential)
+            await _register(admin, claimant_id, claimant_credential)
+            job_id, snapshot = await _seed_job(admin, owner_id, owner_credential)
+            operation = await create_launching(owner, owner_credential, job_id, 1, snapshot)
+            await record_identity(
+                owner,
+                owner_credential,
+                operation.id,
+                CaptureOperationIdentity(operation.host_instance, "boot-a", 40, 50),
+            )
+            await mark_running(owner, owner_credential, operation.id)
+            await admin.execute(
+                "UPDATE jobs SET state = 'queued', worker_id = NULL, "
+                "lease_expires_at = NULL, heartbeat_at = NULL WHERE id = %s",
+                (job_id,),
+            )
+
+            before = await (
+                await admin.execute(
+                    "SELECT state, attempt, current_capture_operation_id FROM jobs WHERE id = %s",
+                    (job_id,),
+                )
+            ).fetchone()
+            assert before == ("queued", 1, operation.id)
+
+            async with owner.transaction():
+                await acknowledge_exit(
+                    owner,
+                    owner_credential,
+                    operation.id,
+                    RecoveryEvidence(
+                        process_absent=True,
+                        provider_quiescence={"result": "absent", "ordering": "fresh-probe"},
+                        exit_outcome="completed",
+                        exit_code=0,
+                    ),
+                )
+                assert (
+                    await queue.dequeue(
+                        claimant,
+                        claimant_id,
+                        incarnation_credential=claimant_credential,
+                    )
+                    is None
+                )
+                during = await (
+                    await admin.execute(
+                        "SELECT state, attempt, current_capture_operation_id "
+                        "FROM jobs WHERE id = %s",
+                        (job_id,),
+                    )
+                ).fetchone()
+                assert during == before
+
+            claimed = await queue.dequeue(
+                claimant,
+                claimant_id,
+                incarnation_credential=claimant_credential,
+            )
+            assert claimed is not None
+            assert claimed.attempt == 2
+            assert claimed.current_capture_operation_id is None
+        finally:
+            await claimant.close()
+            await owner.close()
             await admin.close()
 
     asyncio.run(_run())

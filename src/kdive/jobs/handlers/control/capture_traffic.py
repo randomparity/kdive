@@ -41,7 +41,11 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.capture_operations.protocol import CaptureRequest
-from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor, CaptureSnapshot
+from kdive.jobs.capture_operations.supervisor import (
+    CaptureOperationSupervisor,
+    CaptureSnapshot,
+    require_capture_authority,
+)
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import CaptureTrafficPayload, load_payload
@@ -153,7 +157,6 @@ async def _snapshot(
             resource_id=resource.id,
             system_id=system.id,
             domain_name=system.domain_name or domain_name_for(system.id),
-            resource_name=binding.resource_name or resource.name or "",
             project=run.project,
             write_remediation=capturer.write_remediation,
             configuration=lambda: operation_ports.configuration(resource.id),
@@ -350,6 +353,7 @@ async def capture_traffic_handler(
     data = await supervisor.execute(conn, job, snapshot, request)
     if data is None:
         return None
+    await require_capture_authority()
     if len(data) < _PCAP_HEADER_LEN:
         raise CategorizedError(
             "traffic capture produced no readable pcap",
