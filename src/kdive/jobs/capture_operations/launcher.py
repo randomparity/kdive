@@ -133,7 +133,7 @@ def _verify_runtime_elf_paths(files: list[tuple[str, Path, str]]) -> None:
         raise RuntimeError("capture bootstrap runtime ELF closure drift")
 
 
-def _verify_manifest(path: Path, interpreter: Path, expected_uid: int) -> dict[str, Any]:
+def _read_manifest(path: Path, expected_uid: int) -> bytes:
     metadata = path.lstat()
     if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
         raise PermissionError("capture bootstrap manifest must be a regular file")
@@ -144,11 +144,18 @@ def _verify_manifest(path: Path, interpreter: Path, expected_uid: int) -> dict[s
     raw = path.read_bytes()
     if len(raw) > 1_048_576:
         raise RuntimeError("capture bootstrap manifest exceeds 1048576 bytes")
+    return raw
+
+
+def _decode_manifest(raw: bytes) -> dict[str, Any]:
     try:
         decoded = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RuntimeError("capture bootstrap manifest contains malformed JSON") from error
-    payload = _validate_manifest_shape(decoded, raw)
+    return _validate_manifest_shape(decoded, raw)
+
+
+def _verify_manifest_header(payload: Mapping[str, Any], interpreter: Path) -> None:
     architecture = _ARCHITECTURES.get(platform.machine().lower())
     if payload.get("schema_version") != 1:
         raise RuntimeError("capture bootstrap manifest has an unsupported schema")
@@ -157,6 +164,9 @@ def _verify_manifest(path: Path, interpreter: Path, expected_uid: int) -> dict[s
     resolved_interpreter = interpreter.resolve(strict=True)
     if payload.get("interpreter") != str(resolved_interpreter):
         raise RuntimeError("capture bootstrap manifest interpreter drift")
+
+
+def _verify_manifest_fingerprints(payload: Mapping[str, Any]) -> None:
     files = payload.get("files")
     assert isinstance(files, list)
     verified_files = _verified_manifest_paths(cast(list[object], files))
@@ -165,6 +175,9 @@ def _verify_manifest(path: Path, interpreter: Path, expected_uid: int) -> dict[s
         actual = _sha256(candidate)
         if actual != expected:
             raise RuntimeError(f"capture bootstrap fingerprint drift: {candidate}")
+
+
+def _verify_manifest_modules(payload: Mapping[str, Any]) -> None:
     modules = payload.get("bootstrap_modules")
     required = {
         "kdive",
@@ -176,6 +189,13 @@ def _verify_manifest(path: Path, interpreter: Path, expected_uid: int) -> dict[s
     assert isinstance(modules, list)
     if not required.issubset(modules):
         raise RuntimeError("capture bootstrap import-trace drift")
+
+
+def _verify_manifest(path: Path, interpreter: Path, expected_uid: int) -> dict[str, Any]:
+    payload = _decode_manifest(_read_manifest(path, expected_uid))
+    _verify_manifest_header(payload, interpreter)
+    _verify_manifest_fingerprints(payload)
+    _verify_manifest_modules(payload)
     return payload
 
 
@@ -462,6 +482,29 @@ async def _complete_process_group_scan(
         raise RuntimeError("complete process-group scan exceeded 5 seconds") from error
 
 
+def _acquire_token_handle(
+    identity: LinuxIdentity,
+    *,
+    host_instance: str,
+    handles: dict[int, _ProcessHandle],
+    observed: Mapping[int, LinuxIdentity],
+) -> int | None:
+    prior_observation = observed.get(identity.pid)
+    if prior_observation is not None and prior_observation != identity:
+        raise _ProcessMembershipChanged(f"launch-token recovery observed reused pid {identity.pid}")
+    prior = handles.get(identity.pid)
+    if prior is not None and prior[0] == identity:
+        return None
+    if prior is not None:
+        raise RuntimeError("launch-token recovery observed a reused process identity")
+    try:
+        pidfd = identity.open_pidfd(current_host_instance=host_instance)
+    except ProcessLookupError:
+        return None
+    handles[identity.pid] = (identity, pidfd)
+    return pidfd
+
+
 async def _token_recovery_handles(
     launch_token: str,
     *,
@@ -481,27 +524,123 @@ async def _token_recovery_handles(
     opened: list[int] = []
     try:
         for identity in matches:
-            prior_observation = observed.get(identity.pid)
-            if prior_observation is not None and prior_observation != identity:
-                raise _ProcessMembershipChanged(
-                    f"launch-token recovery observed reused pid {identity.pid}"
-                )
-            prior = handles.get(identity.pid)
-            if prior is not None and prior[0] == identity:
-                continue
-            if prior is not None:
-                raise RuntimeError("launch-token recovery observed a reused process identity")
-            try:
-                pidfd = identity.open_pidfd(current_host_instance=host_instance)
-            except ProcessLookupError:
-                continue
-            handles[identity.pid] = (identity, pidfd)
-            opened.append(pidfd)
+            pidfd = _acquire_token_handle(
+                identity,
+                host_instance=host_instance,
+                handles=handles,
+                observed=observed,
+            )
+            if pidfd is not None:
+                opened.append(pidfd)
     except BaseException:
         for pidfd in opened:
             os.close(pidfd)
         raise
     return handles
+
+
+def _attest_observed_members(
+    members: Mapping[int, LinuxIdentity] | None,
+    *,
+    process_group: int,
+    host_instance: str,
+    handles: dict[int, _ProcessHandle],
+) -> tuple[dict[int, _ProcessHandle], bool]:
+    if members is None:
+        return handles, False
+    try:
+        return (
+            _attest_process_members(
+                members,
+                process_group=process_group,
+                host_instance=host_instance,
+                existing=handles,
+            ),
+            False,
+        )
+    except _ProcessMembershipChanged:
+        return handles, True
+
+
+def _verify_recovered_members(
+    recovered: Mapping[int, LinuxIdentity], observed: Mapping[int, LinuxIdentity]
+) -> None:
+    for pid, identity in recovered.items():
+        prior_observation = observed.get(pid)
+        if prior_observation is not None and prior_observation != identity:
+            raise _ProcessMembershipChanged(f"process-group recovery observed reused pid {pid}")
+
+
+async def _acquire_recovery_handles(
+    process_group: int,
+    *,
+    launch_token: str,
+    interpreter: Path,
+    host_instance: str,
+    handles: dict[int, _ProcessHandle],
+    observed: Mapping[int, LinuxIdentity],
+    recover_group: bool,
+) -> dict[int, _ProcessHandle]:
+    token_matches: tuple[LinuxIdentity, ...] | None = None
+    if recover_group:
+        recovered_members = await _complete_process_group_scan(
+            process_group,
+            host_instance=host_instance,
+        )
+        token_matches = await _complete_token_scan(
+            launch_token,
+            interpreter=interpreter,
+            host_instance=host_instance,
+        )
+        _verify_recovered_members(recovered_members, observed)
+        handles = _attest_process_members(
+            recovered_members,
+            process_group=process_group,
+            host_instance=host_instance,
+            existing=handles,
+        )
+    return await _token_recovery_handles(
+        launch_token,
+        interpreter=interpreter,
+        host_instance=host_instance,
+        existing=handles,
+        observed=observed,
+        matches=token_matches,
+    )
+
+
+async def _confirm_launch_absence(
+    process_group: int,
+    *,
+    launch_token: str,
+    interpreter: Path,
+    host_instance: str,
+    recover_group: bool,
+) -> None:
+    remaining = await _complete_token_scan(
+        launch_token,
+        interpreter=interpreter,
+        host_instance=host_instance,
+    )
+    remaining_group: Mapping[int, LinuxIdentity] = {}
+    if recover_group:
+        remaining_group = await _complete_process_group_scan(
+            process_group,
+            host_instance=host_instance,
+        )
+    if remaining:
+        raise RuntimeError("complete launch-token scan still finds capture children")
+    if remaining_group:
+        raise RuntimeError("complete process-group scan still finds capture children")
+
+
+async def _wait_failed_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=_SIGNAL_WAIT_SECONDS)
+    except TimeoutError as error:
+        raise RuntimeError("capture launch gate-EOF cleanup exceeded 5 seconds") from error
 
 
 async def _cleanup_failed_launch(
@@ -520,75 +659,39 @@ async def _cleanup_failed_launch(
     recover_group = force_recovery
     used_recovery = leader is None or recover_group
     try:
-        if process_members is not None:
-            try:
-                handles = _attest_process_members(
-                    process_members,
-                    process_group=process.pid,
-                    host_instance=host_instance,
-                    existing=handles,
-                )
-            except _ProcessMembershipChanged:
-                recover_group = True
-                used_recovery = True
-        if recover_group:
-            recovered_members = await _complete_process_group_scan(
-                process.pid,
-                host_instance=host_instance,
-            )
-            token_matches = await _complete_token_scan(
-                launch_token,
-                interpreter=interpreter,
-                host_instance=host_instance,
-            )
-            for pid, identity in recovered_members.items():
-                prior_observation = observed.get(pid)
-                if prior_observation is not None and prior_observation != identity:
-                    raise _ProcessMembershipChanged(
-                        f"process-group recovery observed reused pid {pid}"
-                    )
-            handles = _attest_process_members(
-                recovered_members,
-                process_group=process.pid,
-                host_instance=host_instance,
-                existing=handles,
-            )
+        handles, membership_changed = _attest_observed_members(
+            process_members,
+            process_group=process.pid,
+            host_instance=host_instance,
+            handles=handles,
+        )
+        recover_group = recover_group or membership_changed
+        used_recovery = used_recovery or membership_changed
         if used_recovery:
-            handles = await _token_recovery_handles(
-                launch_token,
+            handles = await _acquire_recovery_handles(
+                process.pid,
+                launch_token=launch_token,
                 interpreter=interpreter,
                 host_instance=host_instance,
-                existing=handles,
+                handles=handles,
                 observed=observed,
-                matches=token_matches if recover_group else None,
+                recover_group=recover_group,
             )
         await _signal_and_wait_exact(handles, process)
         _close_process_handles(handles)
         handles = {}
         if used_recovery:
-            remaining = await _complete_token_scan(
-                launch_token,
+            await _confirm_launch_absence(
+                process.pid,
+                launch_token=launch_token,
                 interpreter=interpreter,
                 host_instance=host_instance,
+                recover_group=recover_group,
             )
-            remaining_group: Mapping[int, LinuxIdentity] = {}
-            if recover_group:
-                remaining_group = await _complete_process_group_scan(
-                    process.pid,
-                    host_instance=host_instance,
-                )
-            if remaining:
-                raise RuntimeError("complete launch-token scan still finds capture children")
-            if remaining_group:
-                raise RuntimeError("complete process-group scan still finds capture children")
     finally:
         if handles:
             _close_process_handles(handles)
-        if process.returncode is None:
-            try:
-                await asyncio.wait_for(process.wait(), timeout=_SIGNAL_WAIT_SECONDS)
-            except TimeoutError as error:
-                raise RuntimeError("capture launch gate-EOF cleanup exceeded 5 seconds") from error
+        await _wait_failed_process(process)
 
 
 def _read_result(attempt_dir: Path) -> CaptureResult:
