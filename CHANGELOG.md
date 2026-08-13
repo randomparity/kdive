@@ -533,6 +533,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make the one-time upgrade snippet correct under bash
 - Amend ADR-0401's falsified residual and fix the cleanup command
 - Retry a network CI step only when it produced no verdict
+- Record the orphaned pcap volume reaper design (#1498)
+- Correct ADR-0555 guard rationale and name the grace floor
+- Rekey the capture reaper design on the job row (#1498)
+- Resolve the capture sweep through the Run and bind its host
+- Supersede capture-reclamation decision (#1944)
+- Clarify capture-reclamation convergence (#1944)
+- Make capture reaping fair under failure (#1944)
+- Reset capture reap state before retries (#1944)
+- Fence capture ownership during reaping (#1944)
+- Cancel capture work when fencing is lost (#1944)
+- Recover capture cancellation acknowledgments (#1944)
+- Specify capture operation quiescence (#1944)
+- Make capture attempts authoritative (#1944)
+- Fence legacy capture reclamation rollout (#1944)
+- Decompose capture cancellation prerequisites
+- Close capture reaper enablement gaps
+- Order legacy capture cutover
 
 ### Fixed
 
