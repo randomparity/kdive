@@ -24,7 +24,7 @@ owning run holds while alive, so a concurrent suite's container is never taken
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 
@@ -81,7 +81,12 @@ def _server_url_without_db(url: str) -> str:
 
 
 @contextmanager
-def _cluster_global_role_lock(postgres_url: str, *, timeout_ms: int = 60_000) -> Iterator[None]:
+def _cluster_global_role_lock(
+    postgres_url: str,
+    *,
+    timeout_ms: int = 60_000,
+    _on_connect: Callable[[int], None] | None = None,
+) -> Iterator[None]:
     """Serialize test operations that can mutate cluster-global runtime roles."""
     if timeout_ms <= 0:
         raise ValueError("cluster-global role lock timeout_ms must be greater than zero")
@@ -89,6 +94,8 @@ def _cluster_global_role_lock(postgres_url: str, *, timeout_ms: int = 60_000) ->
     admin_url = _server_url_without_db(postgres_url)
     conn = psycopg.connect(admin_url, autocommit=True)
     try:
+        if _on_connect is not None:
+            _on_connect(conn.info.backend_pid)
         conn.execute(
             "SELECT set_config('statement_timeout', %s, false)",
             (f"{timeout_ms}ms",),
