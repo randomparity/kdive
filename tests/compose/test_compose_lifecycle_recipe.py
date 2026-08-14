@@ -112,7 +112,7 @@ def test_compose_cutover_uses_supported_lifecycle_and_preserves_volumes() -> Non
         "just compose-stop",
         "worker_incarnations",
         "cutover_publish_backup",
-        "docker compose --profile cutover run --rm migrate",
+        '"${compose[@]}" --profile cutover run --rm migrate',
         "just compose-up",
     )
     positions: list[int] = []
@@ -124,5 +124,5 @@ def test_compose_cutover_uses_supported_lifecycle_and_preserves_volumes() -> Non
     assert "--volumes" not in text
     assert "compose-down" not in text
     assert "KDIVE_IMAGE" in text
-    assert "RAISE EXCEPTION 'Compose protocol cutover still has active worker incarnations:" in text
+    assert "RAISE EXCEPTION 'Compose cutover still has active worker incarnations:" in text
     assert "authority_kind <> 'docker'" in text

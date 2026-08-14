@@ -26,6 +26,8 @@ def _compose_stub_environment(
     restore_list_status: int = 0,
     survivors: str = "",
     psql_body: str = "cat >/dev/null",
+    host_database_identity: str = "kdive\\t16384\\t777",
+    container_database_identity: str = "kdive\\t16384\\t777",
 ) -> tuple[dict[str, str], Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -35,24 +37,40 @@ def _compose_stub_environment(
         f"""
 printf 'docker %s\n' "$*" >>"$CUTOVER_TEST_LOG"
 case "$*" in
+  'image inspect --format '*' target:v3') printf 'sha256:abc123\n' ;;
   'image inspect '*) exit 1 ;;
   'pull '*) exit {pull_status} ;;
   *'config --format json'*)
     cat <<'JSON'
-{{"services":{{"migrate":{{"image":"target:v3"}},"server":{{"image":"target:v3"}},
+    {{"name":"cutover-proof","services":{{"migrate":{{"image":"target:v3"}},"server":{{"image":"target:v3"}},
   "worker":{{"image":"target:v3"}},"reconciler":{{"image":"target:v3"}}}}}}
 JSON
     ;;
-  *'compose --profile cutover run --rm migrate'*) exit {migrate_status} ;;
+  *'run --rm --no-deps --entrypoint python migrate'*)
+    printf '{container_database_identity}\n'
+    ;;
+  *'--profile cutover run --rm migrate'*) exit {migrate_status} ;;
   *'compose '*'ps '*'worker'*) printf '%s' {survivors!r} ;;
 esac
 """,
     )
     _executable(
         bin_dir / "just",
-        'printf \'just %s\\n\' "$*" >>"$CUTOVER_TEST_LOG"\n',
+        """
+printf 'just %s file=%s project=%s\n' "$*" "${COMPOSE_FILE:-}" \
+  "${COMPOSE_PROJECT_NAME:-}" >>"$CUTOVER_TEST_LOG"
+""",
     )
-    _executable(bin_dir / "psql", f"{psql_body}\n")
+    _executable(
+        bin_dir / "psql",
+        f"""
+if [[ "$*" == *pg_control_system* ]]; then
+  printf '{host_database_identity}\\n'
+else
+  {psql_body}
+fi
+""",
+    )
     _executable(
         bin_dir / "pg_dump",
         """
@@ -135,8 +153,31 @@ def test_compose_invalid_dump_is_removed_and_same_backup_path_is_resumable(
     assert "rerun the same command" in result.stderr
 
 
+def test_backup_publish_race_never_overwrites_and_retains_validated_dump(
+    tmp_path: Path,
+) -> None:
+    env, _log = _compose_stub_environment(tmp_path)
+    destination = tmp_path / "backup.dump"
+    pg_restore = tmp_path / "bin" / "pg_restore"
+    _executable(
+        pg_restore,
+        f"printf 'unrelated' >{destination!s}\n",
+    )
+
+    result = _run_compose_cutover(tmp_path, env)
+
+    assert result.returncode != 0
+    assert destination.read_text(encoding="utf-8") == "unrelated"
+    retained = list(tmp_path.glob("backup.dump.partial.*"))
+    assert len(retained) == 1
+    assert retained[0].read_text(encoding="utf-8") == "valid custom dump"
+    assert "refusing to overwrite" in result.stderr
+
+
 def test_compose_database_stall_times_out_before_stop_with_full_contract(tmp_path: Path) -> None:
-    env, log = _compose_stub_environment(tmp_path, psql_body="sleep 10")
+    env, log = _compose_stub_environment(tmp_path, host_database_identity="")
+    psql = tmp_path / "bin" / "psql"
+    _executable(psql, "sleep 10\n")
     env["KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS"] = "1"
 
     result = _run_compose_cutover(tmp_path, env)
@@ -146,6 +187,38 @@ def test_compose_database_stall_times_out_before_stop_with_full_contract(tmp_pat
     assert "one external operation" in result.stderr
     assert "incomplete result is rejected" in result.stderr
     assert "just compose-stop" not in log.read_text(encoding="utf-8")
+
+
+def test_compose_database_identity_mismatch_fails_before_stop(tmp_path: Path) -> None:
+    env, log = _compose_stub_environment(
+        tmp_path,
+        container_database_identity="other\\t999\\t888",
+    )
+
+    result = _run_compose_cutover(tmp_path, env)
+
+    assert result.returncode != 0
+    assert "database identities differ" in result.stderr
+    assert "just compose-stop" not in log.read_text(encoding="utf-8")
+
+
+def test_compose_mutations_consume_only_frozen_project_and_model(tmp_path: Path) -> None:
+    env, log = _compose_stub_environment(tmp_path)
+
+    result = _run_compose_cutover(tmp_path, env)
+
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    mutation = next(
+        index for index, line in enumerate(calls) if line.startswith("just compose-stop")
+    )
+    for line in calls[mutation:]:
+        if line.startswith("docker ") and " compose " in line:
+            assert "approved-compose.json" in line
+            assert "--project-name cutover-proof" in line
+        if line.startswith("just "):
+            assert "approved-compose.json" in line
+            assert "project=cutover-proof" in line
 
 
 def _host_cutover_environment(
@@ -307,6 +380,56 @@ def test_host_pid_reuse_witness_failure_stays_stopped_without_backup(tmp_path: P
     assert not (tmp_path / "backup.dump").exists()
 
 
+def test_host_recovery_command_quotes_hostile_backup_path(tmp_path: Path) -> None:
+    marker = tmp_path / "substitution-ran"
+    hostile = tmp_path / "backup-$(touch substitution-ran).dump"
+    env = _host_cutover_environment(tmp_path, terminate_status=18)
+    worker = _start_fake_host_worker(env)
+    env["CUTOVER_TEST_WORKER_PID"] = str(worker.pid)
+    try:
+        result = subprocess.run(
+            [str(HOST_CUTOVER), str(hostile)],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    finally:
+        if worker.poll() is None:
+            worker.terminate()
+            worker.wait(timeout=5)
+
+    command = next(
+        line.strip() for line in result.stderr.splitlines() if line.startswith("  scripts/")
+    )
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=False)
+    assert not marker.exists()
+
+
+def test_compose_recovery_command_quotes_hostile_backup_path(tmp_path: Path) -> None:
+    marker = tmp_path / "compose-substitution-ran"
+    hostile = tmp_path / "backup-$(touch compose-substitution-ran).dump"
+    env, _log = _compose_stub_environment(tmp_path, restore_list_status=31)
+
+    result = subprocess.run(
+        [str(COMPOSE_CUTOVER), str(hostile), "target:v3"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+
+    command = next(
+        line.strip() for line in result.stderr.splitlines() if line.startswith("  scripts/")
+    )
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=False)
+    assert not marker.exists()
+
+
 def test_cutover_scripts_declare_bounded_database_and_operation_contracts() -> None:
     shared = (ROOT / "scripts/cutover-capture-protocol-lib.sh").read_text(encoding="utf-8")
     for relative in (
@@ -335,3 +458,17 @@ def test_cutover_scripts_declare_bounded_database_and_operation_contracts() -> N
 def test_cutover_scripts_never_expand_database_url_in_rollback(relative: str) -> None:
     text = (ROOT / relative).read_text(encoding="utf-8")
     assert 'dbname=\\"${KDIVE_' not in text
+
+
+def test_cutover_shell_and_embedded_blocks_obey_line_limit() -> None:
+    for relative in (
+        "scripts/cutover-capture-protocol-lib.sh",
+        "scripts/live-stack/cutover-capture-protocol.sh",
+        "scripts/cutover-capture-protocol-compose.sh",
+        "scripts/cutover-capture-protocol-helm.sh",
+    ):
+        lines = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        violations = [
+            (number, len(line)) for number, line in enumerate(lines, 1) if len(line) > 100
+        ]
+        assert violations == [], f"{relative}: {violations}"

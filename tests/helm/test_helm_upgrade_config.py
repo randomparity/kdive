@@ -221,6 +221,28 @@ def test_protocol_cutover_preserves_original_worker_replicas() -> None:
     assert "--reuse-values" not in text
 
 
+def test_helm_cutover_freezes_every_approved_authority_input() -> None:
+    text = (
+        Path(__file__).resolve().parents[2] / "scripts/cutover-capture-protocol-helm.sh"
+    ).read_text()
+    assert "frozen_kubeconfig" in text
+    assert "frozen_chart" in text
+    assert "frozen_values" in text
+    assert '"${work_dir}/authority.json"' in text
+    assert "resolved_image" in text
+    assert "cutover_secret" in text
+    assert "databaseCredentials.migration.secretName=${cutover_secret}" in text
+    assert "--server-side --dry-run=server" in text
+    assert '"list pods"' in text
+    assert '"watch pods"' in text
+    assert text.count("current_identity") >= 5
+    upgrade = text[text.index("helm_args=(\n  upgrade") :]
+    assert '"$frozen_chart"' in upgrade
+    assert '"$frozen_values"' in upgrade
+    assert '"${repo_root}/deploy/helm/kdive"' not in upgrade
+    assert '"$values_file"' not in upgrade
+
+
 def _write_tool(path: Path, body: str) -> None:
     path.write_text(f"#!/usr/bin/env bash\nset -euo pipefail\n{body}", encoding="utf-8")
     path.chmod(0o755)
@@ -240,13 +262,19 @@ def test_helm_cutover_refuses_release_target_dsn_mismatch_before_scale(tmp_path:
 printf 'helm %s\n' "$*" >>"$CUTOVER_TEST_LOG"
 case "$*" in
   'version'*) exit 0 ;;
-  *'status kdive'*) exit 0 ;;
+  *'status kdive'*) printf '%s\n' '{"version":4}' ;;
   *'get values kdive'*)
     printf '%s%s\n' '{"worker":{"replicas":2},"databaseCredentials":{"migration":{"secr' \
       'etName":"db-secret","key":"migration-dsn"}}}'
     ;;
   *'template kdive'*)
-    cat <<'YAML'
+    secret_name=db-secret
+    secret_key=migration-dsn
+    if [[ "$*" == *databaseCredentials.migration.secretName=* ]]; then
+      secret_name=kdive-kdive-cutover-4
+      secret_key=database-url
+    fi
+    cat <<YAML
 apiVersion: batch/v1
 kind: Job
 metadata: {name: kdive-kdive-migrate}
@@ -255,10 +283,10 @@ spec:
     spec:
       containers:
         - name: migrate
-          image: target:v3
+          image: registry.example/kdive@sha256:abc123
           env:
             - name: KDIVE_DATABASE_URL
-              valueFrom: {secretKeyRef: {name: db-secret, key: migration-dsn}}
+              valueFrom: {secretKeyRef: {name: $secret_name, key: $secret_key}}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -267,7 +295,7 @@ spec:
   template:
     spec:
       containers:
-        - {name: worker, image: 'target:v3'}
+        - {name: worker, image: 'registry.example/kdive@sha256:abc123'}
 YAML
     ;;
 esac
@@ -287,7 +315,14 @@ case "$*" in
 esac
 """,
     )
-    _write_tool(bin_dir / "docker", "exit 0\n")
+    _write_tool(
+        bin_dir / "docker",
+        """
+if [[ "$*" == *RepoDigests* ]]; then
+  printf 'registry.example/kdive@sha256:abc123\n'
+fi
+""",
+    )
     _write_tool(bin_dir / "psql", "cat >/dev/null\n")
     _write_tool(bin_dir / "pg_dump", "exit 0\n")
     _write_tool(bin_dir / "pg_restore", "exit 0\n")
@@ -309,7 +344,7 @@ esac
             "kdive-system",
             str(values),
             str(backup),
-            "target:v3",
+            "registry.example/kdive:v3",
         ],
         env={
             **os.environ,

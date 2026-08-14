@@ -39,6 +39,11 @@ never calls `down.sh` and never removes a backend, volume, domain, or artifact. 
 precondition or migration leaves workers stopped and the old schema in force. A failure after the
 migration leaves protocol 3 installed and workers stopped.
 
+Backup publication is atomic and never replaces a destination that appears while the dump is in
+progress. That race leaves the validated sibling temporary dump in place and prints its exact
+path. Recovery commands shell-quote every operator-supplied pathname, so copy the printed command
+verbatim even when the backup path contains shell metacharacters.
+
 Every database, dump, and migration operation has a 600-second whole-operation limit measured by
 GNU `timeout`'s monotonic clock. Connections have an additional 10-second limit and statements a
 300-second server-side limit. Override them, in whole seconds, with

@@ -32,7 +32,7 @@ backup_parent="$(dirname -- "$backup_path")"
   echo "no venv python at ${py}; run 'just setup' first" >&2
   exit 2
 }
-for tool in awk gio mktemp mv nohup pg_dump pg_restore ps setsid sleep timeout; do
+for tool in awk gio ln mktemp nohup pg_dump pg_restore ps setsid sleep timeout; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "${tool} is required before the cutover can stop workers" >&2
     exit 2
@@ -63,22 +63,25 @@ recovery() {
   if [[ -z "$survivors" ]]; then
     echo "host stopped-state proof found no KDIVE daemon process." >&2
   else
-    echo "workers may still be running; graceful stop status=${stop_rc}, forced stop status=${force_rc}." >&2
+    echo "workers may still be running; graceful stop status=${stop_rc}," >&2
+    echo "forced stop status=${force_rc}." >&2
     echo "surviving host daemon PIDs: ${survivors//$'\n'/,}" >&2
   fi
   if [[ "$phase" == post-migration ]]; then
     echo "Protocol 3 may be installed. Do not restart a protocol-2 worker." >&2
     echo "Rollback database exactly with:" >&2
-    printf '%s\n' "  pg_restore --clean --if-exists --dbname=\"\$KDIVE_DATABASE_URL\" \"${backup_path}\"" >&2
+    printf "  pg_restore --clean --if-exists --dbname=\"\$KDIVE_DATABASE_URL\" %q\n" \
+      "$backup_path" >&2
     echo "Then deploy the prior binary before starting its workers." >&2
   elif [[ "$phase" == migration ]]; then
     echo "The named backup is complete; correct the blocker and resume with:" >&2
-    printf '%s\n' "  timeout --kill-after=5 \"\${KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS:-600}s\" \"${py}\" -m kdive migrate" >&2
-    echo "Then run restart_host_processes from a shell that sourced scripts/live-stack/lib.sh and env.sh." >&2
+    printf "  timeout --kill-after=5 \"\${KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS:-600}s\"" >&2
+    printf ' %q -m kdive migrate\n' "$py" >&2
+    echo "Then source the live-stack libraries and run restart_host_processes." >&2
   else
     echo "The old schema remains authoritative; partial backup state was rejected." >&2
     echo "Correct the named blocker and rerun the same command:" >&2
-    echo "  scripts/live-stack/cutover-capture-protocol.sh \"${backup_path}\"" >&2
+    printf '  scripts/live-stack/cutover-capture-protocol.sh %q\n' "$backup_path" >&2
   fi
 }
 
@@ -101,7 +104,8 @@ if [[ -n "$cutover_remaining" ]]; then
 fi
 cutover_remaining="$(daemon_pids)"
 [[ -z "$cutover_remaining" ]] || {
-  echo "host-process cutover blocked by still-running daemon PIDs: ${cutover_remaining//$'\n'/,}" >&2
+  echo "host-process cutover blocked by still-running daemon PIDs:" >&2
+  echo "${cutover_remaining//$'\n'/,}" >&2
   exit 1
 }
 cutover_bounded "database local-termination persistence" \

@@ -2,8 +2,7 @@
 # Shared fail-closed bounds and backup publication for protocol cutover authorities.
 
 CUTOVER_BACKUP_TEMP=""
-# shellcheck disable=SC2034 # sourced cutover authorities inspect this state after failures
-CUTOVER_BACKUP_COMPLETE=0
+CUTOVER_BACKUP_VALIDATED=0
 
 cutover_positive_seconds() {
   local name="$1" value="$2"
@@ -24,7 +23,8 @@ cutover_init_contract() {
   cutover_positive_seconds KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS \
     "$CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS"
   export PGCONNECT_TIMEOUT="$CUTOVER_DB_CONNECT_TIMEOUT_SECONDS"
-  export PGOPTIONS="-c statement_timeout=$((CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS * 1000)) ${PGOPTIONS:-}"
+  local statement_timeout_ms=$((CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS * 1000))
+  export PGOPTIONS="-c statement_timeout=${statement_timeout_ms} ${PGOPTIONS:-}"
 }
 
 cutover_bounded() {
@@ -36,7 +36,8 @@ cutover_bounded() {
     rc=$?
   fi
   if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
-    echo "${label} exceeded ${CUTOVER_OPERATION_TIMEOUT_SECONDS} seconds on timeout's monotonic clock." >&2
+    echo "${label} exceeded ${CUTOVER_OPERATION_TIMEOUT_SECONDS} seconds" >&2
+    echo "on timeout's monotonic clock." >&2
     echo "The bound covers this one external operation; its incomplete result is rejected." >&2
     echo "Recovery: correct the stalled dependency and rerun the command named below." >&2
   fi
@@ -55,14 +56,24 @@ cutover_publish_backup() {
     pg_dump --format=custom --file="$CUTOVER_BACKUP_TEMP" "$database_url"
   cutover_bounded "database backup validation" \
     pg_restore --list "$CUTOVER_BACKUP_TEMP" >/dev/null
-  mv -- "$CUTOVER_BACKUP_TEMP" "$backup_path"
+  CUTOVER_BACKUP_VALIDATED=1
+  if ! ln -- "$CUTOVER_BACKUP_TEMP" "$backup_path"; then
+    echo "backup destination appeared during cutover; refusing to overwrite it" >&2
+    echo "validated backup retained at: ${CUTOVER_BACKUP_TEMP}" >&2
+    echo "Recovery: choose a new absolute BACKUP_PATH and publish this validated file." >&2
+    return 1
+  fi
+  gio trash "$CUTOVER_BACKUP_TEMP" >/dev/null 2>&1 ||
+    echo "published backup sibling retained at: ${CUTOVER_BACKUP_TEMP}" >&2
   CUTOVER_BACKUP_TEMP=""
-  # shellcheck disable=SC2034 # sourced cutover authorities inspect this state after failures
-  CUTOVER_BACKUP_COMPLETE=1
 }
 
 cutover_cleanup_temporary_backup() {
   [[ -n "$CUTOVER_BACKUP_TEMP" && -e "$CUTOVER_BACKUP_TEMP" ]] || return 0
+  if [[ "$CUTOVER_BACKUP_VALIDATED" -eq 1 ]]; then
+    echo "validated backup retained at: ${CUTOVER_BACKUP_TEMP}" >&2
+    return 0
+  fi
   gio trash "$CUTOVER_BACKUP_TEMP" >/dev/null 2>&1 || {
     echo "temporary backup remains for inspection: ${CUTOVER_BACKUP_TEMP}" >&2
     return 1

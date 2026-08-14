@@ -138,8 +138,15 @@ use `compose-down`, `--volumes`, or raw worker lifecycle commands, so the named 
 build, and install volumes remain attached to the Compose project. A fresh database with no legacy
 workers is accepted and receives protocol 3 directly.
 
-Before stopping anything, it resolves the target image, renders the exact Compose model, and
-queries the migration database. Each Docker, database, dump, and migration operation has a
+Before stopping anything, it resolves the target image to a local immutable image ID and freezes
+the exact rendered Compose model, project name, and resolved operator environment in a restricted
+mode-0700 cutover directory beside the backup. Every later stop, migration, and start consumes
+only that frozen project and model; the lifecycle supervisor's new per-start nonce remains the
+only runtime substitution. The wrapper queries the database through both the host DSN and the
+frozen migration service and compares database name, database OID, and server system identifier.
+It repeats that positive same-database witness after stop and before backup and migration.
+
+Each Docker, database, dump, and migration operation has a
 600-second whole-operation limit measured by GNU `timeout`'s monotonic clock. Database connects
 also have a 10-second limit and each statement a 300-second server-side limit. Override these
 whole-second values with `KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS`,
@@ -152,6 +159,10 @@ A precondition or migration failure leaves workers stopped and the old schema au
 post-migration failure leaves protocol 3 installed and workers stopped. Never restart a protocol-2
 image against that database. The only post-migration rollback is the exact
 `pg_restore --clean --if-exists` command printed by the script, followed by the prior image.
+Backup publication is atomic and refuses replacement. If the destination appears while the dump
+is running, the validated sibling temporary dump is retained and its exact recovery path is
+printed. The restricted input snapshot is recoverably trashed on success when the filesystem
+supports it; otherwise its retained path is printed for operator cleanup.
 Migration 0112 records operation quiescence only; #1952 still gates publication closure and
 combined historical-capture coverage.
 

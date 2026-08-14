@@ -187,10 +187,20 @@ replica count. The migration hook runs before workload rollout on both external 
 upgrade paths. Migration 0112 holds the global capture-protocol lock and names every blocking
 incarnation or capture job before it installs protocol 3.
 
-The wrapper snapshots `kubectl config current-context` once and passes it to every later Helm and
-Kubernetes operation. Before scaling, it proves the namespace, release, StatefulSet, required
-verbs, exact target render and image, database connectivity, and that both the installed and
-target migration Secret DSNs equal `KDIVE_MIGRATION_DATABASE_URL`; DSNs are never printed. Each
+The wrapper creates a restricted mode-0700 cutover directory beside the backup and freezes a
+flattened kubeconfig, its context and cluster identity, the chart tree, caller values, installed
+release revision and namespace/StatefulSet UIDs, exact target render, registry image digest, and
+migration credential. Every later Helm and Kubernetes operation uses only the frozen kubeconfig,
+context, chart, and values. An immutable cutover-owned Secret supplies the frozen credential to
+the migration hook through completion; it is deleted only after the successor release, workload,
+and Secret identities are proven. A failed run retains the restricted snapshot and Secret and
+prints their exact identities without printing a DSN.
+
+Before scaling, the wrapper proves list/watch Pod access and the exact needed Secret and
+StatefulSet scale verbs, performs a server-side dry run of the frozen target, and verifies database
+connectivity. It revalidates cluster, namespace, StatefulSet, and release identities at every
+mutation boundary. Both installed and target migration Secret DSNs must equal
+`KDIVE_MIGRATION_DATABASE_URL`; DSNs are never printed. Each
 Helm, Kubernetes, image, database, dump, and migration operation has a 600-second limit measured
 by GNU `timeout`'s monotonic clock. Connects additionally have a 10-second limit and statements a
 300-second server-side limit. The three whole-second overrides are
@@ -204,6 +214,8 @@ protocol 3 installed and zero workers. Never start a protocol-2 image after migr
 post-migration rollback is the script's exact `pg_restore --clean --if-exists` command followed by
 the prior chart and image. The cutoff is operation-quiescent evidence only: #1952 still gates
 publication closure and combined historical-capture coverage.
+Backup publication is atomic and refuses replacement. If its destination appears during the dump,
+the validated sibling temporary file is retained and the wrapper prints a safe recovery path.
 
 The remaining staged procedure applies to other worker-fence releases.
 
