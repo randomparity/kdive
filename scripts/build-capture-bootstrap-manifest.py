@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import platform
@@ -15,6 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from kdive.jobs.capture_operations.bootstrap_attestation import fingerprint
 from kdive.jobs.capture_operations.bootstrap_elf import runtime_elf_closure
 
 SCHEMA_VERSION = 1
@@ -40,14 +40,6 @@ def _run(command: list[str], *, source_root: Path | None = None) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"{' '.join(command)} failed: {result.stderr.strip()}")
     return result.stdout
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _bootstrap_trace(interpreter: Path, source_root: Path) -> tuple[list[str], list[Path]]:
@@ -93,7 +85,11 @@ def _manifest(interpreter_arg: str, source_root: Path) -> dict[str, Any]:
         kinds[path] = "elf-interpreter"
     kinds[interpreter] = "python-interpreter"
     files = [
-        {"kind": kinds[path], "path": str(path), "sha256": _sha256(path)}
+        {
+            "kind": kinds[path],
+            "path": str(path),
+            "sha256": fingerprint(path, expected_uid=os.geteuid()),
+        }
         for path in sorted(kinds, key=str)
     ]
     return {

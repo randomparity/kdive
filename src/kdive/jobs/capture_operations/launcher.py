@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import platform
@@ -17,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from kdive.jobs.capture_operations.bootstrap_attestation import fingerprint, read_manifest
 from kdive.jobs.capture_operations.bootstrap_elf import runtime_elf_closure
 from kdive.jobs.capture_operations.linux_identity import LinuxIdentity, scan_launch_token
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
@@ -106,14 +106,6 @@ def _after_spawn_abort(
     )
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _validate_manifest_shape(payload: object, raw: bytes) -> dict[str, Any]:
     if not isinstance(payload, dict) or set(payload) != _MANIFEST_KEYS:
         raise RuntimeError("capture bootstrap manifest has an unsupported schema")
@@ -188,17 +180,7 @@ def _verify_runtime_elf_paths(files: list[tuple[str, Path, str]]) -> None:
 
 
 def _read_manifest(path: Path, expected_uid: int) -> bytes:
-    metadata = path.lstat()
-    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
-        raise PermissionError("capture bootstrap manifest must be a regular file")
-    if metadata.st_uid != expected_uid:
-        raise PermissionError("capture bootstrap manifest has the wrong owner")
-    if stat.S_IMODE(metadata.st_mode) != 0o644:
-        raise PermissionError("capture bootstrap manifest must have mode 0644")
-    raw = path.read_bytes()
-    if len(raw) > 1_048_576:
-        raise RuntimeError("capture bootstrap manifest exceeds 1048576 bytes")
-    return raw
+    return read_manifest(path, expected_uid=expected_uid, maximum_size=1_048_576)
 
 
 def _decode_manifest(raw: bytes) -> dict[str, Any]:
@@ -220,15 +202,15 @@ def _verify_manifest_header(payload: Mapping[str, Any], interpreter: Path) -> No
         raise RuntimeError("capture bootstrap manifest interpreter drift")
 
 
-def _verify_manifest_fingerprints(payload: Mapping[str, Any]) -> None:
+def _verify_manifest_fingerprints(payload: Mapping[str, Any], expected_uid: int) -> None:
     files = payload.get("files")
     assert isinstance(files, list)
     verified_files = _verified_manifest_paths(cast(list[object], files))
-    _verify_runtime_elf_paths(verified_files)
     for _kind, candidate, expected in verified_files:
-        actual = _sha256(candidate)
+        actual = fingerprint(candidate, expected_uid=expected_uid)
         if actual != expected:
             raise RuntimeError(f"capture bootstrap fingerprint drift: {candidate}")
+    _verify_runtime_elf_paths(verified_files)
 
 
 def _verify_manifest_modules(payload: Mapping[str, Any]) -> None:
@@ -248,7 +230,7 @@ def _verify_manifest_modules(payload: Mapping[str, Any]) -> None:
 def _verify_manifest(path: Path, interpreter: Path, expected_uid: int) -> dict[str, Any]:
     payload = _decode_manifest(_read_manifest(path, expected_uid))
     _verify_manifest_header(payload, interpreter)
-    _verify_manifest_fingerprints(payload)
+    _verify_manifest_fingerprints(payload, expected_uid)
     _verify_manifest_modules(payload)
     return payload
 

@@ -114,8 +114,12 @@ provider boundary.
 
 The pre-filter interpreter/loader interval is an explicit trusted host prerequisite rather than a
 claimed kernel boundary. Deployment records a SHA-256 manifest of the exact Python executable and
-the executable ELF dependency closure resolved without environment-controlled search paths. Each
-launch recomputes that fingerprint and fails before spawn on drift. `kdive/__init__.py` is inert;
+the executable ELF dependency closure resolved without environment-controlled search paths. Every
+fingerprinted file and replace-capable ancestor through the filesystem root must be root/image
+owned and not group/world writable; sticky ancestors are accepted only when their child entry has
+an approved owner. Metadata and content are read through no-follow descriptors and the path is
+revalidated against the opened device and inode. Each launch recomputes that fingerprint and fails
+before spawn on drift. `kdive/__init__.py` is inert;
 its public version attribute is lazy, so resolving `kdive.capture_bootstrap` executes no version,
 metadata, subprocess, or provider import. An isolated import-trace test pins the allowed bootstrap
 module set. The gate fd is non-inheritable except for the exact spawned bootstrap and every other

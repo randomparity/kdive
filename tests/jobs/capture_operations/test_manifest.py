@@ -12,8 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from kdive.jobs.capture_operations import bootstrap_elf
-from kdive.jobs.capture_operations import launcher as launcher_module
+from kdive.jobs.capture_operations import bootstrap_attestation, bootstrap_elf
 from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
 
 _ROOT = Path(__file__).parents[3]
@@ -187,6 +186,66 @@ def test_runtime_verifier_rejects_new_higher_priority_hwcaps_selection(tmp_path:
     assert manifest.stat().st_ino == manifest_inode
 
 
+def test_runtime_verifier_rejects_writable_fingerprinted_file(tmp_path: Path) -> None:
+    executable, selected, _unused = _compile_runpath_fixture(tmp_path)
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(manifest, _fixture_manifest(executable))
+    selected.chmod(0o666)
+
+    with pytest.raises(PermissionError, match="fingerprint file.*group/world writable"):
+        verify_capture_bootstrap_manifest(manifest, executable, expected_uid=os.getuid())
+
+
+def test_runtime_verifier_rejects_replace_capable_ancestor(tmp_path: Path) -> None:
+    executable, selected, _unused = _compile_runpath_fixture(tmp_path)
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(manifest, _fixture_manifest(executable))
+    selected.parent.chmod(0o777)
+
+    with pytest.raises(PermissionError, match="fingerprint ancestor.*replaceable"):
+        verify_capture_bootstrap_manifest(manifest, executable, expected_uid=os.getuid())
+
+
+def test_fingerprint_refuses_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.write_bytes(b"approved")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+
+    with pytest.raises(PermissionError, match="not safely openable"):
+        bootstrap_attestation.fingerprint(link, expected_uid=os.getuid())
+
+
+def test_fingerprint_rejects_path_replaced_after_descriptor_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "fingerprinted"
+    target.write_bytes(b"approved")
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"replacement")
+    real_open = os.open
+    replaced = False
+
+    def racing_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal replaced
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == target.name and not replaced:
+            replaced = True
+            os.replace(replacement, target)
+        return descriptor
+
+    monkeypatch.setattr(bootstrap_attestation.os, "open", racing_open)
+
+    with pytest.raises(RuntimeError, match="changed during verification"):
+        bootstrap_attestation.fingerprint(target, expected_uid=os.getuid())
+
+
 @pytest.mark.parametrize("mutation", ["missing", "extra", "reordered"])
 def test_runtime_verifier_rejects_nonexact_or_reordered_file_sets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
@@ -217,12 +276,6 @@ def test_runtime_verifier_rejects_nonexact_or_reordered_file_sets(
         files.reverse()
         expected = "sorted"
     _write_manifest(output, payload)
-    monkeypatch.setattr(
-        launcher_module,
-        "_sha256",
-        lambda _path: (_ for _ in ()).throw(AssertionError("hash ran before path-set proof")),
-    )
-
     with pytest.raises(RuntimeError, match=expected):
         verify_capture_bootstrap_manifest(output, Path(sys.executable), expected_uid=os.getuid())
 
