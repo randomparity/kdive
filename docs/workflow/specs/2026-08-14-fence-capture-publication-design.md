@@ -66,6 +66,22 @@ upgrade, export/import, or compatibility mode.
 
 ## Runtime flow
 
+### Object-store admission
+
+Worker startup extends the existing object-store versioning validation with a live conditional-
+create probe. Two concurrent zero-byte `If-None-Match: *` requests target one random internal key;
+exactly one must succeed and one must return the store's precondition-failed response. Startup then
+HEADs the winner, deletes its immutable version, and verifies cleanup. Any other outcome, store
+fault, or cleanup fault keeps the worker unready and names the configured endpoint plus the action
+to provide a store with atomic conditional create under versioning and restart. Probe keys carry no
+tenant data or credentials. This admission runs once per worker startup before recovery/readiness,
+not once per capture.
+
+The integration suite runs the probe against the supported live MinIO fixture and exercises the
+same overlap through capture-versus-tombstone arbitration. A fake store covers malformed double-
+success, double-failure, missing-version, and cleanup-failure responses. Production logic does not
+infer this capability from an API name or bucket-versioning status alone.
+
 `CaptureOperationSupervisor.execute` accepts an injected async publisher. It retains the
 session-level job fence and authority monitor through these ordered steps:
 
@@ -161,7 +177,7 @@ crosses the worker/PostgreSQL/object-store boundary.
 - **Object store:** is an external dependency that may delay, fail, or return conflicting
   metadata. The operation-unique server-derived key, sensitivity metadata, size bounds, etag
   journal, atomic conditional create, operation identity metadata, row-first recovery, conditional
-  version deletion, and retained fence tombstone bound its effects.
+  version deletion, retained fence tombstone, and live startup admission probe bound its effects.
 - **PostgreSQL:** is the authority for job ownership, current attempt, artifact metadata, and
   publication closure. Advisory fences and transactions serialize decisions; object I/O remains
   outside transactions.
@@ -192,4 +208,5 @@ tombstone makes it fail without creating capture bytes. Tests
 deliberately break transition validation and compensation to show the new
 assertions fail before restoring the implementation. `just ci` is the final local gate on both
 declared target architectures through architecture-independent Python and PostgreSQL behavior;
-no live provider or MCP-contract change is required.
+the live MinIO integration fixture additionally proves atomic conditional-create admission. No
+live provider or MCP-contract change is required.

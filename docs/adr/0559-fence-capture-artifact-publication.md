@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Proposed
 
 ## Context
 
@@ -49,6 +49,16 @@ without a store-side request-completion receipt, absence would reopen the key to
 survived its publisher. Artifact rows continue to expose only their opaque id; the key and
 tombstone shape are not an MCP contract.
 
+Atomic conditional creation is an object-store admission requirement, not an assumption inherited
+from the label "S3-compatible." Before a worker becomes ready, the object-store boundary writes
+two concurrent conditional creates to one unique probe key in the configured versioned bucket and
+requires exactly one success plus one precondition failure. It HEADs the winner, deletes its exact
+version, and verifies probe cleanup. An unsupported result, unavailable store, or cleanup failure
+keeps the worker unready with a named remediation to configure a conforming store and retry. The
+same live MinIO/S3 integration proof exercises overlapping capture/tombstone creates and verifies
+that `discarded` is unreachable until any capture version is removed and the retained tombstone
+wins.
+
 Session-loss handling runs inside the fence owner: the authority monitor cancels the publisher
 before any further database transition and starts draining any in-process PUT. The released job
 fence alone does not authorize another actor to prove absence. Under a fresh connection the owner,
@@ -91,6 +101,9 @@ Attempt-linked reclamation requires the product state `(exited, published|discar
 - The MCP contract and artifact contents do not change.
 - Existing installations cannot apply migration 0113. This is an intentional pre-release reset:
   export/import, data preservation, and protocol-3 object cleanup are unsupported.
+- Worker readiness performs two zero-byte conditional writes plus HEAD and version cleanup against
+  a unique internal probe key. A degraded or nonconforming store prevents claims rather than
+  weakening publication fencing.
 
 ## Considered & rejected
 
