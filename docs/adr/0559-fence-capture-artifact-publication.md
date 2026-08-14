@@ -105,6 +105,15 @@ Attempt-linked reclamation requires the product state `(exited, published|discar
   a unique internal probe key. A degraded or nonconforming store prevents claims rather than
   weakening publication fencing.
 
+Verification injects failure or session loss after key journaling, after successful and ambiguous
+PUT outcomes before identity persistence, after identity persistence before the artifact
+transaction, during the artifact/audit/published transaction, after that commit before job
+acknowledgment, during exact-version deletion, and during tombstone creation. Replacement recovery
+must handle every durable boundary. Each test proves acknowledgment, retry, and reaping remain
+barred before `(exited, published|discarded)`; `published` has exactly one truthful artifact row
+and capture object; and `discarded` has no artifact row or capture version and retains the winning
+tombstone. The live conditional-create race and bare `just ci` complete the gate.
+
 ## Considered & rejected
 
 - **Keep cancellation compensation only in the handler.** An in-memory task cannot survive worker
