@@ -171,6 +171,29 @@ def test_real_child_is_gated_and_has_exact_process_contract(
     asyncio.run(_run())
 
 
+def test_real_launch_uses_libc_when_python_omits_pidfd_wrappers(
+    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delattr(linux_identity_module.linux_pidfd.os, "pidfd_open", raising=False)
+    monkeypatch.delattr(
+        linux_identity_module.linux_pidfd.signal, "pidfd_send_signal", raising=False
+    )
+    request = _request()
+    operation = _operation(request)
+    launcher = GatedCaptureLauncher(
+        runtime_root=tmp_path / "runtime",
+        manifest_path=manifest,
+        interpreter=Path(sys.executable),
+        expected_manifest_uid=os.getuid(),
+    )
+
+    async def _run() -> None:
+        child = await launcher.launch(request, operation)
+        await child.cancel()
+
+    asyncio.run(_run())
+
+
 def test_provider_configuration_uses_post_filter_spool_seam(tmp_path: Path, manifest: Path) -> None:
     request = _request()
     launcher = GatedCaptureLauncher(
@@ -520,7 +543,7 @@ def test_stale_post_spawn_numeric_identity_never_signals_unrelated_group(
         [sys.executable, "-c", "import time; time.sleep(30)"],
         start_new_session=True,
     )
-    unrelated_pidfd = os.pidfd_open(unrelated.pid)
+    unrelated_pidfd = linux_identity_module.linux_pidfd.open_pidfd(unrelated.pid)
     numeric_signals: list[tuple[str, int, int]] = []
     scan_calls: list[str] = []
 
@@ -560,7 +583,7 @@ def test_stale_post_spawn_numeric_identity_never_signals_unrelated_group(
         assert numeric_signals == []
         assert unrelated.poll() is None
     finally:
-        signal.pidfd_send_signal(unrelated_pidfd, signal.SIGKILL)
+        linux_identity_module.linux_pidfd.send_signal(unrelated_pidfd, signal.SIGKILL)
         os.close(unrelated_pidfd)
         unrelated.wait(timeout=5)
 

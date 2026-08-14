@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import errno
 import os
-import signal
 from dataclasses import dataclass
 from pathlib import Path
+
+from kdive.jobs.capture_operations import linux_pidfd
 
 _PROC_ROOT = Path("/proc")
 
@@ -88,7 +89,7 @@ class LinuxIdentity:
         """Open a pidfd and recheck boot/start ticks to close the observation race."""
         self._require_host(current_host_instance)
         try:
-            pidfd = os.pidfd_open(self.pid, 0)
+            pidfd = linux_pidfd.open_pidfd(self.pid, 0)
         except OSError as error:
             if error.errno == errno.ESRCH:
                 raise ProcessLookupError(errno.ESRCH, f"process {self.pid} is absent") from error
@@ -103,7 +104,7 @@ class LinuxIdentity:
 
     def signal(self, pidfd: int, sig: int) -> None:
         """Signal this exact process through its already-open pidfd."""
-        signal.pidfd_send_signal(pidfd, int(sig), None, 0)
+        linux_pidfd.send_signal(pidfd, int(sig), None, 0)
 
     def is_absent(self, *, current_host_instance: str) -> bool:
         """Return true for same-host absence; refuse to infer across host boundaries."""

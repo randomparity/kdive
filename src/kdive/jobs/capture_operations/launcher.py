@@ -19,6 +19,7 @@ from typing import Any, Literal, cast
 from kdive.jobs.capture_operations.bootstrap_attestation import fingerprint, read_manifest
 from kdive.jobs.capture_operations.bootstrap_elf import runtime_elf_closure
 from kdive.jobs.capture_operations.linux_identity import LinuxIdentity, scan_launch_token
+from kdive.jobs.capture_operations.linux_pidfd import require_pidfd_support
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
 from kdive.jobs.capture_operations.repository import CaptureOperation
 
@@ -965,6 +966,7 @@ class GatedCaptureLauncher:
     def _prepare_launch(
         self, request: CaptureRequest, operation: CaptureOperation
     ) -> _PreparedLaunch:
+        require_pidfd_support()
         self._validate_request(operation, request)
         verify_capture_bootstrap_manifest(
             self._manifest_path,

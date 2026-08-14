@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import errno
+import os
 import signal
 from pathlib import Path
 
 import pytest
 
-from kdive.jobs.capture_operations import linux_identity
+from kdive.jobs.capture_operations import linux_identity, linux_pidfd
 from kdive.jobs.capture_operations.linux_identity import (
     HostIdentityMismatch,
     LinuxIdentity,
@@ -74,11 +75,11 @@ def test_pidfd_open_rechecks_identity_and_signal_uses_pidfd(
 ) -> None:
     _proc_tree(tmp_path, 123)
     monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
-    monkeypatch.setattr(linux_identity.os, "pidfd_open", lambda pid, flags=0: 17)
+    monkeypatch.setattr(linux_pidfd, "open_pidfd", lambda pid, flags=0: 17)
     sent: list[tuple[int, int]] = []
     monkeypatch.setattr(
-        linux_identity.signal,
-        "pidfd_send_signal",
+        linux_pidfd,
+        "send_signal",
         lambda fd, sig, _info=None, _flags=0: sent.append((fd, sig)),
     )
     identity = LinuxIdentity.read(123, host_instance="host-a")
@@ -91,8 +92,8 @@ def test_pidfd_open_rechecks_identity_and_signal_uses_pidfd(
 def test_pidfd_open_surfaces_disappearance_as_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     identity = LinuxIdentity(host_instance="host-a", boot_id="boot-a", pid=123, start_ticks=42)
     monkeypatch.setattr(
-        linux_identity.os,
-        "pidfd_open",
+        linux_pidfd,
+        "open_pidfd",
         lambda _pid, _flags=0: (_ for _ in ()).throw(OSError(errno.ESRCH, "gone")),
     )
 
@@ -109,11 +110,39 @@ def test_pidfd_open_refuses_cross_host_identity(monkeypatch: pytest.MonkeyPatch)
         opened = True
         return 17
 
-    monkeypatch.setattr(linux_identity.os, "pidfd_open", _pidfd_open)
+    monkeypatch.setattr(linux_pidfd, "open_pidfd", _pidfd_open)
 
     with pytest.raises(HostIdentityMismatch, match="host-a.*host-b"):
         identity.open_pidfd(current_host_instance="host-b")
     assert not opened
+
+
+def test_fallback_pidfd_is_closed_when_identity_recheck_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _proc_tree(tmp_path, 123, start_ticks=99)
+    monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
+    pidfd = os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC)
+
+    class _Open:
+        argtypes: list[object] = []
+        restype: object = None
+
+        def __call__(self, _pid: int, _flags: int) -> int:
+            return pidfd
+
+    class _Libc:
+        pidfd_open = _Open()
+
+    monkeypatch.delattr(linux_pidfd.os, "pidfd_open", raising=False)
+    monkeypatch.setattr(linux_pidfd, "_LIBC", _Libc())
+    identity = LinuxIdentity(host_instance="host-a", boot_id="boot-a", pid=123, start_ticks=98)
+
+    with pytest.raises(ProcessLookupError, match="identity changed"):
+        identity.open_pidfd(current_host_instance="host-a")
+    with pytest.raises(OSError) as raised:
+        os.fstat(pidfd)
+    assert raised.value.errno == errno.EBADF
 
 
 def test_launch_token_scan_finds_only_exact_executable_and_token(
