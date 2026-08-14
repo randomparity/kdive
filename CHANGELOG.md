@@ -116,6 +116,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route on the kind, on both insert and recycle
 - Declare KDIVE_WORKER_ACCEPTED_LANES
 - Run one claim loop per accepted dispatch lane
+- Persist supervised capture operations
+- Add gated capture child boundary
+- Prove capture operation quiescence
+- Supervise capture operations
+- Enforce capture protocol cutover
 
 ### Changed
 
@@ -180,6 +185,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Point manifests at lifecycle modules
 - Stop mirroring the re-point mapping in the test
 - Name both doc readers in the settable-symbol guard
+- Simplify capture launch cleanup
+- Remove unused capture parameters
 
 ### Documentation
 
@@ -553,6 +560,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Design the host-dump live-holder bound
 - Accept the host-dump live-holder bound
 - Record the host-dump transition race
+- Design supervised capture operations
+- Close capture supervision recovery gaps
+- Order capture quiescence evidence
+- Make pre-registration recovery observable
+- Require live capture ordering proofs
+- Make capture supervision contracts executable
+- Bound capture authority loss recovery
+- Fence capture recovery authority
+- Make legacy capture evidence exact
+- Make capture cutover unconditional
+- Require positive legacy worker termination
+- Fence offline capture protocol activation
+- Finalize residual legacy capture jobs
+- Use the existing canceled job contract
+- Wrap offline cutover contract
+- Plan supervised capture implementation
+- Bind cutover execution paths
+- Separate deployment authorities
+- Bind local termination proof
+- Narrow capture cutoff ownership
+- Specify thread-safe containment
+- Contain interpreter bootstrap
+- Authorize one interpreter exec
+- Verify native POWER launcher
+- Minimize capture bootstrap
+- Attest trusted bootstrap
+- Provision bootstrap manifest
+- Separate manifest installation
+- Clarify bundled install wait behavior
+- Prevent bundled install deadlock
 
 ### Fixed
 
@@ -944,6 +981,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compose down passes all profiles and surfaces non-empty stderr (#1916)
 - Resolve active capture jobs through runs
 - Make CLI colour regression deterministic
+- Harden capture recovery evidence
+- Close capture bootstrap gaps
+- Attest runtime elf closure
+- Detect bootstrap closure drift
+- Preserve exact launch cleanup
+- Bind cleanup member identity
+- Close recovery pidfds
+- Harden capture quiescence
+- Prioritize capture authority loss
+- Clean canceled capture puts
+- Compensate capture registration
+- Finish capture reconciliation
+- Harden protocol cutover
+- Freeze cutover inputs
+- Close cutover safety races
+- Complete Helm cutover checks
+- Acknowledge capture launch aborts
+- Enforce immutable bootstrap paths
+- Keep cutover DSNs out of argv
+- Scrub cutover credential environment
+- Add portable pidfd boundary
+- Preserve migration role delimiter
+- Revoke install scaler authority
 
 ### Build
 
