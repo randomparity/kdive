@@ -33,6 +33,7 @@ from kdive.jobs.capture_operations.repository import (
     commit_published,
     record_capture_version,
     record_cleanup_capture_version,
+    refresh_publication_operation,
 )
 from kdive.jobs.payloads import CaptureTrafficPayload, load_payload
 from kdive.security.audit import AuditEvent
@@ -270,7 +271,8 @@ class CapturePublicationCoordinator:
         operation: CaptureOperation,
     ) -> CaptureOperation:
         """Close an interrupted publication while the exact attempt is still authoritative."""
-        return await recover_publication(conn, self._store, self._credential, operation)
+        current = await refresh_publication_operation(conn, self._credential, operation.id)
+        return await recover_publication(conn, self._store, self._credential, current)
 
     async def publish(
         self,

@@ -465,6 +465,22 @@ async def record_cleanup_capture_version(
     )
 
 
+async def refresh_publication_operation(
+    conn: AsyncConnection,
+    credential: SecretStr,
+    operation_id: UUID,
+) -> CaptureOperation:
+    """Return the current exited operation to its owner or authorized replacement."""
+    return await _operation(
+        conn,
+        "SELECT * FROM public.refresh_capture_publication_operation("
+        "sha256(convert_to(%s, 'UTF8')), %s)",
+        (credential.get_secret_value(), operation_id),
+        refused="capture publication refresh was refused",
+        error=PermissionError,
+    )
+
+
 async def commit_discarded(
     conn: AsyncConnection,
     credential: SecretStr,

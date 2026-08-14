@@ -418,6 +418,27 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION public.refresh_capture_publication_operation(
+    p_credential_hash bytea,
+    p_operation_id uuid
+) RETURNS SETOF public.capture_operations
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_operation public.capture_operations%ROWTYPE;
+BEGIN
+    SELECT operation.* INTO v_operation
+    FROM public.capture_publication_operation(
+        p_credential_hash, p_operation_id, true, true
+    ) AS operation;
+    IF NOT FOUND OR v_operation.state <> 'exited' THEN
+        RETURN;
+    END IF;
+    RETURN NEXT v_operation;
+END
+$$;
+
 CREATE FUNCTION public.begin_capture_publication(
     p_credential_hash bytea,
     p_operation_id uuid,
@@ -756,6 +777,7 @@ FROM kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness;
 REVOKE ALL ON FUNCTION
     public.claim_capture_publication_recovery(bytea, uuid),
     public.capture_publication_operation(bytea, uuid, boolean, boolean),
+    public.refresh_capture_publication_operation(bytea, uuid),
     public.begin_capture_publication(bytea, uuid, text),
     public.begin_cancel_capture_publication(bytea, uuid, text),
     public.record_capture_publication_version(bytea, uuid, text, text),
@@ -767,6 +789,7 @@ FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witne
 
 GRANT EXECUTE ON FUNCTION
     public.claim_capture_publication_recovery(bytea, uuid),
+    public.refresh_capture_publication_operation(bytea, uuid),
     public.begin_capture_publication(bytea, uuid, text),
     public.begin_cancel_capture_publication(bytea, uuid, text),
     public.record_capture_publication_version(bytea, uuid, text, text),

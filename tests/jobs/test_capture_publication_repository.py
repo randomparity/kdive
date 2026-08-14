@@ -30,6 +30,7 @@ from kdive.jobs.capture_operations.repository import (
     record_cleanup_capture_version,
     record_identity,
     record_spool_disposed,
+    refresh_publication_operation,
 )
 from kdive.security.audit import AuditEvent
 from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
@@ -497,6 +498,51 @@ def test_authorized_replacement_can_only_advance_cancellation(migrated_url: str)
             assert (
                 await record_spool_disposed(replacement, replacement_credential, exited.id)
             ).spool_disposed_at is not None
+        finally:
+            await replacement.close()
+            await owner.close()
+            await admin.close()
+
+    asyncio.run(_run())
+
+
+def test_publication_refresh_returns_current_row_to_owner_and_replacement(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        admin = await connect(migrated_url)
+        owner = await _as_worker(migrated_url)
+        replacement = await _as_worker(migrated_url)
+        owner_credential = SecretStr("publication-refresh-owner")
+        replacement_credential = SecretStr("publication-refresh-replacement")
+        owner_id = "local:publication-refresh-owner"
+        replacement_id = "local:publication-refresh-replacement"
+        key = f"local/runs/{uuid4()}/pcap"
+        try:
+            await _register(admin, owner_id, owner_credential)
+            await _register(admin, replacement_id, replacement_credential)
+            exited, run_id = await _exited_operation(admin, owner, owner_id, owner_credential)
+            await begin_publication(owner, owner_credential, exited.id, key)
+            await record_capture_version(owner, owner_credential, exited.id, "version", "etag-a")
+            published = await commit_published(
+                owner, owner_credential, exited.id, _artifact(run_id, key), _audit(run_id)
+            )
+
+            assert (
+                await refresh_publication_operation(owner, owner_credential, exited.id)
+            ).publication_state == "published"
+            await admin.execute(
+                "UPDATE worker_incarnations SET state = 'terminated', outcome = 'killed', "
+                "terminated_at = clock_timestamp() WHERE incarnation = %s",
+                (owner_id,),
+            )
+            assert (
+                await refresh_publication_operation(replacement, replacement_credential, exited.id)
+            ) == published
+            with pytest.raises(PermissionError, match="capture publication refresh was refused"):
+                await refresh_publication_operation(
+                    replacement, SecretStr("wrong-credential"), exited.id
+                )
         finally:
             await replacement.close()
             await owner.close()

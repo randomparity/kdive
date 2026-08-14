@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
@@ -283,6 +283,33 @@ def test_success_uses_operation_identity_metadata_and_adopts_sequential_replay(
                     (subject.job.payload["run_id"],),
                 )
             ).fetchone() == (1,)
+        finally:
+            await _close(subject)
+
+    asyncio.run(_run())
+
+
+def test_coordinator_refreshes_durable_state_before_recovery(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kdive.jobs.capture_operations import publication as publication_module
+
+    async def _run() -> None:
+        subject = await _subject(migrated_url)
+        stale = subject.operation
+        published = replace(stale, publication_state="published")
+        observed: list[object] = []
+
+        async def refresh(*args: object) -> CaptureOperation:
+            observed.append(args[-1])
+            return published
+
+        monkeypatch.setattr(publication_module, "refresh_publication_operation", refresh)
+        coordinator = CapturePublicationCoordinator(cast(ObjectStore, _Store()), subject.credential)
+        try:
+            assert await coordinator.recover(subject.worker, stale) == published
+            assert observed == [stale.id]
         finally:
             await _close(subject)
 
