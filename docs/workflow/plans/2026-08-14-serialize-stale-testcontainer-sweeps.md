@@ -113,6 +113,22 @@ def test_concurrent_removal_warns_at_the_deadline(tmp_path: Path) -> None:
     # Assert the public sweep warns once and does not append the id to its result.
 
 
+def test_verification_lookup_failure_warns_and_keeps_sweeping(tmp_path: Path) -> None:
+    import docker.errors
+
+    first = _FakeDockerContainer(
+        "cid-first",
+        _labels(tmp_path / "first"),
+        error=_api_error("removal of container cid-first is already in progress"),
+    )
+    second = _FakeDockerContainer("cid-second", _labels(tmp_path / "second"))
+    client = _FakeDockerClient(first, second, get_results=[docker.errors.APIError("lookup failed")])
+    with pytest.warns(UserWarning, match="cid-first"):
+        assert xdist_backend.sweep_stale_backend_containers(client) == ["cid-second"]
+    assert first.removed_with is None
+    assert second.removed_with == {"force": True, "v": True}
+
+
 def test_sweep_lock_failure_warns_without_enumerating(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

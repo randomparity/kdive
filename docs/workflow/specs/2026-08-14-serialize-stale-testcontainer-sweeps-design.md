@@ -86,6 +86,9 @@ retry the sweep.
   warning at the five-second bound without a real wait.
 - Explanation tests cover the exact full id, another id, a short-id prefix, and an id superstring;
   every mismatch remains a warning.
+- A verification-lookup failure test makes exact-id lookup raise a non-NotFound Docker error. It
+  asserts one warning, no reaped claim for that id, and successful removal of a later stale
+  candidate.
 - A lock-failure test proves the sweep warns, returns an empty list, and never enumerates Docker
   candidates when opening or acquiring the canonical lock fails.
 - Lock-path tests pre-create a symlink and a non-regular path and simulate a wrong-owner descriptor;
