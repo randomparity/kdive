@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import time
+from collections.abc import Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from queue import Queue
 from threading import Event
-from typing import LiteralString
+from typing import Any, LiteralString
 from uuid import UUID, uuid4
 
 import psycopg
@@ -24,6 +26,7 @@ from kdive.mcp.tools.ops import build_uses
 from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifacts
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
+from tests.db import conftest as db_conftest
 from tests.db_waits import DEFAULT_WAIT_TIMEOUT_S, wait_until_blocked_by
 
 _LOGIN_AUTHENTICATION = "worker-fence-test-authentication"
@@ -1682,12 +1685,18 @@ def test_concurrent_exact_runtime_role_creation_is_idempotent(
                 pg_conn.execute(SQL("DROP ROLE {}").format(Identifier(role)))
 
 
-def test_runtime_role_grant_closes_validation_to_drop_window(
-    pg_conn: psycopg.Connection, postgres_url: str
+@pytest.mark.parametrize("guarded", [False, True], ids=["unguarded-control", "fixture-lock"])
+def test_cluster_global_role_lock_closes_validation_to_drop_window(
+    postgres_url: str, *, guarded: bool
 ) -> None:
-    """A validated role owns its schema capability before another session can drop it."""
-    migrate.apply_migrations(pg_conn)
-    suffix = pg_conn.info.dbname[-10:].replace("-", "_")
+    """The control races; the fixture lock excludes the same cross-database role drop."""
+    suffix = uuid4().hex[:10]
+    migration_url, migration_db = db_conftest._provision_worker_db(
+        postgres_url, dbname=f"kdive_role_migration_{suffix}"
+    )
+    drop_url, drop_db = db_conftest._provision_worker_db(
+        postgres_url, dbname=f"kdive_role_drop_{suffix}"
+    )
     roles = {
         "kdive_server": f"kdive_drop_server_{suffix}",
         "kdive_worker": f"kdive_drop_worker_{suffix}",
@@ -1699,68 +1708,144 @@ def test_runtime_role_grant_closes_validation_to_drop_window(
         role_sql = role_sql.replace(canonical.encode(), isolated.encode())
     pause_key = uuid4().int % (2**63 - 1)
     role_sql = role_sql.replace(
-        b"$$;\n\nREVOKE",
-        f"$$;\n\nSELECT pg_advisory_xact_lock({pause_key});\n\nREVOKE".encode(),
+        b"        EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', v_role);",
+        (
+            f"        PERFORM pg_advisory_xact_lock({pause_key});\n"
+            "        EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', v_role);"
+        ).encode(),
         1,
     )
-
-    for role in roles.values():
-        pg_conn.execute(
-            SQL(
-                "CREATE ROLE {} NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB "
-                "NOCREATEROLE NOREPLICATION NOBYPASSRLS"
-            ).format(Identifier(role))
-        )
-
-    blocker = psycopg.connect(postgres_url)
-    contender = psycopg.connect(postgres_url, autocommit=True)
-    dropper = psycopg.connect(postgres_url, autocommit=True)
-    started = Event()
-
-    def apply_role_migration() -> None:
-        started.set()
-        contender.execute(role_sql)
-
     try:
-        blocker.execute("SELECT pg_advisory_xact_lock(%s)", (pause_key,))
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future = executor.submit(apply_role_migration)
-            assert started.wait(timeout=DEFAULT_WAIT_TIMEOUT_S)
-            wait_until_blocked_by(
-                pg_conn,
-                waiter_pid=contender.info.backend_pid,
-                blocker_pid=blocker.info.backend_pid,
-                future=future,
-                expectation="role migration did not reach the post-validation pause",
-            )
-            with pytest.raises(TimeoutError):
-                future.result(timeout=0.5)
-            drop_future = executor.submit(
-                dropper.execute,
-                SQL("DROP ROLE {}").format(Identifier(roles["kdive_server"])),
-            )
-            drop_was_blocked = True
-            try:
-                drop_future.result(timeout=0.5)
-                drop_was_blocked = False
-            except TimeoutError:
-                pass
-            finally:
-                blocker.commit()
-            if drop_was_blocked:
-                future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
-                with pytest.raises(psycopg.errors.DependentObjectsStillExist):
-                    drop_future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
-            assert drop_was_blocked
-    finally:
-        blocker.rollback()
-        dropper.close()
-        contender.close()
-        blocker.close()
+        with db_conftest._cluster_global_role_lock(postgres_url):
+            for url in (migration_url, drop_url):
+                with psycopg.connect(url, autocommit=True) as conn:
+                    migrate.apply_migrations(conn)
         for role in roles.values():
-            if pg_conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone():
-                pg_conn.execute(SQL("DROP OWNED BY {}").format(Identifier(role)))
-                pg_conn.execute(SQL("DROP ROLE {}").format(Identifier(role)))
+            with psycopg.connect(migration_url, autocommit=True) as conn:
+                conn.execute(
+                    SQL(
+                        "CREATE ROLE {} NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB "
+                        "NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+                    ).format(Identifier(role))
+                )
+
+        blocker = psycopg.connect(migration_url)
+        contender = psycopg.connect(migration_url, autocommit=True)
+        dropper = psycopg.connect(drop_url, autocommit=True)
+        observer = psycopg.connect(
+            db_conftest._server_url_without_db(postgres_url), autocommit=True
+        )
+        try:
+            blocker.execute("SELECT pg_advisory_xact_lock(%s)", (pause_key,))
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                drop_lock_pids: Queue[int] = Queue(maxsize=1)
+                migration_future = executor.submit(
+                    _apply_role_sql,
+                    migration_url,
+                    contender,
+                    role_sql,
+                    guarded=guarded,
+                )
+                wait_until_blocked_by(
+                    observer,
+                    waiter_pid=contender.info.backend_pid,
+                    blocker_pid=blocker.info.backend_pid,
+                    future=migration_future,
+                    expectation="role migration did not reach the pre-grant pause",
+                )
+                drop_future = executor.submit(
+                    _drop_role,
+                    drop_url,
+                    dropper,
+                    roles["kdive_server"],
+                    guarded=guarded,
+                    lock_backend_pids=drop_lock_pids,
+                )
+                if guarded:
+                    _wait_for_cluster_role_lock_waiter(
+                        observer,
+                        drop_future,
+                        waiter_pid=drop_lock_pids.get(timeout=DEFAULT_WAIT_TIMEOUT_S),
+                    )
+                    blocker.commit()
+                    migration_future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
+                    with pytest.raises(psycopg.errors.DependentObjectsStillExist):
+                        drop_future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
+                else:
+                    drop_future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
+                    blocker.commit()
+                    with pytest.raises(psycopg.errors.UndefinedObject):
+                        migration_future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
+        finally:
+            blocker.rollback()
+            observer.close()
+            dropper.close()
+            contender.close()
+            blocker.close()
+    finally:
+        _drop_isolated_roles(postgres_url, migration_url, drop_url, roles.values())
+        db_conftest._drop_worker_db(postgres_url, drop_db)
+        db_conftest._drop_worker_db(postgres_url, migration_db)
+
+
+def _drop_isolated_roles(
+    postgres_url: str, migration_url: str, drop_url: str, roles: Iterable[str]
+) -> None:
+    with (
+        db_conftest._cluster_global_role_lock(postgres_url),
+        psycopg.connect(migration_url, autocommit=True) as conn,
+    ):
+        for role in roles:
+            if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone():
+                for url in (migration_url, drop_url):
+                    with psycopg.connect(url, autocommit=True) as owner:
+                        owner.execute(SQL("DROP OWNED BY {}").format(Identifier(role)))
+                conn.execute(SQL("DROP ROLE {}").format(Identifier(role)))
+
+
+def _apply_role_sql(url: str, conn: psycopg.Connection, role_sql: bytes, *, guarded: bool) -> None:
+    if guarded:
+        with db_conftest._cluster_global_role_lock(url):
+            conn.execute(role_sql)
+    else:
+        conn.execute(role_sql)
+
+
+def _drop_role(
+    url: str,
+    conn: psycopg.Connection,
+    role: str,
+    *,
+    guarded: bool,
+    lock_backend_pids: Queue[int],
+) -> None:
+    if guarded:
+        with db_conftest._cluster_global_role_lock(url, _on_connect=lock_backend_pids.put):
+            conn.execute(SQL("DROP ROLE {}").format(Identifier(role)))
+    else:
+        conn.execute(SQL("DROP ROLE {}").format(Identifier(role)))
+
+
+def _wait_for_cluster_role_lock_waiter(
+    observer: psycopg.Connection, future: Future[Any], *, waiter_pid: int
+) -> None:
+    deadline = time.monotonic() + DEFAULT_WAIT_TIMEOUT_S
+    while time.monotonic() < deadline:
+        waiting = observer.execute(
+            "SELECT 1 FROM pg_locks AS l WHERE l.pid = %s AND l.locktype = 'advisory' "
+            "AND l.database = ("
+            "SELECT oid FROM pg_database WHERE datname = current_database()) "
+            "AND l.classid = %s AND l.objid = %s AND l.objsubid = 2 "
+            "AND NOT l.granted LIMIT 1",
+            (waiter_pid, migrate._LOCK_CLASS_MIGRATION, migrate._LOCK_OBJID),
+        ).fetchone()
+        if waiting is not None:
+            return
+        if future.done():
+            future.result()
+            raise AssertionError("role drop returned before waiting for the fixture lock")
+        time.sleep(0.02)
+    raise AssertionError("role drop did not wait for the cluster-global fixture lock")
 
 
 def test_acquire_derives_exact_locked_job_claim(
