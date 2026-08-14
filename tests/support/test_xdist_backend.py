@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import textwrap
+import time
 import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -351,8 +352,10 @@ class _UninspectableContainer:
 class _FakeDockerClient:
     # `Any` because the sweep also has to cope with a container it cannot inspect, which
     # is a different shape by construction.
-    def __init__(self, *containers: Any) -> None:
+    def __init__(self, *containers: Any, get_results: Sequence[Any] = ()) -> None:
         self._containers = list(containers)
+        self._get_results = list(get_results)
+        self.get_ids: list[str] = []
         self.filters: dict[str, str] | None = None
         self.containers = self
 
@@ -361,6 +364,298 @@ class _FakeDockerClient:
     def list(self, all: bool, filters: dict[str, str]) -> Sequence[_FakeDockerContainer]:  # noqa: A002
         self.filters = filters
         return [*self._containers]
+
+    def get(self, container_id: str) -> Any:
+        self.get_ids.append(container_id)
+        result = self._get_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def _api_error(explanation: str, *, status_code: int = 409) -> Exception:
+    import docker.errors
+    import requests
+
+    response = requests.Response()
+    response.status_code = status_code
+    response.url = "http://docker.test/containers/cid"
+    response.reason = "Conflict"
+    return docker.errors.APIError("remove failed", response=response, explanation=explanation)
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _wait_for_path(path: Path, *processes: subprocess.Popen[str]) -> None:
+    deadline = time.monotonic() + 10
+    while not path.exists() and time.monotonic() < deadline:
+        for process in processes:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(
+                    f"subprocess exited before {path.name}: stdout={stdout!r}, stderr={stderr!r}"
+                )
+        time.sleep(0.01)
+    assert path.exists(), f"timed out waiting for {path}"
+
+
+def test_concurrent_sweeps_have_one_effective_remover(tmp_path: Path) -> None:
+    script = textwrap.dedent(
+        """
+        import sys
+        import time
+        import warnings
+        from pathlib import Path
+
+        sys.path.insert(0, sys.argv[1])
+        from tests.support import xdist_backend
+
+        root = Path(sys.argv[2])
+        role = sys.argv[3]
+        xdist_backend._SWEEP_LOCK_PATH = root / "sweep.lock"
+
+        class Container:
+            id = "cid-shared"
+            labels = {
+                xdist_backend.BACKEND_LABEL: "pg",
+                xdist_backend.LIVENESS_LABEL: str(root / "missing.alive"),
+            }
+
+            def remove(self, **kwargs):
+                (root / "owner-holding").touch()
+                deadline = time.monotonic() + 10
+                while not (root / "contender-done").exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                if not (root / "contender-done").exists():
+                    raise RuntimeError("contender did not finish while owner held the lock")
+                if (root / "contender-enumerated").exists():
+                    (root / "violation").touch()
+                (root / "removed").touch()
+
+        class Containers:
+            def list(self, **kwargs):
+                if role == "contender":
+                    (root / "contender-enumerated").touch()
+                return [] if (root / "removed").exists() else [Container()]
+
+        class Client:
+            containers = Containers()
+
+        if role == "contender":
+            (root / "contender-started").touch()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            xdist_backend.sweep_stale_backend_containers(Client())
+        (root / f"{role}-done").touch()
+        """
+    )
+    args = [sys.executable, "-c", script, str(_REPO_ROOT), str(tmp_path)]
+    owner = subprocess.Popen(
+        [*args, "owner"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    contender: subprocess.Popen[str] | None = None
+    try:
+        _wait_for_path(tmp_path / "owner-holding", owner)
+        contender = subprocess.Popen(
+            [*args, "contender"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        _wait_for_path(tmp_path / "contender-done", owner, contender)
+        owner_stdout, owner_stderr = owner.communicate(timeout=10)
+        contender_stdout, contender_stderr = contender.communicate(timeout=10)
+        assert owner.returncode == 0, (owner_stdout, owner_stderr)
+        assert contender.returncode == 0, (contender_stdout, contender_stderr)
+    finally:
+        for process in (owner, contender):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+    assert (tmp_path / "removed").exists()
+    assert not (tmp_path / "contender-enumerated").exists()
+    assert not (tmp_path / "violation").exists()
+
+
+@pytest.mark.parametrize(
+    "explanation",
+    [
+        "removal of container other-id is already in progress",
+        "removal of container cid is already in progress",
+        "removal of container cid-full-extra is already in progress",
+        "another Docker conflict",
+    ],
+)
+def test_unrelated_409_explanations_warn(explanation: str, tmp_path: Path) -> None:
+    import docker.errors
+
+    container = _FakeDockerContainer("cid-full", _labels(tmp_path), error=_api_error(explanation))
+    client = _FakeDockerClient(container, get_results=[docker.errors.NotFound("gone")])
+    with pytest.warns(UserWarning, match="cid-full"):
+        assert xdist_backend.sweep_stale_backend_containers(client) == []
+
+
+@pytest.mark.parametrize("status_code", [400, 500])
+def test_concurrent_removal_phrase_with_non_conflict_status_warns(
+    status_code: int, tmp_path: Path
+) -> None:
+    import docker.errors
+
+    error = _api_error(
+        "removal of container cid-full is already in progress", status_code=status_code
+    )
+    container = _FakeDockerContainer("cid-full", _labels(tmp_path), error=error)
+    client = _FakeDockerClient(container, get_results=[docker.errors.NotFound("gone")])
+    with pytest.warns(UserWarning, match="cid-full"):
+        assert xdist_backend.sweep_stale_backend_containers(client) == []
+
+
+def test_concurrent_removal_classifier_allows_surrounding_api_prose() -> None:
+    error = _api_error('Conflict ("removal of container cid-full is already in progress")')
+    assert xdist_backend._removal_is_already_in_progress(error, "cid-full") is True
+
+
+def test_concurrent_removal_waits_for_delayed_absence(tmp_path: Path) -> None:
+    import docker.errors
+
+    container = _FakeDockerContainer("cid-full", _labels(tmp_path))
+    client = _FakeDockerClient(
+        container,
+        get_results=[container, container, docker.errors.NotFound("gone")],
+    )
+    clock = _FakeClock()
+    assert xdist_backend._wait_until_container_absent(
+        client, "cid-full", clock=clock, sleep=clock.sleep
+    )
+    assert client.get_ids == ["cid-full", "cid-full", "cid-full"]
+
+
+def test_sweep_is_silent_after_exact_concurrent_removal_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import docker.errors
+
+    container = _FakeDockerContainer(
+        "cid-full",
+        _labels(tmp_path),
+        error=_api_error("removal of container cid-full is already in progress"),
+    )
+    client = _FakeDockerClient(
+        container,
+        get_results=[container, container, docker.errors.NotFound("gone")],
+    )
+    monkeypatch.setattr(xdist_backend, "_REMOVAL_POLL_S", 0.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert xdist_backend.sweep_stale_backend_containers(client) == []
+    assert client.get_ids == ["cid-full", "cid-full", "cid-full"]
+
+
+def test_concurrent_removal_warns_at_the_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    container = _FakeDockerContainer(
+        "cid-full",
+        _labels(tmp_path),
+        error=_api_error("removal of container cid-full is already in progress"),
+    )
+    client = _FakeDockerClient(container, get_results=[container] * 4)
+    clock = _FakeClock()
+    with monkeypatch.context() as patch:
+        patch.setattr(xdist_backend.time, "monotonic", clock)
+        patch.setattr(xdist_backend.time, "sleep", clock.sleep)
+        patch.setattr(xdist_backend, "_REMOVAL_WAIT_S", 0.1)
+        patch.setattr(xdist_backend, "_REMOVAL_POLL_S", 0.05)
+        with pytest.warns(UserWarning, match="cid-full"):
+            assert xdist_backend.sweep_stale_backend_containers(client) == []
+
+
+def test_verification_lookup_failure_warns_and_keeps_sweeping(tmp_path: Path) -> None:
+    first = _FakeDockerContainer(
+        "cid-first",
+        _labels(tmp_path / "first"),
+        error=_api_error("removal of container cid-first is already in progress"),
+    )
+    second = _FakeDockerContainer("cid-second", _labels(tmp_path / "second"))
+    client = _FakeDockerClient(first, second, get_results=[RuntimeError("lookup failed")])
+    with pytest.warns(UserWarning, match="cid-first"):
+        assert xdist_backend.sweep_stale_backend_containers(client) == ["cid-second"]
+    assert second.removed_with == {"force": True, "v": True}
+
+
+@contextmanager
+def _raising_lock() -> Iterator[None]:
+    raise OSError("cannot open sweep lock")
+    yield
+
+
+def test_sweep_lock_failure_warns_without_enumerating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeDockerClient()
+    monkeypatch.setattr(xdist_backend, "_sweep_locked", _raising_lock)
+    with pytest.warns(UserWarning, match="sweep skipped"):
+        assert xdist_backend.sweep_stale_backend_containers(client) == []
+    assert client.filters is None
+
+
+def test_sweep_takes_lock_before_constructing_default_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from testcontainers.core import docker_client
+
+    constructed = False
+
+    def observable_factory() -> None:
+        nonlocal constructed
+        constructed = True
+
+    monkeypatch.setattr(docker_client, "DockerClient", observable_factory)
+    monkeypatch.setattr(xdist_backend, "_sweep_locked", _raising_lock)
+    with pytest.warns(UserWarning, match="sweep skipped"):
+        assert xdist_backend.sweep_stale_backend_containers() == []
+    assert constructed is False
+
+
+def test_sweep_lock_refuses_symlink_without_touching_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.write_text("unchanged")
+    lock_path = tmp_path / "sweep.lock"
+    lock_path.symlink_to(target)
+    monkeypatch.setattr(xdist_backend, "_SWEEP_LOCK_PATH", lock_path)
+    with pytest.warns(UserWarning, match="sweep skipped"):
+        assert xdist_backend.sweep_stale_backend_containers(_FakeDockerClient()) == []
+    assert target.read_text() == "unchanged"
+
+
+def test_sweep_lock_refuses_non_regular_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_path = tmp_path / "sweep.lock"
+    lock_path.mkdir()
+    monkeypatch.setattr(xdist_backend, "_SWEEP_LOCK_PATH", lock_path)
+    with pytest.warns(UserWarning, match="sweep skipped"):
+        assert xdist_backend.sweep_stale_backend_containers(_FakeDockerClient()) == []
+
+
+def test_sweep_lock_refuses_wrong_owner_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_path = tmp_path / "sweep.lock"
+    lock_path.touch(mode=0o600)
+    real_euid = os.geteuid()
+    monkeypatch.setattr(xdist_backend, "_SWEEP_LOCK_PATH", lock_path)
+    monkeypatch.setattr(xdist_backend.os, "geteuid", lambda: real_euid + 1)
+    with pytest.warns(UserWarning, match="sweep skipped"):
+        assert xdist_backend.sweep_stale_backend_containers(_FakeDockerClient()) == []
 
 
 def test_sweep_reaps_only_the_stale_labeled_container_and_its_volume(tmp_path: Path) -> None:

@@ -604,6 +604,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close role lock verification gaps
 - Accept cluster-global role locking
 - Date ADR 0560 acceptance
+- Design serialized stale backend sweeps
+- Fix the stale sweep lock identity
+- Close stale sweep concurrency gaps
+- Make stale sweep verification testable
+- Plan serialized stale backend sweeps
+- Pin stale sweep lock ordering
+- Cover the public conflict recovery path
+- Secure the canonical stale sweep lock
+- Complete the delayed absence test plan
+- Make stale sweep contention nonblocking
+- Cover stale sweep lookup failures
+- Make stale sweep timing injectable
+- Classify Docker removal conflicts semantically
+- Separate red tests from characterization
+- Test Docker conflict status classification
 
 ### Fixed
 
@@ -1018,6 +1033,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add portable pidfd boundary
 - Preserve migration role delimiter
 - Revoke install scaler authority
+- Serialize stale backend sweeps
 
 ### Build
 
