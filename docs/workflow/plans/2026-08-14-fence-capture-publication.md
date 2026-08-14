@@ -73,8 +73,8 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
    environment skip, never a silent success over no assertions.
 6. Wire worker startup before capture recovery/readiness and test that a failed probe prevents job
    claims. Run `uv run python -m pytest tests/processes/test_worker.py -q`.
-7. Run `just lint`, `just type`, and the three focused modules. Flip ADR-0559 to Accepted in this
-   implementing commit and run `just adr-status-check`. Commit:
+7. Run `just lint`, `just type`, and the three focused modules. Keep ADR-0559 Proposed because the
+   publication state machine is not implemented yet. Commit:
    `feat(store): admit conditional capture publication`.
 
 **Acceptance**
@@ -102,6 +102,9 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 - `CaptureOperation` gains `publication_state`, `publication_object_key`, `publication_etag`,
   `publication_artifact_id`, `cleanup_capture_version_id`, `publication_tombstone_version`,
   `publication_started_at`, `publication_closed_at`, and `spool_disposed_at`.
+- Migration 0113 adds a singleton protocol-4 installation-admission row carrying nullable
+  database-clock `admitted_at` and a hash of the dedicated object-store namespace identity. Task 5
+  owns the first write through a security-definer compare-and-set function; restarts only verify.
 - Add repository functions:
   `begin_publication(conn, credential, operation_id, key)`,
   `begin_cancel_publication(conn, credential, operation_id, key)`,
@@ -178,13 +181,14 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
    best-effort discard semantics.
 3. Refactor supervisor execution to call the publisher before leaving `_capture_job_fence` and race
    it against `_monitor_lock_session`. On authority loss cancel the publisher task, prevent further
-   transitions on the dead connection, and hand the durable operation to cleanup.
+   transitions on the dead connection, leave the operation durably nonterminal, and propagate to
+   Task 4's recovery owner; do not acknowledge cancellation here.
 4. Replace handler `_store_capture` with the injected publication callback. Preserve pcap
    validation, filtering, packet count, sensitivity, retention, response id, and short Run locks.
    Delete dead reconciliation helpers only after `rg` proves no callers.
-5. Implement spool disposal after terminal publication and before returning/acknowledging. Test
-   successful and discarded outcomes plus deletion failure. Break disposal ordering and confirm a
-   test catches deletion before artifact commit.
+5. Implement spool disposal after successful `published` state and before returning. Test success
+   plus deletion failure. Break disposal ordering and confirm a test catches deletion before the
+   artifact commit. Discarded spool closure belongs to Task 4.
 6. Run focused handler, supervisor, publication, artifact discard/etag, queue, and worker tests;
    then `just lint` and `just type`. Commit:
    `feat(worker): fence capture artifact publication`.
@@ -193,7 +197,7 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 
 - Live publication cannot outlast its job fence or commit after `canceling`.
 - A successful result has one matching row/object and no private spool.
-- Cancellation is not acknowledged from an in-memory best-effort cleanup.
+- Authority loss leaves a recoverable nonterminal operation and never acknowledges cancellation.
 
 ## Task 4: Recover every publication crash boundary
 
@@ -249,6 +253,9 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 
 - Modify protocol-dependent fresh-install configuration/tests under `deploy/helm/kdive/`,
   `scripts/live-stack/`, and `deploy/ansible/` only where current protocol constants require it.
+- Add `scripts/verify-fresh-publication-install.py`: pre-start database and object-store namespace
+  admission for build-new-only deployment.
+- Add `tests/scripts/test_verify_fresh_publication_install.py`.
 - Modify operator documentation that currently instructs protocol-3 cutover or upgrade.
 - Modify `docs/adr/0559-fence-capture-artifact-publication.md` status only if not already flipped.
 
@@ -256,20 +263,32 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 
 - No new operator migration command. Fresh setup applies the full schema to an empty database and
   starts protocol-4 workers only after store admission and recovery.
+- Fresh deployment supplies a dedicated object-store bucket/namespace. Before the first worker
+  starts, `verify-fresh-publication-install.py` requires the application database tables and the
+  configured bucket to be empty, records a protocol-4 installation marker in PostgreSQL, and fails
+  with instructions to provision new endpoints rather than delete or reuse existing data. Later
+  restarts read the marker and do not require the now-live namespace to remain empty.
 
 **TDD steps**
 
-1. Update fresh-install render/shape tests first to require protocol 4 and reject an upgrade/data-
-   preservation path. Run the focused Helm, Compose, Ansible, and live-workflow-shape modules and
-   observe old protocol expectations fail.
-2. Update only the production manifests/scripts/docs required for fresh installation. Remove or
+1. Write script tests for empty database plus empty bucket admission, either side nonempty, store
+   listing failure, concurrent first admission, marker replay, and mismatch against a reused
+   namespace. Confirm failures do not delete database rows or objects. Implement the script against
+   Task 2's protocol-4 installation marker.
+2. Update fresh-install render/shape tests to require protocol 4, the pre-start admission step, a
+   dedicated bucket/namespace, and rejection of data-preservation paths. Run focused Helm, Compose,
+   Ansible, script, and live-workflow-shape modules; observe old expectations fail.
+3. Update only the production manifests/scripts/docs required for fresh installation. Remove or
    replace protocol-3 upgrade instructions exposed as current guidance; do not add shims.
-3. Run focused deployment tests, `just lint-shell`, `just lint-ansible`, `just test-ansible`,
-   `just lint-workflows`, documentation guards, and `just adr-status-check`. Commit:
+4. Run focused deployment tests, `just lint-shell`, `just lint-ansible`, `just test-ansible`,
+   `just lint-workflows`, documentation guards, and `just adr-status-check`. Flip ADR-0559 to
+   Accepted in this final implementation commit. Commit:
    `feat(deploy): install capture publication protocol 4`.
-4. Run the live MinIO conditional-create integration proof and report the exact arm/result. Live
+5. Run fresh-namespace admission against a disposable empty database/bucket and report their exact
+   identities in public-safe form plus the marker result. Then run the live MinIO conditional-
+   create integration proof and report the exact arm/result. Live
    provider tiers are not required because provider execution and MCP behavior do not change.
-5. Run bare `just ci`. Then run `git status --porcelain`; any output, including untracked files,
+6. Run bare `just ci`. Then run `git status --porcelain`; any output, including untracked files,
    invalidates the green claim. Review `git diff main...HEAD` for naming, complexity, dead helpers,
    and accidental protocol compatibility.
 
