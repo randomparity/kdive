@@ -40,13 +40,15 @@ Migration `0113_capture_publication_fence.sql` extends `capture_operations`:
 - `publication_object_key` includes the durable operation id, is set before PUT, and is immutable;
 - `publication_etag` is set after PUT and before registration when PUT returned;
 - `publication_artifact_id` references the committed artifact row only for `published`;
+- `publication_tombstone_version` records the retained zero-byte fence for `discarded`;
 - `publication_started_at` and `publication_closed_at` use the database clock.
 
 The row checks require publication fields to form complete pending, publishing, canceling, or
 terminal shapes. Provider `exited` requires positive process/provider quiescence; job completion,
 retry, cancellation acknowledgment, and later reclamation separately require the combined product
 state `(exited, published|discarded)`. `published` requires a matching artifact id, key, and etag;
-`discarded` requires no artifact id and a verified-absent journaled version. Immutable-key and
+`discarded` requires no artifact id and a verified operation-identity tombstone version.
+Immutable-key and
 exact-attempt validation live in security-definer transition functions rather than direct worker
 table grants.
 
@@ -84,7 +86,7 @@ session-level job fence and authority monitor through these ordered steps:
    the current-operation link using its existing exact-attempt fence.
 
 Every worker transition derives the incarnation from the credential and requires an active
-protocol-3 worker, the matching operation owner, the job's unchanged attempt/current link, and a
+protocol-4 worker, the matching operation owner, the job's unchanged attempt/current link, and a
 job state that still permits this attempt. Idempotent replay accepts byte-identical facts and
 rejects conflicting facts.
 
@@ -107,19 +109,23 @@ if the tombstone wins, the capture PUT cannot later overwrite it; if conditional
 the key already exists, recovery HEADs it, verifies the operation metadata, deletes that immutable
 version, and retries the tombstone create. Because the operation issues only one capture PUT and
 recovery never resumes it, observing its version or winning the tombstone resolves the only
-possible writer. Recovery verifies and removes the winning tombstone, then verifies absence.
+possible stored capture object. Recovery verifies and retains the winning zero-byte tombstone and
+records its immutable version. Retention is required because the supported S3 contract has no
+durable request-completion receipt: deleting the tombstone could let a delayed conditional PUT
+succeed later. The tombstone is publication-fence state owned by the operation, not an artifact
+row or unregistered object.
 Cleanup follows the row-first decision:
 
 - a matching committed row closes the operation as `published`; the job result is not rewritten;
-- no row requires completed conditional-create arbitration and verified absence; cleanup then
-  reacquires the Run lock and closes as `discarded`;
-- a conflicting row, failed delete, failed absence proof, unavailable store, or database failure
+- no row requires completed conditional-create arbitration and a verified retained tombstone;
+  cleanup then reacquires the Run lock and closes as `discarded` with its version;
+- a conflicting row, failed delete, failed tombstone proof, unavailable store, or database failure
   leaves the operation in `publishing` for startup recovery.
 
 Replacement recovery runs before readiness. For an operation with provider quiescence but open
 publication it repeats the same `canceling` linearization and row-first decision. It never resumes
 a PUT from buffered packet bytes: if registration did not commit, it completes conditional-create
-arbitration, removes the exact capture/tombstone versions, verifies absence, and records
+arbitration, removes the exact capture version, retains the winning tombstone, and records
 `discarded`.
 This is safe because the job cannot retry while the prior operation is nonterminal. Recovery does
 not acknowledge cancellation or expose readiness until object/row publication is terminal.
@@ -135,7 +141,7 @@ and reason code; logs never include packet bytes, credentials, or object-store s
 failure logs the operation and deterministic key only after the standard log redaction path.
 Artifact claim conflicts preserve the existing specific error category and leave recoverable
 state until compensation proves a terminal outcome. A cancellation is not acknowledged merely
-because a delete request was sent: absence or a committed row is required.
+because a delete request was sent: a retained operation tombstone or a committed row is required.
 
 No new duration or size limit is introduced. Existing capture limits retain their published
 five-part contracts. The only waits are existing store client bounds and the worker's cancellation
@@ -155,7 +161,7 @@ crosses the worker/PostgreSQL/object-store boundary.
 - **Object store:** is an external dependency that may delay, fail, or return conflicting
   metadata. The operation-unique server-derived key, sensitivity metadata, size bounds, etag
   journal, atomic conditional create, operation identity metadata, row-first recovery, conditional
-  version deletion, and verified absence bound its effects.
+  version deletion, and retained fence tombstone bound its effects.
 - **PostgreSQL:** is the authority for job ownership, current attempt, artifact metadata, and
   publication closure. Advisory fences and transactions serialize decisions; object I/O remains
   outside transactions.
@@ -179,7 +185,9 @@ unproven. Protocol-cutover tests prove a protocol-3 worker cannot rejoin or clai
 completion. Concurrent-attempt tests prove the second attempt cannot PUT until the first
 publication is terminal. An ambiguous-PUT test holds the capture conditional create in flight,
 lets replacement recovery acquire the released database fence, and proves it cannot record
-`discarded` until capture-versus-tombstone arbitration resolves and the key is absent. Tests
+`discarded` until capture-versus-tombstone arbitration resolves and the operation-identity
+tombstone version is durable. It then lets the delayed PUT evaluate and proves the retained
+tombstone makes it fail without creating capture bytes. Tests
 deliberately break transition validation and compensation to show the new
 assertions fail before restoring the implementation. `just ci` is the final local gate on both
 declared target architectures through architecture-independent Python and PostgreSQL behavior;

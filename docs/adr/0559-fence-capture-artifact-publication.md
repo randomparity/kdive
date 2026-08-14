@@ -31,7 +31,8 @@ Provider execution and publication are orthogonal monotonic states on the same r
 operation state still advances to terminal `exited` only after positive process and provider
 quiescence. Publication advances `pending -> publishing -> published | canceling -> discarded`;
 `published` and `discarded` are terminal. A committed artifact row is required for `published`.
-An absent journaled object is required for `discarded`. Claim, cancellation acknowledgment,
+A retained operation-identity tombstone is required for `discarded`. Claim, cancellation
+acknowledgment,
 retry, and reclamation all require the product state `(exited, published|discarded)`; an operation
 in any other product state remains current and recoverable.
 
@@ -41,10 +42,12 @@ metadata. Recovery never resumes that PUT. A cancellation owner arbitrates an am
 conditionally creating a zero-byte tombstone with the same operation metadata at the same key.
 Exactly one conditional create can win. If the capture object won, recovery HEADs and deletes its
 immutable version, then wins the tombstone create; if the tombstone won, the delayed capture PUT
-fails its precondition. Recovery verifies the tombstone identity, then deletes its version after
-the sole capture PUT has resolved. Only that completed arbitration proves the key absent and no
-request capable of recreating it. Artifact rows continue to expose only their opaque id; the key
-and tombstone shape are not an MCP contract.
+fails its precondition whenever it is evaluated. Recovery retains the winning tombstone and
+records its immutable version on the operation's terminal `discarded` state. The tombstone is
+therefore owned durable publication-fence state, not an unregistered artifact. It is not deleted:
+without a store-side request-completion receipt, absence would reopen the key to a request that
+survived its publisher. Artifact rows continue to expose only their opaque id; the key and
+tombstone shape are not an MCP contract.
 
 Session-loss handling runs inside the fence owner: the authority monitor cancels the publisher
 before any further database transition and starts draining any in-process PUT. The released job
@@ -52,8 +55,9 @@ fence alone does not authorize another actor to prove absence. Under a fresh con
 or a lifecycle-authorized replacement, takes that fence and the Run lock, revalidates the exact
 attempt, and moves `pending|publishing` to `canceling`. That is the database linearization point
 after which publication commit is refused. Outside the Run lock it completes the conditional-
-create arbitration above; this remains safe even when the old PUT has not drained. It then
-reacquires the Run lock to record `discarded`. An external cancellation request waits for the
+create arbitration above and retains the tombstone; this remains safe even when the old PUT has
+not drained. It then reacquires the Run lock to record `discarded` with the tombstone version. An
+external cancellation request waits for the
 live owner's job fence but may only request `canceling`; it cannot record `discarded` without
 arbitration. Its cancellation linearizes only after fence acquisition, so publication already
 committed while the live owner held the fence remains `published`. Failure to prove either
@@ -78,7 +82,11 @@ no rolling compatibility path exists. Historical reclamation may use the cutoff 
   lets startup recovery settle an ambiguous PUT, adopt an already committed row, or remove the
   exact unregistered version. It never guesses from object age or a timeout.
 - A failed delete retains a nonterminal operation and blocks retry and reaping until recovery can
-  prove absence. This prefers retained residue to publication after reclamation.
+  establish its tombstone fence. This prefers retained residue to publication after reclamation.
+- Every discarded operation retains one versioned zero-byte tombstone plus small identity
+  metadata. It is durable fence state referenced by the operation, not an artifact or orphan, and
+  is not age-swept. Removing it requires a future object-store completion receipt or a superseding
+  decision that supplies equivalent positive proof.
 - Concurrent attempts have distinct operation keys, and job claiming remains barred until prior
   publication is terminal. Existing row/etag reconciliation remains defensive for pre-cutover
   data, not the concurrency mechanism.
