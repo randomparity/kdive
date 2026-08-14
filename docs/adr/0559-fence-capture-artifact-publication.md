@@ -1,8 +1,8 @@
-# ADR-0559: Fence capture artifact publication
+# 0559 — Fence capture artifact publication
 
 ## Status
 
-Accepted
+Accepted (2026-08-14)
 
 ## Context
 
