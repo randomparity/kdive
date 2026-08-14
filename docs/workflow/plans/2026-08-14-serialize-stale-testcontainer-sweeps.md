@@ -71,7 +71,13 @@ def test_unrelated_409_explanations_warn(explanation: str, tmp_path: Path) -> No
 
 
 def test_concurrent_removal_waits_for_delayed_absence(tmp_path: Path) -> None:
-    client = _FakeDockerClient(..., get_results=[container, container, docker.errors.NotFound(...)])
+    import docker.errors
+
+    container = _FakeDockerContainer("cid-full", _labels(tmp_path))
+    client = _FakeDockerClient(
+        container,
+        get_results=[container, container, docker.errors.NotFound("gone")],
+    )
     clock = _FakeClock()
     with warnings.catch_warnings():
         warnings.simplefilter("error")
