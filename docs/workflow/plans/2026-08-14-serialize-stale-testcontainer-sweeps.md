@@ -93,6 +93,24 @@ def test_sweep_lock_failure_warns_without_enumerating(
     with pytest.warns(UserWarning, match="sweep skipped"):
         assert xdist_backend.sweep_stale_backend_containers(client) == []
     assert client.filters is None
+
+
+def test_sweep_takes_the_lock_before_constructing_the_default_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from testcontainers.core import docker_client
+
+    constructed = False
+
+    def observable_factory() -> None:
+        nonlocal constructed
+        constructed = True
+
+    monkeypatch.setattr(docker_client, "DockerClient", observable_factory)
+    monkeypatch.setattr(xdist_backend, "_locked", _raising_lock)
+    with pytest.warns(UserWarning, match="sweep skipped"):
+        assert xdist_backend.sweep_stale_backend_containers() == []
+    assert constructed is False
 ```
 
 The subprocess body must import `tests.support.xdist_backend`, replace `_SWEEP_LOCK_PATH` with the
@@ -216,6 +234,7 @@ in GitHub CI before merge handoff.
 - Two public sweeps in separate processes cannot enumerate the shared candidate set concurrently.
 - Only exact concurrent-removal 409 plus verified exact-id absence is silent.
 - Unrelated conflicts, lookup failure, deadline expiry, and lock failure remain warnings.
+- Default Docker-client construction occurs only after the sweep lock is held.
 - The public fixture interface and existing Docker-backed stale/live proof are unchanged.
 - Focused tests, `just lint`, `just type`, and `just ci` pass without untracked files.
 
