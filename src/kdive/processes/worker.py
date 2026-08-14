@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import TYPE_CHECKING
 
@@ -103,6 +104,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
         worker_id = _validate_worker_incarnation(
             incarnation, configured_worker_id=configured_worker_id
         )
+        await asyncio.to_thread(object_store_from_env().validate_conditional_create)
         handler_assembly = build_worker_handler_assembly(
             secret_registry=secret_registry,
             incarnation_credential=incarnation_credential,

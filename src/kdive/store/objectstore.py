@@ -12,10 +12,14 @@ from __future__ import annotations
 
 import io
 from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from threading import Barrier
+from types import MappingProxyType
 from typing import IO, Any, cast
+from uuid import uuid4
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -53,6 +57,8 @@ _LIST_PAGE_SIZE = 1000
 
 # A missing object (404) and an etag mismatch (412) are the one stale_handle case.
 _STALE_STATUSES = frozenset({404, 412})
+
+_CONDITIONAL_PROBE_PREFIX = "_kdive/capture-publication-admission/"
 
 
 def _normalize_etag(raw: str) -> str:
@@ -262,6 +268,196 @@ class ObjectStore:
             request.sensitivity,
             request.retention_class,
             reply.required_nonempty_string("VersionId"),
+        )
+
+    def create_if_absent(
+        self, request: artifact_types.ConditionalArtifactWriteRequest
+    ) -> artifact_types.ConditionalCreateResult:
+        """Atomically create ``request.key``, or report that another writer won."""
+        metadata = {
+            **request.metadata,
+            "sensitivity": request.sensitivity.value,
+            "retention-class": request.retention_class,
+        }
+        try:
+            response = self._client.put_object(
+                Bucket=self._bucket,
+                Key=request.key,
+                Body=request.data,
+                IfNoneMatch="*",
+                Metadata=metadata,
+            )
+        except ClientError as err:
+            code = err.response.get("Error", {}).get("Code")
+            status = err.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if code == "PreconditionFailed" or status == 412:
+                return artifact_types.ConditionalCreateConflict(request.key)
+            raise _infrastructure_error("put_object", request.key, err) from err
+        except BotoCoreError as err:
+            raise _infrastructure_error("put_object", request.key, err) from err
+        reply = _StoreReply("put_object", self._bucket, request.key, response)
+        return artifact_types.StoredArtifact(
+            request.key,
+            _normalize_etag(reply.required_nonempty_string("ETag")),
+            request.sensitivity,
+            request.retention_class,
+            reply.required_nonempty_string("VersionId"),
+        )
+
+    def validate_conditional_create(self) -> None:
+        """Prove atomic conditional creation and remove every probe version created."""
+        probe_id = uuid4().hex
+        key = f"{_CONDITIONAL_PROBE_PREFIX}{probe_id}"
+        request = artifact_types.ConditionalArtifactWriteRequest(
+            key=key,
+            data=b"",
+            metadata={"kdive-probe-id": probe_id},
+            sensitivity=Sensitivity.REDACTED,
+            retention_class="internal",
+        )
+        results: list[artifact_types.ConditionalCreateResult] = []
+        winners: list[artifact_types.StoredArtifact] = []
+        failure: CategorizedError | None = None
+        try:
+            results, create_failed = self._run_conditional_probe_writes(request)
+            winners = [
+                result for result in results if isinstance(result, artifact_types.StoredArtifact)
+            ]
+            conflicts = [
+                result
+                for result in results
+                if isinstance(result, artifact_types.ConditionalCreateConflict)
+            ]
+            if create_failed:
+                failure = self._conditional_admission_error(
+                    "a conditional create request failed",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                )
+            elif len(winners) != 1 or len(conflicts) != 1:
+                failure = self._conditional_admission_error(
+                    "expected exactly one winner and one precondition conflict"
+                )
+            elif not winners[0].version_id:
+                failure = self._conditional_admission_error(
+                    "the conditional-create winner returned no immutable version id"
+                )
+            else:
+                failure = self._validate_conditional_probe_head(winners[0], request)
+        finally:
+            cleanup_failure = self._cleanup_conditional_probe(key, winners)
+            if cleanup_failure is not None:
+                failure = cleanup_failure
+        if failure is not None:
+            raise failure
+
+    def _run_conditional_probe_writes(
+        self, request: artifact_types.ConditionalArtifactWriteRequest
+    ) -> tuple[list[artifact_types.ConditionalCreateResult], bool]:
+        barrier = Barrier(2)
+
+        def create() -> artifact_types.ConditionalCreateResult:
+            barrier.wait()
+            return self.create_if_absent(request)
+
+        results: list[artifact_types.ConditionalCreateResult] = []
+        failed = False
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(create) for _ in range(2)]
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except CategorizedError:
+                    failed = True
+        return results, failed
+
+    def _validate_conditional_probe_head(
+        self,
+        winner: artifact_types.StoredArtifact,
+        request: artifact_types.ConditionalArtifactWriteRequest,
+    ) -> CategorizedError | None:
+        try:
+            head = self.head(winner.key, version_id=winner.version_id)
+        except CategorizedError:
+            return self._conditional_admission_error(
+                "the winner HEAD request failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        expected_metadata = {
+            **request.metadata,
+            "sensitivity": request.sensitivity.value,
+            "retention-class": request.retention_class,
+        }
+        if (
+            head is None
+            or head.version_id != winner.version_id
+            or head.etag != winner.etag
+            or head.size_bytes != 0
+            or head.metadata != expected_metadata
+        ):
+            return self._conditional_admission_error(
+                "the conditional-create winner HEAD did not match the created probe"
+            )
+        return None
+
+    def _cleanup_conditional_probe(
+        self, key: str, winners: Sequence[artifact_types.StoredArtifact]
+    ) -> CategorizedError | None:
+        cleanup_failed = False
+        missing_identity = False
+        exact_head_failed = False
+        residual_version = False
+        for winner in winners:
+            if not winner.version_id:
+                missing_identity = True
+                continue
+            try:
+                self.delete_version(winner.key, winner.version_id)
+            except CategorizedError:
+                cleanup_failed = True
+            try:
+                if self.head(winner.key, version_id=winner.version_id) is not None:
+                    residual_version = True
+            except CategorizedError:
+                exact_head_failed = True
+        try:
+            residual = self.head(key)
+        except CategorizedError:
+            return self._conditional_admission_error(
+                "probe cleanup could not verify absence",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        if missing_identity:
+            return self._conditional_admission_error(
+                "the winner omitted its version id, so exact probe cleanup is impossible"
+            )
+        if cleanup_failed:
+            return self._conditional_admission_error(
+                "exact-version probe cleanup failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        if exact_head_failed:
+            return self._conditional_admission_error(
+                "probe cleanup could not verify exact-version absence",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        if residual is not None:
+            return self._conditional_admission_error("a probe object remains after cleanup")
+        if residual_version:
+            return self._conditional_admission_error("a probe version remains after cleanup")
+        return None
+
+    def _conditional_admission_error(
+        self,
+        problem: str,
+        *,
+        category: ErrorCategory = ErrorCategory.CONFIGURATION_ERROR,
+    ) -> CategorizedError:
+        return CategorizedError(
+            f"object-store conditional-create admission failed for bucket {self._bucket!r}: "
+            f"{problem}. Configure a versioned S3-compatible store that supports atomic "
+            "If-None-Match '*' creation and exact-version deletion, then retry worker startup.",
+            category=category,
+            details={"bucket": self._bucket, "reason": problem},
         )
 
     def put_stream(
@@ -492,7 +688,8 @@ class ObjectStore:
         # An absent ``Metadata`` is normal, but a present non-mapping one would make the
         # sensitivity read below a ``TypeError`` that neither this ``except`` nor any caller's
         # catches — the same escape as a missing required field, by way of an optional one.
-        metadata: Mapping[str, Any] = reply.optional("Metadata", dict) or {}
+        raw_metadata: Mapping[str, Any] = reply.optional("Metadata", dict) or {}
+        metadata = MappingProxyType(cast(dict[str, str], dict(raw_metadata)))
         try:
             sensitivity = Sensitivity(metadata["sensitivity"])
         except (KeyError, ValueError) as _exc:
@@ -505,6 +702,7 @@ class ObjectStore:
             version_id=reply.required_nonempty_string("VersionId"),
             sensitivity=sensitivity,
             content_encoding=metadata.get("content-encoding"),
+            metadata=metadata,
         )
 
     def get_range(
