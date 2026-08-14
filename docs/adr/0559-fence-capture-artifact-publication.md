@@ -26,31 +26,41 @@ and atomically commits artifact-row registration, audit, and the operation's pub
 under the Run lock. Every transition revalidates the credential-bound worker, exact job attempt,
 current-operation link, and nonterminal job state.
 
-The operation state distinguishes provider mutation from publication. Positive provider-exit and
-quiescence evidence advances `running` to `publishing`; only a committed artifact row advances it
-to terminal `published`. A no-artifact outcome advances it to terminal `discarded` only after the
-deterministic key is absent or an artifact row already owns it. A later attempt cannot be claimed
-while the prior operation is nonterminal.
+Provider execution and publication are orthogonal monotonic states on the same row. ADR-0558's
+operation state still advances to terminal `exited` only after positive process and provider
+quiescence. Publication advances `pending -> publishing -> published | canceling -> discarded`;
+`published` and `discarded` are terminal. A committed artifact row is required for `published`.
+An absent journaled object is required for `discarded`. Claim, cancellation acknowledgment,
+retry, and reclamation all require the product state `(exited, published|discarded)`; an operation
+in any other product state remains current and recoverable.
 
-Cancellation, session loss, or replacement recovery cancels any in-process PUT, waits for the
-blocking store call to return, and then checks the key under the Run lock. If no artifact row owns
-the key, it deletes the object and verifies absence before recording `discarded`. If a row was
-already committed, publication is `published` and cancellation cannot rewrite it. Failure to
-prove either terminal outcome leaves the operation recoverable and bars retry and reaping.
+Cancellation, session loss, or replacement recovery first takes the job fence and, under the Run
+lock, atomically revalidates the exact attempt and moves `pending|publishing` to `canceling`. That
+is the linearization point after which publication commit is refused. It then releases the Run
+lock, cancels and drains any in-process PUT, and conditionally deletes only the journaled object
+version and etag. After verifying absence it reacquires the Run lock and records `discarded`. If a
+matching row committed before `canceling`, the state is already `published` and cancellation
+cannot rewrite it. Failure to prove either terminal outcome leaves the operation recoverable and
+bars cancellation acknowledgment, retry, and reaping.
 
-Migration 0113 adds publication state to supervised operations and augments ADR-0558's singleton
-cutoff with `publication_closed` and `complete`. The migration holds the capture-protocol fence,
-requires the existing operation-quiescent cutoff, proves no legacy producer can rejoin, and sets
-both fields atomically. Historical reclamation may use the cutoff only when `complete` is true.
-Attempt-linked reclamation requires an exited operation with terminal publication evidence.
+Migration 0113 raises the worker fence protocol from 3 to 4, adds publication state to supervised
+operations, and augments ADR-0558's singleton cutoff with `publication_closed` and `complete`.
+Under the capture-protocol fence it rejects every protocol-3-or-older incarnation not positively
+terminated by its lifecycle authority, rejects every running capture job or nonterminal operation,
+installs protocol 4 in registration, authentication, and capture claim, and rechecks that
+population before setting both cutoff fields atomically. Deployment uses the existing offline
+Compose, local-host, and Kubernetes lifecycle authorities to stop old workers before migration;
+no rolling compatibility path exists. Historical reclamation may use the cutoff only when
+`complete` is true. Attempt-linked reclamation requires the product state
+`(exited, published|discarded)`.
 
 ## Consequences
 
 - The job fence covers a potentially slow PUT, but the Run lock remains limited to short database
   checks and the metadata commit.
 - A worker crash can leave a journaled key or stored object, but startup recovery has enough
-  durable identity to finish registration only when already committed or remove the unregistered
-  object. It never guesses from object age.
+  durable identity to adopt an already committed row or remove the exact unregistered object
+  version. It never guesses from object age.
 - A failed delete retains a nonterminal operation and blocks retry and reaping until recovery can
   prove absence. This prefers retained residue to publication after reclamation.
 - Concurrent attempts cannot PUT the same key because job claiming remains barred until prior

@@ -35,35 +35,42 @@ retention, sensitivity, and agent-facing schema do not change.
 
 Migration `0113_capture_publication_fence.sql` extends `capture_operations`:
 
-- `state` adds `publishing`; `exited` remains the sole terminal operation state;
-- `publication_outcome` is null before publication and then `published` or `discarded`;
+- ADR-0558's `state` is unchanged and `exited` remains its terminal provider-operation state;
+- `publication_state` is `pending`, `publishing`, `canceling`, `published`, or `discarded`;
 - `publication_object_key` is set before PUT and is immutable;
 - `publication_etag` is set after PUT and before registration when PUT returned;
 - `publication_artifact_id` references the committed artifact row only for `published`;
 - `publication_started_at` and `publication_closed_at` use the database clock.
 
-The row checks require publication fields to form one of four complete shapes: not started,
-started/no PUT result, PUT returned, or terminal. `exited` requires positive process/provider
-quiescence and a terminal publication outcome. `published` requires a matching artifact id, key,
-and etag; `discarded` requires no artifact id. Immutable-key and exact-attempt validation live in
-security-definer transition functions rather than direct worker table grants.
+The row checks require publication fields to form complete pending, publishing, canceling, or
+terminal shapes. Provider `exited` requires positive process/provider quiescence; job completion,
+retry, cancellation acknowledgment, and later reclamation separately require the combined product
+state `(exited, published|discarded)`. `published` requires a matching artifact id, key, and etag;
+`discarded` requires no artifact id and a verified-absent journaled version. Immutable-key and
+exact-attempt validation live in security-definer transition functions rather than direct worker
+table grants.
 
 The existing `capture_operation_cutoff` gains non-null booleans `publication_closed` and
-`complete`. Migration takes the protocol advisory fence, locks the singleton, verifies protocol 3
-and `operation_quiescent`, verifies all pre-protocol workers remain positively terminated, then
-sets `publication_closed = true` and `complete = true` in one transaction. It does not resample
-`cutoff_at`; historical eligibility remains bounded by the database-clock instant at which legacy
-provider work became quiescent. A failed assertion rolls the migration back; the recovery action
-is to terminate the named legacy authority and rerun migration.
+`complete`. Migration raises the worker fence protocol from 3 to 4. Under the protocol advisory
+fence it verifies the cutoff is protocol 3 and `operation_quiescent`, rejects every protocol-3-or-
+older worker without positive lifecycle termination, rejects running capture jobs and operations
+without the combined terminal product state, replaces registration/authentication/claim guards
+with exact protocol 4, and rechecks the whole population. It then sets cutoff protocol 4,
+`publication_closed = true`, and `complete = true` atomically. It does not resample `cutoff_at`;
+historical eligibility remains bounded by the database-clock instant at which legacy provider work
+became quiescent. Compose, local-host, and Kubernetes upgrade paths reuse their existing offline
+termination witnesses and refuse migration until all protocol-3 workers are stopped. A failed
+assertion rolls back; the recovery action is to terminate the named authority and rerun migration.
 
 ## Runtime flow
 
 `CaptureOperationSupervisor.execute` accepts an injected async publisher. It retains the
 session-level job fence and authority monitor through these ordered steps:
 
-1. Launch, run, terminate, and prove provider quiescence as in ADR-0558.
-2. Transition the exact current operation from `running` to `publishing`, persisting provider-exit
-   evidence and the deterministic object key before any PUT.
+1. Launch, run, terminate, and persist provider `exited` plus quiescence as in ADR-0558 while the
+   publication state remains `pending`.
+2. Transition the exact current operation from `pending` to `publishing`, persisting the
+   deterministic object key before any PUT.
 3. Invoke the publisher. The publisher checks for an existing committed row under the Run lock.
    A sequential replay adopts that row through the publication commit transition and performs no
    PUT.
@@ -82,18 +89,23 @@ rejects conflicting facts.
 
 ## Cancellation and recovery
 
-Authority monitoring races publication against the lock-owning connection. If cancellation wins,
-the publisher is canceled, any PUT thread is drained, and cleanup uses the operation's durable
-key. Under the Run lock it first checks for a committed artifact row:
+Authority monitoring races publication against the lock-owning connection. Normal cancellation
+waits on the same job fence. Session loss releases that fence, after which cleanup or replacement
+recovery reacquires it. Under the Run lock the cancellation owner revalidates the exact current
+attempt and atomically moves `pending|publishing` to `canceling`; every publication-commit
+transition rejects that state. It then releases the Run lock, cancels and drains any PUT thread,
+and uses the operation's durable object version and etag:
 
 - a matching committed row closes the operation as `published`; the job result is not rewritten;
-- no row causes object deletion followed by an absence check, then closes as `discarded`;
+- no row causes conditional object-version deletion followed by an absence check; cleanup then
+  reacquires the Run lock and closes as `discarded`;
 - a conflicting row, failed delete, failed absence proof, unavailable store, or database failure
   leaves the operation in `publishing` for startup recovery.
 
 Replacement recovery runs before readiness. For an operation with provider quiescence but open
-publication it repeats the same row-first decision. It never resumes a PUT from buffered packet
-bytes: if registration did not commit, it removes the deterministic key and records `discarded`.
+publication it repeats the same `canceling` linearization and row-first decision. It never resumes
+a PUT from buffered packet bytes: if registration did not commit, it removes the exact journaled
+object version and records `discarded`.
 This is safe because the job cannot retry while the prior operation is nonterminal. Recovery does
 not acknowledge cancellation or expose readiness until object/row publication is terminal.
 
@@ -147,8 +159,9 @@ row plus no object and `discarded`.
 
 Crash-recovery tests seed every durable boundary and prove replacement recovery never invents an
 artifact row, never deletes a registered object, and does not report readiness while cleanup is
-unproven. Concurrent-attempt tests prove the second attempt cannot PUT until the first publication
-is terminal. Tests deliberately break transition validation and compensation to show the new
+unproven. Protocol-cutover tests prove a protocol-3 worker cannot rejoin or claim before aggregate
+completion. Concurrent-attempt tests prove the second attempt cannot PUT until the first
+publication is terminal. Tests deliberately break transition validation and compensation to show the new
 assertions fail before restoring the implementation. `just ci` is the final local gate on both
 declared target architectures through architecture-independent Python and PostgreSQL behavior;
 no live provider or MCP-contract change is required.
