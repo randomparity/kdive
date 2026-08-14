@@ -1910,12 +1910,36 @@ def test_observability_scrape_config_passes_promtool() -> None:
     assert res.returncode == 0, res.stdout + res.stderr
 
 
+def _waits_on_bundled_install(text: str) -> bool:
+    logical_lines = re.sub(r"\\\s*\n\s*", " ", text).splitlines()
+    return any(
+        "helm install" in line and "values-demo.yaml" in line and "--wait" in line
+        for line in logical_lines
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "helm install kdive chart -f values-demo.yaml --wait",
+        "helm install kdive chart --wait -f values-demo.yaml",
+        "helm install kdive chart -f values-demo.yaml \\\n  --wait",
+    ],
+)
+def test_bundled_install_wait_guard_rejects_argument_forms(command: str) -> None:
+    assert _waits_on_bundled_install(command)
+
+
 def test_active_docs_do_not_wait_on_bundled_install() -> None:
-    pattern = re.compile(r"values-demo\.yaml[^\n]*--wait")
-    offenders = [
-        path.relative_to(REPOSITORY).as_posix()
+    docs = [REPOSITORY / "README.md", REPOSITORY / "deploy" / "helm" / "kdive" / "README.md"]
+    docs.extend(
+        path
         for path in (REPOSITORY / "docs").rglob("*.md")
         if "archive" not in path.relative_to(REPOSITORY / "docs").parts
-        and pattern.search(path.read_text(encoding="utf-8"))
+    )
+    offenders = [
+        path.relative_to(REPOSITORY).as_posix()
+        for path in docs
+        if _waits_on_bundled_install(path.read_text(encoding="utf-8"))
     ]
     assert offenders == []
