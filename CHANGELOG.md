@@ -590,6 +590,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Separate manifest installation
 - Clarify bundled install wait behavior
 - Prevent bundled install deadlock
+- Design cluster-global test role locking
+- Make test role lock cluster-wide
+- Bound test role lock acquisition
+- Reuse the migration lock namespace
+- Require end-to-end role race proof
+- Fix the runtime role dependency race
+- Cover both runtime role race outcomes
+- Preserve migration immutability
+- Close the concurrent role creator race
+- Constrain runtime role fix to test fixtures
+- Complete test role lock coverage
+- Close role lock verification gaps
+- Accept cluster-global role locking
+- Date ADR 0560 acceptance
 
 ### Fixed
 
