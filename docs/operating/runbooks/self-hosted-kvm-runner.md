@@ -25,7 +25,8 @@ matching `python3-guestfs` binding (see ADR-0387).
 2. `libvirt_pool_net` (reused) — the `default` dir pool + network.
 3. `live_vm_host` — the contract delta: service-account groups, the toolchain,
    `/boot` kernel readability, the persistent venv, both staging dirs
-   (AppArmor-confined), `enable-linger`, and the two-part host-contract gate.
+   (AppArmor-confined), Bubblewrap for the unreadable-proc lifecycle carrier,
+   `enable-linger`, and the two-part host-contract gate.
 4. `github_runner` — the runner asset (checksum-verified), registration, and the
    systemd service (installed stopped).
 

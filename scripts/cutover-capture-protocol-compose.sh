@@ -23,7 +23,8 @@ backup_parent="$(dirname -- "$backup_path")"
   exit 2
 }
 [[ -n "$target_image" && "$target_image" != *[[:space:]]* ]] || usage
-[[ -d "$backup_parent" && -w "$backup_parent" && ! -e "$backup_path" ]] || {
+[[ -d "$backup_parent" && -w "$backup_parent" && ! -e "$backup_path" &&
+  ! -L "$backup_path" ]] || {
   echo "backup target must be a new file in an existing writable directory" >&2
   exit 2
 }
@@ -199,6 +200,9 @@ recovery() {
       timeout --kill-after=5 \
       "${KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS:-600}s" \
       docker compose --profile cutover run --rm migrate >&2
+    print_shell_command \
+      "COMPOSE_FILE=${frozen_model}" "COMPOSE_PROJECT_NAME=${compose_project}" \
+      just compose-up >&2
   else
     echo "The old schema remains authoritative; rerun the same command:" >&2
     printf '  scripts/cutover-capture-protocol-compose.sh %q %q\n' \
@@ -223,6 +227,13 @@ cutover_bounded "Compose lifecycle stop" just compose-stop
 cutover_bounded "Compose frozen Postgres restart" \
   "${compose[@]}" up -d --wait --wait-timeout 120 postgres
 prove_same_database post-stop
+if ! cmp --silent "${snapshot_dir}/preflight-host-db" \
+  "${snapshot_dir}/post-stop-host-db" ||
+  ! cmp --silent "${snapshot_dir}/preflight-container-db" \
+    "${snapshot_dir}/post-stop-container-db"; then
+  echo "approved database identity changed after stop" >&2
+  exit 1
+fi
 cutover_bounded "database stopped-population proof" \
   psql "$database_url" --set ON_ERROR_STOP=1 <<'SQL'
 DO $check$

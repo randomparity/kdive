@@ -321,6 +321,7 @@ compose-down:
 # Run the isolated executable Compose/Docker lifecycle proof. The explicit environment makes
 # unavailable Docker a failure and guarantees that the sole carrier cannot report a skip as proof.
 test-compose-lifecycle:
+    command -v bwrap >/dev/null || { echo "bubblewrap is required: install bwrap" >&2; exit 2; }
     KDIVE_RUN_COMPOSE_LIFECYCLE_PROOF=1 KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest tests/compose/test_compose_worker_lifecycle_live.py -m live_stack --strict-markers -q
 
 # Run the isolated executable proof that a plain `docker compose down` preserves the named data

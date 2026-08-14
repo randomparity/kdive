@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 from pathlib import Path
@@ -11,6 +12,17 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_CUTOVER = ROOT / "scripts" / "cutover-capture-protocol-compose.sh"
 HOST_CUTOVER = ROOT / "scripts" / "live-stack" / "cutover-capture-protocol.sh"
+CHANGED_CUTOVER_SURFACE = (
+    "scripts/cutover-capture-protocol-lib.sh",
+    "scripts/live-stack/cutover-capture-protocol.sh",
+    "scripts/cutover-capture-protocol-compose.sh",
+    "scripts/cutover-capture-protocol-helm.sh",
+    "deploy/helm/kdive/templates/statefulset-worker.yaml",
+    "tests/scripts/test_capture_cutover_scripts.py",
+    "tests/compose/test_compose_worker_lifecycle_live.py",
+    "tests/helm/test_helm_upgrade_config.py",
+    "tests/compose/test_compose_lifecycle_recipe.py",
+)
 
 
 def _executable(path: Path, body: str) -> None:
@@ -28,10 +40,27 @@ def _compose_stub_environment(
     psql_body: str = "cat >/dev/null",
     host_database_identity: str = "kdive\\t16384\\t777",
     container_database_identity: str = "kdive\\t16384\\t777",
+    switch_identity_after_stop: bool = False,
 ) -> tuple[dict[str, str], Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "calls"
+    switched_identity = "other\\t999\\t888"
+    container_identity_command = f"printf '{container_database_identity}\\n'"
+    host_identity_command = f"printf '{host_database_identity}\\n'"
+    just_switch_command = ":"
+    if switch_identity_after_stop:
+        container_identity_command = (
+            f"[[ -e \"$CUTOVER_DATABASE_SWITCH\" ]] && printf '{switched_identity}\\n' "
+            f"|| printf '{container_database_identity}\\n'"
+        )
+        host_identity_command = (
+            f"[[ -e \"$CUTOVER_DATABASE_SWITCH\" ]] && printf '{switched_identity}\\n' "
+            f"|| printf '{host_database_identity}\\n'"
+        )
+        just_switch_command = (
+            '[[ "$*" == "compose-stop" ]] && : >"$CUTOVER_DATABASE_SWITCH" || true'
+        )
     _executable(
         bin_dir / "docker",
         f"""
@@ -42,12 +71,13 @@ case "$*" in
   'pull '*) exit {pull_status} ;;
   *'config --format json'*)
     cat <<'JSON'
-    {{"name":"cutover-proof","services":{{"migrate":{{"image":"target:v3"}},"server":{{"image":"target:v3"}},
+    {{"name":"cutover-proof","services":{{
+  "migrate":{{"image":"target:v3"}},"server":{{"image":"target:v3"}},
   "worker":{{"image":"target:v3"}},"reconciler":{{"image":"target:v3"}}}}}}
 JSON
     ;;
   *'run --rm --no-deps --entrypoint python migrate'*)
-    printf '{container_database_identity}\n'
+    {container_identity_command}
     ;;
   *'--profile cutover run --rm migrate'*) exit {migrate_status} ;;
   *'compose '*'ps '*'worker'*) printf '%s' {survivors!r} ;;
@@ -56,16 +86,17 @@ esac
     )
     _executable(
         bin_dir / "just",
-        """
-printf 'just %s file=%s project=%s\n' "$*" "${COMPOSE_FILE:-}" \
-  "${COMPOSE_PROJECT_NAME:-}" >>"$CUTOVER_TEST_LOG"
+        f"""
+printf 'just %s file=%s project=%s\n' "$*" "${{COMPOSE_FILE:-}}" \
+  "${{COMPOSE_PROJECT_NAME:-}}" >>"$CUTOVER_TEST_LOG"
+{just_switch_command}
 """,
     )
     _executable(
         bin_dir / "psql",
         f"""
 if [[ "$*" == *pg_control_system* ]]; then
-  printf '{host_database_identity}\\n'
+  {host_identity_command}
 else
   {psql_body}
 fi
@@ -89,6 +120,7 @@ printf 'valid custom dump' >"$output"
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "CUTOVER_TEST_LOG": str(log),
+        "CUTOVER_DATABASE_SWITCH": str(tmp_path / "database-switched"),
         "KDIVE_DATABASE_URL": "postgresql://u:sentinel-password@d/x",  # pragma: allowlist secret
         "KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS": "3",
         "KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS": "1",
@@ -107,6 +139,65 @@ def _run_compose_cutover(tmp_path: Path, env: dict[str, str]) -> subprocess.Comp
         check=False,
         timeout=15,
     )
+
+
+def _function_complexity(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    decisions = 0
+    decision_nodes = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.IfExp, ast.comprehension)
+    for child in ast.walk(node):
+        if isinstance(child, decision_nodes):
+            decisions += 1
+        elif isinstance(child, ast.BoolOp):
+            decisions += len(child.values) - 1
+        elif isinstance(child, ast.ExceptHandler):
+            decisions += 1
+        elif isinstance(child, ast.Match):
+            decisions += max(0, len(child.cases) - 1)
+    return decisions + 1
+
+
+def _assert_line_limits(relative_files: tuple[str, ...]) -> None:
+    for relative in relative_files:
+        lines = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        violations = [
+            (number, len(line)) for number, line in enumerate(lines, 1) if len(line) > 100
+        ]
+        assert violations == [], f"{relative}: {violations}"
+
+
+def _assert_python_quality(relative_files: tuple[str, ...]) -> None:
+    baseline = {
+        ("tests/compose/test_compose_worker_lifecycle_live.py", "_cleanup_isolated_stack"): 18,
+    }
+    for relative in (item for item in relative_files if item.endswith(".py")):
+        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+        functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        oversized = {
+            node.name: node.end_lineno - node.lineno + 1
+            for node in functions
+            if node.end_lineno is not None and node.end_lineno - node.lineno + 1 > 100
+        }
+        complex_functions = {
+            node.name: _function_complexity(node)
+            for node in functions
+            if _function_complexity(node) > baseline.get((relative, node.name), 8)
+        }
+        assert oversized == {}, f"{relative}: {oversized}"
+        assert complex_functions == {}, f"{relative}: {complex_functions}"
+
+
+def _assert_shell_function_sizes(relative_files: tuple[str, ...]) -> None:
+    for relative in (item for item in relative_files if item.endswith(".sh")):
+        lines = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        for start, line in enumerate(lines):
+            if not line.endswith("() {"):
+                continue
+            end = next(index for index in range(start + 1, len(lines)) if lines[index] == "}")
+            assert end - start + 1 <= 100, f"{relative}:{start + 1}-{end + 1}"
 
 
 def test_compose_image_preflight_failure_does_not_stop_deployment(tmp_path: Path) -> None:
@@ -200,6 +291,46 @@ def test_compose_database_identity_mismatch_fails_before_stop(tmp_path: Path) ->
     assert result.returncode != 0
     assert "database identities differ" in result.stderr
     assert "just compose-stop" not in log.read_text(encoding="utf-8")
+
+
+def test_compose_database_identity_change_after_stop_refuses_backup(tmp_path: Path) -> None:
+    env, log = _compose_stub_environment(tmp_path, switch_identity_after_stop=True)
+
+    result = _run_compose_cutover(tmp_path, env)
+
+    assert result.returncode != 0
+    assert "approved database identity changed after stop" in result.stderr
+    assert not (tmp_path / "backup.dump").exists()
+    assert "--profile cutover run --rm migrate" not in log.read_text(encoding="utf-8")
+
+
+def test_backup_publish_rejects_destination_symlink_race(tmp_path: Path) -> None:
+    env, _log = _compose_stub_environment(tmp_path)
+    destination = tmp_path / "backup.dump"
+    redirect = tmp_path / "redirect"
+    pg_restore = tmp_path / "bin" / "pg_restore"
+    _executable(
+        pg_restore,
+        f"mkdir {redirect!s}\nln -s {redirect!s} {destination!s}\n",
+    )
+
+    result = _run_compose_cutover(tmp_path, env)
+
+    assert result.returncode != 0
+    assert destination.is_symlink()
+    assert list(redirect.iterdir()) == []
+    assert "refusing to overwrite" in result.stderr
+
+
+def test_initial_broken_backup_symlink_fails_before_stop(tmp_path: Path) -> None:
+    destination = tmp_path / "backup.dump"
+    destination.symlink_to(tmp_path / "absent")
+    env, log = _compose_stub_environment(tmp_path)
+
+    result = _run_compose_cutover(tmp_path, env)
+
+    assert result.returncode != 0
+    assert not log.exists()
 
 
 def test_compose_mutations_consume_only_frozen_project_and_model(tmp_path: Path) -> None:
@@ -325,6 +456,8 @@ def test_host_cutover_executes_stop_witness_backup_and_migration_trap(tmp_path: 
     assert "host-sentinel" not in result.stdout + result.stderr
     assert "host stopped-state proof found no KDIVE daemon" in result.stderr
     assert (tmp_path / "backup.dump").exists()
+    assert "restart the protocol-3 host processes exactly" in result.stderr
+    assert "  restart_host_processes" in result.stderr
     calls = (tmp_path / "calls").read_text(encoding="utf-8")
     assert calls.index("check-local-cutover-authority") < calls.index("terminate-local-cutover")
     assert calls.index("terminate-local-cutover") < calls.index("kdive migrate")
@@ -430,6 +563,17 @@ def test_compose_recovery_command_quotes_hostile_backup_path(tmp_path: Path) -> 
     assert not marker.exists()
 
 
+def test_compose_migration_recovery_prints_frozen_start_command(tmp_path: Path) -> None:
+    env, _log = _compose_stub_environment(tmp_path, migrate_status=19)
+
+    result = _run_compose_cutover(tmp_path, env)
+
+    assert result.returncode == 19
+    assert "approved-compose.json" in result.stderr
+    assert "docker compose --profile cutover run --rm migrate" in result.stderr
+    assert "just compose-up" in result.stderr
+
+
 def test_cutover_scripts_declare_bounded_database_and_operation_contracts() -> None:
     shared = (ROOT / "scripts/cutover-capture-protocol-lib.sh").read_text(encoding="utf-8")
     for relative in (
@@ -460,15 +604,7 @@ def test_cutover_scripts_never_expand_database_url_in_rollback(relative: str) ->
     assert 'dbname=\\"${KDIVE_' not in text
 
 
-def test_cutover_shell_and_embedded_blocks_obey_line_limit() -> None:
-    for relative in (
-        "scripts/cutover-capture-protocol-lib.sh",
-        "scripts/live-stack/cutover-capture-protocol.sh",
-        "scripts/cutover-capture-protocol-compose.sh",
-        "scripts/cutover-capture-protocol-helm.sh",
-    ):
-        lines = (ROOT / relative).read_text(encoding="utf-8").splitlines()
-        violations = [
-            (number, len(line)) for number, line in enumerate(lines, 1) if len(line) > 100
-        ]
-        assert violations == [], f"{relative}: {violations}"
+def test_cutover_changed_surface_obeys_size_limits() -> None:
+    _assert_line_limits(CHANGED_CUTOVER_SURFACE)
+    _assert_python_quality(CHANGED_CUTOVER_SURFACE)
+    _assert_shell_function_sizes(CHANGED_CUTOVER_SURFACE)

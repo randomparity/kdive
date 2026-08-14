@@ -73,17 +73,20 @@ scripts/cutover-capture-protocol-helm.sh \
 ```
 
 Before mutation, the script freezes a flattened kubeconfig and context, cluster and workload
-identities, chart, values, exact rendered target, image digest, release revision, and migration
-credential in a restricted cutover directory. Every later command consumes those snapshots. A
-cutover-owned immutable Secret overrides the migration hook credential through completion and is
-removed only after its identity and the successor release are proven.
+identities, chart, values, exact upgrade-mode render, repository-matching image digest, release
+revision, and migration credential in a restricted cutover directory. Every later command consumes
+those snapshots. An attempt-unique Kubernetes-immutable Secret overrides the migration hook
+credential through completion and is removed only after its UID, bytes, and the successor release
+are proven.
 
 The script retains the installed `worker.replicas`, scales the worker StatefulSet to zero, waits
 for every Pod finalizer and exact lifecycle-witness termination row, takes a custom-format backup,
 and runs the hooked target upgrade with the original replica count. The migration hook completes
 before Helm applies the target worker template, so migration cannot race the rollout. Identity
-drift, missing required verbs, or a server-side dry-run failure aborts before stop. Failures leave
-workers at zero and retain restricted recovery artifacts. Backup publication never replaces a
+drift, missing required verbs, or the exact Helm upgrade server dry-run failing aborts before stop.
+After deletion, every legacy StatefulSet incarnation must carry exact termination evidence. A
+pre-mutation failure does not stop workers; later failures leave workers at zero and retain
+restricted recovery artifacts. Backup publication never replaces a
 destination that appears during the dump. After migration, never start a protocol-2 image;
 rollback means
 `pg_restore --clean --if-exists` from the named backup followed by the prior chart and image.

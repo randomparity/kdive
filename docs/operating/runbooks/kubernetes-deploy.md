@@ -191,15 +191,19 @@ The wrapper creates a restricted mode-0700 cutover directory beside the backup a
 flattened kubeconfig, its context and cluster identity, the chart tree, caller values, installed
 release revision and namespace/StatefulSet UIDs, exact target render, registry image digest, and
 migration credential. Every later Helm and Kubernetes operation uses only the frozen kubeconfig,
-context, chart, and values. An immutable cutover-owned Secret supplies the frozen credential to
-the migration hook through completion; it is deleted only after the successor release, workload,
-and Secret identities are proven. A failed run retains the restricted snapshot and Secret and
-prints their exact identities without printing a DSN.
+context, chart, and values. An attempt-unique Secret with Kubernetes `immutable: true` supplies the
+frozen credential to the migration hook. Its UID, immutable flag, and bytes are revalidated before
+backup, upgrade, and safe deletion after the successor release and workload identities are proven.
+A failed run retains the restricted snapshot and any still-needed Secret and prints exact
+identities without printing a DSN.
 
-Before scaling, the wrapper proves list/watch Pod access and the exact needed Secret and
-StatefulSet scale verbs, performs a server-side dry run of the frozen target, and verifies database
-connectivity. It revalidates cluster, namespace, StatefulSet, and release identities at every
-mutation boundary. Both installed and target migration Secret DSNs must equal
+Before scaling, the wrapper checks the complete Helm, hook, release-storage, and chart-resource
+verb set. It renders with upgrade semantics and runs the exact frozen Helm arguments with
+`--dry-run=server`, then verifies database connectivity. It revalidates cluster, namespace,
+StatefulSet, release, and cutover-Secret identities at every mutation boundary. After Pod deletion,
+every legacy Kubernetes incarnation for the StatefulSet must have exact durable termination
+evidence before backup. A tagged target image must resolve to exactly one digest for its supplied
+repository. Both installed and target migration Secret DSNs must equal
 `KDIVE_MIGRATION_DATABASE_URL`; DSNs are never printed. Each
 Helm, Kubernetes, image, database, dump, and migration operation has a 600-second limit measured
 by GNU `timeout`'s monotonic clock. Connects additionally have a 10-second limit and statements a
@@ -216,6 +220,10 @@ the prior chart and image. The cutoff is operation-quiescent evidence only: #195
 publication closure and combined historical-capture coverage.
 Backup publication is atomic and refuses replacement. If its destination appears during the dump,
 the validated sibling temporary file is retained and the wrapper prints a safe recovery path.
+The recovery trap does not scale workers unless this attempt began worker mutation. Its output is
+phase-aware: old-schema failures print a complete fresh-attempt command, uncertain upgrade failures
+print the frozen forward-resume and restore commands, and post-upgrade cleanup failures print the
+exact cutover-Secret deletion command.
 
 The remaining staged procedure applies to other worker-fence releases.
 

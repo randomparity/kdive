@@ -57,7 +57,7 @@ cutover_publish_backup() {
   cutover_bounded "database backup validation" \
     pg_restore --list "$CUTOVER_BACKUP_TEMP" >/dev/null
   CUTOVER_BACKUP_VALIDATED=1
-  if ! ln -- "$CUTOVER_BACKUP_TEMP" "$backup_path"; then
+  if ! ln --no-target-directory -- "$CUTOVER_BACKUP_TEMP" "$backup_path"; then
     echo "backup destination appeared during cutover; refusing to overwrite it" >&2
     echo "validated backup retained at: ${CUTOVER_BACKUP_TEMP}" >&2
     echo "Recovery: choose a new absolute BACKUP_PATH and publish this validated file." >&2

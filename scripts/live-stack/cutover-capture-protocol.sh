@@ -24,7 +24,8 @@ backup_parent="$(dirname -- "$backup_path")"
   echo "BACKUP_PATH must be an absolute file path" >&2
   exit 2
 }
-[[ -d "$backup_parent" && -w "$backup_parent" && ! -e "$backup_path" ]] || {
+[[ -d "$backup_parent" && -w "$backup_parent" && ! -e "$backup_path" &&
+  ! -L "$backup_path" ]] || {
   echo "backup target must be a new file in an existing writable directory: ${backup_path}" >&2
   exit 2
 }
@@ -77,7 +78,11 @@ recovery() {
     echo "The named backup is complete; correct the blocker and resume with:" >&2
     printf "  timeout --kill-after=5 \"\${KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS:-600}s\"" >&2
     printf ' %q -m kdive migrate\n' "$py" >&2
-    echo "Then source the live-stack libraries and run restart_host_processes." >&2
+    echo "Then restart the protocol-3 host processes exactly:" >&2
+    printf '  cd %q\n' "$repo_root" >&2
+    printf '  source %q\n' "${here}/lib.sh" >&2
+    printf '  source %q\n' "${here}/env.sh" >&2
+    printf '  restart_host_processes\n' >&2
   else
     echo "The old schema remains authoritative; partial backup state was rejected." >&2
     echo "Correct the named blocker and rerun the same command:" >&2

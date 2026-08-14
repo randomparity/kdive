@@ -4,6 +4,7 @@
 # venv, so their -dev headers (libvirt-dev, libelf/libdw/libkdumpfile) are build deps here;
 # libguestfs has no PyPI package and is symlinked from the system python3-guestfs binding.
 live_vm_host_packages:
+  - bubblewrap         # unreadable-/proc carrier in test-compose-lifecycle
   - crash
   - makedumpfile
   - kexec-tools

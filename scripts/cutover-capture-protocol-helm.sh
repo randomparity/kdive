@@ -28,7 +28,8 @@ py="${repo_root}/.venv/bin/python"
   echo "BACKUP_PATH must be an absolute file path" >&2
   exit 2
 }
-[[ -d "$backup_parent" && -w "$backup_parent" && ! -e "$backup_path" ]] || {
+[[ -d "$backup_parent" && -w "$backup_parent" && ! -e "$backup_path" &&
+  ! -L "$backup_path" ]] || {
   echo "backup target must be a new file in an existing writable directory" >&2
   exit 2
 }
@@ -158,12 +159,61 @@ current_object_identity() {
   }
 }
 
-for permission in "get pods" "list pods" "watch pods" "get secrets" \
-  "create secrets" "delete secrets" "get statefulsets.apps" \
-  "patch statefulsets.apps/scale"; do
+namespaced_permissions=(
+  "get pods" "list pods" "watch pods"
+  "get secrets" "list secrets" "create secrets" "update secrets" "patch secrets"
+  "delete secrets" "get jobs.batch" "list jobs.batch" "watch jobs.batch"
+  "create jobs.batch" "delete jobs.batch" "get deployments.apps" "list deployments.apps"
+  "watch deployments.apps" "delete deployments.apps"
+  "create deployments.apps" "update deployments.apps" "patch deployments.apps"
+  "get statefulsets.apps" "list statefulsets.apps" "watch statefulsets.apps"
+  "create statefulsets.apps" "update statefulsets.apps" "delete statefulsets.apps"
+  "patch statefulsets.apps" "patch statefulsets.apps/scale" "get services"
+  "list services" "create services" "update services" "patch services" "delete services"
+  "get configmaps" "list configmaps" "create configmaps" "update configmaps"
+  "patch configmaps" "delete configmaps" "get serviceaccounts" "list serviceaccounts"
+  "create serviceaccounts" "update serviceaccounts" "patch serviceaccounts"
+  "delete serviceaccounts"
+  "get roles.rbac.authorization.k8s.io" "create roles.rbac.authorization.k8s.io"
+  "update roles.rbac.authorization.k8s.io" "patch roles.rbac.authorization.k8s.io"
+  "list roles.rbac.authorization.k8s.io" "delete roles.rbac.authorization.k8s.io"
+  "get rolebindings.rbac.authorization.k8s.io"
+  "create rolebindings.rbac.authorization.k8s.io"
+  "update rolebindings.rbac.authorization.k8s.io"
+  "patch rolebindings.rbac.authorization.k8s.io"
+  "list rolebindings.rbac.authorization.k8s.io"
+  "delete rolebindings.rbac.authorization.k8s.io" "get networkpolicies.networking.k8s.io"
+  "create networkpolicies.networking.k8s.io" "update networkpolicies.networking.k8s.io"
+  "patch networkpolicies.networking.k8s.io" "list networkpolicies.networking.k8s.io"
+  "delete networkpolicies.networking.k8s.io"
+)
+for permission in "${namespaced_permissions[@]}"; do
   read -r verb resource <<<"$permission"
   allowed="$(cutover_bounded "Kubernetes authorization preflight" \
     "${kubectl_ctx[@]}" auth can-i "$verb" "$resource" --namespace "$namespace")"
+  [[ "$allowed" == yes ]] || {
+    echo "Kubernetes authorization denied: ${verb} ${resource}" >&2
+    exit 1
+  }
+done
+cluster_permissions=(
+  "get clusterroles.rbac.authorization.k8s.io"
+  "create clusterroles.rbac.authorization.k8s.io"
+  "update clusterroles.rbac.authorization.k8s.io"
+  "patch clusterroles.rbac.authorization.k8s.io"
+  "list clusterroles.rbac.authorization.k8s.io"
+  "delete clusterroles.rbac.authorization.k8s.io"
+  "get clusterrolebindings.rbac.authorization.k8s.io"
+  "create clusterrolebindings.rbac.authorization.k8s.io"
+  "update clusterrolebindings.rbac.authorization.k8s.io"
+  "patch clusterrolebindings.rbac.authorization.k8s.io"
+  "list clusterrolebindings.rbac.authorization.k8s.io"
+  "delete clusterrolebindings.rbac.authorization.k8s.io"
+)
+for permission in "${cluster_permissions[@]}"; do
+  read -r verb resource <<<"$permission"
+  allowed="$(cutover_bounded "Kubernetes cluster authorization preflight" \
+    "${kubectl_ctx[@]}" auth can-i "$verb" "$resource")"
   [[ "$allowed" == yes ]] || {
     echo "Kubernetes authorization denied: ${verb} ${resource}" >&2
     exit 1
@@ -195,8 +245,38 @@ fi
 if [[ "$target_image" == *@sha256:* ]]; then
   resolved_image="$target_image"
 else
-  resolved_image="$(cutover_bounded "target image digest snapshot" \
-    docker image inspect --format '{{index .RepoDigests 0}}' "$target_image")"
+  repo_digests="$(cutover_bounded "target image digest snapshot" \
+    docker image inspect --format '{{json .RepoDigests}}' "$target_image")"
+  resolved_image="$(
+    CUTOVER_REPO_DIGESTS="$repo_digests" "$py" - "$target_image" <<'PY'
+import json
+import os
+import sys
+
+
+def normalize_repository(reference: str) -> str:
+    repository = reference.split("@", 1)[0]
+    tail = repository.rsplit("/", 1)[-1]
+    if ":" in tail:
+        repository = repository.rsplit(":", 1)[0]
+    first = repository.split("/", 1)[0]
+    if "/" not in repository:
+        repository = f"docker.io/library/{repository}"
+    elif "." not in first and ":" not in first and first != "localhost":
+        repository = f"docker.io/{repository}"
+    return repository.replace("index.docker.io/", "docker.io/", 1)
+
+
+approved = normalize_repository(sys.argv[1])
+candidates = {
+    item for item in json.loads(os.environ["CUTOVER_REPO_DIGESTS"])
+    if normalize_repository(item) == approved
+}
+if len(candidates) != 1:
+    raise SystemExit("target image has no unique digest for its approved repository")
+print(candidates.pop())
+PY
+  )"
 fi
 [[ "$resolved_image" == *@sha256:* ]] || {
   echo "target image did not resolve to an immutable registry digest" >&2
@@ -211,7 +291,7 @@ source_args=(
   --set-string "image.repository=${image_repository}"
   --set-string "image.tag=" --set-string "image.digest=${image_digest}"
 )
-cutover_bounded "target Helm render" "${helm_ctx[@]}" template \
+cutover_bounded "target Helm render" "${helm_ctx[@]}" template --is-upgrade \
   "${source_args[@]}" >"${work_dir}/source-target.yaml"
 IFS=$'\t' read -r target_secret target_key < <(
   "$py" - "${work_dir}/source-target.yaml" "$resolved_image" <<'PY'
@@ -285,12 +365,33 @@ if any(open(path, "rb").read() != supplied for path in sys.argv[1:]):
     raise SystemExit("migration database does not match release and target authorities")
 PY
 
-cutover_secret="${helm_release}-kdive-cutover-${release_revision}"
+cutover_secret="kdive-cutover-$(
+  "$py" -c 'import secrets; print(secrets.token_hex(8))' # pragma: allowlist secret
+)"
 cutover_key="database-url"
 cutover_bounded "immutable migration Secret render" \
   "${kubectl_ctx[@]}" create secret generic "$cutover_secret" \
   --namespace "$namespace" --from-file="${cutover_key}=${work_dir}/target-dsn" \
   --dry-run=client --output yaml >"${work_dir}/cutover-secret.yaml"
+"$py" - "${work_dir}/cutover-secret.yaml" <<'PY'
+import os
+import sys
+import yaml
+
+path = sys.argv[1]
+payload = yaml.safe_load(open(path, encoding="utf-8"))
+payload["immutable"] = True
+with open(path, "w", encoding="utf-8") as stream:
+    yaml.safe_dump(payload, stream, sort_keys=False)
+os.chmod(path, 0o400)
+PY
+collision="$(cutover_bounded "cutover Secret collision preflight" \
+  "${kubectl_ctx[@]}" get secret "$cutover_secret" --namespace "$namespace" \
+  --ignore-not-found --output name)"
+[[ -z "$collision" ]] || {
+  echo "attempt-unique cutover Secret unexpectedly exists; refusing mutation" >&2
+  exit 1
+}
 helm_args=(
   upgrade "$helm_release" "$frozen_chart" --namespace "$namespace"
   --values "$frozen_values" --set-string "worker.replicas=${worker_replicas}"
@@ -299,7 +400,7 @@ helm_args=(
   --set-string "databaseCredentials.migration.secretName=${cutover_secret}"
   --set-string "databaseCredentials.migration.key=${cutover_key}"
 )
-cutover_bounded "frozen target Helm render" "${helm_ctx[@]}" template \
+cutover_bounded "frozen target Helm render" "${helm_ctx[@]}" template --is-upgrade \
   "${helm_args[@]:1}" >"${work_dir}/target.yaml"
 "$py" - "${work_dir}/target.yaml" "$cutover_secret" "$cutover_key" <<'PY'
 import sys
@@ -316,67 +417,153 @@ ref = database["valueFrom"]["secretKeyRef"]
 if (ref["name"], ref["key"]) != (sys.argv[2], sys.argv[3]):
     raise SystemExit("frozen migration hook does not use the cutover-owned Secret")
 PY
-cutover_bounded "frozen target server-side dry run" \
-  "${kubectl_ctx[@]}" apply --server-side --dry-run=server \
-  --namespace "$namespace" --filename "${work_dir}/target.yaml" >/dev/null
+cutover_bounded "frozen Helm upgrade server-side dry run" \
+  "${helm_ctx[@]}" "${helm_args[@]}" --dry-run=server --hide-secret \
+  --wait --timeout "${CUTOVER_OPERATION_TIMEOUT_SECONDS}s" \
+  >"${work_dir}/upgrade-dry-run.txt"
 cutover_bounded "database lifecycle-authority preflight" \
   psql "$KDIVE_MIGRATION_DATABASE_URL" --set ON_ERROR_STOP=1 --quiet \
   --command "SELECT 1 FROM public.worker_incarnations LIMIT 1" \
   >"${work_dir}/database-authority"
-cutover_bounded "worker Pod identity snapshot" "${kubectl_ctx[@]}" get pods \
-  --namespace "$namespace" -l "app=${worker_name}" \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\n"}{end}' \
-  >"${work_dir}/pods"
 
-phase=secret-create
+cutover_secret_uid=""
+current_cutover_secret() {
+  local observation
+  observation="$(mktemp "${work_dir}/secret-observation.XXXXXX")"
+  cutover_bounded "immutable migration Secret revalidation" \
+    "${kubectl_ctx[@]}" get secret "$cutover_secret" --namespace "$namespace" \
+    --output json >"$observation"
+  "$py" - "$observation" "$cutover_secret_uid" "$cutover_key" \
+    "${work_dir}/target-dsn" <<'PY'
+import base64
+import json
+import sys
+
+observation, expected_uid, key, frozen_path = sys.argv[1:]
+payload = json.load(open(observation, encoding="utf-8"))
+value = base64.b64decode(payload["data"][key], validate=True)
+if payload["metadata"]["uid"] != expected_uid or payload.get("immutable") is not True:
+    raise SystemExit("cutover Secret identity or immutability changed")
+if value != open(frozen_path, "rb").read():
+    raise SystemExit("cutover Secret credential changed")
+PY
+}
+
+print_shell_command() {
+  printf '  '
+  printf '%q ' "$@"
+  printf '\n'
+}
+
+print_original_rerun() {
+  # shellcheck disable=SC2016 # recovery must reference the operator's environment literally
+  printf '  KDIVE_MIGRATION_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL" '
+  printf '%q ' "${repo_root}/scripts/cutover-capture-protocol-helm.sh" \
+    "$helm_release" "$namespace" "$values_file" "$backup_path" "$target_image"
+  printf '\n'
+}
+
+print_successor_cleanup_commands() {
+  echo "Expected release revision: $((release_revision + 1))"
+  print_shell_command "${helm_ctx[@]}" status "$helm_release" --namespace "$namespace" \
+    --output json
+  echo "Expected StatefulSet UID: ${statefulset_uid}"
+  print_shell_command "${kubectl_ctx[@]}" get "statefulset/${worker_name}" \
+    --namespace "$namespace" -o jsonpath='{.metadata.uid}'
+  echo "Expected cutover Secret UID: ${cutover_secret_uid}"
+  print_shell_command "${kubectl_ctx[@]}" get secret "$cutover_secret" \
+    --namespace "$namespace" -o jsonpath='{.metadata.uid}'
+  print_shell_command "${kubectl_ctx[@]}" delete secret "$cutover_secret" \
+    --namespace "$namespace" --wait=true
+}
+
+phase=pre-mutation
+worker_mutation_started=0
 recovery() {
   local rc=$? identity_rc=0 stop_rc=0 replicas="" survivors=""
+  local secret_retained=1
   ((rc == 0)) && return
   trap - EXIT
   set +e
-  current_object_identity >/dev/null 2>&1
-  identity_rc=$?
-  if [[ "$identity_rc" -eq 0 ]]; then
-    cutover_bounded "Helm recovery stop" "${kubectl_ctx[@]}" scale \
-      "statefulset/${worker_name}" --namespace "$namespace" --replicas=0 \
-      >/dev/null 2>&1
-    stop_rc=$?
+  if [[ "$worker_mutation_started" -eq 1 ]]; then
+    current_object_identity >/dev/null 2>&1
+    identity_rc=$?
+    if [[ "$identity_rc" -eq 0 ]]; then
+      cutover_bounded "Helm recovery stop" "${kubectl_ctx[@]}" scale \
+        "statefulset/${worker_name}" --namespace "$namespace" --replicas=0 \
+        >/dev/null 2>&1
+      stop_rc=$?
+    else
+      stop_rc="$identity_rc"
+    fi
+    replicas="$(cutover_bounded "Helm stopped-replica proof" \
+      "${kubectl_ctx[@]}" get "statefulset/${worker_name}" --namespace "$namespace" \
+      -o jsonpath='{.spec.replicas}' 2>/dev/null)"
+    survivors="$(cutover_bounded "Helm stopped-Pod proof" \
+      "${kubectl_ctx[@]}" get pods --namespace "$namespace" -l "app=${worker_name}" \
+      -o jsonpath='{range .items[*]}{.metadata.name}{" uid="}{.metadata.uid}{"\n"}{end}' \
+      2>/dev/null)"
+    if [[ "$stop_rc" -eq 0 && "$replicas" == 0 && -z "$survivors" ]]; then
+      echo "Helm stopped-state proof found zero replicas and Pods." >&2
+    else
+      echo "workers may still be running; surviving replicas=${replicas:-unknown}." >&2
+      echo "surviving Pods=${survivors:-unknown}" >&2
+    fi
   else
-    stop_rc="$identity_rc"
+    echo "worker deployment was not mutated by this cutover attempt." >&2
   fi
-  replicas="$(cutover_bounded "Helm stopped-replica proof" "${kubectl_ctx[@]}" get \
-    "statefulset/${worker_name}" --namespace "$namespace" \
-    -o jsonpath='{.spec.replicas}' 2>/dev/null)"
-  survivors="$(cutover_bounded "Helm stopped-Pod proof" "${kubectl_ctx[@]}" get pods \
-    --namespace "$namespace" -l "app=${worker_name}" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{" uid="}{.metadata.uid}{"\n"}{end}' \
-    2>/dev/null)"
-  if [[ "$stop_rc" -eq 0 && "$replicas" == 0 && -z "$survivors" ]]; then
-    echo "Helm stopped-state proof found zero replicas and Pods." >&2
-  else
-    echo "workers may still be running; surviving replicas=${replicas:-unknown}." >&2
-    echo "surviving Pods=${survivors:-unknown}" >&2
+
+  if [[ "$phase" == secret-created || "$phase" == stop || "$phase" == backup ]]; then
+    if current_object_identity >/dev/null 2>&1 && current_cutover_secret >/dev/null 2>&1; then
+      if cutover_bounded "unused cutover Secret cleanup" \
+        "${kubectl_ctx[@]}" delete secret "$cutover_secret" --namespace "$namespace" \
+        --wait=true >/dev/null 2>&1; then
+        secret_retained=0
+      fi
+    fi
   fi
   echo "restricted frozen Helm snapshot retained at: ${work_dir}" >&2
-  echo "immutable migration Secret retained: ${namespace}/${cutover_secret}" >&2
-  echo "If protocol 3 is installed, rollback exactly with:" >&2
-  printf "  pg_restore --clean --if-exists --dbname=\"\$KDIVE_MIGRATION_DATABASE_URL\" %q\n" \
-    "$backup_path" >&2
+  [[ "$secret_retained" -eq 0 ]] ||
+    echo "immutable migration Secret retained: ${namespace}/${cutover_secret}" >&2
+  if [[ "$phase" == secret-created || "$phase" == stop || "$phase" == backup ]]; then
+    echo "The old schema remains authoritative; rerun the complete cutover exactly:" >&2
+    print_original_rerun >&2
+  elif [[ "$phase" == upgrade ]]; then
+    echo "The named backup is complete; resume the frozen protocol-3 upgrade exactly:" >&2
+    print_shell_command "${helm_ctx[@]}" "${helm_args[@]}" --wait \
+      --timeout "${CUTOVER_OPERATION_TIMEOUT_SECONDS}s" >&2
+    echo "After success, verify the printed identities and remove the cutover Secret:" >&2
+    print_successor_cleanup_commands >&2
+    echo "Or rollback the database exactly before deploying the prior chart and image:" >&2
+    printf "  pg_restore --clean --if-exists --dbname=\"\$KDIVE_MIGRATION_DATABASE_URL\" %q\n" \
+      "$backup_path" >&2
+  else
+    echo "Protocol 3 is installed; verify identities and remove the cutover Secret:" >&2
+    print_successor_cleanup_commands >&2
+  fi
   echo "Never start a protocol-2 worker until database and prior image are restored." >&2
   cutover_cleanup_temporary_backup
   exit "$rc"
 }
-trap recovery EXIT
 
 current_identity
 cutover_bounded "immutable migration Secret creation" \
   "${kubectl_ctx[@]}" create --filename "${work_dir}/cutover-secret.yaml"
+phase=secret-created
+trap recovery EXIT
 cutover_secret_uid="$(cutover_bounded "immutable migration Secret identity" \
   "${kubectl_ctx[@]}" get secret "$cutover_secret" --namespace "$namespace" \
   -o jsonpath='{.metadata.uid}')"
 [[ -n "$cutover_secret_uid" ]] || exit 1
+current_cutover_secret
 phase=stop
 current_identity
+cutover_bounded "worker Pod identity snapshot" "${kubectl_ctx[@]}" get pods \
+  --namespace "$namespace" -l "app=${worker_name}" \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\n"}{end}' \
+  >"${work_dir}/pods"
+current_cutover_secret
+worker_mutation_started=1
 cutover_bounded "Helm worker scale-to-zero" "${kubectl_ctx[@]}" scale \
   "statefulset/${worker_name}" --namespace "$namespace" --replicas=0
 cutover_bounded "Helm worker Pod deletion" "${kubectl_ctx[@]}" wait --for=delete pod \
@@ -385,7 +572,7 @@ cutover_bounded "Helm worker Pod deletion" "${kubectl_ctx[@]}" wait --for=delete
 while IFS=$'\t' read -r pod_name pod_uid; do
   [[ -n "$pod_name" && -n "$pod_uid" ]] || continue
   witness_sql="SELECT count(*) FROM public.worker_incarnations
-WHERE authority_kind = 'kubernetes'
+WHERE fence_protocol < 3 AND authority_kind = 'kubernetes'
   AND authority_binding ->> 'namespace' = :'namespace'
   AND authority_binding ->> 'name' = :'pod_name'
   AND authority_binding ->> 'uid' = :'pod_uid'
@@ -400,12 +587,30 @@ WHERE authority_kind = 'kubernetes'
   }
 done <"${work_dir}/pods"
 
+complete_witness_sql="SELECT coalesce(string_agg(incarnation, ', ' ORDER BY incarnation), '')
+FROM public.worker_incarnations
+WHERE fence_protocol < 3 AND authority_kind = 'kubernetes'
+  AND authority_binding ->> 'namespace' = :'namespace'
+  AND authority_binding ->> 'name' LIKE :'worker_prefix' || '%'
+  AND (state <> 'terminated' OR terminated_at IS NULL OR outcome IS NULL
+    OR jsonb_typeof(authority_binding -> 'uid') IS DISTINCT FROM 'string')"
+legacy_blockers="$(cutover_bounded "complete legacy Kubernetes incarnation witness" \
+  psql "$KDIVE_MIGRATION_DATABASE_URL" --set ON_ERROR_STOP=1 --tuples-only --no-align \
+  --set "namespace=${namespace}" --set "worker_prefix=${worker_name}-" \
+  --command "$complete_witness_sql")"
+[[ -z "$legacy_blockers" ]] || {
+  echo "legacy Kubernetes incarnations are not exactly terminated: ${legacy_blockers}" >&2
+  exit 1
+}
+
 phase=backup
 current_identity
+current_cutover_secret
 cutover_prepare_backup "$backup_path"
 cutover_publish_backup "$backup_path" "$KDIVE_MIGRATION_DATABASE_URL"
 phase=upgrade
 current_identity
+current_cutover_secret
 cutover_bounded "Helm protocol-3 upgrade" "${helm_ctx[@]}" "${helm_args[@]}" \
   --wait --timeout "${CUTOVER_OPERATION_TIMEOUT_SECONDS}s"
 # shellcheck disable=SC2034 # recovery trap reports this boundary if cleanup fails
@@ -418,13 +623,7 @@ new_revision="$(cutover_bounded "upgraded release revision validation" \
   echo "upgraded Helm release revision is not the approved successor" >&2
   exit 1
 }
-current_secret_uid="$(cutover_bounded "cutover Secret cleanup identity" \
-  "${kubectl_ctx[@]}" get secret "$cutover_secret" --namespace "$namespace" \
-  -o jsonpath='{.metadata.uid}')"
-[[ "$current_secret_uid" == "$cutover_secret_uid" ]] || {
-  echo "cutover Secret identity changed; refusing cleanup" >&2
-  exit 1
-}
+current_cutover_secret
 cutover_bounded "cutover Secret cleanup" "${kubectl_ctx[@]}" delete secret \
   "$cutover_secret" --namespace "$namespace" --wait=true
 trap - EXIT

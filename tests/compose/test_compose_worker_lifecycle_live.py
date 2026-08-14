@@ -302,7 +302,10 @@ def _isolated_stack(
         "COMPOSE_PROOF_REPO_ROOT": str(_ROOT),
     }
     credential_path = tmp_path / f"{project}.credential"
-    admin_dsn = f"postgresql://kdive-migration:kdive-migration-local@127.0.0.1:{port}/kdive"  # noqa: E501  # pragma: allowlist secret — isolated local proof
+    admin_dsn = (
+        "postgresql://kdive-migration:kdive-migration-local@"  # pragma: allowlist secret
+        f"127.0.0.1:{port}/kdive"
+    )
     try:
         _run(("docker", "build", "--tag", image, "."), env, timeout=600)
         _compose(env, "up", "-d", "--wait", "--wait-timeout", "60", "postgres")
@@ -664,7 +667,8 @@ def test_compose_worker_lifecycle_preserves_exact_docker_and_database_evidence(
                 "python",
                 "-c",
                 "import os,stat; p='/run/kdive/worker-incarnation-credential'; "
-                "print(f'{os.getuid()}:{len(open(p).read())}:{stat.S_IMODE(os.stat(p).st_mode):o}')",
+                "mode=stat.S_IMODE(os.stat(p).st_mode); "
+                "print(f'{os.getuid()}:{len(open(p).read())}:{mode:o}')",
             ),
             env,
         ).strip()
@@ -806,6 +810,84 @@ def test_compose_capture_protocol_cutover_uses_exact_termination_and_backup(
         assert stopped.returncode == 0, stopped.stderr
 
 
+def _live_host_cutover_env(tmp_path: Path, env: dict[str, str], admin_dsn: str) -> dict[str, str]:
+    client_bin = _cutover_postgres_clients(tmp_path)
+    return {
+        **os.environ,
+        **env,
+        "PATH": f"{client_bin}:{os.environ['PATH']}",
+        "KDIVE_DATABASE_URL": admin_dsn,
+        "KDIVE_PYTHON": str(_ROOT / ".venv" / "bin" / "python"),
+        "KDIVE_STACK_LOG_DIR": str(tmp_path / "host-logs"),
+        "KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS": "60",
+        "KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS": "5",
+        "KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS": "30",
+    }
+
+
+def _replace_local_incarnations(admin_dsn: str, host: str, incarnations: tuple[str, ...]) -> None:
+    with psycopg.connect(admin_dsn) as conn:
+        conn.execute("DELETE FROM worker_incarnations")
+        for incarnation in incarnations:
+            conn.execute(
+                "INSERT INTO worker_incarnations "
+                "(incarnation, authority_kind, authority_binding, fence_protocol) "
+                "VALUES (%s, 'local', %s::jsonb, 2)",
+                (incarnation, f'{{"host":"{host}"}}'),
+            )
+
+
+def _run_host_cutover(
+    backup: Path, cutover_env: dict[str, str], *, prefix: list[str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        *(prefix or []),
+        str(_ROOT / "scripts" / "live-stack" / "cutover-capture-protocol.sh"),
+        str(backup),
+    ]
+    return subprocess.run(
+        command,
+        cwd=_ROOT,
+        env=cutover_env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+
+
+def _assert_host_refusal(result: subprocess.CompletedProcess[str], backup: Path) -> None:
+    assert result.returncode != 0
+    assert "not provably terminated" in result.stderr
+    assert "host stopped-state proof found no KDIVE daemon" in result.stderr
+    assert not backup.exists()
+
+
+def _unreadable_proc_prefix(tmp_path: Path, pid: str) -> tuple[list[str], Path]:
+    bubblewrap = shutil.which("bwrap")
+    assert bubblewrap is not None, "bubblewrap is required for the unreadable /proc carrier"
+    unreadable_proc = tmp_path / "unreadable-proc"
+    unreadable_proc.mkdir()
+    unreadable_stat = unreadable_proc / "stat"
+    unreadable_stat.write_text("unreadable", encoding="utf-8")
+    unreadable_stat.chmod(0)
+    return [
+        bubblewrap,
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev-bind",
+        "/dev",
+        "/dev",
+        "--bind",
+        str(tmp_path),
+        str(tmp_path),
+        "--bind",
+        str(unreadable_proc),
+        f"/proc/{pid}",
+    ], unreadable_stat
+
+
 def test_host_cutover_uses_production_local_verifier_and_real_pre_cutoff_database(
     tmp_path: Path,
 ) -> None:
@@ -815,99 +897,25 @@ def test_host_cutover_uses_production_local_verifier_and_real_pre_cutoff_databas
         exact = worker_incarnation_id(os.getpid())
         host, pid, boot_id, start_ticks = exact.rsplit(":", 3)
         reused = f"{host}:{pid}:{boot_id}:{int(start_ticks) + 1}"
-        with psycopg.connect(admin_dsn) as conn:
-            for incarnation in (reused, exact):
-                conn.execute(
-                    "INSERT INTO worker_incarnations "
-                    "(incarnation, authority_kind, authority_binding, fence_protocol) "
-                    "VALUES (%s, 'local', %s::jsonb, 2)",
-                    (incarnation, f'{{"host":"{host}"}}'),
-                )
+        cutover_env = _live_host_cutover_env(tmp_path, env, admin_dsn)
 
-        client_bin = _cutover_postgres_clients(tmp_path)
+        _replace_local_incarnations(admin_dsn, host, (reused, exact))
         backup = tmp_path / "host-before-protocol-3.dump"
-        cutover_env = {
-            **os.environ,
-            **env,
-            "PATH": f"{client_bin}:{os.environ['PATH']}",
-            "KDIVE_DATABASE_URL": admin_dsn,
-            "KDIVE_PYTHON": str(_ROOT / ".venv" / "bin" / "python"),
-            "KDIVE_STACK_LOG_DIR": str(tmp_path / "host-logs"),
-            "KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS": "60",
-            "KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS": "5",
-            "KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS": "30",
-        }
-        result = subprocess.run(
-            [
-                str(_ROOT / "scripts" / "live-stack" / "cutover-capture-protocol.sh"),
-                str(backup),
-            ],
-            cwd=_ROOT,
-            env=cutover_env,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
-        )
-
-        assert result.returncode != 0
-        assert "not provably terminated" in result.stderr
-        assert "host stopped-state proof found no KDIVE daemon" in result.stderr
-        assert not backup.exists()
+        _assert_host_refusal(_run_host_cutover(backup, cutover_env), backup)
         with psycopg.connect(admin_dsn) as conn:
             rows = conn.execute(
                 "SELECT incarnation, state FROM worker_incarnations ORDER BY incarnation"
             ).fetchall()
         assert rows == sorted([(reused, "active"), (exact, "active")])
 
-        bubblewrap = shutil.which("bwrap")
-        assert bubblewrap is not None, "bubblewrap is required for the unreadable /proc carrier"
-        unreadable_proc = tmp_path / "unreadable-proc"
-        unreadable_proc.mkdir()
-        unreadable_stat = unreadable_proc / "stat"
-        unreadable_stat.write_text("unreadable", encoding="utf-8")
-        unreadable_stat.chmod(0)
-        with psycopg.connect(admin_dsn) as conn:
-            conn.execute("DELETE FROM worker_incarnations")
-            conn.execute(
-                "INSERT INTO worker_incarnations "
-                "(incarnation, authority_kind, authority_binding, fence_protocol) "
-                "VALUES (%s, 'local', %s::jsonb, 2)",
-                (exact, f'{{"host":"{host}"}}'),
-            )
-
+        _replace_local_incarnations(admin_dsn, host, (exact,))
+        prefix, unreadable_stat = _unreadable_proc_prefix(tmp_path, pid)
         unreadable_backup = tmp_path / "unreadable-before-protocol-3.dump"
-        unreadable_result = subprocess.run(
-            [
-                bubblewrap,
-                "--ro-bind",
-                "/",
-                "/",
-                "--dev-bind",
-                "/dev",
-                "/dev",
-                "--bind",
-                str(tmp_path),
-                str(tmp_path),
-                "--bind",
-                str(unreadable_proc),
-                f"/proc/{pid}",
-                str(_ROOT / "scripts" / "live-stack" / "cutover-capture-protocol.sh"),
-                str(unreadable_backup),
-            ],
-            cwd=_ROOT,
-            env=cutover_env,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
-        )
-        unreadable_stat.chmod(0o600)
-
-        assert unreadable_result.returncode != 0
-        assert "not provably terminated" in unreadable_result.stderr
-        assert "host stopped-state proof found no KDIVE daemon" in unreadable_result.stderr
-        assert not unreadable_backup.exists()
+        try:
+            result = _run_host_cutover(unreadable_backup, cutover_env, prefix=prefix)
+        finally:
+            unreadable_stat.chmod(0o600)
+        _assert_host_refusal(result, unreadable_backup)
         with psycopg.connect(admin_dsn) as conn:
             assert conn.execute(
                 "SELECT incarnation, state FROM worker_incarnations"

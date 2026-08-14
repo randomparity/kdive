@@ -144,7 +144,9 @@ mode-0700 cutover directory beside the backup. Every later stop, migration, and 
 only that frozen project and model; the lifecycle supervisor's new per-start nonce remains the
 only runtime substitution. The wrapper queries the database through both the host DSN and the
 frozen migration service and compares database name, database OID, and server system identifier.
-It repeats that positive same-database witness after stop and before backup and migration.
+It repeats that positive same-database witness after stop and before backup and migration, then
+requires both post-stop observations to equal the approved preflight identity. A backend, DNS, or
+proxy switch across the stop boundary therefore aborts without a backup or migration.
 
 Each Docker, database, dump, and migration operation has a
 600-second whole-operation limit measured by GNU `timeout`'s monotonic clock. Database connects
@@ -163,6 +165,9 @@ Backup publication is atomic and refuses replacement. If the destination appears
 is running, the validated sibling temporary dump is retained and its exact recovery path is
 printed. The restricted input snapshot is recoverably trashed on success when the filesystem
 supports it; otherwise its retained path is printed for operator cleanup.
+Existing paths and symlinks are rejected, including a symlink that appears during dump validation.
+After a migration-command failure, the printed recovery procedure names both the frozen migration
+command and the frozen `just compose-up` command needed to complete protocol 3.
 Migration 0112 records operation quiescence only; #1952 still gates publication closure and
 combined historical-capture coverage.
 

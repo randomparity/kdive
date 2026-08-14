@@ -78,6 +78,16 @@ def test_executable_lifecycle_proof_has_a_dedicated_fail_loud_recipe() -> None:
     assert "KDIVE_RUN_COMPOSE_LIFECYCLE_PROOF=1" in justfile
     assert "KDIVE_REQUIRE_DOCKER=1" in justfile
     assert "tests/compose/test_compose_worker_lifecycle_live.py" in justfile
+    assert "command -v bwrap" in _recipe(justfile, "test-compose-lifecycle")
+
+
+def test_live_runner_provisions_and_verifies_bubblewrap() -> None:
+    root = Path(__file__).resolve().parents[2]
+    defaults = (root / "deploy/ansible/roles/live_vm_host/defaults/main.yml").read_text()
+    verify = (root / "deploy/ansible/roles/live_vm_host/tasks/verify.yml").read_text()
+
+    assert "bubblewrap" in defaults
+    assert "bwrap --version" in verify
 
 
 def test_volume_persistence_proof_has_a_dedicated_fail_loud_recipe() -> None:

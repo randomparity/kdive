@@ -27,6 +27,12 @@
   become_user: "{{ github_runner_user }}"
   changed_when: false
 
+- name: Verify the unreadable-proc carrier dependency
+  ansible.builtin.command: bwrap --version
+  become: true
+  become_user: "{{ github_runner_user }}"
+  changed_when: false
+
 # Part 2: the delta check-local-libvirt.sh does not cover. On the Ubuntu target there is no
 # static disk label to assert (AppArmor/virt-aa-helper permits each domain's disk paths
 # dynamically), so the gate verifies group membership and the short XDG_RUNTIME_DIR directly.
