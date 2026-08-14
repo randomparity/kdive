@@ -2,6 +2,7 @@
 
 - **Architecture:** [ADR-0559](../../adr/0559-fence-capture-artifact-publication.md)
 - **Depends on:** merged #1951 and accepted ADR-0558
+- **Recovery-policy approval:** operator decision on 2026-08-14 after the bounded spec review
 - **Base branch:** `main`
 - **Implementation branch:** `feat/fence-capture-publication-1952`
 - **Guardrails:** focused pytest during TDD; `just ci` before each implementation/review commit
@@ -150,6 +151,12 @@ Cleanup follows the row-first decision:
 - a conflicting row or a failure before `canceling` commits leaves the existing nonterminal state;
   a failed delete, tombstone proof, store call, or later database operation retains `canceling` for
   startup recovery. No transition moves `canceling` backward to `publishing`.
+- an object whose operation id, `publication-kind`, or tombstone size does not match remains
+  untouched and leaves the operation in `canceling`. Recovery emits the stable reason
+  `capture_publication_object_identity_conflict` with operation id and key, keeps readiness and
+  acknowledgment barred, and requires an operator to inspect and restore the expected exact object
+  identity before restarting recovery. Automatic deletion, adoption, or metadata repair of an
+  unverified object is forbidden.
 
 Replacement recovery runs before readiness. For an operation with provider quiescence but open
 publication it moves `pending|publishing` to `canceling`, or resumes arbitration directly from an
@@ -231,7 +238,9 @@ operation directory is absent and `spool_disposed_at` commits. Seeded recovery t
 `canceling` after each delete, tombstone-proof, store, and database failure and prove monotonic
 resume without reopening publication. A lost-delete-response test crashes after the exact-version
 delete request and proves recovery uses `cleanup_capture_version_id`, verifies that version's
-absence, and cannot close `discarded` while it remains readable. Tests
+absence, and cannot close `discarded` while it remains readable. Seeded wrong-operation-id,
+unknown-kind, and nonzero-tombstone tests assert the object is untouched, the stable corruption
+reason is logged, and acknowledgment/readiness remain barred. Tests
 deliberately break transition validation and compensation to show the new
 assertions fail before restoring the implementation. `just ci` is the final local gate on both
 declared target architectures through architecture-independent Python and PostgreSQL behavior;
