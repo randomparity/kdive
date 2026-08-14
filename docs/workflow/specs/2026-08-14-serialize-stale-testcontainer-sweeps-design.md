@@ -31,22 +31,24 @@ the exact container is about to disappear.
 
 ## Design
 
-`tests/support/xdist_backend.py` adds a sweep lock path beneath `tempfile.gettempdir()`. Its filename
-uses a fixed KDIVE-owned namespace plus the effective user id, never a checkout or worktree path.
-The existing `_locked` context manager takes an exclusive `fcntl.flock` on it.
+`tests/support/xdist_backend.py` adds the canonical Linux lock path
+`/tmp/kdive-test-backend-sweep-<euid>.lock`. Its filename uses a fixed KDIVE-owned namespace plus
+the effective user id, never an environment-selected temporary directory, checkout, or worktree
+path. The existing `_locked` context manager takes an exclusive `fcntl.flock` on it.
 `sweep_stale_backend_containers` holds that lock across client creation, candidate enumeration,
 liveness inspection, and removal. A lock outside per-run pytest roots coordinates Postgres and
 MinIO, all workers, and concurrent runs from every KDIVE checkout for the same user.
 
-The removal exception path distinguishes Docker `APIError` with HTTP status 409 from NotFound and
-other failures. For a 409, a small helper queries `client.containers.get(container.id)` until the
-exact id raises NotFound or a five-second monotonic deadline expires. Polling sleeps briefly between
-successful lookups. Verified absence is silent and does not append the id to `reaped`, because this
-process did not complete the removal. Timeout, lookup failure other than NotFound, and non-409
-removal errors use the existing per-container warning and continue with later candidates.
+The removal exception path recognizes Docker `APIError` only when it has HTTP status 409 and its
+daemon explanation identifies removal of this exact container as already in progress. A small
+helper then queries `client.containers.get(container.id)` until the exact id raises NotFound or a
+five-second monotonic deadline expires. Polling sleeps briefly between successful lookups. Verified
+absence is silent and does not append the id to `reaped`, because this process did not complete the
+removal. Timeout, lookup failure other than NotFound, an explanation for another container, and
+every other removal error use the existing per-container warning and continue with later candidates.
 
-No message matching decides whether a conflict is benign. Exact-id absence is the only success
-signal after a conflict.
+The sourced concurrent-removal shape admits verification; exact-id absence remains the success
+signal. Neither condition alone suppresses a warning.
 
 ## Failure handling
 
@@ -67,8 +69,8 @@ retry the sweep.
   sweep lock. Exactly one process removes the id and neither warns.
 - A focused conflict test makes removal raise Docker 409, then makes exact-id lookup raise NotFound;
   the sweep is silent and does not claim the id in `reaped`.
-- A retained-conflict test keeps the exact id present through the bounded verifier and asserts the
-  existing warning remains.
+- Retained concurrent-removal and unrelated-409 tests respectively keep the exact id present and
+  change the daemon explanation; both assert the existing warning remains.
 - The existing NotFound, unrelated removal failure, uninspectable-container, and Docker-backed
   stale/live-container tests remain green.
 - The focused support test passes, then `just ci` passes from a clean tracked tree without stale

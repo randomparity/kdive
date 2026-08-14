@@ -18,18 +18,20 @@ sweepers and daemon-version wording coupled.
 
 ## Decision
 
-The repository's stale-backend sweep uses one per-user filesystem lock in the platform temporary
-directory. Its filename contains a fixed KDIVE-owned sweep namespace plus the effective user id; it
-never derives identity from a checkout or worktree path. It takes an exclusive `fcntl.flock` before
-Docker enumeration and holds it through all removals. Postgres and MinIO fixture processes, xdist
-workers, and concurrent test runs from every KDIVE checkout under the same operating-system user
-therefore have one effective sweeper. The empty lock file may persist; process exit releases the
-kernel lock.
+The repository's stale-backend sweep uses one per-user filesystem lock at the canonical Linux path
+`/tmp/kdive-test-backend-sweep-<euid>.lock`. Its fixed KDIVE-owned namespace never depends on an
+environment-selected temporary directory, checkout, or worktree path. It takes an exclusive
+`fcntl.flock` before Docker enumeration and holds it through all removals. Postgres and MinIO
+fixture processes, xdist workers, and concurrent test runs from every KDIVE checkout under the same
+effective user therefore have one effective sweeper. The empty lock file may persist; process exit
+releases the kernel lock. The repository targets Linux, and `/tmp` is a required host prerequisite.
 
-If Docker still reports a removal conflict, the sweeper verifies only the exact container id. It
-polls Docker until that id is absent for at most five seconds measured by the process monotonic
-clock, per conflicted container. Verified absence is benign and is not reported as a successful
-removal by this process. Expiry or any non-conflict failure preserves the existing warning; a later
+If Docker still reports HTTP 409 whose daemon explanation identifies removal of this exact
+container as already in progress, the sweeper verifies only that container id. Both the 409 status
+and the concurrent-removal explanation are required; every other conflict preserves the existing
+warning. Verification polls Docker until the id is absent for at most five seconds measured by the
+process monotonic clock, per conflicted container. Verified absence is benign and is not reported
+as a successful removal by this process. Expiry or any other failure preserves the warning; a later
 fixture startup retries the whole sweep.
 
 The lock changes only test cleanup. It adds no dependency and does not alter liveness detection,
@@ -42,10 +44,11 @@ and removal latency. Fixture startup can wait behind another sweep, and a live s
 delay contenders until that process exits; the lock itself has no timeout. The protected work is
 startup-only and bounded to KDIVE-labelled containers, so cross-checkout serialization is accepted.
 
-A Docker actor outside this lock can still race removal. Exact-id absence verification handles the
-benign case without suppressing a conflict whose container remains. The five-second verification
-limit can still produce a warning for an unusually slow successful removal; that is preferable to
-hiding a container that remains conflicted.
+A Docker actor outside this lock can still race removal. Concurrent-removal classification plus
+exact-id absence verification handles the sourced benign case without suppressing another 409 or a
+conflict whose container remains. The five-second verification limit can still produce a warning
+for an unusually slow successful removal; that is preferable to hiding a container that remains
+conflicted.
 
 ## Considered & rejected
 
@@ -55,6 +58,7 @@ hiding a container that remains conflicted.
   surface for a startup cleanup path with few containers and no measured throughput problem.
 - **Serialize only within each fixture.** Postgres and MinIO use separate fixture processes and can
   still race the same repository-wide candidate set.
-- **Treat `removal already in progress` text as NotFound.** Docker wording is not the invariant, and
-  matching it could suppress an unrelated conflict without proving absence.
+- **Treat every HTTP 409 as concurrent removal.** An unrelated conflict could be followed by a
+  different actor removing the container during verification. Requiring both the sourced daemon
+  explanation and exact-id absence keeps that conflict visible.
 - **Do nothing.** Repeated full-suite runs emitted warnings, violating the warning-free test gate.
