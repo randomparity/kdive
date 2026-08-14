@@ -41,6 +41,8 @@ Verify the whole stack after the post-install migration and worker scaler finish
 Do not add `--wait` to a bundled fresh install; it waits for worker readiness before
 the post-install hooks can start that worker:
   helm test {{ .Release.Name }}
+The scaler empties its own RoleBinding subjects after success. If that cleanup fails,
+the retained hook Job log prints the exact namespaced recovery command.
 
 Reach MCP (keep it cluster-internal — the demo issuer mints valid kdive tokens for
 any caller; never expose it via NodePort/LoadBalancer/Ingress):

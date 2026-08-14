@@ -328,8 +328,10 @@ precedence over consuming either success or failure output.
   token with the Kubernetes scale API. Release templating fixes the namespace and StatefulSet
   name; a namespaced Role permits only `patch` on that exact `statefulsets/scale` resourceName.
   The in-cluster CA verifies API TLS, the request has a 10-second timeout, and the hook Job has a
-  60-second active deadline. These controls restore the configured replicas only after the
-  lower-weight post-install migration succeeds.
+  60-second active deadline. After scaling, the same identity uses exact-resource `patch` authority
+  to empty its own RoleBinding subjects; failure leaves the hook Job for diagnosis and prints the
+  exact namespaced recovery command. These controls restore the configured replicas only after the
+  lower-weight post-install migration succeeds without leaving usable scale authority behind.
 
 Trusted actors are the host operator, lifecycle authority, Postgres, and the configured libvirt
 endpoint. Authenticated tenants are not trusted to select paths, commands, provider endpoints, or

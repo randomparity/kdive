@@ -688,13 +688,136 @@ def test_bundled_install_scaler_has_only_namespaced_worker_scale_authority() -> 
             "resources": ["statefulsets/scale"],
             "resourceNames": ["kdive-kdive-worker"],
             "verbs": ["patch"],
-        }
+        },
+        {
+            "apiGroups": ["rbac.authorization.k8s.io"],
+            "resources": ["rolebindings"],
+            "resourceNames": ["kdive-kdive-install-worker-scaler"],
+            "verbs": ["patch"],
+        },
     ]
     assert not any(
         doc.get("kind") in {"ClusterRole", "ClusterRoleBinding"}
         and str(doc.get("metadata", {}).get("name", "")).endswith("install-worker-scaler")
         for doc in docs
     )
+
+
+def test_bundled_install_scaler_revokes_its_binding_after_scaling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs = _bundled_documents(upgrade=False)
+    scaler = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Job" and doc["metadata"]["name"].endswith("-worker-scaler")
+    )
+    container = scaler["spec"]["template"]["spec"]["containers"][0]
+    requests: list[Any] = []
+
+    class Response:
+        status = 200
+
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.payload
+
+    def fake_open(path: str, **_kwargs: object) -> Any:
+        import io
+
+        value = "kdive-system\n" if path.endswith("/namespace") else "token\n"
+        return io.StringIO(value)
+
+    def fake_urlopen(request: Any, **kwargs: object) -> Response:
+        requests.append((request, kwargs))
+        payload = b'{"subjects": []}' if "/rolebindings/" in request.full_url else b"{}"
+        return Response(payload)
+
+    import builtins
+    import ssl
+    import urllib.request
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(ssl, "create_default_context", lambda **_kwargs: object())
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("WORKER_STATEFULSET", "kdive-kdive-worker")
+    monkeypatch.setenv("WORKER_REPLICAS", "2")
+    monkeypatch.setenv("SCALER_ROLE_BINDING", "kdive-kdive-install-worker-scaler")
+
+    exec(compile(container["args"][0], "install-worker-scaler", "exec"), {})
+
+    assert [request.full_url for request, _kwargs in requests] == [
+        "https://kubernetes.default.svc/apis/apps/v1/namespaces/"
+        "kdive-system/statefulsets/kdive-kdive-worker/scale",
+        "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/"
+        "kdive-system/rolebindings/kdive-kdive-install-worker-scaler",
+    ]
+    assert requests[1][0].data == b'{"subjects": []}'
+    assert all(kwargs["timeout"] == 10 for _request, kwargs in requests)
+
+
+def test_bundled_install_scaler_cleanup_failure_is_diagnosable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs = _bundled_documents(upgrade=False)
+    scaler = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Job" and doc["metadata"]["name"].endswith("-worker-scaler")
+    )
+    script = scaler["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    requests: list[Any] = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"{}"
+
+    def fake_open(path: str, **_kwargs: object) -> Any:
+        import io
+
+        return io.StringIO("kdive-system\n" if path.endswith("/namespace") else "token\n")
+
+    def fail_cleanup(request: Any, **_kwargs: object) -> Response:
+        requests.append(request)
+        if len(requests) == 2:
+            raise OSError("API unavailable")
+        return Response()
+
+    import builtins
+    import ssl
+    import urllib.request
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(ssl, "create_default_context", lambda **_kwargs: object())
+    monkeypatch.setattr(urllib.request, "urlopen", fail_cleanup)
+    monkeypatch.setenv("WORKER_STATEFULSET", "kdive-kdive-worker")
+    monkeypatch.setenv("WORKER_REPLICAS", "2")
+    monkeypatch.setenv("SCALER_ROLE_BINDING", "kdive-kdive-install-worker-scaler")
+
+    recovery = (
+        "worker scaled but scaler authority cleanup failed; run: kubectl -n kdive-system "
+        "patch rolebinding kdive-kdive-install-worker-scaler"
+    )
+    with pytest.raises(SystemExit, match=re.escape(recovery)):
+        exec(compile(script, "install-worker-scaler", "exec"), {})
+
+    assert len(requests) == 2
 
 
 def test_bundled_upgrade_migrates_before_workload_rollout() -> None:

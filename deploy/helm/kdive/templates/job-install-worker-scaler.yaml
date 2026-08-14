@@ -18,6 +18,10 @@ rules:
     resources: ["statefulsets/scale"]
     resourceNames: [{{ printf "%s-worker" (include "kdive.fullname" .) | quote }}]
     verbs: ["patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    resourceNames: [{{ include "kdive.fullname" . }}-install-worker-scaler]
+    verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -78,28 +82,57 @@ spec:
               ).read().strip()
               name = os.environ["WORKER_STATEFULSET"]
               replicas = int(os.environ["WORKER_REPLICAS"])
-              url = (
-                  "https://kubernetes.default.svc/apis/apps/v1/namespaces/"
+              role_binding = os.environ["SCALER_ROLE_BINDING"]
+              api = "https://kubernetes.default.svc"
+              scale_url = (
+                  f"{api}/apis/apps/v1/namespaces/"
                   f"{namespace}/statefulsets/{name}/scale"
               )
-              request = urllib.request.Request(
-                  url,
-                  data=json.dumps({"spec": {"replicas": replicas}}).encode(),
-                  method="PATCH",
-                  headers={
-                      "Authorization": f"Bearer {token}",
-                      "Content-Type": "application/merge-patch+json",
-                  },
+              revoke_url = (
+                  f"{api}/apis/rbac.authorization.k8s.io/v1/namespaces/"
+                  f"{namespace}/rolebindings/{role_binding}"
               )
               context = ssl.create_default_context(
                   cafile="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
               )
-              with urllib.request.urlopen(request, timeout=10, context=context) as response:
-                  if response.status != 200:
-                      raise SystemExit(f"worker scale returned HTTP {response.status}")
+
+              def patch(url, payload, operation):
+                  request = urllib.request.Request(
+                      url,
+                      data=json.dumps(payload).encode(),
+                      method="PATCH",
+                      headers={
+                          "Authorization": f"Bearer {token}",
+                          "Content-Type": "application/merge-patch+json",
+                      },
+                  )
+                  with urllib.request.urlopen(
+                      request, timeout=10, context=context
+                  ) as response:
+                      if response.status != 200:
+                          raise RuntimeError(
+                              f"{operation} returned HTTP {response.status}"
+                          )
+                      return response.read()
+
+              patch(scale_url, {"spec": {"replicas": replicas}}, "worker scale")
+              try:
+                  revoked = json.loads(
+                      patch(revoke_url, {"subjects": []}, "scaler authority cleanup")
+                  )
+                  if revoked.get("subjects") not in (None, []):
+                      raise RuntimeError("scaler RoleBinding still has subjects")
+              except Exception as error:
+                  raise SystemExit(
+                      "worker scaled but scaler authority cleanup failed; run: "
+                      f"kubectl -n {namespace} patch rolebinding {role_binding} "
+                      "--type=merge --patch '{\"subjects\":[]}'"
+                  ) from error
           env:
             - name: WORKER_STATEFULSET
               value: {{ printf "%s-worker" (include "kdive.fullname" .) | quote }}
             - name: WORKER_REPLICAS
               value: {{ .Values.worker.replicas | quote }}
+            - name: SCALER_ROLE_BINDING
+              value: {{ include "kdive.fullname" . }}-install-worker-scaler
 {{- end }}
