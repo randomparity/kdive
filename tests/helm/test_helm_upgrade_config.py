@@ -397,7 +397,11 @@ fi
     _write_tool(
         bin_dir / "psql",
         """
-if [[ -n "${CUTOVER_TEST_LEGACY_BLOCKER:-}" && "$*" == *coalesce* ]]; then
+if [[ "$*" == *coalesce* && -n "${CUTOVER_TEST_NEIGHBOR_BLOCKER:-}" ]]; then
+  if [[ "$*" != *"'^[0-9]+$'"* ]]; then
+    printf '%s\n' "$CUTOVER_TEST_NEIGHBOR_BLOCKER"
+  fi
+elif [[ -n "${CUTOVER_TEST_LEGACY_BLOCKER:-}" && "$*" == *coalesce* ]]; then
   printf '%s\n' "$CUTOVER_TEST_LEGACY_BLOCKER"
 else
   cat >/dev/null
@@ -570,6 +574,19 @@ def test_helm_full_permission_preflight_denial_never_mutates(tmp_path: Path) -> 
     assert " scale " not in calls
 
 
+def test_helm_replicaset_read_denial_never_mutates(tmp_path: Path) -> None:
+    env, log, values, backup, _supplied = _helm_mismatch_environment(tmp_path, matching_dsn=True)
+    env["CUTOVER_TEST_DENIED_PERMISSION"] = "get replicasets.apps"
+
+    result = _run_fake_helm_cutover(env, values, backup)
+
+    assert result.returncode != 0
+    calls = log.read_text(encoding="utf-8")
+    assert "authorization denied: get replicasets.apps" in result.stderr
+    assert " create --filename " not in calls
+    assert " scale " not in calls
+
+
 def test_helm_complete_legacy_incarnation_witness_blocks_backup(tmp_path: Path) -> None:
     env, log, values, backup, _supplied = _helm_mismatch_environment(tmp_path, matching_dsn=True)
     env["CUTOVER_TEST_LEGACY_BLOCKER"] = "kubernetes:kdive-system:kdive-worker-2:uid-new"
@@ -584,6 +601,21 @@ def test_helm_complete_legacy_incarnation_witness_blocks_backup(tmp_path: Path) 
     assert "old schema remains authoritative" in result.stderr
     assert "cutover-capture-protocol-helm.sh" in result.stderr
     assert "pg_restore" not in result.stderr
+
+
+def test_helm_legacy_witness_ignores_neighboring_release_prefix_collision(
+    tmp_path: Path,
+) -> None:
+    env, log, values, backup, _supplied = _helm_mismatch_environment(tmp_path, matching_dsn=True)
+    env["CUTOVER_TEST_NEIGHBOR_BLOCKER"] = (
+        "kubernetes:kdive-system:kdive-kdive-worker-x-kdive-worker-0:neighbor-uid"
+    )
+
+    result = _run_fake_helm_cutover(env, values, backup)
+
+    assert result.returncode == 0, result.stderr
+    assert backup.exists()
+    assert "pg_dump " in log.read_text(encoding="utf-8")
 
 
 def test_helm_upgrade_failure_prints_exact_resume_and_rollback(tmp_path: Path) -> None:

@@ -164,7 +164,8 @@ namespaced_permissions=(
   "get secrets" "list secrets" "create secrets" "update secrets" "patch secrets"
   "delete secrets" "get jobs.batch" "list jobs.batch" "watch jobs.batch"
   "create jobs.batch" "delete jobs.batch" "get deployments.apps" "list deployments.apps"
-  "watch deployments.apps" "delete deployments.apps"
+  "watch deployments.apps" "delete deployments.apps" "get replicasets.apps"
+  "list replicasets.apps"
   "create deployments.apps" "update deployments.apps" "patch deployments.apps"
   "get statefulsets.apps" "list statefulsets.apps" "watch statefulsets.apps"
   "create statefulsets.apps" "update statefulsets.apps" "delete statefulsets.apps"
@@ -477,55 +478,54 @@ print_successor_cleanup_commands() {
     --namespace "$namespace" --wait=true
 }
 
-phase=pre-mutation
-worker_mutation_started=0
-recovery() {
-  local rc=$? identity_rc=0 stop_rc=0 replicas="" survivors=""
-  local secret_retained=1
-  ((rc == 0)) && return
-  trap - EXIT
-  set +e
-  if [[ "$worker_mutation_started" -eq 1 ]]; then
-    current_object_identity >/dev/null 2>&1
-    identity_rc=$?
-    if [[ "$identity_rc" -eq 0 ]]; then
-      cutover_bounded "Helm recovery stop" "${kubectl_ctx[@]}" scale \
-        "statefulset/${worker_name}" --namespace "$namespace" --replicas=0 \
-        >/dev/null 2>&1
-      stop_rc=$?
-    else
-      stop_rc="$identity_rc"
-    fi
-    replicas="$(cutover_bounded "Helm stopped-replica proof" \
-      "${kubectl_ctx[@]}" get "statefulset/${worker_name}" --namespace "$namespace" \
-      -o jsonpath='{.spec.replicas}' 2>/dev/null)"
-    survivors="$(cutover_bounded "Helm stopped-Pod proof" \
-      "${kubectl_ctx[@]}" get pods --namespace "$namespace" -l "app=${worker_name}" \
-      -o jsonpath='{range .items[*]}{.metadata.name}{" uid="}{.metadata.uid}{"\n"}{end}' \
-      2>/dev/null)"
-    if [[ "$stop_rc" -eq 0 && "$replicas" == 0 && -z "$survivors" ]]; then
-      echo "Helm stopped-state proof found zero replicas and Pods." >&2
-    else
-      echo "workers may still be running; surviving replicas=${replicas:-unknown}." >&2
-      echo "surviving Pods=${survivors:-unknown}" >&2
-    fi
-  else
-    echo "worker deployment was not mutated by this cutover attempt." >&2
-  fi
+old_schema_phase() {
+  case "$phase" in
+  secret-created | stop | backup) return 0 ;;
+  *) return 1 ;;
+  esac
+}
 
-  if [[ "$phase" == secret-created || "$phase" == stop || "$phase" == backup ]]; then
-    if current_object_identity >/dev/null 2>&1 && current_cutover_secret >/dev/null 2>&1; then
-      if cutover_bounded "unused cutover Secret cleanup" \
-        "${kubectl_ctx[@]}" delete secret "$cutover_secret" --namespace "$namespace" \
-        --wait=true >/dev/null 2>&1; then
-        secret_retained=0
-      fi
-    fi
+prove_recovery_stopped_state() {
+  local identity_rc=0 stop_rc=0 replicas="" survivors=""
+  current_object_identity >/dev/null 2>&1
+  identity_rc=$?
+  if [[ "$identity_rc" -eq 0 ]]; then
+    cutover_bounded "Helm recovery stop" "${kubectl_ctx[@]}" scale \
+      "statefulset/${worker_name}" --namespace "$namespace" --replicas=0 \
+      >/dev/null 2>&1
+    stop_rc=$?
+  else
+    stop_rc="$identity_rc"
   fi
-  echo "restricted frozen Helm snapshot retained at: ${work_dir}" >&2
-  [[ "$secret_retained" -eq 0 ]] ||
-    echo "immutable migration Secret retained: ${namespace}/${cutover_secret}" >&2
-  if [[ "$phase" == secret-created || "$phase" == stop || "$phase" == backup ]]; then
+  replicas="$(cutover_bounded "Helm stopped-replica proof" \
+    "${kubectl_ctx[@]}" get "statefulset/${worker_name}" --namespace "$namespace" \
+    -o jsonpath='{.spec.replicas}' 2>/dev/null)"
+  survivors="$(cutover_bounded "Helm stopped-Pod proof" \
+    "${kubectl_ctx[@]}" get pods --namespace "$namespace" -l "app=${worker_name}" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" uid="}{.metadata.uid}{"\n"}{end}' \
+    2>/dev/null)"
+  if [[ "$stop_rc" -eq 0 && "$replicas" == 0 && -z "$survivors" ]]; then
+    echo "Helm stopped-state proof found zero replicas and Pods." >&2
+  else
+    echo "workers may still be running; surviving replicas=${replicas:-unknown}." >&2
+    echo "surviving Pods=${survivors:-unknown}" >&2
+  fi
+}
+
+cleanup_unused_cutover_secret() {
+  if ! current_object_identity >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! current_cutover_secret >/dev/null 2>&1; then
+    return 1
+  fi
+  cutover_bounded "unused cutover Secret cleanup" \
+    "${kubectl_ctx[@]}" delete secret "$cutover_secret" --namespace "$namespace" \
+    --wait=true >/dev/null 2>&1
+}
+
+print_phase_recovery() {
+  if old_schema_phase; then
     echo "The old schema remains authoritative; rerun the complete cutover exactly:" >&2
     print_original_rerun >&2
   elif [[ "$phase" == upgrade ]]; then
@@ -541,6 +541,33 @@ recovery() {
     echo "Protocol 3 is installed; verify identities and remove the cutover Secret:" >&2
     print_successor_cleanup_commands >&2
   fi
+}
+
+phase=pre-mutation
+worker_mutation_started=0
+recovery() {
+  local rc=$? secret_retained=1
+  if ((rc == 0)); then
+    return
+  fi
+  trap - EXIT
+  set +e
+  if [[ "$worker_mutation_started" -eq 1 ]]; then
+    prove_recovery_stopped_state
+  else
+    echo "worker deployment was not mutated by this cutover attempt." >&2
+  fi
+
+  if old_schema_phase; then
+    if cleanup_unused_cutover_secret; then
+      secret_retained=0
+    fi
+  fi
+  echo "restricted frozen Helm snapshot retained at: ${work_dir}" >&2
+  if [[ "$secret_retained" -eq 1 ]]; then
+    echo "immutable migration Secret retained: ${namespace}/${cutover_secret}" >&2
+  fi
+  print_phase_recovery
   echo "Never start a protocol-2 worker until database and prior image are restored." >&2
   cutover_cleanup_temporary_backup
   exit "$rc"
@@ -591,12 +618,15 @@ complete_witness_sql="SELECT coalesce(string_agg(incarnation, ', ' ORDER BY inca
 FROM public.worker_incarnations
 WHERE fence_protocol < 3 AND authority_kind = 'kubernetes'
   AND authority_binding ->> 'namespace' = :'namespace'
-  AND authority_binding ->> 'name' LIKE :'worker_prefix' || '%'
+  AND left(authority_binding ->> 'name', length(:'worker_name') + 1)
+    = :'worker_name' || '-'
+  AND substring(authority_binding ->> 'name' from length(:'worker_name') + 2)
+    ~ '^[0-9]+$'
   AND (state <> 'terminated' OR terminated_at IS NULL OR outcome IS NULL
     OR jsonb_typeof(authority_binding -> 'uid') IS DISTINCT FROM 'string')"
 legacy_blockers="$(cutover_bounded "complete legacy Kubernetes incarnation witness" \
   psql "$KDIVE_MIGRATION_DATABASE_URL" --set ON_ERROR_STOP=1 --tuples-only --no-align \
-  --set "namespace=${namespace}" --set "worker_prefix=${worker_name}-" \
+  --set "namespace=${namespace}" --set "worker_name=${worker_name}" \
   --command "$complete_witness_sql")"
 [[ -z "$legacy_blockers" ]] || {
   echo "legacy Kubernetes incarnations are not exactly terminated: ${legacy_blockers}" >&2

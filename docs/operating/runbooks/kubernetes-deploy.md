@@ -198,12 +198,14 @@ A failed run retains the restricted snapshot and any still-needed Secret and pri
 identities without printing a DSN.
 
 Before scaling, the wrapper checks the complete Helm, hook, release-storage, and chart-resource
-verb set. It renders with upgrade semantics and runs the exact frozen Helm arguments with
-`--dry-run=server`, then verifies database connectivity. It revalidates cluster, namespace,
+verb set, including ReplicaSet get/list reads used by Helm's Deployment wait. It renders with
+upgrade semantics and runs the exact frozen Helm arguments with `--dry-run=server`, then verifies
+database connectivity. It revalidates cluster, namespace,
 StatefulSet, release, and cutover-Secret identities at every mutation boundary. After Pod deletion,
-every legacy Kubernetes incarnation for the StatefulSet must have exact durable termination
-evidence before backup. A tagged target image must resolve to exactly one digest for its supplied
-repository. Both installed and target migration Secret DSNs must equal
+every legacy Kubernetes incarnation whose authority name is the exact StatefulSet name plus a
+numeric ordinal must have durable termination evidence before backup. A tagged target image must
+resolve to exactly one digest for its supplied repository. Both installed and target migration
+Secret DSNs must equal
 `KDIVE_MIGRATION_DATABASE_URL`; DSNs are never printed. Each
 Helm, Kubernetes, image, database, dump, and migration operation has a 600-second limit measured
 by GNU `timeout`'s monotonic clock. Connects additionally have a 10-second limit and statements a

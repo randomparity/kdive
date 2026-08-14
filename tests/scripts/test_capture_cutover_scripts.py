@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -23,6 +24,9 @@ CHANGED_CUTOVER_SURFACE = (
     "tests/helm/test_helm_upgrade_config.py",
     "tests/compose/test_compose_lifecycle_recipe.py",
 )
+UNTOUCHED_PYTHON_COMPLEXITY_BASELINE = {
+    ("tests/compose/test_compose_worker_lifecycle_live.py", "_cleanup_isolated_stack"): 18,
+}
 
 
 def _executable(path: Path, body: str) -> None:
@@ -166,9 +170,6 @@ def _assert_line_limits(relative_files: tuple[str, ...]) -> None:
 
 
 def _assert_python_quality(relative_files: tuple[str, ...]) -> None:
-    baseline = {
-        ("tests/compose/test_compose_worker_lifecycle_live.py", "_cleanup_isolated_stack"): 18,
-    }
     for relative in (item for item in relative_files if item.endswith(".py")):
         tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
         functions = [
@@ -184,20 +185,47 @@ def _assert_python_quality(relative_files: tuple[str, ...]) -> None:
         complex_functions = {
             node.name: _function_complexity(node)
             for node in functions
-            if _function_complexity(node) > baseline.get((relative, node.name), 8)
+            if _function_complexity(node)
+            > UNTOUCHED_PYTHON_COMPLEXITY_BASELINE.get((relative, node.name), 8)
         }
         assert oversized == {}, f"{relative}: {oversized}"
         assert complex_functions == {}, f"{relative}: {complex_functions}"
 
 
-def _assert_shell_function_sizes(relative_files: tuple[str, ...]) -> None:
+def _without_shell_heredocs(lines: list[str]) -> list[str]:
+    body: list[str] = []
+    marker: str | None = None
+    for line in lines:
+        if marker is not None:
+            if line == marker:
+                marker = None
+            continue
+        match = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
+        if match is not None:
+            marker = match.group(1)
+        body.append(line)
+    return body
+
+
+def _shell_function_complexity(lines: list[str]) -> int:
+    body = "\n".join(_without_shell_heredocs(lines))
+    controls = re.findall(r"(?m)^\s*(?:if|elif|for|while|until|case)\b", body)
+    boolean_branches = re.findall(r"(?:&&|\|\|)", body)
+    case_branches = re.findall(r"(?m)^\s*(?!case\b)[^#\n]+\)\s+[^)]*$", body)
+    return 1 + len(controls) + len(boolean_branches) + len(case_branches)
+
+
+def _assert_shell_function_quality(relative_files: tuple[str, ...]) -> None:
     for relative in (item for item in relative_files if item.endswith(".sh")):
         lines = (ROOT / relative).read_text(encoding="utf-8").splitlines()
         for start, line in enumerate(lines):
             if not line.endswith("() {"):
                 continue
             end = next(index for index in range(start + 1, len(lines)) if lines[index] == "}")
-            assert end - start + 1 <= 100, f"{relative}:{start + 1}-{end + 1}"
+            function = lines[start : end + 1]
+            complexity = _shell_function_complexity(function)
+            assert len(function) <= 100, f"{relative}:{start + 1}-{end + 1}"
+            assert complexity <= 8, f"{relative}:{start + 1} complexity={complexity}"
 
 
 def test_compose_image_preflight_failure_does_not_stop_deployment(tmp_path: Path) -> None:
@@ -604,7 +632,7 @@ def test_cutover_scripts_never_expand_database_url_in_rollback(relative: str) ->
     assert 'dbname=\\"${KDIVE_' not in text
 
 
-def test_cutover_changed_surface_obeys_size_limits() -> None:
+def test_cutover_changed_surface_obeys_limits_with_scoped_python_baseline() -> None:
     _assert_line_limits(CHANGED_CUTOVER_SURFACE)
     _assert_python_quality(CHANGED_CUTOVER_SURFACE)
-    _assert_shell_function_sizes(CHANGED_CUTOVER_SURFACE)
+    _assert_shell_function_quality(CHANGED_CUTOVER_SURFACE)

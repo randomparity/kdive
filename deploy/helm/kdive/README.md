@@ -83,8 +83,10 @@ The script retains the installed `worker.replicas`, scales the worker StatefulSe
 for every Pod finalizer and exact lifecycle-witness termination row, takes a custom-format backup,
 and runs the hooked target upgrade with the original replica count. The migration hook completes
 before Helm applies the target worker template, so migration cannot race the rollout. Identity
-drift, missing required verbs, or the exact Helm upgrade server dry-run failing aborts before stop.
-After deletion, every legacy StatefulSet incarnation must carry exact termination evidence. A
+drift, missing required verbs (including ReplicaSet get/list for Helm's Deployment wait), or the
+exact Helm upgrade server dry-run failing aborts before stop. After deletion, every legacy
+incarnation matching the exact StatefulSet name plus a numeric ordinal must carry termination
+evidence. A
 pre-mutation failure does not stop workers; later failures leave workers at zero and retain
 restricted recovery artifacts. Backup publication never replaces a
 destination that appears during the dump. After migration, never start a protocol-2 image;
