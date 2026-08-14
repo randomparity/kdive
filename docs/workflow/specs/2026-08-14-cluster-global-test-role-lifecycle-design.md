@@ -40,9 +40,9 @@ window its name claims to cover.
 `tests/db/conftest.py` defines `_cluster_global_role_lock(postgres_url, *, timeout_ms=60_000)`. It
 derives the common `postgres` maintenance-database URL, opens a dedicated autocommit connection,
 sets the acquisition statement timeout, and takes a session advisory lock using ADR-0015's existing
-two-integer migration key. The context manager releases the lock explicitly and closes the
-connection in `finally`. Session close is the release mechanism; the helper does not issue a
-separate unlock query whose failure could replace a consuming-test exception.
+two-integer migration key. The context manager closes the connection in an outer `finally`.
+Session close is the sole release mechanism; the helper does not issue a separate unlock query
+whose failure could replace a consuming-test exception.
 
 `pg_conn` enters the context before dropping and recreating `public`, then holds it across `yield`.
 The consuming test's partial migrations, direct 0104 execution, role mutation, and cleanup therefore
@@ -72,6 +72,8 @@ replacing a consuming-test exception.
   enter until release, then proves both operations finish in order.
 - Fixture-wiring tests prove `pg_conn` holds the helper across the consuming test and teardown, and
   `_migrated_db` holds it around migration and snapshot but not ordinary migrated access.
+- The admin migration test instruments the same helper and proves acquisition precedes its direct
+  schema reset and remains held through `migrate(postgres_url)` and the post-migration assertion.
 - A timeout test uses a shortened test-only timeout and checks the complete diagnostic and recovery
   contract while another maintenance-database session owns the real key.
 - Focused migration and runtime-role tests pass five consecutive times with 16 xdist workers and no
