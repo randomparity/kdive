@@ -104,9 +104,6 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 - `CaptureOperation` gains `publication_state`, `publication_object_key`, `publication_etag`,
   `publication_artifact_id`, `cleanup_capture_version_id`, `publication_tombstone_version`,
   `publication_started_at`, `publication_closed_at`, and `spool_disposed_at`.
-- Migration 0113 adds a singleton protocol-4 installation-admission row carrying nullable
-  database-clock `admitted_at` and a hash of the dedicated object-store namespace identity. Task 4
-  owns the first write through a security-definer compare-and-set function; restarts only verify.
 - Add repository functions:
   `begin_publication(conn, credential, operation_id, key)`,
   `begin_cancel_publication(conn, credential, operation_id, key)`,
@@ -255,63 +252,49 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 
 - Modify protocol-dependent fresh-install configuration/tests under `deploy/helm/kdive/`,
   `scripts/live-stack/`, and `deploy/ansible/` only where current protocol constants require it.
-- Add `scripts/verify-fresh-publication-install.py`: pre-start database and object-store namespace
-  admission for build-new-only deployment.
-- Add `tests/scripts/test_verify_fresh_publication_install.py`.
 - Modify operator documentation that currently instructs protocol-3 cutover or upgrade.
 - Modify `docs/adr/0559-fence-capture-artifact-publication.md` status only if not already flipped.
 
 **Interfaces**
 
 - No new operator migration command. Fresh setup applies the full schema to an empty database and
-  starts protocol-4 workers only after store admission and recovery.
-- Fresh deployment supplies a dedicated object-store bucket/namespace. Before the first worker
-  or any other application writer receives bucket credentials, the admission job is their sole
-  holder. `verify-fresh-publication-install.py` records `admitting` under the protocol advisory
-  lock, requires application database tables and the configured bucket to be empty, performs the
-  store conditional-create capability probe, rechecks bucket emptiness excluding only its exact
-  probe versions, and compare-and-sets the marker to `admitted`. Worker credentials and replicas
-  become available only after that commit. Later restarts verify the admitted namespace hash and
-  do not require the now-live namespace to remain empty.
+  starts protocol-4 workers only after per-worker store admission and recovery.
+- Supplying a dedicated fresh database and object-store bucket/namespace is an operator deployment
+  prerequisite, not a KDIVE persistence protocol. Current setup documentation and manifests name
+  that prerequisite and never claim to migrate, inspect, empty, or preserve protocol-3 resources.
 
 **TDD steps**
 
-1. Write script tests for empty database plus empty bucket admission, either side nonempty, store
-   listing failure, concurrent first admission, marker replay, mismatch against a reused namespace,
-   and an object injected between initial listing and marker finalization. The injected object must
-   leave the marker `admitting`, never `admitted`; retry fails closed until the operator supplies a
-   new empty namespace. Confirm failures delete only exact probe versions and never user objects or
-   database rows. Implement the script against Task 2's protocol-4 installation marker.
-2. Update fresh-install render/shape tests to require protocol 4, the pre-start admission step, a
-   dedicated bucket/namespace, exclusive admission credentials, no worker secret/replicas before
-   `admitted`, and rejection of data-preservation paths. Run focused Helm, Compose, Ansible, script,
-   and live-workflow-shape modules; observe old expectations fail.
-3. Update only the production manifests/scripts/docs required for fresh installation. Remove or
+1. Update fresh-install render/shape tests to require protocol 4, document the operator-provided
+   fresh database/bucket prerequisite, invoke the approved per-worker conditional-create probe
+   before readiness, and reject data-preservation guidance. Run focused Helm, Compose, Ansible,
+   worker-startup, and live-workflow-shape modules; observe old expectations fail.
+2. Update only the production manifests/scripts/docs required for fresh installation. Remove or
    replace protocol-3 upgrade instructions exposed as current guidance; do not add shims.
-4. Run focused deployment tests, `just lint-shell`, `just lint-ansible`, `just test-ansible`,
+3. Run focused deployment tests, `just lint-shell`, `just lint-ansible`, `just test-ansible`,
    `just lint-workflows`, documentation guards, and `just adr-status-check`. Flip ADR-0559 to
    Accepted in this final implementation commit. Commit:
    `feat(deploy): install capture publication protocol 4`.
-5. Run fresh-namespace admission against a disposable empty database/bucket and report their exact
-   identities in public-safe form plus the marker result. Then run the live MinIO conditional-
-   create integration proof and report the exact arm/result. Live
-   provider tiers are not required because provider execution and MCP behavior do not change.
-6. Exercise rollback from both an `admitting` failure and a first-worker startup failure: scale or
-   stop every protocol-4 workload, retain the failed database/bucket and unverified objects for
-   inspection, revoke their workload credentials, and abandon those endpoints. Deploy the prior
-   release configuration against separate untouched fresh resources and prove its readiness path.
-   Test cleanup removes only generated credential bindings and disposable empty probe resources;
-   it never deletes a nonempty bucket, database row, or unverified object.
-7. Run bare `just ci`. Then run `git status --porcelain`; any output, including untracked files,
+4. Run the executable live store proof:
+   `uv run python -m pytest tests/integration/test_capture_publication_store_admission.py -q`.
+   The existing disposable MinIO fixture provisions the bucket, injects endpoint/bucket credentials,
+   asserts one conditional-create winner and worker admission success, and removes only its own
+   fixture container/bucket on fixture teardown. Report pass or the documented environment skip;
+   do not substitute render-only evidence. Live provider tiers are not required because provider
+   execution and MCP behavior do not change.
+5. Run `just test-compose-lifecycle` as the fresh-resource deployment smoke. Its owned fixture
+   brings up the Compose backends, migrates the empty database, starts a protocol-4 worker, and
+   asserts lifecycle/readiness over the real worker process; its fixture teardown owns its
+   generated Compose resources. Report the recipe's exact pass/skip result and do not issue the
+   host-wide testcontainers cleanup command.
+6. Run bare `just ci`. Then run `git status --porcelain`; any output, including untracked files,
    invalidates the green claim. Review `git diff main...HEAD` for naming, complexity, dead helpers,
    and accidental protocol compatibility.
 
 **Acceptance**
 
-- A fresh supported deployment starts only protocol-4 workers against an admitted object store.
-- No application writer can access the new namespace between its final emptiness proof and the
-  durable `admitted` marker.
-- A failed fresh install can be isolated and abandoned without mutating its evidence, and the prior
-  release remains deployable against its own untouched fresh resources.
+- A fresh supported deployment starts only protocol-4 workers after the approved live store probe.
+- Current deployment guidance requires operator-provided fresh resources and contains no upgrade,
+  rollback, migration, namespace-admission, or data-cleanup mechanism.
 - All fault, database, worker, deployment, and repository guardrails pass without warnings.
 - The worktree is clean and ADR-0559 is Accepted only with its implementation present.
