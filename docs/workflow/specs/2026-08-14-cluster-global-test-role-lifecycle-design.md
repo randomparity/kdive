@@ -39,16 +39,18 @@ window its name claims to cover.
 
 `migrate.apply_migrations` detects a pending version 0104 immediately before executing its unchanged
 SQL. A narrow helper attempts `GRANT USAGE ON SCHEMA public` for the four canonical runtime roles.
-It ignores only `psycopg.errors.UndefinedObject`; every other database error propagates. The helper
-accepts a role-name tuple solely so the deterministic regression can use isolated names, while the
-production call passes one fixed module-level tuple.
+On `psycopg.errors.UndefinedObject`, it issues the exact 0104 role-creation statement, tolerates
+only `UniqueViolation` or `DuplicateObject` from a concurrent creator, and retries the grant. Every
+other database error propagates. The helper accepts a role-name tuple solely so the deterministic
+regression can use isolated names, while the production call passes one fixed module-level tuple.
 
 The helper runs inside the same transaction and after the migration advisory lock is acquired. For
 an existing compatible role, `GRANT` creates the dependency that blocks a concurrent drop before
 0104 validates it. If a drop completes first, the helper observes an absent role and unchanged 0104
-follows its safe create-then-grant path. For an incompatible role, 0104's validation error rolls the
-provisional grant back without exposing it. The runner invokes no precondition when 0104 is already
-recorded, and its checksum behavior is unchanged.
+is not entered until the helper creates or joins a concurrent creator and retries the grant. For an
+incompatible concurrent winner, 0104's validation error rolls the provisional grant back without
+exposing it. The runner invokes no precondition when 0104 is already recorded, and its checksum
+behavior is unchanged.
 
 ## Failure handling
 
@@ -66,10 +68,12 @@ the database dependency.
 - Its old-order control skips the precondition, pauses unchanged 0104 after validation, completes a
   drop from the other database, and must reproduce `UndefinedObject` at `GRANT`.
 - Its drop-wins fixed arm completes the cross-database drop before the precondition grant, then
-  proves unchanged 0104 recreates and grants the role and leaves its exact required shape and
-  schema dependency.
+  proves the precondition recreates and grants the role before unchanged 0104 validates it.
 - Its grant-wins fixed arm lets the precondition grant establish the dependency first, then proves
   the cross-database drop blocks and fails with `DependentObjectsStillExist` while 0104 completes.
+- Its concurrent-create fixed arm makes the precondition observe absence, lets another database win
+  creation, and proves the precondition's retry grant protects that winner before 0104 validation
+  and before a cross-database drop can complete.
 - The incompatible-role tests continue to prove that provisional grants roll back and that the
   pre-existing role and its privileges remain unchanged after rejection.
 - Focused migration and runtime-role tests pass five consecutive times with 16 xdist workers and no

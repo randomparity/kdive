@@ -21,15 +21,17 @@ does not exercise this cross-database window.
 
 Migration 0104 remains byte-immutable. Immediately before the migration runner executes a pending
 0104, it establishes the current database's schema dependency for every existing canonical runtime
-role. It attempts `GRANT USAGE ON SCHEMA public` for each name and ignores only
-`undefined_object`, which means that role is not present. It then executes the unchanged migration.
+role. It attempts `GRANT USAGE ON SCHEMA public` for each name. On `undefined_object`, it creates
+the exact required non-login role, tolerates `unique_violation` or `duplicate_object` from a
+concurrent creator, and retries the grant. It then executes the unchanged migration, which remains
+the authoritative validator of role attributes and memberships.
 
 The precondition and migration share the runner's migration transaction. If a role exists, the
-grant creates the dependency before 0104 validates it. If a concurrent drop wins first, the grant
-reports the role absent and 0104 follows its existing create-then-grant path; creation protects the
-new shared-catalog row until its dependency exists. If a role is incompatible, 0104 raises its
-existing error and PostgreSQL rolls back the provisional grant. An uncommitted grant is not visible
-to other sessions.
+grant creates the dependency before 0104 validates it. If a concurrent drop wins first, the
+precondition creates or joins a concurrent exact creator and retries the grant before 0104 begins.
+The creating transaction protects its shared-catalog row; a concurrent winner is protected by the
+retried grant. If that winner is incompatible, 0104 raises its existing error and PostgreSQL rolls
+back the provisional grant. An uncommitted grant is not visible to other sessions.
 
 The precondition runs only when 0104 is pending. A database that already recorded 0104 neither
 replays it nor changes checksum behavior. The runner keeps the precondition adjacent to the exact
@@ -40,12 +42,14 @@ mechanically substituting an isolated set of runtime-role names; it neither copi
 the migration algorithm. The precondition accepts the names as a narrow test seam, while production
 calls it with the fixed canonical tuple.
 
-Two fixed-path schedules cover both outcomes. In the drop-wins schedule, the cross-database drop
-completes before the precondition grant; 0104 must recreate, grant, validate, and leave the exact
-role shape and dependency. In the grant-wins schedule, the precondition establishes its dependency
-before the drop starts; the drop must block and then fail with `DependentObjectsStillExist`. A
-companion control skips the precondition, pauses unchanged 0104 after validation, and must reproduce
-the reported `UndefinedObject` at the grant.
+Three fixed-path schedules cover the outcomes. In the drop-wins schedule, the cross-database drop
+completes before the precondition grant; the precondition must recreate, grant, and leave the exact
+role shape and dependency before 0104 validates it. In the grant-wins schedule, the precondition
+establishes its dependency before the drop starts; the drop must block and then fail with
+`DependentObjectsStillExist`. In the concurrent-create schedule, the precondition first observes
+absence, another database wins role creation, and the precondition must join that outcome and grant
+before a drop can pass. A companion control skips the precondition, pauses unchanged 0104 after
+validation, and must reproduce the reported `UndefinedObject` at the grant.
 
 ## Consequences
 
@@ -70,6 +74,9 @@ required role attributes, canonical names, and final privileges remain unchanged
   point. Reducing the window does not establish an ordering invariant.
 - **Edit migration 0104 in place.** ADR-0015 and the schema guard make applied migrations
   byte-immutable; changing it would fail existing database checksum validation.
+- **Let unchanged 0104 create an absent role.** A concurrent creator can win 0104's tolerated
+  create race and leave the winner exposed between validation and grant. The precondition must
+  finish create-or-join plus grant before 0104 starts.
 - **Add only a forward migration.** A fresh database still has to execute vulnerable 0104 before it
   can reach a later repair migration.
 - **Do nothing.** One full suite already failed with 92 setup errors, and the deterministic
