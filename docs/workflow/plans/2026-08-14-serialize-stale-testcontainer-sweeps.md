@@ -80,6 +80,26 @@ def test_concurrent_removal_waits_for_delayed_absence(tmp_path: Path) -> None:
     assert client.get_ids == ["cid-full", "cid-full", "cid-full"]
 
 
+def test_sweep_is_silent_after_exact_concurrent_removal_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _FakeDockerContainer(
+        "cid-full",
+        _labels(tmp_path),
+        error=_api_error("removal of container cid-full is already in progress"),
+    )
+    client = _FakeDockerClient(
+        container,
+        get_results=[container, container, docker.errors.NotFound("gone")],
+    )
+    monkeypatch.setattr(xdist_backend, "_REMOVAL_POLL_S", 0.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert xdist_backend.sweep_stale_backend_containers(client) == []
+    assert client.get_ids == ["cid-full", "cid-full", "cid-full"]
+
+
 def test_concurrent_removal_warns_at_the_deadline(tmp_path: Path) -> None:
     # Keep get("cid-full") present while injected sleep advances monotonic time to five seconds.
     # Assert the public sweep warns once and does not append the id to its result.
@@ -123,7 +143,8 @@ Run:
 ```sh
 uv run python -m pytest \
   tests/support/test_xdist_backend.py \
-  -k 'concurrent_sweeps or concurrent_removal or unrelated_409 or sweep_lock_failure' -q
+  -k 'concurrent_sweeps or concurrent_removal or unrelated_409 or sweep_lock_failure or \
+      sweep_takes_the_lock or sweep_is_silent_after_exact' -q
 ```
 
 Expected: the new tests fail because sweep enumeration is unlocked and the conflict helper does not
