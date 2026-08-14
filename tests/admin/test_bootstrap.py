@@ -13,6 +13,7 @@ from kdive.admin.projects import (
     seed_project,
     seed_project_statements,
 )
+from tests.db.conftest import _cluster_global_role_lock
 
 
 def test_seed_project_sql_contains_budget_and_quota_upserts() -> None:
@@ -150,18 +151,19 @@ def test_migrate_is_sql_only(
     # migrate() applies the schema and nothing else: even with a systems.toml present it creates
     # no image_catalog config rows. Inventory reconcile is the reconciler's job (ADR-0112); a
     # failed "migrate" therefore always means SQL failed.
-    with psycopg.connect(postgres_url, autocommit=True) as conn:
-        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(_write_baseline_systems_toml(tmp_path)))
+    with _cluster_global_role_lock(postgres_url):
+        with psycopg.connect(postgres_url, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(_write_baseline_systems_toml(tmp_path)))
 
-    applied = migrate(postgres_url)
+        applied = migrate(postgres_url)
 
-    assert applied > 0  # the schema was migrated
-    with psycopg.connect(postgres_url, autocommit=True) as conn:
-        images = conn.execute(
-            "SELECT count(*) FROM image_catalog WHERE managed_by = 'config'"
-        ).fetchone()
-    assert images is not None and images[0] == 0
+        assert applied > 0  # the schema was migrated
+        with psycopg.connect(postgres_url, autocommit=True) as conn:
+            images = conn.execute(
+                "SELECT count(*) FROM image_catalog WHERE managed_by = 'config'"
+            ).fetchone()
+        assert images is not None and images[0] == 0
 
 
 def test_install_fixtures_refuses_overwrite_without_force(tmp_path: Path) -> None:

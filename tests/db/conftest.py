@@ -80,6 +80,58 @@ def _server_url_without_db(url: str) -> str:
     return xdist_backend.with_database_name(url, "postgres")
 
 
+@contextmanager
+def _cluster_global_role_lock(postgres_url: str, *, timeout_ms: int = 60_000) -> Iterator[None]:
+    """Serialize test operations that can mutate cluster-global runtime roles."""
+    if timeout_ms <= 0:
+        raise ValueError("cluster-global role lock timeout_ms must be greater than zero")
+
+    admin_url = _server_url_without_db(postgres_url)
+    conn = psycopg.connect(admin_url, autocommit=True)
+    try:
+        conn.execute(
+            "SELECT set_config('statement_timeout', %s, false)",
+            (f"{timeout_ms}ms",),
+        )
+        try:
+            conn.execute(
+                "SELECT pg_advisory_lock(%s, %s)",
+                (migrate._LOCK_CLASS_MIGRATION, migrate._LOCK_OBJID),
+            )
+        except psycopg.errors.QueryCanceled as exc:
+            conn.execute("SELECT set_config('statement_timeout', '0', false)")
+            blockers = [
+                str(row[0])
+                for row in conn.execute(
+                    """
+                    SELECT pid
+                    FROM pg_catalog.pg_locks
+                    WHERE locktype = 'advisory'
+                      AND database = (SELECT oid FROM pg_catalog.pg_database
+                                      WHERE datname = current_database())
+                      AND classid = %s
+                      AND objid = %s
+                      AND objsubid = 2
+                      AND granted
+                    ORDER BY pid
+                    """,
+                    (migrate._LOCK_CLASS_MIGRATION, migrate._LOCK_OBJID),
+                ).fetchall()
+            ]
+            visible = ", ".join(blockers) if blockers else "none visible"
+            raise RuntimeError(
+                "cluster-global runtime-role test lock timed out after "
+                f"{timeout_ms} milliseconds of PostgreSQL server elapsed time "
+                "(per acquisition); protected operation did not start; "
+                f"maintenance database=postgres, key=({migrate._LOCK_CLASS_MIGRATION}, "
+                f"{migrate._LOCK_OBJID}), visible blocking backend PIDs={visible}; "
+                "stop the stuck test worker or let it exit, then rerun"
+            ) from exc
+        yield
+    finally:
+        conn.close()
+
+
 def _worker_db_name() -> str:
     """A fresh per-worker, run-unique database name."""
     return f"kdive_test_{xdist_backend.xdist_worker_id()}_{xdist_backend.worker_namespace_token()}"
@@ -149,7 +201,10 @@ def postgres_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
 
 @pytest.fixture
 def pg_conn(postgres_url: str) -> Iterator[psycopg.Connection]:
-    with psycopg.connect(postgres_url, autocommit=True) as conn:
+    with (
+        _cluster_global_role_lock(postgres_url),
+        psycopg.connect(postgres_url, autocommit=True) as conn,
+    ):
         conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
         yield conn
 
@@ -226,7 +281,10 @@ def _migrated_db(postgres_url: str) -> Iterator[_MigratedWorkerDb]:
     """
     server = _server_url_without_db(postgres_url)
     worker_url, dbname = _provision_worker_db(server)
-    with psycopg.connect(worker_url, autocommit=True) as conn:
+    with (
+        _cluster_global_role_lock(postgres_url),
+        psycopg.connect(worker_url, autocommit=True) as conn,
+    ):
         migrate.apply_migrations(conn)
         snapshot = {table: _copy_out(conn, table) for table in _application_tables(conn)}
     try:
