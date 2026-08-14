@@ -25,6 +25,9 @@ environment-selected temporary directory, checkout, or worktree path. It takes a
 fixture processes, xdist workers, and concurrent test runs from every KDIVE checkout under the same
 effective user therefore have one effective sweeper. The empty lock file may persist; process exit
 releases the kernel lock. The repository targets Linux, and `/tmp` is a required host prerequisite.
+The sweep uses a dedicated opener with `O_NOFOLLOW`, creates mode 0600, and validates the opened
+descriptor is a regular file owned by the effective user before locking. An unsafe existing path
+skips the best-effort sweep with a warning; it is never followed, truncated, or removed.
 
 If Docker still reports HTTP 409 whose daemon explanation identifies removal of this exact
 container as already in progress, the sweeper verifies only that container id. Both the 409 status
@@ -49,6 +52,11 @@ exact-id absence verification handles the sourced benign case without suppressin
 conflict whose container remains. The five-second verification limit can still produce a warning
 for an unusually slow successful removal; that is preferable to hiding a container that remains
 conflicted.
+
+The predictable name exists in a world-writable directory. Descriptor-relative type and ownership
+validation prevents another local user from redirecting or supplying the lock inode. A hostile path
+can deny the optional stale sweep and cause a warning, but cannot make the test process mutate the
+path or continue without serialization.
 
 ## Considered & rejected
 

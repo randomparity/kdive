@@ -34,10 +34,16 @@ the exact container is about to disappear.
 `tests/support/xdist_backend.py` adds the canonical Linux lock path
 `/tmp/kdive-test-backend-sweep-<euid>.lock`. Its filename uses a fixed KDIVE-owned namespace plus
 the effective user id, never an environment-selected temporary directory, checkout, or worktree
-path. The existing `_locked` context manager takes an exclusive `fcntl.flock` on it.
-`sweep_stale_backend_containers` holds that lock across client creation, candidate enumeration,
-liveness inspection, and removal. A lock outside per-run pytest roots coordinates Postgres and
-MinIO, all workers, and concurrent runs from every KDIVE checkout for the same user.
+path. `sweep_stale_backend_containers` holds the dedicated lock across client construction,
+candidate enumeration, liveness inspection, and removal. A lock outside per-run pytest roots
+coordinates Postgres and MinIO, all workers, and concurrent runs from every KDIVE checkout for the
+same user.
+
+The canonical path has a dedicated context manager rather than the per-run `_locked` helper. It
+opens with `os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW` and mode 0600, then uses `fstat`
+on the opened descriptor to require a regular file owned by `os.geteuid()` before taking `flock`.
+It never performs a stat-then-open check, follows a symlink, truncates the inode, or removes a path
+it did not create. An open, owner, type, or lock failure takes the sweep-skipped warning path.
 
 The removal exception path recognizes Docker `APIError` only when it has HTTP status 409 and
 `exc.explanation` equals `removal of container <full container.id> is already in progress`. The
@@ -80,6 +86,8 @@ retry the sweep.
   every mismatch remains a warning.
 - A lock-failure test proves the sweep warns, returns an empty list, and never enumerates Docker
   candidates when opening or acquiring the canonical lock fails.
+- Lock-path tests pre-create a symlink and a non-regular path and simulate a wrong-owner descriptor;
+  each proves the target is unchanged, the sweep warns, and Docker construction never begins.
 - The existing NotFound, unrelated removal failure, uninspectable-container, and Docker-backed
   stale/live-container tests remain green.
 - The focused support test passes, then `just ci` passes from a clean tracked tree without stale
@@ -95,6 +103,19 @@ smallest design satisfying all issue criteria.
 
 Issue #1963 supplies the outcome, completion criteria, exclusions, and permitted surface. The user
 approved the repository-wide per-user lock with exact-id absence verification on 2026-08-14.
+
+## Threat model
+
+The new boundary is the predictable lock pathname in world-writable `/tmp`. A different local user
+can create directory entries there but cannot choose the effective uid in the KDIVE process or
+control an already-open descriptor. The control is a no-follow, non-truncating open followed by
+regular-file and effective-owner validation on that same descriptor. Failure reveals only the path
+and operating-system error in the existing local test warning and prevents Docker enumeration.
+
+The design widens no network, Docker, tenant, authentication, or production boundary. A local actor
+may deny the optional stale sweep by occupying the pathname with an unsafe inode; preventing local
+test denial of service is out of scope. The required non-regression boundary is that such an actor
+cannot redirect a write, cause truncation, or make the sweep proceed unlocked.
 
 ## Durable workflow context
 

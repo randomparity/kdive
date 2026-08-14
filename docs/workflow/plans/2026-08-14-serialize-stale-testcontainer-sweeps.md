@@ -35,6 +35,7 @@ warning path. No fixture call site or production module changes.
   and MinIO fixture callers.
 - Add private constants `_SWEEP_LOCK_PATH`, `_REMOVAL_WAIT_S = 5.0`, and
   `_REMOVAL_POLL_S = 0.05`.
+- Add `_sweep_locked() -> Iterator[None]`, a dedicated safe opener for the canonical `/tmp` lock.
 - Add `_removal_is_already_in_progress(exc: Exception, container_id: str) -> bool`.
 - Add `_wait_until_container_absent(client: Any, container_id: str, *, timeout_s: float = 5.0,
   clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep) -> bool`.
@@ -109,7 +110,7 @@ def test_sweep_lock_failure_warns_without_enumerating(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _FakeDockerClient()
-    monkeypatch.setattr(xdist_backend, "_locked", _raising_lock)
+    monkeypatch.setattr(xdist_backend, "_sweep_locked", _raising_lock)
     with pytest.warns(UserWarning, match="sweep skipped"):
         assert xdist_backend.sweep_stale_backend_containers(client) == []
     assert client.filters is None
@@ -127,10 +128,48 @@ def test_sweep_takes_the_lock_before_constructing_the_default_client(
         constructed = True
 
     monkeypatch.setattr(docker_client, "DockerClient", observable_factory)
-    monkeypatch.setattr(xdist_backend, "_locked", _raising_lock)
+    monkeypatch.setattr(xdist_backend, "_sweep_locked", _raising_lock)
     with pytest.warns(UserWarning, match="sweep skipped"):
         assert xdist_backend.sweep_stale_backend_containers() == []
     assert constructed is False
+
+
+def test_sweep_lock_refuses_a_symlink_without_touching_its_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.write_text("unchanged")
+    lock_path = tmp_path / "sweep.lock"
+    lock_path.symlink_to(target)
+    monkeypatch.setattr(xdist_backend, "_SWEEP_LOCK_PATH", lock_path)
+    with pytest.warns(UserWarning, match="sweep skipped"):
+        assert xdist_backend.sweep_stale_backend_containers(_FakeDockerClient()) == []
+    assert target.read_text() == "unchanged"
+
+
+def test_sweep_lock_refuses_a_non_regular_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = tmp_path / "sweep.lock"
+    lock_path.mkdir()
+    monkeypatch.setattr(xdist_backend, "_SWEEP_LOCK_PATH", lock_path)
+    with pytest.warns(UserWarning, match="sweep skipped"):
+        assert xdist_backend.sweep_stale_backend_containers(_FakeDockerClient()) == []
+
+
+def test_sweep_lock_refuses_a_wrong_owner_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = tmp_path / "sweep.lock"
+    lock_path.touch(mode=0o600)
+    monkeypatch.setattr(xdist_backend, "_SWEEP_LOCK_PATH", lock_path)
+    real_euid = os.geteuid()
+    monkeypatch.setattr(xdist_backend.os, "geteuid", lambda: real_euid + 1)
+    with pytest.warns(UserWarning, match="sweep skipped"):
+        assert xdist_backend.sweep_stale_backend_containers(_FakeDockerClient()) == []
 ```
 
 The subprocess body must import `tests.support.xdist_backend`, replace `_SWEEP_LOCK_PATH` with the
@@ -160,6 +199,27 @@ environment-selected temp roots:
 _SWEEP_LOCK_PATH = Path(f"/tmp/kdive-test-backend-sweep-{os.geteuid()}.lock")
 _REMOVAL_WAIT_S = 5.0
 _REMOVAL_POLL_S = 0.05
+```
+
+Add a dedicated context manager; do not reuse `_locked`, whose per-run paths do not face a
+world-writable predictable-name boundary:
+
+```python
+@contextmanager
+def _sweep_locked() -> Iterator[None]:
+    flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+    fd = os.open(_SWEEP_LOCK_PATH, flags, 0o600)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.geteuid():
+            raise OSError("stale-backend sweep lock must be a regular file owned by this user")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 ```
 
 Implement the classifier as an exact status-and-explanation comparison. Short ids and substring
@@ -205,8 +265,8 @@ def _wait_until_container_absent(
         sleep(min(_REMOVAL_POLL_S, deadline - now))
 ```
 
-Take `_locked(_SWEEP_LOCK_PATH)` around client construction, enumeration, and the complete candidate
-loop. Catch lock/client/enumeration setup failures outside that context, emit the existing
+Take `_sweep_locked()` around client construction, enumeration, and the complete candidate loop.
+Catch lock/client/enumeration setup failures outside that context, emit the existing
 `stale-backend sweep skipped` warning, and return `[]`; never enumerate unlocked. In the candidate
 exception handler, suppress only when `_removal_is_already_in_progress` and
 `_wait_until_container_absent` both return true. Preserve NotFound and every existing warning path.
@@ -256,6 +316,8 @@ in GitHub CI before merge handoff.
 - Only exact concurrent-removal 409 plus verified exact-id absence is silent.
 - Unrelated conflicts, lookup failure, deadline expiry, and lock failure remain warnings.
 - Default Docker-client construction occurs only after the sweep lock is held.
+- A hostile symlink, wrong-owner inode, or non-regular lock path is not followed, truncated, or
+  removed, and the sweep does not continue unlocked.
 - The public fixture interface and existing Docker-backed stale/live proof are unchanged.
 - Focused tests, `just lint`, `just type`, and `just ci` pass without untracked files.
 
