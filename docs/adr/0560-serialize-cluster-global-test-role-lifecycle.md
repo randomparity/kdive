@@ -38,6 +38,13 @@ the repository while leaving ordinary migrated-database tests parallel.
 The fixture reuses ADR-0015's two-integer migration advisory-lock key through the maintenance
 database. It creates no second lock namespace and changes no production behavior or migration file.
 
+A deterministic guarded counterpart uses the actual maintenance-database helper around the same
+two-database lifecycle as the vulnerable control. The first actor signals only after acquiring the
+guard; the second actor must remain outside its conflicting role operation until release, then
+complete. The control continues to reproduce `UndefinedObject` when it intentionally bypasses the
+guard, so a mismatched database, key, late acquisition, or early release makes the guarded test
+fail instead of relying on stress frequency.
+
 Each acquisition is bounded to 60 seconds of PostgreSQL server elapsed time, scoped to one lock
 attempt. On expiry the fixture fails before entering the protected operation and reports the
 maintenance database, lock key, visible blocking backend identifiers, and recovery action: stop the

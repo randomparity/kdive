@@ -41,7 +41,8 @@ window its name claims to cover.
 derives the common `postgres` maintenance-database URL, opens a dedicated autocommit connection,
 sets the acquisition statement timeout, and takes a session advisory lock using ADR-0015's existing
 two-integer migration key. The context manager releases the lock explicitly and closes the
-connection in `finally`.
+connection in `finally`. Session close is the release mechanism; the helper does not issue a
+separate unlock query whose failure could replace a consuming-test exception.
 
 `pg_conn` enters the context before dropping and recreating `public`, then holds it across `yield`.
 The consuming test's partial migrations, direct 0104 execution, role mutation, and cleanup therefore
@@ -50,15 +51,17 @@ and snapshot capture, then releases it before yielding ordinary migrated access.
 
 Repository inventory shows direct migration execution uses `pg_conn`; the once-per-worker migrated
 path is the other migration entry during the parallel suite. Tests that use an already-migrated URL
-do not change role lifecycle and need no lock.
+do not change role lifecycle and need no lock. The admin migration test directly resets and migrates
+`postgres_url`; it explicitly enters the same helper around that complete operation.
 
 ## Failure handling
 
 The lock query uses a 60-second `statement_timeout`: seconds are measured by the PostgreSQL server's
 elapsed clock, and the limit applies per acquisition. Timeout prevents entry and raises an
 actionable fixture error naming the maintenance database, key, visible blockers, and recovery
-action. Other connection or database errors propagate. Context exit always unlocks and closes the
-guard connection; it does not hide a consuming-test exception.
+action. Other connection or database errors propagate. Context exit closes the dedicated session in
+an outer `finally`, releasing the lock without issuing another database operation and without
+replacing a consuming-test exception.
 
 ## Verification
 
