@@ -20,10 +20,12 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import stat
+import time
 import uuid
 import warnings
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,12 @@ _CONNECTIONS_FLOOR = 500
 # which raises on any label under it, so these live in a private `kdive.` namespace.
 BACKEND_LABEL = "kdive.test-backend"
 LIVENESS_LABEL = "kdive.test-backend-liveness"
+_SWEEP_LOCK_PATH = Path(f"/tmp/kdive-test-backend-sweep-{os.geteuid()}.lock")
+_REMOVAL_WAIT_S = 5.0
+_REMOVAL_POLL_S = 0.05
+_REMOVAL_IN_PROGRESS = re.compile(
+    r"removal of container (?P<container_id>\S+?)\s+is already in progress"
+)
 
 
 def xdist_worker_id() -> str:
@@ -183,38 +191,83 @@ def is_stale_backend_container(labels: Mapping[str, str]) -> bool:
     return not _run_is_live(Path(recorded))
 
 
-def sweep_stale_backend_containers(client: Any | None = None) -> list[str]:
-    """Remove this repo's backend containers whose owning run is gone; return their ids.
+@contextmanager
+def _sweep_locked() -> Iterator[bool]:
+    """Safely try to own the process-external stale-backend sweep."""
+    flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+    fd = os.open(_SWEEP_LOCK_PATH, flags, 0o600)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.geteuid():
+            raise OSError("stale-backend sweep lock must be a regular file owned by this user")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
-    Best-effort by construction: this runs on the way to starting a container, and a
-    Docker hiccup while reaping someone else's leak must not fail the caller's run.
-    """
+
+def _removal_is_already_in_progress(exc: Exception, container_id: str) -> bool:
+    """Whether ``exc`` is Docker's concurrent-removal conflict for ``container_id``."""
     import docker.errors
 
-    try:
-        if client is None:
-            from testcontainers.core.docker_client import DockerClient
+    if not isinstance(exc, docker.errors.APIError) or exc.status_code != 409:
+        return False
+    match = _REMOVAL_IN_PROGRESS.search(exc.explanation or "")
+    return match is not None and match.group("container_id") == container_id
 
-            client = DockerClient().client
-        candidates = client.containers.list(all=True, filters={"label": BACKEND_LABEL})
-    except Exception as exc:  # noqa: BLE001 - any failure means "cannot sweep now"
-        warnings.warn(f"shared_container: stale-backend sweep skipped: {exc}", stacklevel=2)
-        return []
+
+def _wait_until_container_absent(
+    client: Any,
+    container_id: str,
+    *,
+    timeout_s: float | None = None,
+    clock: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> bool:
+    """Poll one container id until absent or the monotonic deadline expires."""
+    import docker.errors
+
+    timeout_s = _REMOVAL_WAIT_S if timeout_s is None else timeout_s
+    clock = time.monotonic if clock is None else clock
+    sleep = time.sleep if sleep is None else sleep
+    deadline = clock() + timeout_s
+    while True:
+        try:
+            client.containers.get(container_id)
+        except docker.errors.NotFound:
+            return True
+        except Exception:  # noqa: BLE001 - lookup failure preserves the removal warning
+            return False
+        now = clock()
+        if now >= deadline:
+            return False
+        sleep(min(_REMOVAL_POLL_S, deadline - now))
+
+
+def _reap_stale_candidates(client: Any, candidates: Sequence[Any]) -> list[str]:
+    """Remove stale candidates while preserving per-container best-effort behavior."""
+    import docker.errors
 
     reaped: list[str] = []
     for container in candidates:
-        # Reading `.labels` is inside the guard too: docker-py raises on a container whose
-        # inspect payload lacks `Config`, and one such container must not abort the sweep
-        # and take the caller's run down with it.
         try:
             if not is_stale_backend_container(container.labels):
                 continue
-            # `v=True` takes the anonymous volume with it. On this path nothing else ever
-            # will: `docker volume prune` skips a volume an existing container holds.
             container.remove(force=True, v=True)
         except docker.errors.NotFound:
-            continue  # a concurrently sweeping run got there first — not a failure
+            continue
         except Exception as exc:  # noqa: BLE001 - keep sweeping the rest
+            if _removal_is_already_in_progress(exc, container.id) and _wait_until_container_absent(
+                client, container.id
+            ):
+                continue
             warnings.warn(
                 f"shared_container: could not reap stale container {container.id}: {exc}",
                 stacklevel=2,
@@ -222,6 +275,27 @@ def sweep_stale_backend_containers(client: Any | None = None) -> list[str]:
             continue
         reaped.append(container.id)
     return reaped
+
+
+def sweep_stale_backend_containers(client: Any | None = None) -> list[str]:
+    """Remove this repo's backend containers whose owning run is gone; return their ids.
+
+    Best-effort by construction: this runs on the way to starting a container, and a
+    Docker hiccup while reaping someone else's leak must not fail the caller's run.
+    """
+    try:
+        with _sweep_locked() as acquired:
+            if not acquired:
+                return []
+            if client is None:
+                from testcontainers.core.docker_client import DockerClient
+
+                client = DockerClient().client
+            candidates = client.containers.list(all=True, filters={"label": BACKEND_LABEL})
+            return _reap_stale_candidates(client, candidates)
+    except Exception as exc:  # noqa: BLE001 - any failure means "cannot sweep now"
+        warnings.warn(f"shared_container: stale-backend sweep skipped: {exc}", stacklevel=2)
+        return []
 
 
 @contextmanager
