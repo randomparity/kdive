@@ -39,10 +39,13 @@ in any other product state remains current and recoverable.
 Each operation key contains the durable operation id rather than only the job id. The capture PUT
 uses atomic conditional creation (`If-None-Match: *`) and carries the operation id as object
 metadata. Recovery never resumes that PUT. A cancellation owner arbitrates an ambiguous PUT by
-conditionally creating a zero-byte tombstone with the same operation metadata at the same key.
+conditionally creating a zero-byte tombstone at the same key. Both objects carry the operation id
+and a server-derived `capture` or `tombstone` kind; tombstones must also have size zero.
 Exactly one conditional create can win. If the capture object won, recovery HEADs and deletes its
-immutable version, then wins the tombstone create; if the tombstone won, the delayed capture PUT
-fails its precondition whenever it is evaluated. Recovery retains the winning tombstone and
+immutable version, then wins the tombstone create; if a verified tombstone already exists,
+recovery adopts its immutable version without deleting or replacing it; and if the tombstone won,
+the delayed capture PUT fails its precondition whenever it is evaluated. Recovery retains the
+winning tombstone and
 records its immutable version on the operation's terminal `discarded` state. The tombstone is
 therefore owned durable publication-fence state, not an unregistered artifact. It is not deleted:
 without a store-side request-completion receipt, absence would reopen the key to a request that
@@ -108,11 +111,13 @@ Attempt-linked reclamation requires the product state `(exited, published|discar
 Verification injects failure or session loss after key journaling, after successful and ambiguous
 PUT outcomes before identity persistence, after identity persistence before the artifact
 transaction, during the artifact/audit/published transaction, after that commit before job
-acknowledgment, during exact-version deletion, and during tombstone creation. Replacement recovery
+acknowledgment, during exact-version deletion, during tombstone creation, and after tombstone
+durability before the `discarded` transaction. Replacement recovery
 must handle every durable boundary. Each test proves acknowledgment, retry, and reaping remain
 barred before `(exited, published|discarded)`; `published` has exactly one truthful artifact row
 and capture object; and `discarded` has no artifact row or capture version and retains the winning
-tombstone. The live conditional-create race and bare `just ci` complete the gate.
+tombstone. Re-entrant recovery must adopt the same verified tombstone version without reopening the
+key. The live conditional-create race and bare `just ci` complete the gate.
 
 ## Considered & rejected
 

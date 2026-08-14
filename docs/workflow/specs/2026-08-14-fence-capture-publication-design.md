@@ -120,10 +120,14 @@ attempt.
 
 If PUT may still commit or its response was lost, recovery uses a storage-side serialization
 point. It conditionally creates a zero-byte tombstone at the same operation-unique key with
-`If-None-Match: *` and the same operation identity metadata. The store permits exactly one winner:
+`If-None-Match: *`. Capture and tombstone objects both carry the operation id plus a distinct,
+server-derived `publication-kind` metadata value; a tombstone must also have size zero. The store
+permits exactly one winner:
 if the tombstone wins, the capture PUT cannot later overwrite it; if conditional creation reports
-the key already exists, recovery HEADs it, verifies the operation metadata, deletes that immutable
-version, and retries the tombstone create. Because the operation issues only one capture PUT and
+the key already exists, recovery HEADs it and verifies the operation and kind metadata. It deletes
+only a verified `capture` version before retrying tombstone creation. It adopts and retains an
+existing verified zero-byte `tombstone` version without deleting or replacing it. Because the
+operation issues only one capture PUT and
 recovery never resumes it, observing its version or winning the tombstone resolves the only
 possible stored capture object. Recovery verifies and retains the winning zero-byte tombstone and
 records its immutable version. Retention is required because the supported S3 contract has no
@@ -204,7 +208,10 @@ publication is terminal. An ambiguous-PUT test holds the capture conditional cre
 lets replacement recovery acquire the released database fence, and proves it cannot record
 `discarded` until capture-versus-tombstone arbitration resolves and the operation-identity
 tombstone version is durable. It then lets the delayed PUT evaluate and proves the retained
-tombstone makes it fail without creating capture bytes. Tests
+tombstone makes it fail without creating capture bytes. A re-entrant recovery test crashes after
+tombstone durability but before the `discarded` transaction, starts replacement recovery while the
+capture PUT remains delayed, and proves it adopts the same tombstone version without reopening the
+key. Tests
 deliberately break transition validation and compensation to show the new
 assertions fail before restoring the implementation. `just ci` is the final local gate on both
 declared target architectures through architecture-independent Python and PostgreSQL behavior;
