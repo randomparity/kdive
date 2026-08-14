@@ -13,11 +13,13 @@ or worker-session loss either prevents publication or removes an unregistered ob
 attempt becomes terminal. A reaper can distinguish positive publication closure from a missing
 or stale acknowledgment.
 
-This change owns capture-operation publication persistence, handler ordering, compensation,
-recovery, the publication half of the historical cutoff, and fault tests. Provider supervision is
+This change owns fresh-install capture-operation publication persistence, handler ordering,
+compensation, recovery, combined cutoff state, and fault tests. Provider supervision is
 settled by #1951. Candidate selection and reclamation remain #1946; provider reapers remain #1947
 and #1948; succeeded-row cleanup-result mechanics remain #1949. The MCP tool, artifact bytes,
-retention, sensitivity, and agent-facing schema do not change.
+retention, sensitivity, and agent-facing schema do not change. Existing protocol-3 data, workers,
+jobs, operations, objects, and in-flight work are not migrated, preserved, reconciled, or cleaned
+up; deployment uses a new database and object-store namespace.
 
 ## Approaches
 
@@ -53,16 +55,14 @@ exact-attempt validation live in security-definer transition functions rather th
 table grants.
 
 The existing `capture_operation_cutoff` gains non-null booleans `publication_closed` and
-`complete`. Migration raises the worker fence protocol from 3 to 4. Under the protocol advisory
-fence it verifies the cutoff is protocol 3 and `operation_quiescent`, rejects every protocol-3-or-
-older worker without positive lifecycle termination, rejects running capture jobs and operations
-without the combined terminal product state, replaces registration/authentication/claim guards
-with exact protocol 4, and rechecks the whole population. It then sets cutoff protocol 4,
-`publication_closed = true`, and `complete = true` atomically. It does not resample `cutoff_at`;
-historical eligibility remains bounded by the database-clock instant at which legacy provider work
-became quiescent. Compose, local-host, and Kubernetes upgrade paths reuse their existing offline
-termination witnesses and refuse migration until all protocol-3 workers are stopped. A failed
-assertion rolls back; the recovery action is to terminate the named authority and rerun migration.
+`complete`. Migration raises the worker fence protocol from 3 to 4 only on an empty installation.
+Under the protocol advisory fence it refuses any row in `worker_incarnations`, `jobs`,
+`capture_operations`, or `artifacts`; replaces registration, authentication, and claim guards with
+exact protocol 4; then sets cutoff protocol 4, `operation_quiescent = true`,
+`publication_closed = true`, `complete = true`, and a fresh database-clock `cutoff_at` atomically.
+A failed emptiness assertion rolls the migration back with the recovery action: provision a new
+database and object-store namespace and deploy there. There is no data conversion, offline drain,
+upgrade, export/import, or compatibility mode.
 
 ## Runtime flow
 
@@ -176,13 +176,14 @@ Database tests prove every state shape, credential/current-attempt fence, idempo
 conflicting replay refusal, nonterminal retry exclusion, and migration cutoff assertion. Handler
 and supervisor tests inject pauses before PUT, during PUT, after PUT journaling, before artifact
 claim, during audit, and after row commit. At each pause they race cancellation or authority loss
-and assert exactly one terminal result: matching artifact row plus object and `published`, or no
-row plus no object and `discarded`.
+and assert exactly one terminal result: matching artifact row plus capture object and `published`,
+or no artifact row plus the retained zero-byte fence tombstone and `discarded`.
 
 Crash-recovery tests seed every durable boundary and prove replacement recovery never invents an
 artifact row, never deletes a registered object, and does not report readiness while cleanup is
-unproven. Protocol-cutover tests prove a protocol-3 worker cannot rejoin or claim before aggregate
-completion. Concurrent-attempt tests prove the second attempt cannot PUT until the first
+unproven. Fresh-install tests prove protocol 4 and aggregate completion are established only on an
+empty database; any protocol-3 worker, job, operation, or artifact population makes migration fail
+without mutation. Concurrent-attempt tests prove the second attempt cannot PUT until the first
 publication is terminal. An ambiguous-PUT test holds the capture conditional create in flight,
 lets replacement recovery acquire the released database fence, and proves it cannot record
 `discarded` until capture-versus-tombstone arbitration resolves and the operation-identity

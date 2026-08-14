@@ -63,16 +63,15 @@ arbitration. Its cancellation linearizes only after fence acquisition, so public
 committed while the live owner held the fence remains `published`. Failure to prove either
 terminal outcome leaves the operation recoverable and bars acknowledgment, retry, and reaping.
 
-Migration 0113 raises the worker fence protocol from 3 to 4, adds publication state to supervised
-operations, and augments ADR-0558's singleton cutoff with `publication_closed` and `complete`.
-Under the capture-protocol fence it rejects every protocol-3-or-older incarnation not positively
-terminated by its lifecycle authority, rejects every running capture job or nonterminal operation,
-installs protocol 4 in registration, authentication, and capture claim, and rechecks that
-population before setting both cutoff fields atomically. Deployment uses the existing offline
-Compose, local-host, and Kubernetes lifecycle authorities to stop old workers before migration;
-no rolling compatibility path exists. Historical reclamation may use the cutoff only when
-`complete` is true. Attempt-linked reclamation requires the product state
-`(exited, published|discarded)`.
+Migration 0113 defines the build-new-only protocol-4 schema. It refuses any database containing a
+worker incarnation, job, capture operation, or artifact; protocol-3 data and objects are not
+migrated, preserved, reconciled, or cleaned up. On the required empty installation it raises the
+worker fence protocol from 3 to 4, adds publication state to supervised operations, installs
+protocol 4 in registration, authentication, and capture claim, and augments ADR-0558's singleton
+cutoff with `publication_closed = true` and `complete = true`. There is no upgrade or rolling-
+compatibility path; operators deploy against a new database and object-store namespace.
+Historical reclamation may use the fresh-install cutoff only when `complete` is true.
+Attempt-linked reclamation requires the product state `(exited, published|discarded)`.
 
 ## Consequences
 
@@ -88,9 +87,10 @@ no rolling compatibility path exists. Historical reclamation may use the cutoff 
   is not age-swept. Removing it requires a future object-store completion receipt or a superseding
   decision that supplies equivalent positive proof.
 - Concurrent attempts have distinct operation keys, and job claiming remains barred until prior
-  publication is terminal. Existing row/etag reconciliation remains defensive for pre-cutover
-  data, not the concurrency mechanism.
+  publication is terminal. Row/etag validation remains defensive, not the concurrency mechanism.
 - The MCP contract and artifact contents do not change.
+- Existing installations cannot apply migration 0113. This is an intentional pre-release reset:
+  export/import, data preservation, and protocol-3 object cleanup are unsupported.
 
 ## Considered & rejected
 
@@ -107,5 +107,8 @@ no rolling compatibility path exists. Historical reclamation may use the cutoff 
 - **Wait for a request timeout, then trust absence.** Client timeout does not prove the store
   rejected a request already in flight. Conditional create at one unique key supplies the needed
   storage-side serialization point without a timing assumption.
+- **Migrate or reconcile protocol-3 history.** The operator explicitly selected a pre-release
+  build-new-only deployment. Carrying legacy rows or objects adds a compatibility mechanism nobody
+  needs and weakens the clean publication invariant.
 - **Do nothing after ADR-0558.** Provider quiescence says nothing about the handler's later PUT and
   metadata transaction, so it cannot authorize reaping.
