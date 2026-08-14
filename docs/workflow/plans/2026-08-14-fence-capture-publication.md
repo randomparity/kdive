@@ -85,7 +85,7 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 - Worker readiness proves the configured store's overlap behavior and cleans its probe.
 - Unsupported/degraded stores cannot claim jobs.
 
-## Task 2: Add the protocol-4 publication state product
+## Task 2: Add and activate the protocol-4 publication state product
 
 **Files**
 
@@ -105,7 +105,7 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
   `publication_artifact_id`, `cleanup_capture_version_id`, `publication_tombstone_version`,
   `publication_started_at`, `publication_closed_at`, and `spool_disposed_at`.
 - Migration 0113 adds a singleton protocol-4 installation-admission row carrying nullable
-  database-clock `admitted_at` and a hash of the dedicated object-store namespace identity. Task 5
+  database-clock `admitted_at` and a hash of the dedicated object-store namespace identity. Task 4
   owns the first write through a security-definer compare-and-set function; restarts only verify.
 - Add repository functions:
   `begin_publication(conn, credential, operation_id, key)`,
@@ -140,17 +140,11 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 6. Update exact protocol expectations mechanically, without adding compatibility branches. Run
    `rg -n 'protocol 3|fence_protocol = 3' src tests deploy scripts docs/operating` and disposition
    every remaining hit as historical prose, deliberate negative fixture, or defect.
-7. Run `just lint`, `just type`, focused database/job tests, `just migration-order-check`, and bare
-   `just ci`; verify status contains only intended tracked changes and no untracked files. Commit,
-   then require empty status: `feat(jobs): persist capture publication closure`.
+7. Run the focused database/job tests and `just migration-order-check`, but do not commit or claim
+   the gate green yet. Continue directly through the successful-publication slice below: schema,
+   queue closure, coordinator wiring, and live success activation are one atomic task and commit.
 
-**Acceptance**
-
-- The database alone can tell whether provider execution, publication, and spool disposal closed.
-- Protocol-3 binaries cannot register, authenticate, or claim on a protocol-4 installation.
-- Nonempty installations fail rather than convert or preserve state.
-
-## Task 3: Publish inside the supervised attempt
+### Successful-publication slice of Task 2
 
 **Files**
 
@@ -185,25 +179,28 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 3. Refactor supervisor execution to call the publisher before leaving `_capture_job_fence` and race
    it against `_monitor_lock_session`. On authority loss cancel the publisher task, prevent further
    transitions on the dead connection, leave the operation durably nonterminal, and propagate to
-   Task 4's recovery owner; do not acknowledge cancellation here.
+   Task 3's recovery owner; do not acknowledge cancellation here.
 4. Replace handler `_store_capture` with the injected publication callback. Preserve pcap
    validation, filtering, packet count, sensitivity, retention, response id, and short Run locks.
    Delete dead reconciliation helpers only after `rg` proves no callers.
 5. Implement spool disposal after successful `published` state and before returning. Test success
    plus deletion failure. Break disposal ordering and confirm a test catches deletion before the
-   artifact commit. Discarded spool closure belongs to Task 4.
-6. Run focused handler, supervisor, publication, artifact discard/etag, queue, and worker tests;
-   then `just lint`, `just type`, and bare `just ci`; verify status contains only intended tracked
-   changes and no untracked files. Commit, then require empty status:
-   `feat(worker): fence capture artifact publication`.
+   artifact commit. Discarded spool closure belongs to Task 3.
+6. Run focused database, handler, supervisor, publication, artifact discard/etag, queue, and worker
+   tests; then `just lint`, `just type`, `just migration-order-check`, and bare `just ci`. Verify
+   status contains only intended tracked changes and no untracked files. Commit the whole Task 2
+   activation, then require empty status: `feat(worker): activate capture publication protocol`.
 
 **Acceptance**
 
 - Live publication cannot outlast its job fence or commit after `canceling`.
 - A successful result has one matching row/object and no private spool.
 - Authority loss leaves a recoverable nonterminal operation and never acknowledges cancellation.
+- The database alone tells whether provider execution, publication, and spool disposal closed.
+- Protocol-3 binaries cannot register, authenticate, or claim; nonempty installs fail rather than
+  convert data.
 
-## Task 4: Recover every publication crash boundary
+## Task 3: Recover every publication crash boundary
 
 **Files**
 
@@ -252,7 +249,7 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 - No unverified object is deleted or adopted.
 - Worker readiness positively proves all recoverable local operations fully closed.
 
-## Task 5: Align fresh-install deployment and complete verification
+## Task 4: Align fresh-install deployment and complete verification
 
 **Files**
 
@@ -299,7 +296,13 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
    identities in public-safe form plus the marker result. Then run the live MinIO conditional-
    create integration proof and report the exact arm/result. Live
    provider tiers are not required because provider execution and MCP behavior do not change.
-6. Run bare `just ci`. Then run `git status --porcelain`; any output, including untracked files,
+6. Exercise rollback from both an `admitting` failure and a first-worker startup failure: scale or
+   stop every protocol-4 workload, retain the failed database/bucket and unverified objects for
+   inspection, revoke their workload credentials, and abandon those endpoints. Deploy the prior
+   release configuration against separate untouched fresh resources and prove its readiness path.
+   Test cleanup removes only generated credential bindings and disposable empty probe resources;
+   it never deletes a nonempty bucket, database row, or unverified object.
+7. Run bare `just ci`. Then run `git status --porcelain`; any output, including untracked files,
    invalidates the green claim. Review `git diff main...HEAD` for naming, complexity, dead helpers,
    and accidental protocol compatibility.
 
@@ -308,5 +311,7 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 - A fresh supported deployment starts only protocol-4 workers against an admitted object store.
 - No application writer can access the new namespace between its final emptiness proof and the
   durable `admitted` marker.
+- A failed fresh install can be isolated and abandoned without mutating its evidence, and the prior
+  release remains deployable against its own untouched fresh resources.
 - All fault, database, worker, deployment, and repository guardrails pass without warnings.
 - The worktree is clean and ADR-0559 is Accepted only with its implementation present.
