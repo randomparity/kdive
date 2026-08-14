@@ -39,23 +39,26 @@ path. The existing `_locked` context manager takes an exclusive `fcntl.flock` on
 liveness inspection, and removal. A lock outside per-run pytest roots coordinates Postgres and
 MinIO, all workers, and concurrent runs from every KDIVE checkout for the same user.
 
-The removal exception path recognizes Docker `APIError` only when it has HTTP status 409 and its
-daemon explanation identifies removal of this exact container as already in progress. A small
-helper then queries `client.containers.get(container.id)` until the exact id raises NotFound or a
-five-second monotonic deadline expires. Polling sleeps briefly between successful lookups. Verified
-absence is silent and does not append the id to `reaped`, because this process did not complete the
-removal. Timeout, lookup failure other than NotFound, an explanation for another container, and
-every other removal error use the existing per-container warning and continue with later candidates.
+The removal exception path recognizes Docker `APIError` only when it has HTTP status 409 and
+`exc.explanation` equals `removal of container <full container.id> is already in progress`. The
+comparison uses the complete id and complete explanation: short ids, prefixes, superstrings, other
+ids, and unrecognized wording do not match. A small helper then queries
+`client.containers.get(container.id)` until the exact id raises NotFound or a five-second monotonic
+deadline expires. Polling sleeps briefly between successful lookups. Verified absence is silent
+and does not append the id to `reaped`, because this process did not complete the removal. Timeout,
+lookup failure other than NotFound, any explanation mismatch, and every other removal error use the
+existing per-container warning and continue with later candidates.
 
 The sourced concurrent-removal shape admits verification; exact-id absence remains the success
 signal. Neither condition alone suppresses a warning.
 
 ## Failure handling
 
-The sweep remains best-effort. Failure to construct the Docker client or enumerate candidates emits
-the existing sweep-skipped warning and returns an empty list. A per-container failure emits one
-warning and does not abandon later candidates. Lock release occurs through the context manager on
-normal return and every exception; process termination releases the kernel lock.
+The sweep remains best-effort. Failure to open or acquire the sweep lock, construct the Docker
+client, or enumerate candidates emits the existing sweep-skipped warning and returns an empty list.
+The sweep never continues unlocked. A per-container failure emits one warning and does not abandon
+later candidates. Lock release occurs through the context manager on normal return and every
+exception; process termination releases the kernel lock.
 
 Conflict verification is bounded to five seconds of process monotonic time per container. On
 expiry the consequence is the existing warning, scoped to that exact candidate. Recovery is to let
@@ -67,10 +70,16 @@ retry the sweep.
 - A deterministic multi-process regression starts two sweepers against one fake stale container,
   pauses the first removal, and proves the second cannot enumerate until the first releases the
   sweep lock. Exactly one process removes the id and neither warns.
-- A focused conflict test makes removal raise Docker 409, then makes exact-id lookup raise NotFound;
-  the sweep is silent and does not claim the id in `reaped`.
-- Retained concurrent-removal and unrelated-409 tests respectively keep the exact id present and
-  change the daemon explanation; both assert the existing warning remains.
+- A focused conflict test makes removal raise the exact concurrent-removal 409, returns the
+  container from at least two exact-id lookups, then raises NotFound. An injected monotonic clock and
+  sleep callable make retries deterministic; the sweep is silent and does not claim the id in
+  `reaped`.
+- A deadline test advances the injected monotonic clock while the id remains present and asserts a
+  warning at the five-second bound without a real wait.
+- Explanation tests cover the exact full id, another id, a short-id prefix, and an id superstring;
+  every mismatch remains a warning.
+- A lock-failure test proves the sweep warns, returns an empty list, and never enumerates Docker
+  candidates when opening or acquiring the canonical lock fails.
 - The existing NotFound, unrelated removal failure, uninspectable-container, and Docker-backed
   stale/live-container tests remain green.
 - The focused support test passes, then `just ci` passes from a clean tracked tree without stale
