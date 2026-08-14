@@ -72,6 +72,23 @@ def test_unrelated_409_explanations_warn(explanation: str, tmp_path: Path) -> No
         assert xdist_backend.sweep_stale_backend_containers(_FakeDockerClient(container)) == []
 
 
+@pytest.mark.parametrize("status_code", [400, 500])
+def test_concurrent_removal_phrase_with_non_conflict_status_warns(
+    status_code: int,
+    tmp_path: Path,
+) -> None:
+    container = _FakeDockerContainer(
+        "cid-full",
+        _labels(tmp_path),
+        error=_api_error(
+            "removal of container cid-full is already in progress",
+            status_code=status_code,
+        ),
+    )
+    with pytest.warns(UserWarning, match="cid-full"):
+        assert xdist_backend.sweep_stale_backend_containers(_FakeDockerClient(container)) == []
+
+
 def test_concurrent_removal_classifier_allows_surrounding_api_prose() -> None:
     error = _api_error(
         'Conflict ("removal of container cid-full is already in progress")'
@@ -320,9 +337,9 @@ Run the focused command from Step 1. Expected: all selected tests pass with no w
 tests that explicitly assert them.
 
 Verify the new tests bite by temporarily changing one implementation decision at a time: bypass
-`_sweep_locked`, accept a mismatched conflict id, remove the absence retry, and allow the unsafe lock
-path. Each corresponding test must fail. Restore the implementation after every mutation and rerun
-the focused module green before proceeding.
+`_sweep_locked`, accept a mismatched conflict id, drop the HTTP 409 requirement, remove the absence
+retry, and allow the unsafe lock path. Each corresponding test must fail. Restore the implementation
+after every mutation and rerun the focused module green before proceeding.
 
 ### Step 3: Verify retained cleanup behavior
 
