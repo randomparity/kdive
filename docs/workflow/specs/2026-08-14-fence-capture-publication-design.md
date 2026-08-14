@@ -75,7 +75,8 @@ session-level job fence and authority monitor through these ordered steps:
    A sequential replay adopts that row through the publication commit transition and performs no
    PUT.
 4. Start the blocking PUT outside the Run lock. Authority loss cancels the async publisher but
-   drains the owned thread task so the store call cannot later return unnoticed.
+   starts draining the owned thread task. The PUT uses `If-None-Match: *` and operation-id metadata
+   so an ambiguous response is resolved by the cancellation arbitration below rather than timing.
 5. Journal the PUT's key and etag through a credential-fenced transition. Under the Run lock,
    revalidate exact current-attempt authority and atomically claim the artifact row, write the
    audit event, and close publication as `published`.
@@ -99,21 +100,27 @@ waits on the same job fence; its cancellation point is fence acquisition, so pub
 already committed while the live owner held the fence is a completed publication, not a canceled
 attempt.
 
-If PUT committed but its response was lost, recovery HEADs the operation-unique key. Because no
-other attempt writes that key and recovery never resumes PUT, the observed version belongs to the
-exact durable operation and may be conditionally deleted without a journaled response. Cleanup
-then follows the row-first decision:
+If PUT may still commit or its response was lost, recovery uses a storage-side serialization
+point. It conditionally creates a zero-byte tombstone at the same operation-unique key with
+`If-None-Match: *` and the same operation identity metadata. The store permits exactly one winner:
+if the tombstone wins, the capture PUT cannot later overwrite it; if conditional creation reports
+the key already exists, recovery HEADs it, verifies the operation metadata, deletes that immutable
+version, and retries the tombstone create. Because the operation issues only one capture PUT and
+recovery never resumes it, observing its version or winning the tombstone resolves the only
+possible writer. Recovery verifies and removes the winning tombstone, then verifies absence.
+Cleanup follows the row-first decision:
 
 - a matching committed row closes the operation as `published`; the job result is not rewritten;
-- no row causes conditional object-version deletion followed by an absence check; cleanup then
+- no row requires completed conditional-create arbitration and verified absence; cleanup then
   reacquires the Run lock and closes as `discarded`;
 - a conflicting row, failed delete, failed absence proof, unavailable store, or database failure
   leaves the operation in `publishing` for startup recovery.
 
 Replacement recovery runs before readiness. For an operation with provider quiescence but open
 publication it repeats the same `canceling` linearization and row-first decision. It never resumes
-a PUT from buffered packet bytes: if registration did not commit, it HEADs the operation-unique
-key, removes the observed immutable version, verifies absence, and records `discarded`.
+a PUT from buffered packet bytes: if registration did not commit, it completes conditional-create
+arbitration, removes the exact capture/tombstone versions, verifies absence, and records
+`discarded`.
 This is safe because the job cannot retry while the prior operation is nonterminal. Recovery does
 not acknowledge cancellation or expose readiness until object/row publication is terminal.
 
@@ -147,8 +154,8 @@ crosses the worker/PostgreSQL/object-store boundary.
   exact current attempt and state transition.
 - **Object store:** is an external dependency that may delay, fail, or return conflicting
   metadata. The operation-unique server-derived key, sensitivity metadata, size bounds, etag
-  journal, row-first recovery, conditional version deletion, and verified absence bound its
-  effects.
+  journal, atomic conditional create, operation identity metadata, row-first recovery, conditional
+  version deletion, and verified absence bound its effects.
 - **PostgreSQL:** is the authority for job ownership, current attempt, artifact metadata, and
   publication closure. Advisory fences and transactions serialize decisions; object I/O remains
   outside transactions.
@@ -170,7 +177,10 @@ Crash-recovery tests seed every durable boundary and prove replacement recovery 
 artifact row, never deletes a registered object, and does not report readiness while cleanup is
 unproven. Protocol-cutover tests prove a protocol-3 worker cannot rejoin or claim before aggregate
 completion. Concurrent-attempt tests prove the second attempt cannot PUT until the first
-publication is terminal. Tests deliberately break transition validation and compensation to show the new
+publication is terminal. An ambiguous-PUT test holds the capture conditional create in flight,
+lets replacement recovery acquire the released database fence, and proves it cannot record
+`discarded` until capture-versus-tombstone arbitration resolves and the key is absent. Tests
+deliberately break transition validation and compensation to show the new
 assertions fail before restoring the implementation. `just ci` is the final local gate on both
 declared target architectures through architecture-independent Python and PostgreSQL behavior;
 no live provider or MCP-contract change is required.

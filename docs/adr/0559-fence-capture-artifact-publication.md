@@ -35,22 +35,29 @@ An absent journaled object is required for `discarded`. Claim, cancellation ackn
 retry, and reclamation all require the product state `(exited, published|discarded)`; an operation
 in any other product state remains current and recoverable.
 
-Each operation key contains the durable operation id rather than only the job id. No peer attempt
-can write that key, and recovery never resumes a PUT, so a HEAD after an ambiguous PUT response
-identifies this operation's object and supplies the immutable version for conditional deletion.
-Artifact rows continue to expose only their opaque id; the key shape is not an MCP contract.
+Each operation key contains the durable operation id rather than only the job id. The capture PUT
+uses atomic conditional creation (`If-None-Match: *`) and carries the operation id as object
+metadata. Recovery never resumes that PUT. A cancellation owner arbitrates an ambiguous PUT by
+conditionally creating a zero-byte tombstone with the same operation metadata at the same key.
+Exactly one conditional create can win. If the capture object won, recovery HEADs and deletes its
+immutable version, then wins the tombstone create; if the tombstone won, the delayed capture PUT
+fails its precondition. Recovery verifies the tombstone identity, then deletes its version after
+the sole capture PUT has resolved. Only that completed arbitration proves the key absent and no
+request capable of recreating it. Artifact rows continue to expose only their opaque id; the key
+and tombstone shape are not an MCP contract.
 
 Session-loss handling runs inside the fence owner: the authority monitor cancels the publisher
-before any further database transition, drains any in-process PUT, and only then uses a fresh
-connection to reacquire the now-released job fence. Under the Run lock it atomically revalidates
-the exact attempt and moves `pending|publishing` to `canceling`. That is the linearization point
-after which publication commit is refused. It then releases the Run lock, HEADs the operation-
-unique key, conditionally deletes the observed version, verifies absence, and reacquires the Run
-lock to record `discarded`. An external cancellation request waits for the live owner's job fence;
-its cancellation linearizes only after acquisition, so a publication already committed before
-that point remains `published` rather than becoming a canceled attempt. If a matching row
-committed before `canceling`, cancellation cannot rewrite it. Failure to prove either terminal
-outcome leaves the operation recoverable and bars cancellation acknowledgment, retry, and reaping.
+before any further database transition and starts draining any in-process PUT. The released job
+fence alone does not authorize another actor to prove absence. Under a fresh connection the owner,
+or a lifecycle-authorized replacement, takes that fence and the Run lock, revalidates the exact
+attempt, and moves `pending|publishing` to `canceling`. That is the database linearization point
+after which publication commit is refused. Outside the Run lock it completes the conditional-
+create arbitration above; this remains safe even when the old PUT has not drained. It then
+reacquires the Run lock to record `discarded`. An external cancellation request waits for the
+live owner's job fence but may only request `canceling`; it cannot record `discarded` without
+arbitration. Its cancellation linearizes only after fence acquisition, so publication already
+committed while the live owner held the fence remains `published`. Failure to prove either
+terminal outcome leaves the operation recoverable and bars acknowledgment, retry, and reaping.
 
 Migration 0113 raises the worker fence protocol from 3 to 4, adds publication state to supervised
 operations, and augments ADR-0558's singleton cutoff with `publication_closed` and `complete`.
@@ -67,9 +74,9 @@ no rolling compatibility path exists. Historical reclamation may use the cutoff 
 
 - The job fence covers a potentially slow PUT, but the Run lock remains limited to short database
   checks and the metadata commit.
-- A worker crash can leave a journaled key or stored object, but startup recovery has enough
-  durable identity to adopt an already committed row or remove the exact unregistered object
-  version. It never guesses from object age.
+- A worker crash can leave a journaled key or stored object, but conditional-create arbitration
+  lets startup recovery settle an ambiguous PUT, adopt an already committed row, or remove the
+  exact unregistered version. It never guesses from object age or a timeout.
 - A failed delete retains a nonterminal operation and blocks retry and reaping until recovery can
   prove absence. This prefers retained residue to publication after reclamation.
 - Concurrent attempts have distinct operation keys, and job claiming remains barred until prior
@@ -89,5 +96,8 @@ no rolling compatibility path exists. Historical reclamation may use the cutoff 
   bytes, and rollback still requires cross-system recovery.
 - **Use a unique object key per attempt and garbage-collect later.** It avoids overwrite races but
   deliberately creates orphan objects and moves correctness to an age-based sweep.
+- **Wait for a request timeout, then trust absence.** Client timeout does not prove the store
+  rejected a request already in flight. Conditional create at one unique key supplies the needed
+  storage-side serialization point without a timing assumption.
 - **Do nothing after ADR-0558.** Provider quiescence says nothing about the handler's later PUT and
   metadata transaction, so it cannot authorize reaping.
