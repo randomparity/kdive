@@ -144,8 +144,11 @@ mode-0700 cutover directory beside the backup. Every later stop, migration, and 
 only that frozen project and model; the lifecycle supervisor's new per-start nonce remains the
 only runtime substitution. That directory also holds a mode-0400 password-free database URI and
 libpq passfile. Host `psql` and `pg_dump` children receive only that URI and passfile path; the
-migration-owner DSN is removed from their argv and environment. The wrapper queries the database
-through both the host authority and the
+migration-owner DSN is removed from their argv and environment.
+After capture, the wrapper removes ambient KDIVE/libpq credential variables. Docker and `just`
+children receive none of them; only the frozen render reads the exact DSN from a mode-0400 attempt
+file, and migration consumes the already-frozen service environment. The wrapper queries the
+database through both the host authority and the
 frozen migration service and compares database name, database OID, and server system identifier.
 It repeats that positive same-database witness after stop and before backup and migration, then
 requires both post-stop observations to equal the approved preflight identity. A backend, DNS, or

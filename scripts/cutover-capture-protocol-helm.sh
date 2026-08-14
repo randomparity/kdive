@@ -68,6 +68,7 @@ cleanup_preflight() {
 }
 trap cleanup_preflight EXIT
 cutover_init_database_access "$KDIVE_MIGRATION_DATABASE_URL" "$work_dir" "$py"
+cutover_scrub_database_environment
 
 kube_context="$(cutover_bounded "Kubernetes context snapshot" \
   kubectl config current-context)"
@@ -357,13 +358,12 @@ PY
 }
 read_secret "$release_secret" "$release_key" "${work_dir}/release-dsn"
 read_secret "$target_secret" "$target_key" "${work_dir}/target-dsn"
-CUTOVER_SUPPLIED_DSN="$KDIVE_MIGRATION_DATABASE_URL" "$py" - \
+"$py" - "$CUTOVER_DATABASE_SECRET" \
   "${work_dir}/release-dsn" "${work_dir}/target-dsn" <<'PY'
-import os
 import sys
 
-supplied = os.environ["CUTOVER_SUPPLIED_DSN"].encode()
-if any(open(path, "rb").read() != supplied for path in sys.argv[1:]):
+supplied = open(sys.argv[1], "rb").read()
+if any(open(path, "rb").read() != supplied for path in sys.argv[2:]):
     raise SystemExit("migration database does not match release and target authorities")
 PY
 

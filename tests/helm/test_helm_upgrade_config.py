@@ -260,7 +260,9 @@ def _write_mismatch_helm(bin_dir: Path) -> None:
     _write_tool(
         bin_dir / "helm",
         """
-printf 'helm %s\n' "$*" >>"$CUTOVER_TEST_LOG"
+printf 'helm %s kdive=%s migration=%s pgpassword=%s\n' "$*" \
+  "${KDIVE_DATABASE_URL:-}" "${KDIVE_MIGRATION_DATABASE_URL:-}" \
+  "${PGPASSWORD:-}" >>"$CUTOVER_TEST_LOG"
 case "$*" in
   'version'*) exit 0 ;;
   *'status kdive'*)
@@ -318,7 +320,9 @@ def _write_mismatch_kubectl(bin_dir: Path, encoded: str) -> None:
     _write_tool(
         bin_dir / "kubectl",
         f"""
-printf 'kubectl %s\n' "$*" >>"$CUTOVER_TEST_LOG"
+printf 'kubectl %s kdive=%s migration=%s pgpassword=%s\n' "$*" \
+  "${{KDIVE_DATABASE_URL:-}}" "${{KDIVE_MIGRATION_DATABASE_URL:-}}" \
+  "${{PGPASSWORD:-}}" >>"$CUTOVER_TEST_LOG"
 case "$*" in
   'config current-context') printf 'ctx-a\n' ;;
   *'get namespace '*'jsonpath'*) printf 'namespace-uid\n' ;;
@@ -580,6 +584,18 @@ def test_helm_database_processes_never_receive_owner_dsn(tmp_path: Path) -> None
     assert "release-sentinel" not in database_calls
     assert "pgpassfile=" in database_calls
     assert "pgdatabase=postgresql://operator@db.example/kdive" in database_calls
+
+
+def test_helm_unrelated_children_never_inherit_owner_credentials(tmp_path: Path) -> None:
+    env, log, values, backup, _supplied = _helm_mismatch_environment(tmp_path, matching_dsn=True)
+    env["PGPASSWORD"] = "ambient-helm-secret"  # pragma: allowlist secret
+
+    result = _run_fake_helm_cutover(env, values, backup)
+
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text(encoding="utf-8")
+    assert "release-sentinel" not in calls
+    assert "ambient-helm-secret" not in calls
 
 
 def test_helm_full_permission_preflight_denial_never_mutates(tmp_path: Path) -> None:

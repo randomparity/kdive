@@ -5,7 +5,9 @@ CUTOVER_BACKUP_TEMP=""
 CUTOVER_BACKUP_VALIDATED=0
 CUTOVER_DATABASE_REFERENCE=""
 CUTOVER_DATABASE_PASSFILE=""
+CUTOVER_DATABASE_SECRET=""
 CUTOVER_DATABASE_ENV=()
+CUTOVER_APP_DATABASE_ENV=()
 
 cutover_positive_seconds() {
   local name="$1" value="$2"
@@ -51,19 +53,23 @@ cutover_init_database_access() {
   local database_url="$1" authority_dir="$2" python="$3"
   local reference_path="${authority_dir}/database-reference"
   local passfile_path="${authority_dir}/database.pgpass"
+  local secret_path="${authority_dir}/database-owner-dsn"
   [[ -d "$authority_dir" && ! -L "$authority_dir" ]] || {
     echo "database authority directory must be an existing non-symlink directory" >&2
     return 2
   }
-  "$python" - "$reference_path" "$passfile_path" 3<<<"$database_url" <<'PY'
+  "$python" - "$reference_path" "$passfile_path" "$secret_path" \
+    3<<<"$database_url" <<'PY'
 import os
 import sys
 import urllib.parse
 
-reference_path, passfile_path = sys.argv[1:]
+reference_path, passfile_path, secret_path = sys.argv[1:]
 with os.fdopen(3, encoding="utf-8") as source:
     database_url = source.read().rstrip("\n")
 parsed = urllib.parse.urlsplit(database_url)
+if "\n" in database_url or "\r" in database_url:
+    raise SystemExit("database DSN must not contain a newline")
 if parsed.scheme not in {"postgres", "postgresql"} or not parsed.path:
     raise SystemExit("database DSN must be a PostgreSQL URI with a database path")
 if parsed.fragment:
@@ -93,6 +99,7 @@ escaped = password.replace("\\", "\\\\").replace(":", "\\:")
 for path, value in (
     (reference_path, reference + "\n"),
     (passfile_path, f"*:*:*:*:{escaped}\n"),
+    (secret_path, database_url),
 ):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -101,12 +108,24 @@ for path, value in (
 PY
   CUTOVER_DATABASE_REFERENCE="$(<"$reference_path")"
   CUTOVER_DATABASE_PASSFILE="$passfile_path"
+  # shellcheck disable=SC2034 # consumed by wrappers after sourcing this library
+  CUTOVER_DATABASE_SECRET="$secret_path"
   CUTOVER_DATABASE_ENV=(
     env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL
     -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE
     PGDATABASE="$CUTOVER_DATABASE_REFERENCE"
     PGPASSFILE="$CUTOVER_DATABASE_PASSFILE"
   )
+  # shellcheck disable=SC2034 # consumed by the host wrapper after sourcing this library
+  CUTOVER_APP_DATABASE_ENV=(
+    "${CUTOVER_DATABASE_ENV[@]}"
+    KDIVE_DATABASE_URL="$CUTOVER_DATABASE_REFERENCE"
+  )
+}
+
+cutover_scrub_database_environment() {
+  unset KDIVE_DATABASE_URL KDIVE_MIGRATION_DATABASE_URL
+  unset PGPASSWORD PGSERVICE PGSERVICEFILE
 }
 
 cutover_print_restore_command() {

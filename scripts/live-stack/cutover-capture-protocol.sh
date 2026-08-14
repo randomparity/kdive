@@ -57,7 +57,9 @@ cleanup_preflight() {
   exit "$rc"
 }
 trap cleanup_preflight EXIT
-cutover_init_database_access "$KDIVE_DATABASE_URL" "$work_dir" "$py"
+database_url="$KDIVE_DATABASE_URL"
+cutover_init_database_access "$database_url" "$work_dir" "$py"
+cutover_scrub_database_environment
 
 mapfile -t initial_daemon_pids < <(daemon_pids)
 for pid in "${initial_daemon_pids[@]}"; do
@@ -69,7 +71,8 @@ done
 
 # Validate that every recorded legacy incarnation belongs to this authority before stopping.
 cutover_bounded "database local-authority preflight" \
-  "$py" -m kdive.processes.lifecycle.worker_incarnation check-local-cutover-authority
+  "${CUTOVER_APP_DATABASE_ENV[@]}" "$py" -m \
+  kdive.processes.lifecycle.worker_incarnation check-local-cutover-authority
 trap - EXIT
 
 phase=precondition
@@ -133,15 +136,18 @@ cutover_remaining="$(daemon_pids)"
   exit 1
 }
 cutover_bounded "database local-termination persistence" \
-  "$py" -m kdive.processes.lifecycle.worker_incarnation terminate-local-cutover
+  "${CUTOVER_APP_DATABASE_ENV[@]}" "$py" -m \
+  kdive.processes.lifecycle.worker_incarnation terminate-local-cutover
 
 phase=backup
 cutover_prepare_backup "$backup_path"
 cutover_publish_backup "$backup_path"
 phase=migration
-cutover_bounded "host database migration" "$py" -m kdive migrate
+cutover_bounded "host database migration" \
+  "${CUTOVER_APP_DATABASE_ENV[@]}" "$py" -m kdive migrate
 phase=post-migration
-restart_host_processes
+KDIVE_DATABASE_URL="$CUTOVER_DATABASE_REFERENCE" \
+  PGPASSFILE="$CUTOVER_DATABASE_PASSFILE" restart_host_processes
 phase=complete
 trap - EXIT
 cleanup_work

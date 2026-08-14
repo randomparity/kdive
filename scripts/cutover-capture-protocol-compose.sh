@@ -43,7 +43,6 @@ else
   database_url="postgresql://kdive-migration:kdive-migration-local@localhost"
   database_url="${database_url}:${KDIVE_POSTGRES_PORT:-5432}/kdive" # pragma: allowlist secret
 fi
-export KDIVE_DATABASE_URL="$database_url"
 export COMPOSE_PROGRESS=quiet
 
 snapshot_dir="$(mktemp -d "${backup_parent}/.kdive-compose-cutover.XXXXXX")"
@@ -66,6 +65,19 @@ cleanup_preflight() {
 }
 trap cleanup_preflight EXIT
 cutover_init_database_access "$database_url" "$snapshot_dir" python3
+cutover_scrub_database_environment
+compose_database_env="${snapshot_dir}/compose-database.env"
+python3 - "$CUTOVER_DATABASE_SECRET" "$compose_database_env" <<'PY'
+import os
+import sys
+
+source, destination = sys.argv[1:]
+value = open(source, encoding="utf-8").read()
+fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as stream:
+    stream.write(f"KDIVE_DATABASE_URL={value}\n")
+os.chmod(destination, 0o400)
+PY
 
 cutover_bounded "Docker Compose version preflight" docker compose version >/dev/null
 if ! cutover_bounded "target image local resolution" \
@@ -79,7 +91,8 @@ target_image_id="$(cutover_bounded "target image identity snapshot" \
   exit 1
 }
 cutover_bounded "target Compose render" env KDIVE_IMAGE="$target_image" \
-  docker compose --profile cutover --profile managed-worker --profile render-only \
+  docker compose --env-file "$compose_database_env" \
+  --profile cutover --profile managed-worker --profile render-only \
   config --format json >"$raw_model"
 IFS=$'\t' read -r compose_project < <(
   python3 - "$raw_model" "$frozen_model" "$target_image" "$target_image_id" <<'PY'

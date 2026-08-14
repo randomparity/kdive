@@ -76,8 +76,12 @@ Before mutation, the script freezes a flattened kubeconfig and context, cluster 
 identities, chart, values, exact upgrade-mode render, repository-matching image digest, release
 revision, and migration credential in a restricted cutover directory. Every later command consumes
 those snapshots. A mode-0400 password-free database URI and libpq passfile keep the owner DSN out
-of local `psql` and `pg_dump` argv and environment. An attempt-unique Kubernetes-immutable Secret
-overrides the migration hook credential through completion and is removed only after its UID,
+of local `psql` and `pg_dump` argv and environment.
+The wrapper removes ambient KDIVE/libpq credential variables after capture. Helm, `kubectl`,
+Docker, and helper Python children receive none of them; credential equality is checked from the
+mode-0400 attempt files rather than a secret-bearing environment variable. An attempt-unique
+Kubernetes-immutable Secret overrides the migration hook credential through completion and is
+removed only after its UID,
 bytes, and the successor release are proven.
 
 The script retains the installed `worker.replicas`, scales the worker StatefulSet to zero, waits

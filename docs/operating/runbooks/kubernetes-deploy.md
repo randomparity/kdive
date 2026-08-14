@@ -192,8 +192,11 @@ flattened kubeconfig, its context and cluster identity, the chart tree, caller v
 release revision and namespace/StatefulSet UIDs, exact target render, registry image digest, and
 migration credential. Every later Helm and Kubernetes operation uses only the frozen kubeconfig,
 context, chart, and values. A mode-0400 password-free database URI and libpq passfile keep the
-migration-owner DSN out of local `psql` and `pg_dump` argv and environment. An attempt-unique
-Secret with Kubernetes `immutable: true` supplies the frozen credential to the migration hook. Its
+migration-owner DSN out of local `psql` and `pg_dump` argv and environment.
+The wrapper then removes ambient KDIVE/libpq credential variables. Helm, `kubectl`, Docker, and
+helper Python children receive none of them; credential equality is checked from the restricted
+attempt files instead of exporting the supplied DSN again. An attempt-unique Secret with
+Kubernetes `immutable: true` supplies the frozen credential to the migration hook. Its
 UID, immutable flag, and bytes are revalidated before
 backup, upgrade, and safe deletion after the successor release and workload identities are proven.
 A failed run retains the restricted snapshot and any still-needed Secret and prints exact

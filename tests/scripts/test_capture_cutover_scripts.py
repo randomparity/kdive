@@ -48,6 +48,22 @@ def _executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+def test_database_environment_scrub_covers_every_libpq_authority_variable() -> None:
+    library = (ROOT / "scripts/cutover-capture-protocol-lib.sh").read_text(encoding="utf-8")
+    scrub = library.split("cutover_scrub_database_environment()", maxsplit=1)[1].split(
+        "}", maxsplit=1
+    )[0]
+
+    for variable in (
+        "KDIVE_DATABASE_URL",
+        "KDIVE_MIGRATION_DATABASE_URL",
+        "PGPASSWORD",
+        "PGSERVICE",
+        "PGSERVICEFILE",
+    ):
+        assert variable in scrub
+
+
 def _compose_stub_environment(
     tmp_path: Path,
     *,
@@ -83,7 +99,9 @@ def _compose_stub_environment(
     _executable(
         bin_dir / "docker",
         f"""
-printf 'docker %s\n' "$*" >>"$CUTOVER_TEST_LOG"
+printf 'docker %s kdive=%s migration=%s pgpassword=%s\n' "$*" \
+  "${{KDIVE_DATABASE_URL:-}}" "${{KDIVE_MIGRATION_DATABASE_URL:-}}" \
+  "${{PGPASSWORD:-}}" >>"$CUTOVER_TEST_LOG"
 case "$*" in
   'image inspect --format '*' target:v3') printf 'sha256:abc123\n' ;;
   'image inspect '*) exit 1 ;;
@@ -106,8 +124,10 @@ esac
     _executable(
         bin_dir / "just",
         f"""
-printf 'just %s file=%s project=%s\n' "$*" "${{COMPOSE_FILE:-}}" \
-  "${{COMPOSE_PROJECT_NAME:-}}" >>"$CUTOVER_TEST_LOG"
+printf 'just %s file=%s project=%s kdive=%s migration=%s pgpassword=%s\n' "$*" \
+  "${{COMPOSE_FILE:-}}" "${{COMPOSE_PROJECT_NAME:-}}" \
+  "${{KDIVE_DATABASE_URL:-}}" "${{KDIVE_MIGRATION_DATABASE_URL:-}}" \
+  "${{PGPASSWORD:-}}" >>"$CUTOVER_TEST_LOG"
 {just_switch_command}
 [[ "$*" != "compose-up" ]] || exit {start_status}
 """,
@@ -408,6 +428,21 @@ def test_compose_database_processes_never_receive_owner_dsn(tmp_path: Path) -> N
     assert "pgdatabase=postgresql://owner@db.example/kdive" in database_calls
 
 
+def test_compose_unrelated_children_never_inherit_owner_credentials(tmp_path: Path) -> None:
+    env, log = _compose_stub_environment(tmp_path)
+    env["KDIVE_DATABASE_URL"] = (
+        "postgresql://owner:compose-child-secret@db.example/kdive"  # pragma: allowlist secret
+    )
+    env["PGPASSWORD"] = "ambient-compose-secret"  # pragma: allowlist secret
+
+    result = _run_compose_cutover(tmp_path, env)
+
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text(encoding="utf-8")
+    assert "compose-child-secret" not in calls
+    assert "ambient-compose-secret" not in calls
+
+
 def test_compose_rollback_recovery_uses_restricted_database_authority(tmp_path: Path) -> None:
     env, _log = _compose_stub_environment(tmp_path, start_status=37)
     env["KDIVE_DATABASE_URL"] = (
@@ -434,13 +469,18 @@ def _host_cutover_environment(
     lifecycle.mkdir(parents=True)
     for parent in (package, package / "processes", lifecycle):
         (parent / "__init__.py").write_text("", encoding="utf-8")
-    main_source = """import sys
+    main_source = """import os
+import sys
 import time
 from pathlib import Path
 
 log = Path(__import__("os").environ["CUTOVER_TEST_LOG"])
 with log.open("a", encoding="utf-8") as stream:
-    stream.write(f"kdive {sys.argv[1]}\\n")
+    stream.write(
+        f"kdive {sys.argv[1]} db={os.environ.get('KDIVE_DATABASE_URL', '')} "
+        f"migration={os.environ.get('KDIVE_MIGRATION_DATABASE_URL', '')} "
+        f"pgpassword={os.environ.get('PGPASSWORD', '')}\\n"
+    )
 if sys.argv[1] == "worker":
     while True:
         time.sleep(60)
@@ -458,7 +498,11 @@ from pathlib import Path
 
 action = sys.argv[1]
 with Path(os.environ["CUTOVER_TEST_LOG"]).open("a", encoding="utf-8") as stream:
-    stream.write(f"lifecycle {{action}}\\n")
+    stream.write(
+        f"lifecycle {{action}} db={{os.environ.get('KDIVE_DATABASE_URL', '')}} "
+        f"migration={{os.environ.get('KDIVE_MIGRATION_DATABASE_URL', '')}} "
+        f"pgpassword={{os.environ.get('PGPASSWORD', '')}}\\n"
+    )
 if action == "check-local-cutover-authority":
     if {authority_status}:
         print("worker process identity is unreadable", file=sys.stderr)
@@ -536,7 +580,11 @@ def test_host_cutover_executes_stop_witness_backup_and_migration_trap(tmp_path: 
     assert (tmp_path / "backup.dump").exists()
     assert "restart the protocol-3 host processes exactly" in result.stderr
     assert "  restart_host_processes" in result.stderr
-    calls = (tmp_path / "calls").read_text(encoding="utf-8")
+    calls = "\n".join(
+        line
+        for line in (tmp_path / "calls").read_text(encoding="utf-8").splitlines()
+        if not line.startswith("kdive worker ")
+    )
     assert calls.index("check-local-cutover-authority") < calls.index("terminate-local-cutover")
     assert calls.index("terminate-local-cutover") < calls.index("kdive migrate")
 
@@ -563,10 +611,47 @@ def test_host_database_processes_never_receive_owner_dsn(tmp_path: Path) -> None
             worker.wait(timeout=5)
 
     assert result.returncode == 29
-    calls = (tmp_path / "calls").read_text(encoding="utf-8")
+    calls = "\n".join(
+        line
+        for line in (tmp_path / "calls").read_text(encoding="utf-8").splitlines()
+        if not line.startswith("kdive worker ")
+    )
     assert "host-argv-secret" not in calls
     assert "pgpassfile=" in calls
     assert "pgdatabase=postgresql://owner@db.example/kdive" in calls
+
+
+def test_host_python_children_receive_only_restricted_database_authority(tmp_path: Path) -> None:
+    env = _host_cutover_environment(tmp_path)
+    env["KDIVE_DATABASE_URL"] = (
+        "postgresql://owner:host-child-secret@db.example/kdive"  # pragma: allowlist secret
+    )
+    env["PGPASSWORD"] = "ambient-host-secret"  # pragma: allowlist secret
+    worker = _start_fake_host_worker(env)
+    try:
+        result = subprocess.run(
+            [str(HOST_CUTOVER), str(tmp_path / "backup.dump")],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    finally:
+        if worker.poll() is None:
+            worker.terminate()
+            worker.wait(timeout=5)
+
+    assert result.returncode == 29
+    calls = "\n".join(
+        line
+        for line in (tmp_path / "calls").read_text(encoding="utf-8").splitlines()
+        if not line.startswith("kdive worker ")
+    )
+    assert "host-child-secret" not in calls
+    assert "ambient-host-secret" not in calls
+    assert "db=postgresql://owner@db.example/kdive" in calls
 
 
 def test_host_rollback_recovery_uses_restricted_database_authority(tmp_path: Path) -> None:
