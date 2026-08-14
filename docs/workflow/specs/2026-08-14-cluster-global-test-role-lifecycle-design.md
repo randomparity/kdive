@@ -13,7 +13,8 @@ This design implements issue #1961 and is governed by
 - Python 3.14 and PostgreSQL 17 remain the test/runtime versions.
 - The host is `x86_64`; the project targets `x86_64` and `ppc64le`.
 - Preserve canonical runtime role names and migration 0104 semantics.
-- Use the existing pytest per-run root and `fcntl.flock`; add no dependency or configuration.
+- Use a PostgreSQL session advisory lock through the shared maintenance database; add no dependency
+  or configuration.
 - Serialize only fixture paths capable of changing cluster-global role state.
 - The full repository guardrail is `just ci`; CI gates its constituent recipes individually.
 
@@ -35,10 +36,11 @@ the fixture provides no ownership boundary for any cluster-global role operation
 
 ## Design
 
-`tests.support.xdist_backend` exposes a context manager for a named run-scoped exclusive lock. It
-derives a lock file below `per_run_root(tmp_path_factory)` and delegates to the module's existing
-kernel `flock` primitive. The name is fixed for PostgreSQL cluster-global state, and the API stays
-generic enough to describe the resource being guarded without introducing a lock registry.
+`tests/db/conftest.py` defines a context manager that derives the server's `postgres` maintenance
+database URL, opens a dedicated connection, and takes a session advisory lock using a two-integer
+key reserved for cluster-global test state. PostgreSQL includes the database identity in advisory
+lock scope, so every worker and concurrent run must use the same maintenance database rather than
+its separate target database. Closing the connection releases the lock.
 
 `pg_conn` acquires the PostgreSQL cluster-global lock before dropping `public`. It holds the lock
 across `yield`, so direct migration SQL, role alteration, and teardown performed by the consuming
@@ -46,9 +48,9 @@ test remain inside the boundary. `_migrated_db` acquires the same lock around it
 `apply_migrations` call and post-migration snapshot. It releases the lock before yielding the
 already-migrated URL, allowing ordinary service tests to retain xdist parallelism.
 
-The lock is process-owned by `flock`. Normal fixture exit and abrupt process termination both
-release it. A waiting worker blocks on the state transition it needs instead of sleeping or retrying
-on a guessed interval.
+The lock is session-owned by PostgreSQL. Normal fixture exit and abrupt process termination both
+close the guard connection and release it. A waiting worker blocks on the state transition it needs
+instead of sleeping or retrying on a guessed interval.
 
 ## Failure handling
 
@@ -62,8 +64,9 @@ migration failure.
 
 ## Verification
 
-- A cross-process unit test acquires the named lock in one process, proves a contender cannot enter
-  until release, then proves it enters after release.
+- An integration test takes the cluster-global lock through one target database's server URL,
+  proves a contender derived from another target database cannot enter until release, then proves
+  it enters after release.
 - A fixture test proves `pg_conn` holds the named lock throughout the consuming test, not only while
   resetting the schema.
 - A fixture test proves `_migrated_db` uses the same named boundary while migrations execute and
@@ -73,9 +76,10 @@ migration failure.
 
 ## Alternatives
 
-ADR-0560 records the rejected per-worker role rewriting, pre-creation, production-lock change, and
-call-only lock designs. The selected fixture-lifetime boundary is the smallest surface that covers
-direct SQL and role mutation while leaving already-migrated tests parallel.
+ADR-0560 records the rejected per-worker role rewriting, pre-creation, production-lock change,
+call-only lock, per-run filesystem lock, and do-nothing designs. The selected fixture-lifetime
+boundary is the smallest surface that covers direct SQL and role mutation, coordinates concurrent
+runs using the same cluster, and leaves already-migrated tests parallel.
 
 ## Durable workflow context
 
