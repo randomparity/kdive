@@ -43,7 +43,11 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     events: list[str] = []
     secret_registry = SecretRegistry()
     handler_registry = object()
-    handler_assembly = SimpleNamespace(resolver=object())
+    handler_assembly = SimpleNamespace(
+        resolver=object(),
+        object_stores=SimpleNamespace(store=None),
+        capture_supervisor=object(),
+    )
 
     class _ConnectionContext:
         async def __aenter__(self) -> object:
@@ -66,6 +70,7 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
             events.append("store-admission")
 
     store_instance = _Store()
+    handler_assembly.object_stores.store = store_instance
 
     monkeypatch.setattr("kdive.processes.worker.create_pool", lambda **kw: pool)
     monkeypatch.setattr("kdive.processes.worker.worker_incarnation_id", lambda pid: "docker:nonce")
@@ -101,11 +106,15 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     async def recover(
         recovery_pool: object,
         resolver: object,
+        store: object,
+        supervisor: object,
         host_identity: str,
         credential: SecretStr,
     ) -> object:
         assert recovery_pool is pool
         assert resolver is handler_assembly.resolver
+        assert store is store_instance
+        assert supervisor is handler_assembly.capture_supervisor
         assert host_identity == "a" * 64
         assert credential is incarnation_credential
         events.append("recover")

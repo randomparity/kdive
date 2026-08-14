@@ -113,6 +113,8 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
         recovery = await recover_capture_operations(
             pool,
             handler_assembly.resolver,
+            handler_assembly.object_stores.store,
+            handler_assembly.capture_supervisor,
             _capture_host_identity(incarnation),
             incarnation_credential,
         )

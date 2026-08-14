@@ -1004,6 +1004,22 @@ def test_dispose_spool_accepts_an_absent_private_root(tmp_path: Path) -> None:
     assert child.dispose_spool()
 
 
+def test_launcher_disposes_operation_derived_spool_during_recovery(tmp_path: Path) -> None:
+    operation_id = uuid4()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    attempt_dir = runtime_root / str(operation_id)
+    attempt_dir.mkdir(mode=0o700)
+    capture = attempt_dir / "capture.pcap"
+    capture.write_bytes(b"pcap")
+    capture.chmod(0o600)
+    launcher = GatedCaptureLauncher(runtime_root=runtime_root)
+
+    assert launcher.dispose_operation_spool(operation_id)
+    assert not attempt_dir.exists()
+    assert launcher.dispose_operation_spool(operation_id)
+
+
 def test_process_group_enumeration_fails_closed_on_unreadable_proc(tmp_path: Path) -> None:
     process = tmp_path / "123"
     process.mkdir()

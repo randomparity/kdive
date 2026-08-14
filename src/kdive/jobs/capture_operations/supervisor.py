@@ -29,6 +29,10 @@ from kdive.jobs.capture_operations.launcher import (
 )
 from kdive.jobs.capture_operations.linux_identity import LinuxIdentity, scan_launch_token
 from kdive.jobs.capture_operations.protocol import CaptureRequest
+from kdive.jobs.capture_operations.publication import (
+    CapturePublicationIdentityConflict,
+    recover_publication,
+)
 from kdive.jobs.capture_operations.repository import (
     CaptureOperation,
     CaptureOperationIdentity,
@@ -47,6 +51,7 @@ from kdive.jobs.capture_operations.repository import (
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.traffic import TrafficCaptureQuiescence
+from kdive.store.objectstore import ObjectStore
 
 LOCK_PROBE_INTERVAL_SECONDS = 0.25
 LOCK_PROBE_TIMEOUT_SECONDS = 1.0
@@ -202,6 +207,10 @@ class CaptureOperationSupervisor:
     def credential(self) -> SecretStr:
         """Expose the same secret reference to the co-assembled publication coordinator."""
         return self._credential
+
+    def dispose_recovery_spool(self, operation_id: UUID) -> bool:
+        """Remove and verify the exact operation-derived spool during startup recovery."""
+        return self._launcher.dispose_operation_spool(operation_id)
 
     @asynccontextmanager
     async def _transition_connection(
@@ -580,11 +589,11 @@ async def _recover_identified(
     host_identity: str,
     credential: SecretStr,
     candidate: CaptureRecoveryCandidate,
-) -> bool:
+) -> CaptureOperation | None:
     if candidate.host_instance != host_identity:
-        return False
+        return None
     if candidate.boot_id is None or candidate.pid is None or candidate.start_ticks is None:
-        return False
+        return None
     identity = LinuxIdentity(
         host_instance=candidate.host_instance,
         boot_id=candidate.boot_id,
@@ -595,7 +604,7 @@ async def _recover_identified(
     if not absent:
         absent = await _terminate_identity(identity)
     if not absent:
-        return False
+        return None
     probe = await _recovery_quiescence(conn, resolver, candidate)
     evidence = await asyncio.to_thread(
         probe.prove_absent,
@@ -603,7 +612,7 @@ async def _recover_identified(
         candidate.domain_name,
         f"kdive-dump-{candidate.job_id}",
     )
-    await recover_operation(
+    return await recover_operation(
         conn,
         credential,
         candidate.id,
@@ -614,12 +623,13 @@ async def _recover_identified(
             exit_code=None,
         ),
     )
-    return True
 
 
 async def recover_capture_operations(
     pool: AsyncConnectionPool,
     resolver: ProviderResolver,
+    store: ObjectStore,
+    supervisor: CaptureOperationSupervisor,
     host_identity: str,
     credential: SecretStr,
 ) -> RecoverySummary:
@@ -629,16 +639,32 @@ async def recover_capture_operations(
         recovered = 0
         for candidate in candidates:
             try:
+                operation: CaptureOperation | None = None
                 if candidate.state == "launching":
                     evidence = await _launching_evidence(candidate)
                     if evidence is None:
                         continue
-                    await recover_operation(conn, credential, candidate.id, evidence)
-                    recovered += 1
-                elif await _recover_identified(
-                    conn, resolver, host_identity, credential, candidate
-                ):
-                    recovered += 1
+                    operation = await recover_operation(conn, credential, candidate.id, evidence)
+                else:
+                    operation = await _recover_identified(
+                        conn, resolver, host_identity, credential, candidate
+                    )
+                if operation is None:
+                    continue
+                operation = await recover_publication(conn, store, credential, operation)
+                disposed = await asyncio.to_thread(supervisor.dispose_recovery_spool, operation.id)
+                if not disposed:
+                    continue
+                await record_spool_disposed(conn, credential, operation.id)
+                recovered += 1
+            except CapturePublicationIdentityConflict as error:
+                _log.error(
+                    "capture_publication_object_identity_conflict operation_id=%s key=%s reason=%s",
+                    error.operation_id,
+                    error.key,
+                    error.reason,
+                )
+                continue
             except Exception:
                 _log.exception("capture operation %s recovery remains pending", candidate.id)
                 continue

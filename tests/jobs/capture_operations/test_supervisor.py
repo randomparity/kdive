@@ -802,6 +802,17 @@ def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
     monkeypatch.setattr(supervisor_module, "_recovery_quiescence", recovery_quiescence)
     monkeypatch.setattr(supervisor_module, "recover_operation", recover)
 
+    async def recover_publication(*args: object) -> CaptureOperation:
+        events.append("publication")
+        return cast(CaptureOperation, args[-1])
+
+    async def disposed(*args: object) -> CaptureOperation:
+        events.append("record-spool")
+        return cast(CaptureOperation, args[-1])
+
+    monkeypatch.setattr(supervisor_module, "recover_publication", recover_publication)
+    monkeypatch.setattr(supervisor_module, "record_spool_disposed", disposed)
+
     class _Pool:
         def connection(self) -> object:
             class _Context:
@@ -817,12 +828,26 @@ def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
         recover_capture_operations(
             cast(AsyncConnectionPool, _Pool()),
             cast(ProviderResolver, SimpleNamespace()),
+            cast(Any, SimpleNamespace()),
+            cast(
+                CaptureOperationSupervisor,
+                SimpleNamespace(
+                    dispose_recovery_spool=lambda operation_id: events.append("spool") or True
+                ),
+            ),
             "host-a",
             SecretStr("replacement"),
         )
     )
     assert summary == RecoverySummary(scanned=1, recovered=1, pending=0)
-    assert events == ["absent", "quiescence", "recover"]
+    assert events == [
+        "absent",
+        "quiescence",
+        "recover",
+        "publication",
+        "spool",
+        "record-spool",
+    ]
 
 
 def _job_for_candidate(candidate: Any) -> Job:

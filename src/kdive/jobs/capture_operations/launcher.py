@@ -864,6 +864,36 @@ def _remove_spool_entries(directory_fd: int) -> bool:
     return True
 
 
+def _dispose_operation_spool(attempt_dir: Path, operation_id: UUID) -> bool:
+    if attempt_dir.name != str(operation_id):
+        return False
+    parent_fd, absent = _open_spool_parent(attempt_dir.parent)
+    if parent_fd is None:
+        return absent
+    try:
+        directory_fd, absent = _open_spool_directory(parent_fd, attempt_dir.name)
+        if directory_fd is None:
+            return absent
+        try:
+            metadata = os.fstat(directory_fd)
+            if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+                return False
+            if not _remove_spool_entries(directory_fd):
+                return False
+        except OSError:
+            return False
+        finally:
+            os.close(directory_fd)
+        try:
+            os.rmdir(attempt_dir.name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except OSError:
+            return False
+        return _entry_absent(parent_fd, attempt_dir.name)
+    finally:
+        os.close(parent_fd)
+
+
 @dataclass(slots=True)
 class LaunchedCapture:
     """A filter-attested child stopped at its one-byte provider gate."""
@@ -926,33 +956,7 @@ class LaunchedCapture:
 
     def dispose_spool(self) -> bool:
         """Remove and verify absence of only this operation's private mode-0700 spool."""
-        if self.attempt_dir.name != str(self.operation_id):
-            return False
-        parent_fd, absent = _open_spool_parent(self.attempt_dir.parent)
-        if parent_fd is None:
-            return absent
-        try:
-            directory_fd, absent = _open_spool_directory(parent_fd, self.attempt_dir.name)
-            if directory_fd is None:
-                return absent
-            try:
-                metadata = os.fstat(directory_fd)
-                if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
-                    return False
-                if not _remove_spool_entries(directory_fd):
-                    return False
-            except OSError:
-                return False
-            finally:
-                os.close(directory_fd)
-            try:
-                os.rmdir(self.attempt_dir.name, dir_fd=parent_fd)
-                os.fsync(parent_fd)
-            except OSError:
-                return False
-            return _entry_absent(parent_fd, self.attempt_dir.name)
-        finally:
-            os.close(parent_fd)
+        return _dispose_operation_spool(self.attempt_dir, self.operation_id)
 
     async def _wait_bounded(self, seconds: float) -> bool:
         if self.process.returncode is not None:
@@ -1009,6 +1013,10 @@ class GatedCaptureLauncher:
         self._interpreter = interpreter
         self._environment = dict(os.environ if environment is None else environment)
         self._expected_manifest_uid = expected_manifest_uid
+
+    def dispose_operation_spool(self, operation_id: UUID) -> bool:
+        """Remove and verify the operation-derived private spool during recovery."""
+        return _dispose_operation_spool(self._runtime_root / str(operation_id), operation_id)
 
     def _child_environment(self) -> dict[str, str]:
         environment = {

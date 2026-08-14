@@ -7,7 +7,7 @@ import hashlib
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
@@ -20,12 +20,16 @@ from pydantic import SecretStr
 from kdive.artifacts.storage import (
     ConditionalArtifactWriteRequest,
     ConditionalCreateResult,
+    HeadResult,
     StoredArtifact,
 )
 from kdive.domain.capacity.state import JobState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.capture_operations.publication import CapturePublicationCoordinator
+from kdive.jobs.capture_operations.publication import (
+    CapturePublicationCoordinator,
+    recover_publication,
+)
 from kdive.jobs.capture_operations.repository import (
     CaptureOperation,
     CaptureOperationIdentity,
@@ -446,6 +450,78 @@ def test_cancellation_while_audit_claim_is_blocked_rolls_back_the_transaction(
             ).fetchone() == (0,)
         finally:
             await blocker.close()
+            await _close(subject)
+
+    asyncio.run(_run())
+
+
+def test_pending_publication_recovery_derives_key_and_commits_tombstone(
+    migrated_url: str,
+) -> None:
+    class _RecoveryStore:
+        def __init__(self) -> None:
+            self.current: HeadResult | None = None
+            self.requests: list[ConditionalArtifactWriteRequest] = []
+
+        def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
+            if self.current is None:
+                return None
+            if version_id is not None and version_id != self.current.version_id:
+                return None
+            return self.current
+
+        def create_if_absent(
+            self, request: ConditionalArtifactWriteRequest
+        ) -> ConditionalCreateResult:
+            self.requests.append(request)
+            stored = StoredArtifact(
+                request.key,
+                hashlib.sha256(request.data).hexdigest(),
+                request.sensitivity,
+                request.retention_class,
+                "tombstone-version",
+            )
+            self.current = HeadResult(
+                size_bytes=0,
+                checksum_sha256=None,
+                etag=stored.etag,
+                last_modified=_NOW,
+                version_id=stored.version_id,
+                sensitivity=request.sensitivity,
+                metadata=MappingProxyType(dict(request.metadata)),
+            )
+            return stored
+
+        def delete_version(self, key: str, version_id: str) -> None:
+            raise AssertionError("pending recovery must not delete an absent capture")
+
+    async def _run() -> None:
+        subject = await _subject(migrated_url)
+        store = _RecoveryStore()
+        try:
+            recovered = await recover_publication(
+                subject.worker,
+                cast(ObjectStore, store),
+                subject.credential,
+                subject.operation,
+            )
+            assert recovered.publication_state == "discarded"
+            assert recovered.publication_tombstone_version == "tombstone-version"
+            assert len(store.requests) == 1
+            request = store.requests[0]
+            assert request.key.endswith(f"/pcap-{subject.operation.id}")
+            assert request.data == b""
+            assert request.metadata == {
+                "operation-id": str(subject.operation.id),
+                "publication-kind": "tombstone",
+            }
+            assert await _operation_row(subject) == (
+                "discarded",
+                None,
+                None,
+                None,
+            )
+        finally:
             await _close(subject)
 
     asyncio.run(_run())

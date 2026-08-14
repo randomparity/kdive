@@ -104,7 +104,11 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
         return object()
 
     monkeypatch.setattr("kdive.jobs.assembly.build_handler_registry", _registry)
-    assembly = SimpleNamespace(resolver=object())
+    assembly = SimpleNamespace(
+        resolver=object(),
+        object_stores=SimpleNamespace(store=object()),
+        capture_supervisor=object(),
+    )
     monkeypatch.setattr(
         "kdive.jobs.assembly.build_worker_handler_assembly", lambda **kwargs: assembly
     )
