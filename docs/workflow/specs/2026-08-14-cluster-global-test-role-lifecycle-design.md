@@ -38,9 +38,9 @@ the fixture provides no ownership boundary for any cluster-global role operation
 
 `tests/db/conftest.py` defines a context manager that derives the server's `postgres` maintenance
 database URL, opens a dedicated connection, and takes a session advisory lock using a two-integer
-key reserved for cluster-global test state. PostgreSQL includes the database identity in advisory
-lock scope, so every worker and concurrent run must use the same maintenance database rather than
-its separate target database. Closing the connection releases the lock.
+key already reserved for migrations by ADR-0015. PostgreSQL includes the database identity in
+advisory lock scope, so every worker and concurrent run must use the same maintenance database
+rather than its separate target database. Closing the connection releases the lock.
 
 `pg_conn` acquires the PostgreSQL cluster-global lock before dropping `public`. It holds the lock
 across `yield`, so direct migration SQL, role alteration, and teardown performed by the consuming

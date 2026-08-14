@@ -25,7 +25,9 @@ guard connection and lock from before its schema reset until after the test and 
 Creation of each worker's session-scoped migrated database holds the same lock while applying
 migrations and capturing its seed snapshot.
 
-The lock uses a dedicated two-integer advisory-lock key reserved by the test fixture. It is a
+The fixture reuses the migration runner's existing two-integer advisory-lock key through the
+maintenance database. ADR-0015 reserves that lock space for migrations; this fixture is ordering
+migration and role-lifecycle tests rather than creating another owner or key namespace. It is a
 test-infrastructure boundary only. Production migration behavior, runtime role names, and
 per-database migration locking remain unchanged.
 
@@ -36,8 +38,8 @@ different database or key therefore makes the regression fail instead of relying
 
 Each lock acquisition is bounded to 60 seconds of PostgreSQL server elapsed time, scoped to that
 single acquisition. On expiry the fixture fails instead of entering the protected operation and
-reports the maintenance database, lock key, visible blocking backend identifiers, and the recovery
-action: terminate the stuck test worker or let it exit, then rerun the failed test. The timeout does
+reports the maintenance database, migration lock key, visible blocking backend identifiers, and
+the recovery action: terminate the stuck test worker or let it exit, then rerun the failed test. The timeout does
 not repair a live holder; it makes that residual state observable and keeps the suite from waiting
 without a bound.
 
