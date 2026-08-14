@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import cast
 
 from pydantic import SecretStr
@@ -18,12 +19,16 @@ from tests.support.object_store import INERT_OBJECT_STORE
 
 def test_register_all_handlers_registers_active_and_no_retired_job_kinds() -> None:
     registry = HandlerRegistry()
+    credential = SecretStr("worker-test-incarnation-credential")
     assembly = WorkerHandlerAssembly(
         resolver=ProviderResolver({}),
-        incarnation_credential=SecretStr("worker-test-incarnation-credential"),
+        incarnation_credential=credential,
         secret_registry=SecretRegistry(),
         object_stores=ObjectStoreAssembly(store=INERT_OBJECT_STORE),
-        capture_supervisor=cast(CaptureOperationSupervisor, object()),
+        capture_supervisor=cast(
+            CaptureOperationSupervisor,
+            SimpleNamespace(credential=credential),
+        ),
     )
 
     register_all_handlers(registry, assembly)

@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -29,6 +29,10 @@ from kdive.jobs.capture_operations.launcher import (
 )
 from kdive.jobs.capture_operations.linux_identity import LinuxIdentity, scan_launch_token
 from kdive.jobs.capture_operations.protocol import CaptureRequest
+from kdive.jobs.capture_operations.publication import (
+    CapturePublicationIdentityConflict,
+    recover_publication,
+)
 from kdive.jobs.capture_operations.repository import (
     CaptureOperation,
     CaptureOperationIdentity,
@@ -37,15 +41,18 @@ from kdive.jobs.capture_operations.repository import (
     CaptureRecoveryCandidate,
     RecoveryEvidence,
     acknowledge_exit,
+    claim_publication_recovery,
     create_launching,
     list_recovery_candidates,
     mark_running,
     record_identity,
+    record_spool_disposed,
     recover_operation,
     request_cancel,
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.traffic import TrafficCaptureQuiescence
+from kdive.store.objectstore import ObjectStore
 
 LOCK_PROBE_INTERVAL_SECONDS = 0.25
 LOCK_PROBE_TIMEOUT_SECONDS = 1.0
@@ -75,6 +82,29 @@ class CaptureAuthorityLost(RuntimeError):
     """The heartbeat or lock-owning session stopped authorizing provider work."""
 
 
+class CapturePublisher(Protocol):
+    """Publish bytes for the exact exited capture operation."""
+
+    async def __call__(
+        self,
+        conn: AsyncConnection,
+        job: Job,
+        operation: CaptureOperation,
+        snapshot: CaptureSnapshot,
+        data: bytes,
+    ) -> UUID: ...
+
+
+class CapturePublicationRecoverer(Protocol):
+    """Close publication for an exited attempt before its failure is propagated."""
+
+    async def __call__(
+        self,
+        conn: AsyncConnection,
+        operation: CaptureOperation,
+    ) -> CaptureOperation: ...
+
+
 @contextmanager
 def capture_authority_scope(lost: asyncio.Event) -> Iterator[None]:
     """Bind worker heartbeat/stop authority to one capture handler task."""
@@ -93,6 +123,20 @@ async def require_capture_authority() -> None:
     await asyncio.sleep(0)
     if lost.is_set():
         raise CaptureAuthorityLost("capture worker authority ended")
+
+
+async def _finish_owned_cleanup(task: asyncio.Task[None]) -> None:
+    """Drain mandatory closure without letting repeated cancellation orphan it."""
+    current = asyncio.current_task()
+    assert current is not None
+    completed = asyncio.Event()
+    task.add_done_callback(lambda _task: completed.set())
+    while not completed.is_set():
+        try:
+            await completed.wait()
+        except asyncio.CancelledError:
+            current.uncancel()
+    task.result()
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +228,15 @@ class CaptureOperationSupervisor:
         self._credential = credential
         self._pool = pool
 
+    @property
+    def credential(self) -> SecretStr:
+        """Expose the same secret reference to the co-assembled publication coordinator."""
+        return self._credential
+
+    def dispose_recovery_spool(self, operation_id: UUID) -> bool:
+        """Remove and verify the exact operation-derived spool during startup recovery."""
+        return self._launcher.dispose_operation_spool(operation_id)
+
     @asynccontextmanager
     async def _transition_connection(
         self, fallback: AsyncConnection
@@ -200,8 +253,11 @@ class CaptureOperationSupervisor:
         job: Job,
         snapshot: CaptureSnapshot,
         request: CaptureRequest,
-    ) -> bytes | None:
-        """Execute only while the exact job lock session remains responsive."""
+        *,
+        publisher: CapturePublisher,
+        publication_recoverer: CapturePublicationRecoverer,
+    ) -> UUID | None:
+        """Execute and publish only while the exact job lock session remains responsive."""
         launched: LaunchedCapture | None = None
         operation: CaptureOperation | None = None
         configuration: bytes | None = None
@@ -240,25 +296,76 @@ class CaptureOperationSupervisor:
                     exit_code=returncode,
                 )
                 acknowledged = True
-                return self._consume_result(launched, request)
+                data = self._consume_result(launched, request)
+                return await self._wait_for_publication(
+                    conn,
+                    job,
+                    operation,
+                    snapshot,
+                    launched,
+                    data,
+                    publisher,
+                )
         except asyncio.CancelledError:
-            if not acknowledged:
+            if acknowledged:
+                assert operation is not None and launched is not None
+                await _finish_owned_cleanup(
+                    asyncio.create_task(
+                        self._cleanup_publication(conn, operation, launched, publication_recoverer)
+                    )
+                )
+            else:
                 await self._cleanup_started(
                     conn, operation, launched, launch_abort, snapshot, configuration
                 )
             raise
         except CaptureAuthorityLost as error:
-            if not acknowledged:
+            if acknowledged:
+                assert operation is not None and launched is not None
+                await _finish_owned_cleanup(
+                    asyncio.create_task(
+                        self._cleanup_publication(conn, operation, launched, publication_recoverer)
+                    )
+                )
+            else:
                 await self._cleanup_started(
                     conn, operation, launched, launch_abort, snapshot, configuration
                 )
             raise _authority_error() from error
         except Exception:
-            if not acknowledged:
+            if acknowledged:
+                assert operation is not None and launched is not None
+                await _finish_owned_cleanup(
+                    asyncio.create_task(
+                        self._cleanup_publication(conn, operation, launched, publication_recoverer)
+                    )
+                )
+            else:
                 await self._cleanup_started(
                     conn, operation, launched, launch_abort, snapshot, configuration
                 )
             raise
+
+    async def _cleanup_publication(
+        self,
+        conn: AsyncConnection,
+        operation: CaptureOperation,
+        launched: LaunchedCapture,
+        recoverer: CapturePublicationRecoverer,
+    ) -> None:
+        async with self._transition_connection(conn) as transition:
+            recovered = await recoverer(transition, operation)
+            disposed = await asyncio.to_thread(launched.dispose_spool)
+            if not disposed:
+                raise CategorizedError(
+                    "capture publication recovery could not dispose its private spool",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={
+                        "reason": "capture_spool_disposal_unverified",
+                        "operation_id": str(operation.id),
+                    },
+                )
+            await record_spool_disposed(transition, self._credential, recovered.id)
 
     async def _cleanup_started(
         self,
@@ -318,6 +425,63 @@ class CaptureOperationSupervisor:
                     task.cancel()
             await asyncio.gather(process, authority, return_exceptions=True)
 
+    async def _wait_for_publication(
+        self,
+        conn: AsyncConnection,
+        job: Job,
+        operation: CaptureOperation,
+        snapshot: CaptureSnapshot,
+        launched: LaunchedCapture,
+        data: bytes,
+        publisher: CapturePublisher,
+    ) -> UUID:
+        publication = asyncio.create_task(
+            self._publish_and_dispose(conn, job, operation, snapshot, launched, data, publisher)
+        )
+        authority = asyncio.create_task(_monitor_lock_session(conn))
+        try:
+            done, _pending = await asyncio.wait(
+                {publication, authority}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if authority in done:
+                await authority
+                raise AssertionError("lock monitor returned without losing authority")
+            await asyncio.sleep(0)
+            if authority.done():
+                await authority
+                raise AssertionError("lock monitor returned without losing authority")
+            await require_capture_authority()
+            return publication.result()
+        finally:
+            for task in (publication, authority):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(publication, authority, return_exceptions=True)
+
+    async def _publish_and_dispose(
+        self,
+        conn: AsyncConnection,
+        job: Job,
+        operation: CaptureOperation,
+        snapshot: CaptureSnapshot,
+        launched: LaunchedCapture,
+        data: bytes,
+        publisher: CapturePublisher,
+    ) -> UUID:
+        artifact_id = await publisher(conn, job, operation, snapshot, data)
+        disposed = await asyncio.to_thread(launched.dispose_spool)
+        if not disposed:
+            raise CategorizedError(
+                "capture publication committed but its private spool remains",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "reason": "capture_spool_disposal_unverified",
+                    "operation_id": str(operation.id),
+                },
+            )
+        await record_spool_disposed(conn, self._credential, operation.id)
+        return artifact_id
+
     async def _cancel_and_acknowledge(
         self,
         conn: AsyncConnection,
@@ -376,7 +540,7 @@ class CaptureOperationSupervisor:
         )
 
     @staticmethod
-    def _consume_result(launched: LaunchedCapture, request: CaptureRequest) -> bytes | None:
+    def _consume_result(launched: LaunchedCapture, request: CaptureRequest) -> bytes:
         result = launched.read_result()
         if result.outcome == "failure":
             assert result.error_category is not None and result.terminal is not None
@@ -493,11 +657,11 @@ async def _recover_identified(
     host_identity: str,
     credential: SecretStr,
     candidate: CaptureRecoveryCandidate,
-) -> bool:
+) -> CaptureOperation | None:
     if candidate.host_instance != host_identity:
-        return False
+        return None
     if candidate.boot_id is None or candidate.pid is None or candidate.start_ticks is None:
-        return False
+        return None
     identity = LinuxIdentity(
         host_instance=candidate.host_instance,
         boot_id=candidate.boot_id,
@@ -508,7 +672,7 @@ async def _recover_identified(
     if not absent:
         absent = await _terminate_identity(identity)
     if not absent:
-        return False
+        return None
     probe = await _recovery_quiescence(conn, resolver, candidate)
     evidence = await asyncio.to_thread(
         probe.prove_absent,
@@ -516,7 +680,7 @@ async def _recover_identified(
         candidate.domain_name,
         f"kdive-dump-{candidate.job_id}",
     )
-    await recover_operation(
+    return await recover_operation(
         conn,
         credential,
         candidate.id,
@@ -527,12 +691,13 @@ async def _recover_identified(
             exit_code=None,
         ),
     )
-    return True
 
 
 async def recover_capture_operations(
     pool: AsyncConnectionPool,
     resolver: ProviderResolver,
+    store: ObjectStore,
+    supervisor: CaptureOperationSupervisor,
     host_identity: str,
     credential: SecretStr,
 ) -> RecoverySummary:
@@ -542,16 +707,34 @@ async def recover_capture_operations(
         recovered = 0
         for candidate in candidates:
             try:
+                operation: CaptureOperation | None = None
                 if candidate.state == "launching":
                     evidence = await _launching_evidence(candidate)
                     if evidence is None:
                         continue
-                    await recover_operation(conn, credential, candidate.id, evidence)
-                    recovered += 1
-                elif await _recover_identified(
-                    conn, resolver, host_identity, credential, candidate
-                ):
-                    recovered += 1
+                    operation = await recover_operation(conn, credential, candidate.id, evidence)
+                elif candidate.state == "exited":
+                    operation = await claim_publication_recovery(conn, credential, candidate.id)
+                else:
+                    operation = await _recover_identified(
+                        conn, resolver, host_identity, credential, candidate
+                    )
+                if operation is None:
+                    continue
+                operation = await recover_publication(conn, store, credential, operation)
+                disposed = await asyncio.to_thread(supervisor.dispose_recovery_spool, operation.id)
+                if not disposed:
+                    continue
+                await record_spool_disposed(conn, credential, operation.id)
+                recovered += 1
+            except CapturePublicationIdentityConflict as error:
+                _log.error(
+                    "capture_publication_object_identity_conflict operation_id=%s key=%s reason=%s",
+                    error.operation_id,
+                    error.key,
+                    error.reason,
+                )
+                continue
             except Exception:
                 _log.exception("capture operation %s recovery remains pending", candidate.id)
                 continue

@@ -13,8 +13,15 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
+from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.domain.catalog.artifacts import Artifact
+from kdive.security.audit import AuditEvent, args_digest
+
 type CaptureOperationState = Literal["launching", "gated", "running", "cancel_requested", "exited"]
 type CaptureProviderKind = Literal["local-libvirt", "remote-libvirt"]
+type CapturePublicationState = Literal[
+    "pending", "publishing", "canceling", "published", "discarded"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +79,15 @@ class CaptureOperation:
     process_absent: bool
     provider_quiescence: dict[str, Any]
     recovered_by: str | None
+    publication_state: CapturePublicationState
+    publication_object_key: str | None
+    publication_etag: str | None
+    publication_artifact_id: UUID | None
+    cleanup_capture_version_id: str | None
+    publication_tombstone_version: str | None
+    publication_started_at: datetime | None
+    publication_closed_at: datetime | None
+    spool_disposed_at: datetime | None
     created_at: datetime
     identity_recorded_at: datetime | None
     running_at: datetime | None
@@ -122,6 +138,15 @@ def _record(row: Mapping[str, Any]) -> CaptureOperation:
         process_absent=cast(bool, row["process_absent"]),
         provider_quiescence=cast(dict[str, Any], row["provider_quiescence"]),
         recovered_by=cast(str | None, row["recovered_by"]),
+        publication_state=cast(CapturePublicationState, row["publication_state"]),
+        publication_object_key=cast(str | None, row["publication_object_key"]),
+        publication_etag=cast(str | None, row["publication_etag"]),
+        publication_artifact_id=cast(UUID | None, row["publication_artifact_id"]),
+        cleanup_capture_version_id=cast(str | None, row["cleanup_capture_version_id"]),
+        publication_tombstone_version=cast(str | None, row["publication_tombstone_version"]),
+        publication_started_at=cast(datetime | None, row["publication_started_at"]),
+        publication_closed_at=cast(datetime | None, row["publication_closed_at"]),
+        spool_disposed_at=cast(datetime | None, row["spool_disposed_at"]),
         created_at=cast(datetime, row["created_at"]),
         identity_recorded_at=cast(datetime | None, row["identity_recorded_at"]),
         running_at=cast(datetime | None, row["running_at"]),
@@ -303,4 +328,185 @@ async def list_recovery_candidates(
             state=cast(CaptureOperationState, row["state"]),
         )
         for row in rows
+    )
+
+
+async def claim_publication_recovery(
+    conn: AsyncConnection,
+    replacement_credential: SecretStr,
+    operation_id: UUID,
+) -> CaptureOperation:
+    """Revalidate replacement authority for an exited but publication-incomplete attempt."""
+    return await _operation(
+        conn,
+        "SELECT * FROM public.claim_capture_publication_recovery("
+        "sha256(convert_to(%s, 'UTF8')), %s)",
+        (replacement_credential.get_secret_value(), operation_id),
+        refused="capture publication recovery was refused",
+        error=PermissionError,
+    )
+
+
+async def begin_publication(
+    conn: AsyncConnection,
+    credential: SecretStr,
+    operation_id: UUID,
+    key: str,
+) -> CaptureOperation:
+    """Journal the immutable object key before the exact owner starts a capture PUT."""
+    return await _operation(
+        conn,
+        "SELECT * FROM public.begin_capture_publication(sha256(convert_to(%s, 'UTF8')), %s, %s)",
+        (credential.get_secret_value(), operation_id, key),
+        refused="capture publication transition was refused",
+        error=ValueError,
+    )
+
+
+async def begin_cancel_publication(
+    conn: AsyncConnection,
+    credential: SecretStr,
+    operation_id: UUID,
+    key: str,
+) -> CaptureOperation:
+    """Move pending or publishing work monotonically into cancellation."""
+    return await _operation(
+        conn,
+        "SELECT * FROM public.begin_cancel_capture_publication("
+        "sha256(convert_to(%s, 'UTF8')), %s, %s)",
+        (credential.get_secret_value(), operation_id, key),
+        refused="capture publication transition was refused",
+        error=ValueError,
+    )
+
+
+async def record_capture_version(
+    conn: AsyncConnection,
+    credential: SecretStr,
+    operation_id: UUID,
+    version_id: str,
+    etag: str,
+) -> CaptureOperation:
+    """Journal the exact capture version and etag returned by conditional creation."""
+    return await _operation(
+        conn,
+        "SELECT * FROM public.record_capture_publication_version("
+        "sha256(convert_to(%s, 'UTF8')), %s, %s, %s)",
+        (credential.get_secret_value(), operation_id, version_id, etag),
+        refused="capture publication transition was refused",
+        error=ValueError,
+    )
+
+
+def _artifact_facts(artifact: Artifact) -> dict[str, object]:
+    return {
+        "id": str(artifact.id),
+        "owner_kind": artifact.owner_kind,
+        "owner_id": str(artifact.owner_id),
+        "object_key": artifact.object_key,
+        "etag": artifact.etag,
+        "sensitivity": artifact.sensitivity.value,
+        "retention_class": artifact.retention_class,
+        "run_id": None if artifact.run_id is None else str(artifact.run_id),
+        "encoding": artifact.encoding,
+        "uncompressed_size": artifact.uncompressed_size,
+    }
+
+
+def _audit_facts(event: AuditEvent) -> dict[str, object]:
+    return {
+        "tool": event.tool,
+        "object_kind": event.object_kind,
+        "object_id": str(event.object_id),
+        "transition": event.transition,
+        "args_digest": args_digest(event.args),
+        "project": event.project,
+    }
+
+
+async def commit_published(
+    conn: AsyncConnection,
+    credential: SecretStr,
+    operation_id: UUID,
+    artifact: Artifact,
+    audit_event: AuditEvent,
+) -> CaptureOperation:
+    """Atomically claim one truthful artifact row, audit it, and close publication."""
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, artifact.owner_id):
+        return await _operation(
+            conn,
+            "SELECT * FROM public.commit_capture_published("
+            "sha256(convert_to(%s, 'UTF8')), %s, %s, %s)",
+            (
+                credential.get_secret_value(),
+                operation_id,
+                Jsonb(_artifact_facts(artifact)),
+                Jsonb(_audit_facts(audit_event)),
+            ),
+            refused="capture publication transition was refused",
+            error=ValueError,
+        )
+
+
+async def record_cleanup_capture_version(
+    conn: AsyncConnection,
+    credential: SecretStr,
+    operation_id: UUID,
+    version_id: str,
+) -> CaptureOperation:
+    """Journal the exact verified capture version before cancellation deletes it."""
+    return await _operation(
+        conn,
+        "SELECT * FROM public.record_capture_cleanup_version("
+        "sha256(convert_to(%s, 'UTF8')), %s, %s)",
+        (credential.get_secret_value(), operation_id, version_id),
+        refused="capture publication transition was refused",
+        error=ValueError,
+    )
+
+
+async def refresh_publication_operation(
+    conn: AsyncConnection,
+    credential: SecretStr,
+    operation_id: UUID,
+) -> CaptureOperation:
+    """Return the current exited operation to its owner or authorized replacement."""
+    return await _operation(
+        conn,
+        "SELECT * FROM public.refresh_capture_publication_operation("
+        "sha256(convert_to(%s, 'UTF8')), %s)",
+        (credential.get_secret_value(), operation_id),
+        refused="capture publication refresh was refused",
+        error=PermissionError,
+    )
+
+
+async def commit_discarded(
+    conn: AsyncConnection,
+    credential: SecretStr,
+    operation_id: UUID,
+    tombstone_version: str,
+) -> CaptureOperation:
+    """Close cancellation with the immutable retained tombstone identity."""
+    return await _operation(
+        conn,
+        "SELECT * FROM public.commit_capture_discarded(sha256(convert_to(%s, 'UTF8')), %s, %s)",
+        (credential.get_secret_value(), operation_id, tombstone_version),
+        refused="capture publication transition was refused",
+        error=ValueError,
+    )
+
+
+async def record_spool_disposed(
+    conn: AsyncConnection,
+    credential: SecretStr,
+    operation_id: UUID,
+) -> CaptureOperation:
+    """Record verified absence of the exact operation's private packet spool."""
+    return await _operation(
+        conn,
+        "SELECT * FROM public.record_capture_spool_disposed(sha256(convert_to(%s, 'UTF8')), %s)",
+        (credential.get_secret_value(), operation_id),
+        refused="capture publication transition was refused",
+        error=ValueError,
     )

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
@@ -23,6 +24,9 @@ from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import (
     ArtifactStreamRequest,
     ArtifactWriteRequest,
+    ConditionalArtifactWriteRequest,
+    ConditionalCreateConflict,
+    HeadResult,
     ObjectVersion,
     StoredArtifact,
     VersionBatch,
@@ -547,6 +551,97 @@ class _CannedPutClient:
         return self._reply
 
 
+def _conditional_request() -> ConditionalArtifactWriteRequest:
+    return ConditionalArtifactWriteRequest(
+        key="internal/capture-publication/probe",
+        data=b"payload",
+        metadata={"operation-id": "op-1", "publication-kind": "capture"},
+        sensitivity=Sensitivity.SENSITIVE,
+        retention_class="capture",
+    )
+
+
+def test_create_if_absent_sends_precondition_metadata_and_returns_identity() -> None:
+    client = _RecordingPutClient()
+
+    result = ObjectStore(client, "the-bucket").create_if_absent(_conditional_request())
+
+    assert client.last_kwargs == {
+        "Bucket": "the-bucket",
+        "Key": "internal/capture-publication/probe",
+        "Body": b"payload",
+        "IfNoneMatch": "*",
+        "Metadata": {
+            "operation-id": "op-1",
+            "publication-kind": "capture",
+            "sensitivity": "sensitive",
+            "retention-class": "capture",
+        },
+    }
+    assert result == StoredArtifact(
+        "internal/capture-publication/probe",
+        "stored-etag",
+        Sensitivity.SENSITIVE,
+        "capture",
+        "put-version-1",
+    )
+
+
+class _ConditionalConflictClient:
+    def __init__(self, response: dict[str, object]) -> None:
+        self._response = response
+
+    def put_object(self, **_kwargs: object) -> dict[str, object]:
+        raise ClientError(self._response, "PutObject")
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"Error": {"Code": "PreconditionFailed"}},
+        {"Error": {"Code": "unexpected"}, "ResponseMetadata": {"HTTPStatusCode": 412}},
+    ],
+)
+def test_create_if_absent_normalizes_precondition_failure(
+    response: dict[str, object],
+) -> None:
+    result = ObjectStore(_ConditionalConflictClient(response), "bucket").create_if_absent(
+        _conditional_request()
+    )
+
+    assert result == ConditionalCreateConflict("internal/capture-publication/probe")
+
+
+def test_create_if_absent_preserves_other_client_errors_as_infrastructure_failures() -> None:
+    client = _ConditionalConflictClient(
+        {"Error": {"Code": "AccessDenied"}, "ResponseMetadata": {"HTTPStatusCode": 403}}
+    )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        ObjectStore(client, "bucket").create_if_absent(_conditional_request())
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert excinfo.value.details == {
+        "key": "internal/capture-publication/probe",
+        "s3_error_code": "AccessDenied",
+    }
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"VersionId": "version-1"},
+        {"ETag": '"etag"'},
+        {"ETag": '"etag"', "VersionId": ""},
+    ],
+)
+def test_create_if_absent_rejects_malformed_successful_reply(reply: dict[str, object]) -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        ObjectStore(_CannedPutClient(reply), "bucket").create_if_absent(_conditional_request())
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
 @pytest.mark.parametrize(
     "reply",
     [
@@ -965,6 +1060,33 @@ def test_head_invalid_sensitivity_metadata_returns_unknown_sensitivity() -> None
     assert head.sensitivity is None
 
 
+def test_head_returns_immutable_operation_metadata() -> None:
+    class _HeadMetadataClient:
+        def head_object(self, **_kwargs: object) -> dict[str, object]:
+            return {
+                "ContentLength": 0,
+                "ETag": '"etag"',
+                "LastModified": STORE_MTIME,
+                "VersionId": "head-version-1",
+                "Metadata": {
+                    "operation-id": "op-1",
+                    "publication-kind": "tombstone",
+                    "sensitivity": "sensitive",
+                },
+            }
+
+    head = ObjectStore(_HeadMetadataClient(), "bucket").head("k")
+
+    assert head is not None
+    assert head.metadata == {
+        "operation-id": "op-1",
+        "publication-kind": "tombstone",
+        "sensitivity": "sensitive",
+    }
+    with pytest.raises(TypeError):
+        head.metadata["operation-id"] = "changed"  # ty: ignore[invalid-assignment]
+
+
 class _MidStreamFailureClient:
     """A stub whose ``get_object`` succeeds but whose body read fails mid-stream."""
 
@@ -1334,6 +1456,164 @@ def test_ping_revalidates_versioning_after_head_bucket() -> None:
     client = _VersioningClient({"Status": "Enabled"})
     ObjectStore(client, "bucket").ping()
     assert client.head_calls == 1 and client.versioning_calls == 1
+
+
+class _AdmissionStore(ObjectStore):
+    """A concurrent fake for the conditional-create startup probe."""
+
+    def __init__(
+        self,
+        outcomes: list[str],
+        *,
+        head_matches: bool = True,
+        delete_fails: bool = False,
+        residual: bool = False,
+        residual_exact_only: bool = False,
+    ) -> None:
+        super().__init__(object(), "probe-bucket")
+        self._outcomes = outcomes
+        self._outcome_lock = threading.Lock()
+        self._create_barrier = threading.Barrier(2)
+        self._winner: StoredArtifact | None = None
+        self._winner_metadata: dict[str, str] = {}
+        self._head_matches = head_matches
+        self._delete_fails = delete_fails
+        self._residual = residual
+        self._residual_exact_only = residual_exact_only
+        self.create_requests: list[ConditionalArtifactWriteRequest] = []
+        self.delete_calls: list[tuple[str, str]] = []
+        self.head_calls: list[tuple[str, str | None]] = []
+
+    def create_if_absent(
+        self, request: ConditionalArtifactWriteRequest
+    ) -> StoredArtifact | ConditionalCreateConflict:
+        with self._outcome_lock:
+            outcome = self._outcomes.pop()
+            self.create_requests.append(request)
+        self._create_barrier.wait(timeout=2)
+        if outcome == "conflict":
+            return ConditionalCreateConflict(request.key)
+        version_id = "" if outcome == "missing-version" else f"version-{outcome}"
+        stored = StoredArtifact(
+            request.key,
+            f"etag-{outcome}",
+            request.sensitivity,
+            request.retention_class,
+            version_id,
+        )
+        with self._outcome_lock:
+            self._winner = stored
+            self._winner_metadata = {
+                **request.metadata,
+                "sensitivity": request.sensitivity.value,
+                "retention-class": request.retention_class,
+            }
+        return stored
+
+    def head(self, key: str, *, version_id: str | None = None) -> HeadResult | None:
+        self.head_calls.append((key, version_id))
+        winner = self._winner
+        if winner is None:
+            return None
+        if self.delete_calls and not self._delete_fails:
+            if self._residual_exact_only and version_id is None:
+                return None
+            if not self._residual and not self._residual_exact_only:
+                return None
+        return HeadResult(
+            size_bytes=0,
+            checksum_sha256=None,
+            etag=winner.etag if self._head_matches else "wrong-etag",
+            last_modified=STORE_MTIME,
+            version_id=winner.version_id,
+            sensitivity=winner.sensitivity,
+            metadata=self._winner_metadata,
+        )
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        self.delete_calls.append((key, version_id))
+        if self._delete_fails:
+            raise CategorizedError(
+                "secret endpoint failure text",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+
+
+def test_validate_conditional_create_accepts_one_winner_and_cleans_exact_version() -> None:
+    store = _AdmissionStore(["winner", "conflict"])
+
+    store.validate_conditional_create()
+
+    assert len(store.create_requests) == 2
+    assert {request.key for request in store.create_requests} == {store.create_requests[0].key}
+    assert all(request.data == b"" for request in store.create_requests)
+    assert store.delete_calls == [(store.create_requests[0].key, "version-winner")]
+    assert store.head_calls[-1] == (store.create_requests[0].key, None)
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "reason"),
+    [
+        (["winner-a", "winner-b"], "exactly one winner"),
+        (["conflict", "conflict"], "exactly one winner"),
+        (["missing-version", "conflict"], "version id"),
+    ],
+)
+def test_validate_conditional_create_rejects_invalid_arbitration(
+    outcomes: list[str], reason: str
+) -> None:
+    store = _AdmissionStore(outcomes)
+
+    with pytest.raises(CategorizedError) as excinfo:
+        store.validate_conditional_create()
+
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert reason in str(excinfo.value).lower()
+    assert "configure" in str(excinfo.value).lower()
+    assert "retry" in str(excinfo.value).lower()
+
+
+def test_validate_conditional_create_rejects_winner_head_mismatch() -> None:
+    store = _AdmissionStore(["winner", "conflict"], head_matches=False)
+
+    with pytest.raises(CategorizedError, match="HEAD did not match") as excinfo:
+        store.validate_conditional_create()
+
+    assert "configure" in str(excinfo.value).lower()
+    assert "retry" in str(excinfo.value).lower()
+
+
+def test_validate_conditional_create_rejects_delete_failure_without_leaking_error_text() -> None:
+    store = _AdmissionStore(["winner", "conflict"], delete_fails=True)
+
+    with pytest.raises(CategorizedError) as excinfo:
+        store.validate_conditional_create()
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "cleanup" in str(excinfo.value).lower()
+    assert "configure" in str(excinfo.value).lower()
+    assert "retry" in str(excinfo.value).lower()
+    assert "secret endpoint failure text" not in str(excinfo.value)
+
+
+def test_validate_conditional_create_rejects_residual_probe_version() -> None:
+    store = _AdmissionStore(["winner", "conflict"], residual=True)
+
+    with pytest.raises(CategorizedError, match="probe object remains") as excinfo:
+        store.validate_conditional_create()
+
+    assert "configure" in str(excinfo.value).lower()
+    assert "retry" in str(excinfo.value).lower()
+
+
+def test_validate_conditional_create_rejects_hidden_residual_probe_version() -> None:
+    store = _AdmissionStore(
+        ["winner", "conflict"],
+        residual_exact_only=True,
+    )
+
+    with pytest.raises(CategorizedError, match="probe version remains"):
+        store.validate_conditional_create()
 
 
 def test_object_store_from_env_defaults_region(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -119,65 +119,18 @@ local role bootstrap before the operator-side lifecycle wrapper registers the cu
 bootstrap resets fixed local development passwords and restores the intended runtime-role
 memberships.
 
-### Protocol-3 capture cutover
+### Capture publication protocol 4
 
-Migration 0112 is an unconditional replacing cutover, not a rolling worker-fence upgrade. Supply
-both a new custom-format backup path and the exact target image:
+Protocol 4 is build-new-only. Start this release with a new empty Postgres database and a new,
+versioned object-store bucket or namespace. Migration 0113 refuses existing worker, job, capture,
+or artifact rows; KDIVE does not migrate, preserve, inspect, or clean protocol-3 state or objects.
+There is no capture-protocol cutover, rollback, or compatibility command.
 
-```bash
-export TARGET_IMAGE='ghcr.io/randomparity/kdive:<target-tag>'
-scripts/cutover-capture-protocol-compose.sh \
-  /var/backups/kdive-before-protocol-3.dump \
-  "$TARGET_IMAGE"
-```
-
-The script runs `just compose-stop`, restarts only Postgres, requires the exact
-`compose_worker_lifecycle` termination rows, runs `pg_dump --format=custom`, executes the target
-image's one-shot `migrate` service, and runs `just compose-up` with that same image. It does not
-use `compose-down`, `--volumes`, or raw worker lifecycle commands, so the named database, artifact,
-build, and install volumes remain attached to the Compose project. A fresh database with no legacy
-workers is accepted and receives protocol 3 directly.
-
-Before stopping anything, it resolves the target image to a local immutable image ID and freezes
-the exact rendered Compose model, project name, and resolved operator environment in a restricted
-mode-0700 cutover directory beside the backup. Every later stop, migration, and start consumes
-only that frozen project and model; the lifecycle supervisor's new per-start nonce remains the
-only runtime substitution. That directory also holds a mode-0400 password-free database URI and
-libpq passfile. Host `psql` and `pg_dump` children receive only that URI and passfile path; the
-migration-owner DSN is removed from their argv and environment.
-After capture, the wrapper removes ambient KDIVE/libpq credential variables. Docker and `just`
-children receive none of them; only the frozen render reads the exact DSN from a mode-0400 attempt
-file, and migration consumes the already-frozen service environment. The wrapper queries the
-database through both the host authority and the
-frozen migration service and compares database name, database OID, and server system identifier.
-It repeats that positive same-database witness after stop and before backup and migration, then
-requires both post-stop observations to equal the approved preflight identity. A backend, DNS, or
-proxy switch across the stop boundary therefore aborts without a backup or migration.
-
-Each Docker, database, dump, and migration operation has a
-600-second whole-operation limit measured by GNU `timeout`'s monotonic clock. Database connects
-also have a 10-second limit and each statement a 300-second server-side limit. Override these
-whole-second values with `KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS`,
-`KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS`, and
-`KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS`. A limit applies to one external operation; expiry
-rejects its incomplete result and runs the stopped-state recovery proof after mutation. Correct
-the stalled Docker or database dependency and rerun the exact command printed by the script.
-
-A precondition or migration failure leaves workers stopped and the old schema authoritative. A
-post-migration failure leaves protocol 3 installed and workers stopped. Never restart a protocol-2
-image against that database. The only post-migration rollback is the exact
-`pg_restore --clean --if-exists` command printed by the script, followed by the prior image.
-That exact command references the retained password-free URI and restricted passfile, not the
-owner DSN. Do not remove the retained cutover directory before rollback completes.
-Backup publication is atomic and refuses replacement. If the destination appears while the dump
-is running, the validated sibling temporary dump is retained and its exact recovery path is
-printed. The restricted input snapshot is recoverably trashed on success when the filesystem
-supports it; otherwise its retained path is printed for operator cleanup.
-Existing paths and symlinks are rejected, including a symlink that appears during dump validation.
-After a migration-command failure, the printed recovery procedure names both the frozen migration
-command and the frozen `just compose-up` command needed to complete protocol 3.
-Migration 0112 records operation quiescence only; #1952 still gates publication closure and
-combined historical-capture coverage.
+Run the ordinary fresh Compose setup against those resources. Before readiness, each worker probes
+the configured store with two concurrent conditional creates, verifies one winner and one
+precondition failure, removes the exact probe version, and confirms absence. A failed probe keeps
+the worker from claiming jobs; correct the bucket's versioning or conditional-create behavior and
+restart the worker.
 
 `KDIVE_LOCAL_ROLE_BOOTSTRAP=0` disables local mutation. An externally provisioned Compose-derived
 deployment must supply an equivalent stop-old, migrate, provision credentials and memberships, and

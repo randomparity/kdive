@@ -85,6 +85,15 @@ def _operation(job: Job, request: CaptureRequest, state: str = "launching") -> C
         process_absent=False,
         provider_quiescence={},
         recovered_by=None,
+        publication_state="pending",
+        publication_object_key=None,
+        publication_etag=None,
+        publication_artifact_id=None,
+        cleanup_capture_version_id=None,
+        publication_tombstone_version=None,
+        publication_started_at=None,
+        publication_closed_at=None,
+        spool_disposed_at=None,
         created_at=_NOW,
         identity_recorded_at=None,
         running_at=None,
@@ -132,11 +141,13 @@ class _Launched:
         *,
         wait_gate: asyncio.Event | None = None,
         cancel_result: bool = True,
+        dispose_result: bool = True,
     ) -> None:
         self.events = events
         self.result = result
         self.wait_gate = wait_gate
         self.cancel_result = cancel_result
+        self.dispose_result = dispose_result
         self.identity = SimpleNamespace(
             host_instance="host-a", boot_id="boot-a", pid=123, start_ticks=456
         )
@@ -168,6 +179,10 @@ class _Launched:
     def read_capture(self, maximum: int) -> bytes:
         assert maximum == 1_048_576
         return b"pcap"
+
+    def dispose_spool(self) -> bool:
+        self.events.append("dispose")
+        return self.dispose_result
 
 
 class _Launcher:
@@ -249,11 +264,48 @@ def _patch_repository(
         events.append("ack")
         return operation
 
+    async def disposed(*args: object, **kwargs: object) -> CaptureOperation:
+        events.append("spool_recorded")
+        return operation
+
     monkeypatch.setattr(supervisor, "create_launching", create)
     monkeypatch.setattr(supervisor, "record_identity", identity)
     monkeypatch.setattr(supervisor, "mark_running", running)
     monkeypatch.setattr(supervisor, "request_cancel", cancel)
     monkeypatch.setattr(supervisor, "acknowledge_exit", acknowledge)
+    monkeypatch.setattr(supervisor, "record_spool_disposed", disposed)
+
+
+def _publisher(
+    events: list[str],
+    *,
+    gate: asyncio.Event | None = None,
+    artifact_id: UUID | None = None,
+):
+    published_id = artifact_id or uuid4()
+
+    async def publish(*args: object, **kwargs: object) -> UUID:
+        events.append("publish")
+        if gate is not None:
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                events.append("publisher_cancelled")
+                raise
+        events.append("published")
+        return published_id
+
+    return publish
+
+
+def _publication_recoverer(events: list[str], *, gate: asyncio.Event | None = None):
+    async def recover(*args: object, **kwargs: object) -> CaptureOperation:
+        events.append("recover-publication")
+        if gate is not None:
+            await gate.wait()
+        return cast(CaptureOperation, args[-1])
+
+    return recover
 
 
 def _job_for(operation: CaptureOperation) -> Job:
@@ -292,13 +344,22 @@ def test_execute_stages_then_probes_releases_and_acks_before_reading_result(
     )
 
     result = asyncio.run(
-        supervisor.execute(_typed_connection(events), job, _snapshot(request, events), request)
+        supervisor.execute(
+            _typed_connection(events),
+            job,
+            _snapshot(request, events),
+            request,
+            publisher=_publisher(events),
+            publication_recoverer=_publication_recoverer(events),
+        )
     )
 
-    assert result == b"pcap"
+    assert isinstance(result, UUID)
     assert events.index("stage") < events.index("probe") < events.index("release")
     assert events.index("absent") < events.index("quiescence") < events.index("ack")
     assert events.index("ack") < events.index("result")
+    assert events.index("result") < events.index("publish") < events.index("dispose")
+    assert events.index("dispose") < events.index("spool_recorded") < events.index("unlock")
     assert LOCK_PROBE_INTERVAL_SECONDS == 0.25
     assert LOCK_PROBE_TIMEOUT_SECONDS == 1.0
 
@@ -327,6 +388,8 @@ def test_lock_loss_before_release_cancels_without_releasing(
                 job,
                 _snapshot(request, events),
                 request,
+                publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         )
 
@@ -334,6 +397,170 @@ def test_lock_loss_before_release_cancels_without_releasing(
     assert "release" not in events
     assert events.index("cancel_requested") < events.index("cancel")
     assert events.index("cancel") < events.index("quiescence") < events.index("ack")
+
+
+def test_authority_loss_during_publication_closes_recovery_before_returning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    publication_gate = asyncio.Event()
+    job = _job()
+    request = _request(job)
+    operation = _operation(job, request)
+    launched = _Launched(
+        events,
+        CaptureResult(outcome="success", size_bytes=4, truncated=False),
+    )
+    _patch_repository(monkeypatch, operation, events)
+    supervisor = CaptureOperationSupervisor(
+        launcher=_typed_launcher(launched),
+        credential=SecretStr("credential"),
+    )
+
+    with pytest.raises(CategorizedError) as raised:
+        asyncio.run(
+            supervisor.execute(
+                _typed_connection(events, fail_probe=2),
+                job,
+                _snapshot(request, events),
+                request,
+                publisher=_publisher(events, gate=publication_gate),
+                publication_recoverer=_publication_recoverer(events),
+            )
+        )
+
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert events.index("ack") < events.index("publish") < events.index("publisher_cancelled")
+    assert events.index("publisher_cancelled") < events.index("recover-publication")
+    assert events.index("recover-publication") < events.index("dispose")
+    assert events.index("dispose") < events.index("spool_recorded")
+    assert "cancel_requested" not in events
+    assert "cancel" not in events
+
+
+def test_spool_disposal_failure_leaves_published_result_unacknowledged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    job = _job()
+    request = _request(job)
+    operation = _operation(job, request)
+    launched = _Launched(
+        events,
+        CaptureResult(outcome="success", size_bytes=4, truncated=False),
+        dispose_result=False,
+    )
+    _patch_repository(monkeypatch, operation, events)
+    supervisor = CaptureOperationSupervisor(
+        launcher=_typed_launcher(launched),
+        credential=SecretStr("credential"),
+    )
+
+    with pytest.raises(CategorizedError) as raised:
+        asyncio.run(
+            supervisor.execute(
+                _typed_connection(events),
+                job,
+                _snapshot(request, events),
+                request,
+                publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
+            )
+        )
+
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert events.index("published") < events.index("dispose")
+    assert "spool_recorded" not in events
+    assert "cancel_requested" not in events
+
+
+def test_provider_failure_after_exit_closes_publication_before_propagating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    job = _job()
+    request = _request(job)
+    operation = _operation(job, request)
+    launched = _Launched(
+        events,
+        CaptureResult(
+            outcome="failure",
+            size_bytes=0,
+            truncated=False,
+            error_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            terminal=False,
+            reason="provider failed",
+        ),
+    )
+    _patch_repository(monkeypatch, operation, events)
+    supervisor = CaptureOperationSupervisor(
+        launcher=_typed_launcher(launched),
+        credential=SecretStr("credential"),
+    )
+
+    with pytest.raises(CategorizedError, match="provider failed"):
+        asyncio.run(
+            supervisor.execute(
+                _typed_connection(events),
+                job,
+                _snapshot(request, events),
+                request,
+                publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
+            )
+        )
+
+    assert events.index("ack") < events.index("result")
+    assert events.index("result") < events.index("recover-publication")
+    assert events.index("recover-publication") < events.index("dispose")
+    assert events.index("dispose") < events.index("spool_recorded")
+
+
+def test_repeated_cancellation_waits_for_post_exit_publication_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> list[str]:
+        events: list[str] = []
+        publication_gate = asyncio.Event()
+        recovery_gate = asyncio.Event()
+        job = _job()
+        request = _request(job)
+        operation = _operation(job, request)
+        launched = _Launched(
+            events,
+            CaptureResult(outcome="success", size_bytes=4, truncated=False),
+        )
+        _patch_repository(monkeypatch, operation, events)
+        supervisor = CaptureOperationSupervisor(
+            launcher=_typed_launcher(launched),
+            credential=SecretStr("credential"),
+        )
+        task = asyncio.create_task(
+            supervisor.execute(
+                _typed_connection(events),
+                job,
+                _snapshot(request, events),
+                request,
+                publisher=_publisher(events, gate=publication_gate),
+                publication_recoverer=_publication_recoverer(events, gate=recovery_gate),
+            )
+        )
+        while "publish" not in events:
+            await asyncio.sleep(0)
+        task.cancel()
+        while "recover-publication" not in events:
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        recovery_gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return events
+
+    events = asyncio.run(_run())
+    assert events.index("recover-publication") < events.index("dispose")
+    assert events.index("dispose") < events.index("spool_recorded")
 
 
 def test_stalled_release_probe_uses_one_second_client_timeout(
@@ -362,6 +589,8 @@ def test_stalled_release_probe_uses_one_second_client_timeout(
                 job,
                 _snapshot(request, events),
                 request,
+                publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         return loop.time() - started
 
@@ -397,6 +626,8 @@ def test_recurring_lock_loss_after_release_cancels_and_bars_result(
                 job,
                 _snapshot(request, events),
                 request,
+                publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         )
 
@@ -451,7 +682,12 @@ def test_tied_process_exit_and_lock_loss_prioritizes_authority(
 
         with pytest.raises(CategorizedError):
             await supervisor.execute(
-                _typed_connection(events), job, _snapshot(request, events), request
+                _typed_connection(events),
+                job,
+                _snapshot(request, events),
+                request,
+                publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         return events
 
@@ -486,7 +722,14 @@ def test_transition_failure_immediately_after_release_still_cancels_child(
 
     with pytest.raises(RuntimeError, match="transition connection lost"):
         asyncio.run(
-            supervisor.execute(_typed_connection(events), job, _snapshot(request, events), request)
+            supervisor.execute(
+                _typed_connection(events),
+                job,
+                _snapshot(request, events),
+                request,
+                publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
+            )
         )
 
     assert events.index("release") < events.index("cancel_requested") < events.index("cancel")
@@ -525,6 +768,8 @@ def test_durable_cancel_failure_does_not_skip_child_termination(
                 job,
                 _snapshot(request, events),
                 request,
+                publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         )
 
@@ -551,7 +796,14 @@ def test_cancellation_waits_for_cleanup_and_reraises(
             credential=SecretStr("credential"),
         )
         task = asyncio.create_task(
-            supervisor.execute(_typed_connection(events), job, _snapshot(request, events), request)
+            supervisor.execute(
+                _typed_connection(events),
+                job,
+                _snapshot(request, events),
+                request,
+                publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
+            )
         )
         while "release" not in events:
             await asyncio.sleep(0)
@@ -590,6 +842,8 @@ def test_child_surviving_term_and_kill_remains_cancel_requested(
                 job,
                 _snapshot(request, events),
                 request,
+                publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         )
 
@@ -659,6 +913,17 @@ def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
     monkeypatch.setattr(supervisor_module, "_recovery_quiescence", recovery_quiescence)
     monkeypatch.setattr(supervisor_module, "recover_operation", recover)
 
+    async def recover_publication(*args: object) -> CaptureOperation:
+        events.append("publication")
+        return cast(CaptureOperation, args[-1])
+
+    async def disposed(*args: object) -> CaptureOperation:
+        events.append("record-spool")
+        return cast(CaptureOperation, args[-1])
+
+    monkeypatch.setattr(supervisor_module, "recover_publication", recover_publication)
+    monkeypatch.setattr(supervisor_module, "record_spool_disposed", disposed)
+
     class _Pool:
         def connection(self) -> object:
             class _Context:
@@ -674,12 +939,106 @@ def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
         recover_capture_operations(
             cast(AsyncConnectionPool, _Pool()),
             cast(ProviderResolver, SimpleNamespace()),
+            cast(Any, SimpleNamespace()),
+            cast(
+                CaptureOperationSupervisor,
+                SimpleNamespace(
+                    dispose_recovery_spool=lambda operation_id: events.append("spool") or True
+                ),
+            ),
             "host-a",
             SecretStr("replacement"),
         )
     )
     assert summary == RecoverySummary(scanned=1, recovered=1, pending=0)
-    assert events == ["absent", "quiescence", "recover"]
+    assert events == [
+        "absent",
+        "quiescence",
+        "recover",
+        "publication",
+        "spool",
+        "record-spool",
+    ]
+
+
+def test_startup_recovery_sends_exited_operation_directly_to_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kdive.jobs.capture_operations import supervisor as supervisor_module
+    from kdive.jobs.capture_operations.repository import CaptureRecoveryCandidate
+
+    operation_id = uuid4()
+    candidate = CaptureRecoveryCandidate(
+        id=operation_id,
+        job_id=uuid4(),
+        job_attempt=1,
+        worker_incarnation="old-worker",
+        provider_kind="local-libvirt",
+        resource_id=uuid4(),
+        system_id=uuid4(),
+        domain_name="guest",
+        launch_token=None,
+        host_instance="host-a",
+        boot_id="boot-a",
+        pid=123,
+        start_ticks=456,
+        state="exited",
+    )
+    operation = _operation(_job_for_candidate(candidate), _request_for_candidate(candidate))
+    events: list[str] = []
+
+    async def candidates(*args: object) -> tuple[CaptureRecoveryCandidate, ...]:
+        return (candidate,)
+
+    async def claim(*args: object) -> CaptureOperation:
+        events.append("claim-publication")
+        return operation
+
+    async def reject_provider_recovery(*args: object) -> CaptureOperation:
+        raise AssertionError("provider recovery must not run for an exited operation")
+
+    async def recover_publication(*args: object) -> CaptureOperation:
+        events.append("publication")
+        return cast(CaptureOperation, args[-1])
+
+    async def disposed(*args: object) -> CaptureOperation:
+        events.append("record-spool")
+        return cast(CaptureOperation, args[-1])
+
+    monkeypatch.setattr(supervisor_module, "list_recovery_candidates", candidates)
+    monkeypatch.setattr(supervisor_module, "claim_publication_recovery", claim)
+    monkeypatch.setattr(supervisor_module, "recover_operation", reject_provider_recovery)
+    monkeypatch.setattr(supervisor_module, "recover_publication", recover_publication)
+    monkeypatch.setattr(supervisor_module, "record_spool_disposed", disposed)
+
+    class _Pool:
+        def connection(self) -> object:
+            class _Context:
+                async def __aenter__(self) -> object:
+                    return object()
+
+                async def __aexit__(self, *args: object) -> None:
+                    return None
+
+            return _Context()
+
+    summary = asyncio.run(
+        recover_capture_operations(
+            cast(AsyncConnectionPool, _Pool()),
+            cast(ProviderResolver, SimpleNamespace()),
+            cast(Any, SimpleNamespace()),
+            cast(
+                CaptureOperationSupervisor,
+                SimpleNamespace(
+                    dispose_recovery_spool=lambda operation_id: events.append("spool") or True
+                ),
+            ),
+            "host-a",
+            SecretStr("replacement"),
+        )
+    )
+    assert summary == RecoverySummary(scanned=1, recovered=1, pending=0)
+    assert events == ["claim-publication", "publication", "spool", "record-spool"]
 
 
 def _job_for_candidate(candidate: Any) -> Job:

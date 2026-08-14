@@ -66,6 +66,15 @@ def _operation(request: CaptureRequest) -> CaptureOperation:
         process_absent=False,
         provider_quiescence={},
         recovered_by=None,
+        publication_state="pending",
+        publication_object_key=None,
+        publication_etag=None,
+        publication_artifact_id=None,
+        cleanup_capture_version_id=None,
+        publication_tombstone_version=None,
+        publication_started_at=None,
+        publication_closed_at=None,
+        spool_disposed_at=None,
         created_at=now,
         identity_recorded_at=None,
         running_at=None,
@@ -877,6 +886,7 @@ def test_release_write_fault_does_not_mark_gate_released(monkeypatch: pytest.Mon
     read_fd, write_fd = os.pipe()
     child = LaunchedCapture(
         process=object(),  # ty: ignore[invalid-argument-type] - release never reads it
+        operation_id=uuid4(),
         identity=object(),  # ty: ignore[invalid-argument-type] - release never reads it
         pidfd=-1,
         gate_fd=write_fd,
@@ -908,6 +918,7 @@ def test_cancel_uses_term_then_kill_and_preserves_timeout(
 
     child = LaunchedCapture(
         process=_Process(),  # ty: ignore[invalid-argument-type] - narrow cancellation fake
+        operation_id=uuid4(),
         identity=_Identity(),  # ty: ignore[invalid-argument-type] - narrow cancellation fake
         pidfd=99,
         gate_fd=-1,
@@ -927,6 +938,88 @@ def test_cancel_uses_term_then_kill_and_preserves_timeout(
     assert signals == [signal.SIGTERM, signal.SIGKILL]
 
 
+def test_dispose_spool_removes_only_exact_private_operation_directory(tmp_path: Path) -> None:
+    operation_id = uuid4()
+    attempt_dir = tmp_path / str(operation_id)
+    attempt_dir.mkdir(mode=0o700)
+    files = ("request.json", "request.sha256", "configuration.json", "result.json", "capture.pcap")
+    for name in files:
+        path = attempt_dir / name
+        path.write_bytes(b"data")
+        path.chmod(0o600)
+    sibling = tmp_path / "sibling"
+    sibling.write_text("keep", encoding="utf-8")
+    child = LaunchedCapture(
+        process=object(),  # ty: ignore[invalid-argument-type] - disposal never reads it
+        operation_id=operation_id,
+        identity=object(),  # ty: ignore[invalid-argument-type] - disposal never reads it
+        pidfd=-1,
+        gate_fd=-1,
+        attempt_dir=attempt_dir,
+        argv=(),
+        environment={},
+    )
+
+    assert child.dispose_spool()
+    assert not attempt_dir.exists()
+    assert sibling.read_text(encoding="utf-8") == "keep"
+    assert child.dispose_spool()
+
+
+def test_dispose_spool_refuses_unexpected_or_non_private_entries(tmp_path: Path) -> None:
+    operation_id = uuid4()
+    attempt_dir = tmp_path / str(operation_id)
+    attempt_dir.mkdir(mode=0o700)
+    unexpected = attempt_dir / "foreign"
+    unexpected.write_bytes(b"keep")
+    unexpected.chmod(0o600)
+    child = LaunchedCapture(
+        process=object(),  # ty: ignore[invalid-argument-type] - disposal never reads it
+        operation_id=operation_id,
+        identity=object(),  # ty: ignore[invalid-argument-type] - disposal never reads it
+        pidfd=-1,
+        gate_fd=-1,
+        attempt_dir=attempt_dir,
+        argv=(),
+        environment={},
+    )
+
+    assert not child.dispose_spool()
+    assert unexpected.read_bytes() == b"keep"
+
+
+def test_dispose_spool_accepts_an_absent_private_root(tmp_path: Path) -> None:
+    operation_id = uuid4()
+    child = LaunchedCapture(
+        process=object(),  # ty: ignore[invalid-argument-type] - disposal never reads it
+        operation_id=operation_id,
+        identity=object(),  # ty: ignore[invalid-argument-type] - disposal never reads it
+        pidfd=-1,
+        gate_fd=-1,
+        attempt_dir=tmp_path / "absent-root" / str(operation_id),
+        argv=(),
+        environment={},
+    )
+
+    assert child.dispose_spool()
+
+
+def test_launcher_disposes_operation_derived_spool_during_recovery(tmp_path: Path) -> None:
+    operation_id = uuid4()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    attempt_dir = runtime_root / str(operation_id)
+    attempt_dir.mkdir(mode=0o700)
+    capture = attempt_dir / "capture.pcap"
+    capture.write_bytes(b"pcap")
+    capture.chmod(0o600)
+    launcher = GatedCaptureLauncher(runtime_root=runtime_root)
+
+    assert launcher.dispose_operation_spool(operation_id)
+    assert not attempt_dir.exists()
+    assert launcher.dispose_operation_spool(operation_id)
+
+
 def test_process_group_enumeration_fails_closed_on_unreadable_proc(tmp_path: Path) -> None:
     process = tmp_path / "123"
     process.mkdir()
@@ -942,6 +1035,33 @@ def test_process_group_enumeration_fails_closed_on_unreadable_proc(tmp_path: Pat
             )
     finally:
         stat_path.chmod(0o600)
+
+
+def test_process_group_enumeration_skips_pid_vanishing_during_stat_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = tmp_path / "123"
+    process.mkdir()
+    stat_path = process / "stat"
+    stat_path.write_text("123 (capture) S 1 123 1")
+    original_read_text = Path.read_text
+
+    def _read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == stat_path:
+            raise ProcessLookupError("process vanished after stat was opened")
+        return original_read_text(path, *args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    assert (
+        launcher_module._process_group_members(
+            123,
+            tmp_path,
+            host_instance="host-a",
+        )
+        == {}
+    )
 
 
 def test_process_group_enumeration_binds_observed_start_ticks(

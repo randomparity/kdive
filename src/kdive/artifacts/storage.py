@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import IO, NamedTuple
 
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -83,6 +85,16 @@ class StoredArtifact(NamedTuple):
     version_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class ConditionalCreateConflict:
+    """A conditional create lost because an object already occupies its key."""
+
+    key: str
+
+
+type ConditionalCreateResult = StoredArtifact | ConditionalCreateConflict
+
+
 class MultipartCompletion(NamedTuple):
     """Identity returned when a multipart upload creates its final immutable version."""
 
@@ -106,6 +118,17 @@ class ArtifactWriteRequest:
 
     def key(self) -> str:
         return artifact_key(self.tenant, self.owner_kind, self.owner_id, self.name)
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ConditionalArtifactWriteRequest:
+    """A conditional write whose caller supplies the validated full object key."""
+
+    key: str
+    data: bytes
+    metadata: Mapping[str, str]
+    sensitivity: Sensitivity
+    retention_class: str
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -180,6 +203,7 @@ class HeadResult(NamedTuple):
     version_id: str
     sensitivity: Sensitivity | None = None
     content_encoding: str | None = None
+    metadata: Mapping[str, str] = MappingProxyType({})
 
 
 class ObjectListing(NamedTuple):

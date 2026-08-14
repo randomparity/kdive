@@ -104,7 +104,11 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
         return object()
 
     monkeypatch.setattr("kdive.jobs.assembly.build_handler_registry", _registry)
-    assembly = SimpleNamespace(resolver=object())
+    assembly = SimpleNamespace(
+        resolver=object(),
+        object_stores=SimpleNamespace(store=object()),
+        capture_supervisor=object(),
+    )
     monkeypatch.setattr(
         "kdive.jobs.assembly.build_worker_handler_assembly", lambda **kwargs: assembly
     )
@@ -116,7 +120,13 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     monkeypatch.setattr(
         "kdive.jobs.capture_operations.supervisor.recover_capture_operations", _recover
     )
-    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: object())
+
+    class _FakeStore:
+        def validate_conditional_create(self) -> None:
+            events.append("store-admission")
+
+    store = _FakeStore()
+    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: store)
     monkeypatch.setattr(
         "kdive.health.processes.server.build_postgres_ping", lambda pool: lambda: None
     )
@@ -143,6 +153,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
         *_warm_open(),
         "acquire(timeout=None)",
         "authenticate",
+        "store-admission",
         "recover",
         "run",
         _close(),

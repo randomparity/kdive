@@ -10,6 +10,7 @@ from typing import cast
 import pytest
 from pydantic import SecretStr
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.jobs.worker import WorkerConfig
 from kdive.observability.facade import Telemetry
 from kdive.processes.worker import run_worker
@@ -42,7 +43,11 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     events: list[str] = []
     secret_registry = SecretRegistry()
     handler_registry = object()
-    handler_assembly = SimpleNamespace(resolver=object())
+    handler_assembly = SimpleNamespace(
+        resolver=object(),
+        object_stores=SimpleNamespace(store=None),
+        capture_supervisor=object(),
+    )
 
     class _ConnectionContext:
         async def __aenter__(self) -> object:
@@ -60,6 +65,13 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     stop = asyncio.Event()
     incarnation_credential = SecretStr("authority-delivered-credential")
 
+    class _Store:
+        def validate_conditional_create(self) -> None:
+            events.append("store-admission")
+
+    store_instance = _Store()
+    handler_assembly.object_stores.store = store_instance
+
     monkeypatch.setattr("kdive.processes.worker.create_pool", lambda **kw: pool)
     monkeypatch.setattr("kdive.processes.worker.worker_incarnation_id", lambda pid: "docker:nonce")
     monkeypatch.setattr(
@@ -75,7 +87,7 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
             "capture_manifest_verifier": kw["capture_manifest_verifier"],
         },
     )
-    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: "store")
+    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: store_instance)
     monkeypatch.setattr(
         "kdive.jobs.assembly.build_handler_registry",
         lambda **kw: (
@@ -94,11 +106,15 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     async def recover(
         recovery_pool: object,
         resolver: object,
+        store: object,
+        supervisor: object,
         host_identity: str,
         credential: SecretStr,
     ) -> object:
         assert recovery_pool is pool
         assert resolver is handler_assembly.resolver
+        assert store is store_instance
+        assert supervisor is handler_assembly.capture_supervisor
         assert host_identity == "a" * 64
         assert credential is incarnation_credential
         events.append("recover")
@@ -150,8 +166,8 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
         built_probe = probe_builder(pool)
         assert built_probe["postgres_ping"] is pool
         assert callable(built_probe["capture_manifest_verifier"])
-        store = cast(Callable[[], str], built_probe["store"])
-        assert store() == "store"
+        store = cast(Callable[[], _Store], built_probe["store"])
+        assert store() is store_instance
 
         async def authenticate(conn: object, credential: SecretStr) -> WorkerIncarnation:
             assert credential is incarnation_credential
@@ -170,8 +186,74 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
 
     asyncio.run(run_worker(secret_registry, _telemetry()))
 
-    assert events == ["authenticate", "recover", "init", "run"]
+    assert events == ["authenticate", "store-admission", "recover", "init", "run"]
     assert secret_registry.snapshot() == frozenset({"authority-delivered-credential"})
+
+
+def test_run_worker_store_admission_failure_prevents_recovery_and_job_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    secret_registry = SecretRegistry()
+    credential = SecretStr("authority-delivered-credential")
+
+    class _ConnectionContext:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class _Pool:
+        def connection(self) -> _ConnectionContext:
+            return _ConnectionContext()
+
+    class _RejectedStore:
+        def validate_conditional_create(self) -> None:
+            events.append("store-admission")
+            raise CategorizedError(
+                "configure a conforming object store and retry worker startup",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+
+    pool = _Pool()
+    monkeypatch.setattr("kdive.processes.worker.create_pool", lambda **kw: pool)
+    monkeypatch.setattr("kdive.processes.worker.worker_incarnation_id", lambda pid: "docker:nonce")
+    monkeypatch.setattr("kdive.processes.worker.worker_incarnation_credential", lambda: credential)
+    monkeypatch.setattr("kdive.processes.worker.install_stop", asyncio.Event)
+    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: _RejectedStore())
+
+    async def authenticate(conn: object, supplied: SecretStr) -> WorkerIncarnation:
+        events.append("authenticate")
+        return WorkerIncarnation(
+            incarnation="docker:nonce",
+            authority_kind="docker",
+            authority_binding={"container_id": "a" * 64},
+            fence_protocol=CURRENT_WORKER_FENCE_PROTOCOL,
+        )
+
+    async def recover(*args: object) -> object:
+        events.append("recover")
+        return SimpleNamespace(pending=0)
+
+    monkeypatch.setattr("kdive.processes.worker.authenticate_worker_incarnation", authenticate)
+    monkeypatch.setattr(
+        "kdive.jobs.capture_operations.supervisor.recover_capture_operations", recover
+    )
+    monkeypatch.setattr(
+        "kdive.jobs.worker.Worker", lambda *args, **kwargs: events.append("worker-init")
+    )
+
+    async def _runtime(**kwargs: object) -> None:
+        body = cast(Callable[[object, object, object], Awaitable[None]], kwargs["body"])
+        await body(pool, "heartbeat", object())
+
+    monkeypatch.setattr("kdive.processes.worker.run_process_runtime", _runtime)
+
+    with pytest.raises(CategorizedError, match="configure a conforming object store"):
+        asyncio.run(run_worker(secret_registry, _telemetry()))
+
+    assert events == ["authenticate", "store-admission"]
 
 
 def test_run_worker_refuses_a_credential_bound_to_another_identity(
