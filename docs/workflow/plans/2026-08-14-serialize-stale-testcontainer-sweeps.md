@@ -72,6 +72,13 @@ def test_unrelated_409_explanations_warn(explanation: str, tmp_path: Path) -> No
         assert xdist_backend.sweep_stale_backend_containers(_FakeDockerClient(container)) == []
 
 
+def test_concurrent_removal_classifier_allows_surrounding_api_prose() -> None:
+    error = _api_error(
+        'Conflict ("removal of container cid-full is already in progress")'
+    )
+    assert xdist_backend._removal_is_already_in_progress(error, "cid-full") is True
+
+
 def test_concurrent_removal_waits_for_delayed_absence(tmp_path: Path) -> None:
     import docker.errors
 
@@ -216,7 +223,7 @@ test before implementation.
 
 ### Step 2: Implement the minimal locked sweep
 
-In `tests/support/xdist_backend.py`, add `time` and define the canonical lock independently of
+In `tests/support/xdist_backend.py`, add `re` and `time`, then define the canonical lock independently of
 environment-selected temp roots:
 
 ```python
@@ -250,19 +257,20 @@ def _sweep_locked() -> Iterator[bool]:
         os.close(fd)
 ```
 
-Implement the classifier as an exact status-and-explanation comparison. Short ids and substring
-matches are deliberately rejected:
+Implement the classifier by extracting the whitespace-delimited id from the semantic phrase.
+Surrounding API prose may vary; short ids and substring matches are deliberately rejected:
 
 ```python
 def _removal_is_already_in_progress(exc: Exception, container_id: str) -> bool:
     import docker.errors
 
-    return (
-        isinstance(exc, docker.errors.APIError)
-        and exc.status_code == 409
-        and exc.explanation
-        == f"removal of container {container_id} is already in progress"
+    if not isinstance(exc, docker.errors.APIError) or exc.status_code != 409:
+        return False
+    match = re.search(
+        r"removal of container (?P<container_id>\S+) is already in progress",
+        exc.explanation or "",
     )
+    return match is not None and match.group("container_id") == container_id
 ```
 
 Implement bounded polling. NotFound alone returns `True`; another lookup exception or deadline

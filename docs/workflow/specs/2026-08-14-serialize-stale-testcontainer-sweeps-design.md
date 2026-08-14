@@ -47,8 +47,10 @@ It never performs a stat-then-open check, follows a symlink, truncates the inode
 it did not create. An open, owner, type, or lock failure takes the sweep-skipped warning path.
 
 The removal exception path recognizes Docker `APIError` only when it has HTTP status 409 and
-`exc.explanation` equals `removal of container <full container.id> is already in progress`. The
-comparison uses the complete id and complete explanation: short ids, prefixes, superstrings, other
+`exc.explanation` contains the semantic phrase
+`removal of container <whitespace-delimited id> is already in progress`. A compiled expression
+extracts that one non-whitespace id token, and the classifier compares it to the complete
+`container.id`. Harmless surrounding API prose may vary; short ids, prefixes, superstrings, other
 ids, and unrecognized wording do not match. A small helper then queries
 `client.containers.get(container.id)` until the exact id raises NotFound or a five-second monotonic
 deadline expires. Polling sleeps briefly between successful lookups. Verified absence is silent
@@ -88,8 +90,8 @@ retry the sweep.
   `reaped`.
 - A deadline test advances the injected monotonic clock while the id remains present and asserts a
   warning at the five-second bound without a real wait.
-- Explanation tests cover the exact full id, another id, a short-id prefix, and an id superstring;
-  every mismatch remains a warning.
+- Explanation tests cover the exact full id with and without surrounding API prose, another id, a
+  short-id prefix, and an id superstring; every identity mismatch remains a warning.
 - A verification-lookup failure test makes exact-id lookup raise a non-NotFound Docker error. It
   asserts one warning, no reaped claim for that id, and successful removal of a later stale
   candidate.
