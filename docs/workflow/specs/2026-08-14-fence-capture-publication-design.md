@@ -142,11 +142,13 @@ Cleanup follows the row-first decision:
 - a matching committed row closes the operation as `published`; the job result is not rewritten;
 - no row requires completed conditional-create arbitration and a verified retained tombstone;
   cleanup then reacquires the Run lock and closes as `discarded` with its version;
-- a conflicting row, failed delete, failed tombstone proof, unavailable store, or database failure
-  leaves the operation in `publishing` for startup recovery.
+- a conflicting row or a failure before `canceling` commits leaves the existing nonterminal state;
+  a failed delete, tombstone proof, store call, or later database operation retains `canceling` for
+  startup recovery. No transition moves `canceling` backward to `publishing`.
 
 Replacement recovery runs before readiness. For an operation with provider quiescence but open
-publication it repeats the same `canceling` linearization and row-first decision. It never resumes
+publication it moves `pending|publishing` to `canceling`, or resumes arbitration directly from an
+already-`canceling` row. It never resumes
 a PUT from buffered packet bytes: if registration did not commit, it completes conditional-create
 arbitration, removes the exact capture version, retains the winning tombstone, and records
 `discarded`.
@@ -220,7 +222,9 @@ tombstone durability but before the `discarded` transaction, starts replacement 
 capture PUT remains delayed, and proves it adopts the same tombstone version without reopening the
 key. Success, cancellation, and replacement-recovery tests fail spool deletion at each terminal
 publication outcome and prove acknowledgment/readiness remain barred until the exact private
-operation directory is absent and `spool_disposed_at` commits. Tests
+operation directory is absent and `spool_disposed_at` commits. Seeded recovery tests start from
+`canceling` after each delete, tombstone-proof, store, and database failure and prove monotonic
+resume without reopening publication. Tests
 deliberately break transition validation and compensation to show the new
 assertions fail before restoring the implementation. `just ci` is the final local gate on both
 declared target architectures through architecture-independent Python and PostgreSQL behavior;
