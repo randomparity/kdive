@@ -298,9 +298,11 @@ def _publisher(
     return publish
 
 
-def _publication_recoverer(events: list[str]):
+def _publication_recoverer(events: list[str], *, gate: asyncio.Event | None = None):
     async def recover(*args: object, **kwargs: object) -> CaptureOperation:
         events.append("recover-publication")
+        if gate is not None:
+            await gate.wait()
         return cast(CaptureOperation, args[-1])
 
     return recover
@@ -510,6 +512,53 @@ def test_provider_failure_after_exit_closes_publication_before_propagating(
 
     assert events.index("ack") < events.index("result")
     assert events.index("result") < events.index("recover-publication")
+    assert events.index("recover-publication") < events.index("dispose")
+    assert events.index("dispose") < events.index("spool_recorded")
+
+
+def test_repeated_cancellation_waits_for_post_exit_publication_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> list[str]:
+        events: list[str] = []
+        publication_gate = asyncio.Event()
+        recovery_gate = asyncio.Event()
+        job = _job()
+        request = _request(job)
+        operation = _operation(job, request)
+        launched = _Launched(
+            events,
+            CaptureResult(outcome="success", size_bytes=4, truncated=False),
+        )
+        _patch_repository(monkeypatch, operation, events)
+        supervisor = CaptureOperationSupervisor(
+            launcher=_typed_launcher(launched),
+            credential=SecretStr("credential"),
+        )
+        task = asyncio.create_task(
+            supervisor.execute(
+                _typed_connection(events),
+                job,
+                _snapshot(request, events),
+                request,
+                publisher=_publisher(events, gate=publication_gate),
+                publication_recoverer=_publication_recoverer(events, gate=recovery_gate),
+            )
+        )
+        while "publish" not in events:
+            await asyncio.sleep(0)
+        task.cancel()
+        while "recover-publication" not in events:
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        recovery_gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return events
+
+    events = asyncio.run(_run())
     assert events.index("recover-publication") < events.index("dispose")
     assert events.index("dispose") < events.index("spool_recorded")
 

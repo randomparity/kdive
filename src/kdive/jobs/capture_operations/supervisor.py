@@ -125,6 +125,20 @@ async def require_capture_authority() -> None:
         raise CaptureAuthorityLost("capture worker authority ended")
 
 
+async def _finish_owned_cleanup(task: asyncio.Task[None]) -> None:
+    """Drain mandatory closure without letting repeated cancellation orphan it."""
+    current = asyncio.current_task()
+    assert current is not None
+    completed = asyncio.Event()
+    task.add_done_callback(lambda _task: completed.set())
+    while not completed.is_set():
+        try:
+            await completed.wait()
+        except asyncio.CancelledError:
+            current.uncancel()
+    task.result()
+
+
 @dataclass(frozen=True, slots=True)
 class RecoverySummary:
     """Startup recovery counts; any pending operation bars readiness and claims."""
@@ -295,7 +309,11 @@ class CaptureOperationSupervisor:
         except asyncio.CancelledError:
             if acknowledged:
                 assert operation is not None and launched is not None
-                await self._cleanup_publication(conn, operation, launched, publication_recoverer)
+                await _finish_owned_cleanup(
+                    asyncio.create_task(
+                        self._cleanup_publication(conn, operation, launched, publication_recoverer)
+                    )
+                )
             else:
                 await self._cleanup_started(
                     conn, operation, launched, launch_abort, snapshot, configuration
@@ -304,7 +322,11 @@ class CaptureOperationSupervisor:
         except CaptureAuthorityLost as error:
             if acknowledged:
                 assert operation is not None and launched is not None
-                await self._cleanup_publication(conn, operation, launched, publication_recoverer)
+                await _finish_owned_cleanup(
+                    asyncio.create_task(
+                        self._cleanup_publication(conn, operation, launched, publication_recoverer)
+                    )
+                )
             else:
                 await self._cleanup_started(
                     conn, operation, launched, launch_abort, snapshot, configuration
@@ -313,7 +335,11 @@ class CaptureOperationSupervisor:
         except Exception:
             if acknowledged:
                 assert operation is not None and launched is not None
-                await self._cleanup_publication(conn, operation, launched, publication_recoverer)
+                await _finish_owned_cleanup(
+                    asyncio.create_task(
+                        self._cleanup_publication(conn, operation, launched, publication_recoverer)
+                    )
+                )
             else:
                 await self._cleanup_started(
                     conn, operation, launched, launch_abort, snapshot, configuration
