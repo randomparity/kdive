@@ -25,6 +25,7 @@ import yaml
 pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 
 CHART = str(Path(__file__).resolve().parents[2] / "deploy" / "helm" / "kdive")
+REPOSITORY = Path(__file__).resolve().parents[2]
 
 _VERSIONING_REPLIES = (
     (
@@ -1907,3 +1908,14 @@ def test_observability_scrape_config_passes_promtool() -> None:
             check=False,
         )
     assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_active_docs_do_not_wait_on_bundled_install() -> None:
+    pattern = re.compile(r"values-demo\.yaml[^\n]*--wait")
+    offenders = [
+        path.relative_to(REPOSITORY).as_posix()
+        for path in (REPOSITORY / "docs").rglob("*.md")
+        if "archive" not in path.relative_to(REPOSITORY / "docs").parts
+        and pattern.search(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == []
