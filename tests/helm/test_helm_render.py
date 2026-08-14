@@ -717,6 +717,23 @@ def test_bundled_runtime_role_bootstrap_runs_after_migration() -> None:
     assert script.index("python -m kdive migrate") < script.index("GRANT {} TO {}")
 
 
+def test_bundled_role_bootstrap_survives_kubernetes_argument_expansion() -> None:
+    jobs = _jobs_by_name("bundledBackends=true", "demoAcknowledged=true")
+    script = jobs["migrate"]["args"][0]
+
+    # Kubernetes command/args expansion turns a doubled dollar into one literal dollar before
+    # /bin/sh sees the heredoc. A named PostgreSQL delimiter must survive that boundary unchanged.
+    assert "DO $$".replace("$$", "$") == "DO $"
+    executed_script = script.replace("$$", "$")
+    python_source = executed_script.split("python - <<'PY'\n", maxsplit=1)[1].rsplit(
+        "\nPY", maxsplit=1
+    )[0]
+    compile(python_source, "bundled-role-bootstrap", "exec")
+    assert '"DO $kdive_role$ BEGIN CREATE ROLE {}' in python_source
+    assert "END $kdive_role$" in python_source
+    assert "EXCEPTION WHEN duplicate_object THEN NULL" in python_source
+
+
 def test_external_render_omits_post_install_migrate_hook() -> None:
     # The migrate Job must stay pre-* on the external path (the bundled path runs it post-install
     # after the in-chart DB). Assert on the migrate Job's phase specifically, not a blanket output

@@ -79,9 +79,9 @@ spec:
                   for login, (password_env, capability) in roles.items():
                       conn.execute(
                           sql.SQL(
-                              "DO $$ BEGIN CREATE ROLE {} LOGIN INHERIT NOSUPERUSER "
+                              "DO $kdive_role$ BEGIN CREATE ROLE {} LOGIN INHERIT NOSUPERUSER "
                               "NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; "
-                              "EXCEPTION WHEN duplicate_object THEN NULL; END $$"
+                              "EXCEPTION WHEN duplicate_object THEN NULL; END $kdive_role$"
                           ).format(sql.Identifier(login))
                       )
                       conn.execute(

@@ -209,10 +209,22 @@ state by design.** The issuer mints valid `aud=kdive` tokens for any caller, so 
 forces `service.type=ClusterIP` on this path — reach MCP with `kubectl port-forward`, never
 expose it.
 
+Before installing the demo, create the two operator-owned Secrets named by
+`workerCredentialBroker`: the TLS Secret must contain `tls.crt`, `tls.key`, and `ca.crt`, with a
+certificate valid for the rendered `<fullname>-worker-credential-broker` Service; the envelope
+Secret must contain `envelope.key`. The chart mounts these authority credentials but does not
+generate them, including on the bundled path.
+
 ```sh
 helm install kdive deploy/helm/kdive -f deploy/helm/kdive/values-demo.yaml
 helm test kdive    # mints a token, asserts tools/list returns tools
 ```
+
+Use the install command exactly without `--wait`. With `--wait`, Helm delays post-install hooks
+until ordinary resources are ready; on this bundled fresh-install topology, app workloads cannot
+become ready until the post-install migration creates their database roles. Follow hook progress
+directly, then use `helm test` as the readiness proof. This ordering does not affect upgrades,
+whose migration is a pre-upgrade hook.
 
 `values-demo.yaml` pins `image.tag=edge` (the rolling published image); without a published
 image the demo cannot pull. The demo migrate Job runs `post-install` behind a DB-readiness
