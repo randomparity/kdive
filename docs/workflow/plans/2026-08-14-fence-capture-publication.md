@@ -93,11 +93,21 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 - Modify `src/kdive/services/runs/worker_incarnations.py`: protocol constant 4.
 - Modify `src/kdive/jobs/capture_operations/repository.py`: publication fields and transitions.
 - Modify `src/kdive/jobs/queue.py`: combined closure gate before retry/current-link clearing.
+- Modify `src/kdive/processes/lifecycle/worker_incarnation.py`: remove the protocol-3
+  retirement queries; a fresh protocol-4 installation has no older incarnation population.
+- Remove or rewrite the obsolete protocol cutover surfaces:
+  `scripts/cutover-capture-protocol-lib.sh`,
+  `scripts/cutover-capture-protocol-compose.sh`,
+  `scripts/cutover-capture-protocol-helm.sh`, and
+  `scripts/live-stack/cutover-capture-protocol.sh`.
 - Add `tests/jobs/test_capture_publication_repository.py`.
 - Add `tests/jobs/test_capture_publication_fresh_install.py`.
 - Modify protocol expectations in `tests/jobs/test_capture_operation_repository.py`,
   `tests/jobs/test_capture_operation_cutover.py`, worker-fence tests, Compose lifecycle tests, and
-  any exact protocol guard discovered with `rg -n 'protocol 3|fence_protocol = 3'`.
+  the cutover coverage in `tests/scripts/test_capture_cutover_scripts.py`,
+  `tests/scripts/test_live_workflow_shape.py`, `tests/scripts/test_live_stack_scripts.py`,
+  `tests/compose/test_compose_worker_lifecycle_live.py`,
+  `tests/compose/test_compose_lifecycle_recipe.py`, and `tests/helm/test_helm_upgrade_config.py`.
 
 **Interfaces**
 
@@ -135,8 +145,11 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
    incomplete product state and proceed only after spool disposal. Run
    `uv run python -m pytest tests/jobs/test_queue.py tests/jobs/test_worker.py -q`.
 6. Update exact protocol expectations mechanically, without adding compatibility branches. Run
-   `rg -n 'protocol 3|fence_protocol = 3' src tests deploy scripts docs/operating` and disposition
-   every remaining hit as historical prose, deliberate negative fixture, or defect.
+   `rg -n -e 'protocol[- ]3' -e 'fence_protocol[^[:digit:]]*3' -e
+   'CURRENT_WORKER_FENCE_PROTOCOL[^[:digit:]]*3' src tests deploy scripts docs/operating` and
+   disposition every remaining hit, including `= 3`, `< 3`, and `IS DISTINCT FROM 3`, as immutable
+   migration/history, a deliberate negative fixture, or a defect. Remove every executable
+   compatibility or cutover hit outside immutable migration files before continuing.
 7. Run the focused database/job tests and `just migration-order-check`, but do not commit or claim
    the gate green yet. Continue directly through the successful-publication slice below: schema,
    queue closure, coordinator wiring, and live success activation are one atomic task and commit.
@@ -251,8 +264,11 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 **Files**
 
 - Modify protocol-dependent fresh-install configuration/tests under `deploy/helm/kdive/`,
-  `scripts/live-stack/`, and `deploy/ansible/` only where current protocol constants require it.
-- Modify operator documentation that currently instructs protocol-3 cutover or upgrade.
+  `scripts/live-stack/`, and `deploy/ansible/` only where current protocol constants require it;
+  explicitly disposition the four cutover scripts named in Task 2 and their Compose, Helm,
+  live-stack, and workflow-shape tests.
+- Modify `scripts/live-stack/README.md` and every other operator document found by the Task 2
+  protocol sweep that currently instructs protocol-3 cutover or upgrade.
 - Modify `docs/adr/0559-fence-capture-artifact-publication.md` status only if not already flipped.
 
 **Interfaces**
@@ -270,7 +286,9 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
    before readiness, and reject data-preservation guidance. Run focused Helm, Compose, Ansible,
    worker-startup, and live-workflow-shape modules; observe old expectations fail.
 2. Update only the production manifests/scripts/docs required for fresh installation. Remove or
-   replace protocol-3 upgrade instructions exposed as current guidance; do not add shims.
+   replace protocol-3 upgrade instructions exposed as current guidance; do not add shims. Re-run
+   the Task 2 broad protocol sweep and require every remaining hit outside immutable migration and
+   historical records to have an explicit negative-fixture or current-protocol justification.
 3. Run focused deployment tests, `just lint-shell`, `just lint-ansible`, `just test-ansible`,
    `just lint-workflows`, documentation guards, and `just adr-status-check`. Flip ADR-0559 to
    Accepted in this final implementation commit. Commit:
