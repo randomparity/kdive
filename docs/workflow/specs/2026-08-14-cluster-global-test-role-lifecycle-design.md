@@ -68,12 +68,13 @@ replacing a consuming-test exception.
 - A two-database control mechanically substitutes isolated names into real 0104 bytes, pauses after
   validation and before grant, completes a cross-database drop, and reproduces `UndefinedObject`.
 - The fixed integration holds `_cluster_global_role_lock` around that migration lifecycle, starts
-  the competing drop from a second process that must acquire the same helper first, proves it cannot
-  enter until release, then proves both operations finish in order.
-- Fixture-wiring tests prove `pg_conn` holds the helper across the consuming test and teardown, and
-  `_migrated_db` holds it around migration and snapshot but not ordinary migrated access.
-- The admin migration test instruments the same helper and proves acquisition precedes its direct
-  schema reset and remains held through `migrate(postgres_url)` and the post-migration assertion.
+  the competing drop from a second backend that must acquire the same helper first, proves that
+  backend waits on the exact maintenance-database key until release, then proves both operations
+  finish in order.
+- Fixture-wiring tests prove the helper uses a dedicated maintenance-database connection, closes it
+  on normal and exceptional exit, and that `pg_conn` holds the shared key during the consuming test.
+- The admin migration test executes its direct schema reset, `migrate(postgres_url)`, and
+  post-migration assertion under the same helper.
 - A timeout test uses a shortened test-only timeout and checks the complete diagnostic and recovery
   contract while another maintenance-database session owns the real key.
 - Focused migration and runtime-role tests pass five consecutive times with 16 xdist workers and no
