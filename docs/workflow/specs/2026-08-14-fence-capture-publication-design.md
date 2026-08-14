@@ -42,6 +42,7 @@ Migration `0113_capture_publication_fence.sql` extends `capture_operations`:
 - `publication_object_key` includes the durable operation id, is set before PUT, and is immutable;
 - `publication_etag` is set after PUT and before registration when PUT returned;
 - `publication_artifact_id` references the committed artifact row only for `published`;
+- `cleanup_capture_version_id` journals a verified capture version before compensation deletes it;
 - `publication_tombstone_version` records the retained zero-byte fence for `discarded`;
 - `spool_disposed_at` records verified removal of the exact attempt's private packet spool;
 - `publication_started_at` and `publication_closed_at` use the database clock.
@@ -128,7 +129,11 @@ server-derived `publication-kind` metadata value; a tombstone must also have siz
 permits exactly one winner:
 if the tombstone wins, the capture PUT cannot later overwrite it; if conditional creation reports
 the key already exists, recovery HEADs it and verifies the operation and kind metadata. It deletes
-only a verified `capture` version before retrying tombstone creation. It adopts and retains an
+only a verified `capture` version: under the Run lock it first persists that immutable version in
+`cleanup_capture_version_id`, then deletes that exact version outside the lock, and verifies
+`head(key, version_id)` reports it absent before retrying tombstone creation. A lost delete response
+or crash therefore resumes against the same durable version id; current-key absence or a delete
+marker is not accepted as proof. It adopts and retains an
 existing verified zero-byte `tombstone` version without deleting or replacing it. Because the
 operation issues only one capture PUT and
 recovery never resumes it, observing its version or winning the tombstone resolves the only
@@ -224,7 +229,9 @@ key. Success, cancellation, and replacement-recovery tests fail spool deletion a
 publication outcome and prove acknowledgment/readiness remain barred until the exact private
 operation directory is absent and `spool_disposed_at` commits. Seeded recovery tests start from
 `canceling` after each delete, tombstone-proof, store, and database failure and prove monotonic
-resume without reopening publication. Tests
+resume without reopening publication. A lost-delete-response test crashes after the exact-version
+delete request and proves recovery uses `cleanup_capture_version_id`, verifies that version's
+absence, and cannot close `discarded` while it remains readable. Tests
 deliberately break transition validation and compensation to show the new
 assertions fail before restoring the implementation. `just ci` is the final local gate on both
 declared target architectures through architecture-independent Python and PostgreSQL behavior;
