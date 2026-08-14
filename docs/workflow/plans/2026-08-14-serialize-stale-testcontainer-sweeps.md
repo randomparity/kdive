@@ -39,7 +39,8 @@ warning path. No fixture call site or production module changes.
   as `False` for the canonical `/tmp` lock.
 - Add `_removal_is_already_in_progress(exc: Exception, container_id: str) -> bool`.
 - Add `_wait_until_container_absent(client: Any, container_id: str, *, timeout_s: float = 5.0,
-  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep) -> bool`.
+  clock: Callable[[], float] | None = None,
+  sleep: Callable[[float], None] | None = None) -> bool`.
   Focused tests may call this private seam to inject deterministic time.
 
 ### Step 1: Write the failing regression tests
@@ -110,7 +111,8 @@ def test_sweep_is_silent_after_exact_concurrent_removal_finishes(
 
 def test_concurrent_removal_warns_at_the_deadline(tmp_path: Path) -> None:
     # Keep get("cid-full") present while injected sleep advances monotonic time to five seconds.
-    # Assert the public sweep warns once and does not append the id to its result.
+    # Monkeypatch xdist_backend.time.monotonic and xdist_backend.time.sleep inside a narrow
+    # monkeypatch.context(), call the public sweep, and assert it warns once without appending the id.
 
 
 def test_verification_lookup_failure_warns_and_keeps_sweeping(tmp_path: Path) -> None:
@@ -203,15 +205,14 @@ ten-second `communicate` timeout with `finally` cleanup. It must exercise the pu
 Run:
 
 ```sh
-uv run python -m pytest \
-  tests/support/test_xdist_backend.py \
-  -k 'concurrent_sweeps or concurrent_removal or unrelated_409 or sweep_lock_failure or \
-      sweep_takes_the_lock or sweep_is_silent_after_exact' -q
+uv run python -m pytest tests/support/test_xdist_backend.py -q
 ```
 
-Expected: the new tests fail because sweep enumeration is unlocked and the conflict helper does not
-exist. Temporarily replace the expected lock or conflict behavior with the old behavior and confirm
-the relevant test reddens; restore the test before implementation.
+Expected: the existing tests pass and every new behavioral group fails: interprocess ownership,
+exact-conflict recovery, unrelated conflicts, lookup/deadline failure, lock-before-client ordering,
+and unsafe lock paths. Record each group before implementation. Temporarily replace the expected
+lock or conflict behavior with the old behavior and confirm the relevant test reddens; restore the
+test before implementation.
 
 ### Step 2: Implement the minimal locked sweep
 
@@ -273,11 +274,13 @@ def _wait_until_container_absent(
     container_id: str,
     *,
     timeout_s: float = _REMOVAL_WAIT_S,
-    clock: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
 ) -> bool:
     import docker.errors
 
+    clock = time.monotonic if clock is None else clock
+    sleep = time.sleep if sleep is None else sleep
     deadline = clock() + timeout_s
     while True:
         try:

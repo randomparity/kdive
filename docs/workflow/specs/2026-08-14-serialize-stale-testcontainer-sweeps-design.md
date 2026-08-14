@@ -56,6 +56,10 @@ and does not append the id to `reaped`, because this process did not complete th
 lookup failure other than NotFound, any explanation mismatch, and every other removal error use the
 existing per-container warning and continue with later candidates.
 
+The helper accepts optional clock and sleep callables and resolves `time.monotonic` and `time.sleep`
+inside the call when they are absent. This keeps production defaults ordinary while allowing both
+private and public-path tests to inject deterministic time without waiting five real seconds.
+
 The sourced concurrent-removal shape admits verification; exact-id absence remains the success
 signal. Neither condition alone suppresses a warning.
 
