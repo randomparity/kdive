@@ -31,10 +31,17 @@ grant, the undefined-role path recreates and grants the required role. If the gr
 dependency prevents the concurrent drop. Creation followed by grant is protected by the creating
 transaction's shared-catalog lock.
 
-The regression uses two databases and an isolated set of runtime-role names. It pauses immediately
-before the dependency-first operation, starts a cross-database drop, and proves the drop cannot
-complete after the grant begins. A companion unlocked control preserves the formerly vulnerable
-validate-then-grant ordering and must reproduce the reported `UndefinedObject` at the grant.
+The regression executes migration 0104's file bytes after mechanically substituting an isolated
+set of runtime-role names; it neither copies nor reimplements the algorithm. It asserts that the
+expected dependency-first statements exist before inserting deterministic pause hooks.
+
+Two fixed-path schedules cover both outcomes. In the drop-wins schedule, the cross-database drop
+completes before the first grant; the grant observes `undefined_object`, and the actual migration
+must recreate, grant, validate, and leave the exact role shape and dependency. In the grant-wins
+schedule, the grant establishes its dependency before the drop starts; the drop must block and then
+fail with `DependentObjectsStillExist`. A companion control mechanically restores the formerly
+vulnerable validate-then-grant order in the same migration artifact and must reproduce the reported
+`UndefinedObject` at the grant.
 
 ## Consequences
 

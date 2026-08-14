@@ -61,12 +61,18 @@ the database dependency.
 
 ## Verification
 
-- Replace the misleading same-database regression with a two-database test using isolated runtime
-  role names. Its unlocked control pauses after validation, drops the role from the other database,
-  and must reproduce `UndefinedObject` at `GRANT`.
-- The fixed-path arm executes the dependency-first migration. Once the grant operation begins, the
-  cross-database drop must block and then fail with `DependentObjectsStillExist`; migration must
-  complete successfully.
+- Replace the misleading same-database regression with a two-database test that reads migration
+  0104's bytes, mechanically substitutes isolated runtime-role names, and asserts the expected
+  dependency-first statement order before inserting pause hooks. No test-only copy of the role
+  algorithm is permitted.
+- Its old-order control mechanically restores validate-then-grant ordering in that artifact,
+  pauses after validation, completes a drop from the other database, and must reproduce
+  `UndefinedObject` at `GRANT`.
+- Its drop-wins fixed arm completes the cross-database drop before the first grant, then proves the
+  actual migration recreates and grants the role and leaves its exact required shape and schema
+  dependency.
+- Its grant-wins fixed arm lets the grant establish the dependency first, then proves the
+  cross-database drop blocks and fails with `DependentObjectsStillExist` while migration completes.
 - The incompatible-role tests continue to prove that provisional grants roll back and that the
   pre-existing role and its privileges remain unchanged after rejection.
 - Focused migration and runtime-role tests pass five consecutive times with 16 xdist workers and no
