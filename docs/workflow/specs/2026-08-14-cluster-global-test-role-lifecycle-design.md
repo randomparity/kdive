@@ -6,7 +6,7 @@ Make parallel migration tests deterministic when xdist workers use separate data
 PostgreSQL cluster, while preserving the production runtime-role shape and final privileges.
 
 This design implements issue #1961 and is governed by
-[ADR-0560](../../adr/0560-establish-runtime-role-dependency-before-validation.md).
+[ADR-0560](../../adr/0560-serialize-cluster-global-test-role-lifecycle.md).
 
 ## Scope and constraints
 
@@ -14,8 +14,8 @@ This design implements issue #1961 and is governed by
 - The host is `x86_64`; the project targets `x86_64` and `ppc64le`.
 - Preserve canonical runtime role names and migration 0104 semantics.
 - Preserve PostgreSQL transactionality; add no dependency or configuration.
-- Keep migration 0104 byte-immutable; close its cross-database window in the runner before it
-  executes.
+- Keep migration 0104 and the production migration runner unchanged.
+- Serialize only fixture lifetimes that can manipulate cluster-global role state.
 - The full repository guardrail is `just ci`; CI gates its constituent recipes individually.
 
 ## Evidence and cause
@@ -37,45 +37,40 @@ window its name claims to cover.
 
 ## Design
 
-`migrate.apply_migrations` detects a pending version 0104 immediately before executing its unchanged
-SQL. A narrow helper attempts `GRANT USAGE ON SCHEMA public` for the four canonical runtime roles.
-On `psycopg.errors.UndefinedObject`, it issues the exact 0104 role-creation statement, tolerates
-only `UniqueViolation` or `DuplicateObject` from a concurrent creator, and retries the grant. Every
-other database error propagates. The helper accepts a role-name tuple solely so the deterministic
-regression can use isolated names, while the production call passes one fixed module-level tuple.
+`tests/db/conftest.py` defines `_cluster_global_role_lock(postgres_url, *, timeout_ms=60_000)`. It
+derives the common `postgres` maintenance-database URL, opens a dedicated autocommit connection,
+sets the acquisition statement timeout, and takes a session advisory lock using ADR-0015's existing
+two-integer migration key. The context manager releases the lock explicitly and closes the
+connection in `finally`.
 
-The helper runs inside the same transaction and after the migration advisory lock is acquired. For
-an existing compatible role, `GRANT` creates the dependency that blocks a concurrent drop before
-0104 validates it. If a drop completes first, the helper observes an absent role and unchanged 0104
-is not entered until the helper creates or joins a concurrent creator and retries the grant. For an
-incompatible concurrent winner, 0104's validation error rolls the provisional grant back without
-exposing it. The runner invokes no precondition when 0104 is already recorded, and its checksum
-behavior is unchanged.
+`pg_conn` enters the context before dropping and recreating `public`, then holds it across `yield`.
+The consuming test's partial migrations, direct 0104 execution, role mutation, and cleanup therefore
+share the boundary. `_migrated_db` enters the same context around its one-time `apply_migrations`
+and snapshot capture, then releases it before yielding ordinary migrated access.
+
+Repository inventory shows direct migration execution uses `pg_conn`; the once-per-worker migrated
+path is the other migration entry during the parallel suite. Tests that use an already-migrated URL
+do not change role lifecycle and need no lock.
 
 ## Failure handling
 
-Migration 0104 keeps the existing fail-closed behavior for a role with login, inheritance,
-privileged attributes, or memberships. Because the provisional grant is transactional, that error
-leaves neither the migration record nor the grant behind. A role dropped before the first grant is
-recreated with the exact required shape; a role whose drop loses to the grant remains protected by
-the database dependency.
+The lock query uses a 60-second `statement_timeout`: seconds are measured by the PostgreSQL server's
+elapsed clock, and the limit applies per acquisition. Timeout prevents entry and raises an
+actionable fixture error naming the maintenance database, key, visible blockers, and recovery
+action. Other connection or database errors propagate. Context exit always unlocks and closes the
+guard connection; it does not hide a consuming-test exception.
 
 ## Verification
 
-- Replace the misleading same-database regression with a two-database test that executes the narrow
-  runner precondition and migration 0104's real bytes after mechanical role-name substitution. No
-  test-only copy of 0104's role algorithm is permitted.
-- Its old-order control skips the precondition, pauses unchanged 0104 after validation, completes a
-  drop from the other database, and must reproduce `UndefinedObject` at `GRANT`.
-- Its drop-wins fixed arm completes the cross-database drop before the precondition grant, then
-  proves the precondition recreates and grants the role before unchanged 0104 validates it.
-- Its grant-wins fixed arm lets the precondition grant establish the dependency first, then proves
-  the cross-database drop blocks and fails with `DependentObjectsStillExist` while 0104 completes.
-- Its concurrent-create fixed arm makes the precondition observe absence, lets another database win
-  creation, and proves the precondition's retry grant protects that winner before 0104 validation
-  and before a cross-database drop can complete.
-- The incompatible-role tests continue to prove that provisional grants roll back and that the
-  pre-existing role and its privileges remain unchanged after rejection.
+- A two-database control mechanically substitutes isolated names into real 0104 bytes, pauses after
+  validation and before grant, completes a cross-database drop, and reproduces `UndefinedObject`.
+- The fixed integration holds `_cluster_global_role_lock` around that migration lifecycle, starts
+  the competing drop from a second process that must acquire the same helper first, proves it cannot
+  enter until release, then proves both operations finish in order.
+- Fixture-wiring tests prove `pg_conn` holds the helper across the consuming test and teardown, and
+  `_migrated_db` holds it around migration and snapshot but not ordinary migrated access.
+- A timeout test uses a shortened test-only timeout and checks the complete diagnostic and recovery
+  contract while another maintenance-database session owns the real key.
 - Focused migration and runtime-role tests pass five consecutive times with 16 xdist workers and no
   retries.
 - Three consecutive bare `just ci` runs pass from a clean tracked tree, with no setup errors,
@@ -84,9 +79,9 @@ the database dependency.
 
 ## Alternatives
 
-ADR-0560 records the rejected fixture serialization, maintenance-database locking, per-worker role
-rewriting, historical migration edit, forward-only repair, shorter-window, and do-nothing designs.
-The pending-version runner precondition is the smallest immutable-compatible production fix.
+ADR-0560 records the rejected production change, per-run filesystem lock, per-worker role rewriting,
+call-only lock, and do-nothing designs. The maintenance-database fixture boundary is the smallest
+surface covering every identified test role-lifecycle path.
 
 ## Durable workflow context
 
