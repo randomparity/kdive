@@ -121,6 +121,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prove capture operation quiescence
 - Supervise capture operations
 - Enforce capture protocol cutover
+- Admit conditional capture publication
+- Activate capture publication protocol
+- Install capture publication protocol 4
 
 ### Changed
 
@@ -604,6 +607,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close role lock verification gaps
 - Accept cluster-global role locking
 - Date ADR 0560 acceptance
+- Design capture publication fence
+- Harden publication fence ordering
+- Close publication recovery gaps
+- Arbitrate ambiguous capture puts
+- Retain capture fence tombstones
+- Make publication schema build-new-only
+- Require conditional-create admission
+- Specify publication fault matrix
+- Make tombstone recovery reentrant
+- Close capture publication spools
+- Make cancellation recovery monotonic
+- Journal capture deletion identity
+- Define corrupt publication recovery
+- Journal canceled pending keys
+- Plan capture publication fence
+- Fix publication implementation order
+- Serialize fresh namespace admission
+- Gate each publication task
+- Make protocol activation atomic
+- Narrow fresh install verification
+- Complete protocol replacement sweep
 - Design serialized stale backend sweeps
 - Fix the stale sweep lock identity
 - Close stale sweep concurrency gaps
@@ -1033,7 +1057,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add portable pidfd boundary
 - Preserve migration role delimiter
 - Revoke install scaler authority
+- Recover capture publication boundaries
 - Serialize stale backend sweeps
+- Recover exited capture publications
+- Close failed capture publications
+- Drain capture cleanup on cancellation
+- Refresh capture publication recovery state
+- Conform ADR 0559 record metadata
 
 ### Build
 
