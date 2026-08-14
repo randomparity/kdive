@@ -331,6 +331,22 @@ async def list_recovery_candidates(
     )
 
 
+async def claim_publication_recovery(
+    conn: AsyncConnection,
+    replacement_credential: SecretStr,
+    operation_id: UUID,
+) -> CaptureOperation:
+    """Revalidate replacement authority for an exited but publication-incomplete attempt."""
+    return await _operation(
+        conn,
+        "SELECT * FROM public.claim_capture_publication_recovery("
+        "sha256(convert_to(%s, 'UTF8')), %s)",
+        (replacement_credential.get_secret_value(), operation_id),
+        refused="capture publication recovery was refused",
+        error=PermissionError,
+    )
+
+
 async def begin_publication(
     conn: AsyncConnection,
     credential: SecretStr,

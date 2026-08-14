@@ -30,10 +30,14 @@ from kdive.jobs.capture_operations.repository import (
     CaptureOperationSnapshot,
     RecoveryEvidence,
     acknowledge_exit,
+    begin_cancel_publication,
+    claim_publication_recovery,
+    commit_discarded,
     create_launching,
     list_recovery_candidates,
     mark_running,
     record_identity,
+    record_spool_disposed,
     recover_operation,
     request_cancel,
 )
@@ -486,6 +490,57 @@ def test_recovery_candidate_helper_is_private_and_sql_functions_fit_limit(
             ).fetchone()
             assert privilege == (False,)
         finally:
+            await admin.close()
+
+    asyncio.run(_run())
+
+
+def test_replacement_recovers_exited_incomplete_publication(migrated_url: str) -> None:
+    async def _run() -> None:
+        admin = await connect(migrated_url)
+        owner = await _as_role(migrated_url, "kdive_worker")
+        replacement = await _as_role(migrated_url, "kdive_worker")
+        owner_credential = SecretStr("publication-old-owner")
+        replacement_credential = SecretStr("publication-replacement")
+        try:
+            await _register(admin, "local:publication-old", owner_credential)
+            await _register(admin, "local:publication-new", replacement_credential)
+            job_id, snapshot = await _seed_job(admin, "local:publication-old", owner_credential)
+            operation = await create_launching(owner, owner_credential, job_id, 1, snapshot)
+            await acknowledge_exit(
+                owner,
+                owner_credential,
+                operation.id,
+                _launch_abort_evidence(operation),
+            )
+            await admin.execute(
+                "UPDATE worker_incarnations SET state = 'terminated', outcome = 'killed', "
+                "terminated_at = clock_timestamp() WHERE incarnation = 'local:publication-old'"
+            )
+
+            candidates = await list_recovery_candidates(replacement, replacement_credential)
+            assert [candidate.id for candidate in candidates] == [operation.id]
+            assert candidates[0].state == "exited"
+
+            claimed = await claim_publication_recovery(
+                replacement, replacement_credential, operation.id
+            )
+            assert claimed.id == operation.id
+            assert claimed.state == "exited"
+            canceling = await begin_cancel_publication(
+                replacement,
+                replacement_credential,
+                operation.id,
+                f"artifacts/local/runs/{job_id}/pcap-{operation.id}",
+            )
+            discarded = await commit_discarded(
+                replacement, replacement_credential, canceling.id, "tombstone-version"
+            )
+            await record_spool_disposed(replacement, replacement_credential, discarded.id)
+            assert await list_recovery_candidates(replacement, replacement_credential) == ()
+        finally:
+            await owner.close()
+            await replacement.close()
             await admin.close()
 
     asyncio.run(_run())

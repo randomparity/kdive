@@ -155,6 +155,82 @@ BEGIN
 END
 $$;
 
+-- Replacement workers must also see provider-exited attempts whose publication product remains
+-- open. Protocol 3 selected only live provider operations, so replace all three selection guards
+-- together before any protocol-4 worker can recover.
+DO $$
+DECLARE
+    v_function regprocedure;
+    v_definition text;
+    v_state_predicate text := 'o.state <> ''exited''';
+    v_locked_state_predicate text := 'v_operation.state <> ''exited''';
+    v_product_predicate text := $predicate$(
+                o.state <> 'exited'
+                OR o.publication_state NOT IN ('published', 'discarded')
+                OR o.spool_disposed_at IS NULL
+            )$predicate$;
+BEGIN
+    FOREACH v_function IN ARRAY ARRAY[
+        'public.capture_recovery_candidate_replacement(bytea)'::regprocedure,
+        'public.list_capture_recovery_candidates(bytea)'::regprocedure
+    ]
+    LOOP
+        v_definition := pg_get_functiondef(v_function);
+        IF v_definition NOT LIKE '%' || v_state_predicate || '%' THEN
+            RAISE EXCEPTION 'protocol-4 recovery selection has an unexpected source shape for %',
+                v_function;
+        END IF;
+        v_definition := replace(v_definition, v_state_predicate, v_product_predicate);
+        IF v_function = 'public.list_capture_recovery_candidates(bytea)'::regprocedure THEN
+            IF v_definition NOT LIKE '%' || v_locked_state_predicate || '%' THEN
+                RAISE EXCEPTION 'protocol-4 locked recovery selection has an unexpected shape';
+            END IF;
+            v_definition := replace(
+                v_definition,
+                v_locked_state_predicate,
+                replace(v_product_predicate, 'o.', 'v_operation.')
+            );
+        END IF;
+        EXECUTE v_definition;
+    END LOOP;
+END
+$$;
+
+CREATE FUNCTION public.claim_capture_publication_recovery(
+    p_credential_hash bytea,
+    p_operation_id uuid
+) RETURNS SETOF public.capture_operations
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_context record;
+    v_operation public.capture_operations%ROWTYPE;
+BEGIN
+    IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
+        RAISE EXCEPTION 'worker authority is required' USING ERRCODE = '42501';
+    END IF;
+    SELECT context.owner, context.replacement, context.operation INTO v_context
+    FROM public.capture_recovery_context(p_credential_hash, p_operation_id) AS context;
+    IF NOT FOUND
+       OR NOT coalesce(
+           public.capture_recovery_authorized(v_context.owner, v_context.replacement), false
+       ) THEN
+        RETURN;
+    END IF;
+    v_operation := v_context.operation;
+    IF v_operation.state <> 'exited'
+       OR (
+           v_operation.publication_state IN ('published', 'discarded')
+           AND v_operation.spool_disposed_at IS NOT NULL
+       ) THEN
+        RETURN;
+    END IF;
+    RETURN NEXT v_operation;
+END
+$$;
+
 -- A queued/lapsed capture retry is not claimable until the previous attempt's complete product is
 -- closed. Keep this replacement adjacent to the protocol replacement above: both reinstall the
 -- immutable 0112 claim function for protocol 4.
@@ -678,6 +754,7 @@ REVOKE ALL ON TABLE public.capture_operations, public.capture_operation_cutoff
 FROM kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness;
 
 REVOKE ALL ON FUNCTION
+    public.claim_capture_publication_recovery(bytea, uuid),
     public.capture_publication_operation(bytea, uuid, boolean, boolean),
     public.begin_capture_publication(bytea, uuid, text),
     public.begin_cancel_capture_publication(bytea, uuid, text),
@@ -689,6 +766,7 @@ REVOKE ALL ON FUNCTION
 FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness;
 
 GRANT EXECUTE ON FUNCTION
+    public.claim_capture_publication_recovery(bytea, uuid),
     public.begin_capture_publication(bytea, uuid, text),
     public.begin_cancel_capture_publication(bytea, uuid, text),
     public.record_capture_publication_version(bytea, uuid, text, text),

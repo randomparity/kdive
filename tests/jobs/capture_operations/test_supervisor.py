@@ -850,6 +850,86 @@ def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
     ]
 
 
+def test_startup_recovery_sends_exited_operation_directly_to_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kdive.jobs.capture_operations import supervisor as supervisor_module
+    from kdive.jobs.capture_operations.repository import CaptureRecoveryCandidate
+
+    operation_id = uuid4()
+    candidate = CaptureRecoveryCandidate(
+        id=operation_id,
+        job_id=uuid4(),
+        job_attempt=1,
+        worker_incarnation="old-worker",
+        provider_kind="local-libvirt",
+        resource_id=uuid4(),
+        system_id=uuid4(),
+        domain_name="guest",
+        launch_token=None,
+        host_instance="host-a",
+        boot_id="boot-a",
+        pid=123,
+        start_ticks=456,
+        state="exited",
+    )
+    operation = _operation(_job_for_candidate(candidate), _request_for_candidate(candidate))
+    events: list[str] = []
+
+    async def candidates(*args: object) -> tuple[CaptureRecoveryCandidate, ...]:
+        return (candidate,)
+
+    async def claim(*args: object) -> CaptureOperation:
+        events.append("claim-publication")
+        return operation
+
+    async def reject_provider_recovery(*args: object) -> CaptureOperation:
+        raise AssertionError("provider recovery must not run for an exited operation")
+
+    async def recover_publication(*args: object) -> CaptureOperation:
+        events.append("publication")
+        return cast(CaptureOperation, args[-1])
+
+    async def disposed(*args: object) -> CaptureOperation:
+        events.append("record-spool")
+        return cast(CaptureOperation, args[-1])
+
+    monkeypatch.setattr(supervisor_module, "list_recovery_candidates", candidates)
+    monkeypatch.setattr(supervisor_module, "claim_publication_recovery", claim)
+    monkeypatch.setattr(supervisor_module, "recover_operation", reject_provider_recovery)
+    monkeypatch.setattr(supervisor_module, "recover_publication", recover_publication)
+    monkeypatch.setattr(supervisor_module, "record_spool_disposed", disposed)
+
+    class _Pool:
+        def connection(self) -> object:
+            class _Context:
+                async def __aenter__(self) -> object:
+                    return object()
+
+                async def __aexit__(self, *args: object) -> None:
+                    return None
+
+            return _Context()
+
+    summary = asyncio.run(
+        recover_capture_operations(
+            cast(AsyncConnectionPool, _Pool()),
+            cast(ProviderResolver, SimpleNamespace()),
+            cast(Any, SimpleNamespace()),
+            cast(
+                CaptureOperationSupervisor,
+                SimpleNamespace(
+                    dispose_recovery_spool=lambda operation_id: events.append("spool") or True
+                ),
+            ),
+            "host-a",
+            SecretStr("replacement"),
+        )
+    )
+    assert summary == RecoverySummary(scanned=1, recovered=1, pending=0)
+    assert events == ["claim-publication", "publication", "spool", "record-spool"]
+
+
 def _job_for_candidate(candidate: Any) -> Job:
     job = _job()
     return job.model_copy(update={"id": candidate.job_id, "attempt": candidate.job_attempt})

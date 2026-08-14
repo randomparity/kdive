@@ -41,6 +41,7 @@ from kdive.jobs.capture_operations.repository import (
     CaptureRecoveryCandidate,
     RecoveryEvidence,
     acknowledge_exit,
+    claim_publication_recovery,
     create_launching,
     list_recovery_candidates,
     mark_running,
@@ -645,6 +646,8 @@ async def recover_capture_operations(
                     if evidence is None:
                         continue
                     operation = await recover_operation(conn, credential, candidate.id, evidence)
+                elif candidate.state == "exited":
+                    operation = await claim_publication_recovery(conn, credential, candidate.id)
                 else:
                     operation = await _recover_identified(
                         conn, resolver, host_identity, credential, candidate
