@@ -22,7 +22,11 @@ from pydantic import SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
-from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher, LaunchedCapture
+from kdive.jobs.capture_operations.launcher import (
+    GatedCaptureLauncher,
+    LaunchAbortEvidence,
+    LaunchedCapture,
+)
 from kdive.jobs.capture_operations.linux_identity import LinuxIdentity, scan_launch_token
 from kdive.jobs.capture_operations.protocol import CaptureRequest
 from kdive.jobs.capture_operations.repository import (
@@ -201,7 +205,13 @@ class CaptureOperationSupervisor:
         launched: LaunchedCapture | None = None
         operation: CaptureOperation | None = None
         configuration: bytes | None = None
+        launch_abort: LaunchAbortEvidence | None = None
         acknowledged = False
+
+        def record_launch_abort(evidence: LaunchAbortEvidence) -> None:
+            nonlocal launch_abort
+            launch_abort = evidence
+
         try:
             async with _capture_job_fence(conn, job.id):
                 operation = await create_launching(
@@ -211,7 +221,9 @@ class CaptureOperationSupervisor:
                     job.attempt,
                     _repository_snapshot(snapshot, request),
                 )
-                launched = await self._launcher.launch(request, operation)
+                launched = await self._launcher.launch(
+                    request, operation, on_abort=record_launch_abort
+                )
                 await record_identity(
                     conn, self._credential, operation.id, _identity(operation, launched)
                 )
@@ -234,15 +246,21 @@ class CaptureOperationSupervisor:
                 return self._consume_result(launched, request)
         except asyncio.CancelledError:
             if not acknowledged:
-                await self._cleanup_started(conn, operation, launched, snapshot, configuration)
+                await self._cleanup_started(
+                    conn, operation, launched, launch_abort, snapshot, configuration
+                )
             raise
         except CaptureAuthorityLost as error:
             if not acknowledged:
-                await self._cleanup_started(conn, operation, launched, snapshot, configuration)
+                await self._cleanup_started(
+                    conn, operation, launched, launch_abort, snapshot, configuration
+                )
             raise _authority_error() from error
         except Exception:
             if not acknowledged:
-                await self._cleanup_started(conn, operation, launched, snapshot, configuration)
+                await self._cleanup_started(
+                    conn, operation, launched, launch_abort, snapshot, configuration
+                )
             raise
 
     async def _cleanup_started(
@@ -250,15 +268,36 @@ class CaptureOperationSupervisor:
         conn: AsyncConnection,
         operation: CaptureOperation | None,
         launched: LaunchedCapture | None,
+        launch_abort: LaunchAbortEvidence | None,
         snapshot: CaptureSnapshot,
         configuration: bytes | None,
     ) -> None:
-        if operation is None or launched is None:
+        if operation is None:
             return
         try:
+            if launched is None:
+                if launch_abort is None:
+                    return
+                async with self._transition_connection(conn) as transition:
+                    await acknowledge_exit(
+                        transition,
+                        self._credential,
+                        operation.id,
+                        RecoveryEvidence(
+                            process_absent=launch_abort.process_absent,
+                            provider_quiescence=dict(launch_abort.provider_quiescence),
+                            exit_outcome=launch_abort.exit_outcome,
+                            exit_code=launch_abort.exit_code,
+                        ),
+                    )
+                return
             await self._cancel_and_acknowledge(conn, operation, launched, snapshot, configuration)
-        except Exception:
-            _log.exception("capture operation %s cleanup did not complete", operation.id)
+        except Exception as error:
+            _log.warning(
+                "capture operation %s cleanup did not complete (%s)",
+                operation.id,
+                type(error).__name__,
+            )
 
     async def _wait_for_exit(self, conn: AsyncConnection, launched: LaunchedCapture) -> int:
         process = asyncio.create_task(launched.wait_process())

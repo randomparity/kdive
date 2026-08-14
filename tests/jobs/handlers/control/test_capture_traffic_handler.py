@@ -461,7 +461,8 @@ def test_non_ready_system_pins_changed_state_error(
 
     err, run_id = asyncio.run(_go())
     assert err.category is ErrorCategory.CONFIGURATION_ERROR
-    assert str(err) == "run's system left the ready local-libvirt state during traffic capture"
+    assert str(err) == "run's system left a ready state or supported traffic-capture provider"
+    assert "local-libvirt" not in str(err)
     assert err.details == {"reason": "system_changed_state", "run_id": run_id}
 
 

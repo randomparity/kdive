@@ -106,7 +106,7 @@ async def run_capture_loop(
 
 def _changed_state_error(run_id: UUID) -> CategorizedError:
     return CategorizedError(
-        "run's system left the ready local-libvirt state during traffic capture",
+        "run's system left a ready state or supported traffic-capture provider",
         category=ErrorCategory.CONFIGURATION_ERROR,
         details={"reason": "system_changed_state", "run_id": str(run_id)},
     )
@@ -115,7 +115,7 @@ def _changed_state_error(run_id: UUID) -> CategorizedError:
 async def _snapshot(
     conn: AsyncConnection, run_id: UUID, resolver: ProviderResolver
 ) -> CaptureSnapshot:
-    """Under the per-Run lock (tx 1): verify Run→System is READY+local and resolve the capturer."""
+    """Verify a ready Run→System uses a supported provider and resolve its capturer."""
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
         run = await RUNS.get(conn, run_id)
         if run is None or run.system_id is None:

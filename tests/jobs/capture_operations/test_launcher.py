@@ -17,7 +17,11 @@ import pytest
 
 from kdive.jobs.capture_operations import launcher as launcher_module
 from kdive.jobs.capture_operations import linux_identity as linux_identity_module
-from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher, LaunchedCapture
+from kdive.jobs.capture_operations.launcher import (
+    GatedCaptureLauncher,
+    LaunchAbortEvidence,
+    LaunchedCapture,
+)
 from kdive.jobs.capture_operations.protocol import CaptureRequest
 from kdive.jobs.capture_operations.repository import CaptureOperation
 from kdive.providers.ports.traffic import LocalCaptureConfiguration
@@ -68,6 +72,19 @@ def _operation(request: CaptureRequest) -> CaptureOperation:
         cancel_requested_at=None,
         exited_at=None,
         updated_at=now,
+    )
+
+
+def _before_spawn_evidence() -> LaunchAbortEvidence:
+    return LaunchAbortEvidence(
+        process_created=False,
+        process_absent=True,
+        provider_quiescence={
+            "evidence_kind": "spawn_not_created_v1",
+            "process_created": False,
+        },
+        exit_outcome="aborted_before_spawn",
+        exit_code=None,
     )
 
 
@@ -243,15 +260,18 @@ def test_manifest_mode_and_fingerprint_drift_fail_before_spawn(
         interpreter=Path(sys.executable),
         expected_manifest_uid=os.getuid(),
     )
+    aborts: list[LaunchAbortEvidence] = []
     os.chmod(manifest, 0o600)
     with pytest.raises(PermissionError, match="0644"):
-        asyncio.run(launcher.launch(request, operation))
+        asyncio.run(launcher.launch(request, operation, on_abort=aborts.append))
+    assert aborts == [_before_spawn_evidence()]
 
     os.chmod(manifest, 0o644)
     data = manifest.read_text()
     manifest.write_text(data.replace('"sha256":"', '"sha256":"0', 1))
     with pytest.raises(RuntimeError, match="fingerprint"):
-        asyncio.run(launcher.launch(request, operation))
+        asyncio.run(launcher.launch(request, operation, on_abort=aborts.append))
+    assert aborts == [_before_spawn_evidence(), _before_spawn_evidence()]
 
 
 def test_result_reader_rejects_symlink_and_oversize(tmp_path: Path, manifest: Path) -> None:
@@ -388,10 +408,19 @@ def test_spawn_failure_closes_gate_and_never_releases(
     async def _fail_spawn(*_args: object, **_kwargs: object) -> None:
         raise OSError("spawn fault")
 
+    aborts: list[LaunchAbortEvidence] = []
     monkeypatch.setattr(launcher_module.asyncio, "create_subprocess_exec", _fail_spawn)
     with pytest.raises(OSError, match="spawn fault"):
-        asyncio.run(launcher.launch(request, operation))
+        asyncio.run(launcher.launch(request, operation, on_abort=aborts.append))
     assert not (tmp_path / "runtime" / str(operation.id) / "result.json").exists()
+    assert len(aborts) == 1
+    assert aborts[0].process_created is False
+    assert aborts[0].process_absent is True
+    assert aborts[0].exit_outcome == "aborted_before_spawn"
+    assert aborts[0].provider_quiescence == {
+        "evidence_kind": "spawn_not_created_v1",
+        "process_created": False,
+    }
 
 
 @pytest.mark.parametrize("fault", ["stat", "pidfd", "process-group"])
@@ -407,20 +436,38 @@ def test_post_spawn_attestation_faults_abort_before_release(
         expected_manifest_uid=os.getuid(),
     )
     if fault == "stat":
+        original_read = launcher_module.LinuxIdentity.read
+        read_calls = 0
+
+        def _fail_first_read(pid: int, *, host_instance: str) -> object:
+            nonlocal read_calls
+            read_calls += 1
+            if read_calls == 1:
+                raise RuntimeError(f"stat fault on {host_instance}")
+            return original_read(pid, host_instance=host_instance)
+
         monkeypatch.setattr(
             launcher_module.LinuxIdentity,
             "read",
-            lambda _pid, *, host_instance: (_ for _ in ()).throw(
-                RuntimeError(f"stat fault on {host_instance}")
-            ),
+            _fail_first_read,
         )
     elif fault == "pidfd":
+        original_open_pidfd = launcher_module.LinuxIdentity.open_pidfd
+        pidfd_calls = 0
+
+        def _fail_first_pidfd(
+            identity: launcher_module.LinuxIdentity, *, current_host_instance: str
+        ) -> int:
+            nonlocal pidfd_calls
+            pidfd_calls += 1
+            if pidfd_calls == 1:
+                raise OSError(f"pidfd fault on {current_host_instance}")
+            return original_open_pidfd(identity, current_host_instance=current_host_instance)
+
         monkeypatch.setattr(
             launcher_module.LinuxIdentity,
             "open_pidfd",
-            lambda _self, *, current_host_instance: (_ for _ in ()).throw(
-                OSError(f"pidfd fault on {current_host_instance}")
-            ),
+            _fail_first_pidfd,
         )
     else:
         group_scans = 0
@@ -438,9 +485,24 @@ def test_post_spawn_attestation_faults_abort_before_release(
 
         monkeypatch.setattr(launcher_module, "_process_group_members", _extra_member)
 
+    aborts: list[LaunchAbortEvidence] = []
     with pytest.raises((OSError, RuntimeError), match=fault.replace("-", " ")):
-        asyncio.run(launcher.launch(request, operation))
+        asyncio.run(launcher.launch(request, operation, on_abort=aborts.append))
     assert not (tmp_path / "runtime" / str(operation.id) / "result.json").exists()
+    assert len(aborts) == 1
+    abort = aborts[0]
+    assert abort.process_created is True
+    assert abort.process_absent is True
+    assert abort.exit_outcome == "aborted_before_identity"
+    assert abort.provider_quiescence == {
+        "evidence_kind": "closed_gate_boundary_token_scan_v1",
+        "gate_closed": True,
+        "boundary_scan_complete": True,
+        "boundary_processes_absent": True,
+        "host_instance": operation.host_instance,
+        "launch_token": operation.launch_token,
+        "launch_token_absent": True,
+    }
 
 
 def test_stale_post_spawn_numeric_identity_never_signals_unrelated_group(

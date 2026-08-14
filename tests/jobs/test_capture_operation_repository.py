@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import replace
+from datetime import UTC, datetime
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -13,7 +16,14 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from kdive.db import migrate
+from kdive.domain.capacity.state import JobState
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
+from kdive.jobs.capture_operations.launcher import (
+    GatedCaptureLauncher,
+    LaunchAbortEvidence,
+)
+from kdive.jobs.capture_operations.protocol import CaptureRequest
 from kdive.jobs.capture_operations.repository import (
     CaptureOperation,
     CaptureOperationIdentity,
@@ -27,6 +37,7 @@ from kdive.jobs.capture_operations.repository import (
     recover_operation,
     request_cancel,
 )
+from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor, CaptureSnapshot
 from tests.reconciler.conftest import connect
 
 
@@ -636,6 +647,129 @@ def test_capture_retry_is_not_charged_until_prior_evidence_is_complete(
                 worker_id,
                 incarnation_credential=credential,
             )
+            assert claimed is not None
+            assert claimed.attempt == 2
+        finally:
+            await worker.close()
+            await admin.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("process_created", "exit_outcome"),
+    [
+        (False, "aborted_before_spawn"),
+        (True, "aborted_before_identity"),
+    ],
+)
+def test_supervisor_terminalizes_clean_launch_abort_before_retry(
+    migrated_url: str,
+    process_created: bool,
+    exit_outcome: str,
+) -> None:
+    class _AbortingLauncher:
+        def __init__(self) -> None:
+            self.error = RuntimeError(f"{exit_outcome} launch fault")
+
+        async def launch(
+            self,
+            request: CaptureRequest,
+            operation: CaptureOperation,
+            *,
+            on_abort: Any = None,
+        ) -> None:
+            del request
+            assert on_abort is not None
+            provider_quiescence: dict[str, object]
+            if process_created:
+                provider_quiescence = {
+                    "evidence_kind": "closed_gate_boundary_token_scan_v1",
+                    "gate_closed": True,
+                    "boundary_scan_complete": True,
+                    "boundary_processes_absent": True,
+                    "host_instance": operation.host_instance,
+                    "launch_token": operation.launch_token,
+                    "launch_token_absent": True,
+                }
+            else:
+                provider_quiescence = {
+                    "evidence_kind": "spawn_not_created_v1",
+                    "process_created": False,
+                }
+            on_abort(
+                LaunchAbortEvidence(
+                    process_created=process_created,
+                    process_absent=True,
+                    provider_quiescence=provider_quiescence,
+                    exit_outcome=cast(Any, exit_outcome),
+                    exit_code=None,
+                )
+            )
+            raise self.error
+
+    async def _run() -> None:
+        admin = await connect(migrated_url)
+        worker_id = f"local:supervisor-{exit_outcome}"
+        credential = SecretStr(f"credential-{exit_outcome}")
+        await _register(admin, worker_id, credential)
+        job_id, seeded_snapshot = await _seed_job(admin, worker_id, credential)
+        request = CaptureRequest(
+            job_id=job_id,
+            provider_kind="local-libvirt",
+            resource_id=seeded_snapshot.resource_id,
+            system_id=seeded_snapshot.system_id,
+            domain_name=seeded_snapshot.domain_name,
+            snaplen=128,
+            max_bytes=1_048_576,
+            max_polls=1,
+        )
+        snapshot = replace(seeded_snapshot, request_digest=request.digest)
+        worker = await _as_role(migrated_url, "kdive_worker")
+        launcher = _AbortingLauncher()
+        supervisor = CaptureOperationSupervisor(
+            launcher=cast(GatedCaptureLauncher, launcher), credential=credential
+        )
+        job = Job(
+            id=job_id,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            kind=JobKind.CAPTURE_TRAFFIC,
+            state=JobState.RUNNING,
+            attempt=1,
+            max_attempts=3,
+            worker_id=worker_id,
+            authorizing={"principal": "principal", "agent_session": None, "project": "project"},
+            dedup_key=f"capture-{job_id}",
+        )
+        supervisor_snapshot = CaptureSnapshot(
+            provider_kind=snapshot.provider_kind,
+            resource_id=snapshot.resource_id,
+            system_id=snapshot.system_id,
+            domain_name=snapshot.domain_name,
+            project="project",
+            write_remediation="unused",
+            configuration=lambda: b"unused",
+            quiescence=cast(Any, lambda _configuration: None),
+        )
+        try:
+            with pytest.raises(RuntimeError) as raised:
+                await supervisor.execute(worker, job, supervisor_snapshot, request)
+            assert raised.value is launcher.error
+            row = await (
+                await admin.execute(
+                    "SELECT state, exit_outcome, process_absent FROM capture_operations "
+                    "WHERE job_id = %s",
+                    (job_id,),
+                )
+            ).fetchone()
+            assert row == ("exited", exit_outcome, True)
+            await admin.execute(
+                "UPDATE jobs SET lease_expires_at = clock_timestamp() - interval '1 second' "
+                "WHERE id = %s",
+                (job_id,),
+            )
+            claimed = await queue.dequeue(worker, worker_id, incarnation_credential=credential)
             assert claimed is not None
             assert claimed.attempt == 2
         finally:

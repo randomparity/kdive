@@ -11,11 +11,11 @@ import signal
 import site
 import stat
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from kdive.jobs.capture_operations.bootstrap_elf import runtime_elf_closure
 from kdive.jobs.capture_operations.linux_identity import LinuxIdentity, scan_launch_token
@@ -50,6 +50,60 @@ _ELF_FINGERPRINT_KINDS = {
     "bootstrap-extension",
 }
 _ELF_ROOT_KINDS = {"python-interpreter", "bootstrap-extension"}
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchAbortEvidence:
+    """Complete cleanup facts for a launch that raised before identity became durable."""
+
+    process_created: bool
+    process_absent: bool
+    provider_quiescence: Mapping[str, object]
+    exit_outcome: Literal["aborted_before_spawn", "aborted_before_identity"]
+    exit_code: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedLaunch:
+    interpreter: Path
+    attempt_dir: Path
+    gate_read: int
+    gate_write: int
+    argv: tuple[str, ...]
+    environment: dict[str, str]
+
+
+def _before_spawn_abort() -> LaunchAbortEvidence:
+    return LaunchAbortEvidence(
+        process_created=False,
+        process_absent=True,
+        provider_quiescence={
+            "evidence_kind": "spawn_not_created_v1",
+            "process_created": False,
+        },
+        exit_outcome="aborted_before_spawn",
+        exit_code=None,
+    )
+
+
+def _after_spawn_abort(
+    operation: CaptureOperation, process: asyncio.subprocess.Process
+) -> LaunchAbortEvidence:
+    return LaunchAbortEvidence(
+        process_created=True,
+        process_absent=True,
+        provider_quiescence={
+            "evidence_kind": "closed_gate_boundary_token_scan_v1",
+            "gate_closed": True,
+            "boundary_scan_complete": True,
+            "boundary_processes_absent": True,
+            "host_instance": operation.host_instance,
+            "launch_token": operation.launch_token,
+            "launch_token_absent": True,
+        },
+        exit_outcome="aborted_before_identity",
+        exit_code=process.returncode,
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -686,14 +740,13 @@ async def _cleanup_failed_launch(
         await _signal_and_wait_exact(handles, process)
         _close_process_handles(handles)
         handles = {}
-        if used_recovery:
-            await _confirm_launch_absence(
-                process.pid,
-                launch_token=launch_token,
-                interpreter=interpreter,
-                host_instance=host_instance,
-                recover_group=recover_group,
-            )
+        await _confirm_launch_absence(
+            process.pid,
+            launch_token=launch_token,
+            interpreter=interpreter,
+            host_instance=host_instance,
+            recover_group=recover_group,
+        )
     finally:
         if handles:
             _close_process_handles(handles)
@@ -927,8 +980,9 @@ class GatedCaptureLauncher:
         ):
             raise ValueError("durable launch token is not 256-bit lowercase hexadecimal")
 
-    async def launch(self, request: CaptureRequest, operation: CaptureOperation) -> LaunchedCapture:
-        """Spawn, attest, and return a child whose provider gate remains unreleased."""
+    def _prepare_launch(
+        self, request: CaptureRequest, operation: CaptureOperation
+    ) -> _PreparedLaunch:
         self._validate_request(operation, request)
         verify_capture_bootstrap_manifest(
             self._manifest_path,
@@ -938,33 +992,56 @@ class GatedCaptureLauncher:
         interpreter = self._interpreter.resolve(strict=True)
         attempt_dir = self._attempt_directory(operation, request)
         gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
-        argv = (
-            str(interpreter),
-            "-S",
-            "-m",
-            "kdive.capture_bootstrap",
-            "--launch-token",
-            operation.launch_token,
-            "--gate-fd",
-            str(gate_read),
+        return _PreparedLaunch(
+            interpreter=interpreter,
+            attempt_dir=attempt_dir,
+            gate_read=gate_read,
+            gate_write=gate_write,
+            argv=(
+                str(interpreter),
+                "-S",
+                "-m",
+                "kdive.capture_bootstrap",
+                "--launch-token",
+                operation.launch_token,
+                "--gate-fd",
+                str(gate_read),
+            ),
+            environment=self._child_environment(),
         )
-        environment = self._child_environment()
+
+    async def launch(
+        self,
+        request: CaptureRequest,
+        operation: CaptureOperation,
+        *,
+        on_abort: Callable[[LaunchAbortEvidence], None] | None = None,
+    ) -> LaunchedCapture:
+        """Spawn, attest, and return a child whose provider gate remains unreleased."""
+        try:
+            prepared = self._prepare_launch(request, operation)
+        except BaseException:
+            if on_abort is not None:
+                on_abort(_before_spawn_abort())
+            raise
         try:
             process = await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=attempt_dir,
-                env=environment,
-                pass_fds=(gate_read,),
+                *prepared.argv,
+                cwd=prepared.attempt_dir,
+                env=prepared.environment,
+                pass_fds=(prepared.gate_read,),
                 start_new_session=True,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
         except BaseException:
-            os.close(gate_read)
-            os.close(gate_write)
+            os.close(prepared.gate_read)
+            os.close(prepared.gate_write)
+            if on_abort is not None:
+                on_abort(_before_spawn_abort())
             raise
-        os.close(gate_read)
+        os.close(prepared.gate_read)
         assert process.stdout is not None
         identity: LinuxIdentity | None = None
         pidfd: int | None = None
@@ -990,13 +1067,13 @@ class GatedCaptureLauncher:
                     raise RuntimeError("capture child task set was not empty at handoff")
                 await asyncio.sleep(0)
         except BaseException as launch_error:
-            os.close(gate_write)
+            os.close(prepared.gate_write)
             leader = (identity, pidfd) if identity is not None and pidfd is not None else None
             try:
                 await _cleanup_failed_launch(
                     process,
                     launch_token=operation.launch_token,
-                    interpreter=interpreter,
+                    interpreter=prepared.interpreter,
                     host_instance=operation.host_instance,
                     leader=leader,
                     process_members=process_members,
@@ -1004,14 +1081,16 @@ class GatedCaptureLauncher:
                 )
             except BaseException as cleanup_error:
                 raise cleanup_error from launch_error
+            if on_abort is not None:
+                on_abort(_after_spawn_abort(operation, process))
             raise
         assert identity is not None and pidfd is not None
         return LaunchedCapture(
             process=process,
             identity=identity,
             pidfd=pidfd,
-            gate_fd=gate_write,
-            attempt_dir=attempt_dir,
-            argv=argv,
-            environment=environment,
+            gate_fd=prepared.gate_write,
+            attempt_dir=prepared.attempt_dir,
+            argv=prepared.argv,
+            environment=prepared.environment,
         )

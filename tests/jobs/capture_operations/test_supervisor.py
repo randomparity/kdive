@@ -174,7 +174,14 @@ class _Launcher:
     def __init__(self, launched: _Launched) -> None:
         self.launched = launched
 
-    async def launch(self, request: CaptureRequest, operation: CaptureOperation) -> _Launched:
+    async def launch(
+        self,
+        request: CaptureRequest,
+        operation: CaptureOperation,
+        *,
+        on_abort: object = None,
+    ) -> _Launched:
+        del on_abort
         assert operation.request_digest == request.digest
         return self.launched
 
