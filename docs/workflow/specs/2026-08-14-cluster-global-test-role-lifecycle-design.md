@@ -71,17 +71,20 @@ migration failure.
 
 ## Verification
 
-- An integration test takes the cluster-global lock through one target database's server URL,
-  signals after acquisition, proves a contender process using the fixture's exact helper and key
-  cannot begin a conflicting role operation until release, then proves it enters after release.
+- A deterministic two-process integration test provisions two target databases on one server. The
+  holder enters the actual `pg_conn` lifecycle boundary and signals after acquisition. The
+  contender calls the real migration runner through the other database and must remain before
+  migration 0104's cluster-global role work until release, then finish successfully. Disabling the
+  fixture boundary makes the ordering assertion fail, proving the regression test bites.
+- Fixture-wiring tests separately prove `pg_conn` holds the helper across the consuming test and
+  `_migrated_db` calls the same helper around its actual `apply_migrations` and snapshot sequence.
 - A timeout test holds the lock, gives a contender a test-shortened acquisition limit, and checks
   that the error names the maintenance database, lock key, blocking backend, and recovery action.
-- A fixture test proves `pg_conn` holds the named lock throughout the consuming test, not only while
-  resetting the schema.
-- A fixture test proves `_migrated_db` uses the same named boundary while migrations execute and
-  does not retain it while ordinary migrated tests run.
-- Focused migration and runtime-role tests run with 16 xdist workers repeatedly.
-- `just ci` passes from a clean tracked tree.
+- Focused migration and runtime-role tests pass five consecutive times with 16 xdist workers and no
+  retries.
+- Three consecutive bare `just ci` runs pass from a clean tracked tree, with no setup errors,
+  failures, or retrying an unchanged failed run. Each run uses the recipe's configured xdist
+  parallelism; all three must pass before completion is claimed.
 
 ## Alternatives
 
