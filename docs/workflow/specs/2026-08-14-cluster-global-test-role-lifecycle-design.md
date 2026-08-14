@@ -14,7 +14,8 @@ This design implements issue #1961 and is governed by
 - The host is `x86_64`; the project targets `x86_64` and `ppc64le`.
 - Preserve canonical runtime role names and migration 0104 semantics.
 - Preserve PostgreSQL transactionality; add no dependency or configuration.
-- Fix migration 0104's cross-database ordering rather than serializing the test suite.
+- Keep migration 0104 byte-immutable; close its cross-database window in the runner before it
+  executes.
 - The full repository guardrail is `just ci`; CI gates its constituent recipes individually.
 
 ## Evidence and cause
@@ -36,24 +37,22 @@ window its name claims to cover.
 
 ## Design
 
-Migration 0104 changes the order for each canonical role:
+`migrate.apply_migrations` detects a pending version 0104 immediately before executing its unchanged
+SQL. A narrow helper attempts `GRANT USAGE ON SCHEMA public` for the four canonical runtime roles.
+It ignores only `psycopg.errors.UndefinedObject`; every other database error propagates. The helper
+accepts a role-name tuple solely so the deterministic regression can use isolated names, while the
+production call passes one fixed module-level tuple.
 
-1. Attempt `GRANT USAGE ON SCHEMA public TO <role>` as the first role-specific operation.
-2. On `undefined_object`, create the exact required role. Continue to tolerate
-   `unique_violation` or `duplicate_object` from a concurrent creator.
-3. Retry the same grant after the create-or-concurrent-create path.
-4. Query the role attributes and memberships and raise the existing incompatibility error unless
-   they match exactly.
-
-For an existing compatible role, `GRANT` either wins and creates the dependency that blocks a
-concurrent drop, or loses to a completed drop and enters the create path. For an absent role, the
-creating transaction prevents a concurrent drop before its grant. For an incompatible role, the
-grant and later validation error share one transaction, so rollback removes the provisional ACL
-without exposing it to other sessions.
+The helper runs inside the same transaction and after the migration advisory lock is acquired. For
+an existing compatible role, `GRANT` creates the dependency that blocks a concurrent drop before
+0104 validates it. If a drop completes first, the helper observes an absent role and unchanged 0104
+follows its safe create-then-grant path. For an incompatible role, 0104's validation error rolls the
+provisional grant back without exposing it. The runner invokes no precondition when 0104 is already
+recorded, and its checksum behavior is unchanged.
 
 ## Failure handling
 
-The migration keeps the existing fail-closed behavior for a role with login, inheritance,
+Migration 0104 keeps the existing fail-closed behavior for a role with login, inheritance,
 privileged attributes, or memberships. Because the provisional grant is transactional, that error
 leaves neither the migration record nor the grant behind. A role dropped before the first grant is
 recreated with the exact required shape; a role whose drop loses to the grant remains protected by
@@ -61,18 +60,16 @@ the database dependency.
 
 ## Verification
 
-- Replace the misleading same-database regression with a two-database test that reads migration
-  0104's bytes, mechanically substitutes isolated runtime-role names, and asserts the expected
-  dependency-first statement order before inserting pause hooks. No test-only copy of the role
-  algorithm is permitted.
-- Its old-order control mechanically restores validate-then-grant ordering in that artifact,
-  pauses after validation, completes a drop from the other database, and must reproduce
-  `UndefinedObject` at `GRANT`.
-- Its drop-wins fixed arm completes the cross-database drop before the first grant, then proves the
-  actual migration recreates and grants the role and leaves its exact required shape and schema
-  dependency.
-- Its grant-wins fixed arm lets the grant establish the dependency first, then proves the
-  cross-database drop blocks and fails with `DependentObjectsStillExist` while migration completes.
+- Replace the misleading same-database regression with a two-database test that executes the narrow
+  runner precondition and migration 0104's real bytes after mechanical role-name substitution. No
+  test-only copy of 0104's role algorithm is permitted.
+- Its old-order control skips the precondition, pauses unchanged 0104 after validation, completes a
+  drop from the other database, and must reproduce `UndefinedObject` at `GRANT`.
+- Its drop-wins fixed arm completes the cross-database drop before the precondition grant, then
+  proves unchanged 0104 recreates and grants the role and leaves its exact required shape and
+  schema dependency.
+- Its grant-wins fixed arm lets the precondition grant establish the dependency first, then proves
+  the cross-database drop blocks and fails with `DependentObjectsStillExist` while 0104 completes.
 - The incompatible-role tests continue to prove that provisional grants roll back and that the
   pre-existing role and its privileges remain unchanged after rejection.
 - Focused migration and runtime-role tests pass five consecutive times with 16 xdist workers and no
@@ -84,8 +81,8 @@ the database dependency.
 ## Alternatives
 
 ADR-0560 records the rejected fixture serialization, maintenance-database locking, per-worker role
-rewriting, shorter-window, and do-nothing designs. Dependency-first ordering is the smallest change
-that makes the database operation itself safe in both tests and production.
+rewriting, historical migration edit, forward-only repair, shorter-window, and do-nothing designs.
+The pending-version runner precondition is the smallest immutable-compatible production fix.
 
 ## Durable workflow context
 
