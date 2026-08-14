@@ -52,6 +52,13 @@ The lock is session-owned by PostgreSQL. Normal fixture exit and abrupt process 
 close the guard connection and release it. A waiting worker blocks on the state transition it needs
 instead of sleeping or retrying on a guessed interval.
 
+Acquisition uses a 60-second PostgreSQL `statement_timeout`. The unit is seconds measured by the
+PostgreSQL server's elapsed-time clock, the scope is one attempt to acquire the cluster-global test
+lock, and expiry prevents entry and fails the fixture. The failure names the maintenance database,
+two-integer lock key, and any visible blocking backend identifiers. Recovery is to terminate the
+stuck test worker or allow it to exit, then rerun the failed test; the fixture does not steal a lock
+from a live holder.
+
 ## Failure handling
 
 Failure while the lock is held propagates unchanged after Python unwinds the context manager. No
@@ -65,8 +72,10 @@ migration failure.
 ## Verification
 
 - An integration test takes the cluster-global lock through one target database's server URL,
-  proves a contender derived from another target database cannot enter until release, then proves
-  it enters after release.
+  signals after acquisition, proves a contender process using the fixture's exact helper and key
+  cannot begin a conflicting role operation until release, then proves it enters after release.
+- A timeout test holds the lock, gives a contender a test-shortened acquisition limit, and checks
+  that the error names the maintenance database, lock key, blocking backend, and recovery action.
 - A fixture test proves `pg_conn` holds the named lock throughout the consuming test, not only while
   resetting the schema.
 - A fixture test proves `_migrated_db` uses the same named boundary while migrations execute and

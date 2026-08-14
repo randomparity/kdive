@@ -29,6 +29,18 @@ The lock uses a dedicated two-integer advisory-lock key reserved by the test fix
 test-infrastructure boundary only. Production migration behavior, runtime role names, and
 per-database migration locking remain unchanged.
 
+A deterministic multi-process regression uses the fixture's actual maintenance-database helper
+and lock key. One process signals only after it holds the lock; a second process must remain outside
+the conflicting role-lifecycle operation until the first releases, then must enter and finish. A
+different database or key therefore makes the regression fail instead of relying on stress timing.
+
+Each lock acquisition is bounded to 60 seconds of PostgreSQL server elapsed time, scoped to that
+single acquisition. On expiry the fixture fails instead of entering the protected operation and
+reports the maintenance database, lock key, visible blocking backend identifiers, and the recovery
+action: terminate the stuck test worker or let it exit, then rerun the failed test. The timeout does
+not repair a live holder; it makes that residual state observable and keeps the suite from waiting
+without a bound.
+
 ## Consequences
 
 Migration-focused tests that use `pg_conn` run serially across xdist workers and concurrent runs
@@ -36,7 +48,9 @@ sharing the server. Tests using an already-migrated database remain parallel aft
 once-per-worker migration completes. A process exit closes its guard connection and PostgreSQL
 releases the session lock, so an interrupted worker cannot permanently wedge the suite. The added
 serialization cost is not yet measured; it is bounded to migration-focused fixture lifetimes and
-is accepted because the issue requires deterministic full-suite runs.
+is accepted because the issue requires deterministic full-suite runs. A live hung holder can delay
+other migration-focused tests for at most the per-acquisition 60-second server-clock interval before
+they fail with the guard diagnostic; operator recovery is still required for that holder.
 
 The lock is intentionally broader than migration 0104: a test can execute migrations directly or
 temporarily alter a canonical role after the fixture yields, so locking only `apply_migrations`
