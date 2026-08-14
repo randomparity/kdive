@@ -3,19 +3,18 @@
 ## Goal
 
 Make parallel migration tests deterministic when xdist workers use separate databases on one
-disposable PostgreSQL cluster, without changing production migration or runtime-role behavior.
+PostgreSQL cluster, while preserving the production runtime-role shape and final privileges.
 
 This design implements issue #1961 and is governed by
-[ADR-0560](../../adr/0560-serialize-cluster-global-test-role-lifecycle.md).
+[ADR-0560](../../adr/0560-establish-runtime-role-dependency-before-validation.md).
 
 ## Scope and constraints
 
 - Python 3.14 and PostgreSQL 17 remain the test/runtime versions.
 - The host is `x86_64`; the project targets `x86_64` and `ppc64le`.
 - Preserve canonical runtime role names and migration 0104 semantics.
-- Use a PostgreSQL session advisory lock through the shared maintenance database; add no dependency
-  or configuration.
-- Serialize only fixture paths capable of changing cluster-global role state.
+- Preserve PostgreSQL transactionality; add no dependency or configuration.
+- Fix migration 0104's cross-database ordering rather than serializing the test suite.
 - The full repository guardrail is `just ci`; CI gates its constituent recipes individually.
 
 ## Evidence and cause
@@ -29,57 +28,47 @@ therefore manipulate the shared role lifecycle while a different worker migrates
 
 The original failure was intermittent: one full `just ci` produced 92 setup errors at migration
 0104's `GRANT ... TO kdive_server`, while an unchanged rerun passed. Five current 16-worker focused
-runs also passed. The absence of a deterministic failure under ordinary scheduling is consistent
-with, rather than contrary to, an unguarded cross-worker ordering. Repository search found no
-production or test path that intentionally drops a canonical role; the unsafe condition is that
-the fixture provides no ownership boundary for any cluster-global role operation.
+runs also passed. A controlled two-database experiment reproduced the exact error: migration 0104
+paused after validating a shared role but before granting it; `DROP ROLE` from the other database
+succeeded; and the resumed migration raised `UndefinedObject` at the grant. The current regression
+pauses after the entire `DO` block, when the grant already exists, and therefore cannot detect the
+window its name claims to cover.
 
 ## Design
 
-`tests/db/conftest.py` defines a context manager that derives the server's `postgres` maintenance
-database URL, opens a dedicated connection, and takes a session advisory lock using a two-integer
-key already reserved for migrations by ADR-0015. PostgreSQL includes the database identity in
-advisory lock scope, so every worker and concurrent run must use the same maintenance database
-rather than its separate target database. Closing the connection releases the lock.
+Migration 0104 changes the order for each canonical role:
 
-`pg_conn` acquires the PostgreSQL cluster-global lock before dropping `public`. It holds the lock
-across `yield`, so direct migration SQL, role alteration, and teardown performed by the consuming
-test remain inside the boundary. `_migrated_db` acquires the same lock around its one-time
-`apply_migrations` call and post-migration snapshot. It releases the lock before yielding the
-already-migrated URL, allowing ordinary service tests to retain xdist parallelism.
+1. Attempt `GRANT USAGE ON SCHEMA public TO <role>` as the first role-specific operation.
+2. On `undefined_object`, create the exact required role. Continue to tolerate
+   `unique_violation` or `duplicate_object` from a concurrent creator.
+3. Retry the same grant after the create-or-concurrent-create path.
+4. Query the role attributes and memberships and raise the existing incompatibility error unless
+   they match exactly.
 
-The lock is session-owned by PostgreSQL. Normal fixture exit and abrupt process termination both
-close the guard connection and release it. A waiting worker blocks on the state transition it needs
-instead of sleeping or retrying on a guessed interval.
-
-Acquisition uses a 60-second PostgreSQL `statement_timeout`. The unit is seconds measured by the
-PostgreSQL server's elapsed-time clock, the scope is one attempt to acquire the cluster-global test
-lock, and expiry prevents entry and fails the fixture. The failure names the maintenance database,
-two-integer lock key, and any visible blocking backend identifiers. Recovery is to terminate the
-stuck test worker or allow it to exit, then rerun the failed test; the fixture does not steal a lock
-from a live holder.
+For an existing compatible role, `GRANT` either wins and creates the dependency that blocks a
+concurrent drop, or loses to a completed drop and enters the create path. For an absent role, the
+creating transaction prevents a concurrent drop before its grant. For an incompatible role, the
+grant and later validation error share one transaction, so rollback removes the provisional ACL
+without exposing it to other sessions.
 
 ## Failure handling
 
-Failure while the lock is held propagates unchanged after Python unwinds the context manager. No
-state file or manual cleanup is required. A missing or unusable per-run root fails the fixture at
-lock acquisition rather than running without serialization.
-
-The fixture does not attempt to repair a role that another process removed. Its contract prevents
-supported test paths from overlapping; unexpected external cluster mutation remains a loud
-migration failure.
+The migration keeps the existing fail-closed behavior for a role with login, inheritance,
+privileged attributes, or memberships. Because the provisional grant is transactional, that error
+leaves neither the migration record nor the grant behind. A role dropped before the first grant is
+recreated with the exact required shape; a role whose drop loses to the grant remains protected by
+the database dependency.
 
 ## Verification
 
-- A deterministic two-process integration test provisions two target databases on one server. The
-  holder enters the actual `pg_conn` lifecycle boundary and signals after acquisition. The
-  contender calls the real migration runner through the other database and must remain before
-  migration 0104's cluster-global role work until release, then finish successfully. Disabling the
-  fixture boundary makes the ordering assertion fail, proving the regression test bites.
-- Fixture-wiring tests separately prove `pg_conn` holds the helper across the consuming test and
-  `_migrated_db` calls the same helper around its actual `apply_migrations` and snapshot sequence.
-- A timeout test holds the lock, gives a contender a test-shortened acquisition limit, and checks
-  that the error names the maintenance database, lock key, blocking backend, and recovery action.
+- Replace the misleading same-database regression with a two-database test using isolated runtime
+  role names. Its unlocked control pauses after validation, drops the role from the other database,
+  and must reproduce `UndefinedObject` at `GRANT`.
+- The fixed-path arm executes the dependency-first migration. Once the grant operation begins, the
+  cross-database drop must block and then fail with `DependentObjectsStillExist`; migration must
+  complete successfully.
+- The incompatible-role tests continue to prove that provisional grants roll back and that the
+  pre-existing role and its privileges remain unchanged after rejection.
 - Focused migration and runtime-role tests pass five consecutive times with 16 xdist workers and no
   retries.
 - Three consecutive bare `just ci` runs pass from a clean tracked tree, with no setup errors,
@@ -88,10 +77,9 @@ migration failure.
 
 ## Alternatives
 
-ADR-0560 records the rejected per-worker role rewriting, pre-creation, production-lock change,
-call-only lock, per-run filesystem lock, and do-nothing designs. The selected fixture-lifetime
-boundary is the smallest surface that covers direct SQL and role mutation, coordinates concurrent
-runs using the same cluster, and leaves already-migrated tests parallel.
+ADR-0560 records the rejected fixture serialization, maintenance-database locking, per-worker role
+rewriting, shorter-window, and do-nothing designs. Dependency-first ordering is the smallest change
+that makes the database operation itself safe in both tests and production.
 
 ## Durable workflow context
 
