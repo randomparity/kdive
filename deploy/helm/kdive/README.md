@@ -75,9 +75,10 @@ scripts/cutover-capture-protocol-helm.sh \
 Before mutation, the script freezes a flattened kubeconfig and context, cluster and workload
 identities, chart, values, exact upgrade-mode render, repository-matching image digest, release
 revision, and migration credential in a restricted cutover directory. Every later command consumes
-those snapshots. An attempt-unique Kubernetes-immutable Secret overrides the migration hook
-credential through completion and is removed only after its UID, bytes, and the successor release
-are proven.
+those snapshots. A mode-0400 password-free database URI and libpq passfile keep the owner DSN out
+of local `psql` and `pg_dump` argv and environment. An attempt-unique Kubernetes-immutable Secret
+overrides the migration hook credential through completion and is removed only after its UID,
+bytes, and the successor release are proven.
 
 The script retains the installed `worker.replicas`, scales the worker StatefulSet to zero, waits
 for every Pod finalizer and exact lifecycle-witness termination row, takes a custom-format backup,
@@ -91,7 +92,8 @@ pre-mutation failure does not stop workers; later failures leave workers at zero
 restricted recovery artifacts. Backup publication never replaces a
 destination that appears during the dump. After migration, never start a protocol-2 image;
 rollback means
-`pg_restore --clean --if-exists` from the named backup followed by the prior chart and image.
+the printed `pg_restore --clean --if-exists` command using the retained restricted passfile,
+followed by the prior chart and image. Retain the cutover directory through recovery.
 Migration 0112 records operation quiescence only; #1952 still gates publication closure and
 combined historical-capture coverage.
 

@@ -35,7 +35,7 @@ py="${repo_root}/.venv/bin/python"
 }
 : "${KDIVE_MIGRATION_DATABASE_URL:?set the explicit migration-owner database DSN}"
 [[ -n "$target_image" && "$target_image" != *[[:space:]]* ]] || usage
-for tool in docker gio helm kubectl ln mktemp pg_dump pg_restore psql timeout; do
+for tool in docker env gio helm kubectl ln mktemp pg_dump pg_restore psql timeout; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "${tool} is required before the cutover can scale workers" >&2
     exit 2
@@ -67,6 +67,7 @@ cleanup_preflight() {
   exit "$rc"
 }
 trap cleanup_preflight EXIT
+cutover_init_database_access "$KDIVE_MIGRATION_DATABASE_URL" "$work_dir" "$py"
 
 kube_context="$(cutover_bounded "Kubernetes context snapshot" \
   kubectl config current-context)"
@@ -423,7 +424,7 @@ cutover_bounded "frozen Helm upgrade server-side dry run" \
   --wait --timeout "${CUTOVER_OPERATION_TIMEOUT_SECONDS}s" \
   >"${work_dir}/upgrade-dry-run.txt"
 cutover_bounded "database lifecycle-authority preflight" \
-  psql "$KDIVE_MIGRATION_DATABASE_URL" --set ON_ERROR_STOP=1 --quiet \
+  "${CUTOVER_DATABASE_ENV[@]}" psql --set ON_ERROR_STOP=1 --quiet \
   --command "SELECT 1 FROM public.worker_incarnations LIMIT 1" \
   >"${work_dir}/database-authority"
 
@@ -535,8 +536,7 @@ print_phase_recovery() {
     echo "After success, verify the printed identities and remove the cutover Secret:" >&2
     print_successor_cleanup_commands >&2
     echo "Or rollback the database exactly before deploying the prior chart and image:" >&2
-    printf "  pg_restore --clean --if-exists --dbname=\"\$KDIVE_MIGRATION_DATABASE_URL\" %q\n" \
-      "$backup_path" >&2
+    cutover_print_restore_command "$backup_path" >&2
   else
     echo "Protocol 3 is installed; verify identities and remove the cutover Secret:" >&2
     print_successor_cleanup_commands >&2
@@ -605,7 +605,7 @@ WHERE fence_protocol < 3 AND authority_kind = 'kubernetes'
   AND authority_binding ->> 'uid' = :'pod_uid'
   AND state = 'terminated' AND terminated_at IS NOT NULL AND outcome IS NOT NULL"
   termination_count="$(cutover_bounded "exact lifecycle termination witness" \
-    psql "$KDIVE_MIGRATION_DATABASE_URL" --set ON_ERROR_STOP=1 \
+    "${CUTOVER_DATABASE_ENV[@]}" psql --set ON_ERROR_STOP=1 \
     --tuples-only --no-align --set "pod_name=${pod_name}" --set "pod_uid=${pod_uid}" \
     --set "namespace=${namespace}" --command "$witness_sql")"
   [[ "$termination_count" == 1 ]] || {
@@ -625,7 +625,7 @@ WHERE fence_protocol < 3 AND authority_kind = 'kubernetes'
   AND (state <> 'terminated' OR terminated_at IS NULL OR outcome IS NULL
     OR jsonb_typeof(authority_binding -> 'uid') IS DISTINCT FROM 'string')"
 legacy_blockers="$(cutover_bounded "complete legacy Kubernetes incarnation witness" \
-  psql "$KDIVE_MIGRATION_DATABASE_URL" --set ON_ERROR_STOP=1 --tuples-only --no-align \
+  "${CUTOVER_DATABASE_ENV[@]}" psql --set ON_ERROR_STOP=1 --tuples-only --no-align \
   --set "namespace=${namespace}" --set "worker_name=${worker_name}" \
   --command "$complete_witness_sql")"
 [[ -z "$legacy_blockers" ]] || {
@@ -637,7 +637,7 @@ phase=backup
 current_identity
 current_cutover_secret
 cutover_prepare_backup "$backup_path"
-cutover_publish_backup "$backup_path" "$KDIVE_MIGRATION_DATABASE_URL"
+cutover_publish_backup "$backup_path"
 phase=upgrade
 current_identity
 current_cutover_secret

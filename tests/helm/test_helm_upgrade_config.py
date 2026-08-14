@@ -397,6 +397,9 @@ fi
     _write_tool(
         bin_dir / "psql",
         """
+printf 'psql argv=%s pgdatabase=%s pgpassfile=%s kdive=%s migration=%s\n' \
+  "$*" "${PGDATABASE:-}" "${PGPASSFILE:-}" "${KDIVE_DATABASE_URL:-}" \
+  "${KDIVE_MIGRATION_DATABASE_URL:-}" >>"$CUTOVER_TEST_LOG"
 if [[ "$*" == *coalesce* && -n "${CUTOVER_TEST_NEIGHBOR_BLOCKER:-}" ]]; then
   if [[ "$*" != *"'^[0-9]+$'"* ]]; then
     printf '%s\n' "$CUTOVER_TEST_NEIGHBOR_BLOCKER"
@@ -411,7 +414,9 @@ fi
     _write_tool(
         bin_dir / "pg_dump",
         """
-printf 'pg_dump %s\n' "$*" >>"$CUTOVER_TEST_LOG"
+printf 'pg_dump argv=%s pgdatabase=%s pgpassfile=%s kdive=%s migration=%s\n' \
+  "$*" "${PGDATABASE:-}" "${PGPASSFILE:-}" "${KDIVE_DATABASE_URL:-}" \
+  "${KDIVE_MIGRATION_DATABASE_URL:-}" >>"$CUTOVER_TEST_LOG"
 for argument in "$@"; do
   case "$argument" in --file=*) : >"${argument#--file=}" ;; esac
 done
@@ -561,6 +566,22 @@ def test_helm_preflight_and_upgrade_use_exact_upgrade_mode(tmp_path: Path) -> No
     assert secret["metadata"]["name"].startswith("kdive-cutover-")
 
 
+def test_helm_database_processes_never_receive_owner_dsn(tmp_path: Path) -> None:
+    env, log, values, backup, _supplied = _helm_mismatch_environment(tmp_path, matching_dsn=True)
+
+    result = _run_fake_helm_cutover(env, values, backup)
+
+    assert result.returncode == 0, result.stderr
+    database_calls = "\n".join(
+        line
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.startswith(("psql ", "pg_dump "))
+    )
+    assert "release-sentinel" not in database_calls
+    assert "pgpassfile=" in database_calls
+    assert "pgdatabase=postgresql://operator@db.example/kdive" in database_calls
+
+
 def test_helm_full_permission_preflight_denial_never_mutates(tmp_path: Path) -> None:
     env, log, values, backup, _supplied = _helm_mismatch_environment(tmp_path, matching_dsn=True)
     env["CUTOVER_TEST_DENIED_PERMISSION"] = "delete jobs.batch"
@@ -630,4 +651,6 @@ def test_helm_upgrade_failure_prints_exact_resume_and_rollback(tmp_path: Path) -
     assert "helm --kubeconfig" in result.stderr
     assert "delete secret kdive-cutover-" in result.stderr
     assert "pg_restore --clean --if-exists" in result.stderr
-    assert 'dbname="$KDIVE_MIGRATION_DATABASE_URL"' in result.stderr
+    assert "PGPASSFILE=" in result.stderr
+    assert "postgresql://operator@db.example/kdive" in result.stderr
+    assert "release-sentinel" not in result.stdout + result.stderr

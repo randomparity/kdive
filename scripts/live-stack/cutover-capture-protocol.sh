@@ -33,13 +33,31 @@ backup_parent="$(dirname -- "$backup_path")"
   echo "no venv python at ${py}; run 'just setup' first" >&2
   exit 2
 }
-for tool in awk gio ln mktemp nohup pg_dump pg_restore ps setsid sleep timeout; do
+for tool in awk env gio ln mktemp nohup pg_dump pg_restore ps setsid sleep timeout; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "${tool} is required before the cutover can stop workers" >&2
     exit 2
   }
 done
 cutover_init_contract
+
+work_dir="$(mktemp -d "${backup_parent}/.kdive-host-cutover.XXXXXX")"
+chmod 0700 "$work_dir"
+cleanup_work() {
+  [[ ! -e "$work_dir" ]] || gio trash "$work_dir" >/dev/null 2>&1 || {
+    echo "restricted host cutover snapshot retained at: ${work_dir}" >&2
+    return 0
+  }
+}
+cleanup_preflight() {
+  local rc=$?
+  trap - EXIT
+  set +e
+  cleanup_work
+  exit "$rc"
+}
+trap cleanup_preflight EXIT
+cutover_init_database_access "$KDIVE_DATABASE_URL" "$work_dir" "$py"
 
 mapfile -t initial_daemon_pids < <(daemon_pids)
 for pid in "${initial_daemon_pids[@]}"; do
@@ -52,6 +70,7 @@ done
 # Validate that every recorded legacy incarnation belongs to this authority before stopping.
 cutover_bounded "database local-authority preflight" \
   "$py" -m kdive.processes.lifecycle.worker_incarnation check-local-cutover-authority
+trap - EXIT
 
 phase=precondition
 recovery() {
@@ -71,8 +90,7 @@ recovery() {
   if [[ "$phase" == post-migration ]]; then
     echo "Protocol 3 may be installed. Do not restart a protocol-2 worker." >&2
     echo "Rollback database exactly with:" >&2
-    printf "  pg_restore --clean --if-exists --dbname=\"\$KDIVE_DATABASE_URL\" %q\n" \
-      "$backup_path" >&2
+    cutover_print_restore_command "$backup_path" >&2
     echo "Then deploy the prior binary before starting its workers." >&2
   elif [[ "$phase" == migration ]]; then
     echo "The named backup is complete; correct the blocker and resume with:" >&2
@@ -88,6 +106,7 @@ recovery() {
     echo "Correct the named blocker and rerun the same command:" >&2
     printf '  scripts/live-stack/cutover-capture-protocol.sh %q\n' "$backup_path" >&2
   fi
+  echo "restricted host cutover snapshot retained at: ${work_dir}" >&2
 }
 
 on_exit() {
@@ -118,11 +137,12 @@ cutover_bounded "database local-termination persistence" \
 
 phase=backup
 cutover_prepare_backup "$backup_path"
-cutover_publish_backup "$backup_path" "$KDIVE_DATABASE_URL"
+cutover_publish_backup "$backup_path"
 phase=migration
 cutover_bounded "host database migration" "$py" -m kdive migrate
 phase=post-migration
 restart_host_processes
 phase=complete
 trap - EXIT
+cleanup_work
 echo "protocol 3 cutover complete; backup retained at ${backup_path}"

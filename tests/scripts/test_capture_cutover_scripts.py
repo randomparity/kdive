@@ -27,6 +27,20 @@ CHANGED_CUTOVER_SURFACE = (
 UNTOUCHED_PYTHON_COMPLEXITY_BASELINE = {
     ("tests/compose/test_compose_worker_lifecycle_live.py", "_cleanup_isolated_stack"): 18,
 }
+DATABASE_PROCESS_LOG = """printf \
+'%s argv=%s pgdatabase=%s pgpassfile=%s kdive=%s migration=%s\\n' \
+  \"${0##*/}\" \"$*\" \"${PGDATABASE:-}\" \"${PGPASSFILE:-}\" \"${KDIVE_DATABASE_URL:-}\" \
+  \"${KDIVE_MIGRATION_DATABASE_URL:-}\" >>\"$CUTOVER_TEST_LOG\"
+"""
+DATABASE_DUMP_TOOL = (
+    DATABASE_PROCESS_LOG
+    + """
+for argument in "$@"; do
+  case "$argument" in --file=*) output=${argument#--file=} ;; esac
+done
+printf 'valid custom dump' >"$output"
+"""
+)
 
 
 def _executable(path: Path, body: str) -> None:
@@ -39,6 +53,7 @@ def _compose_stub_environment(
     *,
     pull_status: int = 0,
     migrate_status: int = 0,
+    start_status: int = 0,
     restore_list_status: int = 0,
     survivors: str = "",
     psql_body: str = "cat >/dev/null",
@@ -94,11 +109,13 @@ esac
 printf 'just %s file=%s project=%s\n' "$*" "${{COMPOSE_FILE:-}}" \
   "${{COMPOSE_PROJECT_NAME:-}}" >>"$CUTOVER_TEST_LOG"
 {just_switch_command}
+[[ "$*" != "compose-up" ]] || exit {start_status}
 """,
     )
     _executable(
         bin_dir / "psql",
         f"""
+{DATABASE_PROCESS_LOG}
 if [[ "$*" == *pg_control_system* ]]; then
   {host_identity_command}
 else
@@ -106,15 +123,7 @@ else
 fi
 """,
     )
-    _executable(
-        bin_dir / "pg_dump",
-        """
-for argument in "$@"; do
-  case "$argument" in --file=*) output=${argument#--file=} ;; esac
-done
-printf 'valid custom dump' >"$output"
-""",
-    )
+    _executable(bin_dir / "pg_dump", DATABASE_DUMP_TOOL)
     _executable(bin_dir / "pg_restore", f"exit {restore_list_status}\n")
     _executable(
         bin_dir / "gio",
@@ -380,16 +389,52 @@ def test_compose_mutations_consume_only_frozen_project_and_model(tmp_path: Path)
             assert "project=cutover-proof" in line
 
 
+def test_compose_database_processes_never_receive_owner_dsn(tmp_path: Path) -> None:
+    env, log = _compose_stub_environment(tmp_path)
+    env["KDIVE_DATABASE_URL"] = (
+        "postgresql://owner:argv-secret-%24%28x%29@db.example/kdive"  # pragma: allowlist secret
+    )
+
+    result = _run_compose_cutover(tmp_path, env)
+
+    assert result.returncode == 0, result.stderr
+    database_calls = "\n".join(
+        line
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.startswith(("psql ", "pg_dump "))
+    )
+    assert "argv-secret" not in database_calls
+    assert "pgpassfile=" in database_calls
+    assert "pgdatabase=postgresql://owner@db.example/kdive" in database_calls
+
+
+def test_compose_rollback_recovery_uses_restricted_database_authority(tmp_path: Path) -> None:
+    env, _log = _compose_stub_environment(tmp_path, start_status=37)
+    env["KDIVE_DATABASE_URL"] = (
+        "postgresql://owner:recovery-secret@db.example/kdive"  # pragma: allowlist secret
+    )
+
+    result = _run_compose_cutover(tmp_path, env)
+
+    assert result.returncode == 37
+    assert "recovery-secret" not in result.stdout + result.stderr
+    assert "PGPASSFILE=" in result.stderr
+    assert "postgresql://owner@db.example/kdive" in result.stderr
+
+
 def _host_cutover_environment(
-    tmp_path: Path, *, authority_status: int = 0, terminate_status: int = 0
+    tmp_path: Path,
+    *,
+    authority_status: int = 0,
+    terminate_status: int = 0,
+    migrate_status: int = 29,
 ) -> dict[str, str]:
     package = tmp_path / "package" / "kdive"
     lifecycle = package / "processes" / "lifecycle"
     lifecycle.mkdir(parents=True)
     for parent in (package, package / "processes", lifecycle):
         (parent / "__init__.py").write_text("", encoding="utf-8")
-    (package / "__main__.py").write_text(
-        """import sys
+    main_source = """import sys
 import time
 from pathlib import Path
 
@@ -400,8 +445,10 @@ if sys.argv[1] == "worker":
     while True:
         time.sleep(60)
 if sys.argv[1] == "migrate":
-    raise SystemExit(29)
-""",
+    raise SystemExit(MIGRATE_STATUS)
+""".replace("MIGRATE_STATUS", str(migrate_status))
+    (package / "__main__.py").write_text(
+        main_source,
         encoding="utf-8",
     )
     (lifecycle / "worker_incarnation.py").write_text(
@@ -429,6 +476,9 @@ elif action == "terminate-local-cutover":
     _executable(
         bin_dir / "pg_dump",
         """
+printf 'pg_dump argv=%s pgdatabase=%s pgpassfile=%s kdive=%s migration=%s\n' \
+  "$*" "${PGDATABASE:-}" "${PGPASSFILE:-}" "${KDIVE_DATABASE_URL:-}" \
+  "${KDIVE_MIGRATION_DATABASE_URL:-}" >>"$CUTOVER_TEST_LOG"
 for argument in "$@"; do
   case "$argument" in --file=*) output=${argument#--file=} ;; esac
 done
@@ -489,6 +539,62 @@ def test_host_cutover_executes_stop_witness_backup_and_migration_trap(tmp_path: 
     calls = (tmp_path / "calls").read_text(encoding="utf-8")
     assert calls.index("check-local-cutover-authority") < calls.index("terminate-local-cutover")
     assert calls.index("terminate-local-cutover") < calls.index("kdive migrate")
+
+
+def test_host_database_processes_never_receive_owner_dsn(tmp_path: Path) -> None:
+    env = _host_cutover_environment(tmp_path)
+    env["KDIVE_DATABASE_URL"] = (
+        "postgresql://owner:host-argv-secret@db.example/kdive"  # pragma: allowlist secret
+    )
+    worker = _start_fake_host_worker(env)
+    try:
+        result = subprocess.run(
+            [str(HOST_CUTOVER), str(tmp_path / "backup.dump")],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    finally:
+        if worker.poll() is None:
+            worker.terminate()
+            worker.wait(timeout=5)
+
+    assert result.returncode == 29
+    calls = (tmp_path / "calls").read_text(encoding="utf-8")
+    assert "host-argv-secret" not in calls
+    assert "pgpassfile=" in calls
+    assert "pgdatabase=postgresql://owner@db.example/kdive" in calls
+
+
+def test_host_rollback_recovery_uses_restricted_database_authority(tmp_path: Path) -> None:
+    env = _host_cutover_environment(tmp_path, migrate_status=0)
+    env["KDIVE_DATABASE_URL"] = (
+        "postgresql://owner:host-recovery-secret@db.example/kdive"  # pragma: allowlist secret
+    )
+    env["KDIVE_WORKER_COUNT"] = "0"
+    worker = _start_fake_host_worker(env)
+    try:
+        result = subprocess.run(
+            [str(HOST_CUTOVER), str(tmp_path / "backup.dump")],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    finally:
+        if worker.poll() is None:
+            worker.terminate()
+            worker.wait(timeout=5)
+
+    assert result.returncode != 0
+    assert "host-recovery-secret" not in result.stdout + result.stderr
+    assert "PGPASSFILE=" in result.stderr
+    assert "postgresql://owner@db.example/kdive" in result.stderr
 
 
 def test_host_unreadable_process_authority_fails_before_stop_or_backup(tmp_path: Path) -> None:
@@ -627,9 +733,10 @@ def test_cutover_scripts_declare_bounded_database_and_operation_contracts() -> N
         "scripts/cutover-capture-protocol-helm.sh",
     ],
 )
-def test_cutover_scripts_never_expand_database_url_in_rollback(relative: str) -> None:
+def test_cutover_scripts_use_restricted_database_rollback_authority(relative: str) -> None:
     text = (ROOT / relative).read_text(encoding="utf-8")
     assert 'dbname=\\"${KDIVE_' not in text
+    assert "cutover_print_restore_command" in text
 
 
 def test_cutover_changed_surface_obeys_limits_with_scoped_python_baseline() -> None:

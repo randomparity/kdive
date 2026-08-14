@@ -28,7 +28,7 @@ backup_parent="$(dirname -- "$backup_path")"
   echo "backup target must be a new file in an existing writable directory" >&2
   exit 2
 }
-for tool in cmp docker gio just ln mktemp pg_dump pg_restore psql python3 timeout; do
+for tool in cmp docker env gio just ln mktemp pg_dump pg_restore psql python3 timeout; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "${tool} is required before the cutover can stop workers" >&2
     exit 2
@@ -65,6 +65,7 @@ cleanup_preflight() {
   exit "$rc"
 }
 trap cleanup_preflight EXIT
+cutover_init_database_access "$database_url" "$snapshot_dir" python3
 
 cutover_bounded "Docker Compose version preflight" docker compose version >/dev/null
 if ! cutover_bounded "target image local resolution" \
@@ -123,7 +124,7 @@ with psycopg.connect(os.environ["KDIVE_DATABASE_URL"]) as conn:
  print("\t".join(map(str,row)))'
 host_database_identity() {
   cutover_bounded "host database identity witness" \
-    psql "$database_url" --set ON_ERROR_STOP=1 --tuples-only --no-align \
+    "${CUTOVER_DATABASE_ENV[@]}" psql --set ON_ERROR_STOP=1 --tuples-only --no-align \
     --field-separator=$'\t' --command "$database_identity_sql"
 }
 container_database_identity() {
@@ -149,7 +150,7 @@ print_shell_command() {
 
 prove_same_database preflight
 cutover_bounded "database lifecycle-authority preflight" \
-  psql "$database_url" --set ON_ERROR_STOP=1 <<'SQL'
+  "${CUTOVER_DATABASE_ENV[@]}" psql --set ON_ERROR_STOP=1 <<'SQL'
 DO $check$
 BEGIN
   IF NOT EXISTS (
@@ -191,8 +192,7 @@ recovery() {
   echo "restricted frozen Compose snapshot retained at: ${snapshot_dir}" >&2
   if [[ "$phase" == post-migration ]]; then
     echo "Protocol 3 may be installed. Rollback exactly with:" >&2
-    printf "  pg_restore --clean --if-exists --dbname=\"\$KDIVE_DATABASE_URL\" %q\n" \
-      "$backup_path" >&2
+    cutover_print_restore_command "$backup_path" >&2
   elif [[ "$phase" == migration ]]; then
     echo "The named backup is complete; correct the blocker and resume with:" >&2
     print_shell_command \
@@ -235,7 +235,7 @@ if ! cmp --silent "${snapshot_dir}/preflight-host-db" \
   exit 1
 fi
 cutover_bounded "database stopped-population proof" \
-  psql "$database_url" --set ON_ERROR_STOP=1 <<'SQL'
+  "${CUTOVER_DATABASE_ENV[@]}" psql --set ON_ERROR_STOP=1 <<'SQL'
 DO $check$
 DECLARE blockers text;
 BEGIN
@@ -252,7 +252,7 @@ $check$;
 SQL
 phase=backup
 cutover_prepare_backup "$backup_path"
-cutover_publish_backup "$backup_path" "$database_url"
+cutover_publish_backup "$backup_path"
 phase=migration
 cutover_bounded "Compose one-shot migration" \
   "${compose[@]}" --profile cutover run --rm migrate

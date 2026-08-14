@@ -882,7 +882,9 @@ def test_host_cutover_stops_verifies_backs_up_migrates_then_restarts() -> None:
     assert positions == sorted(positions)
     assert "down.sh" not in text
     assert "--wipe" not in text
-    assert "pg_restore --clean --if-exists" in text
+    assert "cutover_print_restore_command" in text
+    shared = (ROOT / "scripts/cutover-capture-protocol-lib.sh").read_text()
+    assert "pg_restore --clean --if-exists" in shared
 
 
 def test_restart_host_processes_starts_all_three() -> None:

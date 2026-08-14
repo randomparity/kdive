@@ -324,6 +324,12 @@ precedence over consuming either success or failure output.
 - Deployment automation performs an offline cutover. Existing lifecycle-witness or Compose
   lifecycle authority supplies termination evidence; worker credentials cannot synthesize it,
   and the migration refuses any un-terminated protocol-2 incarnation.
+- On a bundled install, the post-migration scaler exchanges its projected ServiceAccount bearer
+  token with the Kubernetes scale API. Release templating fixes the namespace and StatefulSet
+  name; a namespaced Role permits only `patch` on that exact `statefulsets/scale` resourceName.
+  The in-cluster CA verifies API TLS, the request has a 10-second timeout, and the hook Job has a
+  60-second active deadline. These controls restore the configured replicas only after the
+  lower-weight post-install migration succeeds.
 
 Trusted actors are the host operator, lifecycle authority, Postgres, and the configured libvirt
 endpoint. Authenticated tenants are not trusted to select paths, commands, provider endpoints, or

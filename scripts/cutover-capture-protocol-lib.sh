@@ -3,6 +3,9 @@
 
 CUTOVER_BACKUP_TEMP=""
 CUTOVER_BACKUP_VALIDATED=0
+CUTOVER_DATABASE_REFERENCE=""
+CUTOVER_DATABASE_PASSFILE=""
+CUTOVER_DATABASE_ENV=()
 
 cutover_positive_seconds() {
   local name="$1" value="$2"
@@ -44,6 +47,78 @@ cutover_bounded() {
   return "$rc"
 }
 
+cutover_init_database_access() {
+  local database_url="$1" authority_dir="$2" python="$3"
+  local reference_path="${authority_dir}/database-reference"
+  local passfile_path="${authority_dir}/database.pgpass"
+  [[ -d "$authority_dir" && ! -L "$authority_dir" ]] || {
+    echo "database authority directory must be an existing non-symlink directory" >&2
+    return 2
+  }
+  "$python" - "$reference_path" "$passfile_path" 3<<<"$database_url" <<'PY'
+import os
+import sys
+import urllib.parse
+
+reference_path, passfile_path = sys.argv[1:]
+with os.fdopen(3, encoding="utf-8") as source:
+    database_url = source.read().rstrip("\n")
+parsed = urllib.parse.urlsplit(database_url)
+if parsed.scheme not in {"postgres", "postgresql"} or not parsed.path:
+    raise SystemExit("database DSN must be a PostgreSQL URI with a database path")
+if parsed.fragment:
+    raise SystemExit("database DSN fragments are not supported")
+host = parsed.netloc.rsplit("@", 1)[-1]
+raw_user = parsed.netloc.rsplit("@", 1)[0].split(":", 1)[0]
+netloc = f"{raw_user}@{host}" if "@" in parsed.netloc else host
+query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+query_passwords = [value for key, value in query if key == "password"]
+if parsed.password is not None and query_passwords:
+    raise SystemExit("database DSN has more than one password authority")
+if len(query_passwords) > 1:
+    raise SystemExit("database DSN has more than one password query parameter")
+if any(key == "sslpassword" for key, _value in query):
+    raise SystemExit("database DSN sslpassword is unsupported for cutover")
+safe_query = urllib.parse.urlencode(
+    [(key, value) for key, value in query if key != "password"]
+)
+reference = urllib.parse.urlunsplit(
+    (parsed.scheme, netloc, parsed.path, safe_query, "")
+)
+password_value = parsed.password
+if query_passwords:
+    password_value = query_passwords[0]
+password = urllib.parse.unquote(password_value or "")
+escaped = password.replace("\\", "\\\\").replace(":", "\\:")
+for path, value in (
+    (reference_path, reference + "\n"),
+    (passfile_path, f"*:*:*:*:{escaped}\n"),
+):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(value)
+    os.chmod(path, 0o400)
+PY
+  CUTOVER_DATABASE_REFERENCE="$(<"$reference_path")"
+  CUTOVER_DATABASE_PASSFILE="$passfile_path"
+  CUTOVER_DATABASE_ENV=(
+    env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL
+    -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE
+    PGDATABASE="$CUTOVER_DATABASE_REFERENCE"
+    PGPASSFILE="$CUTOVER_DATABASE_PASSFILE"
+  )
+}
+
+cutover_print_restore_command() {
+  local backup_path="$1"
+  printf '  env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL '
+  printf '%q ' -u PGPASSWORD -u PGSERVICE -u PGSERVICEFILE
+  printf 'PGDATABASE=%q PGPASSFILE=%q ' \
+    "$CUTOVER_DATABASE_REFERENCE" "$CUTOVER_DATABASE_PASSFILE"
+  printf 'pg_restore --clean --if-exists --dbname=%q %q\n' \
+    "$CUTOVER_DATABASE_REFERENCE" "$backup_path"
+}
+
 cutover_prepare_backup() {
   local backup_path="$1"
   CUTOVER_BACKUP_TEMP="$(mktemp "${backup_path}.partial.XXXXXX")"
@@ -51,11 +126,11 @@ cutover_prepare_backup() {
 }
 
 cutover_publish_backup() {
-  local backup_path="$1" database_url="$2"
+  local backup_path="$1"
   cutover_bounded "database backup" \
-    pg_dump --format=custom --file="$CUTOVER_BACKUP_TEMP" "$database_url"
+    "${CUTOVER_DATABASE_ENV[@]}" pg_dump --format=custom --file="$CUTOVER_BACKUP_TEMP"
   cutover_bounded "database backup validation" \
-    pg_restore --list "$CUTOVER_BACKUP_TEMP" >/dev/null
+    "${CUTOVER_DATABASE_ENV[@]}" pg_restore --list "$CUTOVER_BACKUP_TEMP" >/dev/null
   CUTOVER_BACKUP_VALIDATED=1
   if ! ln --no-target-directory -- "$CUTOVER_BACKUP_TEMP" "$backup_path"; then
     echo "backup destination appeared during cutover; refusing to overwrite it" >&2

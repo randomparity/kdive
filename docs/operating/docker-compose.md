@@ -142,7 +142,10 @@ Before stopping anything, it resolves the target image to a local immutable imag
 the exact rendered Compose model, project name, and resolved operator environment in a restricted
 mode-0700 cutover directory beside the backup. Every later stop, migration, and start consumes
 only that frozen project and model; the lifecycle supervisor's new per-start nonce remains the
-only runtime substitution. The wrapper queries the database through both the host DSN and the
+only runtime substitution. That directory also holds a mode-0400 password-free database URI and
+libpq passfile. Host `psql` and `pg_dump` children receive only that URI and passfile path; the
+migration-owner DSN is removed from their argv and environment. The wrapper queries the database
+through both the host authority and the
 frozen migration service and compares database name, database OID, and server system identifier.
 It repeats that positive same-database witness after stop and before backup and migration, then
 requires both post-stop observations to equal the approved preflight identity. A backend, DNS, or
@@ -161,6 +164,8 @@ A precondition or migration failure leaves workers stopped and the old schema au
 post-migration failure leaves protocol 3 installed and workers stopped. Never restart a protocol-2
 image against that database. The only post-migration rollback is the exact
 `pg_restore --clean --if-exists` command printed by the script, followed by the prior image.
+That exact command references the retained password-free URI and restricted passfile, not the
+owner DSN. Do not remove the retained cutover directory before rollback completes.
 Backup publication is atomic and refuses replacement. If the destination appears while the dump
 is running, the validated sibling temporary dump is retained and its exact recovery path is
 printed. The restricted input snapshot is recoverably trashed on success when the filesystem

@@ -191,8 +191,10 @@ The wrapper creates a restricted mode-0700 cutover directory beside the backup a
 flattened kubeconfig, its context and cluster identity, the chart tree, caller values, installed
 release revision and namespace/StatefulSet UIDs, exact target render, registry image digest, and
 migration credential. Every later Helm and Kubernetes operation uses only the frozen kubeconfig,
-context, chart, and values. An attempt-unique Secret with Kubernetes `immutable: true` supplies the
-frozen credential to the migration hook. Its UID, immutable flag, and bytes are revalidated before
+context, chart, and values. A mode-0400 password-free database URI and libpq passfile keep the
+migration-owner DSN out of local `psql` and `pg_dump` argv and environment. An attempt-unique
+Secret with Kubernetes `immutable: true` supplies the frozen credential to the migration hook. Its
+UID, immutable flag, and bytes are revalidated before
 backup, upgrade, and safe deletion after the successor release and workload identities are proven.
 A failed run retains the restricted snapshot and any still-needed Secret and prints exact
 identities without printing a DSN.
@@ -218,7 +220,9 @@ command. Repair the stalled cluster or database dependency and rerun that comman
 A precondition or migration failure leaves the old schema and zero workers. A later failure leaves
 protocol 3 installed and zero workers. Never start a protocol-2 image after migration. The only
 post-migration rollback is the script's exact `pg_restore --clean --if-exists` command followed by
-the prior chart and image. The cutoff is operation-quiescent evidence only: #1952 still gates
+the prior chart and image. That command consumes the retained password-free URI and restricted
+passfile; retain the cutover directory until rollback or forward recovery completes. The cutoff is
+operation-quiescent evidence only: #1952 still gates
 publication closure and combined historical-capture coverage.
 Backup publication is atomic and refuses replacement. If its destination appears during the dump,
 the validated sibling temporary file is retained and the wrapper prints a safe recovery path.
