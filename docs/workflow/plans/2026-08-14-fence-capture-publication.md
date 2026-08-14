@@ -264,20 +264,26 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 - No new operator migration command. Fresh setup applies the full schema to an empty database and
   starts protocol-4 workers only after store admission and recovery.
 - Fresh deployment supplies a dedicated object-store bucket/namespace. Before the first worker
-  starts, `verify-fresh-publication-install.py` requires the application database tables and the
-  configured bucket to be empty, records a protocol-4 installation marker in PostgreSQL, and fails
-  with instructions to provision new endpoints rather than delete or reuse existing data. Later
-  restarts read the marker and do not require the now-live namespace to remain empty.
+  or any other application writer receives bucket credentials, the admission job is their sole
+  holder. `verify-fresh-publication-install.py` records `admitting` under the protocol advisory
+  lock, requires application database tables and the configured bucket to be empty, performs the
+  store conditional-create capability probe, rechecks bucket emptiness excluding only its exact
+  probe versions, and compare-and-sets the marker to `admitted`. Worker credentials and replicas
+  become available only after that commit. Later restarts verify the admitted namespace hash and
+  do not require the now-live namespace to remain empty.
 
 **TDD steps**
 
 1. Write script tests for empty database plus empty bucket admission, either side nonempty, store
-   listing failure, concurrent first admission, marker replay, and mismatch against a reused
-   namespace. Confirm failures do not delete database rows or objects. Implement the script against
-   Task 2's protocol-4 installation marker.
+   listing failure, concurrent first admission, marker replay, mismatch against a reused namespace,
+   and an object injected between initial listing and marker finalization. The injected object must
+   leave the marker `admitting`, never `admitted`; retry fails closed until the operator supplies a
+   new empty namespace. Confirm failures delete only exact probe versions and never user objects or
+   database rows. Implement the script against Task 2's protocol-4 installation marker.
 2. Update fresh-install render/shape tests to require protocol 4, the pre-start admission step, a
-   dedicated bucket/namespace, and rejection of data-preservation paths. Run focused Helm, Compose,
-   Ansible, script, and live-workflow-shape modules; observe old expectations fail.
+   dedicated bucket/namespace, exclusive admission credentials, no worker secret/replicas before
+   `admitted`, and rejection of data-preservation paths. Run focused Helm, Compose, Ansible, script,
+   and live-workflow-shape modules; observe old expectations fail.
 3. Update only the production manifests/scripts/docs required for fresh installation. Remove or
    replace protocol-3 upgrade instructions exposed as current guidance; do not add shims.
 4. Run focused deployment tests, `just lint-shell`, `just lint-ansible`, `just test-ansible`,
@@ -295,5 +301,7 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 **Acceptance**
 
 - A fresh supported deployment starts only protocol-4 workers against an admitted object store.
+- No application writer can access the new namespace between its final emptiness proof and the
+  durable `admitted` marker.
 - All fault, database, worker, deployment, and repository guardrails pass without warnings.
 - The worktree is clean and ADR-0559 is Accepted only with its implementation present.
