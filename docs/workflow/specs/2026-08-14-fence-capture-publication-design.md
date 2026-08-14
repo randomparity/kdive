@@ -37,7 +37,7 @@ Migration `0113_capture_publication_fence.sql` extends `capture_operations`:
 
 - ADR-0558's `state` is unchanged and `exited` remains its terminal provider-operation state;
 - `publication_state` is `pending`, `publishing`, `canceling`, `published`, or `discarded`;
-- `publication_object_key` is set before PUT and is immutable;
+- `publication_object_key` includes the durable operation id, is set before PUT, and is immutable;
 - `publication_etag` is set after PUT and before registration when PUT returned;
 - `publication_artifact_id` references the committed artifact row only for `published`;
 - `publication_started_at` and `publication_closed_at` use the database clock.
@@ -69,8 +69,8 @@ session-level job fence and authority monitor through these ordered steps:
 
 1. Launch, run, terminate, and persist provider `exited` plus quiescence as in ADR-0558 while the
    publication state remains `pending`.
-2. Transition the exact current operation from `pending` to `publishing`, persisting the
-   deterministic object key before any PUT.
+2. Transition the exact current operation from `pending` to `publishing`, persisting an
+   operation-unique deterministic object key before any PUT. A later attempt receives another key.
 3. Invoke the publisher. The publisher checks for an existing committed row under the Run lock.
    A sequential replay adopts that row through the publication commit transition and performs no
    PUT.
@@ -89,12 +89,20 @@ rejects conflicting facts.
 
 ## Cancellation and recovery
 
-Authority monitoring races publication against the lock-owning connection. Normal cancellation
-waits on the same job fence. Session loss releases that fence, after which cleanup or replacement
-recovery reacquires it. Under the Run lock the cancellation owner revalidates the exact current
-attempt and atomically moves `pending|publishing` to `canceling`; every publication-commit
-transition rejects that state. It then releases the Run lock, cancels and drains any PUT thread,
-and uses the operation's durable object version and etag:
+Authority monitoring races publication against the lock-owning connection. On session loss the
+fence-owning task first cancels the publisher, prevents any later database transition on the dead
+connection, and drains the PUT thread. It then uses a fresh connection to reacquire the released
+job fence. Under the Run lock it revalidates the exact current attempt and atomically moves
+`pending|publishing` to `canceling`; every publication-commit transition rejects that state. It
+then releases the Run lock and cleans up the operation-unique key. A normal external cancellation
+waits on the same job fence; its cancellation point is fence acquisition, so publication that
+already committed while the live owner held the fence is a completed publication, not a canceled
+attempt.
+
+If PUT committed but its response was lost, recovery HEADs the operation-unique key. Because no
+other attempt writes that key and recovery never resumes PUT, the observed version belongs to the
+exact durable operation and may be conditionally deleted without a journaled response. Cleanup
+then follows the row-first decision:
 
 - a matching committed row closes the operation as `published`; the job result is not rewritten;
 - no row causes conditional object-version deletion followed by an absence check; cleanup then
@@ -104,8 +112,8 @@ and uses the operation's durable object version and etag:
 
 Replacement recovery runs before readiness. For an operation with provider quiescence but open
 publication it repeats the same `canceling` linearization and row-first decision. It never resumes
-a PUT from buffered packet bytes: if registration did not commit, it removes the exact journaled
-object version and records `discarded`.
+a PUT from buffered packet bytes: if registration did not commit, it HEADs the operation-unique
+key, removes the observed immutable version, verifies absence, and records `discarded`.
 This is safe because the job cannot retry while the prior operation is nonterminal. Recovery does
 not acknowledge cancellation or expose readiness until object/row publication is terminal.
 
@@ -138,8 +146,9 @@ crosses the worker/PostgreSQL/object-store boundary.
   directly. Security-definer functions derive worker identity from the credential and validate the
   exact current attempt and state transition.
 - **Object store:** is an external dependency that may delay, fail, or return conflicting
-  metadata. The deterministic server-derived key, sensitivity metadata, size bounds, etag journal,
-  row-first recovery, and verified deletion bound its effects.
+  metadata. The operation-unique server-derived key, sensitivity metadata, size bounds, etag
+  journal, row-first recovery, conditional version deletion, and verified absence bound its
+  effects.
 - **PostgreSQL:** is the authority for job ownership, current attempt, artifact metadata, and
   publication closure. Advisory fences and transactions serialize decisions; object I/O remains
   outside transactions.

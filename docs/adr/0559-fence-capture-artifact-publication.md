@@ -21,7 +21,8 @@ Run lock across object-store I/O.
 
 The supervised capture operation owns publication as a durable phase. Its session-level per-job
 fence remains held from provider launch until publication reaches a terminal outcome. The worker
-records the deterministic object key before PUT, records the returned object identity after PUT,
+records an operation-unique deterministic object key before PUT, records the returned object
+identity after PUT,
 and atomically commits artifact-row registration, audit, and the operation's published outcome
 under the Run lock. Every transition revalidates the credential-bound worker, exact job attempt,
 current-operation link, and nonterminal job state.
@@ -34,14 +35,22 @@ An absent journaled object is required for `discarded`. Claim, cancellation ackn
 retry, and reclamation all require the product state `(exited, published|discarded)`; an operation
 in any other product state remains current and recoverable.
 
-Cancellation, session loss, or replacement recovery first takes the job fence and, under the Run
-lock, atomically revalidates the exact attempt and moves `pending|publishing` to `canceling`. That
-is the linearization point after which publication commit is refused. It then releases the Run
-lock, cancels and drains any in-process PUT, and conditionally deletes only the journaled object
-version and etag. After verifying absence it reacquires the Run lock and records `discarded`. If a
-matching row committed before `canceling`, the state is already `published` and cancellation
-cannot rewrite it. Failure to prove either terminal outcome leaves the operation recoverable and
-bars cancellation acknowledgment, retry, and reaping.
+Each operation key contains the durable operation id rather than only the job id. No peer attempt
+can write that key, and recovery never resumes a PUT, so a HEAD after an ambiguous PUT response
+identifies this operation's object and supplies the immutable version for conditional deletion.
+Artifact rows continue to expose only their opaque id; the key shape is not an MCP contract.
+
+Session-loss handling runs inside the fence owner: the authority monitor cancels the publisher
+before any further database transition, drains any in-process PUT, and only then uses a fresh
+connection to reacquire the now-released job fence. Under the Run lock it atomically revalidates
+the exact attempt and moves `pending|publishing` to `canceling`. That is the linearization point
+after which publication commit is refused. It then releases the Run lock, HEADs the operation-
+unique key, conditionally deletes the observed version, verifies absence, and reacquires the Run
+lock to record `discarded`. An external cancellation request waits for the live owner's job fence;
+its cancellation linearizes only after acquisition, so a publication already committed before
+that point remains `published` rather than becoming a canceled attempt. If a matching row
+committed before `canceling`, cancellation cannot rewrite it. Failure to prove either terminal
+outcome leaves the operation recoverable and bars cancellation acknowledgment, retry, and reaping.
 
 Migration 0113 raises the worker fence protocol from 3 to 4, adds publication state to supervised
 operations, and augments ADR-0558's singleton cutoff with `publication_closed` and `complete`.
@@ -63,9 +72,9 @@ no rolling compatibility path exists. Historical reclamation may use the cutoff 
   version. It never guesses from object age.
 - A failed delete retains a nonterminal operation and blocks retry and reaping until recovery can
   prove absence. This prefers retained residue to publication after reclamation.
-- Concurrent attempts cannot PUT the same key because job claiming remains barred until prior
-  publication is terminal. Existing row/etag reconciliation remains defensive for pre-cutover or
-  externally repaired data, not the concurrency mechanism.
+- Concurrent attempts have distinct operation keys, and job claiming remains barred until prior
+  publication is terminal. Existing row/etag reconciliation remains defensive for pre-cutover
+  data, not the concurrency mechanism.
 - The MCP contract and artifact contents do not change.
 
 ## Considered & rejected
