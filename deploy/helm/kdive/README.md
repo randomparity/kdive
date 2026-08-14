@@ -81,6 +81,12 @@ leave workers at zero. After migration, never start a protocol-2 image; rollback
 Migration 0112 records operation quiescence only; #1952 still gates publication closure and
 combined historical-capture coverage.
 
+On a fresh bundled install, Helm renders the worker StatefulSet at zero replicas. The post-install
+migration runs first; a later post-install scaler Job, authorized only to patch that StatefulSet's
+namespaced scale resource, restores the configured count. A failed migration therefore creates no
+worker Pod. Upgrades retain normal replicas until the pre-upgrade migration boundary, and the
+cutover wrapper performs the required stop first.
+
 ### Worker capacity: one in-flight job per dispatch lane (ADR-0550)
 
 A worker replica now runs **one in-flight job per accepted dispatch lane — two by default**, where

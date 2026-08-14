@@ -649,10 +649,62 @@ def test_bundled_with_ack_uses_post_install_migrate() -> None:
     assert "post-install" in res.stdout
 
 
+def _bundled_documents(*, upgrade: bool) -> list[dict[str, Any]]:
+    args = ["helm", "template", "kdive", CHART]
+    if upgrade:
+        args.append("--is-upgrade")
+    args.extend(["--set", "bundledBackends=true", "--set", "demoAcknowledged=true"])
+    rendered = _template_args(*args)
+    assert rendered.returncode == 0, rendered.stderr
+    return [doc for doc in yaml.safe_load_all(rendered.stdout) if isinstance(doc, dict)]
+
+
+def test_bundled_fresh_install_keeps_worker_at_zero_until_later_scaler_hook() -> None:
+    docs = _bundled_documents(upgrade=False)
+    worker = next(doc for doc in docs if doc.get("kind") == "StatefulSet")
+    jobs = [doc for doc in docs if doc.get("kind") == "Job"]
+    migrate = next(doc for doc in jobs if doc["metadata"]["name"].endswith("-migrate"))
+    assert worker["spec"]["replicas"] == 0
+    assert migrate["metadata"]["annotations"]["helm.sh/hook"] == ("post-install,pre-upgrade")
+    scaler = next(doc for doc in jobs if doc["metadata"]["name"].endswith("-worker-scaler"))
+    assert scaler["metadata"]["annotations"]["helm.sh/hook"] == "post-install"
+    assert int(scaler["metadata"]["annotations"]["helm.sh/hook-weight"]) > int(
+        migrate["metadata"]["annotations"]["helm.sh/hook-weight"]
+    )
+    assert scaler["spec"]["backoffLimit"] == 0
+    assert scaler["spec"]["template"]["spec"]["restartPolicy"] == "Never"
+
+
+def test_bundled_install_scaler_has_only_namespaced_worker_scale_authority() -> None:
+    docs = _bundled_documents(upgrade=False)
+    role = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Role" and doc["metadata"]["name"].endswith("install-worker-scaler")
+    )
+    assert role["rules"] == [
+        {
+            "apiGroups": ["apps"],
+            "resources": ["statefulsets/scale"],
+            "resourceNames": ["kdive-kdive-worker"],
+            "verbs": ["patch"],
+        }
+    ]
+    assert not any(
+        doc.get("kind") in {"ClusterRole", "ClusterRoleBinding"}
+        and str(doc.get("metadata", {}).get("name", "")).endswith("install-worker-scaler")
+        for doc in docs
+    )
+
+
 def test_bundled_upgrade_migrates_before_workload_rollout() -> None:
-    jobs = _jobs_by_name("bundledBackends=true", "demoAcknowledged=true")
-    phase = jobs["migrate"]["phase"]
-    assert phase is not None
+    docs = _bundled_documents(upgrade=True)
+    worker = next(doc for doc in docs if doc.get("kind") == "StatefulSet")
+    jobs = [doc for doc in docs if doc.get("kind") == "Job"]
+    migrate = next(doc for doc in jobs if doc["metadata"]["name"].endswith("-migrate"))
+    assert worker["spec"]["replicas"] == 2
+    assert not any(doc["metadata"]["name"].endswith("-worker-scaler") for doc in jobs)
+    phase = migrate["metadata"]["annotations"]["helm.sh/hook"]
     assert "post-install" in phase
     assert "pre-upgrade" in phase
     assert "post-upgrade" not in phase

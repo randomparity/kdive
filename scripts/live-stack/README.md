@@ -39,6 +39,14 @@ never calls `down.sh` and never removes a backend, volume, domain, or artifact. 
 precondition or migration leaves workers stopped and the old schema in force. A failure after the
 migration leaves protocol 3 installed and workers stopped.
 
+Every database, dump, and migration operation has a 600-second whole-operation limit measured by
+GNU `timeout`'s monotonic clock. Connections have an additional 10-second limit and statements a
+300-second server-side limit. Override them, in whole seconds, with
+`KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS`, `KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS`, and
+`KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS`. Each bound covers one external operation; a timeout
+rejects its incomplete result and runs the stopped-process proof. Correct the named database or
+process dependency, then rerun the exact command printed by the script.
+
 After migration 0112, never start a protocol-2 worker. The only rollback is the command the script
 prints—`pg_restore --clean --if-exists` from the named backup—followed by deployment of the prior
 binary. Protocol 3 records operation quiescence only; #1952 still gates publication closure and

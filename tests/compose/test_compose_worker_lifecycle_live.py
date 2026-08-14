@@ -65,6 +65,32 @@ def _compose(env: dict[str, str], *args: str, timeout: int = 120) -> str:
     return _run(("docker", "compose", "-f", str(_COMPOSE_FILE), *args), env, timeout=timeout)
 
 
+def _cutover_postgres_clients(tmp_path: Path) -> Path:
+    """Provide host-shaped PostgreSQL clients backed by the isolated fixture container."""
+    bin_dir = tmp_path / "cutover-bin"
+    bin_dir.mkdir()
+    tools = {
+        "psql": """shift
+exec docker compose exec -T postgres psql -U kdive-migration -d kdive \"$@\"
+""",
+        "pg_dump": """output=
+for argument in \"$@\"; do
+  case \"$argument\" in --file=*) output=${argument#--file=} ;; esac
+done
+[[ -n \"$output\" ]]
+docker compose exec -T postgres pg_dump --format=custom -U kdive-migration kdive >\"$output\"
+""",
+        "pg_restore": """[[ \"${1:-}\" == --list && -f \"${2:-}\" ]]
+docker compose exec -T postgres pg_restore --list <\"$2\"
+""",
+    }
+    for name, body in tools.items():
+        path = bin_dir / name
+        path.write_text(f"#!/usr/bin/env bash\nset -euo pipefail\n{body}", encoding="utf-8")
+        path.chmod(0o755)
+    return bin_dir
+
+
 def _wait_for_state(container_id: str, expected: str) -> tuple[str, int]:
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
@@ -268,6 +294,8 @@ def _isolated_stack(
     env = {
         "COMPOSE_PROJECT_NAME": project,
         "COMPOSE_PROOF_IMAGE": image,
+        "COMPOSE_FILE": str(_COMPOSE_FILE),
+        "KDIVE_IMAGE": image,
         "COMPOSE_PROOF_POSTGRES_PORT": str(port),
         "COMPOSE_PROOF_REPO_ROOT": str(_ROOT),
     }
@@ -708,29 +736,40 @@ def test_compose_capture_protocol_cutover_uses_exact_termination_and_backup(
                 (job_id, old_holder, f"cutover-{job_id}"),
             )
 
-        asyncio.run(lifecycle.down())
-        _compose(env, "up", "-d", "--wait", "--wait-timeout", "60", "postgres")
-        assert _incarnation_row(admin_dsn, old_id) == (old_holder, "terminated", "killed")
-
         backup = tmp_path / "pre-protocol-3.dump"
-        postgres_id = _compose(env, "ps", "-q", "postgres").strip()
-        with backup.open("wb") as output:
-            subprocess.run(
-                [
-                    "docker",
-                    "exec",
-                    postgres_id,
-                    "pg_dump",
-                    "--format=custom",
-                    "--username=kdive",
-                    "kdive",
-                ],
-                check=True,
-                stdout=output,
-                stderr=subprocess.PIPE,
-            )
+        client_bin = _cutover_postgres_clients(tmp_path)
+        cutover_env = {
+            **os.environ,
+            **env,
+            "PATH": f"{client_bin}:{os.environ['PATH']}",
+            "KDIVE_DATABASE_URL": admin_dsn,
+            "KDIVE_LIFECYCLE_WITNESS_DATABASE_URL": witness_dsn,
+            "KDIVE_WORKER_DATABASE_URL": (
+                "postgresql://kdive-worker-member:"  # pragma: allowlist secret
+                "kdive-worker-local@postgres:5432/kdive"
+            ),
+            "KDIVE_POSTGRES_PORT": env["COMPOSE_PROOF_POSTGRES_PORT"],
+            "KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS": "120",
+            "KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS": "5",
+            "KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS": "60",
+            "COMPOSE_PROGRESS": "quiet",
+        }
+        result = subprocess.run(
+            [
+                str(_ROOT / "scripts" / "cutover-capture-protocol-compose.sh"),
+                str(backup),
+                env["KDIVE_IMAGE"],
+            ],
+            cwd=_ROOT,
+            env=cutover_env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=360,
+        )
+        assert result.returncode == 0, result.stderr
+        assert _incarnation_row(admin_dsn, old_id) == (old_holder, "terminated", "killed")
         assert backup.stat().st_size > 0
-        _apply_migrations_when_stable(admin_dsn)
         with psycopg.connect(admin_dsn) as conn:
             assert conn.execute(
                 "SELECT protocol, operation_quiescent FROM capture_operation_cutoff"
@@ -743,15 +782,23 @@ def test_compose_capture_protocol_cutover_uses_exact_termination_and_backup(
                 {"reason": "offline_capture_protocol_cutover"},
             )
 
-        lifecycle_v3, _gate_v3 = _managed_lifecycle(env, witness_dsn, credential_path)
-        asyncio.run(lifecycle_v3.recreate())
         replacement_id = _compose(
             env, "--profile", "managed-worker", "ps", "--all", "-q", "worker"
         ).strip()
+        assert replacement_id != old_id
         with psycopg.connect(admin_dsn) as conn:
             assert conn.execute(
                 "SELECT fence_protocol, state FROM worker_incarnations "
                 "WHERE authority_binding = %s::jsonb",
                 (f'{{"container_id":"{replacement_id}"}}',),
             ).fetchone() == (3, "active")
-        asyncio.run(lifecycle_v3.down())
+        stopped = subprocess.run(
+            ["just", "compose-stop"],
+            cwd=_ROOT,
+            env=cutover_env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=180,
+        )
+        assert stopped.returncode == 0, stopped.stderr

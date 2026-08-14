@@ -10,7 +10,9 @@ spec:
   # The governing headless Service (service-worker.yaml). It carries no ports and fronts
   # nothing; a StatefulSet requires the field, which is the whole reason that Service exists.
   serviceName: {{ include "kdive.fullname" . }}-worker
-  replicas: {{ .Values.worker.replicas }}
+  # A bundled fresh install creates its database as an ordinary resource. Keep workers at zero
+  # until the weighted post-install migration and scaler hooks complete in that order.
+  replicas: {{ if and .Values.bundledBackends .Release.IsInstall }}0{{ else }}{{ .Values.worker.replicas }}{{ end }}
   # Workers are interchangeable queue consumers: `FOR UPDATE SKIP LOCKED` lets them claim
   # disjoint rows without blocking (ADR-0018), and no ordinal owns a role or waits on another.
   # Parallel start/stop avoids OrderedReady's one-at-a-time serialization on scale and rollout.

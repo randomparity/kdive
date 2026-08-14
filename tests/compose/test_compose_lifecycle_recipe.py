@@ -111,12 +111,12 @@ def test_compose_cutover_uses_supported_lifecycle_and_preserves_volumes() -> Non
     ordered = (
         "just compose-stop",
         "worker_incarnations",
-        "pg_dump --format=custom",
-        "docker compose run --rm migrate",
+        "cutover_publish_backup",
+        "docker compose --profile cutover run --rm migrate",
         "just compose-up",
     )
     positions: list[int] = []
-    cursor = text.index("trap recovery EXIT")
+    cursor = text.index("trap on_exit EXIT")
     for token in ordered:
         cursor = text.index(token, cursor)
         positions.append(cursor)

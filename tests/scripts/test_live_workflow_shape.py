@@ -18,13 +18,14 @@ _CI = _ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def test_capture_cutovers_are_separate_unconditional_paths() -> None:
+    shared = (_ROOT / "scripts/cutover-capture-protocol-lib.sh").read_text()
     paths = (
         _ROOT / "scripts/live-stack/cutover-capture-protocol.sh",
         _ROOT / "scripts/cutover-capture-protocol-compose.sh",
         _ROOT / "scripts/cutover-capture-protocol-helm.sh",
     )
     for path in paths:
-        text = path.read_text()
+        text = path.read_text() + shared
         assert "rolling" in text.lower()
         assert "protocol 2" in text.lower()
         assert "protocol 3" in text.lower()

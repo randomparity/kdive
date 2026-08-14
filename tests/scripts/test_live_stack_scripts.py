@@ -870,12 +870,12 @@ def test_host_cutover_stops_verifies_backs_up_migrates_then_restarts() -> None:
         "stop_daemons",
         "force_stop_daemons",
         "terminate-local-cutover",
-        "pg_dump --format=custom",
+        "cutover_publish_backup",
         '"$py" -m kdive migrate',
         "restart_host_processes",
     )
     positions: list[int] = []
-    cursor = text.index("trap recovery EXIT")
+    cursor = text.index("trap on_exit EXIT")
     for token in ordered:
         cursor = text.index(token, cursor)
         positions.append(cursor)

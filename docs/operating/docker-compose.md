@@ -138,6 +138,16 @@ use `compose-down`, `--volumes`, or raw worker lifecycle commands, so the named 
 build, and install volumes remain attached to the Compose project. A fresh database with no legacy
 workers is accepted and receives protocol 3 directly.
 
+Before stopping anything, it resolves the target image, renders the exact Compose model, and
+queries the migration database. Each Docker, database, dump, and migration operation has a
+600-second whole-operation limit measured by GNU `timeout`'s monotonic clock. Database connects
+also have a 10-second limit and each statement a 300-second server-side limit. Override these
+whole-second values with `KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS`,
+`KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS`, and
+`KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS`. A limit applies to one external operation; expiry
+rejects its incomplete result and runs the stopped-state recovery proof after mutation. Correct
+the stalled Docker or database dependency and rerun the exact command printed by the script.
+
 A precondition or migration failure leaves workers stopped and the old schema authoritative. A
 post-migration failure leaves protocol 3 installed and workers stopped. Never restart a protocol-2
 image against that database. The only post-migration rollback is the exact

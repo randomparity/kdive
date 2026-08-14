@@ -187,6 +187,18 @@ replica count. The migration hook runs before workload rollout on both external 
 upgrade paths. Migration 0112 holds the global capture-protocol lock and names every blocking
 incarnation or capture job before it installs protocol 3.
 
+The wrapper snapshots `kubectl config current-context` once and passes it to every later Helm and
+Kubernetes operation. Before scaling, it proves the namespace, release, StatefulSet, required
+verbs, exact target render and image, database connectivity, and that both the installed and
+target migration Secret DSNs equal `KDIVE_MIGRATION_DATABASE_URL`; DSNs are never printed. Each
+Helm, Kubernetes, image, database, dump, and migration operation has a 600-second limit measured
+by GNU `timeout`'s monotonic clock. Connects additionally have a 10-second limit and statements a
+300-second server-side limit. The three whole-second overrides are
+`KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS`, `KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS`, and
+`KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS`. Each limit covers one external operation; expiry
+rejects the incomplete result, keeps workers at zero after mutation, and prints the recovery
+command. Repair the stalled cluster or database dependency and rerun that command.
+
 A precondition or migration failure leaves the old schema and zero workers. A later failure leaves
 protocol 3 installed and zero workers. Never start a protocol-2 image after migration. The only
 post-migration rollback is the script's exact `pg_restore --clean --if-exists` command followed by

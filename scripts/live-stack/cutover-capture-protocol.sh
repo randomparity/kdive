@@ -7,6 +7,8 @@ here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${here}/lib.sh"
 # shellcheck disable=SC1091 # repo-relative env script
 source "${here}/env.sh"
+# shellcheck source=scripts/cutover-capture-protocol-lib.sh
+source "${repo_root}/scripts/cutover-capture-protocol-lib.sh"
 cd "$repo_root"
 
 usage() {
@@ -30,12 +32,13 @@ backup_parent="$(dirname -- "$backup_path")"
   echo "no venv python at ${py}; run 'just setup' first" >&2
   exit 2
 }
-for tool in awk nohup pg_dump pg_restore ps setsid sleep; do
+for tool in awk gio mktemp mv nohup pg_dump pg_restore ps setsid sleep timeout; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "${tool} is required before the cutover can stop workers" >&2
     exit 2
   }
 done
+cutover_init_contract
 
 mapfile -t initial_daemon_pids < <(daemon_pids)
 for pid in "${initial_daemon_pids[@]}"; do
@@ -46,33 +49,50 @@ for pid in "${initial_daemon_pids[@]}"; do
 done
 
 # Validate that every recorded legacy incarnation belongs to this authority before stopping.
-"$py" -m kdive.processes.lifecycle.worker_incarnation check-local-cutover-authority
+cutover_bounded "database local-authority preflight" \
+  "$py" -m kdive.processes.lifecycle.worker_incarnation check-local-cutover-authority
 
 phase=precondition
 recovery() {
-  rc=$?
-  ((rc == 0)) && return
-  if [[ "$phase" == post-migration ]]; then
-    stop_daemons >/dev/null 2>&1 || true
-    force_stop_daemons >/dev/null 2>&1 || true
+  local stop_rc=0 force_rc=0 survivors=""
+  set +e
+  stop_daemons >/dev/null 2>&1 || stop_rc=$?
+  force_stop_daemons >/dev/null 2>&1 || force_rc=$?
+  survivors="$(daemon_pids)"
+  echo "capture protocol cutover failed during ${phase}." >&2
+  if [[ -z "$survivors" ]]; then
+    echo "host stopped-state proof found no KDIVE daemon process." >&2
+  else
+    echo "workers may still be running; graceful stop status=${stop_rc}, forced stop status=${force_rc}." >&2
+    echo "surviving host daemon PIDs: ${survivors//$'\n'/,}" >&2
   fi
-  echo "capture protocol cutover failed during ${phase}; workers remain stopped." >&2
   if [[ "$phase" == post-migration ]]; then
     echo "Protocol 3 may be installed. Do not restart a protocol-2 worker." >&2
     echo "Rollback database exactly with:" >&2
-    echo "  pg_restore --clean --if-exists --dbname=\"${KDIVE_DATABASE_URL}\" \"${backup_path}\"" >&2
+    printf '%s\n' "  pg_restore --clean --if-exists --dbname=\"\$KDIVE_DATABASE_URL\" \"${backup_path}\"" >&2
     echo "Then deploy the prior binary before starting its workers." >&2
   elif [[ "$phase" == migration ]]; then
-    echo "The old schema remains authoritative. Correct the named blocker and rerun:" >&2
-    echo "  \"${py}\" -m kdive migrate" >&2
+    echo "The named backup is complete; correct the blocker and resume with:" >&2
+    printf '%s\n' "  timeout --kill-after=5 \"\${KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS:-600}s\" \"${py}\" -m kdive migrate" >&2
     echo "Then run restart_host_processes from a shell that sourced scripts/live-stack/lib.sh and env.sh." >&2
   else
-    echo "The old schema remains authoritative. Correct the named blocker and rerun:" >&2
+    echo "The old schema remains authoritative; partial backup state was rejected." >&2
+    echo "Correct the named blocker and rerun the same command:" >&2
     echo "  scripts/live-stack/cutover-capture-protocol.sh \"${backup_path}\"" >&2
   fi
-  exit "$rc"
 }
-trap recovery EXIT
+
+on_exit() {
+  local rc=$? cleanup_rc=0
+  trap - EXIT
+  if ((rc != 0)); then
+    recovery
+  fi
+  cutover_cleanup_temporary_backup || cleanup_rc=$?
+  ((rc != 0)) && exit "$rc"
+  exit "$cleanup_rc"
+}
+trap on_exit EXIT
 
 stop_daemons
 cutover_remaining="$(daemon_pids)"
@@ -84,11 +104,14 @@ cutover_remaining="$(daemon_pids)"
   echo "host-process cutover blocked by still-running daemon PIDs: ${cutover_remaining//$'\n'/,}" >&2
   exit 1
 }
-"$py" -m kdive.processes.lifecycle.worker_incarnation terminate-local-cutover
+cutover_bounded "database local-termination persistence" \
+  "$py" -m kdive.processes.lifecycle.worker_incarnation terminate-local-cutover
 
-pg_dump --format=custom --file="$backup_path" "$KDIVE_DATABASE_URL"
+phase=backup
+cutover_prepare_backup "$backup_path"
+cutover_publish_backup "$backup_path" "$KDIVE_DATABASE_URL"
 phase=migration
-"$py" -m kdive migrate
+cutover_bounded "host database migration" "$py" -m kdive migrate
 phase=post-migration
 restart_host_processes
 phase=complete
