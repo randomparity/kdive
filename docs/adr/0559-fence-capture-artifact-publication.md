@@ -31,10 +31,11 @@ Provider execution and publication are orthogonal monotonic states on the same r
 operation state still advances to terminal `exited` only after positive process and provider
 quiescence. Publication advances `pending -> publishing -> published | canceling -> discarded`;
 `published` and `discarded` are terminal. A committed artifact row is required for `published`.
-A retained operation-identity tombstone is required for `discarded`. Claim, cancellation
-acknowledgment,
-retry, and reclamation all require the product state `(exited, published|discarded)`; an operation
-in any other product state remains current and recoverable.
+A retained operation-identity tombstone is required for `discarded`. After either publication
+outcome, the supervisor removes the exact attempt's private packet spool and records
+`spool_disposed`. Claim, cancellation acknowledgment, retry, readiness, and reclamation all
+require `(exited, published|discarded, spool_disposed)`; an operation lacking any component remains
+current and recoverable.
 
 Each operation key contains the durable operation id rather than only the job id. The capture PUT
 uses atomic conditional creation (`If-None-Match: *`) and carries the operation id as object
@@ -84,7 +85,7 @@ protocol 4 in registration, authentication, and capture claim, and augments ADR-
 cutoff with `publication_closed = true` and `complete = true`. There is no upgrade or rolling-
 compatibility path; operators deploy against a new database and object-store namespace.
 Historical reclamation may use the fresh-install cutoff only when `complete` is true.
-Attempt-linked reclamation requires the product state `(exited, published|discarded)`.
+Attempt-linked reclamation requires `(exited, published|discarded, spool_disposed)`.
 
 ## Consequences
 
@@ -107,17 +108,22 @@ Attempt-linked reclamation requires the product state `(exited, published|discar
 - Worker readiness performs two zero-byte conditional writes plus HEAD and version cleanup against
   a unique internal probe key. A degraded or nonconforming store prevents claims rather than
   weakening publication fencing.
+- Successful publication, cancellation, and replacement recovery remove the exact attempt spool
+  only after object publication is terminal. Failed or unprovable removal keeps the operation
+  recoverable and bars acknowledgment, retry, readiness, and reaping.
 
 Verification injects failure or session loss after key journaling, after successful and ambiguous
 PUT outcomes before identity persistence, after identity persistence before the artifact
 transaction, during the artifact/audit/published transaction, after that commit before job
-acknowledgment, during exact-version deletion, during tombstone creation, and after tombstone
-durability before the `discarded` transaction. Replacement recovery
+acknowledgment, during exact-version deletion, during tombstone creation, after tombstone
+durability before the `discarded` transaction, and during spool disposal. Replacement recovery
 must handle every durable boundary. Each test proves acknowledgment, retry, and reaping remain
-barred before `(exited, published|discarded)`; `published` has exactly one truthful artifact row
+barred before `(exited, published|discarded, spool_disposed)`; `published` has exactly one truthful
+artifact row
 and capture object; and `discarded` has no artifact row or capture version and retains the winning
 tombstone. Re-entrant recovery must adopt the same verified tombstone version without reopening the
-key. The live conditional-create race and bare `just ci` complete the gate.
+key. Success, cancellation, and replacement tests verify no packet spool remains before closure.
+The live conditional-create race and bare `just ci` complete the gate.
 
 ## Considered & rejected
 

@@ -43,12 +43,14 @@ Migration `0113_capture_publication_fence.sql` extends `capture_operations`:
 - `publication_etag` is set after PUT and before registration when PUT returned;
 - `publication_artifact_id` references the committed artifact row only for `published`;
 - `publication_tombstone_version` records the retained zero-byte fence for `discarded`;
+- `spool_disposed_at` records verified removal of the exact attempt's private packet spool;
 - `publication_started_at` and `publication_closed_at` use the database clock.
 
 The row checks require publication fields to form complete pending, publishing, canceling, or
 terminal shapes. Provider `exited` requires positive process/provider quiescence; job completion,
-retry, cancellation acknowledgment, and later reclamation separately require the combined product
-state `(exited, published|discarded)`. `published` requires a matching artifact id, key, and etag;
+retry, cancellation acknowledgment, worker readiness, and later reclamation require the combined
+state `(exited, published|discarded, spool_disposed)`. `published` requires a matching artifact id,
+key, and etag;
 `discarded` requires no artifact id and a verified operation-identity tombstone version.
 Immutable-key and
 exact-attempt validation live in security-definer transition functions rather than direct worker
@@ -98,8 +100,9 @@ session-level job fence and authority monitor through these ordered steps:
 5. Journal the PUT's key and etag through a credential-fenced transition. Under the Run lock,
    revalidate exact current-attempt authority and atomically claim the artifact row, write the
    audit event, and close publication as `published`.
-6. Return the artifact id only after publication is durably terminal. Queue success then clears
-   the current-operation link using its existing exact-attempt fence.
+6. After publication is durably terminal, remove the exact operation's supervisor-owned packet
+   spool directory and record `spool_disposed_at`. Return the artifact id only after both facts are
+   durable. Queue success then clears the current-operation link using its exact-attempt fence.
 
 Every worker transition derives the incarnation from the credential and requires an active
 protocol-4 worker, the matching operation owner, the job's unchanged attempt/current link, and a
@@ -148,7 +151,11 @@ a PUT from buffered packet bytes: if registration did not commit, it completes c
 arbitration, removes the exact capture version, retains the winning tombstone, and records
 `discarded`.
 This is safe because the job cannot retry while the prior operation is nonterminal. Recovery does
-not acknowledge cancellation or expose readiness until object/row publication is terminal.
+not acknowledge cancellation or expose readiness until object/row publication is terminal and the
+exact private spool is absent. Spool deletion happens after the publication decision so successful
+bytes are never removed before their artifact row commits. A deletion fault leaves
+`spool_disposed_at` null, keeps the current-operation link, and is retried by startup recovery;
+absence of the exact operation directory is idempotent success.
 
 Normal job cancellation and any future reaper take the same job advisory fence. Therefore neither
 can pass the barrier while the live publisher owns it. Process death releases the fence, but the
@@ -211,7 +218,9 @@ tombstone version is durable. It then lets the delayed PUT evaluate and proves t
 tombstone makes it fail without creating capture bytes. A re-entrant recovery test crashes after
 tombstone durability but before the `discarded` transaction, starts replacement recovery while the
 capture PUT remains delayed, and proves it adopts the same tombstone version without reopening the
-key. Tests
+key. Success, cancellation, and replacement-recovery tests fail spool deletion at each terminal
+publication outcome and prove acknowledgment/readiness remain barred until the exact private
+operation directory is absent and `spool_disposed_at` commits. Tests
 deliberately break transition validation and compensation to show the new
 assertions fail before restoring the implementation. `just ci` is the final local gate on both
 declared target architectures through architecture-independent Python and PostgreSQL behavior;
