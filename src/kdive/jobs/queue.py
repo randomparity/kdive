@@ -227,8 +227,9 @@ async def dequeue(
     matches ``worker_id``, and uses the fixed current fence protocol.
 
     A ``capture_traffic`` retry remains ineligible while any prior supervised operation lacks
-    complete process-absence and provider-quiescence evidence. Refusal does not charge an attempt
-    or clear the current operation link; startup recovery must acknowledge that operation first.
+    complete provider quiescence, closed publication, or disposed spool evidence. Refusal does not
+    charge an attempt or clear the current operation link; startup recovery must close the whole
+    operation product first.
 
     ``lease`` is one PostgreSQL interval applied to ``clock_timestamp()`` captured by the database
     after the blocking incarnation fence and immediately before this claim. The computed deadline
@@ -282,7 +283,9 @@ async def count_claimable(
             "      SELECT 1 FROM capture_operations "
             "      WHERE job_id = jobs.id "
             "        AND (state <> 'exited' OR NOT process_absent "
-            "             OR provider_quiescence = '{}'::jsonb)"
+            "             OR provider_quiescence = '{}'::jsonb "
+            "             OR publication_state NOT IN ('published', 'discarded') "
+            "             OR spool_disposed_at IS NULL)"
             "  ))",
             (JobState.QUEUED.value, JobState.RUNNING.value, list(accepted_lanes)),
         )

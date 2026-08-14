@@ -121,7 +121,7 @@ async def _register(
 ) -> None:
     await admin.execute(
         "INSERT INTO worker_incarnations (incarnation, authority_kind, authority_binding, "
-        "fence_protocol, credential_hash) VALUES (%s, %s, %s, 3, %s)",
+        "fence_protocol, credential_hash) VALUES (%s, %s, %s, 4, %s)",
         (
             worker_id,
             authority_kind,
@@ -603,7 +603,7 @@ def test_recovered_launch_abort_requires_evidence_bound_to_operation(migrated_ur
     asyncio.run(_run())
 
 
-def test_capture_retry_is_not_charged_until_prior_evidence_is_complete(
+def test_capture_retry_is_not_charged_after_provider_only_closure(
     migrated_url: str,
 ) -> None:
     async def _run() -> None:
@@ -642,13 +642,19 @@ def test_capture_retry_is_not_charged_until_prior_evidence_is_complete(
                     exit_code=None,
                 ),
             )
-            claimed = await queue.dequeue(
+            still_refused = await queue.dequeue(
                 worker,
                 worker_id,
                 incarnation_credential=credential,
             )
-            assert claimed is not None
-            assert claimed.attempt == 2
+            assert still_refused is None
+            row = await (
+                await admin.execute(
+                    "SELECT attempt, current_capture_operation_id FROM jobs WHERE id = %s",
+                    (job_id,),
+                )
+            ).fetchone()
+            assert row == (1, operation.id)
         finally:
             await worker.close()
             await admin.close()
@@ -663,7 +669,7 @@ def test_capture_retry_is_not_charged_until_prior_evidence_is_complete(
         (True, "aborted_before_identity"),
     ],
 )
-def test_supervisor_terminalizes_clean_launch_abort_before_retry(
+def test_supervisor_leaves_clean_launch_abort_for_publication_recovery(
     migrated_url: str,
     process_created: bool,
     exit_outcome: str,
@@ -754,7 +760,13 @@ def test_supervisor_terminalizes_clean_launch_abort_before_retry(
         )
         try:
             with pytest.raises(RuntimeError) as raised:
-                await supervisor.execute(worker, job, supervisor_snapshot, request)
+                await supervisor.execute(
+                    worker,
+                    job,
+                    supervisor_snapshot,
+                    request,
+                    publisher=cast(Any, None),
+                )
             assert raised.value is launcher.error
             row = await (
                 await admin.execute(
@@ -769,9 +781,14 @@ def test_supervisor_terminalizes_clean_launch_abort_before_retry(
                 "WHERE id = %s",
                 (job_id,),
             )
-            claimed = await queue.dequeue(worker, worker_id, incarnation_credential=credential)
-            assert claimed is not None
-            assert claimed.attempt == 2
+            assert await queue.dequeue(worker, worker_id, incarnation_credential=credential) is None
+            persisted = await (
+                await admin.execute(
+                    "SELECT attempt, current_capture_operation_id FROM jobs WHERE id = %s",
+                    (job_id,),
+                )
+            ).fetchone()
+            assert persisted is not None and persisted[0] == 1 and persisted[1] is not None
         finally:
             await worker.close()
             await admin.close()
@@ -779,7 +796,7 @@ def test_supervisor_terminalizes_clean_launch_abort_before_retry(
     asyncio.run(_run())
 
 
-def test_queued_retry_race_keeps_attempt_and_link_until_exit_evidence_commits(
+def test_queued_retry_race_keeps_attempt_and_link_after_provider_closure(
     migrated_url: str,
 ) -> None:
     async def _run() -> None:
@@ -845,14 +862,21 @@ def test_queued_retry_race_keeps_attempt_and_link_until_exit_evidence_commits(
                 ).fetchone()
                 assert during == before
 
-            claimed = await queue.dequeue(
-                claimant,
-                claimant_id,
-                incarnation_credential=claimant_credential,
+            assert (
+                await queue.dequeue(
+                    claimant,
+                    claimant_id,
+                    incarnation_credential=claimant_credential,
+                )
+                is None
             )
-            assert claimed is not None
-            assert claimed.attempt == 2
-            assert claimed.current_capture_operation_id is None
+            after = await (
+                await admin.execute(
+                    "SELECT state, attempt, current_capture_operation_id FROM jobs WHERE id = %s",
+                    (job_id,),
+                )
+            ).fetchone()
+            assert after == before
         finally:
             await claimant.close()
             await owner.close()

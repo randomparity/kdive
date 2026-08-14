@@ -15,6 +15,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
+from uuid import UUID
 
 from kdive.jobs.capture_operations.bootstrap_attestation import fingerprint, read_manifest
 from kdive.jobs.capture_operations.bootstrap_elf import runtime_elf_closure
@@ -51,6 +52,9 @@ _ELF_FINGERPRINT_KINDS = {
     "bootstrap-extension",
 }
 _ELF_ROOT_KINDS = {"python-interpreter", "bootstrap-extension"}
+_SPOOL_FILES = frozenset(
+    {"request.json", "request.sha256", "configuration.json", "result.json", "capture.pcap"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,7 +384,7 @@ def _process_group_members(
             continue
         try:
             stat_line = (entry / "stat").read_text()
-        except FileNotFoundError:
+        except FileNotFoundError, ProcessLookupError:
             continue
         except OSError as error:
             raise RuntimeError(f"cannot read {entry}/stat during capture handoff") from error
@@ -798,11 +802,74 @@ def _read_capture(attempt_dir: Path, maximum: int) -> bytes:
         os.close(directory_fd)
 
 
+def _entry_absent(parent_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _open_spool_directory(parent_fd: int, name: str) -> tuple[int | None, bool]:
+    try:
+        return (
+            os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            ),
+            False,
+        )
+    except FileNotFoundError:
+        return None, _entry_absent(parent_fd, name)
+    except OSError:
+        return None, False
+
+
+def _open_spool_parent(path: Path) -> tuple[int | None, bool]:
+    try:
+        _validate_private_directory(path)
+        return (
+            os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW),
+            False,
+        )
+    except FileNotFoundError:
+        return None, True
+    except OSError:
+        return None, False
+
+
+def _remove_spool_entries(directory_fd: int) -> bool:
+    try:
+        entries = os.listdir(directory_fd)
+        if any(entry not in _SPOOL_FILES for entry in entries):
+            return False
+        for entry in entries:
+            try:
+                child = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if (
+                not stat.S_ISREG(child.st_mode)
+                or child.st_uid != os.geteuid()
+                or stat.S_IMODE(child.st_mode) != 0o600
+            ):
+                return False
+            os.unlink(entry, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    except OSError:
+        return False
+    return True
+
+
 @dataclass(slots=True)
 class LaunchedCapture:
     """A filter-attested child stopped at its one-byte provider gate."""
 
     process: asyncio.subprocess.Process
+    operation_id: UUID
     identity: LinuxIdentity
     pidfd: int
     gate_fd: int
@@ -856,6 +923,36 @@ class LaunchedCapture:
     def read_capture(self, maximum: int) -> bytes:
         """Read the private pcap only after the supervisor has acknowledged quiescence."""
         return _read_capture(self.attempt_dir, maximum)
+
+    def dispose_spool(self) -> bool:
+        """Remove and verify absence of only this operation's private mode-0700 spool."""
+        if self.attempt_dir.name != str(self.operation_id):
+            return False
+        parent_fd, absent = _open_spool_parent(self.attempt_dir.parent)
+        if parent_fd is None:
+            return absent
+        try:
+            directory_fd, absent = _open_spool_directory(parent_fd, self.attempt_dir.name)
+            if directory_fd is None:
+                return absent
+            try:
+                metadata = os.fstat(directory_fd)
+                if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+                    return False
+                if not _remove_spool_entries(directory_fd):
+                    return False
+            except OSError:
+                return False
+            finally:
+                os.close(directory_fd)
+            try:
+                os.rmdir(self.attempt_dir.name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            except OSError:
+                return False
+            return _entry_absent(parent_fd, self.attempt_dir.name)
+        finally:
+            os.close(parent_fd)
 
     async def _wait_bounded(self, seconds: float) -> bool:
         if self.process.returncode is not None:
@@ -1071,6 +1168,7 @@ class GatedCaptureLauncher:
         assert identity is not None and pidfd is not None
         return LaunchedCapture(
             process=process,
+            operation_id=operation.id,
             identity=identity,
             pidfd=pidfd,
             gate_fd=prepared.gate_write,

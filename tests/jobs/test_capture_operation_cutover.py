@@ -1,4 +1,4 @@
-"""Offline protocol-3 capture-operation cutover migration."""
+"""Historical protocol-3 cutover and active capture protocol boundary."""
 
 from __future__ import annotations
 
@@ -151,7 +151,7 @@ def test_registration_uses_the_same_global_cutover_lock_and_rejects_protocol_2(
         pre_cutover.execute("RESET SESSION AUTHORIZATION")
 
 
-def test_fresh_install_records_only_operation_quiescent_cutoff(
+def test_fresh_install_records_complete_protocol_4_cutoff(
     pg_conn: psycopg.Connection,
 ) -> None:
     migrate.apply_migrations(pg_conn)
@@ -162,30 +162,32 @@ def test_fresh_install_records_only_operation_quiescent_cutoff(
             "WHERE table_schema = 'public' AND table_name = 'capture_operation_cutoff'"
         ).fetchall()
     }
-    assert columns == {"singleton", "protocol", "operation_quiescent", "cutoff_at"}
-    assert pg_conn.execute(
-        "SELECT singleton, protocol, operation_quiescent, cutoff_at <= clock_timestamp() "
-        "FROM capture_operation_cutoff"
-    ).fetchone() == (True, 3, True, True)
-    assert not columns & {
+    assert columns == {
+        "singleton",
+        "protocol",
+        "operation_quiescent",
         "publication_closed",
-        "publication_quiescent",
-        "aggregate_complete",
-        "completed_at",
+        "complete",
+        "cutoff_at",
     }
+    assert pg_conn.execute(
+        "SELECT singleton, protocol, operation_quiescent, publication_closed, complete, "
+        "cutoff_at <= clock_timestamp() "
+        "FROM capture_operation_cutoff"
+    ).fetchone() == (True, 4, True, True, True, True)
 
 
-def test_fresh_install_authentication_and_claim_require_protocol_3(
+def test_fresh_install_authentication_and_claim_require_protocol_4(
     pg_conn: psycopg.Connection,
 ) -> None:
     migrate.apply_migrations(pg_conn)
     protocol = pg_conn.execute(
         "SELECT protocol FROM capture_operation_cutoff WHERE singleton"
     ).fetchone()
-    assert protocol == (3,)
+    assert protocol == (4,)
     function = pg_conn.execute(
         "SELECT pg_get_functiondef("
         "'public.claim_worker_job(text,bytea,interval,text[])'::regprocedure)"
     ).fetchone()
     assert function is not None
-    assert "fence_protocol = 3" in function[0]
+    assert "fence_protocol = 4" in function[0]

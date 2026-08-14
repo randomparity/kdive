@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Sequence
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import uuid4
 
@@ -114,6 +114,109 @@ async def _dequeue(
         lease=lease,
         accepted_lanes=accepted_lanes,
     )
+
+
+async def _seed_capture_retry_product(
+    conn: psycopg.AsyncConnection,
+    *,
+    operation_state: str,
+    publication_state: str,
+    spool_disposed: bool,
+) -> tuple[Job, str]:
+    """Seed one queued prior attempt at an exact provider/publication closure point."""
+    owner_id = f"local:capture-owner:{uuid4()}"
+    await _register_worker(conn, owner_id)
+    resource_id, allocation_id, system_id, job_id, operation_id = (
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+    )
+    await conn.execute(
+        "INSERT INTO resources (id, kind, pool, cost_class, status, host_uri) "
+        "VALUES (%s, 'local-libvirt', 'pool', 'local', 'available', 'qemu:///system')",
+        (resource_id,),
+    )
+    await conn.execute(
+        "INSERT INTO allocations (id, resource_id, state, principal, project) "
+        "VALUES (%s, %s, 'active', 'principal', 'project')",
+        (allocation_id, resource_id),
+    )
+    await conn.execute(
+        "INSERT INTO systems (id, allocation_id, state, provisioning_profile, principal, "
+        "project) VALUES (%s, %s, 'ready', '{}'::jsonb, 'principal', 'project')",
+        (system_id, allocation_id),
+    )
+    await conn.execute(
+        "INSERT INTO jobs (id, kind, payload, state, attempt, max_attempts, authorizing, "
+        "dedup_key) VALUES (%s, 'capture_traffic', %s, 'queued', 1, 3, %s, %s)",
+        (
+            job_id,
+            Jsonb({"run_id": str(uuid4())}),
+            Jsonb(_AUTHORIZING.model_dump()),
+            f"capture-product-{job_id}",
+        ),
+    )
+    now = datetime.now(UTC)
+    key = f"local/runs/{uuid4()}/pcap"
+    artifact_id = uuid4() if publication_state == "published" else None
+    if artifact_id is not None:
+        await conn.execute(
+            "INSERT INTO artifacts (id, owner_kind, owner_id, object_key, etag, sensitivity, "
+            "retention_class) VALUES (%s, 'runs', %s, %s, 'etag', 'sensitive', 'pcap')",
+            (artifact_id, uuid4(), key),
+        )
+    provider_exited = operation_state == "exited"
+    publication_started = publication_state != "pending"
+    publication_closed = publication_state in {"published", "discarded"}
+    await conn.execute(
+        "INSERT INTO capture_operations (id, job_id, job_attempt, worker_incarnation, "
+        "provider_kind, resource_id, system_id, domain_name, request_digest, launch_token, "
+        "host_instance, boot_id, pid, start_ticks, state, exit_outcome, exit_code, "
+        "process_absent, provider_quiescence, exited_at, publication_state, "
+        "publication_object_key, publication_etag, publication_artifact_id, "
+        "cleanup_capture_version_id, publication_tombstone_version, "
+        "publication_started_at, publication_closed_at, spool_disposed_at) VALUES "
+        "(%s, %s, 1, %s, 'local-libvirt', %s, %s, 'guest', %s, %s, 'host', "
+        "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (
+            operation_id,
+            job_id,
+            owner_id,
+            resource_id,
+            system_id,
+            "a" * 64,
+            "b" * 64,
+            None if provider_exited else "boot",
+            None if provider_exited else 42,
+            None if provider_exited else 51,
+            operation_state,
+            "completed" if provider_exited else None,
+            0 if provider_exited else None,
+            provider_exited,
+            Jsonb({"result": "absent"} if provider_exited else {}),
+            now if provider_exited else None,
+            publication_state,
+            key if publication_started else None,
+            "etag" if publication_state == "published" else None,
+            artifact_id,
+            "capture-version" if publication_state == "published" else None,
+            "tombstone-version" if publication_state == "discarded" else None,
+            now if publication_started else None,
+            now if publication_closed else None,
+            now if spool_disposed else None,
+        ),
+    )
+    await conn.execute(
+        "UPDATE jobs SET current_capture_operation_id = %s WHERE id = %s",
+        (operation_id, job_id),
+    )
+    async with conn.cursor(row_factory=dict_row) as cursor:
+        await cursor.execute("SELECT * FROM jobs WHERE id = %s", (job_id,))
+        seeded = await cursor.fetchone()
+    assert seeded is not None
+    return Job.model_validate(seeded), owner_id
 
 
 def test_enqueue_inserts_queued_job(migrated_url: str) -> None:
@@ -443,6 +546,154 @@ def test_worker_role_direct_old_style_claim_is_denied(migrated_url: str) -> None
                 )
             ).fetchone()
             assert persisted == (JobState.QUEUED.value, None, 0)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("operation_state", "publication_state", "spool_disposed", "claimable"),
+    [
+        ("running", "published", True, False),
+        ("exited", "pending", False, False),
+        ("exited", "publishing", False, False),
+        ("exited", "canceling", False, False),
+        ("exited", "published", False, False),
+        ("exited", "discarded", False, False),
+        ("exited", "published", True, True),
+        ("exited", "discarded", True, True),
+    ],
+)
+def test_capture_retry_and_current_link_require_the_complete_product(
+    migrated_url: str,
+    operation_state: str,
+    publication_state: str,
+    spool_disposed: bool,
+    claimable: bool,
+) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            job, _owner_id = await _seed_capture_retry_product(
+                conn,
+                operation_state=operation_state,
+                publication_state=publication_state,
+                spool_disposed=spool_disposed,
+            )
+            claimant_id = f"local:claimant:{uuid4()}"
+            credential = await _register_worker(conn, claimant_id)
+            assert await queue.count_claimable(conn) == int(claimable)
+
+            claimed = await _dequeue(
+                conn,
+                claimant_id,
+                incarnation_credential=credential,
+            )
+            if claimable:
+                assert claimed is not None
+                assert claimed.id == job.id
+                assert claimed.attempt == 2
+                assert claimed.current_capture_operation_id is None
+            else:
+                assert claimed is None
+                persisted = await (
+                    await conn.execute(
+                        "SELECT state, attempt, current_capture_operation_id "
+                        "FROM jobs WHERE id = %s",
+                        (job.id,),
+                    )
+                ).fetchone()
+                assert persisted == ("queued", 1, job.current_capture_operation_id)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("publication_state", "spool_disposed", "completes"),
+    [
+        ("published", False, False),
+        ("published", True, True),
+    ],
+)
+def test_capture_completion_and_current_link_require_spool_closure(
+    migrated_url: str,
+    publication_state: str,
+    spool_disposed: bool,
+    completes: bool,
+) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            job, owner_id = await _seed_capture_retry_product(
+                conn,
+                operation_state="exited",
+                publication_state=publication_state,
+                spool_disposed=spool_disposed,
+            )
+            await conn.execute(
+                "UPDATE jobs SET state = 'running', worker_id = %s, "
+                "lease_expires_at = now() + interval '5 minutes', heartbeat_at = now() "
+                "WHERE id = %s",
+                (owner_id, job.id),
+            )
+            completed = await queue.complete(
+                conn,
+                job.id,
+                "artifact-id",
+                attempt=job.attempt,
+                incarnation_credential=_credential(owner_id),
+            )
+            persisted = await (
+                await conn.execute(
+                    "SELECT state, current_capture_operation_id FROM jobs WHERE id = %s",
+                    (job.id,),
+                )
+            ).fetchone()
+            if completes:
+                assert completed is not None
+                assert completed.state is JobState.SUCCEEDED
+                assert persisted == ("succeeded", None)
+            else:
+                assert completed is None
+                assert persisted == ("running", job.current_capture_operation_id)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("spool_disposed", "persisted_state"),
+    [(False, "running"), (True, "queued")],
+)
+def test_capture_failure_requeue_requires_spool_closure(
+    migrated_url: str,
+    spool_disposed: bool,
+    persisted_state: str,
+) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            job, owner_id = await _seed_capture_retry_product(
+                conn,
+                operation_state="exited",
+                publication_state="published",
+                spool_disposed=spool_disposed,
+            )
+            await conn.execute(
+                "UPDATE jobs SET state = 'running', worker_id = %s, "
+                "lease_expires_at = now() + interval '5 minutes', heartbeat_at = now() "
+                "WHERE id = %s",
+                (owner_id, job.id),
+            )
+            running = job.model_copy(update={"state": JobState.RUNNING, "worker_id": owner_id})
+            await queue.fail(
+                conn,
+                running,
+                ErrorCategory.INFRASTRUCTURE_FAILURE,
+                incarnation_credential=_credential(owner_id),
+            )
+            persisted = await (
+                await conn.execute(
+                    "SELECT state, current_capture_operation_id FROM jobs WHERE id = %s",
+                    (job.id,),
+                )
+            ).fetchone()
+            assert persisted == (persisted_state, job.current_capture_operation_id)
 
     asyncio.run(_run())
 

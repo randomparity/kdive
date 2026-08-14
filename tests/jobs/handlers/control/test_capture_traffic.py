@@ -1,4 +1,4 @@
-"""Worker handler for capture_traffic: poll loop + snapshot/store (ADR-0385)."""
+"""Worker handler for capture_traffic: poll loop and publication wiring (ADR-0385)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -73,7 +73,7 @@ def test_loop_stops_on_cancel() -> None:
     assert result.truncated is False
 
 
-def test_handler_delegates_provider_phase_to_supervisor_without_publication_change(
+def test_handler_delegates_provider_phase_and_publisher_to_supervisor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _run_handler() -> None:
@@ -118,8 +118,10 @@ def test_handler_delegates_provider_phase_to_supervisor_without_publication_chan
                 supplied_job: Job,
                 supplied_snapshot: CaptureSnapshot,
                 request: CaptureRequest,
-            ) -> bytes | None:
-                observed.extend((conn, supplied_job, supplied_snapshot, request))
+                *,
+                publisher: object,
+            ) -> object | None:
+                observed.extend((conn, supplied_job, supplied_snapshot, request, publisher))
                 return None
 
         monkeypatch.setattr(capture_traffic, "_snapshot", snapshot_run)
@@ -127,7 +129,7 @@ def test_handler_delegates_provider_phase_to_supervisor_without_publication_chan
             cast(Any, SimpleNamespace()),
             job,
             resolver=cast(Any, SimpleNamespace()),
-            artifact_store=cast(Any, SimpleNamespace()),
+            publication=cast(Any, SimpleNamespace()),
             supervisor=cast(Any, _Supervisor()),
         )
         assert result is None
@@ -135,6 +137,7 @@ def test_handler_delegates_provider_phase_to_supervisor_without_publication_chan
         assert request.job_id == job.id
         assert request.max_polls == 2
         assert request.resource_id == snapshot.resource_id
+        assert callable(observed[4])
 
     asyncio.run(_run_handler())
 
@@ -179,22 +182,36 @@ def test_handler_does_not_publish_when_worker_authority_ends_with_supervisor(
             return snapshot
 
         class _Supervisor:
-            async def execute(self, *args: object) -> bytes:
+            async def execute(
+                self,
+                conn: object,
+                supplied_job: Job,
+                supplied_snapshot: CaptureSnapshot,
+                _request: CaptureRequest,
+                *,
+                publisher: Any,
+            ) -> UUID:
                 authority_lost.set()
-                return b"x" * 24
+                return await publisher(
+                    conn,
+                    supplied_job,
+                    SimpleNamespace(id=supplied_job.id),
+                    supplied_snapshot,
+                    b"x" * 24,
+                )
 
-        async def store(*args: object) -> object:
-            events.append("published")
-            return uuid4()
+        class _Publication:
+            async def publish(self, *args: object) -> UUID:
+                events.append("published")
+                return uuid4()
 
         monkeypatch.setattr(capture_traffic, "_snapshot", snapshot_run)
-        monkeypatch.setattr(capture_traffic, "_store_capture", store)
         with capture_authority_scope(authority_lost), pytest.raises(CaptureAuthorityLost):
             await capture_traffic.capture_traffic_handler(
                 cast(Any, SimpleNamespace()),
                 job,
                 resolver=cast(Any, SimpleNamespace()),
-                artifact_store=cast(Any, SimpleNamespace()),
+                publication=cast(Any, _Publication()),
                 supervisor=cast(Any, _Supervisor()),
             )
         return events
