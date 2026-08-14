@@ -215,11 +215,16 @@ Run:
 uv run python -m pytest tests/support/test_xdist_backend.py -q
 ```
 
-Expected: the existing tests pass and every new behavioral group fails: interprocess ownership,
-exact-conflict recovery, unrelated conflicts, lookup/deadline failure, lock-before-client ordering,
-and unsafe lock paths. Record each group before implementation. Temporarily replace the expected
-lock or conflict behavior with the old behavior and confirm the relevant test reddens; restore the
-test before implementation.
+Expected baseline matrix:
+
+- Fail or error because the implementation seam is absent: interprocess ownership, exact-conflict
+  recovery, bounded deadline, lock-before-client ordering, non-blocking contention, and unsafe lock
+  paths.
+- Pass as characterization of retained behavior: unrelated 409 warnings, non-NotFound lookup
+  warning plus continuation, existing NotFound handling, and later-candidate removal.
+
+Record each group before implementation. Do not weaken a retained-behavior assertion merely to make
+the baseline red; its passing baseline is the proof that the change must preserve it.
 
 ### Step 2: Implement the minimal locked sweep
 
@@ -313,6 +318,11 @@ Keep functions below 100 lines by extracting the already-locked candidate loop i
 
 Run the focused command from Step 1. Expected: all selected tests pass with no warnings outside the
 tests that explicitly assert them.
+
+Verify the new tests bite by temporarily changing one implementation decision at a time: bypass
+`_sweep_locked`, accept a mismatched conflict id, remove the absence retry, and allow the unsafe lock
+path. Each corresponding test must fail. Restore the implementation after every mutation and rerun
+the focused module green before proceeding.
 
 ### Step 3: Verify retained cleanup behavior
 
