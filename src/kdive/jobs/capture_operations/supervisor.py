@@ -140,7 +140,7 @@ async def _monitor_lock_session(conn: AsyncConnection) -> None:
         deadline += LOCK_PROBE_INTERVAL_SECONDS
 
 
-def _identity(operation: CaptureOperation, launched: LaunchedCapture) -> CaptureOperationIdentity:
+def _identity(launched: LaunchedCapture) -> CaptureOperationIdentity:
     observed = launched.identity
     return CaptureOperationIdentity(
         host_instance=observed.host_instance,
@@ -224,9 +224,7 @@ class CaptureOperationSupervisor:
                 launched = await self._launcher.launch(
                     request, operation, on_abort=record_launch_abort
                 )
-                await record_identity(
-                    conn, self._credential, operation.id, _identity(operation, launched)
-                )
+                await record_identity(conn, self._credential, operation.id, _identity(launched))
                 configuration = snapshot.configuration()
                 launched.stage_configuration(configuration)
                 await _probe_lock_session(conn)
@@ -236,7 +234,6 @@ class CaptureOperationSupervisor:
                 await self._acknowledge(
                     conn,
                     operation,
-                    launched,
                     snapshot,
                     configuration,
                     exit_outcome="completed",
@@ -343,7 +340,6 @@ class CaptureOperationSupervisor:
             await self._acknowledge(
                 transition,
                 operation,
-                launched,
                 snapshot,
                 configuration,
                 exit_outcome="canceled",
@@ -354,7 +350,6 @@ class CaptureOperationSupervisor:
         self,
         conn: AsyncConnection,
         operation: CaptureOperation,
-        launched: LaunchedCapture,
         snapshot: CaptureSnapshot,
         configuration: bytes,
         *,
