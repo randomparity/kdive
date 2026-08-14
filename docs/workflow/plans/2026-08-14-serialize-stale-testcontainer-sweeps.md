@@ -35,7 +35,8 @@ warning path. No fixture call site or production module changes.
   and MinIO fixture callers.
 - Add private constants `_SWEEP_LOCK_PATH`, `_REMOVAL_WAIT_S = 5.0`, and
   `_REMOVAL_POLL_S = 0.05`.
-- Add `_sweep_locked() -> Iterator[None]`, a dedicated safe opener for the canonical `/tmp` lock.
+- Add `_sweep_locked() -> Iterator[bool]`, a dedicated safe opener that reports ordinary contention
+  as `False` for the canonical `/tmp` lock.
 - Add `_removal_is_already_in_progress(exc: Exception, container_id: str) -> bool`.
 - Add `_wait_until_container_absent(client: Any, container_id: str, *, timeout_s: float = 5.0,
   clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep) -> bool`.
@@ -50,9 +51,9 @@ Add these tests before implementation:
 ```python
 def test_concurrent_sweeps_have_one_effective_remover(tmp_path: Path) -> None:
     # Launch two Python subprocesses using the same monkeypatched sweep-lock path and shared marker
-    # files. Process A blocks inside remove after process B announces it is about to sweep. While A
-    # holds the lock it records failure if B has enumerated. After A marks the id removed and exits,
-    # B enumerates an empty candidate list. Assert no violation marker and one removal marker.
+    # files. Process A blocks inside remove after process B announces it is about to sweep. Process B
+    # must return without enumerating Docker while A holds the lock. Assert no second-enumeration
+    # marker, no warnings, and one removal marker.
 
 
 @pytest.mark.parametrize(
@@ -212,16 +213,20 @@ world-writable predictable-name boundary:
 
 ```python
 @contextmanager
-def _sweep_locked() -> Iterator[None]:
+def _sweep_locked() -> Iterator[bool]:
     flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
     fd = os.open(_SWEEP_LOCK_PATH, flags, 0o600)
     try:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.geteuid():
             raise OSError("stale-backend sweep lock must be a regular file owned by this user")
-        fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            yield
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
@@ -272,7 +277,8 @@ def _wait_until_container_absent(
 ```
 
 Take `_sweep_locked()` around client construction, enumeration, and the complete candidate loop.
-Catch lock/client/enumeration setup failures outside that context, emit the existing
+When it yields `False`, return `[]` silently without constructing Docker. Catch other
+lock/client/enumeration setup failures outside that context, emit the existing
 `stale-backend sweep skipped` warning, and return `[]`; never enumerate unlocked. In the candidate
 exception handler, suppress only when `_removal_is_already_in_progress` and
 `_wait_until_container_absent` both return true. Preserve NotFound and every existing warning path.
@@ -319,6 +325,7 @@ in GitHub CI before merge handoff.
 ## Acceptance criteria
 
 - Two public sweeps in separate processes cannot enumerate the shared candidate set concurrently.
+- A contending sweep skips without warning or Docker construction instead of waiting on the owner.
 - Only exact concurrent-removal 409 plus verified exact-id absence is silent.
 - Unrelated conflicts, lookup failure, deadline expiry, and lock failure remain warnings.
 - Default Docker-client construction occurs only after the sweep lock is held.

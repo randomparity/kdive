@@ -21,10 +21,12 @@ sweepers and daemon-version wording coupled.
 The repository's stale-backend sweep uses one per-user filesystem lock at the canonical Linux path
 `/tmp/kdive-test-backend-sweep-<euid>.lock`. Its fixed KDIVE-owned namespace never depends on an
 environment-selected temporary directory, checkout, or worktree path. It takes an exclusive
-`fcntl.flock` before Docker enumeration and holds it through all removals. Postgres and MinIO
-fixture processes, xdist workers, and concurrent test runs from every KDIVE checkout under the same
-effective user therefore have one effective sweeper. The empty lock file may persist; process exit
-releases the kernel lock. The repository targets Linux, and `/tmp` is a required host prerequisite.
+non-blocking `fcntl.flock` before Docker enumeration and holds it through all removals. A contender
+that observes the lock already held skips its optional sweep silently because one effective sweeper
+already exists. Postgres and MinIO fixture processes, xdist workers, and concurrent test runs from
+every KDIVE checkout under the same effective user therefore never remove concurrently. The empty
+lock file may persist; process exit releases the kernel lock. The repository targets Linux, and
+`/tmp` is a required host prerequisite.
 The sweep uses a dedicated opener with `O_NOFOLLOW`, creates mode 0600, and validates the opened
 descriptor is a regular file owned by the effective user before locking. An unsafe existing path
 skips the best-effort sweep with a warning; it is never followed, truncated, or removed.
@@ -42,10 +44,10 @@ container labels, fixture acquisition, or production behavior.
 
 ## Consequences
 
-Stale sweeps from every KDIVE checkout under one user are serial, including Docker enumeration time
-and removal latency. Fixture startup can wait behind another sweep, and a live stuck sweeper can
-delay contenders until that process exits; the lock itself has no timeout. The protected work is
-startup-only and bounded to KDIVE-labelled containers, so cross-checkout serialization is accepted.
+Stale sweeps from every KDIVE checkout under one user have at most one active owner. A contending
+fixture proceeds without cleanup rather than waiting for Docker enumeration or removal latency.
+This can leave a different stale candidate until the next uncontended fixture startup, which is
+consistent with best-effort cleanup and avoids making it a fixture-availability dependency.
 
 A Docker actor outside this lock can still race removal. Concurrent-removal classification plus
 exact-id absence verification handles the sourced benign case without suppressing another 409 or a

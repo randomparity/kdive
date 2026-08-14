@@ -35,9 +35,10 @@ the exact container is about to disappear.
 `/tmp/kdive-test-backend-sweep-<euid>.lock`. Its filename uses a fixed KDIVE-owned namespace plus
 the effective user id, never an environment-selected temporary directory, checkout, or worktree
 path. `sweep_stale_backend_containers` holds the dedicated lock across client construction,
-candidate enumeration, liveness inspection, and removal. A lock outside per-run pytest roots
-coordinates Postgres and MinIO, all workers, and concurrent runs from every KDIVE checkout for the
-same user.
+candidate enumeration, liveness inspection, and removal. Acquisition uses `LOCK_EX | LOCK_NB`.
+Ordinary contention returns an empty result without warning or Docker construction because the
+current owner is already the one effective sweeper. A lock outside per-run pytest roots coordinates
+Postgres and MinIO, all workers, and concurrent runs from every KDIVE checkout for the same user.
 
 The canonical path has a dedicated context manager rather than the per-run `_locked` helper. It
 opens with `os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW` and mode 0600, then uses `fstat`
@@ -60,11 +61,12 @@ signal. Neither condition alone suppresses a warning.
 
 ## Failure handling
 
-The sweep remains best-effort. Failure to open or acquire the sweep lock, construct the Docker
-client, or enumerate candidates emits the existing sweep-skipped warning and returns an empty list.
-The sweep never continues unlocked. A per-container failure emits one warning and does not abandon
-later candidates. Lock release occurs through the context manager on normal return and every
-exception; process termination releases the kernel lock.
+The sweep remains best-effort. Ordinary lock contention silently returns an empty list. Failure to
+open or validate the sweep lock, construct the Docker client, or enumerate candidates emits the
+existing sweep-skipped warning and returns an empty list. The sweep never continues unlocked. A
+per-container failure emits one warning and does not abandon later candidates. Lock release occurs
+through the context manager on normal return and every exception; process termination releases the
+kernel lock.
 
 Conflict verification is bounded to five seconds of process monotonic time per container. On
 expiry the consequence is the existing warning, scoped to that exact candidate. Recovery is to let
@@ -74,8 +76,8 @@ retry the sweep.
 ## Verification
 
 - A deterministic multi-process regression starts two sweepers against one fake stale container,
-  pauses the first removal, and proves the second cannot enumerate until the first releases the
-  sweep lock. Exactly one process removes the id and neither warns.
+  pauses the first removal, and proves the second returns without Docker enumeration while the lock
+  is held. Exactly one process removes the id and neither warns.
 - A focused conflict test makes removal raise the exact concurrent-removal 409, returns the
   container from at least two exact-id lookups, then raises NotFound. An injected monotonic clock and
   sleep callable make retries deterministic; the sweep is silent and does not claim the id in
