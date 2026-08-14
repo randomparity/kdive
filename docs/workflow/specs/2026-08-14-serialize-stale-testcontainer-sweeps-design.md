@@ -31,11 +31,12 @@ the exact container is about to disappear.
 
 ## Design
 
-`tests/support/xdist_backend.py` adds a repository-private sweep lock path beneath
-`tempfile.gettempdir()`, qualified by the effective user id. The existing `_locked` context manager
-takes an exclusive `fcntl.flock` on it. `sweep_stale_backend_containers` holds that lock across
-client creation, candidate enumeration, liveness inspection, and removal. A lock outside per-run
-pytest roots coordinates Postgres and MinIO, all workers, and concurrent runs for the same user.
+`tests/support/xdist_backend.py` adds a sweep lock path beneath `tempfile.gettempdir()`. Its filename
+uses a fixed KDIVE-owned namespace plus the effective user id, never a checkout or worktree path.
+The existing `_locked` context manager takes an exclusive `fcntl.flock` on it.
+`sweep_stale_backend_containers` holds that lock across client creation, candidate enumeration,
+liveness inspection, and removal. A lock outside per-run pytest roots coordinates Postgres and
+MinIO, all workers, and concurrent runs from every KDIVE checkout for the same user.
 
 The removal exception path distinguishes Docker `APIError` with HTTP status 409 from NotFound and
 other failures. For a 409, a small helper queries `client.containers.get(container.id)` until the

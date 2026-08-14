@@ -18,11 +18,13 @@ sweepers and daemon-version wording coupled.
 
 ## Decision
 
-The repository's stale-backend sweep uses one per-user, repository-namespaced filesystem lock in
-the platform temporary directory. It takes an exclusive `fcntl.flock` before Docker enumeration and
-holds it through all removals. Postgres and MinIO fixture processes, xdist workers, and concurrent
-test runs under the same operating-system user therefore have one effective sweeper. The empty lock
-file may persist; process exit releases the kernel lock.
+The repository's stale-backend sweep uses one per-user filesystem lock in the platform temporary
+directory. Its filename contains a fixed KDIVE-owned sweep namespace plus the effective user id; it
+never derives identity from a checkout or worktree path. It takes an exclusive `fcntl.flock` before
+Docker enumeration and holds it through all removals. Postgres and MinIO fixture processes, xdist
+workers, and concurrent test runs from every KDIVE checkout under the same operating-system user
+therefore have one effective sweeper. The empty lock file may persist; process exit releases the
+kernel lock.
 
 If Docker still reports a removal conflict, the sweeper verifies only the exact container id. It
 polls Docker until that id is absent for at most five seconds measured by the process monotonic
@@ -35,10 +37,10 @@ container labels, fixture acquisition, or production behavior.
 
 ## Consequences
 
-Stale sweeps under one user are serial, including Docker enumeration time and removal latency.
-Fixture startup can wait behind another sweep, and a live stuck sweeper can delay contenders until
-that process exits; the lock itself has no timeout. The protected work is startup-only and bounded
-to repository-labelled containers, so this serialization is accepted.
+Stale sweeps from every KDIVE checkout under one user are serial, including Docker enumeration time
+and removal latency. Fixture startup can wait behind another sweep, and a live stuck sweeper can
+delay contenders until that process exits; the lock itself has no timeout. The protected work is
+startup-only and bounded to KDIVE-labelled containers, so cross-checkout serialization is accepted.
 
 A Docker actor outside this lock can still race removal. Exact-id absence verification handles the
 benign case without suppressing a conflict whose container remains. The five-second verification
