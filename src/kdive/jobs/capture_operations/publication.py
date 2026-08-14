@@ -264,6 +264,14 @@ class CapturePublicationCoordinator:
         self._store = store
         self._credential = credential
 
+    async def recover(
+        self,
+        conn: AsyncConnection,
+        operation: CaptureOperation,
+    ) -> CaptureOperation:
+        """Close an interrupted publication while the exact attempt is still authoritative."""
+        return await recover_publication(conn, self._store, self._credential, operation)
+
     async def publish(
         self,
         conn: AsyncConnection,

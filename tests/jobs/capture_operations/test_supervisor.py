@@ -298,6 +298,14 @@ def _publisher(
     return publish
 
 
+def _publication_recoverer(events: list[str]):
+    async def recover(*args: object, **kwargs: object) -> CaptureOperation:
+        events.append("recover-publication")
+        return cast(CaptureOperation, args[-1])
+
+    return recover
+
+
 def _job_for(operation: CaptureOperation) -> Job:
     job = _job()
     return job.model_copy(update={"id": operation.job_id, "attempt": operation.job_attempt})
@@ -340,6 +348,7 @@ def test_execute_stages_then_probes_releases_and_acks_before_reading_result(
             _snapshot(request, events),
             request,
             publisher=_publisher(events),
+            publication_recoverer=_publication_recoverer(events),
         )
     )
 
@@ -378,6 +387,7 @@ def test_lock_loss_before_release_cancels_without_releasing(
                 _snapshot(request, events),
                 request,
                 publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         )
 
@@ -387,7 +397,7 @@ def test_lock_loss_before_release_cancels_without_releasing(
     assert events.index("cancel") < events.index("quiescence") < events.index("ack")
 
 
-def test_authority_loss_during_publication_cancels_only_the_publisher(
+def test_authority_loss_during_publication_closes_recovery_before_returning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -413,15 +423,17 @@ def test_authority_loss_during_publication_cancels_only_the_publisher(
                 _snapshot(request, events),
                 request,
                 publisher=_publisher(events, gate=publication_gate),
+                publication_recoverer=_publication_recoverer(events),
             )
         )
 
     assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert events.index("ack") < events.index("publish") < events.index("publisher_cancelled")
+    assert events.index("publisher_cancelled") < events.index("recover-publication")
+    assert events.index("recover-publication") < events.index("dispose")
+    assert events.index("dispose") < events.index("spool_recorded")
     assert "cancel_requested" not in events
     assert "cancel" not in events
-    assert "dispose" not in events
-    assert "spool_recorded" not in events
 
 
 def test_spool_disposal_failure_leaves_published_result_unacknowledged(
@@ -450,6 +462,7 @@ def test_spool_disposal_failure_leaves_published_result_unacknowledged(
                 _snapshot(request, events),
                 request,
                 publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         )
 
@@ -457,6 +470,48 @@ def test_spool_disposal_failure_leaves_published_result_unacknowledged(
     assert events.index("published") < events.index("dispose")
     assert "spool_recorded" not in events
     assert "cancel_requested" not in events
+
+
+def test_provider_failure_after_exit_closes_publication_before_propagating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    job = _job()
+    request = _request(job)
+    operation = _operation(job, request)
+    launched = _Launched(
+        events,
+        CaptureResult(
+            outcome="failure",
+            size_bytes=0,
+            truncated=False,
+            error_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            terminal=False,
+            reason="provider failed",
+        ),
+    )
+    _patch_repository(monkeypatch, operation, events)
+    supervisor = CaptureOperationSupervisor(
+        launcher=_typed_launcher(launched),
+        credential=SecretStr("credential"),
+    )
+
+    with pytest.raises(CategorizedError, match="provider failed"):
+        asyncio.run(
+            supervisor.execute(
+                _typed_connection(events),
+                job,
+                _snapshot(request, events),
+                request,
+                publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
+            )
+        )
+
+    assert events.index("ack") < events.index("result")
+    assert events.index("result") < events.index("recover-publication")
+    assert events.index("recover-publication") < events.index("dispose")
+    assert events.index("dispose") < events.index("spool_recorded")
 
 
 def test_stalled_release_probe_uses_one_second_client_timeout(
@@ -486,6 +541,7 @@ def test_stalled_release_probe_uses_one_second_client_timeout(
                 _snapshot(request, events),
                 request,
                 publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         return loop.time() - started
 
@@ -522,6 +578,7 @@ def test_recurring_lock_loss_after_release_cancels_and_bars_result(
                 _snapshot(request, events),
                 request,
                 publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         )
 
@@ -581,6 +638,7 @@ def test_tied_process_exit_and_lock_loss_prioritizes_authority(
                 _snapshot(request, events),
                 request,
                 publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         return events
 
@@ -621,6 +679,7 @@ def test_transition_failure_immediately_after_release_still_cancels_child(
                 _snapshot(request, events),
                 request,
                 publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         )
 
@@ -661,6 +720,7 @@ def test_durable_cancel_failure_does_not_skip_child_termination(
                 _snapshot(request, events),
                 request,
                 publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         )
 
@@ -693,6 +753,7 @@ def test_cancellation_waits_for_cleanup_and_reraises(
                 _snapshot(request, events),
                 request,
                 publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         )
         while "release" not in events:
@@ -733,6 +794,7 @@ def test_child_surviving_term_and_kill_remains_cancel_requested(
                 _snapshot(request, events),
                 request,
                 publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
             )
         )
 

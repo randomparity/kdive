@@ -255,7 +255,14 @@ async def capture_traffic_handler(
             data,
         )
 
-    artifact_id = await supervisor.execute(conn, job, snapshot, request, publisher=publish)
+    artifact_id = await supervisor.execute(
+        conn,
+        job,
+        snapshot,
+        request,
+        publisher=publish,
+        publication_recoverer=publication.recover,
+    )
     return None if artifact_id is None else str(artifact_id)
 
 

@@ -111,6 +111,9 @@ def test_handler_delegates_provider_phase_and_publisher_to_supervisor(
         async def snapshot_run(*args: object) -> CaptureSnapshot:
             return snapshot
 
+        async def recover_publication(*args: object) -> object:
+            return args[-1]
+
         class _Supervisor:
             async def execute(
                 self,
@@ -120,8 +123,18 @@ def test_handler_delegates_provider_phase_and_publisher_to_supervisor(
                 request: CaptureRequest,
                 *,
                 publisher: object,
+                publication_recoverer: object,
             ) -> object | None:
-                observed.extend((conn, supplied_job, supplied_snapshot, request, publisher))
+                observed.extend(
+                    (
+                        conn,
+                        supplied_job,
+                        supplied_snapshot,
+                        request,
+                        publisher,
+                        publication_recoverer,
+                    )
+                )
                 return None
 
         monkeypatch.setattr(capture_traffic, "_snapshot", snapshot_run)
@@ -129,7 +142,7 @@ def test_handler_delegates_provider_phase_and_publisher_to_supervisor(
             cast(Any, SimpleNamespace()),
             job,
             resolver=cast(Any, SimpleNamespace()),
-            publication=cast(Any, SimpleNamespace()),
+            publication=cast(Any, SimpleNamespace(recover=recover_publication)),
             supervisor=cast(Any, _Supervisor()),
         )
         assert result is None
@@ -138,6 +151,7 @@ def test_handler_delegates_provider_phase_and_publisher_to_supervisor(
         assert request.max_polls == 2
         assert request.resource_id == snapshot.resource_id
         assert callable(observed[4])
+        assert observed[5] is recover_publication
 
     asyncio.run(_run_handler())
 
@@ -190,7 +204,9 @@ def test_handler_does_not_publish_when_worker_authority_ends_with_supervisor(
                 _request: CaptureRequest,
                 *,
                 publisher: Any,
+                publication_recoverer: Any,
             ) -> UUID:
+                del publication_recoverer
                 authority_lost.set()
                 return await publisher(
                     conn,
@@ -204,6 +220,9 @@ def test_handler_does_not_publish_when_worker_authority_ends_with_supervisor(
             async def publish(self, *args: object) -> UUID:
                 events.append("published")
                 return uuid4()
+
+            async def recover(self, *args: object) -> object:
+                return args[-1]
 
         monkeypatch.setattr(capture_traffic, "_snapshot", snapshot_run)
         with capture_authority_scope(authority_lost), pytest.raises(CaptureAuthorityLost):

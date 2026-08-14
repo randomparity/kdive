@@ -219,7 +219,8 @@ class _PublicationSupervisor:
     def __init__(self, capturer: _FakeCapturer) -> None:
         self._capturer = capturer
 
-    async def execute(self, conn, job, snapshot, request, *, publisher):
+    async def execute(self, conn, job, snapshot, request, *, publisher, publication_recoverer):
+        del publication_recoverer
         qom_id = f"kdive-dump-{job.id}"
         dest = await asyncio.to_thread(self._capturer.prepare, snapshot.system_id, job.id)
 
@@ -260,6 +261,10 @@ class _Publication:
     def __init__(self, store: _FakeStore) -> None:
         self.store = store
         self.calls: list[tuple[UUID, bytes]] = []
+
+    async def recover(self, conn, operation):
+        del conn
+        return operation
 
     async def publish(self, conn, job, operation, snapshot, data) -> UUID:
         run_id = UUID(job.payload["run_id"])

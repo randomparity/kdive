@@ -821,6 +821,7 @@ def test_supervisor_leaves_clean_launch_abort_for_publication_recovery(
                     supervisor_snapshot,
                     request,
                     publisher=cast(Any, None),
+                    publication_recoverer=cast(Any, None),
                 )
             assert raised.value is launcher.error
             row = await (

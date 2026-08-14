@@ -95,6 +95,16 @@ class CapturePublisher(Protocol):
     ) -> UUID: ...
 
 
+class CapturePublicationRecoverer(Protocol):
+    """Close publication for an exited attempt before its failure is propagated."""
+
+    async def __call__(
+        self,
+        conn: AsyncConnection,
+        operation: CaptureOperation,
+    ) -> CaptureOperation: ...
+
+
 @contextmanager
 def capture_authority_scope(lost: asyncio.Event) -> Iterator[None]:
     """Bind worker heartbeat/stop authority to one capture handler task."""
@@ -231,6 +241,7 @@ class CaptureOperationSupervisor:
         request: CaptureRequest,
         *,
         publisher: CapturePublisher,
+        publication_recoverer: CapturePublicationRecoverer,
     ) -> UUID | None:
         """Execute and publish only while the exact job lock session remains responsive."""
         launched: LaunchedCapture | None = None
@@ -282,23 +293,53 @@ class CaptureOperationSupervisor:
                     publisher,
                 )
         except asyncio.CancelledError:
-            if not acknowledged:
+            if acknowledged:
+                assert operation is not None and launched is not None
+                await self._cleanup_publication(conn, operation, launched, publication_recoverer)
+            else:
                 await self._cleanup_started(
                     conn, operation, launched, launch_abort, snapshot, configuration
                 )
             raise
         except CaptureAuthorityLost as error:
-            if not acknowledged:
+            if acknowledged:
+                assert operation is not None and launched is not None
+                await self._cleanup_publication(conn, operation, launched, publication_recoverer)
+            else:
                 await self._cleanup_started(
                     conn, operation, launched, launch_abort, snapshot, configuration
                 )
             raise _authority_error() from error
         except Exception:
-            if not acknowledged:
+            if acknowledged:
+                assert operation is not None and launched is not None
+                await self._cleanup_publication(conn, operation, launched, publication_recoverer)
+            else:
                 await self._cleanup_started(
                     conn, operation, launched, launch_abort, snapshot, configuration
                 )
             raise
+
+    async def _cleanup_publication(
+        self,
+        conn: AsyncConnection,
+        operation: CaptureOperation,
+        launched: LaunchedCapture,
+        recoverer: CapturePublicationRecoverer,
+    ) -> None:
+        async with self._transition_connection(conn) as transition:
+            recovered = await recoverer(transition, operation)
+            disposed = await asyncio.to_thread(launched.dispose_spool)
+            if not disposed:
+                raise CategorizedError(
+                    "capture publication recovery could not dispose its private spool",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={
+                        "reason": "capture_spool_disposal_unverified",
+                        "operation_id": str(operation.id),
+                    },
+                )
+            await record_spool_disposed(transition, self._credential, recovered.id)
 
     async def _cleanup_started(
         self,
