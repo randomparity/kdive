@@ -73,8 +73,10 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
    environment skip, never a silent success over no assertions.
 6. Wire worker startup before capture recovery/readiness and test that a failed probe prevents job
    claims. Run `uv run python -m pytest tests/processes/test_worker.py -q`.
-7. Run `just lint`, `just type`, and the three focused modules. Keep ADR-0559 Proposed because the
-   publication state machine is not implemented yet. Commit:
+7. Run `just lint`, `just type`, the three focused modules, and bare `just ci`; verify
+   `git status --porcelain` contains only the intended tracked changes and no untracked files. Keep
+   ADR-0559 Proposed because the publication state machine is not implemented yet. Commit, then
+   require empty status:
    `feat(store): admit conditional capture publication`.
 
 **Acceptance**
@@ -138,8 +140,9 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 6. Update exact protocol expectations mechanically, without adding compatibility branches. Run
    `rg -n 'protocol 3|fence_protocol = 3' src tests deploy scripts docs/operating` and disposition
    every remaining hit as historical prose, deliberate negative fixture, or defect.
-7. Run `just lint`, `just type`, focused database/job tests, and `just migration-order-check`.
-   Commit: `feat(jobs): persist capture publication closure`.
+7. Run `just lint`, `just type`, focused database/job tests, `just migration-order-check`, and bare
+   `just ci`; verify status contains only intended tracked changes and no untracked files. Commit,
+   then require empty status: `feat(jobs): persist capture publication closure`.
 
 **Acceptance**
 
@@ -190,7 +193,8 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
    plus deletion failure. Break disposal ordering and confirm a test catches deletion before the
    artifact commit. Discarded spool closure belongs to Task 4.
 6. Run focused handler, supervisor, publication, artifact discard/etag, queue, and worker tests;
-   then `just lint` and `just type`. Commit:
+   then `just lint`, `just type`, and bare `just ci`; verify status contains only intended tracked
+   changes and no untracked files. Commit, then require empty status:
    `feat(worker): fence capture artifact publication`.
 
 **Acceptance**
@@ -238,7 +242,8 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 6. Add success/cancel/replacement spool tests. A failed unlink or unverifiable directory retains
    null `spool_disposed_at`; verified absence is idempotent success.
 7. Run publication, supervisor, worker-main, and Compose lifecycle modules. Run `just lint`,
-   `just type`, and `just test-changed`. Commit:
+   `just type`, `just test-changed`, and bare `just ci`; verify status contains only intended
+   tracked changes and no untracked files. Commit, then require empty status:
    `fix(worker): recover capture publication boundaries`.
 
 **Acceptance**
