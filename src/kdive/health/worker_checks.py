@@ -26,6 +26,8 @@ def build_worker_checks(
     *,
     postgres_ping: Callable[[], Awaitable[None]],
     object_store_factory: Callable[[], _Pingable],
+    capture_manifest_verifier: Callable[[], None] | None = None,
+    capture_recovery_ready: Callable[[], bool] | None = None,
 ) -> list[BackendCheck]:
     """Return the worker/reconciler readiness checks: Postgres, MinIO (no OIDC).
 
@@ -34,15 +36,31 @@ def build_worker_checks(
         object_store_factory: Builds an object store exposing a synchronous ``ping()``
             (bucket ``HEAD``). Called **inside the check**, so a misconfigured or
             unreachable store reads as not-ready rather than crashing process startup.
+        capture_manifest_verifier: Optional synchronous bootstrap-attestation verifier.
+        capture_recovery_ready: Optional startup gate that stays false until recovery completes.
     """
 
     async def minio() -> None:
         await asyncio.to_thread(_ping_store, object_store_factory)
 
-    return [
+    checks = [
         BackendCheck(name="postgres", probe=postgres_ping),
         BackendCheck(name="minio", probe=minio),
     ]
+    if capture_manifest_verifier is not None:
+
+        async def capture_manifest() -> None:
+            await asyncio.to_thread(capture_manifest_verifier)
+
+        checks.append(BackendCheck(name="capture_bootstrap_manifest", probe=capture_manifest))
+    if capture_recovery_ready is not None:
+
+        async def capture_recovery() -> None:
+            if not capture_recovery_ready():
+                raise RuntimeError("capture operation recovery is incomplete")
+
+        checks.append(BackendCheck(name="capture_recovery", probe=capture_recovery))
+    return checks
 
 
 def _ping_store(factory: Callable[[], _Pingable]) -> None:

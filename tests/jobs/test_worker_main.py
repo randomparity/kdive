@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -103,6 +104,18 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
         return object()
 
     monkeypatch.setattr("kdive.jobs.assembly.build_handler_registry", _registry)
+    assembly = SimpleNamespace(resolver=object())
+    monkeypatch.setattr(
+        "kdive.jobs.assembly.build_worker_handler_assembly", lambda **kwargs: assembly
+    )
+
+    async def _recover(*args: object) -> object:
+        events.append("recover")
+        return SimpleNamespace(pending=0)
+
+    monkeypatch.setattr(
+        "kdive.jobs.capture_operations.supervisor.recover_capture_operations", _recover
+    )
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: object())
     monkeypatch.setattr(
         "kdive.health.processes.server.build_postgres_ping", lambda pool: lambda: None
@@ -126,7 +139,14 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
 
     asyncio.run(__main__._run_worker(SecretRegistry(), _fake_telemetry()))
 
-    assert events == [*_warm_open(), "acquire(timeout=None)", "authenticate", "run", _close()]
+    assert events == [
+        *_warm_open(),
+        "acquire(timeout=None)",
+        "authenticate",
+        "recover",
+        "run",
+        _close(),
+    ]
     config = constructed["config"]
     assert constructed["incarnation_credential"] is credential
     assert registry_credentials == [credential]

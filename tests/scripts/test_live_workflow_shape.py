@@ -8,12 +8,42 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
 
 import yaml
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _LIVE = _ROOT / ".github" / "workflows" / "live.yml"
 _CI = _ROOT / ".github" / "workflows" / "ci.yml"
+
+
+def test_capture_cutovers_are_separate_unconditional_paths() -> None:
+    shared = (_ROOT / "scripts/cutover-capture-protocol-lib.sh").read_text()
+    paths = (
+        _ROOT / "scripts/live-stack/cutover-capture-protocol.sh",
+        _ROOT / "scripts/cutover-capture-protocol-compose.sh",
+        _ROOT / "scripts/cutover-capture-protocol-helm.sh",
+    )
+    for path in paths:
+        text = path.read_text() + shared
+        assert "rolling" in text.lower()
+        assert "protocol 2" in text.lower()
+        assert "protocol 3" in text.lower()
+        assert "pg_dump --format=custom" in text
+        assert "pg_restore --clean --if-exists" in text
+        assert "compat" not in text.lower()
+
+
+def test_capture_cutovers_refuse_missing_authority_arguments_before_work() -> None:
+    paths = (
+        _ROOT / "scripts/live-stack/cutover-capture-protocol.sh",
+        _ROOT / "scripts/cutover-capture-protocol-compose.sh",
+        _ROOT / "scripts/cutover-capture-protocol-helm.sh",
+    )
+    for path in paths:
+        result = subprocess.run([str(path)], capture_output=True, text=True, check=False)
+        assert result.returncode == 2, (path, result.stderr)
+        assert "usage:" in result.stderr
 
 
 def _load(path: pathlib.Path) -> dict:

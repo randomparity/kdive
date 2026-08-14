@@ -78,6 +78,16 @@ def test_executable_lifecycle_proof_has_a_dedicated_fail_loud_recipe() -> None:
     assert "KDIVE_RUN_COMPOSE_LIFECYCLE_PROOF=1" in justfile
     assert "KDIVE_REQUIRE_DOCKER=1" in justfile
     assert "tests/compose/test_compose_worker_lifecycle_live.py" in justfile
+    assert "command -v bwrap" in _recipe(justfile, "test-compose-lifecycle")
+
+
+def test_live_runner_provisions_and_verifies_bubblewrap() -> None:
+    root = Path(__file__).resolve().parents[2]
+    defaults = (root / "deploy/ansible/roles/live_vm_host/defaults/main.yml").read_text()
+    verify = (root / "deploy/ansible/roles/live_vm_host/tasks/verify.yml").read_text()
+
+    assert "bubblewrap" in defaults
+    assert "bwrap --version" in verify
 
 
 def test_volume_persistence_proof_has_a_dedicated_fail_loud_recipe() -> None:
@@ -103,3 +113,26 @@ def test_examples_scripts_are_covered_by_the_shell_gate() -> None:
     lint_shell = justfile.split("lint-shell:", 1)[1].split("\n\n", 1)[0]
 
     assert "examples" in lint_shell
+
+
+def test_compose_cutover_uses_supported_lifecycle_and_preserves_volumes() -> None:
+    root = Path(__file__).resolve().parents[2]
+    text = (root / "scripts" / "cutover-capture-protocol-compose.sh").read_text()
+    ordered = (
+        "just compose-stop",
+        "worker_incarnations",
+        "cutover_publish_backup",
+        '"${compose[@]}" --profile cutover run --rm migrate',
+        "just compose-up",
+    )
+    positions: list[int] = []
+    cursor = text.index("trap on_exit EXIT")
+    for token in ordered:
+        cursor = text.index(token, cursor)
+        positions.append(cursor)
+    assert positions == sorted(positions)
+    assert "--volumes" not in text
+    assert "compose-down" not in text
+    assert "KDIVE_IMAGE" in text
+    assert "RAISE EXCEPTION 'Compose cutover still has active worker incarnations:" in text
+    assert "authority_kind <> 'docker'" in text

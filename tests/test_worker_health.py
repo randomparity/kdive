@@ -64,6 +64,45 @@ def test_probe_does_not_couple_to_oidc() -> None:
     asyncio.run(_run())
 
 
+def test_worker_probe_includes_callable_capture_manifest_verifier() -> None:
+    calls: list[str] = []
+
+    async def _run() -> None:
+        probe = build_worker_probe(
+            postgres_ping=_pg_ok,
+            object_store_factory=lambda: _FakeStore(ok=True),
+            capture_manifest_verifier=lambda: calls.append("verified"),
+        )
+        result = await probe.check()
+        assert result.ready is True
+        assert result.checks["capture_bootstrap_manifest"] is True
+
+    asyncio.run(_run())
+    assert calls == ["verified"]
+
+
+def test_worker_probe_bars_readiness_until_capture_recovery_completes() -> None:
+    recovered = False
+
+    async def _run() -> None:
+        nonlocal recovered
+        probe = build_worker_probe(
+            postgres_ping=_pg_ok,
+            object_store_factory=lambda: _FakeStore(ok=True),
+            capture_recovery_ready=lambda: recovered,
+        )
+        blocked = await probe.check()
+        assert blocked.ready is False
+        assert blocked.checks["capture_recovery"] is False
+
+        recovered = True
+        ready = await probe.check()
+        assert ready.ready is True
+        assert ready.checks["capture_recovery"] is True
+
+    asyncio.run(_run())
+
+
 def test_readyz_over_aux_listener_omits_oidc() -> None:
     """End-to-end: the worker /readyz body carries postgres + minio, never oidc."""
 

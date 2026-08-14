@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -723,6 +723,160 @@ def test_heartbeat_error_does_not_crash_dispatch(
 
     caplog.set_level(logging.WARNING, logger="kdive.jobs.worker")
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("heartbeat_error", [False, True])
+def test_capture_dispatch_cancels_handler_when_heartbeat_authority_ends(
+    monkeypatch: pytest.MonkeyPatch, heartbeat_error: bool
+) -> None:
+    async def _run() -> None:
+        worker = _worker(_unopened_pool(), HandlerRegistry(), worker_id="w1")
+        job = Job(
+            id=uuid4(),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            kind=JobKind.CAPTURE_TRAFFIC,
+            payload={},
+            state=JobState.RUNNING,
+            attempt=1,
+            max_attempts=3,
+            worker_id="w1",
+            authorizing=_AUTHORIZING.model_dump(),
+            dedup_key="capture-authority",
+        )
+        started = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        async def run_handler(*args: object) -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        async def heartbeat(*args: object) -> None:
+            await started.wait()
+            if heartbeat_error:
+                raise RuntimeError("heartbeat error")
+
+        async def handler(*args: object) -> None:
+            return None
+
+        monkeypatch.setattr(worker, "_invoke_handler", run_handler)
+        monkeypatch.setattr(worker, "_heartbeat_loop", heartbeat)
+        await asyncio.wait_for(worker._dispatch(job, handler), timeout=1)
+        assert cleaned.is_set()
+
+    asyncio.run(_run())
+
+
+def test_worker_stop_cancels_capture_handler_but_keeps_other_jobs_draining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> None:
+        worker = _worker(_unopened_pool(), HandlerRegistry(), worker_id="w1")
+        stop = asyncio.Event()
+        worker._stop_event = stop
+        cleaned = asyncio.Event()
+        started = asyncio.Event()
+        capture = Job(
+            id=uuid4(),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            kind=JobKind.CAPTURE_TRAFFIC,
+            payload={},
+            state=JobState.RUNNING,
+            attempt=1,
+            max_attempts=3,
+            worker_id="w1",
+            authorizing=_AUTHORIZING.model_dump(),
+            dedup_key="capture-stop",
+        )
+
+        async def run_handler(*args: object) -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        async def heartbeat(*args: object) -> None:
+            await asyncio.Event().wait()
+
+        async def handler(*args: object) -> None:
+            return None
+
+        monkeypatch.setattr(worker, "_invoke_handler", run_handler)
+        monkeypatch.setattr(worker, "_heartbeat_loop", heartbeat)
+        task = asyncio.create_task(worker._dispatch(capture, handler))
+        await started.wait()
+        stop.set()
+        await asyncio.wait_for(task, timeout=1)
+        assert cleaned.is_set()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("authority", ["heartbeat", "stop"])
+def test_capture_tied_completion_prioritizes_authority_before_job_finalization(
+    monkeypatch: pytest.MonkeyPatch, authority: str
+) -> None:
+    async def _run() -> list[str]:
+        worker = _worker(_unopened_pool(), HandlerRegistry(), worker_id="w1")
+        stop = asyncio.Event()
+        worker._stop_event = stop
+        rendezvous = asyncio.Event()
+        arrivals = 0
+        events: list[str] = []
+        capture = Job(
+            id=uuid4(),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            kind=JobKind.CAPTURE_TRAFFIC,
+            payload={},
+            state=JobState.RUNNING,
+            attempt=1,
+            max_attempts=3,
+            worker_id="w1",
+            authorizing=_AUTHORIZING.model_dump(),
+            dedup_key="capture-tied-authority",
+        )
+
+        async def arrive() -> None:
+            nonlocal arrivals
+            arrivals += 1
+            if arrivals == 2:
+                rendezvous.set()
+            await rendezvous.wait()
+
+        async def invoke(*args: object) -> None:
+            await arrive()
+            events.append("handler-complete")
+
+        async def heartbeat(*args: object) -> None:
+            if authority == "heartbeat":
+                await arrive()
+            else:
+                await asyncio.Event().wait()
+
+        async def finish(*args: object) -> None:
+            events.append("queue-complete")
+
+        async def handler(*args: object) -> None:
+            return None
+
+        monkeypatch.setattr(worker, "_invoke_handler", invoke)
+        monkeypatch.setattr(worker, "_finalize_handler", finish)
+        monkeypatch.setattr(worker, "_heartbeat_loop", heartbeat)
+        task = asyncio.create_task(worker._dispatch(capture, handler))
+        if authority == "stop":
+            await asyncio.sleep(0)
+            await arrive()
+            stop.set()
+        await asyncio.wait_for(task, timeout=1)
+        return events
+
+    assert asyncio.run(_run()) == ["handler-complete"]
 
 
 def test_run_once_claims_nothing_while_paused(migrated_url: str) -> None:

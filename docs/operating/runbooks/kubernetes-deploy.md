@@ -156,12 +156,85 @@ A `helm upgrade` runs single-responsibility Jobs, so each failure names exactly 
 | Job | Hook phase | Fails when |
 |-----|-----------|------------|
 | `<release>-kdive-validate-systems` | `pre-install`/`pre-upgrade`, weight `-10` | the mounted `systems.toml` is malformed/invalid (fail-fast — aborts the upgrade before migrate) |
-| `<release>-kdive-migrate` | `pre-*` external / `post-*` bundled, weight `0` | a SQL schema migration actually fails |
+| `<release>-kdive-migrate` | `pre-*` external; `post-install` and `pre-upgrade` bundled, weight `0` | a SQL schema migration actually fails |
 
-The validate Job renders only when `systems.configMapName` is set. Migrations are forward-only and
-must be backward-compatible (ADR-0015), so a rollback is image-only.
+The validate Job renders only when `systems.configMapName` is set. Except for the explicitly
+replacing protocol-3 boundary below, migrations are forward-only and backward-compatible
+(ADR-0015), so a rollback is image-only.
 
 ### Staged worker-fence upgrade
+
+#### Protocol-3 capture cutover (migration 0112)
+
+Migration 0112 does not use the generic staged sequence below. It is an unconditional replacing
+cutover with no rolling, compatibility, or protocol-2 restart path. Use the repository script with
+all authority inputs explicit:
+
+```bash
+export KDIVE_MIGRATION_DATABASE_URL='postgresql://migration-owner@db.example/kdive'
+export TARGET_IMAGE='ghcr.io/randomparity/kdive:<target-tag>'
+scripts/cutover-capture-protocol-helm.sh \
+  kdive kdive-system kdive-values.yaml \
+  /var/backups/kdive-before-protocol-3.dump \
+  "$TARGET_IMAGE"
+```
+
+The script reads the installed `worker.replicas`, scales
+`statefulset/<release>-kdive-worker` to zero, waits for deletion and finalizer completion of every
+old worker Pod, verifies the lifecycle authority's exact namespace/name/UID termination rows,
+creates a `pg_dump --format=custom` backup, and runs the target-image Helm upgrade with the saved
+replica count. The migration hook runs before workload rollout on both external and bundled
+upgrade paths. Migration 0112 holds the global capture-protocol lock and names every blocking
+incarnation or capture job before it installs protocol 3.
+
+The wrapper creates a restricted mode-0700 cutover directory beside the backup and freezes a
+flattened kubeconfig, its context and cluster identity, the chart tree, caller values, installed
+release revision and namespace/StatefulSet UIDs, exact target render, registry image digest, and
+migration credential. Every later Helm and Kubernetes operation uses only the frozen kubeconfig,
+context, chart, and values. A mode-0400 password-free database URI and libpq passfile keep the
+migration-owner DSN out of local `psql` and `pg_dump` argv and environment.
+The wrapper then removes ambient KDIVE/libpq credential variables. Helm, `kubectl`, Docker, and
+helper Python children receive none of them; credential equality is checked from the restricted
+attempt files instead of exporting the supplied DSN again. An attempt-unique Secret with
+Kubernetes `immutable: true` supplies the frozen credential to the migration hook. Its
+UID, immutable flag, and bytes are revalidated before
+backup, upgrade, and safe deletion after the successor release and workload identities are proven.
+A failed run retains the restricted snapshot and any still-needed Secret and prints exact
+identities without printing a DSN.
+
+Before scaling, the wrapper checks the complete Helm, hook, release-storage, and chart-resource
+verb set, including ReplicaSet get/list reads used by Helm's Deployment wait. It renders with
+upgrade semantics and runs the exact frozen Helm arguments with `--dry-run=server`, then verifies
+database connectivity. It revalidates cluster, namespace,
+StatefulSet, release, and cutover-Secret identities at every mutation boundary. After Pod deletion,
+every legacy Kubernetes incarnation whose authority name is the exact StatefulSet name plus a
+numeric ordinal must have durable termination evidence before backup. A tagged target image must
+resolve to exactly one digest for its supplied repository. Both installed and target migration
+Secret DSNs must equal
+`KDIVE_MIGRATION_DATABASE_URL`; DSNs are never printed. Each
+Helm, Kubernetes, image, database, dump, and migration operation has a 600-second limit measured
+by GNU `timeout`'s monotonic clock. Connects additionally have a 10-second limit and statements a
+300-second server-side limit. The three whole-second overrides are
+`KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS`, `KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS`, and
+`KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS`. Each limit covers one external operation; expiry
+rejects the incomplete result, keeps workers at zero after mutation, and prints the recovery
+command. Repair the stalled cluster or database dependency and rerun that command.
+
+A precondition or migration failure leaves the old schema and zero workers. A later failure leaves
+protocol 3 installed and zero workers. Never start a protocol-2 image after migration. The only
+post-migration rollback is the script's exact `pg_restore --clean --if-exists` command followed by
+the prior chart and image. That command consumes the retained password-free URI and restricted
+passfile; retain the cutover directory until rollback or forward recovery completes. The cutoff is
+operation-quiescent evidence only: #1952 still gates
+publication closure and combined historical-capture coverage.
+Backup publication is atomic and refuses replacement. If its destination appears during the dump,
+the validated sibling temporary file is retained and the wrapper prints a safe recovery path.
+The recovery trap does not scale workers unless this attempt began worker mutation. Its output is
+phase-aware: old-schema failures print a complete fresh-attempt command, uncertain upgrade failures
+print the frozen forward-resume and restore commands, and post-upgrade cleanup failures print the
+exact cutover-Secret deletion command.
+
+The remaining staged procedure applies to other worker-fence releases.
 
 Use this procedure for a release carrying the worker-fence protocol. It is stop-old-first and
 forward-only: do not restore an old worker image, force-delete a Pod, remove a finalizer, or
@@ -1105,7 +1178,7 @@ put all four `demoCredentials.postgresql.serverPassword`,
 `demoCredentials.postgresql.workerPassword`,
 `demoCredentials.postgresql.reconcilerPassword`, and
 `demoCredentials.postgresql.lifecycleWitnessPassword` values in `$TARGET_VALUES` before this stage.
-Its post-upgrade hook migrates and resets those role passwords. On external backends, rotate the
+Its pre-upgrade hook migrates and resets those role passwords. On external backends, rotate the
 four database role credentials and referenced Secrets only after this all-zero migration succeeds.
 
 ```bash
@@ -1139,7 +1212,7 @@ also skips the external ConfigMap hook.
 
 #### Stage 5 — Correct target credential content
 
-For bundled backends, Stage 4's post-upgrade hook has already reset the four runtime-role passwords
+For bundled backends, Stage 4's pre-upgrade hook has already reset the four runtime-role passwords
 from the target `demoCredentials` values. For external backends, complete the deployment-specific
 database-role and same-reference Secret-content rotation now. Confirm every target Secret key is
 ready before continuing; this runbook does not invent commands for an external secret manager.

@@ -21,11 +21,16 @@ user and the pcap is readable without the ADR-0223 root-readback wall (that wall
 from __future__ import annotations
 
 import contextlib
+import json
+import multiprocessing
+import os
 import socket
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Protocol
 
 import pytest
 
@@ -33,10 +38,56 @@ from kdive.testing.live_vm import boot_throwaway_domain
 from tests.live_vm import require_live_vm_throwaway
 
 
+class _Event(Protocol):
+    def set(self) -> None: ...
+    def wait(self, timeout: float | None = None) -> bool: ...
+
+
+class _Process(Protocol):
+    def start(self) -> None: ...
+    def terminate(self) -> None: ...
+    def join(self, timeout: float | None = None) -> None: ...
+    def is_alive(self) -> bool: ...
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+def _submit_fifo_filter(
+    uri: str,
+    domain_name: str,
+    qom_id: str,
+    fifo_path: str,
+    entered: _Event,
+) -> None:
+    """Submit the real blocking QMP mutation from a killable client process."""
+    import libvirt  # noqa: PLC0415
+    import libvirt_qemu  # noqa: PLC0415
+
+    from kdive.providers.local_libvirt.lifecycle.xml import (  # noqa: PLC0415
+        SYSTEM_SSH_NETDEV_ID,
+    )
+
+    connection = libvirt.open(uri)
+    try:
+        domain = connection.lookupByName(domain_name)
+        command = {
+            "execute": "object-add",
+            "arguments": {
+                "qom-type": "filter-dump",
+                "id": qom_id,
+                "netdev": SYSTEM_SSH_NETDEV_ID,
+                "file": fifo_path,
+                "maxlen": 128,
+            },
+        }
+        entered.set()
+        libvirt_qemu.qemuMonitorCommand(domain, json.dumps(command), 0)
+    finally:
+        connection.close()
 
 
 @pytest.mark.live_vm
@@ -94,3 +145,88 @@ def test_live_vm_traffic_capture_filter_dump() -> None:  # pragma: no cover - li
         pcap_file.unlink(missing_ok=True)
         with contextlib.suppress(OSError):
             pcap_dir.rmdir()
+
+
+@pytest.mark.live_vm
+@pytest.mark.live_vm_throwaway
+def test_local_capture_operation_waits_for_fresh_monitor_ordering() -> None:  # pragma: no cover
+    """A fresh absence query cannot pass an accepted FIFO-blocked QMP mutation."""
+    contract = require_live_vm_throwaway("qemu:///session", session_required=True)
+    try:
+        import libvirt  # noqa: PLC0415  # operator-provided
+        import libvirt_qemu  # noqa: PLC0415  # operator-provided
+    except ImportError:
+        pytest.skip("libvirt-python / libvirt_qemu unavailable")
+
+    from kdive.providers.local_libvirt.lifecycle.capture_operation import (  # noqa: PLC0415
+        LocalLibvirtCaptureQuiescence,
+    )
+    from kdive.providers.local_libvirt.lifecycle.xml import (  # noqa: PLC0415
+        SYSTEM_SSH_NETDEV_ID,
+    )
+
+    name = f"kdive-order-live-{uuid.uuid4().hex[:12]}"
+    qom_id = f"kdive-delay-{uuid.uuid4().hex[:12]}"
+    resource_id = uuid.uuid4()
+    fifo_dir = Path(tempfile.mkdtemp(prefix="kdive-capture-order-live-"))
+    fifo_path = fifo_dir / "capture.fifo"
+    os.mkfifo(fifo_path, mode=0o600)
+    process_context = multiprocessing.get_context("spawn")
+    entered = process_context.Event()
+    client: _Process | None = None
+    reader_fd = -1
+    try:
+        with boot_throwaway_domain(
+            contract.rootfs,
+            arch="x86_64",
+            name=name,
+            mode=contract.libvirt_uri,
+            ssh_hostfwd_port=_free_port(),
+            ssh_netdev_id=SYSTEM_SSH_NETDEV_ID,
+            wait_for="active",
+            settle_s=2.0,
+        ):
+            client = process_context.Process(
+                target=_submit_fifo_filter,
+                args=(contract.libvirt_uri, name, qom_id, str(fifo_path), entered),
+            )
+            client.start()
+            assert entered.wait(timeout=5), "monitor submitter did not enter qemuMonitorCommand"
+            time.sleep(0.1)
+            assert client.is_alive(), "FIFO mutation returned before a reader existed"
+
+            probe = LocalLibvirtCaptureQuiescence(
+                resource_id=resource_id,
+                connect=lambda: libvirt.open(contract.libvirt_uri),
+                monitor=libvirt_qemu.qemuMonitorCommand,
+            )
+            finished = threading.Event()
+            failures: list[BaseException] = []
+
+            def observe() -> None:
+                try:
+                    probe.prove_absent(resource_id, name, qom_id)
+                except BaseException as error:
+                    failures.append(error)
+                finally:
+                    finished.set()
+
+            observer = threading.Thread(target=observe)
+            observer.start()
+            assert not finished.wait(timeout=0.2), "fresh monitor query acknowledged too early"
+            client.terminate()
+            client.join(timeout=5)
+            assert not client.is_alive()
+            reader_fd = os.open(fifo_path, os.O_RDONLY | os.O_NONBLOCK)
+            observer.join(timeout=5)
+            assert finished.is_set(), "fresh monitor query did not cross the released FIFO command"
+            assert failures == []
+    finally:
+        if client is not None and client.is_alive():
+            client.terminate()
+            client.join(timeout=5)
+        if reader_fd >= 0:
+            os.close(reader_fd)
+        fifo_path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            fifo_dir.rmdir()

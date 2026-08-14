@@ -34,9 +34,10 @@ from pydantic import SecretStr
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
-from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, Job, dispatch_lane_for_kind
+from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, Job, JobKind, dispatch_lane_for_kind
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
+from kdive.jobs.capture_operations.supervisor import capture_authority_scope
 from kdive.jobs.models import HandlerRegistry, JobHandler
 from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
 from kdive.jobs.worker_telemetry import JobSpan, WorkerTelemetry
@@ -184,6 +185,7 @@ class Worker:
         self._heartbeat_sleep_until_stop = config.heartbeat_sleep_until_stop
         self._readiness = config.readiness
         self._telemetry = config.telemetry or WorkerTelemetry.disabled()
+        self._stop_event: asyncio.Event | None = None
 
     async def run_once(self, lane: str) -> Job | None:
         """Claim and dispatch one job **from ``lane``**; return it, or ``None`` if idle.
@@ -263,9 +265,11 @@ class Worker:
         dependency recovers.
         """
         ticker = self._start_heartbeat_ticker(stop)
+        self._stop_event = stop
         try:
             await self._run_lane_loops(stop)
         finally:
+            self._stop_event = None
             if ticker is not None:
                 ticker.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -342,6 +346,9 @@ class Worker:
     async def _dispatch(self, job: Job, handler: JobHandler) -> None:
         with self._telemetry.job_span(job.kind.value) as span:
             heartbeat = asyncio.create_task(self._heartbeat_loop(job.id, job.attempt))
+            if job.kind is JobKind.CAPTURE_TRAFFIC:
+                await self._dispatch_capture(job, handler, span, heartbeat)
+                return
             try:
                 await self._run_handler(job, handler, span)
             finally:
@@ -349,14 +356,65 @@ class Worker:
                 with contextlib.suppress(asyncio.CancelledError):
                     await heartbeat
 
-    async def _run_handler(self, job: Job, handler: JobHandler, span: JobSpan) -> None:
+    async def _dispatch_capture(
+        self,
+        job: Job,
+        handler: JobHandler,
+        span: JobSpan,
+        heartbeat: asyncio.Task[None],
+    ) -> None:
+        """Cancel a capture handler as soon as heartbeat or process authority ends."""
+        stop_task = (
+            asyncio.create_task(self._stop_event.wait()) if self._stop_event is not None else None
+        )
+        authority_tasks = {heartbeat}
+        if stop_task is not None:
+            authority_tasks.add(stop_task)
+        authority_lost = asyncio.Event()
+        for task in authority_tasks:
+            task.add_done_callback(lambda _task: authority_lost.set())
+        with capture_authority_scope(authority_lost):
+            handler_task = asyncio.create_task(self._invoke_handler(job, handler))
         try:
-            async with self._pool.connection() as conn:
-                await conn.set_autocommit(True)
-                try:
-                    result_ref = await handler(conn, job)
-                finally:
-                    await conn.set_autocommit(False)
+            done, _pending = await asyncio.wait(
+                {handler_task, *authority_tasks}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if done & authority_tasks:
+                handler_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await handler_task
+            else:
+                await self._finalize_handler(job, span, handler_task)
+            if heartbeat in done:
+                with contextlib.suppress(Exception):
+                    heartbeat.result()
+        finally:
+            if not handler_task.done():
+                handler_task.cancel()
+                await asyncio.gather(handler_task, return_exceptions=True)
+            for task in authority_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*authority_tasks, return_exceptions=True)
+
+    async def _invoke_handler(self, job: Job, handler: JobHandler) -> str | None:
+        """Run only handler work; capture authority is adjudicated before finalization."""
+        async with self._pool.connection() as conn:
+            await conn.set_autocommit(True)
+            try:
+                return await handler(conn, job)
+            finally:
+                await conn.set_autocommit(False)
+
+    async def _run_handler(self, job: Job, handler: JobHandler, span: JobSpan) -> None:
+        handler_task = asyncio.create_task(self._invoke_handler(job, handler))
+        await self._finalize_handler(job, span, handler_task)
+
+    async def _finalize_handler(
+        self, job: Job, span: JobSpan, handler_task: asyncio.Task[str | None]
+    ) -> None:
+        try:
+            result_ref = await handler_task
         except Exception as exc:  # noqa: BLE001 - the worker turns any handler failure into a dead-letter/requeue
             span.set_outcome("error")
             category = _failure_category(exc)

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kdive.dev/schemas/capture-bootstrap-manifest.schema.json",
+  "title": "KDIVE capture bootstrap manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "architecture", "interpreter", "bootstrap_modules", "files"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "architecture": {"enum": ["x86_64", "ppc64le"]},
+    "interpreter": {"type": "string", "pattern": "^/"},
+    "bootstrap_modules": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path", "sha256"],
+        "properties": {
+          "kind": {
+            "enum": [
+              "python-interpreter",
+              "elf-interpreter",
+              "elf-dependency",
+              "bootstrap-python",
+              "bootstrap-extension"
+            ]
+          },
+          "path": {"type": "string", "pattern": "^/"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    }
+  }
+}

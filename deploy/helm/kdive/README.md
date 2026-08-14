@@ -58,6 +58,57 @@ It captures live replica counts, proves every KDIVE workload is stopped for migr
 workers only after the target-image witness is ready. Do not use a rolling upgrade or an old image
 after the migration.
 
+**The protocol-3 release carrying migration 0112 has its own unconditional replacing path.** Do
+not use the generic staged procedure or a normal rolling upgrade for this boundary. Export the
+explicit migration-owner DSN and pass the Helm release, namespace, target values file, new backup
+path, and exact tagged or digest-pinned target image:
+
+```bash
+export KDIVE_MIGRATION_DATABASE_URL='postgresql://migration-owner@db.example/kdive'
+export TARGET_IMAGE='ghcr.io/randomparity/kdive:<target-tag>'
+scripts/cutover-capture-protocol-helm.sh \
+  kdive kdive-system kdive-values.yaml \
+  /var/backups/kdive-before-protocol-3.dump \
+  "$TARGET_IMAGE"
+```
+
+Before mutation, the script freezes a flattened kubeconfig and context, cluster and workload
+identities, chart, values, exact upgrade-mode render, repository-matching image digest, release
+revision, and migration credential in a restricted cutover directory. Every later command consumes
+those snapshots. A mode-0400 password-free database URI and libpq passfile keep the owner DSN out
+of local `psql` and `pg_dump` argv and environment.
+The wrapper removes ambient KDIVE/libpq credential variables after capture. Helm, `kubectl`,
+Docker, and helper Python children receive none of them; credential equality is checked from the
+mode-0400 attempt files rather than a secret-bearing environment variable. An attempt-unique
+Kubernetes-immutable Secret overrides the migration hook credential through completion and is
+removed only after its UID,
+bytes, and the successor release are proven.
+
+The script retains the installed `worker.replicas`, scales the worker StatefulSet to zero, waits
+for every Pod finalizer and exact lifecycle-witness termination row, takes a custom-format backup,
+and runs the hooked target upgrade with the original replica count. The migration hook completes
+before Helm applies the target worker template, so migration cannot race the rollout. Identity
+drift, missing required verbs (including ReplicaSet get/list for Helm's Deployment wait), or the
+exact Helm upgrade server dry-run failing aborts before stop. After deletion, every legacy
+incarnation matching the exact StatefulSet name plus a numeric ordinal must carry termination
+evidence. A
+pre-mutation failure does not stop workers; later failures leave workers at zero and retain
+restricted recovery artifacts. Backup publication never replaces a
+destination that appears during the dump. After migration, never start a protocol-2 image;
+rollback means
+the printed `pg_restore --clean --if-exists` command using the retained restricted passfile,
+followed by the prior chart and image. Retain the cutover directory through recovery.
+Migration 0112 records operation quiescence only; #1952 still gates publication closure and
+combined historical-capture coverage.
+
+On a fresh bundled install, Helm renders the worker StatefulSet at zero replicas. The post-install
+migration runs first; a later post-install scaler Job, authorized only to patch that StatefulSet's
+namespaced scale resource and its own exact RoleBinding, restores the configured count and then
+empties that binding's subjects. A cleanup failure fails and retains the hook Job, whose log prints
+the exact namespaced recovery command. A failed migration therefore creates no worker Pod. Upgrades
+retain normal replicas until the pre-upgrade migration boundary, and the cutover wrapper performs
+the required stop first.
+
 ### Worker capacity: one in-flight job per dispatch lane (ADR-0550)
 
 A worker replica now runs **one in-flight job per accepted dispatch lane — two by default**, where
@@ -160,10 +211,22 @@ state by design.** The issuer mints valid `aud=kdive` tokens for any caller, so 
 forces `service.type=ClusterIP` on this path — reach MCP with `kubectl port-forward`, never
 expose it.
 
+Before installing the demo, create the two operator-owned Secrets named by
+`workerCredentialBroker`: the TLS Secret must contain `tls.crt`, `tls.key`, and `ca.crt`, with a
+certificate valid for the rendered `<fullname>-worker-credential-broker` Service; the envelope
+Secret must contain `envelope.key`. The chart mounts these authority credentials but does not
+generate them, including on the bundled path.
+
 ```sh
 helm install kdive deploy/helm/kdive -f deploy/helm/kdive/values-demo.yaml
 helm test kdive    # mints a token, asserts tools/list returns tools
 ```
+
+Use the install command exactly without `--wait`. With `--wait`, Helm delays post-install hooks
+until ordinary resources are ready; on this bundled fresh-install topology, app workloads cannot
+become ready until the post-install migration creates their database roles. Follow hook progress
+directly, then use `helm test` as the readiness proof. This ordering does not affect upgrades,
+whose migration is a pre-upgrade hook.
 
 `values-demo.yaml` pins `image.tag=edge` (the rolling published image); without a published
 image the demo cannot pull. The demo migrate Job runs `post-install` behind a DB-readiness

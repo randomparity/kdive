@@ -52,10 +52,24 @@ def _validate_worker_incarnation(
     return incarnation.incarnation
 
 
+def _capture_host_identity(incarnation: WorkerIncarnation) -> str:
+    binding_key = {
+        "local": "host",
+        "docker": "container_id",
+        "kubernetes": "uid",
+    }[incarnation.authority_kind]
+    identity = incarnation.authority_binding.get(binding_key)
+    if not isinstance(identity, str) or not 1 <= len(identity.encode()) <= 512:
+        raise RuntimeError("authenticated worker incarnation has no valid capture host identity")
+    return identity
+
+
 async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
     from kdive.health.processes.server import build_postgres_ping
     from kdive.health.processes.worker import build_worker_probe
-    from kdive.jobs.assembly import build_handler_registry
+    from kdive.jobs.assembly import build_handler_registry, build_worker_handler_assembly
+    from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
+    from kdive.jobs.capture_operations.supervisor import recover_capture_operations
     from kdive.jobs.worker import Worker, WorkerConfig
     from kdive.jobs.worker_telemetry import WorkerTelemetry
     from kdive.store.objectstore import object_store_from_env
@@ -70,25 +84,48 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
     # fails at construction on every start (ADR-0550).
     accepted_lanes = config.require(WORKER_ACCEPTED_LANES)
     pool_max_size = max(_MIN_POOL_MAX_SIZE, worker_pool_floor(accepted_lanes))
+    capture_recovery_complete = False
 
     def build_probe(pool: AsyncConnectionPool) -> HealthProbe:
         return build_worker_probe(
-            postgres_ping=build_postgres_ping(pool), object_store_factory=object_store_from_env
+            postgres_ping=build_postgres_ping(pool),
+            object_store_factory=object_store_from_env,
+            capture_manifest_verifier=verify_capture_bootstrap_manifest,
+            capture_recovery_ready=lambda: capture_recovery_complete,
         )
 
     async def run_worker_body(
         pool: AsyncConnectionPool, heartbeat: Heartbeat, probe: HealthProbe
     ) -> None:
+        nonlocal capture_recovery_complete
         async with pool.connection() as conn:
             incarnation = await authenticate_worker_incarnation(conn, incarnation_credential)
         worker_id = _validate_worker_incarnation(
             incarnation, configured_worker_id=configured_worker_id
         )
+        handler_assembly = build_worker_handler_assembly(
+            secret_registry=secret_registry,
+            incarnation_credential=incarnation_credential,
+            pool=pool,
+        )
+        recovery = await recover_capture_operations(
+            pool,
+            handler_assembly.resolver,
+            _capture_host_identity(incarnation),
+            incarnation_credential,
+        )
+        if recovery.pending:
+            raise RuntimeError(
+                f"capture operation recovery left {recovery.pending} operation(s) pending"
+            )
+        capture_recovery_complete = True
         worker = Worker(
             pool,
             build_handler_registry(
                 secret_registry=secret_registry,
                 incarnation_credential=incarnation_credential,
+                assembly=handler_assembly,
+                pool=pool,
             ),
             worker_id=worker_id,
             incarnation_credential=incarnation_credential,

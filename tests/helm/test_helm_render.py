@@ -25,6 +25,7 @@ import yaml
 pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 
 CHART = str(Path(__file__).resolve().parents[2] / "deploy" / "helm" / "kdive")
+REPOSITORY = Path(__file__).resolve().parents[2]
 
 _VERSIONING_REPLIES = (
     (
@@ -649,11 +650,212 @@ def test_bundled_with_ack_uses_post_install_migrate() -> None:
     assert "post-install" in res.stdout
 
 
+def _bundled_documents(*, upgrade: bool) -> list[dict[str, Any]]:
+    args = ["helm", "template", "kdive", CHART]
+    if upgrade:
+        args.append("--is-upgrade")
+    args.extend(["--set", "bundledBackends=true", "--set", "demoAcknowledged=true"])
+    rendered = _template_args(*args)
+    assert rendered.returncode == 0, rendered.stderr
+    return [doc for doc in yaml.safe_load_all(rendered.stdout) if isinstance(doc, dict)]
+
+
+def test_bundled_fresh_install_keeps_worker_at_zero_until_later_scaler_hook() -> None:
+    docs = _bundled_documents(upgrade=False)
+    worker = next(doc for doc in docs if doc.get("kind") == "StatefulSet")
+    jobs = [doc for doc in docs if doc.get("kind") == "Job"]
+    migrate = next(doc for doc in jobs if doc["metadata"]["name"].endswith("-migrate"))
+    assert worker["spec"]["replicas"] == 0
+    assert migrate["metadata"]["annotations"]["helm.sh/hook"] == ("post-install,pre-upgrade")
+    scaler = next(doc for doc in jobs if doc["metadata"]["name"].endswith("-worker-scaler"))
+    assert scaler["metadata"]["annotations"]["helm.sh/hook"] == "post-install"
+    assert int(scaler["metadata"]["annotations"]["helm.sh/hook-weight"]) > int(
+        migrate["metadata"]["annotations"]["helm.sh/hook-weight"]
+    )
+    assert scaler["spec"]["backoffLimit"] == 0
+    assert scaler["spec"]["template"]["spec"]["restartPolicy"] == "Never"
+
+
+def test_bundled_install_scaler_has_only_namespaced_worker_scale_authority() -> None:
+    docs = _bundled_documents(upgrade=False)
+    role = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Role" and doc["metadata"]["name"].endswith("install-worker-scaler")
+    )
+    assert role["rules"] == [
+        {
+            "apiGroups": ["apps"],
+            "resources": ["statefulsets/scale"],
+            "resourceNames": ["kdive-kdive-worker"],
+            "verbs": ["patch"],
+        },
+        {
+            "apiGroups": ["rbac.authorization.k8s.io"],
+            "resources": ["rolebindings"],
+            "resourceNames": ["kdive-kdive-install-worker-scaler"],
+            "verbs": ["patch"],
+        },
+    ]
+    assert not any(
+        doc.get("kind") in {"ClusterRole", "ClusterRoleBinding"}
+        and str(doc.get("metadata", {}).get("name", "")).endswith("install-worker-scaler")
+        for doc in docs
+    )
+
+
+def test_bundled_install_scaler_revokes_its_binding_after_scaling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs = _bundled_documents(upgrade=False)
+    scaler = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Job" and doc["metadata"]["name"].endswith("-worker-scaler")
+    )
+    container = scaler["spec"]["template"]["spec"]["containers"][0]
+    requests: list[Any] = []
+
+    class Response:
+        status = 200
+
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.payload
+
+    def fake_open(path: str, **_kwargs: object) -> Any:
+        import io
+
+        value = "kdive-system\n" if path.endswith("/namespace") else "token\n"
+        return io.StringIO(value)
+
+    def fake_urlopen(request: Any, **kwargs: object) -> Response:
+        requests.append((request, kwargs))
+        payload = b'{"subjects": []}' if "/rolebindings/" in request.full_url else b"{}"
+        return Response(payload)
+
+    import builtins
+    import ssl
+    import urllib.request
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(ssl, "create_default_context", lambda **_kwargs: object())
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("WORKER_STATEFULSET", "kdive-kdive-worker")
+    monkeypatch.setenv("WORKER_REPLICAS", "2")
+    monkeypatch.setenv("SCALER_ROLE_BINDING", "kdive-kdive-install-worker-scaler")
+
+    exec(compile(container["args"][0], "install-worker-scaler", "exec"), {})
+
+    assert [request.full_url for request, _kwargs in requests] == [
+        "https://kubernetes.default.svc/apis/apps/v1/namespaces/"
+        "kdive-system/statefulsets/kdive-kdive-worker/scale",
+        "https://kubernetes.default.svc/apis/rbac.authorization.k8s.io/v1/namespaces/"
+        "kdive-system/rolebindings/kdive-kdive-install-worker-scaler",
+    ]
+    assert requests[1][0].data == b'{"subjects": []}'
+    assert all(kwargs["timeout"] == 10 for _request, kwargs in requests)
+
+
+def test_bundled_install_scaler_cleanup_failure_is_diagnosable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs = _bundled_documents(upgrade=False)
+    scaler = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Job" and doc["metadata"]["name"].endswith("-worker-scaler")
+    )
+    script = scaler["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    requests: list[Any] = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"{}"
+
+    def fake_open(path: str, **_kwargs: object) -> Any:
+        import io
+
+        return io.StringIO("kdive-system\n" if path.endswith("/namespace") else "token\n")
+
+    def fail_cleanup(request: Any, **_kwargs: object) -> Response:
+        requests.append(request)
+        if len(requests) == 2:
+            raise OSError("API unavailable")
+        return Response()
+
+    import builtins
+    import ssl
+    import urllib.request
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(ssl, "create_default_context", lambda **_kwargs: object())
+    monkeypatch.setattr(urllib.request, "urlopen", fail_cleanup)
+    monkeypatch.setenv("WORKER_STATEFULSET", "kdive-kdive-worker")
+    monkeypatch.setenv("WORKER_REPLICAS", "2")
+    monkeypatch.setenv("SCALER_ROLE_BINDING", "kdive-kdive-install-worker-scaler")
+
+    recovery = (
+        "worker scaled but scaler authority cleanup failed; run: kubectl -n kdive-system "
+        "patch rolebinding kdive-kdive-install-worker-scaler"
+    )
+    with pytest.raises(SystemExit, match=re.escape(recovery)):
+        exec(compile(script, "install-worker-scaler", "exec"), {})
+
+    assert len(requests) == 2
+
+
+def test_bundled_upgrade_migrates_before_workload_rollout() -> None:
+    docs = _bundled_documents(upgrade=True)
+    worker = next(doc for doc in docs if doc.get("kind") == "StatefulSet")
+    jobs = [doc for doc in docs if doc.get("kind") == "Job"]
+    migrate = next(doc for doc in jobs if doc["metadata"]["name"].endswith("-migrate"))
+    assert worker["spec"]["replicas"] == 2
+    assert not any(doc["metadata"]["name"].endswith("-worker-scaler") for doc in jobs)
+    phase = migrate["metadata"]["annotations"]["helm.sh/hook"]
+    assert "post-install" in phase
+    assert "pre-upgrade" in phase
+    assert "post-upgrade" not in phase
+
+
 def test_bundled_runtime_role_bootstrap_runs_after_migration() -> None:
     jobs = _jobs_by_name("bundledBackends=true", "demoAcknowledged=true")
-    assert jobs["migrate"]["phase"] == "post-install,post-upgrade"
+    assert jobs["migrate"]["phase"] == "post-install,pre-upgrade"
     script = jobs["migrate"]["args"][0]
     assert script.index("python -m kdive migrate") < script.index("GRANT {} TO {}")
+
+
+def test_bundled_role_bootstrap_survives_kubernetes_argument_expansion() -> None:
+    jobs = _jobs_by_name("bundledBackends=true", "demoAcknowledged=true")
+    script = jobs["migrate"]["args"][0]
+
+    # Kubernetes command/args expansion turns a doubled dollar into one literal dollar before
+    # /bin/sh sees the heredoc. A named PostgreSQL delimiter must survive that boundary unchanged.
+    assert "DO $$".replace("$$", "$") == "DO $"
+    executed_script = script.replace("$$", "$")
+    python_source = executed_script.split("python - <<'PY'\n", maxsplit=1)[1].rsplit(
+        "\nPY", maxsplit=1
+    )[0]
+    compile(python_source, "bundled-role-bootstrap", "exec")
+    assert '"DO $kdive_role$ BEGIN CREATE ROLE {}' in python_source
+    assert "END $kdive_role$" in python_source
+    assert "EXCEPTION WHEN duplicate_object THEN NULL" in python_source
 
 
 def test_external_render_omits_post_install_migrate_hook() -> None:
@@ -1706,3 +1908,38 @@ def test_observability_scrape_config_passes_promtool() -> None:
             check=False,
         )
     assert res.returncode == 0, res.stdout + res.stderr
+
+
+def _waits_on_bundled_install(text: str) -> bool:
+    logical_lines = re.sub(r"\\\s*\n\s*", " ", text).splitlines()
+    return any(
+        "helm install" in line and "values-demo.yaml" in line and "--wait" in line
+        for line in logical_lines
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "helm install kdive chart -f values-demo.yaml --wait",
+        "helm install kdive chart --wait -f values-demo.yaml",
+        "helm install kdive chart -f values-demo.yaml \\\n  --wait",
+    ],
+)
+def test_bundled_install_wait_guard_rejects_argument_forms(command: str) -> None:
+    assert _waits_on_bundled_install(command)
+
+
+def test_active_docs_do_not_wait_on_bundled_install() -> None:
+    docs = [REPOSITORY / "README.md", REPOSITORY / "deploy" / "helm" / "kdive" / "README.md"]
+    docs.extend(
+        path
+        for path in (REPOSITORY / "docs").rglob("*.md")
+        if "archive" not in path.relative_to(REPOSITORY / "docs").parts
+    )
+    offenders = [
+        path.relative_to(REPOSITORY).as_posix()
+        for path in docs
+        if _waits_on_bundled_install(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == []

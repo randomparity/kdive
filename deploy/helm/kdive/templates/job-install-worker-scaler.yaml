@@ -1,0 +1,138 @@
+{{- if and .Values.bundledBackends .Release.IsInstall }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kdive.fullname" . }}-install-worker-scaler
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kdive.fullname" . }}-install-worker-scaler
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    resourceNames: [{{ printf "%s-worker" (include "kdive.fullname" .) | quote }}]
+    verbs: ["patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    resourceNames: [{{ include "kdive.fullname" . }}-install-worker-scaler]
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kdive.fullname" . }}-install-worker-scaler
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kdive.fullname" . }}-install-worker-scaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kdive.fullname" . }}-install-worker-scaler
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "kdive.fullname" . }}-worker-scaler
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 60
+  template:
+    metadata:
+      labels:
+        {{- include "kdive.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "kdive.fullname" . }}-install-worker-scaler
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: scale-worker
+          image: {{ include "kdive.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-c"]
+          args:
+            - |
+              import json
+              import os
+              import ssl
+              import urllib.request
+
+              namespace = open(
+                  "/var/run/secrets/kubernetes.io/serviceaccount/namespace",
+                  encoding="utf-8",
+              ).read().strip()
+              token = open(
+                  "/var/run/secrets/kubernetes.io/serviceaccount/token",
+                  encoding="utf-8",
+              ).read().strip()
+              name = os.environ["WORKER_STATEFULSET"]
+              replicas = int(os.environ["WORKER_REPLICAS"])
+              role_binding = os.environ["SCALER_ROLE_BINDING"]
+              api = "https://kubernetes.default.svc"
+              scale_url = (
+                  f"{api}/apis/apps/v1/namespaces/"
+                  f"{namespace}/statefulsets/{name}/scale"
+              )
+              revoke_url = (
+                  f"{api}/apis/rbac.authorization.k8s.io/v1/namespaces/"
+                  f"{namespace}/rolebindings/{role_binding}"
+              )
+              context = ssl.create_default_context(
+                  cafile="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              )
+
+              def patch(url, payload, operation):
+                  request = urllib.request.Request(
+                      url,
+                      data=json.dumps(payload).encode(),
+                      method="PATCH",
+                      headers={
+                          "Authorization": f"Bearer {token}",
+                          "Content-Type": "application/merge-patch+json",
+                      },
+                  )
+                  with urllib.request.urlopen(
+                      request, timeout=10, context=context
+                  ) as response:
+                      if response.status != 200:
+                          raise RuntimeError(
+                              f"{operation} returned HTTP {response.status}"
+                          )
+                      return response.read()
+
+              patch(scale_url, {"spec": {"replicas": replicas}}, "worker scale")
+              try:
+                  revoked = json.loads(
+                      patch(revoke_url, {"subjects": []}, "scaler authority cleanup")
+                  )
+                  if revoked.get("subjects") not in (None, []):
+                      raise RuntimeError("scaler RoleBinding still has subjects")
+              except Exception as error:
+                  raise SystemExit(
+                      "worker scaled but scaler authority cleanup failed; run: "
+                      f"kubectl -n {namespace} patch rolebinding {role_binding} "
+                      "--type=merge --patch '{\"subjects\":[]}'"
+                  ) from error
+          env:
+            - name: WORKER_STATEFULSET
+              value: {{ printf "%s-worker" (include "kdive.fullname" .) | quote }}
+            - name: WORKER_REPLICAS
+              value: {{ .Values.worker.replicas | quote }}
+            - name: SCALER_ROLE_BINDING
+              value: {{ include "kdive.fullname" . }}-install-worker-scaler
+{{- end }}

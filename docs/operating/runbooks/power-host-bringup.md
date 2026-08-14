@@ -114,6 +114,37 @@ The remaining WARN (`non-root worker under qemu:///system` cannot read the root-
 is expected — resolve it by running the worker as **root**, the natural identity for
 `qemu:///system` (§6); build and kdump capture work regardless.
 
+### Install capture-child attestation from the final POWER runtime
+
+Generate with the same target-native interpreter and installed source the worker will execute,
+then perform the separate privileged installation. Re-run both commands after any Python,
+loader, shared-library, or bootstrap-source update and before restarting workers. Workers only
+verify this root-owned manifest; a stale manifest makes readiness fail.
+
+```bash
+just build-capture-bootstrap-manifest \
+  "$PWD/.venv/bin/python" \
+  "$PWD/build/capture-bootstrap-manifest.json"
+sudo "$PWD/.venv/bin/python" scripts/build-capture-bootstrap-manifest.py install \
+  --staged "$PWD/build/capture-bootstrap-manifest.json" \
+  --destination /usr/share/kdive/capture-bootstrap-manifest.json
+sudo test "$(stat -c '%u:%g:%a' /usr/share/kdive/capture-bootstrap-manifest.json)" = "0:0:644"
+```
+
+Ansible operators may instead apply `libvirt_stack` a second time after the final checkout and
+venv exist, setting `libvirt_stack_capture_manifest_interpreter` to the venv Python and
+`libvirt_stack_capture_manifest_source_root` to the checkout's `src` directory. The role keeps
+the build and privileged install as distinct actions.
+
+Run the native POWER containment carrier on that host; emulation is not release proof:
+
+```bash
+uv run python -m pytest tests/jobs/capture_operations/test_sandbox.py -q
+```
+
+Success requires the fork/vfork/exec/clone/clone3 matrix and an empty child process tree to pass
+on ppc64le. Record an unavailable POWER host as unavailable, never as a green arm.
+
 ## 5. The OIDC issuer on ppc64le (no upstream image)
 
 The live-stack backends come up on ppc64le **except the mock-OIDC issuer**: `postgres`, `minio`,

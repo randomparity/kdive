@@ -1,18 +1,175 @@
-"""Traffic-capture provider port (ADR-0385/0432): host-side pcap of a running guest's netdev.
+"""Traffic-capture provider ports (ADR-0385/0432/0558).
 
-The worker handler owns the bounded poll loop and cancellation, so the provider stays thin: it
-attaches/detaches a capture sink keyed on the provider domain name (DB-free, like the Controller
-port), and owns the *file side* of the capture — where the pcap lives, its growing size, reading it
-back, and reclaiming it. That file side is provider-dispatched (ADR-0432) rather than assumed
-worker-local: local-libvirt writes a worker-readable file, remote-libvirt writes on the remote host
-and streams it back over ``qemu+tls``. The handler names only the sink (``qom_id``), the snaplen,
-and an opaque ``dest_path`` token the provider returns from :meth:`prepare`.
+``TrafficCapturer`` is the low-level, DB-free provider primitive for a running guest. Supervised
+captures reconstruct a provider-specific ``TrafficCaptureExecutor`` after child release; that
+synchronous executor owns the bounded poll, detach, fetch, private spool write, and reclaim. A
+separate ``TrafficCaptureQuiescence`` opens a fresh connection after exact process absence and
+returns evidence only after an ordered QOM absence query. Local and remote share these value and
+protocol models, not transport or probe implementations.
 """
 
 from __future__ import annotations
 
-from typing import Protocol
+import json
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Annotated, Literal, Protocol, Self
 from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_MAX_CONFIGURATION_BYTES = 16_384
+
+
+def _canonical_bytes(model: BaseModel) -> bytes:
+    payload = model.model_dump(mode="json", exclude_none=True)
+    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _configuration_object(data: bytes) -> dict[str, object]:
+    if len(data) > _MAX_CONFIGURATION_BYTES:
+        raise ValueError("capture provider configuration exceeds 16384 bytes")
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("capture provider configuration is malformed") from error
+    if not isinstance(value, dict):
+        raise ValueError("capture provider configuration must be an object")
+    return value
+
+
+class LocalCaptureConfiguration(BaseModel):
+    """Replayable local-libvirt child configuration, bound to one Resource."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    provider_kind: Literal["local-libvirt"] = "local-libvirt"
+    resource_id: UUID
+    uri: Annotated[str, Field(min_length=1, max_length=255)]
+
+    @field_validator("uri")
+    @classmethod
+    def _local_uri(cls, uri: str) -> str:
+        if uri not in {"qemu:///system", "qemu:///session"}:
+            raise ValueError("local libvirt URI must be qemu:///system or qemu:///session")
+        return uri
+
+    def to_canonical_json(self) -> bytes:
+        """Serialize the bounded post-release configuration."""
+        return _canonical_bytes(self)
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        """Parse a strict local configuration object."""
+        _configuration_object(data)
+        return cls.model_validate_json(data)
+
+
+class RemoteCaptureConfiguration(BaseModel):
+    """Exact Resource-bound remote TLS references consumed only after child release."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    provider_kind: Literal["remote-libvirt"] = "remote-libvirt"
+    resource_id: UUID
+    uri: Annotated[str, Field(min_length=1, max_length=2048)]
+    client_cert_ref: Annotated[str, Field(min_length=1, max_length=1024)]
+    client_key_ref: Annotated[str, Field(min_length=1, max_length=1024)]
+    ca_cert_ref: Annotated[str, Field(min_length=1, max_length=1024)]
+    secrets_root: Annotated[str, Field(min_length=1, max_length=1024)]
+    storage_pool: Annotated[str, Field(min_length=1, max_length=255)]
+
+    def to_canonical_json(self) -> bytes:
+        """Serialize references and topology without resolving credential bytes."""
+        return _canonical_bytes(self)
+
+    @classmethod
+    def from_canonical_json(cls, data: bytes) -> Self:
+        """Parse a strict remote configuration object."""
+        _configuration_object(data)
+        return cls.model_validate_json(data)
+
+
+class QuiescenceEvidence(BaseModel):
+    """Bounded positive evidence from a provider-specific ordered absence probe."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    provider_kind: Literal["local-libvirt", "remote-libvirt"]
+    resource_id: UUID
+    domain_name: Annotated[str, Field(min_length=1, max_length=255)]
+    qom_id: Annotated[str, Field(min_length=1, max_length=255)]
+    result: Literal["absent"]
+    ordering: Literal["fresh-qmp-connection"]
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the JSON-ready evidence persisted by the operation authority."""
+        return self.model_dump(mode="json")
+
+    def to_canonical_json(self) -> bytes:
+        """Serialize evidence deterministically for its database size bound."""
+        return _canonical_bytes(self)
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureExecutionResult:
+    """Metadata for the private ``capture.pcap`` written by a provider child executor."""
+
+    size_bytes: int
+    truncated: bool
+
+
+class CaptureExecutionRequest(Protocol):
+    """Request fields a synchronous provider executor consumes."""
+
+    @property
+    def provider_kind(self) -> Literal["local-libvirt", "remote-libvirt"]: ...
+
+    @property
+    def job_id(self) -> UUID: ...
+
+    @property
+    def resource_id(self) -> UUID: ...
+
+    @property
+    def system_id(self) -> UUID: ...
+
+    @property
+    def domain_name(self) -> str: ...
+
+    @property
+    def snaplen(self) -> int: ...
+
+    @property
+    def max_bytes(self) -> int: ...
+
+    @property
+    def max_polls(self) -> int: ...
+
+
+class TrafficCaptureExecutor(Protocol):
+    """Execute one bounded provider phase synchronously inside the gated child."""
+
+    def execute(
+        self, request: CaptureExecutionRequest, result_dir: Path
+    ) -> CaptureExecutionResult: ...
+
+
+class TrafficCaptureQuiescence(Protocol):
+    """Prove an exact capture object absent after crossing a fresh transport barrier."""
+
+    def prove_absent(
+        self, resource_id: UUID, domain_name: str, qom_id: str
+    ) -> QuiescenceEvidence: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TrafficCaptureOperationPorts:
+    """Provider-neutral factories used by worker supervision and startup recovery."""
+
+    configuration: Callable[[UUID], bytes]
+    quiescence: Callable[[bytes], TrafficCaptureQuiescence]
 
 
 class TrafficCapturer(Protocol):

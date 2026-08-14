@@ -1,16 +1,23 @@
+{{- $deathCeiling := include "kdive.effectiveDeathCeiling" . -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: {{ include "kdive.fullname" . }}-worker
   annotations:
-    kdive.io/death-verification-ordinal-ceiling: {{ include "kdive.effectiveDeathCeiling" . | quote }}
+    kdive.io/death-verification-ordinal-ceiling: {{ $deathCeiling | quote }}
   labels:
     {{- include "kdive.labels" . | nindent 4 }}
 spec:
   # The governing headless Service (service-worker.yaml). It carries no ports and fronts
   # nothing; a StatefulSet requires the field, which is the whole reason that Service exists.
   serviceName: {{ include "kdive.fullname" . }}-worker
+  # A bundled fresh install creates its database as an ordinary resource. Keep workers at zero
+  # until the weighted post-install migration and scaler hooks complete in that order.
+  {{ if and .Values.bundledBackends .Release.IsInstall -}}
+  replicas: 0
+  {{ else -}}
   replicas: {{ .Values.worker.replicas }}
+  {{ end -}}
   # Workers are interchangeable queue consumers: `FOR UPDATE SKIP LOCKED` lets them claim
   # disjoint rows without blocking (ADR-0018), and no ordinal owns a role or waits on another.
   # Parallel start/stop avoids OrderedReady's one-at-a-time serialization on scale and rollout.
@@ -136,7 +143,9 @@ spec:
             items:
               - key: {{ .Values.workerCredentialBroker.tls.caKey | quote }}
                 path: {{ .Values.workerCredentialBroker.tls.caKey | quote }}
-      {{- if or .Values.secrets.secretName .Values.systems.configMapName .Values.fixtures.configMapName }}
+      {{- $hasFixtures := or .Values.secrets.secretName .Values.systems.configMapName }}
+      {{- $hasFixtures = or $hasFixtures .Values.fixtures.configMapName }}
+      {{- if $hasFixtures }}
         {{- include "kdive.secretsVolume" . | nindent 8 }}
         {{- include "kdive.systemsVolume" . | nindent 8 }}
         {{- include "kdive.fixturesVolume" . | nindent 8 }}

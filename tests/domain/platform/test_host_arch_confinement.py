@@ -42,6 +42,11 @@ _HOST_ARCH_READ_ALLOWLIST = frozenset(
         # the gdb-engine's cross-arch binary selection (ADR-0347): guest arch comes from the
         # staged vmlinux ELF; the host arch only picks gdb vs gdb-multiarch.
         "kdive/providers/shared/debug_common/gdbmi/core/engine.py",
+        # capture-child attestation selects the worker host's approved manifest architecture;
+        # this never influences guest architecture (ADR-0558).
+        "kdive/jobs/capture_operations/launcher.py",
+        # seccomp syscall/audit-ABI policy is selected for the worker host kernel, not a guest.
+        "kdive/jobs/capture_operations/sandbox.py",
     }
 )
 

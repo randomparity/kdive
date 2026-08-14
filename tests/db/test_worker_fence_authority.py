@@ -29,6 +29,8 @@ from tests.db_waits import DEFAULT_WAIT_TIMEOUT_S, wait_until_blocked_by
 _LOGIN_AUTHENTICATION = "worker-fence-test-authentication"
 _BINDING_MAX_BYTES = 4096
 _PROTECTED_TABLES = {
+    "capture_operation_cutoff",
+    "capture_operations",
     "investigation_build_use_recoveries",
     "investigation_build_uses",
     "schema_migrations",
@@ -367,6 +369,7 @@ def residual_privilege_role_dsn(pg_conn: psycopg.Connection) -> Iterator[RoleDsn
             "0109_kubernetes_credential_envelopes.sql",
             "0110_idempotent_worker_termination.sql",
             "0111_restrict_pinned_job_deletion.sql",
+            "0112_capture_operation_supervision.sql",
         ):
             role_sql = (migrate.SCHEMA_DIR / filename).read_bytes()
             for canonical, isolated in roles.items():
@@ -394,7 +397,13 @@ def _login_operation_succeeds(conn: psycopg.Connection, operation: str) -> bool:
         elif operation == "register":
             conn.execute(
                 "SELECT public.register_worker_incarnation(%s, %s, %s, %s, %s)",
-                ("docker:authority-test", "docker", Jsonb({}), bytes(32), 1),
+                (
+                    "docker:authority-test",
+                    "docker",
+                    Jsonb({"container_id": "a" * 64}),
+                    bytes(32),
+                    CURRENT_WORKER_FENCE_PROTOCOL,
+                ),
             )
         elif operation == "terminate_function":
             conn.execute(
@@ -1540,6 +1549,20 @@ def test_migration_upgrade_resets_guarded_function_matrix(
         "register_kubernetes_worker_incarnation(text,jsonb,bytea,bytea,integer)": {
             "kdive_lifecycle_witness"
         },
+        "create_capture_operation(bytea,uuid,integer,text,uuid,uuid,text,text)": {"kdive_worker"},
+        "record_capture_operation_identity(bytea,uuid,text,text,integer,bigint)": {"kdive_worker"},
+        "mark_capture_operation_running(bytea,uuid)": {"kdive_worker"},
+        "request_capture_operation_cancel(bytea,uuid)": {"kdive_worker"},
+        "acknowledge_capture_operation_exit(bytea,uuid,boolean,jsonb,text,integer)": {
+            "kdive_worker"
+        },
+        "recover_capture_operation(bytea,uuid,boolean,jsonb,text,integer)": {"kdive_worker"},
+        "capture_authenticated_worker(bytea)": set(),
+        "capture_create_or_replay_operation("
+        "text,uuid,integer,text,uuid,uuid,text,text,text)": set(),
+        "capture_launch_abort_evidence_valid(capture_operations,jsonb)": set(),
+        "capture_recovery_authorized(worker_incarnations,worker_incarnations)": set(),
+        "capture_recovery_context(bytea,uuid)": set(),
         "read_kubernetes_credential_envelope(text,jsonb)": {"kdive_lifecycle_witness"},
         "acknowledge_kubernetes_credential_envelope(text,jsonb)": {"kdive_lifecycle_witness"},
     }
@@ -1556,8 +1579,12 @@ def test_migration_upgrade_resets_guarded_function_matrix(
         residual_privilege_role_dsn("kdive_lifecycle_witness"), autocommit=True
     ) as witness:
         witness.execute(
-            "SELECT public.register_worker_incarnation(%s, 'docker', '{}'::jsonb, %s, 1)",
-            ("docker:upgrade-authority", credential),
+            "SELECT public.register_worker_incarnation(%s, 'docker', %s, %s, 3)",
+            (
+                "docker:upgrade-authority",
+                Jsonb({"container_id": "a" * 64}),
+                credential,
+            ),
         )
     with psycopg.connect(residual_privilege_role_dsn("kdive_worker"), autocommit=True) as worker:
         authenticated = worker.execute(
@@ -2030,7 +2057,7 @@ def test_incarnation_identity_bound_is_bytes_at_table_and_function(
     with pytest.raises(psycopg.errors.CheckViolation):
         pg_conn.execute(
             "INSERT INTO worker_incarnations (incarnation, authority_kind, authority_binding, "
-            "fence_protocol, credential_hash) VALUES (%s, 'docker', '{}'::jsonb, 1, %s)",
+            "fence_protocol, credential_hash) VALUES (%s, 'docker', '{}'::jsonb, 3, %s)",
             (oversized_identity, b"i" * 32),
         )
 
@@ -2039,7 +2066,7 @@ def test_incarnation_identity_bound_is_bytes_at_table_and_function(
         pytest.raises(psycopg.errors.InvalidParameterValue),
     ):
         witness.execute(
-            "SELECT public.register_worker_incarnation(%s, 'docker', '{}'::jsonb, %s, 1)",
+            "SELECT public.register_worker_incarnation(%s, 'docker', '{}'::jsonb, %s, 3)",
             (oversized_identity, b"j" * 32),
         )
 
@@ -2052,7 +2079,7 @@ def test_authority_binding_bound_is_serialized_bytes_at_table_and_function(
     with pytest.raises(psycopg.errors.CheckViolation):
         pg_conn.execute(
             "INSERT INTO worker_incarnations (incarnation, authority_kind, authority_binding, "
-            "fence_protocol, credential_hash) VALUES ('docker:large-direct', 'docker', %s, 1, %s)",
+            "fence_protocol, credential_hash) VALUES ('docker:large-direct', 'docker', %s, 3, %s)",
             (Jsonb(oversized_binding), b"b" * 32),
         )
 
@@ -2061,7 +2088,7 @@ def test_authority_binding_bound_is_serialized_bytes_at_table_and_function(
         pytest.raises(psycopg.errors.InvalidParameterValue),
     ):
         witness.execute(
-            "SELECT public.register_worker_incarnation(%s, 'docker', %s, %s, 1)",
+            "SELECT public.register_worker_incarnation(%s, 'docker', %s, %s, 3)",
             ("docker:large-function", Jsonb(oversized_binding), b"c" * 32),
         )
 
@@ -2079,11 +2106,11 @@ def test_kubernetes_envelope_is_exact_uid_bound_and_durably_cleared(
     envelope = b"controller-key-encrypted-envelope"
     with psycopg.connect(role_dsn("kdive_lifecycle_witness"), autocommit=True) as witness:
         assert witness.execute(
-            "SELECT public.register_kubernetes_worker_incarnation(%s, %s, %s, %s, 2)",
+            "SELECT public.register_kubernetes_worker_incarnation(%s, %s, %s, %s, 3)",
             (holder, Jsonb(binding), b"e" * 32, envelope),
         ).fetchone() == (True,)
         assert witness.execute(
-            "SELECT public.register_kubernetes_worker_incarnation(%s, %s, %s, %s, 2)",
+            "SELECT public.register_kubernetes_worker_incarnation(%s, %s, %s, %s, 3)",
             (holder, Jsonb(binding), b"f" * 32, b"replacement-envelope"),
         ).fetchone() == (True,)
         assert witness.execute(
@@ -2121,7 +2148,7 @@ def test_kubernetes_registration_requires_a_bounded_matching_uid_binding(
         pytest.raises(psycopg.errors.InvalidParameterValue),
     ):
         witness.execute(
-            "SELECT public.register_kubernetes_worker_incarnation(%s, %s, %s, %s, 2)",
+            "SELECT public.register_kubernetes_worker_incarnation(%s, %s, %s, %s, 3)",
             (
                 "kubernetes:kdive:kdive-worker-0:uid-1",
                 Jsonb({"namespace": "kdive", "name": "kdive-worker-0", "uid": "uid-2"}),

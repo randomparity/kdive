@@ -15,6 +15,7 @@ from kdive.mcp.tools._common import encode_ts_uuid_cursor
 from kdive.mcp.tools.ops import build_uses
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.runs.worker_incarnations import (
+    CURRENT_WORKER_FENCE_PROTOCOL,
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
@@ -76,7 +77,7 @@ async def _seed(pool: AsyncConnectionPool, *, terminated: bool = False) -> tuple
             "local",
             {"host": "host-a", "pid": 42, "boot_id": "boot-123", "start_ticks": "987"},
             hashlib.sha256(holder.encode()).digest(),
-            1,
+            CURRENT_WORKER_FENCE_PROTOCOL,
         )
     if terminated:
         async with pool.connection() as conn:

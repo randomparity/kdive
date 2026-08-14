@@ -27,7 +27,8 @@ Deploy the control plane with the chart and attach the provider (see
 [Kubernetes deploy runbook](../runbooks/kubernetes-deploy.md)):
 
 ```bash
-helm install kdive deploy/helm/kdive -n kdive-demo -f deploy/helm/kdive/values-demo.yaml --wait
+helm install kdive deploy/helm/kdive -n kdive-demo -f deploy/helm/kdive/values-demo.yaml
+helm test kdive -n kdive-demo
 ```
 
 ## 3. Onboard the project

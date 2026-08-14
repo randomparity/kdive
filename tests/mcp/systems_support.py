@@ -48,6 +48,7 @@ from kdive.providers.ports.lifecycle import (
     DebugTransportKind,
     IntrospectionMode,
 )
+from kdive.providers.ports.traffic import TrafficCaptureOperationPorts
 from kdive.security.authz.rbac import Role
 from kdive.serialization import JsonValue
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
@@ -243,6 +244,14 @@ def provider_resolver(
         )
         if supports_traffic_capture
         else None,
+        traffic_capture_operation=(
+            TrafficCaptureOperationPorts(
+                configuration=lambda _resource_id: b"test-configuration",
+                quiescence=lambda _raw: unused_port,
+            )
+            if supports_traffic_capture
+            else None
+        ),
         # ``console_reader`` models a provider (remote-libvirt) whose console is read through the
         # ADR-0429 strict read seam rather than a worker-local file; the control handlers pick the
         # remote path when ``console.reader_factory`` is set (ADR-0433, #1435).

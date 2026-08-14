@@ -28,7 +28,7 @@ services:
       - ${COMPOSE_PROOF_REPO_ROOT}/deploy/compose/bootstrap-runtime-roles.sh:/bootstrap/bootstrap-runtime-roles.sh:ro
 
   worker:
-    image: ${COMPOSE_PROOF_IMAGE}
+    image: ${KDIVE_IMAGE:-kdive-lifecycle-proof:missing}
     profiles: ["managed-worker"]
     user: "10001:10001"
     labels:
@@ -45,6 +45,26 @@ services:
         time.sleep(600)
     environment:
       KDIVE_WORKER_INCARNATION_ID: docker:${KDIVE_WORKER_INCARNATION_NONCE:-unmanaged}
+
+  migrate:
+    image: ${KDIVE_IMAGE:-kdive-lifecycle-proof:missing}
+    profiles: ["cutover"]
+    entrypoint: ["python", "-m", "kdive"]
+    command: ["migrate"]
+    environment:
+      KDIVE_DATABASE_URL: postgresql://kdive-migration:kdive-migration-local@postgres:5432/kdive # pragma: allowlist secret — isolated local proof
+
+  server:
+    image: ${KDIVE_IMAGE:-kdive-lifecycle-proof:missing}
+    profiles: ["render-only"]
+    entrypoint: ["python", "-c"]
+    command: ["raise SystemExit('render-only service')"]
+
+  reconciler:
+    image: ${KDIVE_IMAGE:-kdive-lifecycle-proof:missing}
+    profiles: ["render-only"]
+    entrypoint: ["python", "-c"]
+    command: ["raise SystemExit('render-only service')"]
 
 volumes:
   proof-postgres:

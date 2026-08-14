@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from uuid import UUID
 
+import libvirt
+
+import kdive.config as config
 from kdive.components.references import (
     CONFIG_COMPONENT,
     INITRD_COMPONENT,
@@ -36,6 +40,10 @@ from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.local_libvirt.lifecycle.capture_operation import (
+    LocalCaptureExecutor,
+    LocalLibvirtCaptureQuiescence,
+)
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
 from kdive.providers.local_libvirt.lifecycle.install import LocalLibvirtInstall
@@ -49,6 +57,8 @@ from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePoli
 from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
+from kdive.providers.local_libvirt.settings import LIBVIRT_URI
+from kdive.providers.ports.traffic import LocalCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     real_module_debuginfo_resolver,
@@ -60,6 +70,40 @@ from kdive.store.objectstore import ObjectStore
 
 _POOL = "local-libvirt"
 _COST_CLASS = "local"
+
+
+def capture_operation_configuration(resource_id: UUID) -> bytes:
+    """Snapshot the allowlisted local URI for post-filter child assembly."""
+    return LocalCaptureConfiguration(
+        resource_id=resource_id,
+        uri=config.require(LIBVIRT_URI),
+    ).to_canonical_json()
+
+
+def build_capture_executor(
+    configuration: LocalCaptureConfiguration,
+) -> LocalCaptureExecutor:
+    """Reconstruct the local synchronous executor from released configuration."""
+    import libvirt_qemu
+
+    capturer = LocalLibvirtTrafficCapture(
+        connect=lambda: libvirt.open(configuration.uri),
+        monitor=libvirt_qemu.qemuMonitorCommand,
+    )
+    return LocalCaptureExecutor(capturer=capturer)
+
+
+def build_capture_quiescence(
+    configuration: LocalCaptureConfiguration,
+) -> LocalLibvirtCaptureQuiescence:
+    """Build an independent fresh-connection local absence probe."""
+    import libvirt_qemu
+
+    return LocalLibvirtCaptureQuiescence(
+        resource_id=configuration.resource_id,
+        connect=lambda: libvirt.open(configuration.uri),
+        monitor=libvirt_qemu.qemuMonitorCommand,
+    )
 
 
 def _component_sources() -> ComponentSourceCapabilities:
@@ -210,4 +254,10 @@ def build_runtime(
         # Host-side filter-dump traffic capture (ADR-0385, #1258). Matches
         # ``support.supports_traffic_capture``.
         traffic_capturer=traffic_capturer,
+        traffic_capture_operation=TrafficCaptureOperationPorts(
+            configuration=capture_operation_configuration,
+            quiescence=lambda raw: build_capture_quiescence(
+                LocalCaptureConfiguration.from_canonical_json(raw)
+            ),
+        ),
     )

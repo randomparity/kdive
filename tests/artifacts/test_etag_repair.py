@@ -119,6 +119,9 @@ def test_a_failed_stat_leaves_the_row_untouched_and_never_raises(
         assert _repair(migrated_url, store, "etag-stale") == "etag-stale"
     assert store.heads == [_KEY]
     assert any(_KEY in record.getMessage() for record in caplog.records)
+    assert any("CategorizedError" in record.getMessage() for record in caplog.records)
+    assert all("head_object failed" not in record.getMessage() for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 def test_a_failed_row_update_leaves_the_row_untouched_and_never_raises(
@@ -128,3 +131,6 @@ def test_a_failed_row_update_leaves_the_row_untouched_and_never_raises(
     with caplog.at_level(logging.WARNING, logger="kdive.artifacts.etag_repair"):
         assert _repair(migrated_url, _StatStore("etag-observed"), "etag-stale") == "etag-stale"
     assert any(_KEY in record.getMessage() for record in caplog.records)
+    assert any("ProgrammingError" in record.getMessage() for record in caplog.records)
+    assert all("no_such_table" not in record.getMessage() for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)

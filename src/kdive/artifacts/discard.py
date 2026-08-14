@@ -61,8 +61,10 @@ async def discard_unregistered_objects(
     Best-effort: a store fault is logged and swallowed, because the caller is already on an
     abort path whose own outcome (a canceled job, a changed-state error) is the result that
     matters. A swallowed fault leaves exactly the orphan this call exists to prevent, and on a
-    teardown path no later attempt will overwrite it, so it is logged at warning with the key.
-    One unreachable object must not strand the others: each key is an independent orphan.
+    teardown path no later attempt will overwrite it, so it is logged at warning with the key and
+    exception class. External exception messages and tracebacks are omitted because object-store
+    and database clients can include sensitive backend output. One unreachable object must not
+    strand the others: each key is an independent orphan.
 
     Args:
         store: The object store this attempt wrote to.
@@ -90,10 +92,10 @@ async def discard_unregistered_objects(
                 )
                 continue
             await asyncio.to_thread(store.delete_version, obj.key, obj.version_id)
-        except Exception:  # noqa: BLE001 - compensating discard must not mask the caller outcome
+        except Exception as error:  # noqa: BLE001 - abort-path compensation is best-effort
             _log.warning(
                 "deleting unregistered object %s failed; it has no artifacts row, so no "
-                "reclaim sweep will reach it",
+                "reclaim sweep will reach it (%s)",
                 obj.key,
-                exc_info=True,
+                type(error).__name__,
             )
