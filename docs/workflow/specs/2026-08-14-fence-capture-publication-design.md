@@ -117,7 +117,9 @@ Authority monitoring races publication against the lock-owning connection. On se
 fence-owning task first cancels the publisher, prevents any later database transition on the dead
 connection, and drains the PUT thread. It then uses a fresh connection to reacquire the released
 job fence. Under the Run lock it revalidates the exact current attempt and atomically moves
-`pending|publishing` to `canceling`; every publication-commit transition rejects that state. It
+`pending|publishing` to `canceling`; every publication-commit transition rejects that state. For a
+`pending` row, the same transition derives and journals the immutable operation-unique key before
+entering `canceling`; no PUT can have started before that key exists. It
 then releases the Run lock and cleans up the operation-unique key. A normal external cancellation
 waits on the same job fence; its cancellation point is fence acquisition, so publication that
 already committed while the live owner held the fence is a completed publication, not a canceled
@@ -240,7 +242,9 @@ resume without reopening publication. A lost-delete-response test crashes after 
 delete request and proves recovery uses `cleanup_capture_version_id`, verifies that version's
 absence, and cannot close `discarded` while it remains readable. Seeded wrong-operation-id,
 unknown-kind, and nonzero-tombstone tests assert the object is untouched, the stable corruption
-reason is logged, and acknowledgment/readiness remain barred. Tests
+reason is logged, and acknowledgment/readiness remain barred. A provider-exited, `pending`,
+key-null seed proves recovery journals the deterministic key on `pending -> canceling`, wins the
+tombstone, disposes the spool, and closes without issuing a capture PUT. Tests
 deliberately break transition validation and compensation to show the new
 assertions fail before restoring the implementation. `just ci` is the final local gate on both
 declared target architectures through architecture-independent Python and PostgreSQL behavior;
