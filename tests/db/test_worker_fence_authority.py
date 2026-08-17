@@ -49,6 +49,7 @@ _ORDINARY_TABLES = {
     "cost_class_coefficients",
     "debug_sessions",
     "egress_probe_guests",
+    "host_dump_volume_leases",
     "idempotency_keys",
     "image_catalog",
     "investigation_build_gc_cursor",
@@ -79,6 +80,7 @@ _SERVER_MUTATIONS = {
     "INSERT": _ORDINARY_TABLES
     - {
         "build_artifact_gc_cursors",
+        "host_dump_volume_leases",
         "investigation_build_gc_cursor",
         "investigation_build_tombstones",
         "system_object_sweep_cursors",
@@ -87,6 +89,7 @@ _SERVER_MUTATIONS = {
     - {
         "audit_log",
         "build_artifact_gc_cursors",
+        "host_dump_volume_leases",
         "investigation_build_gc_cursor",
         "investigation_build_tombstones",
         "ledger",
@@ -121,6 +124,7 @@ _WORKER_SELECT = {
     "cost_class_coefficients",
     "debug_sessions",
     "egress_probe_guests",
+    "host_dump_volume_leases",
     "image_catalog",
     "investigation_build_tombstones",
     "investigation_builds",
@@ -146,6 +150,7 @@ _WORKER_MUTATIONS = {
         "artifacts",
         "component_uploads",
         "egress_probe_guests",
+        "host_dump_volume_leases",
         "ledger",
         "object_write_leases",
         "rootfs_fetch_leases",
@@ -171,6 +176,7 @@ _WORKER_MUTATIONS = {
     },
     "DELETE": {
         "artifacts",
+        "host_dump_volume_leases",
         "object_write_leases",
         "rootfs_fetch_leases",
         "run_steps",
@@ -212,6 +218,7 @@ _RECONCILER_MUTATIONS = {
     },
     "DELETE": {
         "artifacts",
+        "host_dump_volume_leases",
         "idempotency_keys",
         "image_catalog",
         "investigation_builds",

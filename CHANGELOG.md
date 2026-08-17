@@ -643,6 +643,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Classify Docker removal conflicts semantically
 - Separate red tests from characterization
 - Test Docker conflict status classification
+- Record the host-dump volume capture fence
 
 ### Fixed
 
@@ -1067,6 +1068,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump mermaid-check jsdom and mermaid to clear npm audit findings
 - Drop false kdive ownership from transient debug domains
 - Disown the live preserve-attach domain
+- Fence the dump-volume sweep on a per-System capture lease
+- Do not count a declined dump volume as reaped
+- Apply adversarial-review findings to the dump-volume fence
 
 ### Build
 

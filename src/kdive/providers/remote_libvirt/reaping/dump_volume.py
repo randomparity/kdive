@@ -5,10 +5,13 @@ The reconciler's stateless orphan-volume sweep consumes this provider port (the
 worker/host crash that bypassed the capture's ``finally`` cleanup. It lists the storage
 pool's dump volumes (matched by the deterministic ``kdive-host-dump-<system_id>.kdump``
 name) with each volume's store mtime — read from the volume XML's ``<timestamps>/<mtime>``,
-which libvirt populates for filesystem/dir-backed pools — and deletes one by name. The
-reconciler owns both live-holder guards (no active capture job, mtime older than the grace
-window); this port is the narrow libvirt I/O seam. The blocking libvirt calls run only under
-the ``live_vm`` gate; orchestration + name/mtime parsing are unit-tested with fakes.
+which libvirt populates for filesystem/dir-backed pools — and deletes one by name **and sampled
+mtime**: the deterministic name is reused by every capture of that System, so the delete re-reads
+the volume it looked up and declines a volume that is no longer the one the reconciler classified
+(ADR-0562). The reconciler owns the live-holder guards (no live capture lease, no active capture
+job, mtime older than the grace window) and holds the System's advisory lock across both its final
+classification and this delete; this port is the narrow libvirt I/O seam. The blocking libvirt calls
+run only under the ``live_vm`` gate; orchestration + name/mtime parsing are unit-tested with fakes.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Callable
+from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
@@ -25,6 +29,7 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import DumpVolume
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.connection.transport import (
     RemoteLibvirtConnections,
 )
@@ -66,6 +71,21 @@ class _ReaperConn(Protocol):
 type OpenDumpReaperConnection = Callable[[str], _ReaperConn]
 
 
+class _HostOutcome(StrEnum):
+    """What one host did with a delete-by-name-and-identity request.
+
+    Three states rather than the fan-out's two, because "this host handled the name" and "the volume
+    is gone" are different facts once the delete can decline: a decline stops the fan-out (the name
+    belongs to this host) while leaving the volume in place (ADR-0562).
+    """
+
+    #: No volume of that name here — the fan-out should try the next host.
+    NOT_HERE = "not_here"
+    #: A volume of that name is here, but it is not the one the reconciler classified.
+    DECLINED = "declined"
+    DELETED = "deleted"
+
+
 def system_id_from_dump_volume_name(name: str) -> UUID | None:
     """The owning System UUID encoded in a dump-volume name, or ``None`` if it does not match."""
     match = _DUMP_VOLUME_RE.match(name)
@@ -98,6 +118,33 @@ def volume_mtime_epoch_s(volume_xml: str) -> float:
         return 0.0
 
 
+def volume_mtime_or_warn(volume_xml: str, name: str) -> float:
+    """:func:`volume_mtime_epoch_s`, warning when the volume reports no usable timestamp.
+
+    A ``0.0`` here means both of this volume's guards are inert, and neither says so on its own.
+    ADR-0094's mtime grace is defeated because ``0.0`` is older than any cutoff, and ADR-0562's
+    identity re-read is defeated because ``0.0`` compares equal to ``0.0`` — so a volume a live
+    capture recreated reads as the one the reconciler classified. What still protects it is
+    the capture lease and the System lock the sweep holds across its delete, which is why this is a
+    warning about a degraded pool rather than a refusal to reap: refusing would strand every genuine
+    orphan on that pool forever.
+
+    Warned at every read rather than once: the read is once per volume per reconciler pass, and
+    the condition is a property of the pool the operator configured — a single startup line would be
+    lost long before anyone looked for it.
+    """
+    mtime = volume_mtime_epoch_s(volume_xml)
+    if mtime == 0.0:
+        _log.warning(
+            "reconciler: host_dump volume %s reports no usable <target>/<timestamps>/<mtime>; "
+            "its mtime grace (ADR-0094) and identity re-read (ADR-0562) are both inert, so the "
+            "capture lease and the System lock as its only guards. Is the storage pool "
+            "filesystem/dir-backed?",
+            name,
+        )
+    return mtime
+
+
 class RemoteLibvirtDumpVolumeReaper:
     """List + delete host_dump volumes in the operator's storage pool (the reconciler seam)."""
 
@@ -121,9 +168,21 @@ class RemoteLibvirtDumpVolumeReaper:
         """List the storage pool's host_dump volumes with their store mtime (offloaded)."""
         return await asyncio.to_thread(self._list_blocking)
 
-    async def delete_dump_volume(self, name: str) -> None:
-        """Delete one dump volume by name; a volume already gone is not an error (offloaded)."""
-        await asyncio.to_thread(self._delete_blocking, name)
+    async def delete_dump_volume(self, name: str, *, expected_mtime_epoch_s: float) -> bool:
+        """Delete the dump volume the reconciler sampled; a volume already gone is not an error.
+
+        ``expected_mtime_epoch_s`` is the mtime :meth:`list_dump_volumes` reported for this volume.
+        A volume whose mtime has changed since then is not the one the reconciler classified — the
+        deterministic name is reused by every capture of that System — and is left alone (ADR-0562).
+        Offloaded, like every libvirt call here.
+
+        Returns:
+            Whether **this call deleted the volume**. ``False`` both when a host holds a volume of
+            that name whose identity does not match the sample, and when no reachable host had it at
+            all — the second is benign, but nothing was reclaimed either way and the reconciler's
+            count must not claim otherwise.
+        """
+        return await asyncio.to_thread(self._delete_blocking, name, expected_mtime_epoch_s)
 
     def _list_blocking(self) -> list[DumpVolume]:  # pragma: no cover - live_vm
         per_host = map_over_fleet(
@@ -147,39 +206,77 @@ class RemoteLibvirtDumpVolumeReaper:
                 DumpVolume(
                     name=name,
                     system_id=system_id,
-                    mtime_epoch_s=volume_mtime_epoch_s(volume.XMLDesc(0)),
+                    mtime_epoch_s=volume_mtime_or_warn(volume.XMLDesc(0), name),
                 )
             )
         return volumes
 
-    def _delete_blocking(self, name: str) -> None:  # pragma: no cover - live_vm
+    def _delete_blocking(self, name: str, expected_mtime_epoch_s: float) -> bool:
         # A dump-volume name encodes the owning System but not its host, so the reconciler calls
         # delete-by-name with no host. find_over_fleet tries each declared host (isolating an
         # unreachable one) and stops at the one that has the volume; an already-gone or
         # not-on-this-host volume is benign — never an error.
-        find_over_fleet(
-            self._connections,
-            lambda conn, config: self._delete_on_host(conn, config.storage_pool, name),
-            operation="dump-volume delete",
-        )
+        #
+        # find_over_fleet's own bool means "this host handled the name", which a decline also is —
+        # so the decline is carried out separately. Reporting a decline as "not mine" would send the
+        # fan-out looking for another host's copy of the same deterministic name, and delete it.
+        declined = False
+
+        def delete_here(conn: _ReaperConn, config: RemoteLibvirtConfig) -> bool:
+            nonlocal declined
+            outcome = self._delete_on_host(conn, config.storage_pool, name, expected_mtime_epoch_s)
+            declined = outcome is _HostOutcome.DECLINED
+            return outcome is not _HostOutcome.NOT_HERE
+
+        # `find_over_fleet` reports whether some host handled the name, which a decline also is;
+        # only the conjunction means a volume was actually removed. An all-hosts-unreachable pass
+        # reports False here (it skipped every host and handled nothing), which is what keeps the
+        # sweep from counting a reclamation it could not have performed.
+        handled = find_over_fleet(self._connections, delete_here, operation="dump-volume delete")
+        return handled and not declined
 
     @staticmethod
-    def _delete_on_host(  # pragma: no cover - live_vm
-        conn: _ReaperConn, storage_pool: str, name: str
-    ) -> bool:
+    def _delete_on_host(
+        conn: _ReaperConn, storage_pool: str, name: str, expected_mtime_epoch_s: float
+    ) -> _HostOutcome:
+        """Delete this host's copy of ``name`` if it is still the volume the reconciler sampled.
+
+        The mtime re-read sits between the lookup and the delete, on the volume object the lookup
+        returned, so nothing can substitute a volume in between (ADR-0562). A mismatch means a
+        capture recreated the deterministic name after the reconciler classified the old one: this
+        host has handled the name, so the fan-out stops, and nothing is deleted.
+
+        A pool whose volume XML carries no ``<timestamps>`` reports ``0.0`` on both reads, so this
+        comparison cannot distinguish a recreated volume there. Such a pool has already lost
+        ADR-0094's mtime grace for the same reason; the lease and the reconciler's System lock are
+        its guards, and this is the backstop for the writer they cannot see.
+        """
         pool = conn.storagePoolLookupByName(storage_pool)
         try:
             volume = pool.storageVolLookupByName(name)
         except libvirt.libvirtError as exc:
             if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
-                return False  # not on this host (or already gone) — try the next
+                return _HostOutcome.NOT_HERE  # not on this host (or already gone)
             raise _infra("looking up host_dump volume", volume=name) from exc
+        try:
+            observed_mtime = volume_mtime_or_warn(volume.XMLDesc(0), name)
+        except libvirt.libvirtError as exc:
+            raise _infra("re-reading host_dump volume identity", volume=name) from exc
+        if observed_mtime != expected_mtime_epoch_s:
+            _log.info(
+                "reconciler: host_dump volume %s changed since it was classified "
+                "(sampled mtime %s, now %s); leaving it to the next pass",
+                name,
+                expected_mtime_epoch_s,
+                observed_mtime,
+            )
+            return _HostOutcome.DECLINED
         try:
             volume.delete(0)
         except libvirt.libvirtError as exc:
             raise _infra("deleting host_dump volume", volume=name) from exc
         _log.info("reconciler: deleted orphaned host_dump volume %s", name)
-        return True
+        return _HostOutcome.DELETED
 
 
 def _infra(verb: str, **details: str) -> CategorizedError:
@@ -195,4 +292,5 @@ __all__ = [
     "OpenDumpReaperConnection",
     "system_id_from_dump_volume_name",
     "volume_mtime_epoch_s",
+    "volume_mtime_or_warn",
 ]
