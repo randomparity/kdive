@@ -54,15 +54,15 @@ map is provider-composition state, not schema, and provenance rides the existing
 ### Amendment (2026-08-17): the rejection-shape claim was never reached (#1942)
 
 This is an amendment rather than a rewrite because the paragraph above is the accepted decision and
-stays on the record as written. It qualifies the sentence beginning "`reject_unsupported_component_
-source` already keeps the existing `configuration_error` shape": that claim does not hold and did not
-hold when this record was accepted. The helper had one call site in all of `src/`
+stays on the record as written. It qualifies the sentence claiming that the helper
+`reject_unsupported_component_source` "already keeps the existing `configuration_error` shape … for
+any unadvertised kind/source combination": that claim does not hold and did not hold when this
+record was accepted. The helper had one call site in all of `src/`
 (`services/systems/validation.py`, inside `validate_profile_for_provider`) with `component_kind`
 hard-coded to `ROOTFS_COMPONENT`, so it was never called for `KERNEL` or `VMLINUX` and no such
 rejection ever happened. Runtime behaviour before and after #1432 is identical: unenforced either
 way. [ADR-0563](0563-component-source-declarations-narrow-to-the-enforced-kind.md) removes the two
-entries this record added and adds a guard that fails a declaration with no reachable enforcement
-call site.
+entries this record added and adds a guard that fails a declaration no enforcement call site names.
 
 ## Consequences
 

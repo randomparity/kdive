@@ -65,11 +65,17 @@ Extend the #1428 parity guard (`tests/providers/test_capability_parity.py`) so t
 cannot recur. It parses `src/kdive/` with `ast` and collects the `component_kind` argument of every
 `reject_unsupported_component_source` call, then fails when any provider declares a kind no call
 site names. Enforcement is a property of the call graph, so the guard reads the call graph rather
-than importing and calling: a reachable call site is exactly what the removed declarations lacked.
-The guard fails closed in the directions that matter — a call site whose `component_kind` is not a
-resolvable member is reported rather than skipped, and a rename of the helper empties the enforced
-set and reddens two guards rather than passing vacuously. Both halves are asserted: the inert set
-must be empty, and `ROOTFS` must still be declared by all three providers and still be enforced.
+than importing and calling: a call site naming the kind is exactly what the removed declarations
+lacked. The guard fails closed in the directions that matter — a call site whose `component_kind` is
+not a resolvable member is reported rather than skipped, and a rename of the helper empties the
+enforced set and reddens two guards rather than passing vacuously. Both halves are asserted: the
+inert set must be empty, and `ROOTFS` must still be declared by all three providers and still be
+enforced.
+
+The guard proves that a call site naming the kind exists, not that it is reachable from a request, so
+a call in dead code would satisfy it. That weaker claim is deliberate: deciding reachability needs a
+whole-program analysis, and the defect here was the absence of any call site at all. The per-kind
+behaviour tests beside each provider carry the stronger property.
 
 Re-declaring a kind is therefore a three-part change — the caller entry point, the enforcement call
 site, and the declaration — in one commit. The guard is what makes that ordering mandatory.

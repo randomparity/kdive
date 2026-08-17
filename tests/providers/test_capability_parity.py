@@ -182,9 +182,16 @@ def test_waiver_table_has_no_stale_entries() -> None:
 #
 # `_enforced_component_kinds` finds that by parsing `src/kdive/` rather than by importing and
 # calling, because enforcement is a property of the call graph, not of any one runtime value: a
-# reachable call site is exactly what the removed declarations lacked. A rename of the helper
+# call site naming the kind is exactly what the removed declarations lacked. A rename of the helper
 # empties the enforced set, which reddens `test_every_declared_component_kind_is_enforced` and
 # `test_rootfs_is_declared_by_every_provider_and_enforced` rather than passing vacuously.
+#
+# What it proves and what it does not: a call site naming the kind exists somewhere in `src/kdive/`.
+# It does not prove that site is reachable from a request, so a call in dead code would satisfy it.
+# That is the weaker claim on purpose — deciding reachability needs a whole-program analysis, and
+# the defect this exists to catch (#1942) was the absence of any call site at all, not an
+# unreachable one. The stronger property is carried by the per-kind behaviour tests beside each
+# provider.
 
 _ENFORCEMENT_HELPER = "reject_unsupported_component_source"
 
@@ -248,7 +255,12 @@ def _enforced_component_kinds() -> set[ComponentKind]:
 
 
 def _declared_component_sources() -> dict[str, ComponentSourceCapabilities]:
-    """Every provider's component-source declaration, keyed by provider name."""
+    """Every provider's component-source declaration, keyed by provider name.
+
+    Enumerated rather than discovered, so a fourth provider is not silently skipped: the provider
+    set is pinned in :func:`test_rootfs_is_declared_by_every_provider_and_enforced`, which reddens
+    until whoever adds one adds it here too.
+    """
     registry = SecretRegistry()
     runtimes = (
         build_local_runtime(secret_registry=registry),
