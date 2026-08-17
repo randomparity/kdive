@@ -201,6 +201,56 @@ def test_launch_token_scan_skips_matched_process_that_exits_before_identity_read
     )
 
 
+def test_launch_token_scan_raises_for_genuine_identity_read_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ESRCH OSError from the identity read is a genuine failure, not a vanished
+    process, and must still abort the scan rather than being widened into a skip
+    (acceptance criteria for #1974)."""
+    _proc_tree(tmp_path, 123)
+    interpreter = tmp_path / "python"
+    interpreter.write_bytes(b"python")
+    (tmp_path / "123/exe").symlink_to(interpreter)
+    token = "a" * 64
+    (tmp_path / "123/cmdline").write_bytes(
+        b"python\0-S\0-m\0kdive.capture_bootstrap\0--launch-token\0" + token.encode() + b"\0"
+    )
+    monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
+    monkeypatch.setattr(
+        LinuxIdentity,
+        "read",
+        lambda _pid, *, host_instance: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+
+    with pytest.raises(RuntimeError, match="complete launch-token scan could not attest"):
+        scan_launch_token(token, interpreter=interpreter, host_instance="host-a")
+
+
+def test_launch_token_scan_raises_when_boot_id_sentinel_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``LinuxIdentity.read`` reports a vanished pid and an unreadable shared boot_id sentinel
+    as the same ``ProcessLookupError`` shape. Only the pid-specific case means "this matched
+    process vanished, skip it" — an unreadable boot_id is a genuine scan failure and must
+    still raise RuntimeError, not be silently absorbed by the vanished-process skip."""
+    interpreter = tmp_path / "python"
+    interpreter.write_bytes(b"python")
+    token = "a" * 64
+    tail = ["S", *(["0"] * 18), "4242"]
+    proc = tmp_path / "123"
+    proc.mkdir()
+    proc.joinpath("stat").write_text(f"123 (odd ) name) {' '.join(tail)}\n")
+    proc.joinpath("exe").symlink_to(interpreter)
+    proc.joinpath("cmdline").write_bytes(
+        b"python\0-S\0-m\0kdive.capture_bootstrap\0--launch-token\0" + token.encode() + b"\0"
+    )
+    # deliberately no sys/kernel/random/boot_id under tmp_path
+    monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
+
+    with pytest.raises(RuntimeError, match="boot id sentinel"):
+        scan_launch_token(token, interpreter=interpreter, host_instance="host-a")
+
+
 def test_launch_token_scan_refuses_incomplete_proc_enumeration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
