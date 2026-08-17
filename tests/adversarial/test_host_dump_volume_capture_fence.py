@@ -138,7 +138,7 @@ class _PausingDumpVolumeReaper:
 
     async def delete_dump_volume(
         self, name: str, *, expected_mtime_epoch_s: float | None = None
-    ) -> None:
+    ) -> bool:
         self.about_to_delete.set()
         if self._pause:
             await self.proceed.wait()
@@ -146,12 +146,13 @@ class _PausingDumpVolumeReaper:
             self.expected_mtimes.append(expected_mtime_epoch_s)
         observed = self._pool.mtime(name)
         if observed is None:
-            return  # already gone — never an error (the port's documented contract)
+            return True  # already gone — never an error (the port's documented contract)
         if expected_mtime_epoch_s is not None and observed != expected_mtime_epoch_s:
             self.refused.append((name, expected_mtime_epoch_s, observed))
-            return
+            return False
         self._pool.remove(name)
         self.deleted.append((name, observed))
+        return True
 
 
 class _SuspendedCapture:

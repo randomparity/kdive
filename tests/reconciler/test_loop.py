@@ -1084,9 +1084,16 @@ def test_console_reap_live_skip_does_not_halt_gone_reap(migrated_url: str) -> No
 class _FakeDumpVolumeReaper:
     """Records delete calls; returns scripted volumes; structurally a DumpVolumeReaper."""
 
-    def __init__(self, *volumes: DumpVolume, fail_on: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self,
+        *volumes: DumpVolume,
+        fail_on: frozenset[str] = frozenset(),
+        decline_on: frozenset[str] = frozenset(),
+    ) -> None:
         self._volumes = list(volumes)
         self._fail_on = fail_on
+        #: Names the port reports as *not reclaimed* — a real reaper's identity refusal (ADR-0562).
+        self._decline_on = decline_on
         self.deleted: list[str] = []
         #: The identity each delete was addressed to (ADR-0562), so a test can pin that the sweep
         #: hands the provider the mtime it sampled rather than an unqualified name.
@@ -1095,11 +1102,12 @@ class _FakeDumpVolumeReaper:
     async def list_dump_volumes(self) -> list[DumpVolume]:
         return list(self._volumes)
 
-    async def delete_dump_volume(self, name: str, *, expected_mtime_epoch_s: float) -> None:
+    async def delete_dump_volume(self, name: str, *, expected_mtime_epoch_s: float) -> bool:
         self.deleted.append(name)
         self.deleted_identities.append((name, expected_mtime_epoch_s))
         if name in self._fail_on:
             raise RuntimeError(f"libvirt vol delete of {name} failed")
+        return name not in self._decline_on
 
 
 def test_null_dump_volume_reaper_is_a_dump_volume_reaper() -> None:
@@ -1109,7 +1117,7 @@ def test_null_dump_volume_reaper_is_a_dump_volume_reaper() -> None:
         reaper = NullDumpVolumeReaper()
         assert isinstance(reaper, DumpVolumeReaper)
         assert await reaper.list_dump_volumes() == []
-        assert await reaper.delete_dump_volume("anything", expected_mtime_epoch_s=1.0) is None
+        assert await reaper.delete_dump_volume("anything", expected_mtime_epoch_s=1.0) is True
 
     asyncio.run(_run())
 
@@ -1537,6 +1545,36 @@ def test_a_contended_system_lock_defers_the_volume(migrated_url: str) -> None:
             )
         assert count == 1
         assert reaper.deleted == [f"kdive-host-dump-{free_sys}.kdump"]
+
+    asyncio.run(_run())
+
+
+def test_a_volume_the_provider_declines_is_not_counted_as_reaped(migrated_url: str) -> None:
+    """An identity refusal leaves the volume in place, so the count must not claim it.
+
+    ``reaped_dump_volumes`` is what an operator reads to see reclamation happening. Counting a
+    decline would report a volume as reclaimed while it is still on the host — and would do so
+    exactly in the case the identity guard fires, which is a live capture's volume.
+    """
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            declined_sys = await seed_system(seed, system_state=SystemState.CRASHED)
+            reaped_sys = await seed_system(seed, system_state=SystemState.CRASHED)
+            now_epoch = await _seed_now_epoch(seed)
+        declined = f"kdive-host-dump-{declined_sys}.kdump"
+        reaper = _FakeDumpVolumeReaper(
+            _vol(declined_sys, age_s=3600, now_epoch=now_epoch),  # declined, listed first
+            _vol(reaped_sys, age_s=3600, now_epoch=now_epoch),  # reached after it
+            decline_on=frozenset({declined}),
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool,
+                lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
+            )
+        assert count == 1  # the declined volume is not counted; the sweep continues past it
+        assert reaper.deleted == [declined, f"kdive-host-dump-{reaped_sys}.kdump"]  # both attempted
 
     asyncio.run(_run())
 

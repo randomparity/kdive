@@ -194,7 +194,7 @@ async def reap_orphaned_dump_volumes(
     guards are a state sample: ADR-0557 deliberately excludes a ``queued`` job, so a worker claiming
     the job between the check and the delete left the answer stale, and the capture's own
     delete-stale-then-dump pair put a **new** volume at the same deterministic name for the delete
-    resolve onto (#1955).
+    to resolve onto (#1955).
 
     Stale leases are collected first, ahead of the volume list, so a deployment whose reaper owns no
     volumes still drains rows a failed capture left behind.
@@ -260,7 +260,7 @@ async def _delete_if_still_orphaned(
             if await has_active_capture_job(conn, volume.system_id):
                 return False
         try:
-            await reaper.delete_dump_volume(
+            reclaimed = await reaper.delete_dump_volume(
                 volume.name, expected_mtime_epoch_s=volume.mtime_epoch_s
             )
         except Exception:  # noqa: BLE001 - one volume failure must not starve the rest
@@ -270,6 +270,11 @@ async def _delete_if_still_orphaned(
                 exc_info=True,
             )
             return False
+    if not reclaimed:
+        # The provider found a different volume under this name than the one classified, and left it
+        # alone. Counting it would report reclamation of a volume that is still there; the provider
+        # logs the two mtimes, so nothing is added here.
+        return False
     _log.info("reconciler: reaped orphaned host_dump volume %s", volume.name)
     return True
 

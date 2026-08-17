@@ -66,12 +66,16 @@ classification; the identity argument still applies to its delete.
 
 ### The provider port
 
-`DumpVolumeReaper.delete_dump_volume(name, *, expected_mtime_epoch_s: float)`.
+`DumpVolumeReaper.delete_dump_volume(name, *, expected_mtime_epoch_s: float) -> bool`, where the
+return means "the name is gone": true when the volume was deleted or no host had it, false only on an
+identity decline. Without it `reaped_dump_volumes` would count a declined volume as reclaimed.
+
 `RemoteLibvirtDumpVolumeReaper._delete_on_host` re-reads `volume.XMLDesc(0)` through
-`volume_mtime_epoch_s` after `storageVolLookupByName` and returns `True` without deleting when the
-value differs from `expected_mtime_epoch_s`; the fan-out therefore stops at the host that holds the
-volume rather than continuing to look for another copy. `NullDumpVolumeReaper` accepts and ignores
-the argument.
+`volume_mtime_epoch_s` after `storageVolLookupByName` and skips the delete when the value differs
+from `expected_mtime_epoch_s`. It returns a three-state `_HostOutcome` rather than the fan-out's
+bool, because "this host handled the name" and "the volume is gone" stop being the same fact once a
+delete can decline: a decline must stop the fan-out — otherwise the sweep goes looking for another
+host's copy of the same deterministic name — while still reporting nothing reclaimed.
 
 ## Failure behavior
 
@@ -90,16 +94,21 @@ Database-backed and unit tests, all in the default (non-`live_vm`) tier:
 1. **The race test** (`tests/adversarial/test_host_dump_volume_capture_fence.py`). A queued capture
    job and an old volume for its System. The sweep is suspended inside the port's
    `delete_dump_volume`, i.e. after its classification. The test then performs the real
-   queued-to-running transition — `queue.dequeue` followed by `capture_handler` — and waits until the
-   handler's mint is provably blocked on `(SYSTEM, system_id)`, read from `pg_locks` on a third
-   connection. Releasing the sweep lets it delete the identity it classified; the capture then
-   proceeds and creates its own volume. The assertions are that the capture's volume survives the
-   pass and that the sweep deleted only the volume it sampled. Against unfixed code the handler mints
-   nothing, the lock is never contended, and the wait fails.
+   queued-to-running transition — `queue.dequeue` followed by `capture_handler` — and then waits for
+   whichever of two states the tree under test reaches, both stable once true: the handler's mint
+   blocked on `(SYSTEM, system_id)`, read from `pg_locks` on a third connection, or the provider call
+   reached with nothing declared. Releasing the sweep then lets it act. The assertions are
+   behavioural — the capture's volume is present at the end of the pass, and the sweep deleted only
+   the identity it sampled — so against unfixed code the test fails on the destroyed volume rather
+   than on a wait, and against the fix neither branch is a timing bet.
 2. **The fence, without the interleaving.** A claimed capture holding a live lease, suspended
    mid-provider-operation: the sweep reports `0` and deletes nothing even though the sampled mtime is
-   an hour old. The falsifier arm deletes the lease row from an outside session and runs the same pass
-   against the same volume, which reaps it — so the lease accounts for the difference.
+   an hour old. The falsifier arm removes the holders from an outside session and runs the same pass
+   against the same volume, which reaps it — so the refusal is a refusal and not a no-op. It removes
+   **both** the lease row and the `running` job state, because the two holders are independent and
+   either alone defeats the arm; what the lease contributes that the job-state predicate cannot is
+   isolated separately in `tests/reconciler/test_loop.py`, against a volume whose System the running
+   job's Run is not bound to.
 3. **The mint's visibility and the lock's freedom**, sampled from an independent connection while the
    provider operation is in flight, mirroring `tests/adversarial/test_vmcore_capture_write_lease.py`:
    a savepoint mint inserts the row, raises nothing, and fences nothing.
@@ -108,9 +117,11 @@ Database-backed and unit tests, all in the default (non-`live_vm`) tier:
 5. **The identity-addressed delete** (`tests/providers/remote_libvirt/retrieve/test_dump_volume_reaper.py`).
    The existing fakes drive `_delete_on_host`: a matching mtime deletes, a changed mtime does not, and
    the fan-out stops at the host that held the volume either way.
-6. **The sweep's own regressions** (`tests/reconciler/test_loop.py`): the contended-lock skip, the
-   live-lease skip, the stale-lease collection running on an empty volume list, and the existing
-   grace-window, terminal-job, iteration and per-volume failure-isolation tests.
+6. **The sweep's own behaviour** (`tests/reconciler/test_loop.py`): the contended-lock skip, the
+   live-lease skip and its lapsed-holder falsifier, the stale-lease collection running on an empty
+   volume list, the sampled identity reaching the port, a declined volume not being counted as
+   reaped, and the existing grace-window, terminal-job, iteration and per-volume failure-isolation
+   tests.
 7. `env -u FORCE_COLOR just ci` bare.
 
 Each new guard is mutation-verified by breaking it and confirming the test reddens, with

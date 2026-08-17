@@ -101,6 +101,11 @@ holds across both its final classification and its delete.
    claim holds no lease and satisfies no state predicate, and the volume it recreated is the only
    evidence it exists.
 
+   The port now returns whether the name is gone — true when the volume was deleted or was already
+   absent, false only on a decline — so `reaped_dump_volumes` does not report reclamation of a volume
+   that is still on the host. A decline still stops the fleet fan-out: the host holds that name, and
+   reporting "not mine" would send the sweep to another host's copy of the same deterministic name.
+
 7. **Stale leases are collected at the head of the sweep**, before it lists volumes, by the same
    `LIVE_HOLDER_SQL` the classification honours. A lease the collection has not reached already
    fences nothing, so this bounds table growth rather than exposure — and the growth is guaranteed,
@@ -152,10 +157,11 @@ co-hold and therefore not an ordering exception.
   running job's lease is represented has to consider this fence, as ADR-0502 already noted for the
   object store.
 - One additive, forward-only migration (`0114`). One provider port signature change
-  (`DumpVolumeReaper.delete_dump_volume` gains a required keyword argument), which has one production
-  implementation and one null implementation. No configuration knob, no MCP tool-surface change, no
-  RBAC role change beyond the new table's grants, and no change to the `reaped_dump_volumes` counter's
-  meaning.
+  (`DumpVolumeReaper.delete_dump_volume` gains a required keyword argument and returns a bool), which
+  has one production implementation and one null implementation. No configuration knob, no MCP
+  tool-surface change, and no RBAC role change beyond the new table's grants — worker read/insert/
+  delete, reconciler read/delete, server read-only, matching the shape every other ordinary table has.
+  The `reaped_dump_volumes` counter keeps its meaning: a volume the sweep declined is not counted.
 
 ## Considered & rejected
 
