@@ -58,6 +58,9 @@ class LinuxIdentity:
         stable_host = _validate_host_instance(host_instance)
         try:
             boot_id = (_PROC_ROOT / "sys/kernel/random/boot_id").read_text().strip()
+        except FileNotFoundError as error:
+            raise RuntimeError("boot id sentinel is unreadable") from error
+        try:
             stat_line = (_PROC_ROOT / str(pid) / "stat").read_text().strip()
         except FileNotFoundError as error:
             raise ProcessLookupError(errno.ESRCH, f"process {pid} is absent") from error
@@ -156,7 +159,7 @@ def scan_launch_token(
         try:
             observed_executable = (entry / "exe").resolve(strict=True)
             identity = LinuxIdentity.read(int(entry.name), host_instance=stable_host)
-        except FileNotFoundError:
+        except FileNotFoundError, ProcessLookupError:
             continue
         except OSError as error:
             raise RuntimeError(f"complete launch-token scan could not attest {entry}") from error
