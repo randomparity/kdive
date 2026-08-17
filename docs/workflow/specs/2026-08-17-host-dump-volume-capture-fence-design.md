@@ -52,6 +52,10 @@ the mint's `LockScope.SYSTEM` is a fourth sequential acquisition and not a co-ho
 2. `reaper.list_dump_volumes()`; return `0` on an empty list.
 3. `_now_epoch` inside its own transaction, so the connection returns to idle and the per-volume
    blocks are real transactions rather than savepoints.
+   `require_top_level_transaction` is asserted at the head of the function as well as per volume,
+   because step 1 runs before the volume list and would otherwise degrade to a savepoint that commits
+   nothing on a connection already in a transaction — and with an empty list the pass would return `0`
+   without ever reaching the per-volume assertion.
 4. Per volume, one transaction asserting `require_top_level_transaction`:
    - skip when the sampled mtime is at or after the cutoff (unchanged);
    - when the volume names a System: `try_advisory_xact_lock(SYSTEM, system_id)`, skipping the volume
@@ -67,8 +71,8 @@ classification; the identity argument still applies to its delete.
 ### The provider port
 
 `DumpVolumeReaper.delete_dump_volume(name, *, expected_mtime_epoch_s: float) -> bool`, where the
-return means "the name is gone": true when the volume was deleted or no host had it, false only on an
-identity decline. Without it `reaped_dump_volumes` would count a declined volume as reclaimed.
+return means "this call deleted the volume". False covers both an identity decline and a name no
+reachable host held; neither reclaimed anything, and `reaped_dump_volumes` counts reclamation.
 
 `RemoteLibvirtDumpVolumeReaper._delete_on_host` re-reads `volume.XMLDesc(0)` through
 `volume_mtime_epoch_s` after `storageVolLookupByName` and skips the delete when the value differs
@@ -81,7 +85,10 @@ host's copy of the same deterministic name — while still reporting nothing rec
 
 - A contended System lock defers that volume to the next pass; it is not a counted fault.
 - An identity mismatch is an INFO line naming the volume and both mtimes, not an error: the volume the
-  sweep classified is gone and the one present is not its business.
+  sweep classified is gone and the one present is not its business. It is not counted as reaped.
+- A volume reporting no `<target>/<timestamps>/<mtime>` gets a WARNING from `volume_mtime_or_warn`
+  naming the volume and the two guards `0.0` defeats, on every read. The reap still proceeds — refusing
+  would strand every genuine orphan on such a pool.
 - A lookup that reports `VIR_ERR_NO_STORAGE_VOL` remains benign, as today.
 - A `libvirtError` from the re-read is wrapped as `INFRASTRUCTURE_FAILURE` like the existing lookup
   and delete failures, and the sweep's per-volume `except` isolates it.
@@ -115,14 +122,19 @@ Database-backed and unit tests, all in the default (non-`live_vm`) tier:
 4. **The release and the reap.** A successful capture leaves no lease; a failed one leaves its lease
    and `reap_stale_host_dump_volume_leases` collects it. A `kdump` capture mints no lease.
 5. **The identity-addressed delete** (`tests/providers/remote_libvirt/retrieve/test_dump_volume_reaper.py`).
-   The existing fakes drive `_delete_on_host`: a matching mtime deletes, a changed mtime does not, and
-   the fan-out stops at the host that held the volume either way.
-6. **The sweep's own behaviour** (`tests/reconciler/test_loop.py`): the contended-lock skip, the
+   The existing fakes drive `_delete_on_host`: a matching mtime deletes and reports `True`, a changed
+   mtime does not and reports `False`, the fan-out stops at the host that held the volume either way,
+   an absent volume is benign but is not a reap, and a failed identity re-read is an infrastructure
+   fault. A volume reporting no `<timestamps>` warns exactly once; one reporting a usable timestamp
+   warns not at all.
+6. **The port contract holds for the doubles.** `isinstance(double, DumpVolumeReaper)`, so a double
+   cannot quietly re-admit the defaulted `expected_mtime_epoch_s` the port requires.
+7. **The sweep's own behaviour** (`tests/reconciler/test_loop.py`): the contended-lock skip, the
    live-lease skip and its lapsed-holder falsifier, the stale-lease collection running on an empty
    volume list, the sampled identity reaching the port, a declined volume not being counted as
-   reaped, and the existing grace-window, terminal-job, iteration and per-volume failure-isolation
-   tests.
-7. `env -u FORCE_COLOR just ci` bare.
+   reaped, the head transaction guard and its transaction-free counterpart, and the existing
+   grace-window, terminal-job, iteration and per-volume failure-isolation tests.
+8. `env -u FORCE_COLOR just ci` bare.
 
 Each new guard is mutation-verified by breaking it and confirming the test reddens, with
 `__pycache__` cleared before re-confirming the restored tree is green.

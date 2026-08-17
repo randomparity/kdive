@@ -66,10 +66,10 @@ class DumpVolumeReaper(Protocol):
     mtime differs from the value the reconciler sampled, so the delete cannot resolve onto a volume
     the reconciler never classified. A default would make that a guard that silently does nothing.
 
-    The return reports whether the named volume is gone: ``True`` when this call removed it or it
-    was already absent — both mean the reconciler has nothing left to reclaim there — and ``False``
-    only when the identity check declined. Without it the ``reaped_dump_volumes`` count would report
-    reclamation of a volume that is still on the host.
+    The return reports whether **this call deleted the volume** — not whether the name is now
+    absent. ``False`` covers both the identity decline and a name no reachable host held, because
+    neither reclaimed anything and ``reaped_dump_volumes`` counts what the sweep reclaimed. An
+    absent volume is still not an error; it is simply not a reap.
     """
 
     async def list_dump_volumes(self) -> list[DumpVolume]: ...
@@ -83,7 +83,6 @@ class NullDumpVolumeReaper:
         return []
 
     async def delete_dump_volume(self, name: str, *, expected_mtime_epoch_s: float) -> bool:
-        # Unreachable through the reconciler, which only deletes what this reaper listed. It reports
-        # "gone" rather than "declined" because a reaper that owns no volumes has none to protect,
-        # and a False here would read as an identity refusal.
-        return True
+        # Unreachable through the reconciler, which only deletes what this reaper listed — and it
+        # lists nothing. ``False`` is the honest answer either way: nothing was deleted.
+        return False

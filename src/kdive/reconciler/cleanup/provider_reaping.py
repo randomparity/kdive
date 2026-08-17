@@ -199,10 +199,17 @@ async def reap_orphaned_dump_volumes(
     Stale leases are collected first, ahead of the volume list, so a deployment whose reaper owns no
     volumes still drains rows a failed capture left behind.
 
+    The transaction-free precondition is asserted **here**, not only per volume: the stale-lease
+    collection runs before the volume list, and on a connection already in a transaction it
+    would degrade to a savepoint that commits nothing. With an empty volume list the pass would then
+    return ``0`` having silently discarded that work, never reaching the per-volume assertion.
+
     Returns:
         The number of volumes deleted. Skips — a contended System, a live holder, a volume in the
-        grace window, a volume whose identity changed — are not counted and are not faults.
+        grace window, a volume whose identity changed, a volume no reachable host held — are not
+        counted and are not faults.
     """
+    require_top_level_transaction(conn, "the host_dump orphan sweep")
     await reap_stale_host_dump_volume_leases(conn)
     volumes = await reaper.list_dump_volumes()
     if not volumes:
@@ -250,11 +257,15 @@ async def _delete_if_still_orphaned(
                     volume.name,
                 )
                 return False
-            # Two holders, not one mechanism twice. The lease covers a capture whose job lease is
-            # live, including the interval between the claim and its first provider call, which no
-            # job-state predicate can see. ADR-0557's predicate covers a `running` job whose *job*
-            # lease has lapsed — a worker the queue gave up on whose libvirt thread may still be
-            # writing. Dropping either widens the window.
+            # Two holders, not one mechanism twice, but they overlap heavily: `dequeue` commits
+            # `running` before the handler runs, so ADR-0557's predicate already covers the whole
+            # interval from the claim to the last provider call. What the lease adds is that it is
+            # keyed on the System directly. ADR-0557's predicate reaches the System only through
+            # `runs.id::text = jobs.payload->>'run_id'`, so a Run row deleted mid-capture unfences a
+            # live capture; the lease row does not depend on that join. What ADR-0557's predicate
+            # adds is a `running` job whose *job lease* has lapsed — the queue has given up on it,
+            # which makes the lease row no longer live, while its libvirt thread may still be
+            # writing. Neither is redundant, and neither alone covers both.
             if await has_live_host_dump_volume_lease(conn, volume.system_id):
                 return False
             if await has_active_capture_job(conn, volume.system_id):
@@ -271,9 +282,10 @@ async def _delete_if_still_orphaned(
             )
             return False
     if not reclaimed:
-        # The provider found a different volume under this name than the one classified, and left it
-        # alone. Counting it would report reclamation of a volume that is still there; the provider
-        # logs the two mtimes, so nothing is added here.
+        # Either the provider found a different volume under this name than the one classified and
+        # left it alone, or no reachable host held the name at all. Neither reclaimed anything, and
+        # counting it would report reclamation that did not happen; the provider logs which case it
+        # was, so nothing is added here.
         return False
     _log.info("reconciler: reaped orphaned host_dump volume %s", volume.name)
     return True

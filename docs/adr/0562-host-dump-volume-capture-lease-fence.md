@@ -86,12 +86,22 @@ holds across both its final classification and its delete.
    reconciler pass that has no deadline behind a foreground operation (the trade ADR-0502 item 4
    makes for the same reason).
 
-5. **The classification keeps `has_active_capture_job` alongside the lease**, because the two cover
-   different holders rather than the same one. The lease covers a capture whose job lease is live,
-   including the interval between the claim and the first provider call, which no job-state predicate
-   can see. ADR-0557's predicate covers a `running` job whose *job* lease has lapsed — a worker whose
-   libvirt thread may still be writing while the queue has already declared the job abandoned. Losing
-   either would widen the window rather than simplify the guard.
+5. **The classification keeps `has_active_capture_job` alongside the lease.** The two overlap for
+   most of a capture's life — `dequeue` commits `running` before the handler runs, so ADR-0557's
+   predicate already covers the whole interval from the claim to the last provider call — but neither
+   is a superset of the other, and each covers a failure the other does not.
+
+   The lease is keyed on the System. ADR-0557's predicate reaches the System only through
+   `runs.id::text = jobs.payload->>'run_id'`, which is by design (`CaptureVmcorePayload` is
+   Run-addressed and ADR-0557 rejected duplicating System identity into it), so a `runs` row deleted
+   while its capture is in flight makes that predicate stop matching a live capture. The lease row
+   does not depend on the join.
+
+   ADR-0557's predicate, conversely, still matches a `running` job whose *job lease* has lapsed. That
+   is precisely the state in which the lease row stops being live, and it is a worker the queue has
+   given up on whose libvirt thread may still be writing.
+
+   Losing either would widen the window rather than simplify the guard.
 
 6. **`delete_dump_volume` becomes identity-addressed.** It takes the `mtime_epoch_s` the sweep
    sampled, and `_delete_on_host` re-reads the volume's `<target>/<timestamps>/<mtime>` from the
@@ -101,10 +111,12 @@ holds across both its final classification and its delete.
    claim holds no lease and satisfies no state predicate, and the volume it recreated is the only
    evidence it exists.
 
-   The port now returns whether the name is gone — true when the volume was deleted or was already
-   absent, false only on a decline — so `reaped_dump_volumes` does not report reclamation of a volume
-   that is still on the host. A decline still stops the fleet fan-out: the host holds that name, and
-   reporting "not mine" would send the sweep to another host's copy of the same deterministic name.
+   The port now returns whether **this call deleted the volume**, so `reaped_dump_volumes` counts
+   what the sweep reclaimed and nothing else. False therefore covers two cases: the identity decline,
+   and a name no reachable host held — the latter benign, but not a reap either. A decline still stops
+   the fleet fan-out, because the host does hold that name and reporting "not mine" would send the
+   sweep to another host's copy of the same deterministic name; the per-host step returns a three-state
+   outcome so "handled the name" and "deleted the volume" stay separable.
 
 7. **Stale leases are collected at the head of the sweep**, before it lists volumes, by the same
    `LIVE_HOLDER_SQL` the classification honours. A lease the collection has not reached already
@@ -134,22 +146,39 @@ co-hold and therefore not an ordering exception.
   the delete refuses on identity.
 - An unowned stale volume is still reclaimed on the first pass that finds the System's lock free,
   which is every pass on which no capture is running.
-- **The sweep now holds `LockScope.SYSTEM` across one provider delete.** For remote-libvirt that
-  delete is a `find_over_fleet` walk that opens a connection per declared host until one holds the
-  volume, so an unreachable host's connect timeout is inside the hold, and `runs.create` and
-  `repair_leaked_domains` for that System wait behind it. This is the same trade ADR-0502 accepted in
-  the other direction for `store.delete`, and it is bounded by the fleet's connect timeouts times the
-  number of declared hosts. The sweep's own acquire is a `try`, so the sweep never joins such a queue
-  — it only ever forms one.
+- **The sweep now holds `LockScope.SYSTEM` across one provider delete, and the hold is not bounded by
+  any timeout this tree configures.** For remote-libvirt that delete is a `find_over_fleet` walk
+  opening a connection per declared host until one holds the volume, and
+  `connection/transport.py`'s `open_libvirt_protocol` is a bare `libvirt.open(uri)` — there is no
+  connect timeout anywhere in the tree. The worst case is therefore the operating system's TCP
+  connect timeout (on Linux, `tcp_syn_retries`, ~130 s by default) once per unreachable declared
+  host, not a value an operator can tune. That is the honest bound, and it is the same shape of trade
+  ADR-0502 accepted in the other direction for `store.delete`, where botocore's five-attempt/60 s
+  budget at least bounded it.
+
+  The waiters are wider than the sweep's own scope. `services/runs/bind.py`'s `_bind_locked` blocks on
+  `SYSTEM` **while already holding `ALLOCATION`**, so a bind that queues behind this hold also queues
+  everything waiting on that allocation — `allocations.release` and the reconciler's
+  expired-allocation repair among them. `repair_leaked_domains` and any other per-System operation
+  wait directly. The sweep's own acquire is a `try`, so the sweep never joins such a queue; it only
+  ever forms one.
+
+  A `lock_timeout` would not help, for ADR-0502's reason: it bounds a waiter's wait, not a holder's
+  hold. Bounding this properly means giving the remote-libvirt transport a connect timeout, which is
+  a change to every remote-libvirt path rather than to this sweep, and is left to its own decision.
 - **A System whose lock is held stays skipped, silently and per pass.** The skip is not counted as a
   fault, so a wedged lock holder defers that System's volume on every pass while the sweep reports a
   clean count. The per-skip INFO line naming the System is the whole of the signal, which is the
   drift hazard ADR-0455 §4 already discloses for its own skips.
-- **A pool that reports no volume timestamps loses the identity backstop.** `volume_mtime_epoch_s`
-  yields `0.0` for a volume whose XML carries no `<timestamps>`, and `0.0` compares equal to `0.0`, so
-  the re-read cannot distinguish a recreated volume there. Such a pool has already lost ADR-0094's
-  mtime grace for the same reason (`0.0` is always older than any cutoff), so the lease and the lock
-  are its only guards — which is why item 6 is a backstop and not the mechanism.
+- **A pool that reports no volume timestamps loses the identity backstop, and says so.**
+  `volume_mtime_epoch_s` yields `0.0` for a volume whose XML carries no `<timestamps>`, and `0.0`
+  compares equal to `0.0`, so the re-read cannot distinguish a recreated volume there. Such a pool has
+  already lost ADR-0094's mtime grace for the same reason (`0.0` is always older than any cutoff), so
+  the lease and the lock are its only guards — which is why item 6 is a backstop and not the mechanism.
+  Because a guard that degrades in silence is one nobody knows to fix, `volume_mtime_or_warn` logs a
+  WARNING naming the volume and both defeated guards on every such read. It does **not** refuse to
+  reap: refusing would strand every genuine orphan on that pool forever, which is a worse failure than
+  the one being disclosed.
 - **A capture whose job lease lapses mid-operation loses its lease fence**, exactly as ADR-0502
   discloses for the write lease. `has_active_capture_job` still covers it while the row reads
   `running`, and the identity re-read still covers the volume it recreated.

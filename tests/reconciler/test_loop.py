@@ -1117,7 +1117,8 @@ def test_null_dump_volume_reaper_is_a_dump_volume_reaper() -> None:
         reaper = NullDumpVolumeReaper()
         assert isinstance(reaper, DumpVolumeReaper)
         assert await reaper.list_dump_volumes() == []
-        assert await reaper.delete_dump_volume("anything", expected_mtime_epoch_s=1.0) is True
+        # It owns nothing, so it deletes nothing — `False` is "not a reap", not an error.
+        assert await reaper.delete_dump_volume("anything", expected_mtime_epoch_s=1.0) is False
 
     asyncio.run(_run())
 
@@ -1512,6 +1513,52 @@ def test_the_sweep_collects_stale_leases_even_with_no_volumes(migrated_url: str)
             cur = await check.execute("SELECT count(*) FROM host_dump_volume_leases")
             row = await cur.fetchone()
         assert row is not None and row[0] == 0
+
+    asyncio.run(_run())
+
+
+def test_the_sweep_refuses_a_connection_already_in_a_transaction(migrated_url: str) -> None:
+    """The precondition is checked before the stale-lease collection, not only per volume.
+
+    On a connection already in a transaction every ``conn.transaction()`` below is a savepoint that
+    commits nothing and every ``pg_advisory_xact_lock`` is held until the caller commits. With an
+    empty volume list the pass would return ``0`` having silently discarded the lease collection and
+    never reaching the per-volume assertion — a clean-looking pass that did nothing.
+    """
+
+    async def _run() -> None:
+        reaper = _FakeDumpVolumeReaper()  # lists nothing, so only the head guard can fire
+        # A pool connection, because that is what the repair runner hands every repair and because
+        # only a non-autocommit connection has this failure mode: a bare read on it opens a
+        # transaction that lives until the pool takes the connection back.
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await conn.execute("SELECT 1")
+            with pytest.raises(RuntimeError, match="savepoint"):
+                await reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30))
+
+    asyncio.run(_run())
+
+
+def test_the_sweep_admits_a_transaction_free_connection(migrated_url: str) -> None:
+    """The counterpart, so the guard above is not merely "always raises".
+
+    Without this the ``pytest.raises`` would pass against a guard that rejected the connection the
+    reconciler's repair runner actually hands it, and the whole sweep would be dead in production.
+    """
+
+    async def _run() -> None:
+        reaper = _FakeDumpVolumeReaper()
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            assert (
+                await run_repair(
+                    pool,
+                    lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
+                )
+                == 0
+            )
 
     asyncio.run(_run())
 

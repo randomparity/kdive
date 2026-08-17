@@ -118,6 +118,33 @@ def volume_mtime_epoch_s(volume_xml: str) -> float:
         return 0.0
 
 
+def volume_mtime_or_warn(volume_xml: str, name: str) -> float:
+    """:func:`volume_mtime_epoch_s`, warning when the volume reports no usable timestamp.
+
+    A ``0.0`` here means both of this volume's guards are inert, and neither says so on its own.
+    ADR-0094's mtime grace is defeated because ``0.0`` is older than any cutoff, and ADR-0562's
+    identity re-read is defeated because ``0.0`` compares equal to ``0.0`` — so a volume a live
+    capture recreated reads as the one the reconciler classified. What still protects it is
+    the capture lease and the System lock the sweep holds across its delete, which is why this is a
+    warning about a degraded pool rather than a refusal to reap: refusing would strand every genuine
+    orphan on that pool forever.
+
+    Warned at every read rather than once: the read is once per volume per reconciler pass, and
+    the condition is a property of the pool the operator configured — a single startup line would be
+    lost long before anyone looked for it.
+    """
+    mtime = volume_mtime_epoch_s(volume_xml)
+    if mtime == 0.0:
+        _log.warning(
+            "reconciler: host_dump volume %s reports no usable <target>/<timestamps>/<mtime>; "
+            "its mtime grace (ADR-0094) and identity re-read (ADR-0562) are both inert, so the "
+            "capture lease and the System lock as its only guards. Is the storage pool "
+            "filesystem/dir-backed?",
+            name,
+        )
+    return mtime
+
+
 class RemoteLibvirtDumpVolumeReaper:
     """List + delete host_dump volumes in the operator's storage pool (the reconciler seam)."""
 
@@ -150,8 +177,10 @@ class RemoteLibvirtDumpVolumeReaper:
         Offloaded, like every libvirt call here.
 
         Returns:
-            Whether the name is gone: ``True`` when a host deleted it or no host had it, ``False``
-            when a host holds a volume of that name whose identity does not match the sample.
+            Whether **this call deleted the volume**. ``False`` both when a host holds a volume of
+            that name whose identity does not match the sample, and when no reachable host had it at
+            all — the second is benign, but nothing was reclaimed either way and the reconciler's
+            count must not claim otherwise.
         """
         return await asyncio.to_thread(self._delete_blocking, name, expected_mtime_epoch_s)
 
@@ -177,7 +206,7 @@ class RemoteLibvirtDumpVolumeReaper:
                 DumpVolume(
                     name=name,
                     system_id=system_id,
-                    mtime_epoch_s=volume_mtime_epoch_s(volume.XMLDesc(0)),
+                    mtime_epoch_s=volume_mtime_or_warn(volume.XMLDesc(0), name),
                 )
             )
         return volumes
@@ -199,8 +228,12 @@ class RemoteLibvirtDumpVolumeReaper:
             declined = outcome is _HostOutcome.DECLINED
             return outcome is not _HostOutcome.NOT_HERE
 
-        find_over_fleet(self._connections, delete_here, operation="dump-volume delete")
-        return not declined
+        # `find_over_fleet` reports whether some host handled the name, which a decline also is;
+        # only the conjunction means a volume was actually removed. An all-hosts-unreachable pass
+        # reports False here (it skipped every host and handled nothing), which is what keeps the
+        # sweep from counting a reclamation it could not have performed.
+        handled = find_over_fleet(self._connections, delete_here, operation="dump-volume delete")
+        return handled and not declined
 
     @staticmethod
     def _delete_on_host(
@@ -226,7 +259,7 @@ class RemoteLibvirtDumpVolumeReaper:
                 return _HostOutcome.NOT_HERE  # not on this host (or already gone)
             raise _infra("looking up host_dump volume", volume=name) from exc
         try:
-            observed_mtime = volume_mtime_epoch_s(volume.XMLDesc(0))
+            observed_mtime = volume_mtime_or_warn(volume.XMLDesc(0), name)
         except libvirt.libvirtError as exc:
             raise _infra("re-reading host_dump volume identity", volume=name) from exc
         if observed_mtime != expected_mtime_epoch_s:
@@ -259,4 +292,5 @@ __all__ = [
     "OpenDumpReaperConnection",
     "system_id_from_dump_volume_name",
     "volume_mtime_epoch_s",
+    "volume_mtime_or_warn",
 ]

@@ -50,7 +50,7 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers.artifacts import vmcore as vmcore_plane
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
-from kdive.providers.infra.reaping import DumpVolume
+from kdive.providers.infra.reaping import DumpVolume, DumpVolumeReaper
 from kdive.providers.ports.retrieve import CaptureOutput
 from kdive.providers.remote_libvirt.reaping.dump_volume import system_id_from_dump_volume_name
 from kdive.providers.remote_libvirt.retrieve.host_dump_capture import host_dump_volume_name
@@ -69,6 +69,16 @@ _ORPHAN_AGE_S = 3600.0
 #: The mtime the capture's freshly created volume carries. Distinct from the orphan's by an hour,
 #: which is what makes an identity comparison on this field meaningful rather than incidental.
 _FRESH_MTIME = 2_000_000_000.0
+
+
+def test_the_double_conforms_to_the_dump_volume_reaper_port() -> None:
+    """The doubles below stand in for the port, so they must satisfy it structurally.
+
+    Without this a double could reintroduce the defaulted ``expected_mtime_epoch_s`` the port bans,
+    and every test in this module would keep passing while exercising a contract the shipped reaper
+    does not offer.
+    """
+    assert isinstance(_PausingDumpVolumeReaper(_StoragePool()), DumpVolumeReaper)
 
 
 def _core(run_id: str) -> CaptureOutput:
@@ -141,18 +151,21 @@ class _PausingDumpVolumeReaper:
             for name, mtime in sorted(self._pool.present().items())
         ]
 
-    async def delete_dump_volume(
-        self, name: str, *, expected_mtime_epoch_s: float | None = None
-    ) -> bool:
+    async def delete_dump_volume(self, name: str, *, expected_mtime_epoch_s: float) -> bool:
+        """The port's contract, including the identity refusal, over the in-memory pool.
+
+        ``expected_mtime_epoch_s`` is required exactly as the port requires it. A default here would
+        let this double accept the call the port forbids — and the ADR's whole reason for making it
+        required is that a defaulted identity is a guard that silently does nothing.
+        """
         self.about_to_delete.set()
         if self._pause:
             await self.proceed.wait()
-        if expected_mtime_epoch_s is not None:
-            self.expected_mtimes.append(expected_mtime_epoch_s)
+        self.expected_mtimes.append(expected_mtime_epoch_s)
         observed = self._pool.mtime(name)
         if observed is None:
-            return True  # already gone — never an error (the port's documented contract)
-        if expected_mtime_epoch_s is not None and observed != expected_mtime_epoch_s:
+            return False  # already gone: not an error, and not a reap either
+        if observed != expected_mtime_epoch_s:
             self.refused.append((name, expected_mtime_epoch_s, observed))
             return False
         self._pool.remove(name)
@@ -341,8 +354,14 @@ def test_the_sweep_cannot_delete_the_volume_of_a_capture_claimed_mid_pass(
                         )
 
                 handler = asyncio.create_task(_handle())
-                await _await_capture_reaching_the_volume_or_the_boundary(
+                reached = await _await_capture_reaching_the_volume_or_the_boundary(
                     migrated_url, system_id, retriever.entered
+                )
+                # Asserted, not merely returned: this is the direct statement of the ordering claim,
+                # where the volume-survival assertions below are its observable consequence.
+                assert reached == "blocked-on-boundary", (
+                    "the capture's declaration must contend the boundary the sweep holds over its "
+                    f"delete; it instead {reached}"
                 )
             finally:
                 reaper.proceed.set()
@@ -369,9 +388,12 @@ def test_the_sweep_cannot_delete_the_volume_of_a_capture_claimed_mid_pass(
 def test_a_live_lease_holds_the_sweep_off_an_hour_old_volume(migrated_url: str) -> None:
     """The fence on its own, with a claimed capture in flight and the lock uncontended.
 
-    Separate from the interleaving test because it isolates the lease from the boundary: here the
+    Separate from the interleaving test because it isolates the *fence* from the boundary: here the
     sweep runs start to finish while the capture is suspended, takes the System lock unopposed, and
-    still declines. The only thing standing between an hour-old volume and ``delete`` is the row.
+    still declines. Two holders account for that, not one — the lease row and the ``running`` job
+    ADR-0557's predicate matches — and this test does not distinguish them. What only the lease can
+    account for is isolated in
+    ``tests/reconciler/test_loop.py::test_a_live_lease_fences_a_volume_whose_job_state_does_not_match``.
     """
 
     async def _run() -> None:

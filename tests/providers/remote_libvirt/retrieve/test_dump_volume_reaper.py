@@ -9,6 +9,7 @@ libvirt object here is a fake.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -43,9 +44,9 @@ _SAMPLED_MTIME = 1700000000.0
 
 async def _delete(
     reaper: RemoteLibvirtDumpVolumeReaper, *, expected_mtime_epoch_s: float = _SAMPLED_MTIME
-) -> None:
+) -> bool:
     """Delete the fixture volume, addressed by default to the identity the fake reports."""
-    await reaper.delete_dump_volume(
+    return await reaper.delete_dump_volume(
         host_dump_volume_name(_SID), expected_mtime_epoch_s=expected_mtime_epoch_s
     )
 
@@ -87,6 +88,42 @@ def test_mtime_is_zero_when_absent_or_malformed() -> None:
         )
         == 0.0
     )
+
+
+def test_a_volume_with_no_timestamps_warns_that_both_guards_are_inert(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """A pool with no ``<timestamps>`` degrades two guards at once, and must say so.
+
+    ``0.0`` is older than any cutoff, so ADR-0094's mtime grace never fires; and ``0.0`` compares
+    equal to ``0.0``, so ADR-0562's identity re-read cannot tell a recreated volume from the sampled
+    one. Both failures are invisible in the reaper's own behaviour — it keeps reaping, which is the
+    right call, since refusing would strand every genuine orphan on that pool.
+    """
+    conn = _FakeConn(volumes=[_FakeVolume(mtime="")])
+    reaper = _reaper(conn, tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        volumes = asyncio.run(reaper.list_dump_volumes())
+
+    assert [vol.mtime_epoch_s for vol in volumes] == [0.0]
+    warnings = [rec.getMessage() for rec in caplog.records if rec.levelno >= logging.WARNING]
+    assert len(warnings) == 1, warnings
+    assert host_dump_volume_name(_SID) in warnings[0]
+    assert "ADR-0094" in warnings[0] and "ADR-0562" in warnings[0]
+
+
+def test_a_volume_with_a_usable_timestamp_warns_about_nothing(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """The counterpart, so the warning above is not simply emitted on every read."""
+    conn = _FakeConn()
+    reaper = _reaper(conn, tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(reaper.list_dump_volumes())
+
+    assert [rec.getMessage() for rec in caplog.records if rec.levelno >= logging.WARNING] == []
 
 
 def test_list_dump_volumes_fans_out_over_the_fleet(tmp_path: Path) -> None:
@@ -173,8 +210,10 @@ def test_delete_dump_volume_treats_missing_volume_as_done(tmp_path: Path) -> Non
     conn = _FakeConn(volume_error=libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL))
     reaper = _reaper(conn, tmp_path)
 
-    asyncio.run(_delete(reaper))
+    reclaimed = asyncio.run(_delete(reaper))
 
+    # Benign, and still not a reap: the reconciler's count must not claim a volume it never removed.
+    assert reclaimed is False
     assert conn.pool.lookups == [host_dump_volume_name(_SID)]
     assert conn.closed
 
@@ -218,8 +257,9 @@ def test_delete_declines_a_volume_recreated_since_the_reconciler_sampled_it(tmp_
     conn = _FakeConn()
     reaper = _reaper(conn, tmp_path)
 
-    asyncio.run(_delete(reaper, expected_mtime_epoch_s=_SAMPLED_MTIME - 3600))
+    reclaimed = asyncio.run(_delete(reaper, expected_mtime_epoch_s=_SAMPLED_MTIME - 3600))
 
+    assert reclaimed is False  # nothing was reclaimed, so the sweep must not count it
     assert conn.pool.lookups == [host_dump_volume_name(_SID)]
     assert conn.pool.volume.xml_reads == 1  # the re-read happened
     assert conn.pool.volume.deleted == 0  # and it stopped the delete
@@ -235,8 +275,9 @@ def test_delete_deletes_when_the_identity_still_matches(tmp_path: Path) -> None:
     conn = _FakeConn()
     reaper = _reaper(conn, tmp_path)
 
-    asyncio.run(_delete(reaper, expected_mtime_epoch_s=_SAMPLED_MTIME))
+    reclaimed = asyncio.run(_delete(reaper, expected_mtime_epoch_s=_SAMPLED_MTIME))
 
+    assert reclaimed is True
     assert conn.pool.volume.xml_reads == 1
     assert conn.pool.volume.deleted == 1
 
