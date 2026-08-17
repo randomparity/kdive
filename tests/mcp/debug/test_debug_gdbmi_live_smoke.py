@@ -17,7 +17,7 @@ import socket
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -45,6 +45,8 @@ from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import ModuleDebuginfo
+from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, QEMU_NS
+from kdive.providers.shared.runtime_paths import system_id_from_domain_name
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.testing.live_vm import boot_gdbstub_domain, create_overlay
 from tests.live_vm import (
@@ -52,7 +54,7 @@ from tests.live_vm import (
     require_live_vm_throwaway,
     require_live_vm_vmlinux,
 )
-from tests.mcp.debug.live_support import render_panicking_domain
+from tests.mcp.debug.live_support import drop_ownership_metadata, render_panicking_domain
 from tests.mcp.debug.session_support import (
     PROFILE,
     PROFILE_POLICY,
@@ -197,6 +199,61 @@ def test_live_vm_debug_advance_modes(  # pragma: no cover - live_vm
             wait_timeout_s=180.0,
         ):
             asyncio.run(_drive_advance_modes(live_debug_surface, vmlinux, ssh_port))
+
+
+def _stepping_domain_xml(tmp_path: Path) -> str:
+    return _render_stepping_domain(
+        disk=tmp_path / "overlay.qcow2",
+        bzimage=tmp_path / "bzImage",
+        gdb_port=51201,
+        ssh_port=51202,
+    )
+
+
+def _panicking_domain_xml(tmp_path: Path) -> str:
+    return render_panicking_domain(
+        bzimage=str(tmp_path / "bzImage"),
+        disk=tmp_path / "garbage.qcow2",
+        console=tmp_path / "console.log",
+    )
+
+
+@pytest.mark.parametrize("render", [_stepping_domain_xml, _panicking_domain_xml])
+def test_transient_live_debug_domain_claims_no_production_ownership(
+    render: Callable[[Path], str], tmp_path: Path
+) -> None:
+    """A transient live-debug domain must not self-identify as a kdive-owned System (#1930).
+
+    Both helpers render **production** domain XML and then rename to ``kdive-x``, so a
+    concurrently running production reconciler must resolve them as foreign: the kdive
+    ownership ``<metadata>`` tag has to be gone (else ``_owned_entry`` reads a System id that
+    exists only in pytest's disposable database and ``repair_leaked_domains`` destroys the
+    domain mid-test), and the name must not match the ``kdive-<uuid>`` convention the reaper
+    falls back to.
+    """
+    root = ET.fromstring(render(tmp_path))  # noqa: S314 - kdive-rendered, trusted
+
+    assert root.find("metadata") is None, "transient domain still claims kdive ownership"
+    assert KDIVE_METADATA_NS not in ET.tostring(root, encoding="unicode")
+    assert root.findtext("name") == "kdive-x"
+    assert system_id_from_domain_name("kdive-x") is None, "name still reaps by convention"
+
+
+@pytest.mark.parametrize("render", [_stepping_domain_xml, _panicking_domain_xml])
+def test_transient_live_debug_domain_keeps_production_gdbstub_xml(
+    render: Callable[[Path], str], tmp_path: Path
+) -> None:
+    """Stripping ownership must remove only the claim, not the production XML under test."""
+    root = ET.fromstring(render(tmp_path))  # noqa: S314 - kdive-rendered, trusted
+
+    arg_path = f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg"
+    args = [arg.get("value") for arg in root.findall(arg_path)]
+    assert "-gdb" in args
+    assert any(arg is not None and arg.startswith("tcp:127.0.0.1:") for arg in args)
+    assert "-netdev" in args
+    assert root.findtext("./os/kernel")
+    assert root.find("./devices/disk/source") is not None
+    assert root.find("./devices/serial/log") is not None
 
 
 def test_continue_to_vfs_read_closes_ssh_trigger_on_tool_error(
@@ -657,6 +714,7 @@ def _render_stepping_domain(*, disk: Path, bzimage: Path, gdb_port: int, ssh_por
         kernel_path=bzimage,
     )
     root = ET.fromstring(rendered)  # noqa: S314 - kdive-rendered, trusted
+    drop_ownership_metadata(root)
     name = root.find("name")
     cmdline = root.find("./os/cmdline")
     assert name is not None and cmdline is not None and cmdline.text is not None

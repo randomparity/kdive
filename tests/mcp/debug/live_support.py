@@ -12,6 +12,28 @@ from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from tests.mcp.debug.session_support import PROFILE
 
 
+def drop_ownership_metadata(root: ET.Element) -> None:
+    """Strip the kdive ownership tag from a transient, non-production domain (#1930).
+
+    ``render_domain_xml`` always stamps ``<metadata><kdive:system>`` with the System id it was
+    handed, because every domain it renders in production *is* owned by a live ``systems`` row.
+    The live-debug helpers below render that production XML for a System that exists only in
+    pytest's disposable database, so the tag is a false ownership claim: a concurrently running
+    production reconciler resolves it (the tag is authoritative in
+    ``LocalLibvirtDiscovery._owned_entry``), finds no matching row, and ``repair_leaked_domains``
+    destroys the domain mid-test.
+
+    Dropping the whole ``<metadata>`` element — kdive renders nothing else inside it — sends
+    ``_owned_entry`` down its ``VIR_ERR_NO_DOMAIN_METADATA`` path, where the ``kdive-x`` name
+    these helpers set does not match the ``kdive-<uuid>`` convention and is correctly treated as
+    foreign/unmanaged. Everything else stays production XML: the gdbstub passthrough, the SSH
+    forward, the direct-kernel ``<os>``, and the disk are exactly what a real System boots.
+    """
+    metadata = root.find("metadata")
+    if metadata is not None:
+        root.remove(metadata)
+
+
 def render_panicking_domain(*, bzimage: str, disk: Path, console: Path) -> str:
     """Render the preserved gdbstub domain used by live early-panic tests.
 
@@ -41,6 +63,7 @@ def render_panicking_domain(*, bzimage: str, disk: Path, console: Path) -> str:
         kernel_path=Path(bzimage),
     )
     root = ET.fromstring(base)  # noqa: S314 - kdive-rendered, trusted
+    drop_ownership_metadata(root)
     name = root.find("name")
     assert name is not None
     name.text = "kdive-x"  # seed_system's domain_name, so the connector lookup resolves it
