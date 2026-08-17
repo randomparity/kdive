@@ -55,7 +55,7 @@ from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.processes.lifecycle.worker_incarnation import WorkerDeathVerifier
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.infra.reaping import DumpVolumeReaper, InfraReaper
+from kdive.providers.infra.reaping import CaptureReaper, DumpVolumeReaper, InfraReaper
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
 
@@ -68,6 +68,7 @@ class AppAssembly:
     secret_registry: SecretRegistry
     reaper: InfraReaper
     dump_volume_reaper: DumpVolumeReaper
+    capture_reapers: Mapping[str, CaptureReaper]
     object_stores: ObjectStoreAssembly
     worker_death_verifier: WorkerDeathVerifier | None
 
@@ -100,6 +101,7 @@ def _reconcile_tools_registrar(
     *,
     reaper: InfraReaper,
     dump_volume_reaper: DumpVolumeReaper,
+    capture_reapers: Mapping[str, CaptureReaper],
     object_stores: ObjectStoreAssembly,
 ) -> PlaneRegistrar:
     def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -108,6 +110,7 @@ def _reconcile_tools_registrar(
             upload_store=object_stores.store,
             image_store=object_stores.store,
             dump_volume_reaper=dump_volume_reaper,
+            capture_reapers=capture_reapers,
         )
         ops_reconcile_tools.register(app, pool, ports=ports)
 
@@ -269,6 +272,7 @@ def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
         _reconcile_tools_registrar(
             reaper=assembly.reaper,
             dump_volume_reaper=assembly.dump_volume_reaper,
+            capture_reapers=assembly.capture_reapers,
             object_stores=assembly.object_stores,
         ),
         _reconcile_systems_tools_registrar(assembly.object_stores),

@@ -112,6 +112,7 @@ def build_app(
         secret_registry=composition.secret_registry,
         reaper=composition.build_reconciler_reaper(),
         dump_volume_reaper=composition.build_reconciler_dump_volume_reaper(),
+        capture_reapers=composition.build_reconciler_capture_reapers(),
         object_stores=stores,
         worker_death_verifier=durable_witness,
     )

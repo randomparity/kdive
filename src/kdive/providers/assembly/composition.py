@@ -8,9 +8,10 @@ runtime assembly lives next to each provider.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 from psycopg_pool import AsyncConnectionPool
@@ -33,6 +34,7 @@ from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
 from kdive.providers.infra.console_hosting import DbRunningRemoteSystems
 from kdive.providers.infra.reaping import (
+    CaptureReaper,
     DumpVolumeReaper,
     InfraReaper,
     NullDumpVolumeReaper,
@@ -479,6 +481,42 @@ class ProviderComposition:
         ):
             return factory()
         return NullDumpVolumeReaper()
+
+    def build_reconciler_capture_reapers(
+        self,
+        *,
+        enable_fault_inject: bool | None = None,
+        enable_local_libvirt: bool | None = None,
+        enable_remote_libvirt: bool | None = None,
+    ) -> Mapping[str, CaptureReaper]:
+        """Assemble ``Resource kind -> CaptureReaper`` for the ADR-0556 capture sweep.
+
+        Keyed by kind rather than composed into one fan-out reaper because the job chain already
+        names the Resource: dispatching a row to the wrong provider would fail host binding on
+        every pass and bury the sweep's own failure signal.
+
+        Only the two kinds that implement traffic capture appear. A future provider's
+        capture-reclamation contract needs its own decision rather than inheriting support from a
+        capability flag, so fault-inject contributes nothing even when it is enabled. Both entries
+        are currently ``NullCaptureReaper``, which is disabled wiring: the sweep leaves those kinds
+        out of selection entirely, so neither can be dispatched or marked complete until #1947 and
+        #1948 each register their own.
+        """
+        builders: dict[ResourceKind, Callable[[], CaptureReaper]] = {
+            ResourceKind.LOCAL_LIBVIRT: local_composition.build_capture_reaper,
+            ResourceKind.REMOTE_LIBVIRT: remote_composition.build_capture_reaper,
+        }
+        return MappingProxyType(
+            {
+                descriptor.kind.value: builders[descriptor.kind]()
+                for descriptor in self._enabled_runtime_descriptors(
+                    enable_fault_inject=enable_fault_inject,
+                    enable_remote_libvirt=enable_remote_libvirt,
+                    enable_local_libvirt=enable_local_libvirt,
+                )
+                if descriptor.kind in builders
+            }
+        )
 
     async def build_reconciler_console_hosting(
         self,
