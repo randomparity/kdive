@@ -111,8 +111,11 @@ site, and the declaration — in one commit. The guard is what makes that orderi
 - The parity guard now depends on the *name* `reject_unsupported_component_source` and on
   `component_kind` being passed as a member rather than computed. Both are asserted by the guard
   itself, so the coupling fails loudly instead of degrading into a guard that checks nothing.
-- Parsing every file under `src/kdive/` costs one `ast.parse` per module in the default `just test`
-  gate. Measured well under a second, and it needs no libvirt host (ADR-0076).
+- Parsing every file under `src/kdive/` costs one `ast.parse` per module. Measured at 0.38 s for 711
+  files, run once per test that needs it — three of them, so about 1.1 s added to the default
+  `just test` gate, against a suite that takes over two minutes. Left uncached deliberately: a cache
+  on a function returning a mutable set is a footgun worth more than the second it saves. It needs no
+  libvirt host (ADR-0076).
 
 ## Considered & rejected
 
