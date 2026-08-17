@@ -37,7 +37,12 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import HeadResult, StoredArtifact
-from kdive.db.locks import LockScope, _advisory_lock_oids, _lock_key
+from kdive.db.locks import (
+    LockScope,
+    _advisory_lock_oids,
+    _lock_key,
+    try_advisory_xact_lock,
+)
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -235,8 +240,6 @@ async def _lease_holders(url: str, system_id: str) -> list[UUID]:
 
 async def _system_lock_is_free(url: str, system_id: str) -> bool:
     """Whether ``(SYSTEM, system_id)`` can be taken right now — i.e. nothing is holding it."""
-    from kdive.db.locks import try_advisory_xact_lock
-
     async with await psycopg.AsyncConnection.connect(url) as probe, probe.transaction():
         return await try_advisory_xact_lock(probe, LockScope.SYSTEM, UUID(system_id))
 
@@ -352,6 +355,10 @@ def test_the_sweep_cannot_delete_the_volume_of_a_capture_claimed_mid_pass(
         )
         assert reaper.deleted == [(volume, orphan_mtime)], (
             "the sweep must delete the identity it classified and nothing else"
+        )
+        assert reaper.refused == [], (
+            "the boundary, not the identity backstop, must be what accounts for this: a refusal "
+            "here would mean the capture had already recreated the volume under the sweep"
         )
         assert reaped == 1
         assert isinstance(outcome, str), f"the capture should have finalized, got {outcome!r}"
