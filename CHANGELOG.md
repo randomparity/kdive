@@ -1068,6 +1068,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump mermaid-check jsdom and mermaid to clear npm audit findings
 - Drop false kdive ownership from transient debug domains
 - Disown the live preserve-attach domain
+- Skip vanished process instead of aborting launch-token scan
+- Stop conflating an unreadable boot_id with a vanished pid
 - Fence the dump-volume sweep on a per-System capture lease
 - Do not count a declined dump volume as reaped
 - Apply adversarial-review findings to the dump-volume fence
