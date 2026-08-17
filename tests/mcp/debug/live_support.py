@@ -10,6 +10,7 @@ from uuid import uuid4
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from tests.mcp.debug.session_support import PROFILE
+from tests.support.domain_ownership import drop_ownership_metadata
 
 
 def render_panicking_domain(*, bzimage: str, disk: Path, console: Path) -> str:
@@ -41,6 +42,7 @@ def render_panicking_domain(*, bzimage: str, disk: Path, console: Path) -> str:
         kernel_path=Path(bzimage),
     )
     root = ET.fromstring(base)  # noqa: S314 - kdive-rendered, trusted
+    drop_ownership_metadata(root)
     name = root.find("name")
     assert name is not None
     name.text = "kdive-x"  # seed_system's domain_name, so the connector lookup resolves it
