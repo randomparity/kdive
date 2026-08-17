@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import NamedTuple, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -86,3 +87,71 @@ class NullDumpVolumeReaper:
         # Unreachable through the reconciler, which only deletes what this reaper listed — and it
         # lists nothing. ``False`` is the honest answer either way: nothing was deleted.
         return False
+
+
+class OrphanedCapture(NamedTuple):
+    """One terminal capture job's host state, named from its persisted ownership chain.
+
+    Carries exactly what a reaper needs to name the owning capture and nothing wider
+    (ADR-0556): the provider kind that selected it, the Resource it must bind to (ADR-0187
+    binds by ``resource_name``), the stored-or-derived domain name, the owning System, and the
+    job id every reaper turns into a sink name through
+    :func:`kdive.providers.ports.traffic.capture_qom_id`.
+
+    The sink name is deliberately *not* a field. It is derived from ``job_id`` by the one shared
+    convention, so a reaper cannot be handed a name that disagrees with what the producer
+    attached.
+    """
+
+    provider_kind: str
+    resource_id: UUID
+    resource_name: str
+    system_id: UUID
+    domain_name: str
+    job_id: UUID
+
+
+@runtime_checkable
+class CaptureReaper(Protocol):
+    """The narrow provider port the reconciler consumes for orphaned traffic captures.
+
+    An implementation detaches the capture's QOM object **before** removing its destination and
+    tolerates an already-missing filter, domain, or destination: a crash between a successful
+    provider call and the reconciler's completion write repeats an already-effective call, so the
+    contract is at-least-once attempts with a convergent effect, not exactly-once execution.
+
+    The return reports whether **this call** left no capture state behind. ``False`` is not an
+    error — it covers a host no longer reachable and any other reason the call declined — but it
+    is also not a reclaim, so the sweep neither counts it nor marks the row complete and the row
+    becomes eligible again after its retry deadline. Raising and returning ``False`` differ only
+    in whether the sweep logs a traceback; neither can mark a row.
+    """
+
+    async def reclaim_capture(self, capture: OrphanedCapture) -> bool: ...
+
+
+class NullCaptureReaper:
+    """Disabled wiring for a provider kind whose concrete reaper has not landed (ADR-0556).
+
+    A kind wired to this is not merely a no-op call: :func:`dispatchable_capture_kinds` leaves it
+    out of the eligible-kind set, so the sweep never selects its rows and never reaches a
+    completion write for one. #1947 and #1948 each enable only their own kind by replacing this
+    with a concrete reaper.
+    """
+
+    async def reclaim_capture(self, capture: OrphanedCapture) -> bool:
+        # Unreachable through the reconciler, which never selects a row for an undispatchable
+        # kind. ``False`` is the honest answer either way: nothing was reclaimed.
+        return False
+
+
+def dispatchable_capture_kinds(reapers: Mapping[str, CaptureReaper]) -> frozenset[str]:
+    """The provider kinds a **concrete** capture reaper is registered for (ADR-0556).
+
+    Filtering the registry rather than letting a ``Null`` reaper answer keeps disablement a
+    selection property: rows of a disabled kind never enter the batch, so they cannot consume the
+    per-pass bound or starve a kind that does have a reaper.
+    """
+    return frozenset(
+        kind for kind, reaper in reapers.items() if not isinstance(reaper, NullCaptureReaper)
+    )
