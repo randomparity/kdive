@@ -27,6 +27,10 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import CaptureVmcorePayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.shared.host_dump_volume_leases import (
+    hold_host_dump_volume_lease,
+    release_host_dump_volume_lease,
+)
 from kdive.security import audit
 
 _DISABLED_TELEMETRY = CaptureTelemetry.disabled()
@@ -207,6 +211,13 @@ async def finalize_capture(
         # release too — the core it found is already row-protected, and its own write reused that
         # same key.
         await release_write_lease(conn, RUN_UPLOAD_OWNER, run.id, job.id)
+        # The dump-volume lease goes with it (ADR-0562). Released unconditionally rather than under
+        # the same ``host_dump`` test that gates the mint, so the gate lives in one place and
+        # narrowing it later cannot strand a row: with no lease the DELETE matches nothing. A Run
+        # with no System binding never reached the mint, and both arms release for the write lease's
+        # reason — the replay arm's own earlier attempt held one over the same volume.
+        if run.system_id is not None:
+            await release_host_dump_volume_lease(conn, run.system_id, job.id)
         existing = await raw_vmcore_key(conn, run.id)
         if existing is not None:
             ensure_method_match(existing, method, run.id)
@@ -258,6 +269,12 @@ async def capture_handler(
     so relying on an ``except`` here would be a fence that holds only for the failures Python got
     to observe.
     ``reap_stale_write_leases`` collects it instead, off the holding job's own liveness.
+
+    A ``host_dump`` capture holds a second lease over its **System** across the same window
+    (ADR-0562), fencing the reconciler's orphaned-volume sweep off the deterministic dump volume the
+    provider is about to recreate. It follows the write lease's shape exactly — minted under the
+    lock the sweep also takes, released by :func:`finalize_capture`, never by the ``except``
+    — and is collected by ``reap_stale_host_dump_volume_leases``.
     """
     payload = load_payload(job, CaptureVmcorePayload)
     run_id = UUID(payload.run_id)
@@ -278,6 +295,15 @@ async def capture_handler(
     # handler returns while holding ``LockScope.RUN`` across the whole capture. ``hold_write_lease``
     # raises rather than allowing that, so the ordering cannot rot silently.
     await hold_write_lease(conn, RUN_UPLOAD_OWNER, run.id, job.id)
+    # The second declaration, over the System rather than the object prefix (ADR-0562). Only
+    # is the only method that creates ``kdive-host-dump-<system_id>.kdump``, so it is the only one
+    # that needs to fence the reconciler's orphaned-volume sweep off that name; a kdump/gdbstub/
+    # console capture mints nothing. It sits here, after the write lease and before the resolver's
+    # read, for the same connection-state reason: ``hold_write_lease`` has just committed, so this
+    # mint's own transaction is a real one rather than a savepoint that commits nothing and holds
+    # ``LockScope.SYSTEM`` across the whole capture. Both mints assert that rather than assume it.
+    if method is CaptureMethod.HOST_DUMP:
+        await hold_host_dump_volume_lease(conn, system.id, job.id)
     binding = await resolver.binding_for_system(conn, system.id)
     set_provider_kind(binding.kind.value)
     retriever = binding.runtime.retriever
