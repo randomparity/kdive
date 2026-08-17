@@ -156,7 +156,7 @@ def scan_launch_token(
         try:
             observed_executable = (entry / "exe").resolve(strict=True)
             identity = LinuxIdentity.read(int(entry.name), host_instance=stable_host)
-        except FileNotFoundError:
+        except FileNotFoundError, ProcessLookupError:
             continue
         except OSError as error:
             raise RuntimeError(f"complete launch-token scan could not attest {entry}") from error

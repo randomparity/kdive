@@ -163,6 +163,44 @@ def test_launch_token_scan_finds_only_exact_executable_and_token(
     )
 
 
+def test_launch_token_scan_skips_matched_process_that_exits_before_identity_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A matched process vanishing between the cmdline read and the identity read is skipped,
+    not turned into a scan-wide RuntimeError (regression test for #1974).
+
+    ``LinuxIdentity.read`` reports a vanished process as ``ProcessLookupError``, not
+    ``FileNotFoundError`` — drive that exact exception through the real second-stage
+    call site rather than patching the ``except`` arm directly.
+    """
+    (tmp_path / "sys/kernel/random").mkdir(parents=True)
+    (tmp_path / "sys/kernel/random/boot_id").write_text("boot-a\n")
+    interpreter = tmp_path / "python"
+    interpreter.write_bytes(b"python")
+    token = "a" * 64
+    cmdline = b"python\0-S\0-m\0kdive.capture_bootstrap\0--launch-token\0" + token.encode() + b"\0"
+    for pid, start_ticks in ((111, 1111), (222, 2222)):
+        tail = ["S", *(["0"] * 18), str(start_ticks)]
+        proc = tmp_path / str(pid)
+        proc.mkdir()
+        proc.joinpath("stat").write_text(f"{pid} (odd ) name) {' '.join(tail)}\n")
+        proc.joinpath("exe").symlink_to(interpreter)
+        proc.joinpath("cmdline").write_bytes(cmdline)
+    monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
+    real_read = LinuxIdentity.read
+
+    def _flaky_read(pid: int, *, host_instance: str) -> LinuxIdentity:
+        if pid == 111:
+            raise ProcessLookupError(errno.ESRCH, f"process {pid} is absent")
+        return real_read(pid, host_instance=host_instance)
+
+    monkeypatch.setattr(LinuxIdentity, "read", _flaky_read)
+
+    assert scan_launch_token(token, interpreter=interpreter, host_instance="host-a") == (
+        LinuxIdentity(host_instance="host-a", boot_id="boot-a", pid=222, start_ticks=2222),
+    )
+
+
 def test_launch_token_scan_refuses_incomplete_proc_enumeration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
