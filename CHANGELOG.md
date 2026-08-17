@@ -1064,6 +1064,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drain capture cleanup on cancellation
 - Refresh capture publication recovery state
 - Conform ADR 0559 record metadata
+- Bump mermaid-check jsdom and mermaid to clear npm audit findings
 
 ### Build
 
