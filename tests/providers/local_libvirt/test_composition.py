@@ -6,14 +6,7 @@ from typing import Any, cast
 
 import pytest
 
-from kdive.components.references import (
-    CONFIG_COMPONENT,
-    INITRD_COMPONENT,
-    KERNEL_COMPONENT,
-    PATCH_COMPONENT,
-    ROOTFS_COMPONENT,
-    VMLINUX_COMPONENT,
-)
+from kdive.components.references import ROOTFS_COMPONENT
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.providers.local_libvirt import composition
@@ -82,13 +75,10 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
     # Direct-kernel boot: the platform owns the whole-disk root device (ADR-0183).
     assert runtime.platform_root_cmdline == "root=/dev/vda"
     assert runtime.support.component_sources.provider == ResourceKind.LOCAL_LIBVIRT.value
+    # ROOTFS only — the one kind with a caller entry point and an enforcement call site
+    # (ADR-0563, #1942). Equality, not containment: an added kind must fail here too.
     assert runtime.support.component_sources.accepted_component_sources == {
         ROOTFS_COMPONENT: frozenset({"catalog", "local"}),
-        KERNEL_COMPONENT: frozenset({"local"}),
-        INITRD_COMPONENT: frozenset({"local"}),
-        CONFIG_COMPONENT: frozenset({"catalog", "local"}),
-        PATCH_COMPONENT: frozenset({"local"}),
-        VMLINUX_COMPONENT: frozenset({"local"}),
     }
     assert runtime.rootfs is not None
     assert runtime.rootfs.validator is not None

@@ -67,7 +67,10 @@ def test_rejects_when_component_kind_has_no_accepted_sources() -> None:
     assert caught.value.details["accepted_source_kinds"] == []
 
 
-def test_rejects_unimplemented_local_libvirt_kernel_artifact_source() -> None:
+def test_rejects_a_source_kind_absent_from_a_declared_kinds_accepted_set() -> None:
+    # Synthetic capabilities, not local-libvirt's: since ADR-0563 (#1942) no provider declares
+    # KERNEL. What is under test is the helper's rule for a declared kind — a source kind outside
+    # the accepted set is rejected — which holds for whatever kind a caller declares.
     caps = ComponentSourceCapabilities(
         provider="local-libvirt",
         accepted_component_sources={ComponentKind.KERNEL: frozenset({"local"})},

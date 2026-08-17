@@ -1,6 +1,7 @@
 # ADR 0430 — Remote-libvirt accepts a supplied KERNEL + VMLINUX component source
 
 - **Status:** Accepted
+> **Superseded by [0563](0563-component-source-declarations-narrow-to-the-enforced-kind.md)** (2026-08-17)
 - **Date:** 2026-07-23
 - **Deciders:** kdive maintainers
 
@@ -50,6 +51,19 @@ existing `configuration_error` shape (`provider` / `component_kind` / `source_ki
 map is provider-composition state, not schema, and provenance rides the existing
 `provider_components.source` column.
 
+### Amendment (2026-08-17): the rejection-shape claim was never reached (#1942)
+
+This is an amendment rather than a rewrite because the paragraph above is the accepted decision and
+stays on the record as written. It qualifies the sentence beginning "`reject_unsupported_component_
+source` already keeps the existing `configuration_error` shape": that claim does not hold and did not
+hold when this record was accepted. The helper had one call site in all of `src/`
+(`services/systems/validation.py`, inside `validate_profile_for_provider`) with `component_kind`
+hard-coded to `ROOTFS_COMPONENT`, so it was never called for `KERNEL` or `VMLINUX` and no such
+rejection ever happened. Runtime behaviour before and after #1432 is identical: unenforced either
+way. [ADR-0563](0563-component-source-declarations-narrow-to-the-enforced-kind.md) removes the two
+entries this record added and adds a guard that fails a declaration with no reachable enforcement
+call site.
+
 ## Consequences
 
 - A remote caller can supply an already-built `vmlinuz+modules` bundle from a worker-host path
@@ -66,3 +80,19 @@ map is provider-composition state, not schema, and provenance rides the existing
   nothing checks that consistency today (the base image's "matching vmlinux/debuginfo" is an
   operator obligation, ADR-0078/0079). This entry does not add such a check; it inherits the same
   operator obligation local carries.
+
+### Amendment (2026-08-17): the supplied-bundle consequence has no runtime path (#1942)
+
+An amendment for the same reason as the one on `## Decision`: the consequences above stay on the
+record and this qualifies the first of them. "A remote caller can supply an already-built
+`vmlinuz+modules` bundle from a worker-host path instead of forcing a rebuild" describes a capability
+no caller can reach. `RemoteLibvirtInstall.install()` installs `run.kernel_ref`, and `runs.kernel_ref`
+is written from build output (`services/runs/complete_build.py`) and from upload finalization — there
+is no caller-supplied-kernel entry point, and the declaration this record added was not read by
+anything. Adding it to the map was necessary for such a caller but not sufficient, and the
+sufficiency half was never built.
+
+Whether that capability is still wanted is an open product question, not an implementation detail:
+[ADR-0563](0563-component-source-declarations-narrow-to-the-enforced-kind.md) removes the
+declaration and deliberately does not decide whether #1432 should be reopened. That question is
+tracked as a follow-up on #1942.

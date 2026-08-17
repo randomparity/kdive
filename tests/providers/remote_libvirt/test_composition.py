@@ -17,6 +17,7 @@ from kdive.components.references import (
     VMLINUX_COMPONENT,
     ArtifactComponentRef,
     CatalogComponentRef,
+    ComponentUploadRef,
     LocalComponentRef,
 )
 from kdive.components.validation import reject_unsupported_component_source
@@ -249,36 +250,46 @@ def test_build_runtime_validators_and_component_sources() -> None:
     # component_sources reflects _component_sources(): the remote provider id and source map.
     sources = runtime.support.component_sources
     assert sources.provider == ResourceKind.REMOTE_LIBVIRT.value
-    assert sources.accepted_component_sources[CONFIG_COMPONENT] == frozenset({"catalog", "local"})
-    assert sources.accepted_component_sources[PATCH_COMPONENT] == frozenset({"local"})
-    # ADR-0430 (#1432): remote now accepts a supplied kernel + vmlinux from the worker-host `local`
-    # source kind, matching local-libvirt.
-    assert sources.accepted_component_sources[KERNEL_COMPONENT] == frozenset({"local"})
-    assert sources.accepted_component_sources[VMLINUX_COMPONENT] == frozenset({"local"})
+    assert sources.accepted_component_sources[ROOTFS_COMPONENT] == frozenset({"local"})
 
 
 def test_component_sources_map_directly() -> None:
-    # Exercise the module-level builder directly so its exact contents are pinned.
+    # Exercise the module-level builder directly so its exact contents are pinned. ROOTFS is the
+    # only kind: it is the only one `reject_unsupported_component_source` is reached for, so it is
+    # the only one a declaration can promise anything about (ADR-0563, #1942).
     caps = composition._component_sources()
     assert caps.provider == ResourceKind.REMOTE_LIBVIRT.value
     assert caps.accepted_component_sources == {
         # ADR-0440 (#1433): a supplied ROOTFS base image from the worker-host `local` source kind;
         # NOT `catalog` (that role is the operator-staged base_image_volume) and NOT `upload`.
         ROOTFS_COMPONENT: frozenset({"local"}),
-        CONFIG_COMPONENT: frozenset({"catalog", "local"}),
-        KERNEL_COMPONENT: frozenset({"local"}),
-        PATCH_COMPONENT: frozenset({"local"}),
-        VMLINUX_COMPONENT: frozenset({"local"}),
     }
 
 
-def test_remote_accepts_supplied_kernel_and_vmlinux_from_local_source() -> None:
-    # ADR-0430 (#1432): a worker-host-local supplied KERNEL/VMLINUX is accepted (parity with local);
-    # the reject-path helper returns without raising for the `local` source kind.
+def test_remote_declares_no_source_for_the_kinds_with_no_caller_entry_point() -> None:
+    # ADR-0563 (#1942) narrowed the map: KERNEL and VMLINUX (formerly ADR-0430, #1432), CONFIG and
+    # PATCH are gone, because no caller-supplied ref of those kinds reaches any resolver. Every
+    # source kind for them now rejects with the documented shape and an empty accepted list — the
+    # `{"local"}` KERNEL/VMLINUX entry never made a difference, since nothing called the helper for
+    # those kinds; this pins what the declaration means now that it is absent.
     caps = composition._component_sources()
-    local_ref = LocalComponentRef(kind="local", path="/var/lib/kdive/kernel/vmlinuz-6.9")
-    for kind in (KERNEL_COMPONENT, VMLINUX_COMPONENT):
-        reject_unsupported_component_source(caps, component_kind=kind, ref=local_ref)
+    refs = (
+        LocalComponentRef(kind="local", path="/var/lib/kdive/kernel/vmlinuz-6.9"),
+        ArtifactComponentRef(kind="artifact", artifact_id=uuid4()),
+        ComponentUploadRef(kind="component-upload", upload_id=uuid4()),
+        CatalogComponentRef(kind="catalog", provider="remote-libvirt", name="kdump"),
+    )
+    narrowed = (KERNEL_COMPONENT, VMLINUX_COMPONENT, CONFIG_COMPONENT, PATCH_COMPONENT)
+    for kind in narrowed:
+        assert kind not in caps.accepted_component_sources
+        for ref in refs:
+            with pytest.raises(CategorizedError) as caught:
+                reject_unsupported_component_source(caps, component_kind=kind, ref=ref)
+            assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert caught.value.details["provider"] == ResourceKind.REMOTE_LIBVIRT.value
+            assert caught.value.details["component_kind"] == kind
+            assert caught.value.details["source_kind"] == ref.kind
+            assert caught.value.details["accepted_source_kinds"] == []
 
 
 def test_remote_accepts_supplied_rootfs_from_local_source() -> None:
@@ -301,19 +312,6 @@ def test_remote_rejects_catalog_and_upload_rootfs_sources() -> None:
             reject_unsupported_component_source(caps, component_kind=ROOTFS_COMPONENT, ref=ref)
         assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
         assert caught.value.details["source_kind"] == kind_name
-        assert caught.value.details["accepted_source_kinds"] == ["local"]
-
-
-def test_remote_rejects_component_upload_and_artifact_kernel_vmlinux_sources() -> None:
-    # component-upload stays unaccepted for every kind (agent upload is a non-goal, #1423); an
-    # artifact source is likewise not advertised. Both keep the existing configuration-error shape.
-    caps = composition._component_sources()
-    artifact_ref = ArtifactComponentRef(kind="artifact", artifact_id=uuid4())
-    for kind in (KERNEL_COMPONENT, VMLINUX_COMPONENT):
-        with pytest.raises(CategorizedError) as caught:
-            reject_unsupported_component_source(caps, component_kind=kind, ref=artifact_ref)
-        assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
-        assert caught.value.details["source_kind"] == "artifact"
         assert caught.value.details["accepted_source_kinds"] == ["local"]
 
 

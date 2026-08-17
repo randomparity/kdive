@@ -10,11 +10,7 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.references import (
-    CONFIG_COMPONENT,
-    KERNEL_COMPONENT,
-    PATCH_COMPONENT,
     ROOTFS_COMPONENT,
-    VMLINUX_COMPONENT,
     ComponentKind,
     ComponentSourceKind,
 )
@@ -187,24 +183,20 @@ def build_capture_quiescence(
 
 
 def _component_sources() -> ComponentSourceCapabilities:
-    # Remote-libvirt accepts catalog/local kernel config inputs, local patch artifacts, and a
-    # worker-host-local supplied KERNEL and VMLINUX (ADR-0430, #1432) and a supplied ROOTFS base
-    # image (ADR-0440, #1433) — the same `local` source kind local accepts. `local` is a
-    # worker-host absolute path (LocalComponentRef), not an agent upload: `component-upload` stays
-    # unaccepted for every kind. The target iterates kernels on the disk-image base OS, and the
-    # install plane pulls + installs a vmlinuz+modules bundle into the deterministic `kdive` grub
-    # slot (ADR-0078/0081) whether the bundle was built or supplied, so accepting these needs no
-    # install-path change; provenance is the recorded component source kind (local vs the built
-    # artifact). ROOTFS accepts only `local` (a supplied qcow2 staged onto the pool), NOT `catalog`:
-    # a remote catalog image is the host-staged volume `base_image_volume` already names, so a
-    # catalog source would download-then-re-upload it to the host it lives on (ADR-0440). initrd is
-    # future work in the parity epic (#1423).
+    # ROOTFS only: it is the one kind a caller can supply, and the one kind
+    # `reject_unsupported_component_source` is reached for (ADR-0563, #1942). The former KERNEL,
+    # VMLINUX (ADR-0430, #1432), CONFIG and PATCH entries declared a rejection that never
+    # happened — the server-build plane that would have carried config/patch refs was removed in
+    # `fde55d70e`, and `runs.kernel_ref` is written from build output rather than from a caller.
+    # ROOTFS accepts only `local` (a supplied qcow2 staged onto the pool), NOT `catalog`: a remote
+    # catalog image is the host-staged volume `base_image_volume` already names, so a catalog
+    # source would download-then-re-upload it to the host it lives on (ADR-0440, #1433). `local`
+    # is a worker-host absolute path (LocalComponentRef), not an agent upload; `component-upload`
+    # stays unaccepted. Re-declare a kind in the same change that adds the caller entry point and
+    # its enforcement call site; the guard in `tests/providers/test_capability_parity.py` fails a
+    # declaration without one.
     accepted: dict[ComponentKind, frozenset[ComponentSourceKind]] = {
         ROOTFS_COMPONENT: frozenset({"local"}),
-        CONFIG_COMPONENT: frozenset({"catalog", "local"}),
-        KERNEL_COMPONENT: frozenset({"local"}),
-        PATCH_COMPONENT: frozenset({"local"}),
-        VMLINUX_COMPONENT: frozenset({"local"}),
     }
     return ComponentSourceCapabilities(
         provider=ResourceKind.REMOTE_LIBVIRT.value,

@@ -12,15 +12,30 @@ nor waives with a documented reason. The waiver table below is the record a futu
 instead of re-deriving each correct-and-deliberate difference. Both compositions are buildable
 without operator config (ADR-0076), so this runs in the default ``just test`` gate with no libvirt
 host.
+
+Declaration parity is necessary and not sufficient: two providers can agree on a capability nothing
+reads. The second half of this module (ADR-0563, #1942) therefore holds the component-source maps to
+a stronger rule — every declared ``ComponentKind`` must be one some code path passes to
+``reject_unsupported_component_source``, so a declaration cannot promise a rejection that never
+happens.
 """
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 from enum import Enum
+from pathlib import Path
 
+import kdive
+from kdive.components import references
+from kdive.components.references import ROOTFS_COMPONENT, ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
-from kdive.providers.assembly.composition import build_local_runtime, build_remote_runtime
+from kdive.providers.assembly.composition import (
+    build_fault_inject_runtime,
+    build_local_runtime,
+    build_remote_runtime,
+)
 from kdive.providers.core.runtime import ProviderRuntime, ProviderSupport
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -57,10 +72,6 @@ _WAIVERS: dict[str, str] = {
         "System that also carries a crashkernel reservation (ADR-0349)."
     ),
     "support.component_sources.rootfs:catalog": _ROOTFS_CATALOG_WAIVER,
-    "support.component_sources.initrd:local": (
-        "an initrd component source is future work on both providers, tracked by the parity epic "
-        "(#1423); local declares it first."
-    ),
 }
 
 
@@ -159,3 +170,137 @@ def test_waiver_table_has_no_stale_entries() -> None:
         "them, or local dropped them. Remove the stale waivers:\n"
         + "\n".join(f"  - {key}" for key in stale)
     )
+
+
+# --- Declared-vs-enforced component kinds (ADR-0563, #1942) --------------------------------------
+#
+# The parity guards above compare what two providers *declare*. That is the wrong question on its
+# own: for five of the six `ComponentKind` values the maps agreed with each other while nothing
+# read them, so "parity" meant "the two files match", not "the two providers behave the same"
+# (#1942). A declared kind is only load-bearing if some code path passes it to
+# `reject_unsupported_component_source` — the sole consumer of `accepted_component_sources`.
+#
+# `_enforced_component_kinds` finds that by parsing `src/kdive/` rather than by importing and
+# calling, because enforcement is a property of the call graph, not of any one runtime value: a
+# reachable call site is exactly what the removed declarations lacked. A rename of the helper
+# empties the enforced set, which reddens `test_every_declared_component_kind_is_enforced` and
+# `test_rootfs_is_declared_by_every_provider_and_enforced` rather than passing vacuously.
+
+_ENFORCEMENT_HELPER = "reject_unsupported_component_source"
+
+# `ComponentKind` members reachable by name from `kdive.components.references` — the
+# `ROOTFS_COMPONENT`-style aliases every call site actually writes.
+_KIND_ALIASES: dict[str, ComponentKind] = {
+    name: value for name, value in vars(references).items() if isinstance(value, ComponentKind)
+}
+
+
+def _kind_from_node(node: ast.expr) -> ComponentKind | None:
+    """Resolve a ``component_kind=`` argument to a member, or ``None`` if it is not a literal."""
+    if isinstance(node, ast.Name):
+        return _KIND_ALIASES.get(node.id)
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == ComponentKind.__name__
+    ):
+        return ComponentKind.__members__.get(node.attr)
+    return None
+
+
+def _callee_name(node: ast.Call) -> str | None:
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
+def _scan_enforcement_call_sites() -> tuple[set[ComponentKind], list[str]]:
+    """Return the kinds ``src/kdive/`` enforces, plus one label per unresolvable call site.
+
+    An unresolvable site (``component_kind`` supplied by a variable, a call, or ``**kwargs``)
+    is reported rather than skipped: silently dropping it would shrink the enforced set and let
+    a declaration pass as enforced, or as inert, on no evidence either way.
+    """
+    source_root = Path(kdive.__file__).resolve().parent
+    enforced: set[ComponentKind] = set()
+    unresolvable: list[str] = []
+    for path in sorted(source_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or _callee_name(node) != _ENFORCEMENT_HELPER:
+                continue
+            argument = next(
+                (kw.value for kw in node.keywords if kw.arg == "component_kind"),
+                None,
+            )
+            kind = None if argument is None else _kind_from_node(argument)
+            if kind is None:
+                unresolvable.append(f"{path.relative_to(source_root.parent)}:{node.lineno}")
+            else:
+                enforced.add(kind)
+    return enforced, unresolvable
+
+
+def _enforced_component_kinds() -> set[ComponentKind]:
+    return _scan_enforcement_call_sites()[0]
+
+
+def _declared_component_sources() -> dict[str, ComponentSourceCapabilities]:
+    """Every provider's component-source declaration, keyed by provider name."""
+    registry = SecretRegistry()
+    runtimes = (
+        build_local_runtime(secret_registry=registry),
+        build_remote_runtime(secret_registry=registry),
+        build_fault_inject_runtime(),
+    )
+    return {
+        runtime.support.component_sources.provider: runtime.support.component_sources
+        for runtime in runtimes
+    }
+
+
+def test_every_enforcement_call_site_names_a_literal_component_kind() -> None:
+    _, unresolvable = _scan_enforcement_call_sites()
+    assert not unresolvable, (
+        f"{_ENFORCEMENT_HELPER} is called with a `component_kind` this guard cannot resolve to a "
+        "ComponentKind member, so it cannot tell which declared kinds are enforced. Pass the "
+        "member directly, or teach _kind_from_node in this file to resolve the new form:\n"
+        + "\n".join(f"  - {site}" for site in unresolvable)
+    )
+
+
+def test_every_declared_component_kind_is_enforced() -> None:
+    declarations = _declared_component_sources()
+    assert declarations, "no provider component-source declarations were collected"
+
+    enforced = _enforced_component_kinds()
+    assert enforced, (
+        f"no call site in src/kdive/ passes a literal component kind to {_ENFORCEMENT_HELPER}, so "
+        "no declared kind is enforced anywhere. Was the helper renamed?"
+    )
+
+    inert = sorted(
+        f"{provider}:{kind.value}"
+        for provider, caps in declarations.items()
+        for kind in caps.accepted_component_sources
+        if kind not in enforced
+    )
+    assert not inert, (
+        "a provider declares accepted component sources for kinds that no code path passes to "
+        f"{_ENFORCEMENT_HELPER}, so the declaration promises a rejection that never happens "
+        "(#1942, ADR-0563). Either add the enforcing call site where the ref enters a System or "
+        "Run, or remove the kind from the provider's map:\n"
+        + "\n".join(f"  - {entry}" for entry in inert)
+    )
+
+
+def test_rootfs_is_declared_by_every_provider_and_enforced() -> None:
+    """The positive half: narrowing must not empty the maps or drop the one enforced kind."""
+    assert ROOTFS_COMPONENT in _enforced_component_kinds()
+    declarations = _declared_component_sources()
+    assert set(declarations) == {"local-libvirt", "remote-libvirt", "fault-inject"}
+    for provider, caps in declarations.items():
+        accepted = caps.accepted_component_sources.get(ROOTFS_COMPONENT, frozenset())
+        assert "local" in accepted, f"{provider} must still accept a `local` ROOTFS source"

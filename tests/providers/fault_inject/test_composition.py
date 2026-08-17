@@ -9,14 +9,7 @@ from uuid import uuid4
 import pytest
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
-from kdive.components.references import (
-    CONFIG_COMPONENT,
-    INITRD_COMPONENT,
-    KERNEL_COMPONENT,
-    PATCH_COMPONENT,
-    ROOTFS_COMPONENT,
-    VMLINUX_COMPONENT,
-)
+from kdive.components.references import ROOTFS_COMPONENT
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
@@ -98,13 +91,10 @@ def test_build_runtime_wires_fault_inject_ports_and_capabilities() -> None:
     assert runtime.debug.attach_seam is fault_inject_attach_seam
     assert runtime.rootfs is None
     assert runtime.support.component_sources.provider == ResourceKind.FAULT_INJECT.value
+    # ROOTFS only — the one kind with a caller entry point and an enforcement call site
+    # (ADR-0563, #1942). Equality, not containment: an added kind must fail here too.
     assert runtime.support.component_sources.accepted_component_sources == {
         ROOTFS_COMPONENT: frozenset({"catalog", "local"}),
-        KERNEL_COMPONENT: frozenset({"local"}),
-        INITRD_COMPONENT: frozenset({"local"}),
-        CONFIG_COMPONENT: frozenset({"local"}),
-        PATCH_COMPONENT: frozenset({"local"}),
-        VMLINUX_COMPONENT: frozenset({"local"}),
     }
 
 

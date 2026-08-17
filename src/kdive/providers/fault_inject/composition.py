@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 from kdive.components.references import (
-    CONFIG_COMPONENT,
-    INITRD_COMPONENT,
-    KERNEL_COMPONENT,
-    PATCH_COMPONENT,
     ROOTFS_COMPONENT,
-    VMLINUX_COMPONENT,
     ComponentKind,
     ComponentSourceKind,
 )
@@ -49,13 +44,14 @@ _COST_CLASS = "local"
 
 
 def _component_sources() -> ComponentSourceCapabilities:
+    # ROOTFS only, mirroring local-libvirt: it is the one kind a caller can supply, and the one
+    # kind `reject_unsupported_component_source` is reached for (ADR-0563, #1942). The former
+    # KERNEL, VMLINUX, CONFIG, PATCH and INITRD entries declared a rejection that never happened.
+    # Re-declare a kind in the same change that adds the caller entry point and its enforcement
+    # call site; the guard in `tests/providers/test_capability_parity.py` fails a declaration
+    # without one.
     accepted: dict[ComponentKind, frozenset[ComponentSourceKind]] = {
         ROOTFS_COMPONENT: frozenset({"catalog", "local"}),
-        KERNEL_COMPONENT: frozenset({"local"}),
-        INITRD_COMPONENT: frozenset({"local"}),
-        CONFIG_COMPONENT: frozenset({"local"}),
-        PATCH_COMPONENT: frozenset({"local"}),
-        VMLINUX_COMPONENT: frozenset({"local"}),
     }
     return ComponentSourceCapabilities(
         provider=ResourceKind.FAULT_INJECT.value,

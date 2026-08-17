@@ -10,12 +10,7 @@ import libvirt
 
 import kdive.config as config
 from kdive.components.references import (
-    CONFIG_COMPONENT,
-    INITRD_COMPONENT,
-    KERNEL_COMPONENT,
-    PATCH_COMPONENT,
     ROOTFS_COMPONENT,
-    VMLINUX_COMPONENT,
     ComponentKind,
     ComponentSourceKind,
 )
@@ -107,13 +102,15 @@ def build_capture_quiescence(
 
 
 def _component_sources() -> ComponentSourceCapabilities:
+    # ROOTFS only: it is the one kind a caller can supply, and the one kind
+    # `reject_unsupported_component_source` is reached for (ADR-0563, #1942). A KERNEL, VMLINUX,
+    # CONFIG, PATCH or INITRD entry here declared a rejection that never happened, because no
+    # profile field or tool input carries a ref of those kinds — `ProvisioningProfile` carries
+    # `rootfs` and nothing else, and `runs.kernel_ref` is written from build output. Re-declare a
+    # kind in the same change that adds the caller entry point and its enforcement call site; the
+    # guard in `tests/providers/test_capability_parity.py` fails a declaration without one.
     accepted: dict[ComponentKind, frozenset[ComponentSourceKind]] = {
         ROOTFS_COMPONENT: frozenset({"catalog", "local"}),
-        KERNEL_COMPONENT: frozenset({"local"}),
-        INITRD_COMPONENT: frozenset({"local"}),
-        CONFIG_COMPONENT: frozenset({"catalog", "local"}),
-        PATCH_COMPONENT: frozenset({"local"}),
-        VMLINUX_COMPONENT: frozenset({"local"}),
     }
     return ComponentSourceCapabilities(
         provider=ResourceKind.LOCAL_LIBVIRT.value,

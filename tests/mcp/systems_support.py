@@ -87,11 +87,13 @@ class _NoopSnapshotter:
         del domain_name
 
 
+# ROOTFS only, matching every real provider since ADR-0563 (#1942): it is the one kind the
+# provision path passes to `reject_unsupported_component_source`. A CONFIG entry here modelled a
+# declaration nothing read.
 TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="test-provider",
     accepted_component_sources={
         ComponentKind.ROOTFS: frozenset({"catalog", "local"}),
-        ComponentKind.CONFIG: frozenset({"local"}),
     },
 )
 SYSTEM_PROVISION_HANDLERS = SystemProvisionHandlers(
