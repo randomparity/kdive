@@ -54,7 +54,7 @@ from tests.live_vm import (
     require_live_vm_throwaway,
     require_live_vm_vmlinux,
 )
-from tests.mcp.debug.live_support import drop_ownership_metadata, render_panicking_domain
+from tests.mcp.debug.live_support import render_panicking_domain
 from tests.mcp.debug.session_support import (
     PROFILE,
     PROFILE_POLICY,
@@ -67,6 +67,7 @@ from tests.mcp.debug.session_support import (
     pool as open_pool,
 )
 from tests.mcp.systems_support import provider_resolver
+from tests.support.domain_ownership import drop_ownership_metadata
 
 
 @dataclass(frozen=True, slots=True)
