@@ -1066,6 +1066,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Conform ADR 0559 record metadata
 - Bump mermaid-check jsdom and mermaid to clear npm audit findings
 - Drop false kdive ownership from transient debug domains
+- Disown the live preserve-attach domain
 
 ### Build
 
