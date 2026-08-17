@@ -55,13 +55,20 @@ class DumpVolume(NamedTuple):
 class DumpVolumeReaper(Protocol):
     """The narrow provider port the reconciler consumes for orphaned host_dump volumes.
 
-    Lists the provider's host_dump volumes with their store mtime, and deletes one by name.
-    Deletion is idempotent — a volume already gone is not an error (a live capture's own
-    ``finally`` may have removed it between the list and the delete).
+    Lists the provider's host_dump volumes with their store mtime, and deletes one **by name and
+    sampled identity**. Deletion is idempotent — a volume already gone is not an error (a live
+    capture's own ``finally`` may have removed it between the list and the delete).
+
+    ``expected_mtime_epoch_s`` is required rather than optional because the name alone does not
+    identify a volume over time (ADR-0562): the deterministic ``kdive-host-dump-<system_id>.kdump``
+    name is reused by every capture of that System, and a capture's delete-stale-then-dump pair puts
+    a new volume there. An implementation must re-read the volume it looked up and decline when its
+    mtime differs from the value the reconciler sampled, so the delete cannot resolve onto a volume
+    the reconciler never classified. A default would make that a guard that silently does nothing.
     """
 
     async def list_dump_volumes(self) -> list[DumpVolume]: ...
-    async def delete_dump_volume(self, name: str) -> None: ...
+    async def delete_dump_volume(self, name: str, *, expected_mtime_epoch_s: float) -> None: ...
 
 
 class NullDumpVolumeReaper:
@@ -70,5 +77,5 @@ class NullDumpVolumeReaper:
     async def list_dump_volumes(self) -> list[DumpVolume]:
         return []
 
-    async def delete_dump_volume(self, name: str) -> None:
+    async def delete_dump_volume(self, name: str, *, expected_mtime_epoch_s: float) -> None:
         return None

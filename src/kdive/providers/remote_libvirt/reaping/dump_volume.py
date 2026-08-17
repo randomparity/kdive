@@ -5,10 +5,13 @@ The reconciler's stateless orphan-volume sweep consumes this provider port (the
 worker/host crash that bypassed the capture's ``finally`` cleanup. It lists the storage
 pool's dump volumes (matched by the deterministic ``kdive-host-dump-<system_id>.kdump``
 name) with each volume's store mtime — read from the volume XML's ``<timestamps>/<mtime>``,
-which libvirt populates for filesystem/dir-backed pools — and deletes one by name. The
-reconciler owns both live-holder guards (no active capture job, mtime older than the grace
-window); this port is the narrow libvirt I/O seam. The blocking libvirt calls run only under
-the ``live_vm`` gate; orchestration + name/mtime parsing are unit-tested with fakes.
+which libvirt populates for filesystem/dir-backed pools — and deletes one by name **and sampled
+mtime**: the deterministic name is reused by every capture of that System, so the delete re-reads
+the volume it looked up and declines a volume that is no longer the one the reconciler classified
+(ADR-0562). The reconciler owns the live-holder guards (no live capture lease, no active capture
+job, mtime older than the grace window) and holds the System's advisory lock across both its final
+classification and this delete; this port is the narrow libvirt I/O seam. The blocking libvirt calls
+run only under the ``live_vm`` gate; orchestration + name/mtime parsing are unit-tested with fakes.
 """
 
 from __future__ import annotations
@@ -121,9 +124,15 @@ class RemoteLibvirtDumpVolumeReaper:
         """List the storage pool's host_dump volumes with their store mtime (offloaded)."""
         return await asyncio.to_thread(self._list_blocking)
 
-    async def delete_dump_volume(self, name: str) -> None:
-        """Delete one dump volume by name; a volume already gone is not an error (offloaded)."""
-        await asyncio.to_thread(self._delete_blocking, name)
+    async def delete_dump_volume(self, name: str, *, expected_mtime_epoch_s: float) -> None:
+        """Delete the dump volume the reconciler sampled; a volume already gone is not an error.
+
+        ``expected_mtime_epoch_s`` is the mtime :meth:`list_dump_volumes` reported for this volume.
+        A volume whose mtime has changed since then is not the one the reconciler classified — the
+        deterministic name is reused by every capture of that System — and is left alone (ADR-0562).
+        Offloaded, like every libvirt call here.
+        """
+        await asyncio.to_thread(self._delete_blocking, name, expected_mtime_epoch_s)
 
     def _list_blocking(self) -> list[DumpVolume]:  # pragma: no cover - live_vm
         per_host = map_over_fleet(
@@ -152,21 +161,35 @@ class RemoteLibvirtDumpVolumeReaper:
             )
         return volumes
 
-    def _delete_blocking(self, name: str) -> None:  # pragma: no cover - live_vm
+    def _delete_blocking(self, name: str, expected_mtime_epoch_s: float) -> None:
         # A dump-volume name encodes the owning System but not its host, so the reconciler calls
         # delete-by-name with no host. find_over_fleet tries each declared host (isolating an
         # unreachable one) and stops at the one that has the volume; an already-gone or
         # not-on-this-host volume is benign — never an error.
         find_over_fleet(
             self._connections,
-            lambda conn, config: self._delete_on_host(conn, config.storage_pool, name),
+            lambda conn, config: self._delete_on_host(
+                conn, config.storage_pool, name, expected_mtime_epoch_s
+            ),
             operation="dump-volume delete",
         )
 
     @staticmethod
-    def _delete_on_host(  # pragma: no cover - live_vm
-        conn: _ReaperConn, storage_pool: str, name: str
+    def _delete_on_host(
+        conn: _ReaperConn, storage_pool: str, name: str, expected_mtime_epoch_s: float
     ) -> bool:
+        """Delete this host's copy of ``name`` if it is still the volume the reconciler sampled.
+
+        The mtime re-read sits between the lookup and the delete, on the volume object the lookup
+        returned, so nothing can substitute a volume in between (ADR-0562). A mismatch means a
+        capture recreated the deterministic name after the reconciler classified the old volume: the
+        host is reported as having handled the name so the fan-out stops, and nothing is deleted.
+
+        A pool whose volume XML carries no ``<timestamps>`` reports ``0.0`` on both reads, so this
+        comparison cannot distinguish a recreated volume there. Such a pool has already lost
+        ADR-0094's mtime grace for the same reason; the lease and the reconciler's System lock are
+        its guards, and this is the backstop for the writer they cannot see.
+        """
         pool = conn.storagePoolLookupByName(storage_pool)
         try:
             volume = pool.storageVolLookupByName(name)
@@ -174,6 +197,19 @@ class RemoteLibvirtDumpVolumeReaper:
             if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
                 return False  # not on this host (or already gone) — try the next
             raise _infra("looking up host_dump volume", volume=name) from exc
+        try:
+            observed_mtime = volume_mtime_epoch_s(volume.XMLDesc(0))
+        except libvirt.libvirtError as exc:
+            raise _infra("re-reading host_dump volume identity", volume=name) from exc
+        if observed_mtime != expected_mtime_epoch_s:
+            _log.info(
+                "reconciler: host_dump volume %s changed since it was classified "
+                "(sampled mtime %s, now %s); leaving it to the next pass",
+                name,
+                expected_mtime_epoch_s,
+                observed_mtime,
+            )
+            return True
         try:
             volume.delete(0)
         except libvirt.libvirtError as exc:

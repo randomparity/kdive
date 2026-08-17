@@ -10,12 +10,21 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.locks import (
+    LockScope,
+    advisory_xact_lock,
+    require_top_level_transaction,
+    try_advisory_xact_lock,
+)
 from kdive.diagnostics.egress_probe import DEFAULT_PROBE_HEARTBEAT_STALE_AFTER
 from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.operations.jobs import JobKind
 from kdive.providers.infra.console_hosting import CollectorRegistry
-from kdive.providers.infra.reaping import DumpVolumeReaper, InfraReaper
+from kdive.providers.infra.reaping import DumpVolume, DumpVolumeReaper, InfraReaper
+from kdive.providers.shared.host_dump_volume_leases import (
+    has_live_host_dump_volume_lease,
+    reap_stale_host_dump_volume_leases,
+)
 from kdive.providers.shared.runtime_paths import system_id_from_domain_name
 from kdive.reconciler.repairs.allocations import has_active_capture_job
 from kdive.reconciler.repairs.systems import gone_system_state_values
@@ -176,29 +185,93 @@ async def reap_console_collectors(conn: AsyncConnection, registry: CollectorRegi
 async def reap_orphaned_dump_volumes(
     conn: AsyncConnection, reaper: DumpVolumeReaper, grace: timedelta
 ) -> int:
-    """Delete host_dump volumes orphaned by a non-graceful worker/host crash (ADR-0094)."""
+    """Delete host_dump volumes orphaned by a non-graceful worker/host crash (ADR-0094, ADR-0562).
+
+    Each candidate's final classification and its delete run in **one transaction holding
+    ``(SYSTEM, system_id)``** — the lock ``hold_host_dump_volume_lease`` mints under. A capture
+    therefore either declares itself before this pass classifies (and is seen), or blocks until the
+    delete is done and then recreates a volume this pass has already passed over. Without that the
+    guards are a state sample: ADR-0557 deliberately excludes a ``queued`` job, so a worker claiming
+    the job between the check and the delete left the answer stale, and the capture's own
+    delete-stale-then-dump pair put a **new** volume at the same deterministic name for the delete
+    resolve onto (#1955).
+
+    Stale leases are collected first, ahead of the volume list, so a deployment whose reaper owns no
+    volumes still drains rows a failed capture left behind.
+
+    Returns:
+        The number of volumes deleted. Skips — a contended System, a live holder, a volume in the
+        grace window, a volume whose identity changed — are not counted and are not faults.
+    """
+    await reap_stale_host_dump_volume_leases(conn)
     volumes = await reaper.list_dump_volumes()
     if not volumes:
         return 0
-    cutoff_epoch = await _now_epoch(conn) - grace.total_seconds()
+    # In its own transaction, so the connection is idle again afterwards. On the reconciler's
+    # non-autocommit pool connection a bare `execute` opens a transaction that lives until the pool
+    # takes the connection back, after which every per-volume `conn.transaction()` below would be a
+    # savepoint that commits nothing and every `pg_advisory_xact_lock` would be held for the whole
+    # pass rather than for one volume (ADR-0005; the same hazard `require_top_level_transaction`
+    # exists for).
+    async with conn.transaction():
+        cutoff_epoch = await _now_epoch(conn) - grace.total_seconds()
     reaped = 0
     for volume in volumes:
         if volume.mtime_epoch_s >= cutoff_epoch:
             continue
-        if volume.system_id is not None and await has_active_capture_job(conn, volume.system_id):
-            continue
+        if await _delete_if_still_orphaned(conn, reaper, volume):
+            reaped += 1
+    return reaped
+
+
+async def _delete_if_still_orphaned(
+    conn: AsyncConnection, reaper: DumpVolumeReaper, volume: DumpVolume
+) -> bool:
+    """Re-classify ``volume`` and delete it, both under the System's advisory lock (ADR-0562).
+
+    The acquire is a ``try``: a contended System is one a capture is declaring itself on now, so
+    the volume is skipped and the next pass re-derives it. A blocking acquire would let one holder
+    stall a reconciler pass that has no deadline, behind allocation expiry and System repair
+    — the trade ADR-0502 item 4 makes for the same reason. The skip is deliberately not a counted
+    fault, so a wedged holder defers this System's volume on every pass while the count reads clean;
+    the INFO line is the whole of the signal.
+
+    A volume whose name carries no parseable System UUID has no lock to take and keeps its age-only
+    classification; its delete is still identity-addressed.
+    """
+    require_top_level_transaction(conn, "the host_dump orphan sweep's per-volume fence")
+    async with conn.transaction():
+        if volume.system_id is not None:
+            if not await try_advisory_xact_lock(conn, LockScope.SYSTEM, volume.system_id):
+                _log.info(
+                    "reconciler: system %s is locked by an active operation; deferring dump "
+                    "volume %s to the next pass",
+                    volume.system_id,
+                    volume.name,
+                )
+                return False
+            # Two holders, not one mechanism twice. The lease covers a capture whose job lease is
+            # live, including the interval between the claim and its first provider call, which no
+            # job-state predicate can see. ADR-0557's predicate covers a `running` job whose *job*
+            # lease has lapsed — a worker the queue gave up on whose libvirt thread may still be
+            # writing. Dropping either widens the window.
+            if await has_live_host_dump_volume_lease(conn, volume.system_id):
+                return False
+            if await has_active_capture_job(conn, volume.system_id):
+                return False
         try:
-            await reaper.delete_dump_volume(volume.name)
+            await reaper.delete_dump_volume(
+                volume.name, expected_mtime_epoch_s=volume.mtime_epoch_s
+            )
         except Exception:  # noqa: BLE001 - one volume failure must not starve the rest
             _log.warning(
                 "reconciler: deleting orphaned dump volume %s failed; retry next pass",
                 volume.name,
                 exc_info=True,
             )
-            continue
-        reaped += 1
-        _log.info("reconciler: reaped orphaned host_dump volume %s", volume.name)
-    return reaped
+            return False
+    _log.info("reconciler: reaped orphaned host_dump volume %s", volume.name)
+    return True
 
 
 async def _now_epoch(conn: AsyncConnection) -> float:

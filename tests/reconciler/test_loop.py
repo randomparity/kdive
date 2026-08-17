@@ -12,6 +12,7 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import AllocationState, DebugSessionState, RunState, SystemState
 from kdive.health.heartbeat import Heartbeat
 from kdive.providers.infra.reaping import DumpVolume, InfraReaper, NullReaper
@@ -1087,12 +1088,16 @@ class _FakeDumpVolumeReaper:
         self._volumes = list(volumes)
         self._fail_on = fail_on
         self.deleted: list[str] = []
+        #: The identity each delete was addressed to (ADR-0562), so a test can pin that the sweep
+        #: hands the provider the mtime it sampled rather than an unqualified name.
+        self.deleted_identities: list[tuple[str, float]] = []
 
     async def list_dump_volumes(self) -> list[DumpVolume]:
         return list(self._volumes)
 
-    async def delete_dump_volume(self, name: str) -> None:
+    async def delete_dump_volume(self, name: str, *, expected_mtime_epoch_s: float) -> None:
         self.deleted.append(name)
+        self.deleted_identities.append((name, expected_mtime_epoch_s))
         if name in self._fail_on:
             raise RuntimeError(f"libvirt vol delete of {name} failed")
 
@@ -1104,7 +1109,7 @@ def test_null_dump_volume_reaper_is_a_dump_volume_reaper() -> None:
         reaper = NullDumpVolumeReaper()
         assert isinstance(reaper, DumpVolumeReaper)
         assert await reaper.list_dump_volumes() == []
-        assert await reaper.delete_dump_volume("anything") is None
+        assert await reaper.delete_dump_volume("anything", expected_mtime_epoch_s=1.0) is None
 
     asyncio.run(_run())
 
@@ -1373,6 +1378,191 @@ def test_reaps_a_stray_named_volume_with_no_system(migrated_url: str) -> None:
                 lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
             )
         assert count == 1  # no System => no live capture possible => age-reap
+
+    asyncio.run(_run())
+
+
+# --- the ADR-0562 exclusion boundary ---------------------------------------------------------
+
+
+async def _seed_dump_volume_lease(
+    conn: psycopg.AsyncConnection, system_id: UUID, *, job_state: str, job_lease: timedelta
+) -> None:
+    """A lease row plus the ``jobs`` row whose liveness the fence tests.
+
+    ``job_lease`` is an offset from ``now()`` **evaluated by Postgres** — the fence's own clock is
+    ``jobs.lease_expires_at > now()``, and this tree's ``now()`` is session-TZ rather than UTC, so a
+    Python-side timestamp would be comparing against the wrong clock.
+    """
+    from psycopg.types.json import Jsonb
+
+    run_id = str(await seed_run(conn, system_id))
+    cur = await conn.execute(
+        "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, authorizing, dedup_key, "
+        "                  lease_expires_at) "
+        "VALUES ('capture_vmcore', %s, %s, 0, 5, %s, %s, now() + %s) "
+        "RETURNING id",
+        (
+            Jsonb({"run_id": run_id, "method": "host_dump"}),
+            job_state,
+            Jsonb({"principal": "p", "agent_session": None, "project": "proj"}),
+            f"{system_id}:capture_vmcore:host_dump:lease:{job_state}:{job_lease}",
+            job_lease,
+        ),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    await conn.execute(
+        "INSERT INTO host_dump_volume_leases (system_id, job_id) VALUES (%s, %s)",
+        (system_id, row[0]),
+    )
+
+
+def test_a_live_lease_fences_a_volume_whose_job_state_does_not_match(migrated_url: str) -> None:
+    """The lease's own contribution, isolated from ADR-0557's job-state predicate.
+
+    Both guards fence a plainly-running capture, so a test that seeds one cannot tell which one
+    refused. Here the volume names a *different* System from the one the running job's Run is bound
+    to, so ``has_active_capture_job`` does not match it and only the lease row can account for the
+    refusal — the case a live capture whose ``runs`` row vanished mid-operation falls into.
+    """
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            leased_sys = await seed_system(seed, system_state=SystemState.CRASHED)
+            await _seed_dump_volume_lease(
+                seed, leased_sys, job_state="running", job_lease=timedelta(minutes=5)
+            )
+            now_epoch = await _seed_now_epoch(seed)
+            # Prove the other guard is genuinely inert for this System: the lease's holder is a
+            # running job, but its Run belongs to `leased_sys`, so the predicate that resolves
+            # System through Run is the same one that is being kept out of the way here.
+            await seed.execute("DELETE FROM runs WHERE system_id = %s", (leased_sys,))
+            assert await has_active_capture_job(seed, leased_sys) is False
+        reaper = _FakeDumpVolumeReaper(_vol(leased_sys, age_s=3600, now_epoch=now_epoch))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool,
+                lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
+            )
+        assert count == 0
+        assert reaper.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_a_lease_whose_holder_is_not_live_fences_nothing(migrated_url: str) -> None:
+    """The falsifier: identical row, identical volume, a holder the queue no longer renews.
+
+    Without this the test above passes against a fence that honours *any* lease row, which would
+    make every failed capture's leftover row a permanent pin on its System's volume — the failure
+    mode ADR-0557 rejected for queued jobs, reintroduced through the lease.
+    """
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed, system_state=SystemState.CRASHED)
+            await _seed_dump_volume_lease(
+                seed, system_id, job_state="running", job_lease=timedelta(minutes=-5)
+            )
+            now_epoch = await _seed_now_epoch(seed)
+            await seed.execute("DELETE FROM runs WHERE system_id = %s", (system_id,))
+        reaper = _FakeDumpVolumeReaper(_vol(system_id, age_s=3600, now_epoch=now_epoch))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool,
+                lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
+            )
+        assert count == 1
+        assert reaper.deleted == [f"kdive-host-dump-{system_id}.kdump"]
+
+    asyncio.run(_run())
+
+
+def test_the_sweep_collects_stale_leases_even_with_no_volumes(migrated_url: str) -> None:
+    """The collection runs ahead of the volume list, so an owner-less reaper still drains rows.
+
+    A deployment whose dump-volume reaper owns nothing returns early from the sweep. If the
+    collection sat after that return, every failed capture's row would accumulate forever with
+    nothing to remove it, which is the whole reason the collection exists.
+    """
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed, system_state=SystemState.CRASHED)
+            await _seed_dump_volume_lease(
+                seed, system_id, job_state="succeeded", job_lease=timedelta(minutes=5)
+            )
+        reaper = _FakeDumpVolumeReaper()  # lists nothing at all
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool,
+                lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
+            )
+        assert count == 0  # the counter still means "volumes reaped"
+        async with await connect(migrated_url) as check:
+            cur = await check.execute("SELECT count(*) FROM host_dump_volume_leases")
+            row = await cur.fetchone()
+        assert row is not None and row[0] == 0
+
+    asyncio.run(_run())
+
+
+def test_a_contended_system_lock_defers_the_volume(migrated_url: str) -> None:
+    """A System an operation holds is skipped rather than waited on, and is not a counted fault.
+
+    The lock is the boundary the mint contends for, so the sweep's refusal to queue behind it is
+    load-bearing: a blocking acquire would let one holder stall a reconciler pass that also owes
+    allocation expiry and orphaned-System repair.
+    """
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            held_sys = await seed_system(seed, system_state=SystemState.CRASHED)
+            free_sys = await seed_system(seed, system_state=SystemState.CRASHED)
+            now_epoch = await _seed_now_epoch(seed)
+        reaper = _FakeDumpVolumeReaper(
+            _vol(held_sys, age_s=3600, now_epoch=now_epoch),  # locked → deferred, listed first
+            _vol(free_sys, age_s=3600, now_epoch=now_epoch),  # reached after the skip
+        )
+        async with (
+            await connect(migrated_url) as holder,
+            holder.transaction(),
+            advisory_xact_lock(holder, LockScope.SYSTEM, held_sys),
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool,
+        ):
+            count = await run_repair(
+                pool,
+                lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
+            )
+        assert count == 1
+        assert reaper.deleted == [f"kdive-host-dump-{free_sys}.kdump"]
+
+    asyncio.run(_run())
+
+
+def test_the_delete_is_addressed_to_the_identity_the_sweep_sampled(migrated_url: str) -> None:
+    """The sampled mtime reaches the provider, which is what lets it refuse a recreated volume.
+
+    The provider's own refusal is covered in
+    ``tests/providers/remote_libvirt/retrieve/test_dump_volume_reaper.py``; what can only be checked
+    here is that the reconciler passes the identity at all. An unqualified name would leave that
+    guard unable to do anything.
+    """
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed, system_state=SystemState.CRASHED)
+            now_epoch = await _seed_now_epoch(seed)
+        volume = _vol(system_id, age_s=3600, now_epoch=now_epoch)
+        reaper = _FakeDumpVolumeReaper(volume)
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool,
+                lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
+            )
+        assert count == 1
+        assert reaper.deleted_identities == [(volume.name, volume.mtime_epoch_s)]
 
     asyncio.run(_run())
 

@@ -51,6 +51,15 @@ class LockScope(StrEnum):
     + audit transaction (ADR-0526). That inverse-looking exception is acyclic because a reservation
     holding PROJECT never attempts IMAGE_PUBLISH before commit, and the finisher takes PROJECT
     before any catalog-row mutation that could block a reservation.
+
+    The total order constrains **co-holds** only, and ``capture_vmcore``'s handler is the case that
+    looks like a violation and is not (ADR-0562): it takes ``RUN`` in ``precheck_run``, ``RUN``
+    in ``hold_write_lease``, then ``SYSTEM`` for the dump-volume lease, then ``RUN`` once more in
+    ``finalize_capture`` — ``RUN`` before ``SYSTEM``, in the reverse of the order above. Each
+    acquisition commits and releases before the next statement runs (which is why both mints assert
+    :func:`require_top_level_transaction`; a savepoint would turn the sequence into a real co-hold),
+    and the reconciler's orphaned-volume sweep holds ``SYSTEM`` alone. No transaction anywhere holds
+    two of these at once, so the wait-for graph stays acyclic.
     """
 
     PROJECT = "project"
