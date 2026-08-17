@@ -20,6 +20,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
+from kdive.db.locks import CAPTURE_JOB_FENCE_KEY_SQL
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.capture_operations.launcher import (
@@ -151,7 +152,7 @@ class RecoverySummary:
 @asynccontextmanager
 async def _capture_job_fence(conn: AsyncConnection, job_id: UUID) -> AsyncIterator[None]:
     await conn.execute(
-        "SELECT pg_advisory_lock(hashtextextended('kdive:job:' || %s::text, 1951))",
+        f"SELECT pg_advisory_lock({CAPTURE_JOB_FENCE_KEY_SQL})",  # noqa: S608
         (job_id,),
     )
     try:
@@ -162,7 +163,7 @@ async def _capture_job_fence(conn: AsyncConnection, job_id: UUID) -> AsyncIterat
             await conn.execute("SET statement_timeout = 0")
         with contextlib.suppress(Exception):
             await conn.execute(
-                "SELECT pg_advisory_unlock(hashtextextended('kdive:job:' || %s::text, 1951))",
+                f"SELECT pg_advisory_unlock({CAPTURE_JOB_FENCE_KEY_SQL})",  # noqa: S608
                 (job_id,),
             )
 
