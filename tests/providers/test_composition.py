@@ -13,13 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.artifacts.storage import StoredArtifact
-from kdive.components.references import (
-    CONFIG_COMPONENT,
-    KERNEL_COMPONENT,
-    PATCH_COMPONENT,
-    ROOTFS_COMPONENT,
-    VMLINUX_COMPONENT,
-)
+from kdive.components.references import ROOTFS_COMPONENT
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
@@ -246,13 +240,10 @@ def test_default_runtime_advertises_implemented_component_sources_only() -> None
 
     assert isinstance(runtime.profile_policy, LocalLibvirtProfilePolicy)
     assert runtime.support.component_sources.provider == "local-libvirt"
+    # "Implemented" is now the literal claim: ROOTFS is the only kind a caller can supply and the
+    # only kind `reject_unsupported_component_source` is reached for (ADR-0563, #1942).
     assert runtime.support.component_sources.accepted_component_sources == {
         "rootfs": frozenset({"catalog", "local"}),
-        "kernel": frozenset({"local"}),
-        "initrd": frozenset({"local"}),
-        "config": frozenset({"catalog", "local"}),
-        "patch": frozenset({"local"}),
-        "vmlinux": frozenset({"local"}),
     }
 
 
@@ -1143,18 +1134,14 @@ def test_remote_runtime_wires_connect_and_introspect_ports(
     assert isinstance(runtime.live_introspector, RemoteLibvirtLiveIntrospect)
 
 
-def test_remote_runtime_accepts_local_and_catalog_config_and_local_patch_sources() -> None:
-    # The remote build merges a kdump fragment from a local .config or the seeded catalog entry +
-    # applies an optional local patch, so it advertises CONFIG as {"catalog", "local"} and PATCH as
-    # {"local"} (ADR-0081/0096). Since ADR-0430 (#1432) it also accepts a worker-host-local supplied
-    # KERNEL and VMLINUX, matching local-libvirt.
+def test_remote_runtime_accepts_a_supplied_local_rootfs_and_declares_nothing_else() -> None:
+    # ADR-0440 (#1433): a supplied ROOTFS base image from the worker-host `local` source kind — the
+    # one declaration remote carries, because it is the one an enforcement call site reads. CONFIG
+    # and PATCH (ADR-0081/0096) and KERNEL/VMLINUX (ADR-0430, #1432) were removed by ADR-0563
+    # (#1942): the server-build plane that would have supplied a config or patch ref is gone
+    # (`fde55d70e`), so nothing ever asked the map about them.
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
     accepted = runtime.support.component_sources.accepted_component_sources
-    assert accepted.get(CONFIG_COMPONENT) == frozenset({"catalog", "local"})
-    assert accepted.get(PATCH_COMPONENT) == frozenset({"local"})
-    assert accepted.get(KERNEL_COMPONENT) == frozenset({"local"})
-    assert accepted.get(VMLINUX_COMPONENT) == frozenset({"local"})
-    # ADR-0440 (#1433): a supplied ROOTFS base image from the worker-host `local` source kind.
-    assert accepted.get(ROOTFS_COMPONENT) == frozenset({"local"})
+    assert accepted == {ROOTFS_COMPONENT: frozenset({"local"})}
     assert runtime.support.component_sources.provider == ResourceKind.REMOTE_LIBVIRT.value
