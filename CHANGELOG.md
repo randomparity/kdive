@@ -644,6 +644,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Separate red tests from characterization
 - Test Docker conflict status classification
 - Record the host-dump volume capture fence
+- State what the enforcement guard proves and what it does not
+- Record the measured cost of the AST scan
 
 ### Fixed
 
@@ -1073,6 +1075,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fence the dump-volume sweep on a per-System capture lease
 - Do not count a declined dump volume as reaped
 - Apply adversarial-review findings to the dump-volume fence
+- Declare only the enforced component source kind
 
 ### Build
 
