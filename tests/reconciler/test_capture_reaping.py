@@ -13,6 +13,8 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.conninfo import make_conninfo
+from psycopg.sql import SQL, Identifier, Literal
 from psycopg.types.json import Jsonb
 
 from kdive.domain.capacity.state import JobState
@@ -29,6 +31,7 @@ _LOCAL = "local-libvirt"
 _REMOTE = "remote-libvirt"
 _SETTLE = timedelta(minutes=30)
 _PAST_SETTLE = timedelta(minutes=45)
+_ROLE_AUTHENTICATION = "capture-reap-role-test"
 
 
 class _Reaper:
@@ -867,5 +870,51 @@ def test_an_exited_attempt_without_quiescence_evidence_is_not_reaped(migrated_ur
                 (Jsonb({"result": "absent"}), job_id),
             )
             assert await _reap(migrated_url, {_REMOTE: reaper}) == 1
+
+    asyncio.run(_run())
+
+
+def test_the_sweep_runs_under_the_real_reconciler_role(migrated_url: str) -> None:
+    """Every grant the sweep needs, exercised as the process principal rather than a superuser.
+
+    The rest of this module connects as the test superuser, so a missing grant would only ever
+    surface in a deployed reconciler. This drives the whole path — the five-table ownership join,
+    the guarded capture_operations and capture_operation_cutoff column reads, and the reap-state
+    write — through a login that holds only kdive_reconciler.
+    """
+    reaper = _Reaper()
+    login = f"kdive_reconciler_capture_{uuid4().hex[:10]}"
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as admin:
+            _, run_id = await _seed_chain(admin)
+            job_id = await _seed_capture_job(admin, run_id)
+            await admin.execute(
+                SQL("CREATE ROLE {} LOGIN PASSWORD {} IN ROLE kdive_reconciler").format(
+                    Identifier(login), Literal(_ROLE_AUTHENTICATION)
+                )
+            )
+            try:
+                role_url = make_conninfo(
+                    **{
+                        **admin.info.get_parameters(),
+                        "user": login,
+                        "password": _ROLE_AUTHENTICATION,
+                    }
+                )
+                async with await psycopg.AsyncConnection.connect(role_url) as conn:
+                    reaped = await reap_orphaned_captures(
+                        conn,
+                        {_REMOTE: reaper},
+                        settle=_SETTLE,
+                        batch=DEFAULT_CAPTURE_REAP_BATCH,
+                        retry_base=DEFAULT_CAPTURE_RETRY_BASE,
+                        retry_cap=DEFAULT_CAPTURE_RETRY_CAP,
+                    )
+                assert reaped == 1
+                assert [capture.job_id for capture in reaper.seen] == [job_id]
+                assert await _reap_state(admin, job_id) == (1, False, True)
+            finally:
+                await admin.execute(SQL("DROP ROLE IF EXISTS {}").format(Identifier(login)))
 
     asyncio.run(_run())
