@@ -108,14 +108,26 @@ site, and the declaration — in one commit. The guard is what makes that orderi
   removed with the server-build plane in `fde55d70e` — so the `CONFIG_COMPONENT` declaration was
   its last visible trace, and removing it makes the drift legible instead of hidden. Reconciling
   ADR-0096 with the tree is out of scope here and is named in the follow-up.
+- **Dead code flagged, not removed.** `KERNEL_COMPONENT`, `INITRD_COMPONENT`, `CONFIG_COMPONENT`,
+  `PATCH_COMPONENT` and `VMLINUX_COMPONENT` (`components/references.py:38-42`) now have zero uses in
+  `src/`; only the definitions remain. They are still read by tests and reflectively by the parity
+  guard, which resolves a call site's `component_kind` through `vars(kdive.components.references)`,
+  so removing them is not a free deletion — and the `ComponentKind` members they alias are held by
+  the stored-column argument in `## Considered & rejected`. Recorded here so the next reader does
+  not mistake them for live wiring.
 - The parity guard now depends on the *name* `reject_unsupported_component_source` and on
   `component_kind` being passed as a member rather than computed. Both are asserted by the guard
   itself, so the coupling fails loudly instead of degrading into a guard that checks nothing.
-- Parsing every file under `src/kdive/` costs one `ast.parse` per module. Measured at 0.38 s for 711
-  files, run once per test that needs it — three of them, so about 1.1 s added to the default
-  `just test` gate, against a suite that takes over two minutes. Left uncached deliberately: a cache
-  on a function returning a mutable set is a footgun worth more than the second it saves. It needs no
-  libvirt host (ADR-0076).
+- Parsing every file under `src/kdive/` costs one `ast.parse` plus one `ast.walk` per module — 711
+  files at the time of writing. `_scan_enforcement_call_sites` measures **0.69 s** (median of five
+  warm runs) and it runs once per test that needs it, three of them, so pytest `--durations` reports
+  **0.69 / 0.69 / 0.61 s — about 2.0 s** added to the default `just test` gate, against a suite that
+  takes a little over two minutes. Measured on x86_64 Linux, CPython 3.14.6, 48 cores, warm page
+  cache; re-measure rather than trusting the figure on a different host. An earlier draft of this
+  record claimed 0.38 s and 1.1 s: that benchmark timed `ast.parse` alone and omitted the `ast.walk`
+  traversal, which is roughly half the cost. Left uncached deliberately: a cache on a function
+  returning a mutable set is a footgun worth more than the second it saves. It needs no libvirt host
+  (ADR-0076).
 
 ## Considered & rejected
 
@@ -131,11 +143,19 @@ site, and the declaration — in one commit. The guard is what makes that orderi
   change, and it keeps the declarations available for whoever wires enforcement later. Rejected:
   a warning nothing fails on is how the five inert entries survived from ADR-0430 through #1428 to
   #1942 in the first place, and the declarations are wrong in the meantime.
-- **Delete the unused `ComponentKind` members along with the declarations.** Tempting as dead-code
-  removal, but the kinds are not dead — `KERNEL` and `VMLINUX` name real artifacts the install and
-  introspect planes handle, and `provider_components` records a component's kind. Only the
-  *capability declaration* was inert. Rejected as over-reach that would force the enum back on the
-  first entry point.
+- **Delete the unused `ComponentKind` members along with the declarations.** After this change no
+  `src/` module *uses* `KERNEL`, `INITRD`, `CONFIG`, `PATCH` or `VMLINUX`; the only remaining
+  references are the alias definitions themselves (`components/references.py:38-42`). So they are
+  dead by reference count, and the reason to keep them is not that some plane still handles them.
+  It is that the enum is the read vocabulary of a stored column: `provider_components.component_kind`
+  and `component_uploads.component_kind` are `text NOT NULL` with no CHECK pinning their values
+  (`db/schema/0009_provider_components.sql`), and `_component_kind_from_row`
+  (`components/records.py`) turns whatever is stored back into a `ComponentKind`, raising
+  `INFRASTRUCTURE_FAILURE` on a value it cannot parse. Dropping a member would convert existing rows
+  from readable to fatal, which is a data-compatibility break, not a cleanup. That `records.py`
+  currently has no `src/` importer (only two test modules) narrows the blast radius but does not
+  change the argument, because the rows outlive the reader. Rejected on that basis; the members are
+  flagged as dead-by-reference so a later change can weigh removal against a migration.
 - **Keep the entries and document them as aspirational in a comment.** Rejected: a comment saying
   a declaration is not enforced leaves two sources of truth for one question, and the map is read
   by the parity guard and by anyone auditing provider capabilities, neither of which reads comments.

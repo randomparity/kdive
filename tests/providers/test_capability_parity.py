@@ -32,7 +32,7 @@ from kdive.components import references
 from kdive.components.references import ROOTFS_COMPONENT, ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.providers.assembly.composition import (
-    build_fault_inject_runtime,
+    ProviderComposition,
     build_local_runtime,
     build_remote_runtime,
 )
@@ -257,19 +257,22 @@ def _enforced_component_kinds() -> set[ComponentKind]:
 def _declared_component_sources() -> dict[str, ComponentSourceCapabilities]:
     """Every provider's component-source declaration, keyed by provider name.
 
-    Enumerated rather than discovered, so a fourth provider is not silently skipped: the provider
-    set is pinned in :func:`test_rootfs_is_declared_by_every_provider_and_enforced`, which reddens
-    until whoever adds one adds it here too.
+    Discovered from ``ProviderComposition._runtime_descriptors``, the one registry every provider
+    runtime is built from, rather than from a hand-listed set: a fourth provider is covered the
+    moment it is registered there, with no edit here. Listing the builders instead would make
+    :func:`test_rootfs_is_declared_by_every_provider_and_enforced` compare a hardcoded set against
+    itself, so a new provider could ship an inert declaration with every test green.
+
+    The *unfiltered* descriptor list is deliberate. ``_enabled_runtime_descriptors`` drops whatever
+    this deployment's env vars disable (ADR-0127/0131), and a declaration is wrong whether or not
+    the current environment happens to compose it.
     """
-    registry = SecretRegistry()
-    runtimes = (
-        build_local_runtime(secret_registry=registry),
-        build_remote_runtime(secret_registry=registry),
-        build_fault_inject_runtime(),
-    )
+    composition = ProviderComposition(secret_registry=SecretRegistry())
     return {
         runtime.support.component_sources.provider: runtime.support.component_sources
-        for runtime in runtimes
+        for runtime in (
+            descriptor.build_runtime() for descriptor in composition._runtime_descriptors()
+        )
     }
 
 
