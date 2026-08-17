@@ -17,14 +17,27 @@ from kdive.jobs.capture_operations.linux_identity import (
 )
 
 
+def _stat_text(pid: int, start_ticks: int) -> str:
+    # comm may contain spaces and ')'; starttime is field 22 after the final ')'.
+    tail = ["S", *(["0"] * 18), str(start_ticks)]
+    return f"{pid} (odd ) name) {' '.join(tail)}\n"
+
+
 def _proc_tree(root: Path, pid: int, *, start_ticks: int = 4242) -> None:
     (root / "sys/kernel/random").mkdir(parents=True)
     (root / "sys/kernel/random/boot_id").write_text("boot-a\n")
     proc = root / str(pid)
     proc.mkdir()
-    # comm may contain spaces and ')'; starttime is field 22 after the final ')'.
-    tail = ["S", *(["0"] * 18), str(start_ticks)]
-    (proc / "stat").write_text(f"{pid} (odd ) name) {' '.join(tail)}\n")
+    (proc / "stat").write_text(_stat_text(pid, start_ticks))
+
+
+def _register_bootstrap(proc: Path, *, interpreter: Path, token: str) -> None:
+    """Make ``proc`` (an already-created /proc/<pid> dir) match scan_launch_token's
+    capture-bootstrap probe: same exe target, cmdline carrying the exact token."""
+    proc.joinpath("exe").symlink_to(interpreter)
+    proc.joinpath("cmdline").write_bytes(
+        b"python\0-S\0-m\0kdive.capture_bootstrap\0--launch-token\0" + token.encode() + b"\0"
+    )
 
 
 def test_linux_identity_reads_boot_pid_and_exact_start_ticks(
@@ -151,11 +164,8 @@ def test_launch_token_scan_finds_only_exact_executable_and_token(
     _proc_tree(tmp_path, 123)
     interpreter = tmp_path / "python"
     interpreter.write_bytes(b"python")
-    (tmp_path / "123/exe").symlink_to(interpreter)
     token = "a" * 64
-    (tmp_path / "123/cmdline").write_bytes(
-        b"python\0-S\0-m\0kdive.capture_bootstrap\0--launch-token\0" + token.encode() + b"\0"
-    )
+    _register_bootstrap(tmp_path / "123", interpreter=interpreter, token=token)
     monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
 
     assert scan_launch_token(token, interpreter=interpreter, host_instance="host-a") == (
@@ -178,14 +188,11 @@ def test_launch_token_scan_skips_matched_process_that_exits_before_identity_read
     interpreter = tmp_path / "python"
     interpreter.write_bytes(b"python")
     token = "a" * 64
-    cmdline = b"python\0-S\0-m\0kdive.capture_bootstrap\0--launch-token\0" + token.encode() + b"\0"
     for pid, start_ticks in ((111, 1111), (222, 2222)):
-        tail = ["S", *(["0"] * 18), str(start_ticks)]
         proc = tmp_path / str(pid)
         proc.mkdir()
-        proc.joinpath("stat").write_text(f"{pid} (odd ) name) {' '.join(tail)}\n")
-        proc.joinpath("exe").symlink_to(interpreter)
-        proc.joinpath("cmdline").write_bytes(cmdline)
+        proc.joinpath("stat").write_text(_stat_text(pid, start_ticks))
+        _register_bootstrap(proc, interpreter=interpreter, token=token)
     monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
     real_read = LinuxIdentity.read
 
@@ -210,11 +217,8 @@ def test_launch_token_scan_raises_for_genuine_identity_read_failure(
     _proc_tree(tmp_path, 123)
     interpreter = tmp_path / "python"
     interpreter.write_bytes(b"python")
-    (tmp_path / "123/exe").symlink_to(interpreter)
     token = "a" * 64
-    (tmp_path / "123/cmdline").write_bytes(
-        b"python\0-S\0-m\0kdive.capture_bootstrap\0--launch-token\0" + token.encode() + b"\0"
-    )
+    _register_bootstrap(tmp_path / "123", interpreter=interpreter, token=token)
     monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
     monkeypatch.setattr(
         LinuxIdentity,
@@ -236,14 +240,10 @@ def test_launch_token_scan_raises_when_boot_id_sentinel_is_unreadable(
     interpreter = tmp_path / "python"
     interpreter.write_bytes(b"python")
     token = "a" * 64
-    tail = ["S", *(["0"] * 18), "4242"]
     proc = tmp_path / "123"
     proc.mkdir()
-    proc.joinpath("stat").write_text(f"123 (odd ) name) {' '.join(tail)}\n")
-    proc.joinpath("exe").symlink_to(interpreter)
-    proc.joinpath("cmdline").write_bytes(
-        b"python\0-S\0-m\0kdive.capture_bootstrap\0--launch-token\0" + token.encode() + b"\0"
-    )
+    proc.joinpath("stat").write_text(_stat_text(123, 4242))
+    _register_bootstrap(proc, interpreter=interpreter, token=token)
     # deliberately no sys/kernel/random/boot_id under tmp_path
     monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
 
