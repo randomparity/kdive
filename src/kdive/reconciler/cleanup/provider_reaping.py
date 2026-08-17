@@ -95,6 +95,11 @@ _CAPTURE_JOB_KIND_VALUE = JobKind.CAPTURE_TRAFFIC.value
 #   complete and the job was created no later than the committed cutoff — the rows that predate
 #   supervision and can therefore never grow an attempt link. After the cutoff a missing link is
 #   fail-closed.
+#
+#   ADR-0556 describes that generation as recorded per provider kind. The table 0112 created and
+#   0113 extended is a singleton, with one `complete` flag covering both kinds, so the predicate
+#   reads the singleton and the kind match stays where it already is: the selection predicate
+#   above. #1947 and #1948 must not assume a per-kind cutoff row exists.
 # * Ordering leads with an explicit `(reap state exists)` discriminator instead of relying on
 #   NULLs sorting a particular way, so an untouched row always precedes a just-failed one even
 #   when that row's backoff expired first. Without it, one permanently failing old row would come
