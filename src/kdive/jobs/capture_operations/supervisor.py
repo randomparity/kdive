@@ -51,7 +51,7 @@ from kdive.jobs.capture_operations.repository import (
     request_cancel,
 )
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports.traffic import TrafficCaptureQuiescence
+from kdive.providers.ports.traffic import TrafficCaptureQuiescence, capture_qom_id
 from kdive.store.objectstore import ObjectStore
 
 LOCK_PROBE_INTERVAL_SECONDS = 0.25
@@ -525,7 +525,7 @@ class CaptureOperationSupervisor:
             probe.prove_absent,
             snapshot.resource_id,
             snapshot.domain_name,
-            f"kdive-dump-{operation.job_id}",
+            capture_qom_id(operation.job_id),
         )
         await acknowledge_exit(
             conn,
@@ -678,7 +678,7 @@ async def _recover_identified(
         probe.prove_absent,
         candidate.resource_id,
         candidate.domain_name,
-        f"kdive-dump-{candidate.job_id}",
+        capture_qom_id(candidate.job_id),
     )
     return await recover_operation(
         conn,

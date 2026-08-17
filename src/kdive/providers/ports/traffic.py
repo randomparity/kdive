@@ -22,6 +22,22 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 _MAX_CONFIGURATION_BYTES = 16_384
 
 
+def capture_qom_id(job_id: UUID) -> str:
+    """The QOM object name a traffic capture attaches its ``filter-dump`` sink under.
+
+    Defined here, beside the ``qom_id`` port contract, because three parties must agree on it
+    and none of them may import the others: the provider executors that attach and detach it,
+    the supervisor's quiescence probe that proves it absent, and the ADR-0556 capture reapers
+    that detach an orphan left by a dead worker. A reaper reconstructs this string from the
+    persisted job row alone, so a second spelling anywhere detaches nothing and the leak it was
+    written to reclaim survives silently.
+
+    Job-scoped rather than System-scoped: one System can hold sinks from several attempts, and
+    a reaper must name only the capture its own job row owns.
+    """
+    return f"kdive-dump-{job_id}"
+
+
 def _canonical_bytes(model: BaseModel) -> bytes:
     payload = model.model_dump(mode="json", exclude_none=True)
     return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()

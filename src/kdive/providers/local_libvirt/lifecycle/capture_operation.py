@@ -19,6 +19,7 @@ from kdive.providers.ports.traffic import (
     CaptureExecutionResult,
     QuiescenceEvidence,
     TrafficCapturer,
+    capture_qom_id,
 )
 
 _CAPTURE_NAME = "capture.pcap"
@@ -116,7 +117,7 @@ class LocalCaptureExecutor:
                         raise
 
     def _capture(self, request: CaptureExecutionRequest, destination: str) -> tuple[bytes, bool]:
-        qom_id = f"kdive-dump-{request.job_id}"
+        qom_id = capture_qom_id(request.job_id)
         try:
             self._capturer.attach(
                 request.domain_name,
