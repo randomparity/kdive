@@ -400,6 +400,17 @@ audit:
 pull-test-images:
     ./scripts/pull-test-images.sh
 
+# Install Debian/Ubuntu system packages under a hard per-call timeout and a bounded retry
+# (3 attempts, 5s/15s). CI's `Install libvirt build headers` step wedged for 13 and 33 minutes
+# on two runs in one afternoon against a ~15s normal (#1978); the failure is a stall rather than
+# a non-zero exit, so the timeout is the half that makes it fail and the retry is the half that
+# keeps a slow-but-working mirror from going red (ADR-0566). Raise KDIVE_APT_TIMEOUT_S for a
+# large package set, as live.yml does. Not part of `ci:` — this installs system packages, and
+# the workflows invoke the script directly because they run before `just` is set up. The recipe
+# is where the command text lives (AGENTS.md).
+apt-install +PACKAGES:
+    ./scripts/apt-install.sh {{PACKAGES}}
+
 # Set the project version in pyproject.toml AND uv.lock together. `--no-sync` re-locks
 # (updates uv.lock) WITHOUT rebuilding the virtual environment — so a version bump does not
 # require libvirt-dev to compile libvirt-python; the editable install refreshes on the next

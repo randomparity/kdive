@@ -17,6 +17,14 @@ jobs:
   lint-type-test:
     name: lint · type · test
     runs-on: ubuntu-latest
+    # Every job here declares timeout-minutes, because the GitHub default is 360 and a wedged
+    # step burns all of it: the apt step below hung for 13 and 33 minutes on two runs in one
+    # afternoon and a human had to cancel each (#1978). Sized as the job's observed runtime plus
+    # the apt script's own worst case (3 attempts x (60s update + 60s install) + 20s backoff,
+    # ~6.5 min) plus margin, so the step still fails with its diagnostic before the job is cut
+    # off. Observed ~11 min; tests/guards/test_apt_install_is_bounded.py fails a job that drops
+    # this (ADR-0566).
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -26,9 +34,14 @@ jobs:
       - name: Install libvirt build headers
         # libvirt-python has no wheels; it compiles against the system libvirt
         # headers, so `uv sync` fails without libvirt-dev present.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libvirt-dev
+        #
+        # Same script `just apt-install libvirt-dev` runs. Invoked directly rather than through
+        # `just`, which is not set up until later in this job — and not at all in the two supply
+        # chain jobs that need the same headers. It bounds each apt call with a hard timeout and
+        # retries 3 times with 5s/15s backoff: this step wedged for 13 and 33 minutes on two runs
+        # in one afternoon against a ~15s normal, and a stall does not exit, so a retry alone
+        # would never have fired (ADR-0566, #1978).
+        run: ./scripts/apt-install.sh libvirt-dev
 
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -255,6 +268,8 @@ jobs:
   image-build:
     name: image build + smoke
     runs-on: ubuntu-latest
+    # Observed ~2.5 min; no apt step (ADR-0566).
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -313,6 +328,8 @@ jobs:
   pre-commit:
     name: pre-commit hooks
     runs-on: ubuntu-latest
+    # Observed ~2 min; no apt step (ADR-0566).
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -360,6 +377,8 @@ jobs:
   workflow-hygiene:
     name: workflow security scan
     runs-on: ubuntu-latest
+    # Observed ~15s; no apt step (ADR-0566).
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -378,6 +397,8 @@ jobs:
   supply-chain-runtime:
     name: supply chain (runtime)
     runs-on: ubuntu-latest
+    # Observed ~1 min plus the apt script's ~6.5 min worst case (ADR-0566).
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -394,9 +415,9 @@ jobs:
         # pip-audit resolves the pinned set with pip, which builds libvirt-python
         # (sdist only) to read its metadata; that build needs the libvirt headers.
         # Without them, --strict fails rather than silently skipping the package.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libvirt-dev
+        # Same bounded script `just apt-install libvirt-dev` runs; this job never sets up
+        # `just`, so it invokes the script directly (ADR-0566, #1978).
+        run: ./scripts/apt-install.sh libvirt-dev
 
       - name: Audit runtime dependencies
         # Same script `just audit` runs. It retries only a run that produced no verdict — a
@@ -408,6 +429,8 @@ jobs:
   supply-chain-dev:
     name: supply chain (dev)
     runs-on: ubuntu-latest
+    # Observed ~2 min plus the apt script's ~6.5 min worst case (ADR-0566).
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -423,9 +446,8 @@ jobs:
       - name: Install libvirt build headers
         # Same reason as the runtime job: pip-audit builds libvirt-python to read
         # its metadata, so without the headers it would silently skip the package.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libvirt-dev
+        # Same bounded script `just apt-install libvirt-dev` runs (ADR-0566, #1978).
+        run: ./scripts/apt-install.sh libvirt-dev
 
       - name: Audit all dependencies (including dev)
         # Dev advisories do not ship to users, so this never fails the build — but it surfaces

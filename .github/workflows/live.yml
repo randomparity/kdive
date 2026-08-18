@@ -69,9 +69,17 @@ jobs:
           persist-credentials: false
 
       - name: Install host deps (ppc64le emulator, libguestfs, elfutils, debuginfod, libvirt-dev)
+        # Same bounded script `just apt-install <packages>` runs, shared with the PR gate's
+        # libvirt-dev step (ADR-0566, #1978). This set is an order of magnitude larger to
+        # download than libvirt-dev alone — the emulator and the libguestfs appliance — so it
+        # raises the install budget rather than forcing one value to fit both. `apt-get update`
+        # keeps its own 60s cap inside the script, so the worst case for a total outage is
+        # 3 attempts x (60s + 300s) + 20s of backoff — about 18 minutes, inside this job's
+        # timeout-minutes, so the step still reports which mirror wedged it.
+        env:
+          KDIVE_APT_TIMEOUT_S: "300"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          ./scripts/apt-install.sh \
             qemu-system-ppc libguestfs-tools e2fsprogs elfutils debuginfod libvirt-dev \
             python3-guestfs libvirt-daemon-system libvirt-clients qemu-utils
 

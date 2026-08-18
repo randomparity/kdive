@@ -26,6 +26,9 @@ jobs:
   test-random-seed:
     name: test (PYTHONHASHSEED=random)
     runs-on: ubuntu-latest
+    # The GitHub default is 360 minutes, and a wedged apt step burns all of it (#1978).
+    # Observed ~7 min plus the apt script's ~6.5 min worst case, plus margin (ADR-0566).
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,9 +38,9 @@ jobs:
       - name: Install libvirt build headers
         # libvirt-python has no wheels; it compiles against the system libvirt
         # headers, so `uv sync` fails without libvirt-dev present.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libvirt-dev
+        # Same bounded script `just apt-install libvirt-dev` runs; `just` is not set up until
+        # later in this job, so it invokes the script directly (ADR-0566, #1978).
+        run: ./scripts/apt-install.sh libvirt-dev
 
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
