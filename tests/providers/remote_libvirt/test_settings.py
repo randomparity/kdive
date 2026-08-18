@@ -32,9 +32,10 @@ def test_machine_setting_fields() -> None:
     assert s.processes == _RT
 
 
-def test_settings_list_is_the_three_declared_settings_in_order() -> None:
+def test_settings_list_is_the_declared_settings_in_order() -> None:
     assert settings.SETTINGS == [
         settings.REMOTE_LIBVIRT_STORAGE_POOL,
         settings.REMOTE_LIBVIRT_NETWORK,
         settings.REMOTE_LIBVIRT_MACHINE,
+        settings.REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS,
     ]

@@ -195,6 +195,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simplify capture launch cleanup
 - Remove unused capture parameters
 - Share one capture qom_id convention
+- Cut duplicated rationale from the reaping-latency diff
+- Mask the status bullet only where the preamble is examined
+- Drop a guard in mask_status_bullet that cannot fire
 
 ### Documentation
 
@@ -654,6 +657,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the cutover-generation shape the sweep reads
 - Record the unbounded provider call, and report reaped_captures
 - Regenerate the reference for KDIVE_APT_TIMEOUT_S
+- Decide the reaping-latency bound as a lane budget plus a connect gate
+- Correct the lane-order, prior-disclosure, and knob-interaction claims
+- Add the implementation plan and the second-round design fixes
+- Start the lane deadline after the candidate list, not before it
+- Keep placeholder supersession links inside fenced examples
+- Say which of the two supersession links the gate resolves
 
 ### Fixed
 
@@ -1088,6 +1097,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Defer a fence-refused capture instead of skipping it
 - Bound the apt install with a timeout, then retry it
 - Make the apt timeout actually reach dpkg, and bound the repair
+- Bound the two host-state reaping lanes
+- Share one deadline across a host's resolved addresses
+- Declare the connect gate for the server, and name its failures
+- Keep the composed pkipath out of the gate's errors
+- Check no_verify on the gate and strip userinfo from its errors
+- Read status rules from the region that holds the status
+- Close two holes adversarial review found in the status region
+- Key BANNER_REPLACES_STATUS to the Status body, not the region
+- Restore the Status-body key on the BANNER_REPLACES_STATUS return
+- Read the Status body from a here-string, not a pipe into grep -q
+- Bound the status allowance to one line instead of the first
+- Pass the status pattern through the environment, not awk -v
 
 ### Build
 
