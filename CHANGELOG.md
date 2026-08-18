@@ -653,6 +653,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the measured cost of the AST scan
 - Record the cutover-generation shape the sweep reads
 - Record the unbounded provider call, and report reaped_captures
+- Regenerate the reference for KDIVE_APT_TIMEOUT_S
 
 ### Fixed
 
@@ -1085,6 +1086,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Declare only the enforced component source kind
 - Close the fail-open cutover branch for a retried capture
 - Defer a fence-refused capture instead of skipping it
+- Bound the apt install with a timeout, then retry it
+- Make the apt timeout actually reach dpkg, and bound the repair
 
 ### Build
 
