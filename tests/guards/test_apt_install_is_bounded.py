@@ -212,11 +212,23 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
             declared = job.get("timeout-minutes") if isinstance(job, dict) else None
             if declared is None:
                 missing.append(f"{path.name}:{job_name}")
-            elif not isinstance(declared, int) or declared >= _ACTIONS_DEFAULT_TIMEOUT_MINUTES:
+            # `(int, float)` because GitHub's schema for this key is a float, so `0.5` is legal
+            # and is a *tighter* bound than any integer. `not isinstance(declared, bool)` because
+            # `bool` subclasses `int`: `timeout-minutes: true` parses to `True`, and `True >= 360`
+            # is False — the one spelling that would slip past the check this assertion exists to
+            # be. actionlint rejects it too, but not from this file.
+            elif (
+                not isinstance(declared, int | float)
+                or isinstance(declared, bool)
+                or declared >= _ACTIONS_DEFAULT_TIMEOUT_MINUTES
+            ):
                 unbounded.append(f"{path.name}:{job_name}={declared!r}")
 
     # The real count across the ten workflows is 17. `>= len(paths)` would be satisfied by a
-    # parser that found one job per file and silently stopped checking the other seven.
+    # parser that found one job per file and silently stopped checking the other seven. It is a
+    # tripwire for that regression, not a coverage assertion, and it goes slack as jobs are
+    # added — at 20 jobs a parser hiding three of them still clears 17. An exact count would
+    # redden on every legitimate new job, which is churn this buys nothing for.
     assert checked >= 17, (
         f"only {checked} job(s) parsed across {[path.name for path in paths]}; the parser has "
         "drifted and this guard is checking a fraction of what it claims to (ADR-0566)."

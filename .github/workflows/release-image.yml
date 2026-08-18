@@ -28,10 +28,12 @@ jobs:
     # already 1.6x min-to-max, so this bound sits just under the 360-minute default it replaces
     # rather than far below it — the honest value for this job, not a comfortable one.
     #
-    # Sized up rather than down for two reasons. Every observation above is a main push; a v*
-    # tag build has never run and does strictly more work, emitting an SBOM and max provenance
-    # per platform, the ppc64le one under the same emulation that accounts for the whole four
-    # hours. And a fired timeout here is not merely a red check: `Build and push` runs with
+    # Sized up rather than down for two reasons. The two v* tag builds to date — v0.3.0 at 132
+    # min and v0.4.0 at 241 min, both successful — sit inside that range, but a tag build does
+    # strictly more work, emitting an SBOM and max provenance per platform, the ppc64le one
+    # under the same emulation that accounts for the whole four hours; v0.4.0 landing at the top
+    # of the range is what that costs. And a fired timeout here is not merely a red check, which
+    # is the second reason and the one that decides the direction: `Build and push` runs with
     # `push: true`, so a cut-off that lands after it leaves the digest and its :X.Y.Z, :X.Y and
     # :latest tags in GHCR with `Sign the published digest` never reached — a published,
     # :latest-tagged, unsigned release image, which nothing in this workflow cleans up and

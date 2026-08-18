@@ -43,8 +43,9 @@ jobs:
   publish:
     name: build · push · verify
     runs-on: ubuntu-latest
-    # Observed ~1 min over six runs (max 1.2); no apt step. Loose for a job whose cost is a
-    # GHCR push and pull, both of which can be slow without being wedged (ADR-0566, #1983).
+    # Observed 38-76s across the four runs that succeeded; no apt step. Loose for a job whose
+    # cost is a GHCR push and pull, both of which can be slow without being wedged (ADR-0566,
+    # #1983).
     timeout-minutes: 15
     steps:
       - name: Checkout
