@@ -31,8 +31,9 @@ implementation"; those ADRs live here.
   `## Status` section, or in the preamble for a pre-0504 record that keeps its
   status as a bullet there
   ([ADR-0564](0564-the-status-region-is-where-a-record-keeps-its-status.md)).
+  The status line's *own* link is not gate-checked — keep it in step by hand.
   A record's status value is the one part of it the gate does not hold
-  immutable, in either shape.
+  immutable, in either shape, and a record may carry only one such line.
 - A merged ADR is append-only outside `## Status`. When later evidence or a
   follow-up decision qualifies its reasoning, append a block to the level-2
   section it qualifies with the heading
