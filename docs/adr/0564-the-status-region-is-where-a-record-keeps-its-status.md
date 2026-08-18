@@ -69,29 +69,32 @@ through `status_region` would flip most of the corpus to conforming and hold 483
 severity on every other rule at once.
 
 A status **value** is not a protected region, wherever it lives. `protected_shape` already drops
-the `## Status` body; it now also reduces a preamble status bullet to a `<status>` sentinel, and
-`check_preamble_intact` compares preambles through the same reduction:
+the `## Status` body, and `check_preamble_intact` — the one rule that examines a preamble — now
+compares both sides through a reduction that does the same for a status bullet:
 
 ```sh
-mask_status_bullet() {   # applied to the preamble only — it stops at the first `## `
+mask_status_bullet() {   # fed `preamble` output, which already stops at the first `## `
   LC_ALL=C awk '
-    /^## / { seen = 1 }
-    !seen && /^[[:space:]]*(- )?(\*\*Status:\*\*|Status:)/ { print "<status>"; next }
+    /^[[:space:]]*(- )?(\*\*Status:\*\*|Status:)/ { print "<status>"; next }
     { print }
   '
 }
 ```
 
 The sentinel is a line, not a deletion, so the bullet still has to be *there*: removing it drops a
-line from both sides of the comparison and `E-PREAMBLE-REWRITTEN` still fires. Both call sites
-are needed, not one — the realistic supersession commit changes the bullet *and* adds the banner
-line, which is not a marker-only change, so it falls through to `check_preamble_intact`.
+line from both sides of the comparison and `E-PREAMBLE-REWRITTEN` still fires. A `Status:` line
+inside a section is body content of an append-only section, stays byte-protected, and never
+reaches this filter.
 
-This goes in `protected_shape`, not in `canonicalise`. `canonicalise` is the definition of a
-*marker*, and it is also what `renumbered_elsewhere` compares two records' content with; a status
-value is content, and discarding it there would let a deleted record be excused by a sibling that
-differs from it only in status. `protected_shape` is documented as exactly what the three
-anti-rewrite rules examine, which is the question being answered.
+One call site, not two. `marker_only_change` — the shortcut in front of the three anti-rewrite
+rules — is left as strict as it was, because a status-bullet edit it declines simply arrives at
+`check_preamble_intact` and is accepted there. Masking in `protected_shape` as well was
+measurably redundant: neutralising it left the suite green.
+
+This does not go in `canonicalise`. `canonicalise` is the definition of a *marker*, and it is also
+what `renumbered_elsewhere` compares two records' content with; a status value is content, and
+discarding it there would let a deleted record be excused by a sibling that differs from it only
+in status.
 
 ## Consequences
 

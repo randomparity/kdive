@@ -234,18 +234,19 @@ adr_dir() {
   printf '%s' "$dir"
 }
 
-# write_legacy_adr <dir> <name> <status-lines>
+# write_legacy_adr <dir> <name> <preamble-lines>
 #
 # An ADR in the pre-0504 shape: no `## Status` section at all, the status carried as a metadata
 # bullet in the preamble instead. That shape is what grandfathers a record, and it is the shape
-# the corpus this gate was adopted into holds 483 of. <status-lines> is written verbatim, so a
-# case can put a supersession banner beneath the bullet the way the ADR README prescribes.
+# the corpus this gate was adopted into holds 483 of. <preamble-lines> is written verbatim above
+# the `- **Date:**` bullet, so a case can put a supersession banner beneath the status the way
+# the ADR README prescribes, or add a second metadata bullet of its own.
 write_legacy_adr() {
-  local dir=$1 name=$2 status=$3
+  local dir=$1 name=$2 preamble=$3
   cat >"$dir/docs/adr/$name" <<EOF
 # ${name%%-*} — a pre-template decision
 
-$status
+$preamble
 - **Date:** 2026-01-01
 
 ## Context
@@ -1901,6 +1902,23 @@ MD
 > **Superseded by [0002](0002-later.md)** (2026-01-02)"
   run_case "legacy status bullet and banner in one change" 0 - "$d" BASE_SHA="$b" \
     RECORD_PROFILES=adr
+
+  # The bullet the mask names, anchored at the start of the line. The Deciders bullet carries the
+  # word "Status" in its text on purpose: a pattern one character wider matches every preamble
+  # bullet, and an unanchored one matches any line that mentions a status at all. Either way the
+  # region a pre-template record keeps its provenance in stops being guarded.
+  d="$SCRATCH/adr_legacy_other_bullet"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
+- **Deciders:** the Status review group"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  sed 's/^- \*\*Deciders:\*\* .*$/- **Deciders:** a later Status review group/' \
+    "$d/docs/adr/0001-legacy.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
+  run_case "a non-status preamble bullet is still protected" 1 E-PREAMBLE-REWRITTEN "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
 
   # The allowance is the preamble's, not the word "Status"'s. A line that looks like a status
   # bullet but sits inside a section is body content of an append-only section and stays

@@ -238,16 +238,22 @@ status_region() {
 # same allowance, or the supersession docs/adr/README.md prescribes is the single edit the gate
 # refuses. See ADR 0564.
 #
-# Scoped to the preamble, by stopping at the first `## ` the way preamble() does: a line that
-# looks like a status bullet but sits inside a section is body content of an append-only section
-# and stays byte-protected.
+# Preamble-scoped by its caller, not by a test of its own: it is fed `preamble` output, which
+# already stops at the first `## `. A second stop condition here would be a guard that cannot
+# fire — a false guarantee, by the same argument date_to_int makes about its own missing
+# invalid-input branch — so the contract is stated instead: pass this a preamble. A line that
+# looks like a status bullet but sits inside a section is body content of an append-only section,
+# stays byte-protected, and never reaches here.
+#
+# Anchored at the start of the line and on the field label, not on the word: an unanchored match
+# would mask any metadata bullet that merely mentions a status, and the preamble is where a
+# pre-template record keeps its provenance.
 #
 # A sentinel line, not a deletion, so the bullet still has to be present: removing it outright
 # drops a line from the comparison and E-PREAMBLE-REWRITTEN still fires.
 mask_status_bullet() {
   LC_ALL=C awk '
-    /^## / { seen = 1 }
-    !seen && /^[[:space:]]*(- )?(\*\*Status:\*\*|Status:)/ { print "<status>"; next }
+    /^[[:space:]]*(- )?(\*\*Status:\*\*|Status:)/ { print "<status>"; next }
     { print }
   '
 }
