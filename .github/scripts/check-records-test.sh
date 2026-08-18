@@ -1872,6 +1872,48 @@ MD
   run_case "dangling banner with no Status section" 1 E-SUPERSEDE-DANGLING "$d" \
     BASE_SHA="$b" RECORD_PROFILES=adr
 
+  # The banner rules in check_status reach a preamble banner too, not only the link rule in the
+  # profile: without that, a legacy record could carry a banner of any shape at all and the gate
+  # would report nothing about it. Bespoke, because a record with no `## Status` is non-conforming
+  # by definition, so this finding is always downgraded and run_case asserts on the code itself.
+  d="$SCRATCH/adr_legacy_banner_form"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
+> **Superseded by 0002**"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  printf '  %-4s %-44s ' "" "malformed banner with no Status section"
+  if (cd "$d" && env -u GITHUB_ACTIONS RECORD_PROFILES=adr BASE_SHA="$b" \
+    ./.github/scripts/check-records.sh) >"$d/.out" 2>"$d/.err"; then
+    if grep -q '::warning::W-LEGACY-SHAPE: .*(E-BANNER-FORM)$' "$d/.err"; then
+      passed=$((passed + 1))
+      printf 'ok   exit=0 E-BANNER-FORM reported, downgraded\n'
+    else
+      failed=$((failed + 1))
+      printf 'FAIL the preamble banner was never judged\n'
+    fi
+  else
+    failed=$((failed + 1))
+    printf 'FAIL %s\n' "$(sed -n 's/^::error:://p' "$d/.err" | head -1)"
+  fi
+
+  # Reading one link is not enough on this shape. E-BANNER-COUNT is downgradable, so a second
+  # banner on a grandfathered record is a warning rather than a stop, and the first one here
+  # resolves — so a rule that took the first link and returned would pass the run at exit 0 with
+  # a banner naming a record that does not exist.
+  d="$SCRATCH/adr_legacy_second_banner"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Superseded by [ADR-0002](0002-later.md)
+> **Superseded by [0002](0002-later.md)** (2026-01-02)
+> **Superseded by [0009](0009-nowhere.md)** (2026-01-03)"
+  write_adr "$d" "0002-later.md" "Accepted (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "second banner's dangling link is still read" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
   # The supersession docs/adr/README.md prescribes, on the shape the corpus actually has. Setting
   # the bullet rewrites a preamble line, which was E-PREAMBLE-REWRITTEN through err_full — a
   # finding W-LEGACY-SHAPE deliberately cannot downgrade — so the gate refused the one edit that
