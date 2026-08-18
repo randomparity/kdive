@@ -27,6 +27,17 @@ if (($# == 0)); then
   exit 2
 fi
 
+# Fail fast off Debian/Ubuntu. `just apt-install` is the documented developer entry point and
+# this project's own dev hosts are Fedora, where the retry loop would otherwise spend 20s of
+# backoff re-running a command that cannot exist, then close by advising a `dpkg` repair on a
+# machine with no dpkg. Three identical 127s are not a transient failure.
+for tool in apt-get sudo; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "apt-install: needs '${tool}', which this host does not have — this installs Debian/Ubuntu packages and is meant for a CI runner" >&2
+    exit 2
+  fi
+done
+
 # Wall-clock ceiling for the install. `libvirt-dev` lands in ~15s and the slowest healthy step
 # #1978 recorded was 83s for update and install together, so 60s is several times the observed
 # cost and still an order of magnitude under the wedge. `live.yml` installs the ppc64le emulator
@@ -76,17 +87,23 @@ readonly APT_OPTS=(
   # outside (ADR-0566).
   -o Acquire::Retries=0
   # Without this the timeout below cannot reach dpkg, and the whole change is decorative.
-  # `timeout` signals its own process group; apt's default pty mode puts dpkg in a *new* group
-  # and a new session (measured: apt-get pgid 1, dpkg pgid 988 sid 988), and dpkg ignores SIGHUP
-  # (SigIgn 0x7), so the pty hangup does not reach it either. A budget that expired mid-unpack
-  # therefore left an orphaned root dpkg holding /var/lib/dpkg/lock, and every retry then failed
-  # instantly against that lock. `DPkg::Use-Pty=0` keeps dpkg in apt's group, where the kill
-  # lands. The only thing lost is apt's pty progress rendering, which no CI log reads.
+  # `timeout` puts itself and apt-get in one process group and signals that group; apt's default
+  # pty mode then starts dpkg in a group and session of its own, outside it. Measured in
+  # ubuntu:24.04: timeout pgid 141, apt-get pgid 141, dpkg pgid 321 sid 321. dpkg also ignores
+  # SIGHUP (SigIgn 0x7), so the pty hangup does not reach it either. A budget that expired
+  # mid-unpack therefore left an orphaned root dpkg holding /var/lib/dpkg/lock, and every retry
+  # then failed instantly against that lock. `DPkg::Use-Pty=0` keeps dpkg in the group the kill
+  # lands on. The only thing lost is apt's pty progress rendering, which no CI log reads.
   -o DPkg::Use-Pty=0
   # apt's compiled default is 0 — fail immediately if the lock is held. A retry that races a
   # still-exiting dpkg from the attempt this script just killed would otherwise burn an attempt
   # on exit 100 rather than waiting the moment out.
   -o DPkg::Lock::Timeout=30
+  # A conffile prompt is a stall this script's retry cannot absorb — it is not transient, so it
+  # would burn all three attempts identically and go red. Keep the installed version, which is
+  # what an unattended `-y` install means to mean. `DEBIAN_FRONTEND=noninteractive` below closes
+  # the debconf half of the same hole.
+  -o Dpkg::Options::=--force-confold
 )
 
 # The mirrors apt is *configured* to use — not, on its own, the mirror that failed. On a hosted
@@ -109,8 +126,11 @@ apt_mirrors() {
 # scripts (libvirt-daemon-system's postinst creates users and enables units) and this script's
 # whole claim is that no call it makes is unbounded. Non-fatal: it is recovery from damage this
 # script caused, and a database that is genuinely broken still fails the next attempt loudly.
+# Its stdout goes to /dev/null: after a killed install this emits tens of lines of maintainer
+# script output, which would sit between the last attempt line and the `::error::` annotation the
+# reader is looking for. Failures still surface, on stderr.
 repair_dpkg() {
-  sudo timeout --kill-after="${KILL_AFTER_S}s" "${UPDATE_TIMEOUT_S}s" dpkg --configure -a ||
+  sudo timeout --kill-after="${KILL_AFTER_S}s" "${UPDATE_TIMEOUT_S}s" dpkg --configure -a >/dev/null ||
     echo "apt-install: dpkg --configure -a did not complete; the package database may still be broken" >&2
 }
 
@@ -120,7 +140,11 @@ repair_dpkg() {
 run_apt() {
   local budget="$1"
   shift
-  sudo timeout --kill-after="${KILL_AFTER_S}s" "${budget}s" apt-get "${APT_OPTS[@]}" "$@"
+  # `sudo env VAR=…` and not `sudo VAR=… `: sudoers may refuse to pass an environment variable
+  # through, and a frontend that falls back to an interactive one is the stall this is closing.
+  # `env` sets it for the child regardless of the sudoers env policy.
+  sudo env DEBIAN_FRONTEND=noninteractive \
+    timeout --kill-after="${KILL_AFTER_S}s" "${budget}s" apt-get "${APT_OPTS[@]}" "$@"
 }
 
 # `phase` names which apt call failed, for the diagnostic. Set before each call rather than
@@ -151,10 +175,14 @@ for ((attempt = 1; attempt <= ATTEMPTS; attempt++)); do
   fi
   echo "apt-install: attempt ${attempt}/${ATTEMPTS}: apt-get ${phase} ${reason} while installing '$*' (budgets: ${UPDATE_TIMEOUT_S}s update, ${INSTALL_TIMEOUT_S}s install); configured mirrors: $(apt_mirrors)" >&2
 
-  # After every failed attempt, including the last. A killed install leaves packages half
+  # After every failed *install*, including the last: a killed install leaves packages half
   # unpacked whether or not another attempt follows, and skipping the repair on exhaustion would
-  # hand a developer running `just apt-install` a broken package database with no message.
-  repair_dpkg
+  # hand a developer running `just apt-install` a broken package database with no message. A
+  # failed `update` unpacked nothing, so repairing there would only claim a database problem
+  # that does not exist.
+  if [[ $phase == install ]]; then
+    repair_dpkg
+  fi
 
   if ((attempt < ATTEMPTS)); then
     delay="${BACKOFF_S[attempt - 1]}"
@@ -163,5 +191,12 @@ for ((attempt = 1; attempt <= ATTEMPTS; attempt++)); do
   fi
 done
 
-echo "::error::apt-install: could not install '$*' after ${ATTEMPTS} attempts (budgets: ${UPDATE_TIMEOUT_S}s update, ${INSTALL_TIMEOUT_S}s install); the last failure was apt-get ${phase}, so a stall in the install phase may be local unpack work rather than the network; configured mirrors: $(apt_mirrors). If this ran outside CI, check the package database with 'sudo dpkg --configure -a'." >&2
+# The caveat is phase-specific and must stay that way: an `update` stall IS a network stall (the
+# primary shape of #1978), and telling the reader it might be local unpack work would hand them
+# the opposite hypothesis in the sentence that names the phase.
+hint="a stall in that phase is a download stall"
+if [[ $phase == install ]]; then
+  hint="a stall in that phase may be local unpack work rather than the network"
+fi
+echo "::error::apt-install: could not install '$*' after ${ATTEMPTS} attempts (budgets: ${UPDATE_TIMEOUT_S}s update, ${INSTALL_TIMEOUT_S}s install); the last failure was apt-get ${phase}, so ${hint}; configured mirrors: $(apt_mirrors)." >&2
 exit 1

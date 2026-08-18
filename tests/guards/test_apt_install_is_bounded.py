@@ -42,11 +42,18 @@ _APT_WORKFLOWS = ("ci.yml", "test-ordering.yml", "mcp-spec-drift.yml", "live.yml
 #: A `run:` value that installs or refreshes packages, wherever it sits on the line — `run: |`
 #: block scalars and the `run: sudo apt-get install …` one-liner alike. Anchoring at the start of
 #: the line, the obvious way to write this, matches only the block form and lets the more common
-#: one-liner straight through. Excludes comment lines so prose about apt does not trip it.
+#: one-liner straight through. The `(?:-[^ \t]+[ \t]+)*` is the same class of hole one level in:
+#: without it `apt-get -y install` and `apt-get -qq update` walk past a guard that claims to ban
+#: them. Comments are stripped before matching rather than excluded by a lookahead, which would
+#: only skip *whole-line* comments and still trip on a trailing `# … apt-get install …`.
 _BARE_APT = re.compile(
-    r"^(?![ \t]*#).*\bapt(?:-get)?[ \t]+(?:install|update|upgrade|dist-upgrade|full-upgrade)\b.*$",
+    r"^.*\bapt(?:-get)?[ \t]+(?:-[^ \t]+[ \t]+)*"
+    r"(?:install|update|upgrade|dist-upgrade|full-upgrade)\b.*$",
     re.MULTILINE,
 )
+
+#: A `#` comment to end of line. YAML has no block comments, so this is the whole grammar.
+_YAML_COMMENT = re.compile(r"#.*$", re.MULTILINE)
 
 #: Both spellings GitHub accepts. Globbing only `*.yml` would let a `.yaml` workflow escape.
 _WORKFLOW_GLOBS = ("*.yml", "*.yaml")
@@ -103,7 +110,10 @@ def _workflow_files() -> list[Path]:
 def test_no_workflow_installs_packages_with_a_bare_apt_get() -> None:
     """The command text has one home, and every call site reaches the bounded one."""
     offenders = {
-        path.name: [line.strip() for line in _BARE_APT.findall(path.read_text(encoding="utf-8"))]
+        path.name: [
+            line.strip()
+            for line in _BARE_APT.findall(_YAML_COMMENT.sub("", path.read_text(encoding="utf-8")))
+        ]
         for path in _workflow_files()
     }
     offenders = {name: lines for name, lines in offenders.items() if lines}
@@ -203,6 +213,20 @@ def test_the_justfile_owns_the_command_text() -> None:
     )
 
 
+def test_the_live_budget_override_reaches_the_script() -> None:
+    """`live.yml` raises the install budget by env var; nothing else ties the two names."""
+    live = _workflow_text("live.yml")
+    assert re.search(r"^\s*KDIVE_APT_TIMEOUT_S:\s*\"\d+\"\s*$", live, re.MULTILINE), (
+        "live.yml no longer sets KDIVE_APT_TIMEOUT_S. Its host-dep set is an order of magnitude "
+        "larger than libvirt-dev, so on the default budget it runs on roughly 2x its measured "
+        "install time (ADR-0566)."
+    )
+    assert "${KDIVE_APT_TIMEOUT_S" in _APT_SCRIPT.read_text(encoding="utf-8"), (
+        "scripts/apt-install.sh no longer reads KDIVE_APT_TIMEOUT_S, so live.yml's override is "
+        "inert and that job silently dropped to the default budget (ADR-0566)."
+    )
+
+
 # ---------------------------------------------------------------------------------------------
 # Behavioral: run the script for real. `apt-get`, `sudo`, `dpkg` and `sleep` come from a stub
 # directory prepended to PATH; `timeout` deliberately does not, because it is the thing on
@@ -232,6 +256,33 @@ _REAL_SLEEP = shutil.which("sleep")
 _STUB_HANGS = _STUB_PREAMBLE + f"exec {_REAL_SLEEP} 300\n"
 _STUB_FAILS = _STUB_PREAMBLE + "echo 'E: Unable to fetch some archives' >&2\nexit 100\n"
 _STUB_SUCCEEDS = _STUB_PREAMBLE + "exit 0\n"
+
+#: The scenario the other three cannot reach. `_STUB_HANGS` and `_STUB_FAILS` both fail on the
+#: *first* apt call, which is `update`, so the `install` call is never exercised on a failure
+#: path — and every assertion about the bound is then satisfied by `update` alone. Measured:
+#: without this stub, deleting `timeout` from the install call leaves all tests green, which is
+#: #1978 itself shipping past its own guard.
+_STUB_INSTALL_HANGS = (
+    _STUB_PREAMBLE
+    + f"""for arg in "$@"; do
+  if [ "$arg" = "install" ]; then
+    exec {_REAL_SLEEP} 300
+  fi
+done
+exit 0
+"""
+)
+
+
+#: The bound as one command, not as a bag of substrings. Membership tests on `"sudo env"`,
+#: `"--kill-after"` and `"install"` separately are all satisfied by a script that bounds `update`
+#: and leaves `install` bare — verified, that mutation passed every such assertion.
+def _bounded_call(subcommand: str, budget: int) -> re.Pattern[str]:
+    return re.compile(
+        rf"sudo env DEBIAN_FRONTEND=noninteractive timeout --kill-after=10s {budget}s "
+        rf"apt-get\b[^\n]*\b{subcommand}\b"
+    )
+
 
 _ATTEMPT_TIMEOUT_S = 1
 #: Two apt calls per attempt, three attempts, plus interpreter and signal-delivery overhead.
@@ -313,25 +364,37 @@ def test_a_stalled_apt_get_fails_the_step_within_the_budget(tmp_path: Path) -> N
         "the failure names no mirror, so the wedge is undiagnosable from the log, which is the "
         f"third acceptance criterion of #1978.\n{completed.stderr}"
     )
-    # The options the bound is actually made of, checked as *given to apt*, not as present in
-    # the file. Each of these was individually deletable without reddening any test before the
-    # stubs started recording argv.
+    # The `update` call, matched as one command. Each option below was individually deletable
+    # without reddening any test before the stubs started recording argv.
+    assert _bounded_call("update", _ATTEMPT_TIMEOUT_S).search(argv), (
+        "`apt-get update` was not invoked as one bounded command — the budget, the SIGKILL grace "
+        f"and the privilege drop have to hold together.\nRecorded argv:\n{argv}"
+    )
     for required in (
-        "sudo timeout",
-        "--kill-after=10s",
         # `timeout` signals its own process group, and apt's default pty mode puts dpkg in a new
         # group and session where the kill cannot reach it — leaving an orphaned root dpkg on
         # the lock and failing every retry. Verified in ubuntu:24.04.
         "-o DPkg::Use-Pty=0",
+        # Without this a retry racing a still-exiting dpkg dies instantly on the lock: apt's
+        # compiled default is 0, meaning fail immediately.
+        "-o DPkg::Lock::Timeout=30",
         "-o Acquire::Retries=0",
+        # Secondary to the outer timeout, and deliberately asserted anyway: they are what makes a
+        # blackholed mirror fail *inside* apt, where the error names the host and IP. A stub
+        # apt-get cannot exercise a transport timeout, so argv is the only place to hold them.
+        "-o Acquire::http::Timeout=15",
+        "-o Acquire::https::Timeout=15",
+        # A conffile prompt is a stall the retry cannot absorb — it is not transient.
+        "-o Dpkg::Options::=--force-confold",
+        "DEBIAN_FRONTEND=noninteractive",
     ):
         assert required in argv, (
             f"apt was never invoked with `{required}`, so the guarantee it carries is not in "
             f"force however the script reads.\nRecorded argv:\n{argv}"
         )
-    assert "dpkg --configure -a" in argv, (
-        "the dpkg repair never ran, so a killed install leaves the package database half "
-        f"unpacked with nothing to clear it.\nRecorded argv:\n{argv}"
+    assert "dpkg --configure -a" not in argv, (
+        "the dpkg repair ran after a failed `update`, which unpacked nothing. Claiming a broken "
+        f"package database there is a false diagnosis.\nRecorded argv:\n{argv}"
     )
     assert "::error::" in completed.stderr, (
         f"the final failure is not annotated for the Actions log.\n{completed.stderr}"
@@ -386,8 +449,53 @@ def test_a_healthy_apt_get_succeeds_on_the_first_attempt(tmp_path: Path) -> None
     )
 
 
+def test_a_stalled_install_is_bounded_and_repaired(tmp_path: Path) -> None:
+    """The scenario the other stubs cannot reach: `update` succeeds and `install` hangs.
+
+    `apt-get install` is the call named in #1978, and it only runs when `update` returned 0. A
+    suite whose failure stubs both fail on the first call proves the bound for `update` and
+    nothing else — measured: deleting `timeout` from the install call left all other tests green.
+    """
+    completed, elapsed, argv = _run(tmp_path, _STUB_INSTALL_HANGS)
+
+    assert completed.returncode == 1, (
+        f"a stalled install must fail the step, got exit {completed.returncode}.\n"
+        f"{completed.stderr}"
+    )
+    assert elapsed < _BOUND_S, (
+        f"the install call ran {elapsed:.1f}s against a {_ATTEMPT_TIMEOUT_S}s budget "
+        f"(bound {_BOUND_S}s) — it is not bounded, which is #1978 unfixed for the very call the "
+        "issue names."
+    )
+    assert _bounded_call("install", _ATTEMPT_TIMEOUT_S).search(argv), (
+        "`apt-get install` was not invoked as one bounded command. A script that bounds `update` "
+        "and leaves `install` bare satisfies every separate substring check and still wedges.\n"
+        f"Recorded argv:\n{argv}"
+    )
+    assert "apt-get install stalled and was killed" in completed.stderr, (
+        f"the stalled call is not named as the install phase.\n{completed.stderr}"
+    )
+    assert "may be local unpack work" in completed.stderr, (
+        "an install-phase stall must not be reported as a network failure outright — it may be "
+        f"local unpack work overrunning the budget.\n{completed.stderr}"
+    )
+    # Counted on the *bounded* invocation, not on the words appearing anywhere: both the `sudo`
+    # and the `dpkg` stub record the same call, so a bare substring count double-counts and an
+    # unbounded repair would still match. Once per failed attempt, including the last — skipping
+    # it on exhaustion leaves a half-unpacked database with nothing in the log about it.
+    repairs = re.findall(r"sudo timeout --kill-after=10s \d+s dpkg --configure -a", argv)
+    assert len(repairs) == 3, (
+        f"the bounded dpkg repair ran {len(repairs)} time(s), not once per failed attempt. It "
+        "runs maintainer scripts and can block on a lock, so it has to be both present and "
+        f"bounded.\nRecorded argv:\n{argv}"
+    )
+
+
 def test_a_zero_or_malformed_budget_is_refused(tmp_path: Path) -> None:
     """`timeout 0s` means *no limit*, so an unvalidated budget silently restores #1978."""
+    # The stub PATH is needed even here: without an `apt-get` on PATH the script fails its host
+    # preflight first, and this test would pass on exit 2 for the wrong reason.
+    stubs = _stub_dir(tmp_path, _STUB_SUCCEEDS, tmp_path / "argv.log")
     # An *empty* value is deliberately not here: `${KDIVE_APT_TIMEOUT_S:-60}` treats it as unset
     # and falls back to the bounded default, which is the safe direction. Only a value that
     # parses as a budget but is not one needs refusing.
@@ -396,7 +504,11 @@ def test_a_zero_or_malformed_budget_is_refused(tmp_path: Path) -> None:
             [str(_APT_SCRIPT), "libvirt-dev"],
             capture_output=True,
             text=True,
-            env={**os.environ, "KDIVE_APT_TIMEOUT_S": bad},
+            env={
+                **os.environ,
+                "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
+                "KDIVE_APT_TIMEOUT_S": bad,
+            },
             timeout=60,
             check=False,
         )

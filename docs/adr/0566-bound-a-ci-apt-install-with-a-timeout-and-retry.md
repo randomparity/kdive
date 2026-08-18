@@ -49,8 +49,8 @@ verdict classification `audit-deps.sh` carries.
 
 **`DPkg::Use-Pty=0` is not a detail; without it the timeout is decorative.** `timeout` signals
 its own process group, and apt's default pty mode starts `dpkg` in a *new* group and a new
-session — measured in `ubuntu:24.04` as `apt-get` pgid 1 against `dpkg` pgid 988 sid 988 — where
-neither the SIGTERM nor the `--kill-after` SIGKILL can reach it. `dpkg` also ignores SIGHUP
+session outside it — measured in `ubuntu:24.04` as `timeout` pgid 141, `apt-get` pgid 141,
+`dpkg` pgid 321 sid 321 — where neither the SIGTERM nor the `--kill-after` SIGKILL can reach it. `dpkg` also ignores SIGHUP
 (`SigIgn` 0x7), so the pty hangup does not end it either. A budget that expired mid-unpack
 therefore left an orphaned root `dpkg` holding `/var/lib/dpkg/lock`, and because apt's compiled
 `DPkg::Lock::Timeout` default is 0 — fail immediately — every remaining attempt died instantly
@@ -66,9 +66,24 @@ the last, itself under `timeout` because it executes maintainer scripts. Skippin
 exhaustion path would hand a developer who ran `just apt-install` a broken package database with
 nothing in the log to say so.
 
+The repair is skipped after a failed `update`, which unpacked nothing — repairing there would
+only assert a database problem that does not exist.
+
 `KDIVE_APT_TIMEOUT_S` is validated as a positive whole number. `timeout 0s` means *no limit*, so
 an unvalidated budget would let one mistyped digit silently restore the unbounded behavior of
 #1978 while the log went on printing a budget as though it were enforcing one.
+
+**Not every stall is a mirror.** A debconf question or a conffile prompt stalls apt just as
+effectively and is *not* transient, so it would burn all three attempts identically and go red —
+the one failure shape this design's retry cannot absorb. `DEBIAN_FRONTEND=noninteractive` (passed
+through `sudo env`, because sudoers may refuse to forward an environment variable) and
+`Dpkg::Options::=--force-confold` close both halves. Keeping the installed conffile is what an
+unattended `-y` install already means to mean.
+
+**The script refuses to run off Debian/Ubuntu.** `just apt-install` is the documented developer
+entry point and this project's own dev hosts are Fedora, where the loop would otherwise spend 20s
+of backoff re-running a command that cannot exist and close by advising a `dpkg` repair on a
+machine with no dpkg. Three identical `127`s are not a transient failure.
 
 **The budget is sized so that a timeout is expected to be survivable, not exceptional.** The
 install ceiling defaults to 60s — several times the ~15s `libvirt-dev` costs, and an order of
@@ -126,13 +141,19 @@ install …` one-liner straight through — every package-installing workflow re
 every job in one declares `timeout-minutes`, and the retry shape still matches
 `pull-test-images.sh`.
 
-The other four **run the script**: against a stub `apt-get` that hangs, one that exits 100, and
-one that succeeds, plus one that rejects a malformed budget. No static assertion can tell whether
-the timeout actually fires, and "no bare `apt-get` in the workflows" would pass just as happily
-over a script that hangs forever. Those runs also record the argv every stub was handed, so
-`--kill-after`, `sudo`, `DPkg::Use-Pty=0`, `Acquire::Retries=0` and `--no-install-recommends` are
-asserted as *given to apt* — each was individually deletable without reddening a test until the
-stubs started recording.
+The other six **run the script**: against a stub `apt-get` that hangs on `update`, one that
+exits 100, one that succeeds, one that lets `update` pass and hangs on `install`, and one that
+rejects a malformed budget. No static assertion can tell whether the timeout actually fires, and
+"no bare `apt-get` in the workflows" would pass just as happily over a script that hangs forever.
+
+The install-hang stub earns its place by measurement. Without it, every failure stub failed on
+the *first* apt call — `update` — so the `install` call, the one the issue names, was never
+exercised on a failure path, and deleting its `timeout` left the whole suite green. The runs also
+record the argv every stub was handed and match each call as one bounded command, because
+membership tests on `sudo`, `--kill-after` and `install` as separate substrings are all satisfied
+by a script that bounds `update` and leaves `install` bare. Twelve mutations were run against the
+result — an unbounded install, an unbounded or unprivileged repair, a repair skipped on the last
+attempt, and each of the six `-o` options deleted individually — and all twelve fail the suite.
 
 ## Consequences
 
