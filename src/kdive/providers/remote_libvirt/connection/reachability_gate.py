@@ -47,7 +47,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.connection.uri_validation import REQUIRED_REMOTE_SCHEME
+from kdive.providers.remote_libvirt.connection.uri_validation import validate_remote_transport
 from kdive.providers.remote_libvirt.settings import REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS
 
 #: libvirt's registered port for the TLS transport, used when the URI names no port.
@@ -82,14 +82,14 @@ def remote_endpoint(uri: str) -> tuple[str, int]:
             is not a usable TCP port. Probing ``localhost`` instead of refusing a host-less URI
             would silently gate a host the operator never declared.
     """
-    parsed = urlsplit(uri)
     # Re-checked here rather than trusted from the caller. `remote_connection` does run the full
     # `validate_remote_uri` first, but this module is a public seam #1947's capture reaper is told
-    # to open through, and the scheme is what keeps the probe destination inside the operator's
-    # declared, TLS-only inventory. Only the scheme: the full validator forbids a `pkipath`
-    # parameter, and by this point `remote_connection` has composed exactly that onto the URI.
-    if parsed.scheme != REQUIRED_REMOTE_SCHEME:
-        raise _misconfigured(uri, f"does not use the {REQUIRED_REMOTE_SCHEME}:// scheme")
+    # to open through, and the scheme plus `no_verify` are what keep the probe destination inside
+    # the operator's declared, TLS-only inventory. The transport subset rather than the whole
+    # validator: the full one forbids a `pkipath` parameter, and by this point `remote_connection`
+    # has composed exactly that onto the URI.
+    validate_remote_transport(uri)
+    parsed = urlsplit(uri)
     host = (parsed.hostname or "").strip()
     if not host:
         raise _misconfigured(uri, "names no host, so its reachability cannot be checked")
@@ -103,15 +103,23 @@ def remote_endpoint(uri: str) -> tuple[str, int]:
 
 
 def _reportable(uri: str) -> str:
-    """``uri`` with its query stripped, for a message or an error detail.
+    """``uri`` reduced to scheme, host, port and path, for a message or an error detail.
 
     ``remote_connection`` composes ``?pkipath=<mkdtemp dir>`` onto the URI before handing it to the
     opener, and that directory holds the 0600 client key for the op. Reporting the composed spelling
     would put the path to live private-key material into a WARNING that ``_enter_host`` already logs
-    with ``exc_info=True``. The host, port and scheme are what an operator needs; the query is not.
+    with ``exc_info=True``. The netloc is rebuilt from the host and port rather than reused, so any
+    userinfo an operator put in the URI goes with the query rather than surviving into the log.
     """
     parsed = urlsplit(uri)
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    host = parsed.hostname or ""
+    try:
+        port = parsed.port
+    except ValueError:
+        # This runs on the path that *reports* a malformed port, so it cannot re-raise on one.
+        port = None
+    netloc = f"{host}:{port}" if port else host
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
 def _misconfigured(uri: str, problem: str) -> CategorizedError:

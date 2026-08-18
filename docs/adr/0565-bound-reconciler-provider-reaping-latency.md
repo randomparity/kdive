@@ -200,6 +200,11 @@ dump-volume reaper, `RemoteLibvirtInfraReaper` — which backs the `leaked_domai
   resolver still costs the resolver's own retry budget per host, ahead of the gate's clock. The lane
   budget is what caps that at one candidate per pass; the setting's contract says so rather than
   implying a bound it does not have.
+- **The gate re-checks the transport it is about to probe** — scheme and `no_verify`, via
+  `validate_remote_transport`, the subset of `validate_remote_uri` that survives the per-op pkipath
+  composition. `remote_connection` already validates, so this is redundant on today's only caller;
+  it exists because the opener is the seam #1947 is told to use, and a caller that skipped
+  validation would otherwise pick the probe's destination.
 - **The gate is a check-then-act.** A host that accepts TCP at probe time and dies before
   `libvirt.open` is back to the unbounded case. The window is one round trip wide and the outcome is
   the pre-existing behavior, so the gate is an improvement rather than a guarantee.

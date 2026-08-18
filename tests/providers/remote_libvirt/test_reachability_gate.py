@@ -17,6 +17,9 @@ from kdive.providers.remote_libvirt.connection.reachability_gate import (
     require_reachable,
 )
 
+#: Credential-looking userinfo, present only so a test can assert it is *not* logged.
+_USERINFO = "admin:hunter2"  # pragma: allowlist secret
+
 
 @pytest.fixture
 def listening_endpoint() -> Iterator[tuple[str, int]]:
@@ -206,12 +209,16 @@ def test_the_refusal_carries_the_last_address_failure_rather_than_claiming_a_tim
     assert isinstance(excinfo.value.__cause__, ConnectionRefusedError)
 
 
-def test_a_non_tls_scheme_is_refused_before_anything_is_probed() -> None:
+@pytest.mark.parametrize(
+    "uri",
+    ["qemu+tcp://plain.example/system", "qemu+tls://host.example/system?no_verify=1"],
+)
+def test_a_weakened_transport_is_refused_before_anything_is_probed(uri: str) -> None:
     """The gate re-validates rather than trusting its caller.
 
     ``remote_connection`` does validate first, but this is a public seam #1947's capture reaper is
-    told to open through, and the scheme check is what keeps the probe destination inside the
-    operator's declared, TLS-only inventory.
+    told to open through, and the scheme plus ``no_verify`` are what keep the probe destination
+    inside the operator's declared, TLS-only inventory.
     """
     probed: list[object] = []
 
@@ -220,9 +227,44 @@ def test_a_non_tls_scheme_is_refused_before_anything_is_probed() -> None:
         raise AssertionError("must not be reached")
 
     with pytest.raises(CategorizedError) as excinfo:
-        require_reachable("qemu+tcp://plain.example/system", timeout=1.0, connect=connect)
+        require_reachable(uri, timeout=1.0, connect=connect)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert probed == []
+
+
+def test_no_failure_path_reports_the_composed_pkipath_or_userinfo() -> None:
+    """Every raise the gate can take, not just the timeout one.
+
+    ``_enter_host`` logs the raise with ``exc_info=True``, so one unstripped path is one leak.
+    """
+    pki = "/tmp/kdive-remote-pki-secret"  # noqa: S108 - a literal path, not a real one
+    base = f"qemu+tls://{_USERINFO}@down.example/system?pkipath={pki}"
+
+    def refuse(_address: tuple[str, int], _timeout: float) -> ProbeSocket:
+        raise TimeoutError("timed out")
+
+    cases = [
+        # no address resolved, resolver failed, every address failed, unusable port
+        lambda: require_reachable(base, timeout=1.0, resolve=lambda _h, _p: []),
+        lambda: require_reachable(base, timeout=1.0, resolve=_raise_oserror),
+        lambda: require_reachable(
+            base, timeout=1.0, connect=refuse, resolve=lambda _h, port: [("192.0.2.1", port)]
+        ),
+        lambda: remote_endpoint(
+            f"qemu+tls://{_USERINFO}@down.example:notanum/system?pkipath={pki}"
+        ),
+    ]
+    for case in cases:
+        with pytest.raises(CategorizedError) as excinfo:
+            case()
+        rendered = str(excinfo.value) + repr(excinfo.value.details)
+        assert pki not in rendered
+        assert _USERINFO not in rendered
+        assert "down.example" in rendered
+
+
+def _raise_oserror(_host: str, _port: int) -> list[tuple[str, int]]:
+    raise OSError("Name or service not known")
 
 
 def test_a_failure_never_reports_the_composed_pkipath() -> None:
