@@ -240,8 +240,7 @@ status_region() {
 #
 # Scoped to the preamble, by stopping at the first `## ` the way preamble() does: a line that
 # looks like a status bullet but sits inside a section is body content of an append-only section
-# and stays byte-protected. Applied to canonicalise's output as well as to a raw file, where the
-# heading has already been lowercased — `/^## /` matches either spelling.
+# and stays byte-protected.
 #
 # A sentinel line, not a deletion, so the bullet still has to be present: removing it outright
 # drops a line from the comparison and E-PREAMBLE-REWRITTEN still fires.
@@ -269,12 +268,13 @@ mask_status_bullet() {
 # canonicalise has already lowercased it, so `## Status:` and `## status` both arrive here
 # as `## status` and the same test recognises either spelling.
 #
-# mask_status_bullet is the same exclusion for the other shape a record's status comes in. It is
-# applied here rather than inside canonicalise because canonicalise is the definition of a marker
-# and is also renumbered_elsewhere's content comparison — discarding a status value there would
-# let a deleted record be excused by a sibling differing from it only in status.
+# A pre-template record's status bullet is *not* excluded here, even though its value is equally
+# unprotected (see mask_status_bullet). Excluding it would only widen the marker-only shortcut in
+# front of the three rules; the rule that actually examines the preamble does the masking itself,
+# so a status-bullet edit falls through this predicate and is accepted there. Being stricter here
+# than the rules are is safe in the one direction that matters — it makes them run.
 protected_shape() {
-  canonicalise "$1" | mask_status_bullet | awk '
+  canonicalise "$1" | awk '
     /^## / { in_status = ($0 == "## status"); print; next }
     !in_status { print }
   '
@@ -481,9 +481,9 @@ check_headings_intact() {
 # never reaches them either — it is where a pre-template record keeps its metadata bullets.
 #
 # Compared through mask_status_bullet, for the reason protected_shape drops the `## Status` body:
-# the status value is not protected in either shape. Both call sites are needed. The allowance in
-# front of this rule answers a marker-only diff, and the realistic supersession commit changes the
-# bullet *and* adds the banner line beneath it, which is not marker-only and lands here.
+# the status value is not protected in either shape. This is the only place it is masked — the
+# marker-only allowance in front of this rule does not need to know, since a status-bullet edit
+# it declines simply arrives here and is accepted.
 check_preamble_intact() {
   local tmp=$1 path=$2 removed
   removed=$(diff <(preamble "$tmp" | mask_status_bullet) <(preamble "$path" | mask_status_bullet) |
