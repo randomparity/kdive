@@ -6,8 +6,8 @@ failure is a **stall**, not a non-zero exit — `apt-get` never returned — so 
 half of the fix is the hard `timeout` in `scripts/apt-install.sh`, and the retry is what keeps a
 timeout from being fatal on a merely slow mirror.
 
-Four of these tests are static: they read the workflows, the script and the `justfile` and
-assert the wiring. The other four actually **run** the script — against a stub `apt-get` that
+Five of these tests are static: they read the workflows, the script and the `justfile` and
+assert the wiring. The other five actually **run** the script — against a stub `apt-get` that
 hangs, that fails, and that succeeds, plus a malformed budget — because a wiring assertion
 cannot tell whether the timeout fires. That is the whole claim, and asserting the absence of a
 bare `apt-get` would pass just as happily over a script that hangs forever. Those runs also
@@ -140,35 +140,43 @@ def test_no_workflow_installs_packages_with_a_bare_apt_get() -> None:
     )
 
 
-def test_every_job_in_a_package_installing_workflow_declares_a_timeout() -> None:
-    """A hard timeout inside the script bounds one step; `timeout-minutes` bounds the rest."""
-    # Derived, not hardcoded: any workflow that reaches the shared script is a workflow whose
-    # jobs can be wedged by an apt step, including one added after this guard was written.
-    names = sorted(
-        {path.name for path in _workflow_files() if _SHARED_SCRIPT.search(path.read_text("utf-8"))}
-        | set(_APT_WORKFLOWS)
+def test_every_job_in_every_workflow_declares_a_timeout() -> None:
+    """A hard timeout inside the script bounds one step; `timeout-minutes` bounds the rest.
+
+    Every workflow, not only the package-installing ones (#1983). The 360-minute default is a
+    property of GitHub Actions, not of `apt-get`: a job that wedges on a registry push or an
+    emulated build burns the same six hours, and scoping this to `_APT_WORKFLOWS` left five
+    workflows on the default with nothing to say so.
+    """
+    paths = _workflow_files()
+    # Non-empty first: "every job declares a timeout" is also true of a directory with no
+    # workflows in it, and of a glob that stopped matching either spelling.
+    assert paths, (
+        f"no workflow files matched {_WORKFLOW_GLOBS} under {_WORKFLOWS.relative_to(_ROOT)}, so "
+        "this guard is asserting nothing (ADR-0566, #1983)."
     )
 
     missing: list[str] = []
     checked = 0
-    for name in names:
-        jobs = _jobs(_workflow_text(name))
-        assert jobs, f"no jobs parsed out of {name} — the workflow layout changed (ADR-0566)"
+    for path in paths:
+        jobs = _jobs(_workflow_text(path.name))
+        assert jobs, f"no jobs parsed out of {path.name} — the workflow layout changed (ADR-0566)"
         for job_name, body in jobs.items():
             checked += 1
             if not _JOB_TIMEOUT.search(body):
-                missing.append(f"{name}:{job_name}")
+                missing.append(f"{path.name}:{job_name}")
 
-    # The real count across these four workflows is 11. `>= len(names)` would be satisfied by a
+    # The real count across the ten workflows is 17. `>= len(paths)` would be satisfied by a
     # parser that found one job per file and silently stopped checking the other seven.
-    assert checked >= 11, (
-        f"only {checked} job(s) parsed across {names}; the parser has drifted and this guard is "
-        "checking a fraction of what it claims to (ADR-0566)."
+    assert checked >= 17, (
+        f"only {checked} job(s) parsed across {[path.name for path in paths]}; the parser has "
+        "drifted and this guard is checking a fraction of what it claims to (ADR-0566)."
     )
     assert not missing, (
         f"{missing} declare no job-level `timeout-minutes`, so a wedged step there runs to the "
         "360-minute GitHub Actions default. That is what made #1978 cost a full CI cycle each "
-        "time it fired. Size it from the job's observed runtime with headroom (ADR-0566)."
+        "time it fired. Size it from the job's observed runtime with headroom, and put the "
+        "observed figure in a comment beside it (ADR-0566, #1983)."
     )
 
 

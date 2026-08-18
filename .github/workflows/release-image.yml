@@ -23,6 +23,14 @@ jobs:
   publish:
     name: build · push · sbom · sign
     runs-on: ubuntu-latest
+    # Observed 152-248 min across the last 19 successful runs, all of them main pushes; no apt
+    # step. The emulated linux/ppc64le leg is the whole of that (ADR-0359) and its spread is
+    # ~60%, so this bound sits close to the 360-minute default it replaces rather than far
+    # below it — the honest value for this job, not a comfortable one. A v* tag build has never
+    # run and additionally emits an SBOM and max provenance, which is the other reason not to
+    # size this to the observed maximum. #1986 tracks making the observation smaller
+    # (ADR-0566, #1983).
+    timeout-minutes: 330
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
