@@ -37,6 +37,9 @@ jobs:
   check-drift:
     name: upstream spec revision
     runs-on: ubuntu-latest
+    # The GitHub default is 360 minutes, and a wedged apt step burns all of it (#1978).
+    # Observed ~35s plus the apt script's ~11 min worst case, plus margin (ADR-0566).
+    timeout-minutes: 15
     permissions:
       contents: read # read the checkout to run the guard; no write scope is needed here
     outputs:
@@ -53,9 +56,9 @@ jobs:
       - name: Install libvirt build headers
         # libvirt-python has no wheels; it compiles against the system libvirt headers, so
         # `uv sync` fails without libvirt-dev present.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libvirt-dev
+        # Same bounded script `just apt-install libvirt-dev` runs; this job never sets up
+        # `just`, so it invokes the script directly (ADR-0566, #1978).
+        run: ./scripts/apt-install.sh libvirt-dev
 
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -84,6 +87,8 @@ jobs:
   report:
     name: file or update the tracking issue
     runs-on: ubuntu-latest
+    # Observed ~5s; no apt step (ADR-0566).
+    timeout-minutes: 10
     needs: check-drift
     if: needs.check-drift.outputs.exit_code != '0'
     permissions:

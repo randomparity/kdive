@@ -52,7 +52,11 @@ jobs:
     runs-on: ubuntu-26.04
     # timeout-minutes is set from the measured boot-to-panic wall-time (ceil(measured x 1.5), floor
     # 30) by the local TCG proof (#1293 plan Task 7); 30 is the floor default until measured.
-    timeout-minutes: 30
+    # Raised from 30 to hold the host-dep step's own worst case alongside that floor: the bounded
+    # apt retry below can spend ~17 minutes before it gives up, and at 30 a total mirror outage
+    # would cut the job off instead of letting the step fail with the mirror named (#1978,
+    # ADR-0566). The boot-to-panic budget itself is unchanged.
+    timeout-minutes: 50
     concurrency:
       group: live-tcg-${{ github.ref }}
       cancel-in-progress: false
@@ -69,9 +73,18 @@ jobs:
           persist-credentials: false
 
       - name: Install host deps (ppc64le emulator, libguestfs, elfutils, debuginfod, libvirt-dev)
+        # Same bounded script `just apt-install <packages>` runs, shared with the PR gate's
+        # libvirt-dev step (ADR-0566, #1978). This set is an order of magnitude larger to
+        # download than libvirt-dev alone — the emulator and the libguestfs appliance — so it
+        # raises the install budget rather than forcing one value to fit both. Measured: this
+        # whole set installs in ~30s, so 180s is six times the observed cost. `apt-get update`
+        # keeps its own 60s cap inside the script, so the worst case for a total outage is about
+        # 17 minutes — which is why timeout-minutes above had to grow to hold it alongside the
+        # emulated boot.
+        env:
+          KDIVE_APT_TIMEOUT_S: "180"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          ./scripts/apt-install.sh \
             qemu-system-ppc libguestfs-tools e2fsprogs elfutils debuginfod libvirt-dev \
             python3-guestfs libvirt-daemon-system libvirt-clients qemu-utils
 
