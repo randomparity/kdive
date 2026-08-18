@@ -93,8 +93,12 @@ _JUST_RECIPE = re.compile(
 )
 
 
-def _jobs(path: Path) -> dict[str, dict[str, object]]:
+def _jobs(path: Path) -> dict[str, object]:
     """Parse a workflow into ``{job name: that job's mapping}``.
+
+    The values are typed `object`, not `dict`, because nothing here has validated them — a
+    malformed workflow can put anything under a job key, and claiming `dict` would move that
+    check from the callers, which do it, into a signature, which cannot.
 
     Per job, not per file: a `timeout-minutes` on one job says nothing about the wedge budget
     of the job beside it, and a whole-file search would count it for both.
