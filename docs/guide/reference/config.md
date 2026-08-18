@@ -274,6 +274,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `KDIVE_APT_TIMEOUT_S` | `60` | Positive whole-second wall-clock bound for each `apt-get install` in scripts/apt-install.sh; `apt-get update` is capped at 60s independently. Raised by live.yml for its larger host-dep set (ADR-0566, #1978). |
 | `KDIVE_BOOT_DIR` | `/boot` | Boot directory `check-local-libvirt.sh` scans for readable `vmlinuz-*` host kernels (libguestfs build-fs appliance, ADR-0222). |
 | `KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS` | `10` | Positive whole-second PostgreSQL connection bound exported by the protocol cutover wrappers for each database operation. |
 | `KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS` | `300` | Positive whole-second server-side statement bound exported by the protocol cutover wrappers for each database operation. |
