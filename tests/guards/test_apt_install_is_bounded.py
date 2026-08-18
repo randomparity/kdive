@@ -1,4 +1,9 @@
-"""Guard: CI's apt installs are bounded, retried, and written down exactly once (ADR-0566).
+"""Guard: CI's apt installs are bounded and retried, and every workflow job declares a timeout.
+
+Two guarantees, one record (ADR-0566), because one is why the other exists. The apt half is
+bounded, retried and written down exactly once. The job half — the `declares_a_timeout` test
+below — began as its backstop and is now the repo-wide rule for every workflow, apt or not
+(#1983); a workflow author who trips a red check from this file is most likely tripping that.
 
 `Install libvirt build headers` wedged for 13 and 33 minutes on two runs in one afternoon
 against a ~15s normal (#1978), and each time a human had to notice and cancel the job. The
@@ -186,12 +191,23 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
         assert jobs, f"no jobs parsed out of {path.name} — the workflow layout changed (ADR-0566)"
         for job_name, job in jobs.items():
             checked += 1
-            if isinstance(job, dict) and "uses" in job:
+            uses = job.get("uses") if isinstance(job, dict) else None
+            if uses is not None:
                 # A job that calls a reusable workflow cannot declare `timeout-minutes` —
                 # actionlint (`just lint-workflows`, on the same `just ci` chain as this test)
                 # rejects it, and so does GitHub. Requiring it here would deadlock the first
-                # such job against the repo's other gate. Nothing is lost: a caller's runtime
-                # is the callee's, and a callee in this repo is a workflow this guard reads.
+                # such job against the repo's other gate. What makes the skip safe is that the
+                # callee is a workflow this guard also reads, so assert that rather than
+                # assuming it: an out-of-repo callee's jobs are invisible here and run on the
+                # default, which is the one way this exemption becomes the hole it exists to
+                # avoid. This is the guard's only skip, so it fails loudly instead of silently.
+                assert str(uses).startswith("./"), (
+                    f"{path.name}:{job_name} calls the out-of-repo reusable workflow {uses!r}. "
+                    "Its jobs are not in this repo, so nothing here can check their "
+                    "`timeout-minutes` and they run on the 360-minute Actions default, while "
+                    "this guard reports the repo as bounded. A local callee (`./.github/...`) "
+                    "is covered because this guard reads it directly (ADR-0566, #1983)."
+                )
                 continue
             declared = job.get("timeout-minutes") if isinstance(job, dict) else None
             if declared is None:
@@ -220,8 +236,6 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
         "runner nothing above it is enforceable either. Size it from the job's observed runtime "
         "(ADR-0566, #1983)."
     )
-    # Non-empty first, for the same reason as everything else here: "every declaration carries a
-    # comment" is trivially true of a tree with no declarations in it.
 
 
 def test_apt_retry_shape_matches_the_prepull_script() -> None:
