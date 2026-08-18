@@ -56,8 +56,17 @@ Both regions, unconditionally, rather than a branch on which shape the record is
 needs a predicate, and every cheap one is forgeable from inside the record it judges: a
 `## Status` line quoted in a fenced example satisfies `grep -qxF`, `section_body` then returns the
 fence, and the preamble's real banner goes unread — this defect, reopened by a documentation
-snippet. The union has no such input, and it costs nothing: a conforming record's preamble is
-empty, and a pre-0504 record has no `## Status` body.
+snippet. The union has no such input, and for the two shapes records actually come in it costs
+nothing: a conforming record's preamble is empty, and a pre-0504 record has no `## Status` body.
+
+It does cost something for a third, constructible shape — content in both regions — and that has
+to be paid rather than assumed away. `BANNER_REPLACES_STATUS=yes` (the deferral profile) makes a
+well-formed banner stand in for the status word, so a banner one line above the first heading
+would skip `profile_check_status` altogether; in the base pass that flips the record's verdict to
+conforming, and one line would both stop its status being validated and revoke its grandfathering.
+That early return is therefore keyed to the `## Status` body, not to the whole region: the body is
+the only place a record of such a kind declares a status. The form, count and date rules stay on
+the union, because judging a banner wherever it sits is the point.
 
 `check_status` (engine) and `check_supersede_link` (`profiles/adr.sh`) both read `status_region`
 instead of `section_body … "## Status"`, so banner form, banner count, banner date and banner link
@@ -95,6 +104,12 @@ label. Masking every match would let a change add a `Status:` bullet carrying a 
 commit and gut it in the next, both green — an erasure route straight through the allowance, since
 `check_preamble_intact` counts removals and never objects to the addition.
 
+First by position, not by which line is really the status. A `Status:`-prefixed prose line placed
+above the status bullet consumes the allowance and leaves the bullet protected. That is the loud
+direction — the prescribed supersession edit then reports `E-PREAMBLE-REWRITTEN` and the author
+moves the line — so position is enough, and a rule that tried to identify the *real* status line
+would need a heuristic over prose.
+
 One call site, not two. `marker_only_change` — the shortcut in front of the three anti-rewrite
 rules — is left as strict as it was, because a status-bullet edit it declines simply arrives at
 `check_preamble_intact` and is accepted there. Masking in `protected_shape` as well was
@@ -120,11 +135,14 @@ in status.
   gains no warning and loses none — a measured 1720 before and after — and no error is
   introduced, because the link extractor does not recognise that spelling either. The banner
   form the README prescribes stays the single canonical one.
-- A merged record may now rewrite the value of its **first** status bullet to anything. That is
-  the same latitude the `## Status` body has always had, and the same argument covers it: a status
-  is state, not a claim the record makes. Nothing else moves — a `Date:` or `Deciders:` bullet, a
-  second `Status:`-labelled preamble line, an indented one, and a `Status:` line inside any
-  section all stay byte-protected.
+- A merged record may now rewrite the value of the **first** column-one `Status:`-labelled line
+  in its preamble to anything. That is the same latitude the `## Status` body has always had, and
+  the same argument covers it: a status is state, not a claim the record makes. Nothing else
+  moves — a `Date:` or `Deciders:` bullet, any *later* `Status:`-labelled preamble line, an
+  indented one, and a `Status:` line inside any section all stay byte-protected.
+- A deferral record's status still comes from its `## Status` section. A resolution banner in the
+  preamble is judged for form, count and date, but does not stand in for the status word, so such
+  a record cannot become conforming by growing one line above its first heading.
 - `migrate-records.sh` checks its own output with `marker_only_change`, which this change leaves
   untouched, so the migrator gains no permission it did not have: a transform that rewrote a status
   bullet would still fail its `E-SELF-CHECK` and refuse to write. It has no such transform —

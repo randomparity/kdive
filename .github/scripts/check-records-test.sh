@@ -1660,6 +1660,23 @@ SH
   write_adr "$d" "0001-first.md" "Accepted (2026-01-01)" "> **Superseded by 0002**"
   run_case "malformed ADR banner" 1 E-BANNER-FORM "$d" BASE_SHA="$b" RECORD_PROFILES=adr
 
+  # BANNER_REPLACES_STATUS is a deferral-profile property, and the status region reaches the
+  # preamble — so a banner one line above the first heading must not stand in for the record's
+  # status. It would skip profile_check_status entirely, and in the base pass that flips the
+  # record's verdict to conforming: one line would both stop its status being validated and
+  # revoke the grandfathering that line's own shape is the reason for.
+  d=$(case_dir debt_preamble_banner)
+  b=$(base_of "$d")
+  {
+    head -1 "$d/docs/debt/0001-valid.md"
+    printf '\n> **Resolved by nothing at all** (2026-01-01)\n'
+    tail -n +2 "$d/docs/debt/0001-valid.md"
+  } >"$d/.rec"
+  mv "$d/.rec" "$d/docs/debt/0001-valid.md"
+  sed 's/^Open$/Pending/' "$d/docs/debt/0001-valid.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/debt/0001-valid.md"
+  run_case "a preamble banner does not stand in for Status" 1 E-STATUS "$d" BASE_SHA="$b"
+
   # The same contract on the deferral profile, which has never had a case for it: the two
   # patterns are per-profile values, so one profile's routing proves nothing about the other's.
   d=$(case_dir debt_banner_form)
