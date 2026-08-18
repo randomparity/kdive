@@ -125,6 +125,14 @@ class CaptureReaper(Protocol):
     is also not a reclaim, so the sweep neither counts it nor marks the row complete and the row
     becomes eligible again after its retry deadline. Raising and returning ``False`` differ only
     in whether the sweep logs a traceback; neither can mark a row.
+
+    **A remote implementation must open through** ``remote_libvirt_reaper_connections``. The sweep
+    calls this from inside the job's fenced transaction, and libvirt honours no connect-timeout URI
+    parameter, so the only thing bounding an unreachable host is the reachability gate on that
+    seam's opener (ADR-0565). A reaper that calls ``open_libvirt_protocol`` itself compiles and
+    passes its tests while holding the fence for the kernel's ~130 s TCP connect timeout per
+    unreachable declared host. Nothing enforces this mechanically; #1947 owns it. (#1948's
+    local-libvirt reaper connects over ``qemu:///system`` and does not use this seam.)
     """
 
     async def reclaim_capture(self, capture: OrphanedCapture) -> bool: ...

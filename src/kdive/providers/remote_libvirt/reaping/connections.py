@@ -17,6 +17,10 @@ from contextlib import AbstractContextManager, ExitStack
 from typing import NoReturn, Protocol
 
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, all_remote_configs
+from kdive.providers.remote_libvirt.connection.reachability_gate import (
+    reaper_connect_timeout,
+    require_reachable,
+)
 from kdive.providers.remote_libvirt.connection.transport import (
     ClosableConn,
     RemoteLibvirtConnections,
@@ -106,7 +110,20 @@ def find_over_fleet[C](
 
 
 def open_libvirt_reaper[ConnT: ClosableConn](uri: str) -> ConnT:
-    """Production opener for live remote-libvirt reaper paths."""
+    """Production opener for live remote-libvirt reaper paths, gated on reachability (ADR-0565).
+
+    The gate runs first so an unreachable host raises ``TRANSPORT_FAILURE`` here instead of costing
+    ``libvirt.open`` the kernel's TCP connect timeout (~130 s, and not a value an operator can
+    tune — libvirt honours no connect-timeout URI parameter). :func:`_enter_host` already isolates
+    that raise as the unreachable-host case it logs and skips, so no caller changes.
+
+    Every fleet-fan-out reaper shares this opener — the dump-volume sweep, the leaked-domain and
+    leaked-probe sweeps through :class:`RemoteLibvirtInfraReaper`, and #1947's capture reaper when
+    it lands — which is what makes one gate cover them all. It runs inside ``remote_connection``'s
+    materialized pkipath, so an unreachable host still costs one materialize-and-delete cycle; the
+    gate reads none of that material.
+    """
+    require_reachable(uri, timeout=reaper_connect_timeout())
     return open_libvirt_protocol(uri)
 
 

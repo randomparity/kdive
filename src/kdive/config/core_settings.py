@@ -700,6 +700,30 @@ RESOURCE_LEASE_TTL_SECONDS = Setting(
     suggest="an integer number of seconds, e.g. 86400 (24 hours)",
 )
 
+RECONCILER_LANE_BUDGET_SECONDS = Setting(
+    name="KDIVE_RECONCILER_LANE_BUDGET_SECONDS",
+    parse=_positive_int,
+    default="10",
+    group="reconciler",
+    processes=_RECONCILER,
+    help=(
+        "Seconds either host-state reaping lane may keep starting new candidates in one pass "
+        "(ADR-0565). Measured on the reconciler process's monotonic clock, per lane per pass — the "
+        "capture lane and the dump-volume lane each get a full budget rather than a share of one. "
+        "The lane consults it only between candidates, never while a provider call is in "
+        "flight, so it never ends a transaction the provider may still be mutating host state "
+        "under. On violation the lane returns after the candidate in flight completes, having "
+        "attempted fewer than its batch allows; that is not counted as a failure and is logged "
+        "at INFO with the unattempted count. No recovery is required — the next pass re-derives "
+        "the remainder. Raise it, or the reconcile interval, when a backlog is not draining; the "
+        "default is a third of the 30 s interval so both lanes still leave room for the rest of "
+        "the repair catalog. "
+        "ops.reconcile_now's on-demand pass uses the compiled-in default, as it does for every "
+        "other reconciler knob."
+    ),
+    suggest="a positive integer number of seconds, e.g. 10",
+)
+
 FAULT_INJECT = Setting(
     name="KDIVE_FAULT_INJECT",
     parse=_str,
@@ -1066,6 +1090,7 @@ SETTINGS = [
     INVENTORY_WRITEBACK,
     INVENTORY_WRITEBACK_CONFIGMAP,
     RESOURCE_LEASE_TTL_SECONDS,
+    RECONCILER_LANE_BUDGET_SECONDS,
     FAULT_INJECT,
     LOCAL_LIBVIRT_ENABLED,
     OTEL_ENABLED,

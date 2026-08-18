@@ -168,10 +168,17 @@
 | `KDIVE_OTEL_SERVICE_NAMESPACE` | lifecycle-witness, migrate, reconciler, server, worker | `kdive` | no | service.namespace resource attribute on all emitted telemetry. |
 | `KDIVE_OTEL_TRACES_SAMPLER_RATIO` | lifecycle-witness, migrate, reconciler, server, worker | `0.1` | no | Parent-based ratio trace sampler ratio in [0, 1] (default 0.1). |
 
+## reconciler
+
+| Variable | Processes | Default | Required | Value |
+|----------|-----------|---------|----------|-------|
+| `KDIVE_RECONCILER_LANE_BUDGET_SECONDS` | reconciler | `10` | no | Seconds either host-state reaping lane may keep starting new candidates in one pass (ADR-0565). Measured on the reconciler process's monotonic clock, per lane per pass — the capture lane and the dump-volume lane each get a full budget rather than a share of one. The lane consults it only between candidates, never while a provider call is in flight, so it never ends a transaction the provider may still be mutating host state under. On violation the lane returns after the candidate in flight completes, having attempted fewer than its batch allows; that is not counted as a failure and is logged at INFO with the unattempted count. No recovery is required — the next pass re-derives the remainder. Raise it, or the reconcile interval, when a backlog is not draining; the default is a third of the 30 s interval so both lanes still leave room for the rest of the repair catalog. ops.reconcile_now's on-demand pass uses the compiled-in default, as it does for every other reconciler knob. |
+
 ## remote-libvirt
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
+| `KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS` | reconciler, server | `5` | no | Seconds a reconciler reaper waits for one libvirt host to accept a TCP connection before treating it as unreachable (ADR-0565). Measured on the reconciler's monotonic clock, shared by every address the host resolves to, per host per reaper connection attempt: a fan-out spends it once per unreachable host it walks, so the all-hosts-down worst case for one provider call is this value times the number of declared hosts. On violation that host is logged and skipped and the fan-out continues to the next declared host — the capture lane defers its row behind the usual backoff, the dump-volume lane leaves the volume for the next pass, and neither is counted as a fault. No caller recovery is needed; raise this for a slow-but-reachable fleet, or remove a down host from the declared inventory. Two things sit outside it: name resolution, because getaddrinfo takes no timeout (declare hosts by IP literal to remove that), and a host that accepts and then stalls, which only the lane budget caps (#1981). libvirt honours no connect-timeout URI parameter, which is why this is a separate probe. |
 | `KDIVE_REMOTE_LIBVIRT_MACHINE` | reconciler, worker | `pc` | no | QEMU machine type (pc/i440fx by default; q35 opt-in). |
 | `KDIVE_REMOTE_LIBVIRT_NETWORK` | reconciler, worker | `default` | no | libvirt network for guests. |
 | `KDIVE_REMOTE_LIBVIRT_STORAGE_POOL` | reconciler, worker | `default` | no | libvirt storage pool for guest disks. |
