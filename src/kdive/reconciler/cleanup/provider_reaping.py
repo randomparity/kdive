@@ -676,11 +676,11 @@ async def _dispatch_capture(
     The bound is therefore placed where it can be taken safely (ADR-0565), in two pieces outside
     this call. The reaper's own opener gates each host on a bounded TCP connect, so an unreachable
     host costs ``KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS`` rather than the kernel's ~130 s SYN
-    retry budget — for a capture reaper that opens through ``remote_libvirt_reaper_connections``,
-    which
-    #1947 must do to inherit it. And :func:`reap_orphaned_captures` stops dispatching once
-    its pass budget is spent, so a host that accepts the connection and then stalls costs the pass
-    one candidate instead of the whole batch (#1981 owns bounding that stall itself).
+    retry budget — which a remote capture reaper inherits only by opening through
+    ``remote_libvirt_reaper_connections``, as the :class:`CaptureReaper` port docstring requires.
+    And :func:`reap_orphaned_captures` stops dispatching once its pass budget is spent, so a host
+    that accepts the connection and then stalls costs the pass one candidate instead of the whole
+    batch (#1981 owns bounding that stall itself).
     """
     try:
         return await reaper.reclaim_capture(capture)

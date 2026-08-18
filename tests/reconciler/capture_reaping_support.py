@@ -29,7 +29,7 @@ async def connect(url: str) -> psycopg.AsyncConnection:
     return await psycopg.AsyncConnection.connect(url, autocommit=True)
 
 
-async def one_id(cursor: psycopg.AsyncCursor) -> UUID:
+async def _one_id(cursor: psycopg.AsyncCursor) -> UUID:
     """The single id a seeding INSERT returned."""
     row = await cursor.fetchone()
     assert row is not None
@@ -49,21 +49,21 @@ async def seed_chain(
     ``nameless=True`` leaves the column NULL, the ownership-integrity case ADR-0187 binding
     cannot resolve a host from.
     """
-    resource_id = await one_id(
+    resource_id = await _one_id(
         await conn.execute(
             "INSERT INTO resources (kind, name, pool, cost_class, status, host_uri) "
             "VALUES (%s, %s, 'p', 'c', 'available', 'qemu:///system') RETURNING id",
             (kind, None if nameless else f"host-{uuid4().hex[:12]}"),
         )
     )
-    allocation_id = await one_id(
+    allocation_id = await _one_id(
         await conn.execute(
             "INSERT INTO allocations (principal, project, resource_id, state) "
             "VALUES ('alice', 'proj', %s, 'active') RETURNING id",
             (resource_id,),
         )
     )
-    system_id = await one_id(
+    system_id = await _one_id(
         await conn.execute(
             "INSERT INTO systems (principal, project, allocation_id, state, "
             "    provisioning_profile, domain_name) "
@@ -71,13 +71,13 @@ async def seed_chain(
             (allocation_id, Jsonb({"k": "v"}), domain_name),
         )
     )
-    investigation_id = await one_id(
+    investigation_id = await _one_id(
         await conn.execute(
             "INSERT INTO investigations (principal, project, title, state) "
             "VALUES ('alice', 'proj', 't', 'open') RETURNING id"
         )
     )
-    run_id = await one_id(
+    run_id = await _one_id(
         await conn.execute(
             "INSERT INTO runs (principal, project, investigation_id, system_id, target_kind, "
             "    state, build_profile) "

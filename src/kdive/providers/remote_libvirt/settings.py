@@ -12,15 +12,14 @@ from __future__ import annotations
 from kdive.config.registry import Setting
 
 _RT = frozenset({"worker", "reconciler"})
-# The reaper connect gate is read only where the reapers run. The worker opens remote-libvirt
-# connections too, but against one host its caller already selected and under its own job lease, so
-# ADR-0565 deliberately leaves the worker planes' failure timing unchanged.
 # The reaper connect gate is read wherever a reaper runs, which is both processes that run a
 # reconcile pass: the reconciler on its loop, and the server through `ops.reconcile_now`, whose
-# `ReconcileRepairPorts` builds the same dump-volume and infra reapers. `processes` does not gate
-# resolution — the gate reads the value at call time either way — but declaring both makes
-# `config validate` reject a malformed value at server startup instead of letting it raise from
-# inside a fan-out, where `_enter_host` would log it as one more unreachable host on every pass.
+# `ReconcileRepairPorts` builds the same dump-volume and infra reapers. Not the worker — it opens
+# remote-libvirt connections too, but against one host its caller already selected and under its own
+# job lease, so ADR-0565 leaves the worker planes' failure timing unchanged. `processes` does not
+# gate resolution — the gate reads the value at call time either way — but declaring both
+# makes `config validate` reject a malformed value at server startup instead of letting it raise
+# from inside a fan-out, where `_enter_host` would log it as one more unreachable host every pass.
 _REAPER_HOSTS = frozenset({"reconciler", "server"})
 
 

@@ -232,6 +232,10 @@ def test_a_weakened_transport_is_refused_before_anything_is_probed(uri: str) -> 
     assert probed == []
 
 
+def _raise_oserror(_host: str, _port: int) -> list[tuple[str, int]]:
+    raise OSError("Name or service not known")
+
+
 def test_no_failure_path_reports_the_composed_pkipath_or_userinfo() -> None:
     """Every raise the gate can take, not just the timeout one.
 
@@ -261,31 +265,6 @@ def test_no_failure_path_reports_the_composed_pkipath_or_userinfo() -> None:
         assert pki not in rendered
         assert _USERINFO not in rendered
         assert "down.example" in rendered
-
-
-def _raise_oserror(_host: str, _port: int) -> list[tuple[str, int]]:
-    raise OSError("Name or service not known")
-
-
-def test_a_failure_never_reports_the_composed_pkipath() -> None:
-    """The opener is handed ``?pkipath=<mkdtemp dir>``, and that directory holds the 0600 key.
-
-    ``_enter_host`` logs the gate's raise with ``exc_info=True``, so anything in the message or the
-    details reaches the operator log.
-    """
-    pki = "/tmp/kdive-remote-pki-secret"  # noqa: S108 - a literal path, not a real one
-    uri = f"qemu+tls://down.example/system?pkipath={pki}"
-
-    def connect(_address: tuple[str, int], _timeout: float) -> ProbeSocket:
-        raise TimeoutError("timed out")
-
-    with pytest.raises(CategorizedError) as excinfo:
-        require_reachable(
-            uri, timeout=1.0, connect=connect, resolve=lambda _h, port: [("192.0.2.1", port)]
-        )
-    rendered = str(excinfo.value) + repr(excinfo.value.details)
-    assert pki not in rendered
-    assert "down.example" in rendered
 
 
 def test_the_timeout_comes_from_the_operator_setting(monkeypatch: pytest.MonkeyPatch) -> None:

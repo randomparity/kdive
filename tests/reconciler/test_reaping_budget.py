@@ -1,8 +1,9 @@
 """The per-lane pass budget on the two host-state reaping lanes (ADR-0565, #1980).
 
-The load-bearing tests here are the two ``holds_its_lock_until_the_provider_call_finishes`` cases.
-They are the proof #1980 asks for: that the bound never ends a transaction while a provider call
-may still be mutating host state. The shape is deliberate and each part carries weight —
+The load-bearing tests here are the two that assert a lane still holds its lock when the provider
+call finishes. They are the proof #1980 asks for: that the bound never ends a transaction while a
+provider call may still be mutating host state. The shape is deliberate and each part carries
+weight —
 
 * the fake reaper runs its work inside ``asyncio.shield``, so cancelling the coroutine awaiting it
   does **not** stop the work. That is the asymmetry a real reaper has: it drives a synchronous
@@ -156,9 +157,7 @@ class _ShieldedDumpVolumeReaper:
             await asyncio.gather(task, return_exceptions=True)
 
 
-async def _reap_captures(
-    url: str, reapers: dict[str, CaptureReaper], *, budget: timedelta = DEFAULT_LANE_BUDGET
-) -> int:
+async def _reap_captures(url: str, reapers: dict[str, CaptureReaper], *, budget: timedelta) -> int:
     async with await psycopg.AsyncConnection.connect(url) as conn:
         return await reap_orphaned_captures(
             conn,
@@ -171,9 +170,7 @@ async def _reap_captures(
         )
 
 
-async def _reap_volumes(
-    url: str, reaper: DumpVolumeReaper, *, budget: timedelta = DEFAULT_LANE_BUDGET
-) -> int:
+async def _reap_volumes(url: str, reaper: DumpVolumeReaper, *, budget: timedelta) -> int:
     async with await psycopg.AsyncConnection.connect(url) as conn:
         return await reap_orphaned_dump_volumes(conn, reaper, _GRACE, budget=budget)
 
@@ -230,7 +227,7 @@ def test_dump_volume_lane_holds_its_system_lock_until_the_delete_finishes(
 
 
 def test_capture_lane_stops_dispatching_once_the_budget_is_spent(migrated_url: str) -> None:
-    reaper = _ShieldedCaptureReaper(migrated_url, seconds=_CALL_SECONDS)
+    reaper = _ShieldedCaptureReaper(migrated_url)
 
     async def _run() -> None:
         async with await connect(migrated_url) as conn:

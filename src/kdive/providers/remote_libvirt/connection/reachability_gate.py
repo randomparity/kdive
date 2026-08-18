@@ -27,11 +27,6 @@ per reaper call, which is the shape connection-scanning detectors look for. On a
 fail2ban or an IDS the reconciler's own address needs an allowlist entry, or the detector will
 eventually block the process that is trying to clean up after it.
 
-Resolution happens once and every resolved address shares a single monotonic deadline, so a
-dual-stack host that publishes both an A and an AAAA record costs the timeout once rather than once
-per address — which is what ``socket.create_connection`` would do, since it applies its ``timeout``
-inside its own per-address loop.
-
 The gate is not a security control. It proves only that something accepted a TCP connection; mutual
 TLS remains the sole control over who the reconciler is talking to. It sends no bytes and reads no
 TLS material.
@@ -160,12 +155,13 @@ def require_reachable(
 ) -> None:
     """Refuse ``uri`` unless one of its addresses accepts a TCP connection within ``timeout``.
 
-    Every resolved address shares one monotonic deadline, so the total connect cost is ``timeout``
-    however many addresses the host publishes. The probe is closed immediately; nothing is sent. On
-    a reachable host that costs one extra connection libvirtd accepts and sees closed before the TLS
-    handshake, which its log records — the price of not entering the kernel's SYN retry budget on
-    an unreachable one. Name resolution is **not** inside the deadline; the module docstring says
-    why.
+    Resolution happens once and every resolved address shares one monotonic deadline, so a
+    dual-stack host costs ``timeout`` in total rather than once per address — which is what
+    ``socket.create_connection`` would do, applying its ``timeout`` inside its own per-address loop.
+    The probe is closed immediately; nothing is sent. On a reachable host that costs one extra
+    connection libvirtd accepts and sees closed before the TLS handshake, which its log records —
+    the price of not entering the kernel's SYN retry budget on an unreachable one. Name resolution
+    is **not** inside the deadline; the module docstring says why.
 
     Raises:
         CategorizedError: ``TRANSPORT_FAILURE`` when no address accepts in time, matching the
