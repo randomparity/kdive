@@ -167,28 +167,6 @@ co-hold and therefore not an ordering exception.
   hold. Bounding this properly means giving the remote-libvirt transport a connect timeout, which is
   a change to every remote-libvirt path rather than to this sweep, and is left to its own decision.
 
-### Amendment (2026-08-17): the hold is now bounded, and the fix was narrowed (#1980)
-
-This qualifies the consequence above, which stated that the hold "is not bounded by any timeout this
-tree configures" and that bounding it would be "a change to every remote-libvirt path". Both were
-true when this record was accepted; [ADR-0565](0565-bound-reconciler-provider-reaping-latency.md)
-has since changed them, and it did not take the direction named here.
-
-The gate went on `open_libvirt_reaper` — the opener every fleet-fan-out reaper shares — rather than
-on the transport as a whole, because the reconciler is where an unreachable declared host is routine
-and unattended, while a worker op runs against one host its caller already selected and under its own
-job lease. A libvirt URI parameter was not available: the remote driver extracts a fixed parameter
-set and no timeout is in it. So the bound is a plain TCP reachability probe under
-`KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS` (default 5), taken before `libvirt.open`, which
-replaces the operating system's ~130 s connect timeout with a value the operator sets. The sweep
-additionally stops starting volumes once `KDIVE_RECONCILER_LANE_BUDGET_SECONDS` (default 10) is
-spent, checked only between volumes so no transaction ends while a delete may still be mutating host
-state.
-
-What this amendment does **not** retract: a host that accepts the TCP connection and then stalls — in
-the TLS handshake, or in a live-but-wedged libvirtd — still holds `LockScope.SYSTEM` for as long as
-it stalls, and the waiters this record enumerates still queue behind it. The lane budget caps that at
-one volume per pass rather than eliminating it. Bounding the stall itself is #1981.
 - **A System whose lock is held stays skipped, silently and per pass.** The skip is not counted as a
   fault, so a wedged lock holder defers that System's volume on every pass while the sweep reports a
   clean count. The per-skip INFO line naming the System is the whole of the signal, which is the
@@ -214,6 +192,29 @@ one volume per pass rather than eliminating it. Bounding the stall itself is #19
   tool-surface change, and no RBAC role change beyond the new table's grants — worker read/insert/
   delete, reconciler read/delete, server read-only, matching the shape every other ordinary table has.
   The `reaped_dump_volumes` counter keeps its meaning: a volume the sweep declined is not counted.
+
+### Amendment (2026-08-17): the hold is now bounded, and the fix was narrowed (#1980)
+
+This qualifies the consequence above, which stated that the hold "is not bounded by any timeout this
+tree configures" and that bounding it would be "a change to every remote-libvirt path". Both were
+true when this record was accepted; [ADR-0565](0565-bound-reconciler-provider-reaping-latency.md)
+has since changed them, and it did not take the direction named here.
+
+The gate went on `open_libvirt_reaper` — the opener every fleet-fan-out reaper shares — rather than
+on the transport as a whole, because the reconciler is where an unreachable declared host is routine
+and unattended, while a worker op runs against one host its caller already selected and under its own
+job lease. A libvirt URI parameter was not available: the remote driver extracts a fixed parameter
+set and no timeout is in it. So the bound is a plain TCP reachability probe under
+`KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS` (default 5), taken before `libvirt.open`, which
+replaces the operating system's ~130 s connect timeout with a value the operator sets. The sweep
+additionally stops starting volumes once `KDIVE_RECONCILER_LANE_BUDGET_SECONDS` (default 10) is
+spent, checked only between volumes so no transaction ends while a delete may still be mutating host
+state.
+
+What this amendment does **not** retract: a host that accepts the TCP connection and then stalls — in
+the TLS handshake, or in a live-but-wedged libvirtd — still holds `LockScope.SYSTEM` for as long as
+it stalls, and the waiters this record enumerates still queue behind it. The lane budget caps that at
+one volume per pass rather than eliminating it. Bounding the stall itself is #1981.
 
 ## Considered & rejected
 

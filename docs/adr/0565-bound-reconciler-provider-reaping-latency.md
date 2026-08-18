@@ -116,11 +116,18 @@ retry budget is never entered.
 `KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS`, default 5, is the operator's knob.
 
 - **Unit** — seconds.
-- **Reference clock** — the host kernel's socket timer, via the Python socket timeout.
-- **Scope** — per host, per reaper connection attempt. A fan-out walks the declared hosts, so one
-  provider call spends the timeout once per *unreachable* host it walks before it finds the target,
-  plus the reachable hosts' RPC time. The all-hosts-down worst case is
-  `connect_timeout × declared_hosts`.
+- **Reference clock** — the reconciler process's monotonic clock, which every address of one host
+  shares. `socket.create_connection` applies its own `timeout` inside a per-address loop, so handing
+  it the whole budget would spend it once per A and AAAA record; the gate resolves once and hands
+  each address only what the deadline has left.
+- **Scope** — per host, per reaper connection attempt, covering the connect only. A fan-out walks
+  the declared hosts, so one provider call spends the timeout once per *unreachable* host it walks
+  before it finds the target, plus the reachable hosts' RPC time. The all-hosts-down worst case is
+  `connect_timeout × declared_hosts`. **Name resolution is outside it**: `getaddrinfo` accepts no
+  timeout and no portable one exists, so a host declared by DNS also costs the resolver's own budget
+  — glibc's default is `timeout:5 attempts:2` per nameserver — and that is worst in the correlated
+  case, where the partition that downed the host also downed the resolver. Declaring hosts by IP
+  literal removes it.
 - **Consequence of violation** — that host is treated as unreachable for this call: logged and
   skipped, the fan-out continues to the next declared host. The capture lane defers the row behind
   its backoff deadline; the dump-volume lane leaves the volume for the next pass. Neither is counted
@@ -185,6 +192,10 @@ dump-volume reaper, `RemoteLibvirtInfraReaper` — which backs the `leaked_domai
   worker-local storage. The gate itself never reads that material. The placement is deliberate: the
   opener is the seam every reaper test already replaces, so the gate is production-only without
   adding a parameter to the fan-out helpers.
+- **The gate bounds the connect, not the lookup.** A fleet declared by DNS against an unreachable
+  resolver still costs the resolver's own retry budget per host, ahead of the gate's clock. The lane
+  budget is what caps that at one candidate per pass; the setting's contract says so rather than
+  implying a bound it does not have.
 - **The gate is a check-then-act.** A host that accepts TCP at probe time and dies before
   `libvirt.open` is back to the unbounded case. The window is one round trip wide and the outcome is
   the pre-existing behavior, so the gate is an improvement rather than a guarantee.
@@ -208,6 +219,10 @@ dump-volume reaper, `RemoteLibvirtInfraReaper` — which backs the `leaked_domai
   collapsing them would make one of the two meaningless.
 - The `reaped_captures` and `reaped_dump_volumes` counters keep their meaning: a candidate the budget
   left unattempted is not counted, exactly as a deferred or declined one is not.
+- `CAPTURE_JOB_FENCE_KEY_SQL` in `db/locks.py` gains a `LiteralString` annotation. Behaviour-neutral,
+  and correct on its own terms — the constant is interpolated into an f-string query at both call
+  sites, so it must stay a literal — but it is a production edit this decision did not otherwise
+  need, made so a test can interpolate the same expression rather than re-derive the fence key.
 - No migration, no schema change, no MCP tool-surface change, no RBAC change. Two additive settings,
   one additive `ReconcileConfig` field, and one keyword (`budget`) on each of the two lane functions,
   defaulted to `DEFAULT_LANE_BUDGET` so a caller cannot obtain an unbounded lane by omitting it.

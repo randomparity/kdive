@@ -102,10 +102,13 @@ the kernel's SYN retry budget is never entered.
 Setting: `KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS`, integer seconds, default 5, read by the
 `worker` and `reconciler` processes (the provider settings module's existing reader set).
 
-Full limit contract: unit **seconds**; reference clock the **host kernel's socket timer**; scope
-**per host, per reaper connection attempt** — a fan-out spends it once per *unreachable* host it
-walks before it finds the target, so the all-hosts-down worst case for one provider call is
-`connect_timeout × declared_hosts`; consequence of violation **that host is
+Full limit contract: unit **seconds**; reference clock the **reconciler's monotonic clock**, shared
+by every address one host resolves to (`socket.create_connection` applies its own timeout inside a
+per-address loop, so a dual-stack host would otherwise cost the budget once per A/AAAA record);
+scope **per host, per reaper connection attempt, connect only** — a fan-out spends it once per
+*unreachable* host it walks before it finds the target, so the all-hosts-down worst case for one
+provider call is `connect_timeout × declared_hosts`, and **name resolution sits outside it** because
+`getaddrinfo` takes no timeout; consequence of violation **that host is
 treated as unreachable for this call — logged and skipped, the fan-out continues to the next
 declared host, the capture lane defers the row behind its backoff and the dump-volume lane leaves
 the volume for the next pass, neither counted as a fault**; recovery action **none required by a
@@ -204,7 +207,11 @@ walks. ADR-0565 records the relation and why it is left to the operator rather t
   `leaked_domains` and `leaked_probe_guests` lanes gain the gate; their existing tests must still
   pass with it wired.
 - **Budget not spent** — the full batch is attempted, unchanged from today.
-- **Connect gate** — `require_reachable` succeeds against a real listening socket on `127.0.0.1:0`;
+- **Connect gate** — every resolved address shares one deadline (a two-address fake resolver gets a
+  strictly shrinking timeout, never a fresh budget); a later address is still tried when an earlier
+  one refuses; an unresolvable host is a `TRANSPORT_FAILURE`; a malformed or zero port is a
+  `CONFIGURATION_ERROR` naming the URI. `require_reachable` succeeds against a real listening socket
+  on `127.0.0.1:0`;
   raises `TRANSPORT_FAILURE` when the injected connector raises `TimeoutError` or `OSError`; the
   endpoint parser resolves an explicit port, defaults to 16514, and raises `CONFIGURATION_ERROR` for
   a host-less URI rather than probing `localhost`. A test that `open_libvirt_reaper` calls the gate

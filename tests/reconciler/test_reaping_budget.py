@@ -59,11 +59,14 @@ from tests.reconciler.capture_reaping_support import (
 _GRACE = timedelta(minutes=30)
 
 #: Short enough that the first provider call always outlives it, long enough that the *first*
-#: candidate is never gated out by scheduler jitter before any work has happened.
-_BUDGET = timedelta(seconds=0.2)
-#: An order of magnitude past the budget, so an observation taken after it cannot race a rollback
-#: that a cancelled await would have triggered at the budget.
-_CALL_SECONDS = 2.0
+#: candidate is never gated out before any work has happened. The dump-volume lane starts its
+#: deadline and then runs a BEGIN / ``now()`` / COMMIT round trip against a container Postgres
+#: before its first budget check, so a margin measured in tens of milliseconds would flake under
+#: the testcontainer contention this repo already tracks.
+_BUDGET = timedelta(seconds=1.0)
+#: Several times the budget, so an observation taken after it cannot race a rollback that a
+#: cancelled await would have triggered at the budget.
+_CALL_SECONDS = 4.0
 
 
 async def _lock_is_held(url: str, sql: LiteralString, key: UUID | int) -> bool:
@@ -242,6 +245,11 @@ def test_capture_lane_stops_dispatching_once_the_budget_is_spent(migrated_url: s
             # Exactly one provider call: the first candidate outlived the budget, and the check
             # before candidate two stopped the lane.
             assert len(reaper.seen) == 1
+            # The break path is the one an implementation could get wrong in the opposite
+            # direction — cancelling the in-flight call *because* more candidates remain. The R2
+            # tests above never reach `break` (one candidate each), so the fence observation is
+            # asserted here too, where it does.
+            assert reaper.fence_held_at_end == [True]
             dispatched = reaper.seen[0].job_id
             untouched = [j for j in job_ids if j != dispatched]
             # A candidate the budget never reached writes no deferral, so it keeps its place in the
@@ -260,6 +268,9 @@ def test_dump_volume_lane_stops_deleting_once_the_budget_is_spent(migrated_url: 
         assert await _reap_volumes(migrated_url, reaper, budget=_BUDGET) == 1
         await reaper.drain()
         assert reaper.deleted == [volumes[0].name]
+        # As above: this is the test that actually reaches `break`, so it is where the System lock
+        # observation has to hold.
+        assert reaper.lock_held_at_end == [True]
 
     asyncio.run(_run())
 

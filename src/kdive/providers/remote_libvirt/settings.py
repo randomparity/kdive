@@ -63,16 +63,18 @@ REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS = Setting(
     processes=_RECONCILER,
     help=(
         "Seconds a reconciler reaper waits for one libvirt host to accept a TCP connection before "
-        "treating it as unreachable (ADR-0565). Measured on the host kernel's socket timer, per "
-        "host per reaper connection attempt: a fan-out spends it once per unreachable host it "
-        "walks, so the all-hosts-down worst case for one provider call is this value times the "
-        "number of declared hosts. On violation that host is logged and skipped and the fan-out "
-        "continues to the next declared host — the capture lane defers its row behind the usual "
-        "backoff, the dump-volume lane leaves the volume for the next pass, and neither is counted "
-        "as a fault. No caller recovery is needed; raise this for a slow-but-reachable fleet, or "
-        "remove a down host from the declared inventory. It bounds the connect, not the call: a "
-        "host that accepts and then stalls is bounded only by the lane budget (#1981). libvirt "
-        "honours no connect-timeout URI parameter, which is why this is a separate probe."
+        "treating it as unreachable (ADR-0565). Measured on the reconciler's monotonic clock, "
+        "shared by every address the host resolves to, per host per reaper connection attempt: a "
+        "fan-out spends it once per unreachable host it walks, so the all-hosts-down worst case "
+        "for one provider call is this value times the number of declared hosts. On violation that "
+        "host is logged and skipped and the fan-out continues to the next declared host — the "
+        "capture lane defers its row behind the usual backoff, the dump-volume lane leaves the "
+        "volume for the next pass, and neither is counted as a fault. No caller recovery is "
+        "needed; raise this for a slow-but-reachable fleet, or remove a down host from the "
+        "declared inventory. Two things sit outside it: name resolution, because getaddrinfo takes "
+        "no timeout (declare hosts by IP literal to remove that), and a host that accepts and then "
+        "stalls, which only the lane budget caps (#1981). libvirt honours no connect-timeout URI "
+        "parameter, which is why this is a separate probe."
     ),
     suggest="a positive integer number of seconds, e.g. 5",
 )

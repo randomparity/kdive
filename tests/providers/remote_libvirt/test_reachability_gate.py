@@ -57,6 +57,83 @@ def test_a_host_less_uri_is_a_configuration_error_not_a_localhost_probe() -> Non
     assert "names no host" in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    ("uri", "problem"),
+    [
+        ("qemu+tls://host.example:notanum/system", "not an integer"),
+        ("qemu+tls://host.example:0/system", "port 0"),
+    ],
+)
+def test_an_unusable_port_is_a_configuration_error_naming_the_uri(uri: str, problem: str) -> None:
+    # validate_remote_uri checks the scheme and two forbidden parameters, never the port, so an
+    # unchecked `parsed.port` would raise a bare ValueError naming neither the URI nor the setting —
+    # and _enter_host would log it as "skipped an unreachable host".
+    with pytest.raises(CategorizedError) as excinfo:
+        remote_endpoint(uri)
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert problem in str(excinfo.value)
+    assert "host.example" in str(excinfo.value)
+
+
+def test_every_resolved_address_shares_one_deadline() -> None:
+    """A dual-stack host must cost the timeout once, not once per address.
+
+    ``socket.create_connection`` applies its ``timeout`` inside its own per-address loop, so handing
+    it the whole budget would spend it once per A/AAAA record and make the stated bound wrong by a
+    factor nobody configured.
+    """
+    handed: list[float] = []
+
+    def resolve(_host: str, port: int) -> list[tuple[str, int]]:
+        return [("::1", port), ("127.0.0.1", port)]
+
+    def connect(_address: tuple[str, int], timeout: float) -> ProbeSocket:
+        handed.append(timeout)
+        raise TimeoutError("timed out")
+
+    with pytest.raises(CategorizedError):
+        require_reachable(
+            "qemu+tls://dual.example/system", timeout=4.0, connect=connect, resolve=resolve
+        )
+    assert len(handed) == 2
+    assert handed[0] <= 4.0
+    # The second address gets what the first left, never a fresh budget.
+    assert handed[1] < handed[0]
+
+
+def test_a_later_address_still_answers_when_an_earlier_one_does_not() -> None:
+    """A host whose IPv6 route is dead is still reachable over IPv4."""
+    tried: list[str] = []
+
+    def resolve(_host: str, port: int) -> list[tuple[str, int]]:
+        return [("::1", port), ("127.0.0.1", port)]
+
+    class _Probe:
+        def close(self) -> None: ...
+
+    def connect(address: tuple[str, int], _timeout: float) -> ProbeSocket:
+        tried.append(address[0])
+        if address[0] == "::1":
+            raise ConnectionRefusedError("refused")
+        return _Probe()
+
+    require_reachable(
+        "qemu+tls://dual.example/system", timeout=4.0, connect=connect, resolve=resolve
+    )
+    assert tried == ["::1", "127.0.0.1"]
+
+
+def test_a_name_that_does_not_resolve_is_a_transport_failure() -> None:
+    def resolve(_host: str, _port: int) -> list[tuple[str, int]]:
+        raise OSError("Name or service not known")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        require_reachable("qemu+tls://nowhere.invalid/system", timeout=1.0, resolve=resolve)
+    # To a reaper an unresolvable host and an unreachable one are the same outcome, so they take the
+    # same category and _enter_host isolates both the same way.
+    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+
+
 def test_a_listening_endpoint_is_reachable(listening_endpoint: tuple[str, int]) -> None:
     host, port = listening_endpoint
     require_reachable(f"qemu+tls://{host}:{port}/system", timeout=5.0)
@@ -72,7 +149,8 @@ def test_the_probe_is_closed_and_sends_nothing(listening_endpoint: tuple[str, in
 
     def connect(address: tuple[str, int], timeout: float) -> ProbeSocket:
         assert address == (host, port)
-        assert timeout == 3.0
+        # The whole budget, less whatever resolution and the loop head have already consumed.
+        assert 0 < timeout <= 3.0
         return _Probe()
 
     require_reachable(f"qemu+tls://{host}:{port}/system", timeout=3.0, connect=connect)

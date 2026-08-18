@@ -9,19 +9,33 @@ advisory lock, which is the hazard #1980 reports.
 
 This gate opens and immediately closes a plain TCP connection to the endpoint the reaper is about to
 open, under a timeout the operator sets, and refuses the host if it does not answer. libvirt is then
-never called for that host, so the kernel's SYN retry budget is never entered. It is a gate on
-reachability, not a timeout on the libvirt call: a host that completes the TCP handshake and then
-stalls in the TLS handshake or in a wedged libvirtd's RPC is still unbounded (#1981), and what caps
-the damage there is the reaping lane's own pass budget.
+never called for that host, so the kernel's SYN retry budget is never entered.
 
-The gate is deliberately not a security control. It proves only that something accepted a TCP
-connection; mutual TLS remains the sole control over who the reconciler is talking to. It sends no
-bytes and reads no TLS material.
+Two things are outside the bound and both are deliberate:
+
+* **Name resolution.** ``socket.getaddrinfo`` takes no timeout, and no portable one exists. A
+  declared host named by DNS therefore costs the resolver's own budget — glibc's default is
+  ``timeout:5 attempts:2`` per nameserver — before the gate's clock is consulted at all. That
+  matters most in the correlated case, where the partition that downed the host also downed the
+  resolver. Declaring hosts by IP literal removes it entirely.
+* **A host that accepts and then stalls**, in the TLS handshake or in a wedged libvirtd's RPC. The
+  gate proves reachability, not liveness; what caps that is the reaping lane's own pass budget
+  (#1981).
+
+Resolution happens once and every resolved address shares a single monotonic deadline, so a
+dual-stack host that publishes both an A and an AAAA record costs the timeout once rather than once
+per address — which is what ``socket.create_connection`` would do, since it applies its ``timeout``
+inside its own per-address loop.
+
+The gate is not a security control. It proves only that something accepted a TCP connection; mutual
+TLS remains the sole control over who the reconciler is talking to. It sends no bytes and reads no
+TLS material.
 """
 
 from __future__ import annotations
 
 import socket
+import time
 from collections.abc import Callable
 from typing import Protocol
 from urllib.parse import urlsplit
@@ -40,9 +54,13 @@ class ProbeSocket(Protocol):
     def close(self) -> None: ...
 
 
-#: Opens a TCP connection to ``(host, port)`` under ``timeout`` seconds, or raises. Injected so the
-#: gate is testable without a live host; production binds :func:`socket.create_connection`.
+#: Opens a TCP connection to one resolved ``(address, port)`` under ``timeout`` seconds, or raises.
+#: Injected so the gate is testable without a live host; production binds
+#: :func:`socket.create_connection`.
 type TcpConnect = Callable[[tuple[str, int], float], ProbeSocket]
+
+#: Resolves ``(host, port)`` to the addresses to try, in preference order.
+type Resolve = Callable[[str, int], list[tuple[str, int]]]
 
 
 def remote_endpoint(uri: str) -> tuple[str, int]:
@@ -50,20 +68,33 @@ def remote_endpoint(uri: str) -> tuple[str, int]:
 
     Callers reach this only for a URI ``validate_remote_uri`` has already fail-closed to the
     ``qemu+tls`` scheme, so an absent port means libvirt's TLS default rather than an unknown one.
+    Nothing upstream checks the *port*, though, so a malformed one is caught here rather than left
+    to surface as a bare ``ValueError`` naming neither the URI nor the setting.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when the URI names no host. Probing ``localhost``
-            instead would silently gate a host the operator never declared.
+        CategorizedError: ``CONFIGURATION_ERROR`` when the URI names no host, or names a port that
+            is not a usable TCP port. Probing ``localhost`` instead of refusing a host-less URI
+            would silently gate a host the operator never declared.
     """
     parsed = urlsplit(uri)
     host = (parsed.hostname or "").strip()
     if not host:
-        raise CategorizedError(
-            f"remote-libvirt URI {uri!r} names no host, so its reachability cannot be checked",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"uri": uri},
-        )
-    return host, parsed.port or DEFAULT_LIBVIRT_TLS_PORT
+        raise _misconfigured(uri, "names no host, so its reachability cannot be checked")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise _misconfigured(uri, "carries a port that is not an integer") from exc
+    if port == 0:
+        raise _misconfigured(uri, "carries port 0, which is not a libvirt endpoint")
+    return host, port or DEFAULT_LIBVIRT_TLS_PORT
+
+
+def _misconfigured(uri: str, problem: str) -> CategorizedError:
+    return CategorizedError(
+        f"remote-libvirt URI {uri!r} {problem}",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"uri": uri},
+    )
 
 
 def reaper_connect_timeout() -> float:
@@ -71,37 +102,81 @@ def reaper_connect_timeout() -> float:
     return float(config.require(REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS))
 
 
-def require_reachable(uri: str, *, timeout: float, connect: TcpConnect | None = None) -> None:
-    """Refuse ``uri`` unless its endpoint accepts a TCP connection within ``timeout`` seconds.
+def _resolve_addresses(host: str, port: int) -> list[tuple[str, int]]:
+    """Every address ``host`` resolves to, in ``getaddrinfo`` preference order, de-duplicated.
 
-    The probe is closed immediately; nothing is sent. On a reachable host this costs one extra
-    connection that libvirtd accepts and sees closed before the TLS handshake, which its log
-    records — the price of not entering the kernel's SYN retry budget on an unreachable one.
+    Not covered by the gate's deadline: ``getaddrinfo`` accepts no timeout. De-duplicated because a
+    host publishing both an A and an AAAA record can yield the same address twice across socket
+    types, and each duplicate would spend deadline for nothing.
+    """
+    addresses: list[tuple[str, int]] = []
+    for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+        address = (str(info[4][0]), int(info[4][1]))
+        if address not in addresses:
+            addresses.append(address)
+    return addresses
+
+
+def require_reachable(
+    uri: str,
+    *,
+    timeout: float,
+    connect: TcpConnect | None = None,
+    resolve: Resolve | None = None,
+) -> None:
+    """Refuse ``uri`` unless one of its addresses accepts a TCP connection within ``timeout``.
+
+    Every resolved address shares one monotonic deadline, so the total connect cost is ``timeout``
+    however many addresses the host publishes. The probe is closed immediately; nothing is sent. On
+    a reachable host that costs one extra connection libvirtd accepts and sees closed before the TLS
+    handshake, which its log records — the price of not entering the kernel's SYN retry budget on
+    an unreachable one. Name resolution is **not** inside the deadline; the module docstring says
+    why.
 
     Raises:
-        CategorizedError: ``TRANSPORT_FAILURE`` when the endpoint does not accept in time, matching
-            the category a failed ``qemu+tls`` connect already raises, so the reaper fan-out's
-            existing unreachable-host isolation logs and skips the host unchanged.
-            ``CONFIGURATION_ERROR`` when the URI names no host.
+        CategorizedError: ``TRANSPORT_FAILURE`` when no address accepts in time, matching the
+            category a failed ``qemu+tls`` connect already raises, so the reaper fan-out's existing
+            unreachable-host isolation logs and skips the host unchanged. ``CONFIGURATION_ERROR``
+            when the URI names no host or an unusable port.
     """
     host, port = remote_endpoint(uri)
     opener = connect if connect is not None else socket.create_connection
+    resolver = resolve if resolve is not None else _resolve_addresses
     try:
-        probe = opener((host, port), timeout)
+        addresses = resolver(host, port)
     except OSError as exc:
-        # TimeoutError is an OSError subclass, so a refused connection and an unanswered SYN take
-        # the same path: both mean this host cannot serve the reaper call now.
+        # To a reaper an unresolvable host and an unreachable one are the same outcome, so they take
+        # the same category and the fan-out isolates both the same way.
         raise CategorizedError(
-            f"remote-libvirt host {host}:{port} did not accept a connection within {timeout}s",
+            f"remote-libvirt host {host} did not resolve",
             category=ErrorCategory.TRANSPORT_FAILURE,
-            details={"uri": uri, "connect_timeout_seconds": str(timeout)},
+            details={"uri": uri},
         ) from exc
-    probe.close()
+    deadline = time.monotonic() + timeout
+    for address in addresses:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            probe = opener(address, remaining)
+        except OSError:
+            # TimeoutError is an OSError subclass, so an unanswered SYN and a refused connection
+            # take the same path. Try the next address: a dual-stack host whose IPv6 route is dead
+            # is still reachable over IPv4.
+            continue
+        probe.close()
+        return
+    raise CategorizedError(
+        f"remote-libvirt host {host}:{port} did not accept a connection within {timeout}s",
+        category=ErrorCategory.TRANSPORT_FAILURE,
+        details={"uri": uri, "connect_timeout_seconds": str(timeout)},
+    )
 
 
 __all__ = [
     "DEFAULT_LIBVIRT_TLS_PORT",
     "ProbeSocket",
+    "Resolve",
     "TcpConnect",
     "reaper_connect_timeout",
     "remote_endpoint",

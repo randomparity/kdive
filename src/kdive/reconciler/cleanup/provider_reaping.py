@@ -426,11 +426,15 @@ async def reap_orphaned_dump_volumes(
     # exists for).
     async with conn.transaction():
         cutoff_epoch = await _now_epoch(conn) - grace.total_seconds()
+    # Filtered before the loop rather than skipped inside it, so the unattempted count the budget
+    # logs is the number of volumes this pass would otherwise have deleted. Counting the trailing
+    # slice of the raw list would report a backlog that is mostly volumes still inside the grace
+    # window, which the lane was never going to touch — and that log line is the whole of the signal
+    # a truncated lane leaves (#1982).
+    due = [volume for volume in volumes if volume.mtime_epoch_s < cutoff_epoch]
     reaped = 0
-    for index, volume in enumerate(volumes):
-        if volume.mtime_epoch_s >= cutoff_epoch:
-            continue
-        if _budget_spent(deadline, "dump-volume", remaining=len(volumes) - index):
+    for index, volume in enumerate(due):
+        if _budget_spent(deadline, "dump-volume", remaining=len(due) - index):
             break
         if await _delete_if_still_orphaned(conn, reaper, volume):
             reaped += 1
