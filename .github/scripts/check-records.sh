@@ -334,8 +334,9 @@ check_sections() {
 # counts zero, and misroutes to E-STATUS.
 check_status() {
   local file=$1 label=$2 pass=$3
-  local status_block banner banner_count banner_date today banner_int today_int
+  local status_block status_body banner banner_count banner_date today banner_int today_int
   status_block=$(status_region "$file")
+  status_body=$(section_body "$file" '## Status')
 
   banner=$(printf '%s\n' "$status_block" | grep "$BANNER_PREFIX" || true)
   if [ -n "$banner" ]; then
@@ -360,8 +361,11 @@ check_status() {
     # above the first heading would otherwise skip profile_check_status, and for a pre-template
     # record that flips its base-ref verdict to conforming. One line above the H1 would both stop
     # its status being validated and revoke its grandfathering, which is the opposite of both.
-    if [ "$BANNER_REPLACES_STATUS" = yes ] &&
-      section_body "$file" '## Status' | grep -q "$BANNER_PREFIX"; then
+    # A here-string rather than a pipe into `grep -q`: under `pipefail` an early-exiting grep can
+    # SIGPIPE its producer, and the pipeline's non-zero status would then read as "no banner" on
+    # the very input that has one. The section is two lines, so it has never bitten elsewhere in
+    # this file — but a rule that silently inverts is not one to leave to buffer sizes.
+    if [ "$BANNER_REPLACES_STATUS" = yes ] && grep -q "$BANNER_PREFIX" <<<"$status_body"; then
       return 0
     fi
   fi
