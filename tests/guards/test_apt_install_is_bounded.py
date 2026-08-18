@@ -6,11 +6,14 @@ failure is a **stall**, not a non-zero exit — `apt-get` never returned — so 
 half of the fix is the hard `timeout` in `scripts/apt-install.sh`, and the retry is what keeps a
 timeout from being fatal on a merely slow mirror.
 
-Three of these tests are static: they read the workflows, the script and the `justfile` and
-assert the wiring. The last three actually **run** the script against a stub `apt-get` that
-hangs, that fails, and that succeeds, because a wiring assertion cannot tell whether the timeout
-fires. That is the whole claim, and asserting the absence of a bare `apt-get` would pass just as
-happily over a script that hangs forever.
+Four of these tests are static: they read the workflows, the script and the `justfile` and
+assert the wiring. The other four actually **run** the script — against a stub `apt-get` that
+hangs, that fails, and that succeeds, plus a malformed budget — because a wiring assertion
+cannot tell whether the timeout fires. That is the whole claim, and asserting the absence of a
+bare `apt-get` would pass just as happily over a script that hangs forever. Those runs also
+record the argv every stub was handed, so the options that make the bound work —
+`--kill-after`, `sudo`, `DPkg::Use-Pty=0` — are under test rather than merely present in the
+file.
 
 Stdlib + pytest only, matching `test_prepull_images_match_fixtures.py`: this reads the tree and
 runs one shell script, not the project.
@@ -31,17 +34,22 @@ _PULL_SCRIPT = _ROOT / "scripts" / "pull-test-images.sh"
 _JUSTFILE = _ROOT / "justfile"
 _WORKFLOWS = _ROOT / ".github" / "workflows"
 
-#: Every workflow that installs system packages. Each must go through the shared script.
+#: Every workflow known to install system packages. A *minimum*, not the whole check: the
+#: bare-apt ban below runs over every workflow file, so a new one is covered without editing
+#: this tuple. This exists so silently losing a call site is also caught.
 _APT_WORKFLOWS = ("ci.yml", "test-ordering.yml", "mcp-spec-drift.yml", "live.yml")
 
-#: Every workflow whose jobs must declare a job-level `timeout-minutes`. Without one a wedged
-#: step runs to the 360-minute Actions default, which is what made #1978 cost a whole CI cycle.
-#: `live.yml` already sized both of its jobs; it is listed to keep that from being lost.
-_TIMEOUT_WORKFLOWS = ("ci.yml", "test-ordering.yml", "mcp-spec-drift.yml", "live.yml")
+#: A `run:` value that installs or refreshes packages, wherever it sits on the line — `run: |`
+#: block scalars and the `run: sudo apt-get install …` one-liner alike. Anchoring at the start of
+#: the line, the obvious way to write this, matches only the block form and lets the more common
+#: one-liner straight through. Excludes comment lines so prose about apt does not trip it.
+_BARE_APT = re.compile(
+    r"^(?![ \t]*#).*\bapt(?:-get)?[ \t]+(?:install|update|upgrade|dist-upgrade|full-upgrade)\b.*$",
+    re.MULTILINE,
+)
 
-#: An `apt-get` invocation as a command: start of line, optional `sudo`. A YAML comment line
-#: starts with `#`, so mentioning apt-get in prose does not trip this.
-_BARE_APT = re.compile(r"^[ \t]*(?:sudo[ \t]+)?apt-get\b.*$", re.MULTILINE)
+#: Both spellings GitHub accepts. Globbing only `*.yml` would let a `.yaml` workflow escape.
+_WORKFLOW_GLOBS = ("*.yml", "*.yaml")
 
 #: The shared script, however a workflow spells the path to it.
 _SHARED_SCRIPT = re.compile(r"\./scripts/apt-install\.sh\b")
@@ -88,11 +96,15 @@ def _workflow_text(name: str) -> str:
     return text
 
 
+def _workflow_files() -> list[Path]:
+    return sorted(path for glob in _WORKFLOW_GLOBS for path in _WORKFLOWS.glob(glob))
+
+
 def test_no_workflow_installs_packages_with_a_bare_apt_get() -> None:
     """The command text has one home, and every call site reaches the bounded one."""
     offenders = {
         path.name: [line.strip() for line in _BARE_APT.findall(path.read_text(encoding="utf-8"))]
-        for path in sorted(_WORKFLOWS.glob("*.yml"))
+        for path in _workflow_files()
     }
     offenders = {name: lines for name, lines in offenders.items() if lines}
 
@@ -120,9 +132,16 @@ def test_no_workflow_installs_packages_with_a_bare_apt_get() -> None:
 
 def test_every_job_in_a_package_installing_workflow_declares_a_timeout() -> None:
     """A hard timeout inside the script bounds one step; `timeout-minutes` bounds the rest."""
+    # Derived, not hardcoded: any workflow that reaches the shared script is a workflow whose
+    # jobs can be wedged by an apt step, including one added after this guard was written.
+    names = sorted(
+        {path.name for path in _workflow_files() if _SHARED_SCRIPT.search(path.read_text("utf-8"))}
+        | set(_APT_WORKFLOWS)
+    )
+
     missing: list[str] = []
     checked = 0
-    for name in _TIMEOUT_WORKFLOWS:
+    for name in names:
         jobs = _jobs(_workflow_text(name))
         assert jobs, f"no jobs parsed out of {name} — the workflow layout changed (ADR-0566)"
         for job_name, body in jobs.items():
@@ -130,9 +149,11 @@ def test_every_job_in_a_package_installing_workflow_declares_a_timeout() -> None
             if not _JOB_TIMEOUT.search(body):
                 missing.append(f"{name}:{job_name}")
 
-    assert checked >= len(_TIMEOUT_WORKFLOWS), (
-        f"only {checked} job(s) parsed across {list(_TIMEOUT_WORKFLOWS)}; the parser has drifted "
-        "and this guard is checking almost nothing (ADR-0566)."
+    # The real count across these four workflows is 11. `>= len(names)` would be satisfied by a
+    # parser that found one job per file and silently stopped checking the other seven.
+    assert checked >= 11, (
+        f"only {checked} job(s) parsed across {names}; the parser has drifted and this guard is "
+        "checking a fraction of what it claims to (ADR-0566)."
     )
     assert not missing, (
         f"{missing} declare no job-level `timeout-minutes`, so a wedged step there runs to the "
@@ -218,15 +239,20 @@ _ATTEMPT_TIMEOUT_S = 1
 _BOUND_S = 3 * 2 * _ATTEMPT_TIMEOUT_S + 20
 
 
-def _stub_dir(tmp_path: Path, apt_get: str) -> Path:
+def _stub_dir(tmp_path: Path, apt_get: str, argv_log: Path) -> Path:
     stubs = tmp_path / "stubs"
     stubs.mkdir()
+    # Every stub records the argv it was handed. Without this the stubs ignore their arguments
+    # entirely, and the tests pass just as happily on a script that dropped `--kill-after`,
+    # `sudo`, the `-o` options, or `--no-install-recommends`: nothing about the command apt is
+    # actually given would be under test.
+    record = f'printf "%s\\n" "$0 $*" >> {argv_log}\n'
     scripts = {
         "apt-get": apt_get,
         # `exec "$@"` and not a no-op: the script relies on sudo being transparent, and a sudo
         # that swallowed its argv would make every scenario below pass for the wrong reason.
-        "sudo": '#!/bin/sh\nexec "$@"\n',
-        "dpkg": "#!/bin/sh\nexit 0\n",
+        "sudo": f'#!/bin/sh\n{record}exec "$@"\n',
+        "dpkg": f"#!/bin/sh\n{record}exit 0\n",
         "sleep": "#!/bin/sh\nexit 0\n",
     }
     for name, body in scripts.items():
@@ -236,9 +262,10 @@ def _stub_dir(tmp_path: Path, apt_get: str) -> Path:
     return stubs
 
 
-def _run(tmp_path: Path, apt_get: str) -> tuple[subprocess.CompletedProcess[str], float]:
+def _run(tmp_path: Path, apt_get: str) -> tuple[subprocess.CompletedProcess[str], float, str]:
+    argv_log = tmp_path / "argv.log"
     env = dict(os.environ)
-    env["PATH"] = f"{_stub_dir(tmp_path, apt_get)}{os.pathsep}{env['PATH']}"
+    env["PATH"] = f"{_stub_dir(tmp_path, apt_get, argv_log)}{os.pathsep}{env['PATH']}"
     env["KDIVE_APT_TIMEOUT_S"] = str(_ATTEMPT_TIMEOUT_S)
     started = time.monotonic()
     completed = subprocess.run(
@@ -251,12 +278,13 @@ def _run(tmp_path: Path, apt_get: str) -> tuple[subprocess.CompletedProcess[str]
         timeout=_BOUND_S * 3,
         check=False,
     )
-    return completed, time.monotonic() - started
+    recorded = argv_log.read_text(encoding="utf-8") if argv_log.exists() else ""
+    return completed, time.monotonic() - started, recorded
 
 
 def test_a_stalled_apt_get_fails_the_step_within_the_budget(tmp_path: Path) -> None:
     """The claim in one test: a hang becomes a bounded, red, diagnosable failure (#1978)."""
-    completed, elapsed = _run(tmp_path, _STUB_HANGS)
+    completed, elapsed, argv = _run(tmp_path, _STUB_HANGS)
 
     assert completed.returncode == 1, (
         "a permanently stalled apt-get must fail the step. Exhausting the attempt budget is a "
@@ -285,6 +313,26 @@ def test_a_stalled_apt_get_fails_the_step_within_the_budget(tmp_path: Path) -> N
         "the failure names no mirror, so the wedge is undiagnosable from the log, which is the "
         f"third acceptance criterion of #1978.\n{completed.stderr}"
     )
+    # The options the bound is actually made of, checked as *given to apt*, not as present in
+    # the file. Each of these was individually deletable without reddening any test before the
+    # stubs started recording argv.
+    for required in (
+        "sudo timeout",
+        "--kill-after=10s",
+        # `timeout` signals its own process group, and apt's default pty mode puts dpkg in a new
+        # group and session where the kill cannot reach it — leaving an orphaned root dpkg on
+        # the lock and failing every retry. Verified in ubuntu:24.04.
+        "-o DPkg::Use-Pty=0",
+        "-o Acquire::Retries=0",
+    ):
+        assert required in argv, (
+            f"apt was never invoked with `{required}`, so the guarantee it carries is not in "
+            f"force however the script reads.\nRecorded argv:\n{argv}"
+        )
+    assert "dpkg --configure -a" in argv, (
+        "the dpkg repair never ran, so a killed install leaves the package database half "
+        f"unpacked with nothing to clear it.\nRecorded argv:\n{argv}"
+    )
     assert "::error::" in completed.stderr, (
         f"the final failure is not annotated for the Actions log.\n{completed.stderr}"
     )
@@ -299,7 +347,7 @@ def test_a_stalled_apt_get_fails_the_step_within_the_budget(tmp_path: Path) -> N
 
 def test_a_failing_apt_get_is_retried_then_fails(tmp_path: Path) -> None:
     """A mirror that answers with an error is retried on the same budget, and still fails."""
-    completed, _ = _run(tmp_path, _STUB_FAILS)
+    completed, _, _argv = _run(tmp_path, _STUB_FAILS)
 
     assert completed.returncode == 1, (
         f"exhausted attempts must fail the step, never pass it. Got {completed.returncode}."
@@ -315,7 +363,7 @@ def test_a_failing_apt_get_is_retried_then_fails(tmp_path: Path) -> None:
 
 def test_a_healthy_apt_get_succeeds_on_the_first_attempt(tmp_path: Path) -> None:
     """The counterweight: the tests above would also pass on a script that always fails."""
-    completed, _ = _run(tmp_path, _STUB_SUCCEEDS)
+    completed, _, argv = _run(tmp_path, _STUB_SUCCEEDS)
 
     assert completed.returncode == 0, (
         f"a working apt-get must install and exit 0.\n{completed.stderr}"
@@ -326,3 +374,38 @@ def test_a_healthy_apt_get_succeeds_on_the_first_attempt(tmp_path: Path) -> None
     assert "attempt" not in completed.stderr, (
         f"a first-attempt success must not log a retry.\n{completed.stderr}"
     )
+    # The install phase only runs when update succeeded, so this is the scenario that can see
+    # the install flags at all.
+    for required in ("apt-get", "install", "-y", "--no-install-recommends", "libvirt-dev"):
+        assert required in argv, (
+            f"the install was not invoked with `{required}`.\nRecorded argv:\n{argv}"
+        )
+    assert "dpkg --configure -a" not in argv, (
+        "a successful install ran the dpkg repair, which should only follow a failed attempt — "
+        f"it runs maintainer scripts and is not free.\nRecorded argv:\n{argv}"
+    )
+
+
+def test_a_zero_or_malformed_budget_is_refused(tmp_path: Path) -> None:
+    """`timeout 0s` means *no limit*, so an unvalidated budget silently restores #1978."""
+    # An *empty* value is deliberately not here: `${KDIVE_APT_TIMEOUT_S:-60}` treats it as unset
+    # and falls back to the bounded default, which is the safe direction. Only a value that
+    # parses as a budget but is not one needs refusing.
+    for bad in ("0", "-5", "60s", "abc", "1e3", " 60"):
+        completed = subprocess.run(
+            [str(_APT_SCRIPT), "libvirt-dev"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "KDIVE_APT_TIMEOUT_S": bad},
+            timeout=60,
+            check=False,
+        )
+        assert completed.returncode == 2, (
+            f"KDIVE_APT_TIMEOUT_S={bad!r} was not refused (exit {completed.returncode}). `0` in "
+            "particular means no limit to GNU timeout, so accepting it would leave the script "
+            "unbounded while the log still printed a budget.\n"
+            f"{completed.stdout}{completed.stderr}"
+        )
+        assert "KDIVE_APT_TIMEOUT_S" in completed.stderr, (
+            f"the rejection does not name the variable that is wrong.\n{completed.stderr}"
+        )

@@ -38,7 +38,7 @@ jobs:
     name: upstream spec revision
     runs-on: ubuntu-latest
     # The GitHub default is 360 minutes, and a wedged apt step burns all of it (#1978).
-    # Observed ~35s plus the apt script's ~6.5 min worst case, plus margin (ADR-0566).
+    # Observed ~35s plus the apt script's ~11 min worst case, plus margin (ADR-0566).
     timeout-minutes: 15
     permissions:
       contents: read # read the checkout to run the guard; no write scope is needed here

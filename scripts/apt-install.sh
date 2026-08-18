@@ -33,12 +33,25 @@ fi
 # and the libguestfs appliance — far more to fetch — and raises this rather than forcing one
 # value to fit both.
 readonly INSTALL_TIMEOUT_S="${KDIVE_APT_TIMEOUT_S:-60}"
+# Validated, and not merely for tidiness: `timeout 0s` means *no limit*, so a single mistyped
+# digit would silently restore the unbounded behaviour of #1978 while the log went on printing a
+# budget. Rejecting anything but a positive integer also keeps the arithmetic below from
+# evaluating an attacker- or typo-supplied string, which bash would expand rather than reject.
+if [[ ! "$INSTALL_TIMEOUT_S" =~ ^[1-9][0-9]*$ ]]; then
+  echo "apt-install: KDIVE_APT_TIMEOUT_S must be a positive whole number of seconds, got '${INSTALL_TIMEOUT_S}'" >&2
+  exit 2
+fi
 # `apt-get update` fetches the repository indexes and costs the same whatever is installed
 # afterwards, so it never needs the larger budget a large package set does — capping it keeps
-# `live.yml`'s raised budget from tripling the worst case for a total outage (3 x 2 x 300s would
-# land outside that job's own timeout-minutes, which would swallow the diagnostic below). Taking
-# the smaller of the two also keeps a *lowered* budget applying to both calls, which is how the
-# guard test drives this script.
+# `live.yml`'s raised budget from inflating the worst case below. Taking the smaller of the two
+# also keeps a *lowered* budget applying to both calls and to the repair, which is how the guard
+# test drives this script.
+#
+# Worst case for a total outage, at the defaults: 3 attempts x (60s + 60s), plus up to 10s of
+# SIGKILL grace per call, plus a bounded repair after each attempt, plus 20s of backoff — about
+# 11 minutes, against the 360-minute Actions default. Every job-level timeout-minutes in the
+# workflows that call this script is sized to contain that, so the step fails with the
+# diagnostic below rather than being cut off mid-sentence.
 readonly UPDATE_TIMEOUT_S=$((INSTALL_TIMEOUT_S < 60 ? INSTALL_TIMEOUT_S : 60))
 # Grace between SIGTERM and SIGKILL. apt installs a SIGTERM handler and can be blocked in a
 # socket read, which is precisely the state this script kills it in.
@@ -58,20 +71,47 @@ readonly APT_OPTS=(
   -o Acquire::https::Timeout=15
   # This script owns the retry. apt's own retries would multiply into the budget above without
   # appearing in it, and would re-try inside a call the outer timeout is already counting down.
+  # The cost is granularity: apt would have re-fetched a single flaky file in about a second,
+  # where this script re-runs the whole attempt. Accepted for a budget that is legible from the
+  # outside (ADR-0566).
   -o Acquire::Retries=0
+  # Without this the timeout below cannot reach dpkg, and the whole change is decorative.
+  # `timeout` signals its own process group; apt's default pty mode puts dpkg in a *new* group
+  # and a new session (measured: apt-get pgid 1, dpkg pgid 988 sid 988), and dpkg ignores SIGHUP
+  # (SigIgn 0x7), so the pty hangup does not reach it either. A budget that expired mid-unpack
+  # therefore left an orphaned root dpkg holding /var/lib/dpkg/lock, and every retry then failed
+  # instantly against that lock. `DPkg::Use-Pty=0` keeps dpkg in apt's group, where the kill
+  # lands. The only thing lost is apt's pty progress rendering, which no CI log reads.
+  -o DPkg::Use-Pty=0
+  # apt's compiled default is 0 — fail immediately if the lock is held. A retry that races a
+  # still-exiting dpkg from the attempt this script just killed would otherwise burn an attempt
+  # on exit 100 rather than waiting the moment out.
+  -o DPkg::Lock::Timeout=30
 )
 
-# The mirrors apt is configured to use, for the failure line. Read out of apt's own resolved
-# configuration so it covers both the deb822 (`.sources`) and legacy (`.list`) layouts, and
-# local-only — it parses configuration and never touches the network, which is what makes it
-# usable at the exact moment the network is wedged.
+# The mirrors apt is *configured* to use — not, on its own, the mirror that failed. On a hosted
+# runner this is a constant, so it is context for the failure rather than a diagnosis of it; the
+# phase below is what discriminates a download stall from local unpack work overrunning the
+# budget. Read out of apt's own resolved configuration so it covers both the deb822 (`.sources`)
+# and legacy (`.list`) layouts, and bounded like every other apt call here: `indextargets` reads
+# local configuration and should never block, but this runs on the failure path, right after the
+# script SIGKILLed apt, and a diagnostic that hangs loses the diagnosis.
 apt_mirrors() {
   local sites
-  sites="$(apt-get indextargets --no-release-info 2>/dev/null |
+  sites="$(timeout 5s apt-get indextargets --no-release-info 2>/dev/null |
     awk '$1 == "Site:" && $2 != "" { print $2 }' |
     sort -u |
     paste -sd' ' -)"
   printf '%s' "${sites:-<apt reported no configured sources>}"
+}
+
+# Clear a dpkg left mid-unpack by this script's own SIGKILL. Bounded, because it runs maintainer
+# scripts (libvirt-daemon-system's postinst creates users and enables units) and this script's
+# whole claim is that no call it makes is unbounded. Non-fatal: it is recovery from damage this
+# script caused, and a database that is genuinely broken still fails the next attempt loudly.
+repair_dpkg() {
+  sudo timeout --kill-after="${KILL_AFTER_S}s" "${UPDATE_TIMEOUT_S}s" dpkg --configure -a ||
+    echo "apt-install: dpkg --configure -a did not complete; the package database may still be broken" >&2
 }
 
 # `sudo timeout` and not `timeout sudo`: the timeout has to be the parent of `apt-get` and run as
@@ -109,21 +149,19 @@ for ((attempt = 1; attempt <= ATTEMPTS; attempt++)); do
   if ((status == 124 || status == 137)); then
     reason="stalled and was killed"
   fi
-  echo "apt-install: attempt ${attempt}/${ATTEMPTS}: apt-get ${phase} ${reason} while installing '$*' (budgets: ${UPDATE_TIMEOUT_S}s update, ${INSTALL_TIMEOUT_S}s install); apt mirrors: $(apt_mirrors)" >&2
+  echo "apt-install: attempt ${attempt}/${ATTEMPTS}: apt-get ${phase} ${reason} while installing '$*' (budgets: ${UPDATE_TIMEOUT_S}s update, ${INSTALL_TIMEOUT_S}s install); configured mirrors: $(apt_mirrors)" >&2
+
+  # After every failed attempt, including the last. A killed install leaves packages half
+  # unpacked whether or not another attempt follows, and skipping the repair on exhaustion would
+  # hand a developer running `just apt-install` a broken package database with no message.
+  repair_dpkg
 
   if ((attempt < ATTEMPTS)); then
     delay="${BACKOFF_S[attempt - 1]}"
     echo "apt-install: retrying in ${delay}s" >&2
     sleep "$delay"
-    # A SIGKILLed `apt-get install` can leave dpkg mid-unpack. That state is a direct consequence
-    # of the timeout above, so clear it before the retry rather than letting the next attempt
-    # fail on something this script did. Recovery, not suppression: a dpkg that is genuinely
-    # broken still fails the next attempt loudly, and the exhausted-budget path below still
-    # fails the step.
-    sudo dpkg --configure -a ||
-      echo "apt-install: dpkg --configure -a failed; retrying the install anyway" >&2
   fi
 done
 
-echo "::error::apt-install: could not install '$*' after ${ATTEMPTS} attempts (budgets: ${UPDATE_TIMEOUT_S}s update, ${INSTALL_TIMEOUT_S}s install); last failure was apt-get ${phase}; apt mirrors: $(apt_mirrors)" >&2
+echo "::error::apt-install: could not install '$*' after ${ATTEMPTS} attempts (budgets: ${UPDATE_TIMEOUT_S}s update, ${INSTALL_TIMEOUT_S}s install); the last failure was apt-get ${phase}, so a stall in the install phase may be local unpack work rather than the network; configured mirrors: $(apt_mirrors). If this ran outside CI, check the package database with 'sudo dpkg --configure -a'." >&2
 exit 1

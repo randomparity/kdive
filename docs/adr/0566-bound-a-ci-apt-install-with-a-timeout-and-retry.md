@@ -47,6 +47,29 @@ the retry to resolve, because a non-zero exit can only mean the packages are not
 plain bounded retry is therefore correct and sufficient, and nothing here needs the
 verdict classification `audit-deps.sh` carries.
 
+**`DPkg::Use-Pty=0` is not a detail; without it the timeout is decorative.** `timeout` signals
+its own process group, and apt's default pty mode starts `dpkg` in a *new* group and a new
+session — measured in `ubuntu:24.04` as `apt-get` pgid 1 against `dpkg` pgid 988 sid 988 — where
+neither the SIGTERM nor the `--kill-after` SIGKILL can reach it. `dpkg` also ignores SIGHUP
+(`SigIgn` 0x7), so the pty hangup does not end it either. A budget that expired mid-unpack
+therefore left an orphaned root `dpkg` holding `/var/lib/dpkg/lock`, and because apt's compiled
+`DPkg::Lock::Timeout` default is 0 — fail immediately — every remaining attempt died instantly
+against that lock. The script would have reported an exhausted budget and blamed the mirror,
+having damaged the runner itself. `DPkg::Use-Pty=0` keeps `dpkg` in apt's group where the kill
+lands, and `DPkg::Lock::Timeout=30` makes a retry wait out a still-exiting `dpkg` rather than
+burn an attempt on it. The only thing given up is apt's pty progress rendering, which no CI log
+reads.
+
+The same reasoning makes the repair mandatory rather than optional: a killed install leaves
+packages half unpacked, so `dpkg --configure -a` runs after **every** failed attempt including
+the last, itself under `timeout` because it executes maintainer scripts. Skipping it on the
+exhaustion path would hand a developer who ran `just apt-install` a broken package database with
+nothing in the log to say so.
+
+`KDIVE_APT_TIMEOUT_S` is validated as a positive whole number. `timeout 0s` means *no limit*, so
+an unvalidated budget would let one mistyped digit silently restore the unbounded behavior of
+#1978 while the log went on printing a budget as though it were enforcing one.
+
 **The budget is sized so that a timeout is expected to be survivable, not exceptional.** The
 install ceiling defaults to 60s — several times the ~15s `libvirt-dev` costs, and an order of
 magnitude under the wedge. That is deliberately tight enough to fire on a slow-but-working
@@ -56,23 +79,37 @@ run instead would put the bound back above the wedge it exists to catch.
 
 `apt-get update` fetches the repository indexes and costs the same whatever is installed
 afterwards, so its ceiling is capped at 60s independently. Only the install budget follows the
-package set, via `KDIVE_APT_TIMEOUT_S`, which `live.yml` raises to 300s for the ppc64le emulator
-and the libguestfs appliance. The cap is what keeps that raise from tripling the worst case: 3 x
-(60s + 300s) + 20s of backoff is about 18 minutes, inside that job's `timeout-minutes: 30`, so
-the step still fails with its own diagnostic rather than being cut off by the job.
+package set, via `KDIVE_APT_TIMEOUT_S`, which `live.yml` raises to 180s for the ppc64le emulator
+and the libguestfs appliance — measured at ~30s for that whole set, so six times the observed
+cost.
 
-**Failure names the mirror and the attempt.** Every failed attempt logs the attempt number, which
-of the two apt calls failed, whether it stalled or exited non-zero, the budgets in force, and the
-mirror hosts apt is configured to use — read from `apt-get indextargets`, which parses local
-configuration and never touches the network, so it is usable at exactly the moment the network is
-not. The exhausted-budget line is an `::error::` annotation. Distinguishing a stall from a
-non-zero exit is the part that matters: they have different causes and different fixes, and
-#1978 was hard to diagnose because the log showed neither.
+The worst case for a total outage is about 11 minutes at the defaults: three attempts of two
+bounded calls, the SIGKILL grace on each, a bounded repair after each attempt, and 20s of
+backoff. `live.yml` reaches about 17 minutes on its larger budget, which is why that job's
+`timeout-minutes` had to grow from 30 to 50: 30 was sized for the emulated boot alone, and
+leaving it there would have let a mirror outage cut the job off before the step could name the
+mirror. Every other job-level value is the job's observed runtime plus the ~11 minutes plus
+margin.
+
+**Failure names the phase, the attempt, and the configured mirrors.** Every failed attempt logs
+the attempt number, which of the two apt calls failed, whether it stalled or exited non-zero, the
+budgets in force, and the mirror hosts apt is configured to use — read from `apt-get
+indextargets`, which parses local configuration and never touches the network, so it is usable at
+exactly the moment the network is not, and bounded like every other apt call here. The
+exhausted-budget line is an `::error::` annotation.
+
+The mirror list is labelled *configured* rather than *failing*, deliberately. On a hosted runner
+it is a constant, so on its own it discriminates nothing; what discriminates is the phase. A
+stall in `update` is a download stall. A stall in `install` may equally be local unpack work
+overrunning the budget, and the `::error::` line says so rather than implying the network. That
+distinction is the part that matters — a stall and a non-zero exit have different causes and
+different fixes, and #1978 was hard to diagnose because the log showed neither.
 
 **Every job in a workflow that installs packages declares `timeout-minutes`.** Sized as the
 job's observed runtime plus the script's own worst case plus margin, so the step fails with its
-diagnostic before the job is cut off. `live.yml` already sized both of its jobs; the guard now
-keeps that from being lost.
+diagnostic before the job is cut off. `live.yml` had already sized both of its jobs, but for
+their own work only — its `tcg` job is raised here because this change adds a new worst case to
+it, not because 30 was wrong for what it previously covered.
 
 Per `AGENTS.md` the `justfile` is the single source of truth for commands, so the command text
 lives in the script and `just apt-install <packages>` is the recipe. The workflows invoke the
@@ -83,17 +120,26 @@ command in one place either way; adding `setup-just` to two more jobs to shell o
 would add a network dependency to the very steps this record is bounding.
 
 `tests/guards/test_apt_install_is_bounded.py` owns the wiring. Four of its tests are static: no
-workflow calls `apt-get` directly, every package-installing workflow reaches the script, every
-job in one declares `timeout-minutes`, and the retry shape still matches `pull-test-images.sh`.
-The other three **run the script** against a stub `apt-get` that hangs, one that exits 100, and
-one that succeeds, because no static assertion can tell whether the timeout actually fires — and
-"no bare `apt-get` in the workflows" would pass just as happily over a script that hangs forever.
+workflow calls `apt-get` directly — matched anywhere in a `run:` value, because anchoring the
+pattern at the start of a line catches the block-scalar form and lets the `run: sudo apt-get
+install …` one-liner straight through — every package-installing workflow reaches the script,
+every job in one declares `timeout-minutes`, and the retry shape still matches
+`pull-test-images.sh`.
+
+The other four **run the script**: against a stub `apt-get` that hangs, one that exits 100, and
+one that succeeds, plus one that rejects a malformed budget. No static assertion can tell whether
+the timeout actually fires, and "no bare `apt-get` in the workflows" would pass just as happily
+over a script that hangs forever. Those runs also record the argv every stub was handed, so
+`--kill-after`, `sudo`, `DPkg::Use-Pty=0`, `Acquire::Retries=0` and `--no-install-recommends` are
+asserted as *given to apt* — each was individually deletable without reddening a test until the
+stubs started recording.
 
 ## Consequences
 
-A wedged apt step now fails in about 6.5 minutes on the PR gate instead of running toward 360,
-and it fails with a line naming the mirror rather than needing a human to recognize a hang. A
-transient stall costs up to 20s of backoff and stays green.
+A wedged apt step now fails in about 11 minutes on the PR gate instead of running toward 360,
+and it fails with a line naming the phase, the attempt and the configured mirrors rather than
+needing a human to recognize a hang. A transient stall costs up to 20s of backoff and stays
+green.
 
 The tight budget means a genuinely slow runner will sometimes retry where it previously
 succeeded first time. That is the intended trade and it is visible in the log; if a mirror gets
@@ -105,9 +151,11 @@ system package to CI now means editing that script's caller, and the guard fails
 reintroduces a bare `apt-get`.
 
 The script SIGKILLs `apt-get` by construction, which can leave dpkg mid-unpack. It therefore runs
-`dpkg --configure -a` before each retry, non-fatally: that state is this script's own doing, so
-recovering from it is not suppression, and a dpkg that is genuinely broken still fails the next
-attempt and the exhausted-budget path.
+a bounded `dpkg --configure -a` after every failed attempt, non-fatally: that state is this
+script's own doing, so recovering from it is not suppression, and a dpkg that is genuinely broken
+still fails the next attempt and the exhausted-budget path. Verified end to end in
+`ubuntu:24.04`: a 20s budget against the `live.yml` package set kills attempt 1 mid-unpack,
+leaves no orphaned `dpkg` and no held lock, and attempt 2 completes the install.
 
 `timeout-minutes` values are now a thing to keep roughly in step with observed runtimes. They are
 deliberately loose — a backstop, not a performance budget — so ordinary growth will not trip
@@ -136,6 +184,12 @@ here — bound, then retry — is what they should adopt if they start to.
   blackholed mirror *inside* apt, whose error names the host and IP, rather than leaving the
   outer kill with nothing to read. `Acquire::Retries=0` is explicit for the opposite reason: this
   script owns the retry, and apt's own would multiply into a budget that does not show them.
+- **Leave apt's own `Acquire::Retries` on.** Rejected, with a cost worth naming: apt re-fetches
+  an *individual file* in about a second, where this script re-runs the whole attempt. Turning it
+  off trades that fine granularity for a budget that is legible from outside the process — apt's
+  retries would otherwise consume the outer timeout without appearing in it. One flaky file that
+  apt would have absorbed invisibly now costs one attempt out of three, which the backoff and the
+  remaining attempts absorb.
 - **`nick-fields/retry` or another remote retry action.** ADR-0553 rejected this for the image
   pull and the same reasons hold here: a new supply-chain entry and a new pin to keep truthful
   under ADR-0505, to solve what a shell loop solves. It also cannot express the part that

@@ -20,10 +20,10 @@ jobs:
     # Every job here declares timeout-minutes, because the GitHub default is 360 and a wedged
     # step burns all of it: the apt step below hung for 13 and 33 minutes on two runs in one
     # afternoon and a human had to cancel each (#1978). Sized as the job's observed runtime plus
-    # the apt script's own worst case (3 attempts x (60s update + 60s install) + 20s backoff,
-    # ~6.5 min) plus margin, so the step still fails with its diagnostic before the job is cut
-    # off. Observed ~11 min; tests/guards/test_apt_install_is_bounded.py fails a job that drops
-    # this (ADR-0566).
+    # the apt script's own worst case (3 attempts x (60s update + 60s install), SIGKILL grace,
+    # a bounded dpkg repair after each attempt, and 20s of backoff — about 11 min) plus margin, so
+    # the step still fails with its diagnostic before the job is cut off. Observed ~11 min;
+    # tests/guards/test_apt_install_is_bounded.py fails a job that drops this (ADR-0566).
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -397,7 +397,7 @@ jobs:
   supply-chain-runtime:
     name: supply chain (runtime)
     runs-on: ubuntu-latest
-    # Observed ~1 min plus the apt script's ~6.5 min worst case (ADR-0566).
+    # Observed ~1 min plus the apt script's ~11 min worst case (ADR-0566).
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -429,7 +429,7 @@ jobs:
   supply-chain-dev:
     name: supply chain (dev)
     runs-on: ubuntu-latest
-    # Observed ~2 min plus the apt script's ~6.5 min worst case (ADR-0566).
+    # Observed ~2 min plus the apt script's ~11 min worst case (ADR-0566).
     timeout-minutes: 15
     steps:
       - name: Checkout

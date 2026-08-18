@@ -27,7 +27,7 @@ jobs:
     name: test (PYTHONHASHSEED=random)
     runs-on: ubuntu-latest
     # The GitHub default is 360 minutes, and a wedged apt step burns all of it (#1978).
-    # Observed ~7 min plus the apt script's ~6.5 min worst case, plus margin (ADR-0566).
+    # Observed ~7 min plus the apt script's ~11 min worst case, plus margin (ADR-0566).
     timeout-minutes: 25
     steps:
       - name: Checkout
