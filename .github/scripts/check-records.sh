@@ -261,9 +261,15 @@ STATUS_BULLET_RE='^(- )?(\*\*Status:\*\*|Status:)'
 #
 # A sentinel line, not a deletion, so a masked line still has to be present: removing one drops a
 # line from the comparison and E-PREAMBLE-REWRITTEN still fires.
+# Passed through the environment, not `-v`. `-v` runs the value through awk's escape processing
+# first, so `\*` arrives as a plain `*` and the pattern silently degrades to one that matches any
+# line beginning `Status` — asterisks and colon optional. The counter below is a real ERE and
+# keeps the backslashes, so the two disagree about which lines the allowance covers, which is
+# exactly what makes E-STATUS-AMBIGUOUS unable to bound the mask. ENVIRON[] bypasses that pass and
+# is portable across gawk, mawk and BSD awk.
 mask_status_bullet() {
-  LC_ALL=C awk -v re="$STATUS_BULLET_RE" '
-    $0 ~ re { print "<status>"; next }
+  STATUS_BULLET_RE="$STATUS_BULLET_RE" LC_ALL=C awk '
+    $0 ~ ENVIRON["STATUS_BULLET_RE"] { print "<status>"; next }
     { print }
   '
 }

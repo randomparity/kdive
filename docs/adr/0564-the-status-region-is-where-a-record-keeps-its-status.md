@@ -88,12 +88,17 @@ compares both sides through a reduction that does the same for a status bullet:
 STATUS_BULLET_RE='^(- )?(\*\*Status:\*\*|Status:)'
 
 mask_status_bullet() {   # fed `preamble` output, which already stops at the first `## `
-  LC_ALL=C awk -v re="$STATUS_BULLET_RE" '
-    $0 ~ re { print "<status>"; next }
+  STATUS_BULLET_RE="$STATUS_BULLET_RE" LC_ALL=C awk '
+    $0 ~ ENVIRON["STATUS_BULLET_RE"] { print "<status>"; next }
     { print }
   '
 }
 ```
+
+Through the environment, not `awk -v`. `-v` runs its value through awk's escape processing before
+the regex engine sees it, so `\*` arrives as a plain `*`, the pattern degrades to one matching any
+line that begins `Status`, and the counter — a real ERE that keeps its backslashes — no longer
+agrees with it. `ENVIRON[]` bypasses that pass and is portable across gawk, mawk and BSD awk.
 
 The sentinel is a line, not a deletion, so the bullet still has to be *there*: removing it drops a
 line from both sides of the comparison and `E-PREAMBLE-REWRITTEN` still fires. A `Status:` line
@@ -115,7 +120,11 @@ preamble to more than one `Status:`-labelled line, so the parking commit is refu
 the mask covers stays at one. It reports only what the change *introduces*, the way
 `W-DUP-PREEXISTING` splits a number collision: a record that already had two must stay amendable,
 because holding a later PR to a shape it did not create is the deadlock grandfathering exists for.
-One regex serves the mask and the rule, so the two cannot disagree about which lines are covered.
+One regex serves the mask and the rule — but one string is not one pattern, because they are read
+by two engines, so the suite asserts on a line set built to discriminate (`Statusx:`, `StatusZZZ:`)
+that both select the same lines, and treats any tool output on the gate's stderr as a failure. The
+`awk -v` degradation above was caught by neither the corpus run nor 149 behavioural cases, and it
+had been printing a warning on every run of the suite.
 
 One call site, not two. `marker_only_change` — the shortcut in front of the three anti-rewrite
 rules — is left as strict as it was, because a status-bullet edit it declines simply arrives at

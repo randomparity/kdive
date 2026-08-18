@@ -38,6 +38,11 @@ fi
 passed=0
 failed=0
 
+# Opt-out for the two cases whose fixture breaks a tool on purpose — a chmod 000 directory and a
+# stub mktemp — so the tool's own message on stderr is the expected outcome rather than noise.
+# Every other case asserts that the checker's stderr carries nothing but its own coded findings.
+EXPECT_TOOL_STDERR=""
+
 # A fresh repo containing one valid record, committed, with BASE pointing at it.
 new_repo() {
   local dir=$1
@@ -136,7 +141,15 @@ run_case() {
     why="exit=$got but $code never fired"
   elif [ "$code" = "-" ] && grep -q '::error::' "$dir/.err"; then
     why="unexpected error: $(sed -n 's/^::error:://p' "$dir/.err" | head -1)"
+  elif [ -z "$EXPECT_TOOL_STDERR" ] && grep -qv '^::' "$dir/.err"; then
+    # Every line the checker writes to stderr is a coded finding; anything else came from a tool
+    # it invoked. An `awk -v` whose value carried backslashes warned on every run of this suite
+    # for the life of a defect nobody saw, because nothing looked at stderr it had not asked for.
+    why="foreign stderr: $(grep -v '^::' "$dir/.err" | head -1)"
   fi
+  # Set per case and cleared after each one, the way the checker scopes its own EMIT_MODE: a case
+  # that leaked the opt-out would silence every case after it, which is the failure this rule is.
+  EXPECT_TOOL_STDERR=""
 
   if [ -z "$why" ]; then
     passed=$((passed + 1))
@@ -1202,6 +1215,7 @@ EOF
     d=$(case_dir unreadable_dir)
     b=$(base_of "$d")
     chmod 000 "$d/docs/debt"
+    EXPECT_TOOL_STDERR=1
     run_case "record directory unreadable" 1 E-ENUM "$d" BASE_SHA="$b"
     chmod 755 "$d/docs/debt"
   fi
@@ -1409,6 +1423,7 @@ echo "mktemp: stub failure (check-records-test.sh forcing E-TMPFILE)" >&2
 exit 1
 STUB
   chmod +x "$d.bin/mktemp"
+  EXPECT_TOOL_STDERR=1
   run_case "temp file unavailable" 1 E-TMPFILE "$d" BASE_SHA="$b" PATH="$d.bin:$PATH"
 
   # A profile that sets its variables but defines no status hook. Without this check the
@@ -1987,6 +2002,56 @@ MD
   git -C "$d" commit -qm base
   b=$(base_of "$d")
   run_case "a traversal banner target is not a record" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The mask and the counter have to classify the same lines — that invariant is the only reason
+  # E-STATUS-AMBIGUOUS can bound the mask, and nothing checked it. They are two regex engines
+  # reading one pattern: the counter is an ERE, the mask is awk, and `awk -v` runs its value
+  # through escape processing first, which once degraded the mask to "any line beginning Status"
+  # while the counter stayed strict. `Statusx:` and `StatusZZZ:` are the discriminating inputs —
+  # labels that start with the word without being the field. The expected count is pinned, so two
+  # engines that agree on nothing do not pass this by both matching zero.
+  d="$SCRATCH/mask_counter_agreement"
+  mkdir -p "$d"
+  cat >"$d/lines.txt" <<'MD'
+- **Status:** Accepted
+- **Status rationale:** prose a later change must not be able to rewrite
+- **Statusx:** x
+StatusZZZ: x
+Status: bare
+  - Status: indented
+- **Date:** 2026-01-01
+MD
+  printf '  %-4s %-44s ' "" "mask and counter classify the same lines"
+  if (
+    # shellcheck source=/dev/null
+    . "$CHECKER"
+    masked=$(mask_status_bullet <"$d/lines.txt" | grep -c '^<status>$' || true)
+    counted=$(grep -cE "$STATUS_BULLET_RE" "$d/lines.txt" || true)
+    [ "$masked" = "$counted" ] && [ "$masked" = 2 ]
+  ) 2>"$d/.err" && [ ! -s "$d/.err" ]; then
+    passed=$((passed + 1))
+    printf 'ok   both engines select 2 lines\n'
+  else
+    failed=$((failed + 1))
+    printf 'FAIL disagreement, wrong count, or a tool warned: %s\n' "$(head -1 "$d/.err")"
+  fi
+
+  # What that disagreement costs, end to end: a merged record carries a `Status`-prefixed label the
+  # counter does not count, and a later change rewrites the prose under it. A mask that honours the
+  # label reduces both sides to the sentinel and the rewrite is invisible, while E-STATUS-AMBIGUOUS
+  # cannot object because by its own reading the record has one status.
+  d="$SCRATCH/adr_legacy_status_lookalike"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
+- **Status rationale:** the build lane was measured before this decision was accepted."
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  sed 's|^- \*\*Status rationale:\*\* .*$|- **Status rationale:** n/a|' \
+    "$d/docs/adr/0001-legacy.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
+  run_case "a Status-prefixed label is not the status" 1 E-PREAMBLE-REWRITTEN "$d" \
     BASE_SHA="$b" RECORD_PROFILES=adr
 
   # And the mask is anchored at column one, so an indented sub-bullet is not a candidate at all.
