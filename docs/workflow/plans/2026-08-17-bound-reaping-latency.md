@@ -76,13 +76,20 @@ gate reads no TLS material. `just lint` and `just type` green.
 ```python
 DEFAULT_LANE_BUDGET: timedelta = timedelta(seconds=10)   # provider_reaping.py
 async def reap_orphaned_dump_volumes(
-    conn, reaper, grace: timedelta, *, budget: timedelta
+    conn, reaper, grace: timedelta, *, budget: timedelta = DEFAULT_LANE_BUDGET
 ) -> int: ...
 async def reap_orphaned_captures(
-    conn, reapers, *, settle, batch, retry_base, retry_cap, budget: timedelta
+    conn, reapers, *, settle, batch, retry_base, retry_cap,
+    budget: timedelta = DEFAULT_LANE_BUDGET,
 ) -> int: ...
 RECONCILER_LANE_BUDGET_SECONDS: Setting                  # core_settings.py
 ```
+
+The `budget` keyword is **defaulted**, not required: a caller must not be able to obtain an
+unbounded lane by omitting it, and defaulting also leaves the ~24 existing lane call sites in
+`tests/reconciler/test_loop.py`, `tests/reconciler/test_capture_reaping.py`,
+`tests/reconciler/test_capture_reaping_wiring.py`, and
+`tests/adversarial/test_host_dump_volume_capture_fence.py` untouched.
 
 Order: write the R2 test for the capture lane first — it is the load-bearing proof and the hardest
 to retrofit. Its shape is fixed by the spec's *Testing* section: the fake reaper's work runs inside
@@ -97,9 +104,14 @@ a volume name carrying a parseable System UUID, `mtime_epoch_s` older than `grac
 
 Then the between-candidates tests: two candidates and a budget spent by the first ⇒ exactly one
 provider call and no reap-state row for the second; a budget not spent ⇒ the full batch attempted.
-Then implement: a module-level `_budget_spent(deadline, lane, *, remaining)` helper logging the
-unattempted count at INFO, a `time.monotonic()` deadline started at the top of each lane, and the
-check at the head of each candidate loop, lexically outside every `conn.transaction()`. Update the
+Then the livelock test: a dump-volume lane whose `list_dump_volumes` itself takes longer than the
+whole budget must still attempt its first candidate. Then implement: a module-level
+`_budget_spent(deadline, lane, *, remaining)` helper logging the unattempted count at INFO, a
+`time.monotonic()` deadline started **after** the candidate list is in hand (after
+`list_dump_volumes` / after `_orphaned_capture_rows`, never at the top of the lane — a deadline
+started ahead of the dump-volume fan-out is spent before the loop on a fleet with three down hosts
+and the lane livelocks at zero candidates per pass), and the check at the head of each candidate
+loop, lexically outside every `conn.transaction()`. Update the
 `_dispatch_capture` and `reap_orphaned_dump_volumes` docstrings so no comment still claims the call
 is unbounded (R4). Declare `RECONCILER_LANE_BUDGET_SECONDS` with a parser that rejects a
 non-positive value and a five-part `help`; add a test that `config.validate` fails on `0` and `-1`.
@@ -112,8 +124,15 @@ Acceptance: R1–R4 satisfied; `just test` green for `tests/reconciler/`.
 ## Task 3 — wiring and generated docs
 
 **Modifies** `src/kdive/reconciler/loop.py`, `src/kdive/processes/reconciler.py`,
+`src/kdive/providers/infra/reaping.py`, `docs/adr/0562-host-dump-volume-capture-lease-fence.md`,
 `docs/guide/reference/config.md` (generated).
-**Modifies** `tests/reconciler/test_loop.py` or its neighbours where the lane signatures are called.
+
+Record on the `CaptureReaper` port docstring that a concrete reaper must open through
+`remote_libvirt_reaper_connections` to inherit the connect gate. Append an amendment to ADR-0562 —
+`### Amendment (2026-08-17): the dump-volume hold is now bounded (#1980)` — since its Consequences
+assert the hold is bounded by no timeout this tree configures and that the fix would be a change to
+every remote-libvirt path; ADR-0565 narrowed it to the reaper seam. Append only; do not rewrite the
+existing prose (AGENTS.md: a merged ADR is append-only outside `## Status`).
 
 Add `ReconcileConfig.lane_budget: timedelta = DEFAULT_LANE_BUDGET` with a five-part docstring
 comment, pass it from both `_REPAIR_CATALOG` entries (`reaped_dump_volumes`, `reaped_captures`), and

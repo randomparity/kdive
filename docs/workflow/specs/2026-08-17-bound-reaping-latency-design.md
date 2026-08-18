@@ -51,10 +51,18 @@ decision and the alternatives; this section states the shape the implementation 
 
 ### Limit 1 — per-lane pass budget
 
-`reap_orphaned_captures(..., budget: timedelta)` and `reap_orphaned_dump_volumes(..., budget:
-timedelta)` each start a monotonic deadline at the top of the lane and consult it **only between
-candidates**, before opening the next candidate's transaction. A spent budget ends the lane's pass
-and returns the count reclaimed so far.
+`reap_orphaned_captures(..., budget: timedelta = DEFAULT_LANE_BUDGET)` and
+`reap_orphaned_dump_volumes(..., budget: timedelta = DEFAULT_LANE_BUDGET)` each start a monotonic
+deadline **once their candidate list is in hand** and consult it **only between candidates**, before
+opening the next candidate's transaction. A spent budget ends the lane's pass and returns the count
+reclaimed so far. The keyword is defaulted rather than required so no caller can obtain an unbounded
+lane by omitting it, and so the ~24 existing call sites in `tests/` need no mechanical edit.
+
+Starting the deadline after the candidate list, not at the top of the lane, is load-bearing for the
+dump-volume lane: `list_dump_volumes` is itself a whole-fleet fan-out costing up to
+`connect_timeout × declared_hosts`, so a deadline started ahead of it would already be spent before
+the loop on any fleet with more down hosts than `budget ÷ connect_timeout` — three, against the
+defaults — and the lane would attempt zero candidates on every pass, forever.
 
 The placement is the whole of R2: the check is lexically outside every `conn.transaction()` block in
 both lanes, so a spent budget can only prevent the *next* transaction from opening. It can never
@@ -120,8 +128,8 @@ libvirtd's RPC — is still unbounded and still holds its transaction for as lon
 weighed for that residual (`virConnectSetKeepAlive`, and ADR-0558's supervised-child shape) and
 takes neither.
 
-The dump-volume lane's `list_dump_volumes` fan-out runs *before* the loop and is therefore not
-preemptible by the budget: a lane's pass ceiling is its budget, plus the candidate in flight when
+The dump-volume lane's `list_dump_volumes` fan-out runs before the deadline starts and is therefore
+not preemptible by the budget: a lane's pass ceiling is its budget, plus the candidate in flight when
 the budget expires, plus that one un-budgeted listing. R1 is unaffected because the listing runs
 with the connection idle rather than idle-in-transaction — `reap_stale_host_dump_volume_leases`
 closes its own transaction before returning, and `reap_orphaned_dump_volumes` asserts
@@ -148,6 +156,8 @@ walks. ADR-0565 records the relation and why it is left to the operator rather t
 | `src/kdive/reconciler/cleanup/provider_reaping.py` | the two lanes take `budget`, check it between candidates; R4's comment updates |
 | `src/kdive/reconciler/loop.py` | `ReconcileConfig.lane_budget`, threaded into both lane repairs |
 | `src/kdive/processes/reconciler.py` | read the setting into `ReconcileConfig` |
+| `src/kdive/providers/infra/reaping.py` | record on the `CaptureReaper` port that a concrete reaper must open through the shared reaper seam to inherit the connect gate |
+| `docs/adr/0562-host-dump-volume-capture-lease-fence.md` | append an amendment: the hold is now bounded, and the fix was narrowed to the reaper seam rather than every remote-libvirt path |
 | `docs/guide/reference/config.md` | regenerated (`just config-docs`) |
 
 ## Testing
@@ -187,6 +197,12 @@ walks. ADR-0565 records the relation and why it is left to the operator rather t
   reap-state row written for it).
 - **The setting rejects a non-positive budget** — `config.validate` fails on `0` and on `-1`,
   naming the setting.
+- **A slow candidate listing does not starve the lane** — a dump-volume lane whose
+  `list_dump_volumes` takes longer than the whole budget still attempts its first candidate. This is
+  the livelock the deadline's placement exists to prevent, so it gets its own test.
+- **The gate's reach** — `open_libvirt_reaper` is also `RemoteLibvirtInfraReaper`'s opener, so the
+  `leaked_domains` and `leaked_probe_guests` lanes gain the gate; their existing tests must still
+  pass with it wired.
 - **Budget not spent** — the full batch is attempted, unchanged from today.
 - **Connect gate** — `require_reachable` succeeds against a real listening socket on `127.0.0.1:0`;
   raises `TRANSPORT_FAILURE` when the injected connector raises `TimeoutError` or `OSError`; the
@@ -229,4 +245,6 @@ operator-settable bound.
 - Landing a concrete capture reaper for either provider kind (#1947, #1948). The lane budget covers
   the capture lane today; the connect gate covers whatever reaper the shared seam opens.
 - Extending the connect gate to the worker's provider planes.
-- Any supervised-child-process shape for reaping.
+- Any supervised-child-process shape for reaping, and any bound on a host that stalls *after* the TCP
+  handshake — #1981.
+- Surfacing budget truncation beyond the lane's INFO line — #1982.

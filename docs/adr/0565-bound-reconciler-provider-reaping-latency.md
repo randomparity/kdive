@@ -60,10 +60,18 @@ Bound the two lanes with two limits at two different scopes. Neither cancels an 
 call.
 
 **1. A per-lane pass budget, consulted only between candidates.** `reap_orphaned_captures` and
-`reap_orphaned_dump_volumes` each take a `budget: timedelta`, start a monotonic deadline at the top
-of the lane, and check it **before** opening the next candidate's transaction. A spent budget ends
-the lane's pass and returns the count reclaimed so far; the unattempted candidates are re-derived on
-the next pass.
+`reap_orphaned_dump_volumes` each take a `budget: timedelta`, start a monotonic deadline once their
+candidate list is in hand, and check it **before** opening the next candidate's transaction. A spent
+budget ends the lane's pass and returns the count reclaimed so far; the unattempted candidates are
+re-derived on the next pass.
+
+The deadline starts *after* the candidate list rather than at the top of the lane, and that
+placement is load-bearing for the dump-volume lane. `list_dump_volumes` is itself a whole-fleet
+fan-out that can cost `connect_timeout × declared_hosts`, so a deadline started ahead of it would be
+spent before the loop on any fleet with more down hosts than the budget divided by the timeout —
+three down hosts against the defaults — and the lane would attempt zero candidates on every pass,
+forever. The budget bounds the work the lane chooses to do, not the work it must do to know what the
+work is.
 
 The check is lexically outside every `conn.transaction()` block in both lanes. A spent budget can
 therefore only stop the *next* transaction from opening; it can never unwind one that is open, so it
@@ -146,6 +154,11 @@ dump-volume reaper, `RemoteLibvirtInfraReaper` — which backs the `leaked_domai
   connection idle rather than idle-in-transaction: `reap_stale_host_dump_volume_leases` closes its
   own transaction before returning, and `reap_orphaned_dump_volumes` asserts
   `require_top_level_transaction` for exactly that reason.
+- **The capture lane's connect bound is conditional on #1947.** Both capture reapers are
+  `NullCaptureReaper` today, so the gate reaches that lane only once a concrete reaper lands, and
+  only if it opens through `remote_libvirt_reaper_connections` rather than calling
+  `open_libvirt_protocol` itself. Nothing reddens if #1947 takes the second path. The `CaptureReaper`
+  port docstring records the constraint; the lane budget covers the lane either way.
 - **Two more lanes get the gate and no budget.** `leaked_domains` and `leaked_probe_guests` open
   their connections through the same reaper seam, so their connects are bounded too. They get no
   budget because they do not have the hazard #1980 names: both make their provider calls *outside*
@@ -164,8 +177,8 @@ dump-volume reaper, `RemoteLibvirtInfraReaper` — which backs the `leaked_domai
 - **The gate bounds the connect, not the call.** A host that completes the TCP handshake and then
   stalls — in the TLS handshake, or in a wedged libvirtd's RPC — is still unbounded, and still holds
   its transaction for as long as it stalls. What limits the blast radius there is the lane budget:
-  such a host costs the pass one candidate, not the whole batch. Bounding a stalled RPC is left to
-  its own decision; the two shapes considered for it are in the rejected list.
+  such a host costs the pass one candidate, not the whole batch. Bounding a stalled RPC is #1981;
+  the two shapes weighed for it are in the rejected list.
 - **The gate runs after the per-op pkipath is materialized**, because it sits in the injected
   `open_connection` seam that `remote_connection` calls from inside `materialized_pkipath`. An
   unreachable host therefore still costs one materialize-and-delete cycle of TLS material on
@@ -189,14 +202,15 @@ dump-volume reaper, `RemoteLibvirtInfraReaper` — which backs the `leaked_domai
   whole pass instead, so this is not a regression, but the INFO line naming the unattempted count is
   the whole of the signal, the same drift hazard ADR-0562 discloses for its per-System skips. The
   capture lane does not share it: every attempted candidate writes a backoff deadline, so a failing
-  row sorts behind the untouched ones on the next pass.
+  row sorts behind the untouched ones on the next pass. Making truncation observable beyond that log
+  line is #1982.
 - **Two knobs, not one.** They bound different scopes and differ by an order of magnitude, so
   collapsing them would make one of the two meaningless.
 - The `reaped_captures` and `reaped_dump_volumes` counters keep their meaning: a candidate the budget
   left unattempted is not counted, exactly as a deferred or declined one is not.
 - No migration, no schema change, no MCP tool-surface change, no RBAC change. Two additive settings,
-  one additive `ReconcileConfig` field, and one required keyword (`budget`) on each of the two lane
-  functions.
+  one additive `ReconcileConfig` field, and one keyword (`budget`) on each of the two lane functions,
+  defaulted to `DEFAULT_LANE_BUDGET` so a caller cannot obtain an unbounded lane by omitting it.
 
 ## Considered & rejected
 
