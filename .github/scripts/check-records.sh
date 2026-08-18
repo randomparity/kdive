@@ -256,6 +256,11 @@ status_region() {
 # one commit and gut it in the next, both green. Masking one line keeps the allowance the size of
 # the thing it is for.
 #
+# First by position, not by which line is really the status: a `Status:`-prefixed prose line
+# placed above the status bullet consumes the allowance, leaving the bullet protected. That
+# direction is loud — the prescribed supersession edit then reports E-PREAMBLE-REWRITTEN and the
+# author moves the line — rather than a silent hole, which is why position is enough.
+#
 # A sentinel line, not a deletion, so the bullet still has to be present: removing it outright
 # drops a line from the comparison and E-PREAMBLE-REWRITTEN still fires.
 mask_status_bullet() {
@@ -350,7 +355,15 @@ check_status() {
     if [ "$banner_int" -gt "$today_int" ]; then
       err "E-BANNER-FUTURE: $label: resolution banner is dated in the future ($banner_date)"
     fi
-    [ "$BANNER_REPLACES_STATUS" = yes ] && return 0
+    # Keyed to the `## Status` body, not to the whole status region. A banner replaces the status
+    # for a kind that says so, and the body is the only place such a kind declares one — a banner
+    # above the first heading would otherwise skip profile_check_status, and for a pre-template
+    # record that flips its base-ref verdict to conforming. One line above the H1 would both stop
+    # its status being validated and revoke its grandfathering, which is the opposite of both.
+    if [ "$BANNER_REPLACES_STATUS" = yes ] &&
+      section_body "$file" '## Status' | grep -q "$BANNER_PREFIX"; then
+      return 0
+    fi
   fi
 
   profile_check_status "$file" "$label" "$pass"
