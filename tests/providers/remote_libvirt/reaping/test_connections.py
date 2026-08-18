@@ -53,16 +53,26 @@ def _fleet(hosts: list[tuple[RemoteLibvirtConfig, object]]) -> connections.Fleet
 
 def test_open_libvirt_reaper_uses_protocol_opener(monkeypatch: pytest.MonkeyPatch) -> None:
     opened: list[str] = []
+    gated: list[tuple[str, float]] = []
     conn = _Conn()
 
     def open_protocol(uri: str) -> _Conn:
         opened.append(uri)
         return conn
 
+    def gate(uri: str, *, timeout: float) -> None:
+        gated.append((uri, timeout))
+
+    # The reachability gate (ADR-0565) is stubbed rather than exercised: this test owns the opener's
+    # delegation, and `test_reachability_gate.py` owns the gate's own behavior and its ordering
+    # ahead of libvirt. Leaving it live would make this unit test open a real socket.
+    monkeypatch.setattr(connections, "require_reachable", gate)
+    monkeypatch.setattr(connections, "reaper_connect_timeout", lambda: 5.0)
     monkeypatch.setattr(connections, "open_libvirt_protocol", open_protocol)
 
     assert connections.open_libvirt_reaper("qemu+tls://builder.example/system") is conn
     assert opened == ["qemu+tls://builder.example/system"]
+    assert gated == [("qemu+tls://builder.example/system", 5.0)]
 
 
 def test_reaper_connections_bind_fleet_configs_and_opener() -> None:

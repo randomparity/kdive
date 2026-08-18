@@ -14,6 +14,7 @@ import kdive.config as config
 from kdive.config.core_settings import (
     BUILD_ARTIFACT_RETENTION_DAYS,
     INVESTIGATION_CLEANUP_GRACE_DAYS,
+    RECONCILER_LANE_BUDGET_SECONDS,
     REPORT_ARTIFACT_RETENTION_DAYS,
 )
 from kdive.db.pool import create_pool
@@ -162,6 +163,7 @@ def build_reconcile_config(
         resetter=provider_composition.build_reconciler_transport_resetter(),
         dump_volume_reaper=provider_composition.build_reconciler_dump_volume_reaper(),
         capture_reapers=provider_composition.build_reconciler_capture_reapers(),
+        lane_budget=timedelta(seconds=config.require(RECONCILER_LANE_BUDGET_SECONDS)),
         heartbeat=heartbeat,
         telemetry=ReconcilerTelemetry(
             tracer=telemetry.tracer_provider.get_tracer("kdive.reconciler"),

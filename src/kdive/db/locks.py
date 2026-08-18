@@ -26,6 +26,7 @@ import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from enum import StrEnum
+from typing import LiteralString
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -197,7 +198,7 @@ async def try_advisory_xact_lock(conn: AsyncConnection, scope: LockScope, key: U
 #: expression lives here once and both call sites interpolate it. It deliberately does not go
 #: through :func:`_lock_key`: the fence predates that scheme on the worker side, and re-keying it
 #: would silently unfence every in-flight capture at the deploy that changed it.
-CAPTURE_JOB_FENCE_KEY_SQL = "hashtextextended('kdive:job:' || %s::text, 1951)"
+CAPTURE_JOB_FENCE_KEY_SQL: LiteralString = "hashtextextended('kdive:job:' || %s::text, 1951)"
 
 
 async def try_capture_job_fence(conn: AsyncConnection, job_id: UUID) -> bool:

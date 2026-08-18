@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any, Protocol
@@ -45,6 +46,13 @@ _TEARDOWN_JOB_KIND_VALUE = JobKind.TEARDOWN.value
 _TORN_DOWN_SYSTEM_STATE_VALUE = SystemState.TORN_DOWN.value
 
 DEFAULT_DUMP_VOLUME_GRACE = timedelta(minutes=30)
+
+#: How long either host-state reaping lane may keep starting new candidates in one pass (ADR-0565).
+#: A third of the reconciler's default 30 s interval, so both lanes spending their whole budget
+#: still leaves a third of an interval — minus each lane's in-flight-candidate overshoot — for the
+#: rest of the repair catalog. The full limit contract is on
+#: :data:`kdive.config.core_settings.RECONCILER_LANE_BUDGET_SECONDS` and repeated on each lane.
+DEFAULT_LANE_BUDGET = timedelta(seconds=10)
 
 #: How long a terminal ``capture_traffic`` row must sit untouched before the sweep considers it
 #: (ADR-0556). Chosen to match :data:`DEFAULT_DUMP_VOLUME_GRACE` so an operator reasons about one
@@ -178,6 +186,43 @@ VALUES (%(job_id)s, 1, now())
 ON CONFLICT (job_id) DO UPDATE
 SET attempts = s.attempts + 1, retry_after = NULL, reclaimed_at = now()
 """
+
+
+def _lane_deadline(budget: timedelta) -> float:
+    """The monotonic instant a lane stops starting new candidates (ADR-0565).
+
+    Started by the caller **after** its candidate list is in hand, never at the top of the lane. The
+    dump-volume lane's ``list_dump_volumes`` is itself a whole-fleet fan-out costing up to one
+    connect timeout per declared host, so a deadline started ahead of it is already spent before the
+    loop on a fleet with more down hosts than ``budget / connect_timeout`` — and the lane would then
+    attempt zero candidates on every pass, forever. The budget bounds the work a lane chooses to do,
+    not the work it must do to know what that work is.
+    """
+    return time.monotonic() + budget.total_seconds()
+
+
+def _budget_spent(deadline: float, lane: str, *, remaining: int) -> bool:
+    """Whether ``lane`` must stop starting candidates, logging what it leaves behind (ADR-0565).
+
+    Called only **between** candidates, before the next candidate's transaction opens, so a spent
+    budget can never unwind a transaction that is already open. That placement is the whole of the
+    ownership guarantee: an ``asyncio.timeout`` around the provider call would instead cancel the
+    await while the synchronous libvirt work continued in its worker thread, ending the
+    transaction — and releasing the ownership fence or the System lock — with host state still
+    being mutated.
+
+    Ending short is not a fault and is not counted. The INFO line naming the unattempted count is
+    the whole of the signal today; making it observable beyond the log is #1982.
+    """
+    if time.monotonic() < deadline:
+        return False
+    _log.info(
+        "reconciler: %s lane ended its pass on the budget with %d candidate(s) unattempted; "
+        "they are re-derived next pass",
+        lane,
+        remaining,
+    )
+    return True
 
 
 async def repair_leaked_domains(conn: AsyncConnection, reaper: InfraReaper) -> int:
@@ -325,7 +370,11 @@ async def reap_console_collectors(conn: AsyncConnection, registry: CollectorRegi
 
 
 async def reap_orphaned_dump_volumes(
-    conn: AsyncConnection, reaper: DumpVolumeReaper, grace: timedelta
+    conn: AsyncConnection,
+    reaper: DumpVolumeReaper,
+    grace: timedelta,
+    *,
+    budget: timedelta = DEFAULT_LANE_BUDGET,
 ) -> int:
     """Delete host_dump volumes orphaned by a non-graceful worker/host crash (ADR-0094, ADR-0562).
 
@@ -346,20 +395,29 @@ async def reap_orphaned_dump_volumes(
     would degrade to a savepoint that commits nothing. With an empty volume list the pass would then
     return ``0`` having silently discarded that work, never reaching the per-volume assertion.
 
-    The per-volume provider call is unbounded in time, the same residual #1980 tracks for the
-    ADR-0556 capture lane; both hold a locked transaction across a call that an unreachable host
-    can stall.
+    ``budget`` caps how long the lane keeps starting volumes (ADR-0565). Measured on the reconciler
+    process's monotonic clock, per lane per pass, and consulted only **between** volumes — never
+    while a delete is in flight, so it can end no transaction the provider is still mutating host
+    state under. On violation the lane returns after the volume in flight completes, having
+    attempted fewer than it listed; that is not a fault and is not counted, and the next pass
+    re-derives the rest. The clock starts once the volume list is in hand: ``list_dump_volumes``
+    is itself a whole-fleet fan-out, and a deadline started ahead of it would be spent before the
+    loop on a degraded fleet and reclaim nothing, ever.
+
+    A stalling host is bounded per call by the reaper's own connect gate; a host that accepts and
+    then stalls is bounded only by this budget, which caps it at one volume per pass (#1981).
 
     Returns:
         The number of volumes deleted. Skips — a contended System, a live holder, a volume in the
-        grace window, a volume whose identity changed, a volume no reachable host held — are not
-        counted and are not faults.
+        grace window, a volume whose identity changed, a volume no reachable host held, and a volume
+        the budget left unattempted — are not counted and are not faults.
     """
     require_top_level_transaction(conn, "the host_dump orphan sweep")
     await reap_stale_host_dump_volume_leases(conn)
     volumes = await reaper.list_dump_volumes()
     if not volumes:
         return 0
+    deadline = _lane_deadline(budget)
     # In its own transaction, so the connection is idle again afterwards. On the reconciler's
     # non-autocommit pool connection a bare `execute` opens a transaction that lives until the pool
     # takes the connection back, after which every per-volume `conn.transaction()` below would be a
@@ -369,9 +427,11 @@ async def reap_orphaned_dump_volumes(
     async with conn.transaction():
         cutoff_epoch = await _now_epoch(conn) - grace.total_seconds()
     reaped = 0
-    for volume in volumes:
+    for index, volume in enumerate(volumes):
         if volume.mtime_epoch_s >= cutoff_epoch:
             continue
+        if _budget_spent(deadline, "dump-volume", remaining=len(volumes) - index):
+            break
         if await _delete_if_still_orphaned(conn, reaper, volume):
             reaped += 1
     return reaped
@@ -384,10 +444,11 @@ async def _delete_if_still_orphaned(
 
     The acquire is a ``try``: a contended System is one a capture is declaring itself on now, so
     the volume is skipped and the next pass re-derives it. A blocking acquire would let one holder
-    stall a reconciler pass that has no deadline, behind allocation expiry and System repair
-    — the trade ADR-0502 item 4 makes for the same reason. The skip is deliberately not a counted
-    fault, so a wedged holder defers this System's volume on every pass while the count reads clean;
-    the INFO line is the whole of the signal.
+    stall the lane for as long as it liked — the lane's pass budget (ADR-0565) caps how long the
+    lane keeps *starting* volumes, not how long one blocked acquire waits — behind every lane
+    placed after it. That is the trade ADR-0502 item 4 makes for the same reason. The skip is
+    deliberately not a counted fault, so a wedged holder defers this System's volume on every pass
+    while the count reads clean; the INFO line is the whole of the signal.
 
     A volume whose name carries no parseable System UUID has no lock to take and keeps its age-only
     classification; its delete is still identity-addressed.
@@ -445,6 +506,7 @@ async def reap_orphaned_captures(
     batch: int,
     retry_base: timedelta,
     retry_cap: timedelta,
+    budget: timedelta = DEFAULT_LANE_BUDGET,
 ) -> int:
     """Reclaim traffic-capture host state orphaned by a terminal job row (ADR-0556).
 
@@ -466,6 +528,15 @@ async def reap_orphaned_captures(
     partitioned live worker keeps it and refuses this pass. That positive ownership boundary, not
     the settle duration, is what prevents state being created after an absence-tolerant reap.
 
+    ``budget`` caps how long the lane keeps dispatching candidates (ADR-0565). Measured on the
+    reconciler process's monotonic clock, per lane per pass, and consulted only **between**
+    candidates — never while a provider call is in flight, so it can end no fenced transaction the
+    reaper is still mutating host state under. On violation the lane returns after the candidate in
+    flight completes, having dispatched fewer than ``batch``; that is not a fault and is not
+    counted.
+    A candidate the budget never reached writes no deferral, so it keeps its place in the untouched
+    leading group and the next pass reaches it first.
+
     Returns:
         The number of captures this pass reclaimed. Every other outcome is not a fault and is not
         counted: a fenced row, a row whose ownership chain has no Resource name, a provider that
@@ -478,8 +549,11 @@ async def reap_orphaned_captures(
         return 0
     async with conn.transaction():
         candidates = await _orphaned_capture_rows(conn, kinds, settle, batch)
+    deadline = _lane_deadline(budget)
     reaped = 0
-    for row in candidates:
+    for index, row in enumerate(candidates):
+        if _budget_spent(deadline, "capture", remaining=len(candidates) - index):
+            break
         if await _reclaim_capture(
             conn,
             reapers[str(row["provider_kind"])],
@@ -589,15 +663,20 @@ async def _dispatch_capture(
 ) -> bool:
     """Call one reaper, converting a raise into the same deferral a decline gets.
 
-    Deliberately unbounded in time, which is a known residual tracked in #1980: an unreachable host
-    holds this pass's connection idle-in-transaction for however long its transport takes to give
-    up, and the pass runs up to ``capture_reap_batch`` of these in sequence. An ``asyncio.timeout``
-    here would be worse than the problem — a reaper drives a synchronous libvirt client in a worker
-    thread, so cancelling the await abandons the thread rather than stopping it, and the fenced
-    transaction would then end while the provider was still mutating host state. ADR-0556 forbids
-    exactly that: lock release alone is not evidence that provider mutation stopped. Bounding it
-    safely needs a terminable provider operation, which #1980 owns for this lane and the
-    dump-volume lane together.
+    Nothing here bounds the call, and nothing here may: this runs inside the fenced transaction, and
+    an ``asyncio.timeout`` would cancel the await while the reaper's synchronous libvirt client kept
+    running in its worker thread — ending the transaction, and releasing the ownership fence, with
+    host state still being mutated. ADR-0556 forbids exactly that: lock release alone is not
+    evidence that provider mutation stopped.
+
+    The bound is therefore placed where it can be taken safely (ADR-0565), in two pieces outside
+    this call. The reaper's own opener gates each host on a bounded TCP connect, so an unreachable
+    host costs ``KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS`` rather than the kernel's ~130 s SYN
+    retry budget — for a capture reaper that opens through ``remote_libvirt_reaper_connections``,
+    which
+    #1947 and #1948 must do to inherit it. And :func:`reap_orphaned_captures` stops dispatching once
+    its pass budget is spent, so a host that accepts the connection and then stalls costs the pass
+    one candidate instead of the whole batch (#1981 owns bounding that stall itself).
     """
     try:
         return await reaper.reclaim_capture(capture)

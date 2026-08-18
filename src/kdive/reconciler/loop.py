@@ -100,6 +100,7 @@ DEFAULT_QUEUE_MAX_WAIT = allocation_repairs.DEFAULT_QUEUE_MAX_WAIT
 DEFAULT_CRASHED_IDLE_GRACE = allocation_repairs.DEFAULT_CRASHED_IDLE_GRACE
 DEFAULT_IDEMPOTENCY_RETENTION = idempotency.DEFAULT_IDEMPOTENCY_RETENTION
 DEFAULT_DUMP_VOLUME_GRACE = provider_reaping.DEFAULT_DUMP_VOLUME_GRACE
+DEFAULT_LANE_BUDGET = provider_reaping.DEFAULT_LANE_BUDGET
 DEFAULT_CAPTURE_SETTLE = provider_reaping.DEFAULT_CAPTURE_SETTLE
 DEFAULT_CAPTURE_REAP_BATCH = provider_reaping.DEFAULT_CAPTURE_REAP_BATCH
 DEFAULT_CAPTURE_RETRY_BASE = provider_reaping.DEFAULT_CAPTURE_RETRY_BASE
@@ -308,6 +309,12 @@ class ReconcileConfig:
     #: at, both measured on the database clock.
     capture_retry_base: timedelta = DEFAULT_CAPTURE_RETRY_BASE
     capture_retry_cap: timedelta = DEFAULT_CAPTURE_RETRY_CAP
+    #: How long each host-state reaping lane may keep starting candidates in one pass (ADR-0565).
+    #: Seconds on the reconciler's monotonic clock, per lane per pass, consulted only between
+    #: candidates — so it never ends a transaction a provider call may still be mutating host state
+    #: under. A lane that spends it returns early with the candidate in flight completed; that is
+    #: not a fault and is not counted, and the next pass re-derives the rest.
+    lane_budget: timedelta = DEFAULT_LANE_BUDGET
     #: How long a `crashed` System's crash investigation must show no activity before its
     #: still-`active` allocation is reclaimed (ADR-0480). The operator's brake on the one repair
     #: that can end a live investigation: raise it where investigations idle for long stretches.
@@ -507,7 +514,7 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         "reaped_dump_volumes",
         lambda _r, c, _g: (
             lambda conn: _reap_orphaned_dump_volumes(
-                conn, c.dump_volume_reaper, c.dump_volume_grace
+                conn, c.dump_volume_reaper, c.dump_volume_grace, budget=c.lane_budget
             )
         ),
     ),
@@ -525,6 +532,7 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
                 batch=c.capture_reap_batch,
                 retry_base=c.capture_retry_base,
                 retry_cap=c.capture_retry_cap,
+                budget=c.lane_budget,
             )
         ),
     ),
