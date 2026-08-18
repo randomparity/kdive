@@ -209,6 +209,50 @@ preamble() {
   awk '/^## / { exit } NR > 1 { print }' "$1"
 }
 
+# Where a record keeps its status. A record written to the current template keeps it in a
+# `## Status` section; a pre-template record keeps it as a metadata bullet in the preamble, which
+# belongs to no section and which section_body therefore never reaches. Every status rule has to
+# read whichever region the record has, or it silently checks nothing for the pre-template half
+# of a corpus — which is how a supersession banner on such a record went unvalidated. See ADR
+# 0564.
+#
+# The heading test is `grep -qxF '## Status'`, the same exact-match check_sections uses: a record
+# spelling it `## status` or `## Status:` already reports E-SECTION-MISSING, and a second, looser
+# notion of "has a Status section" here would disagree with that.
+#
+# profile_check_status is deliberately *not* routed through this. It is what makes a pre-template
+# record non-conforming at the base ref, and therefore what grandfathers it; widening it would
+# flip most such records to conforming and hold them to full severity on every other rule at once.
+status_region() {
+  local file=$1
+  if grep -qxF '## Status' "$file"; then
+    section_body "$file" '## Status'
+  else
+    preamble "$file"
+  fi
+}
+
+# A pre-template record's status bullet, reduced to a sentinel. A status *value* is the one thing
+# a merged record is meant to change: protected_shape already drops the `## Status` body for
+# exactly that reason, and a record that keeps its status in the preamble instead has to get the
+# same allowance, or the supersession docs/adr/README.md prescribes is the single edit the gate
+# refuses. See ADR 0564.
+#
+# Scoped to the preamble, by stopping at the first `## ` the way preamble() does: a line that
+# looks like a status bullet but sits inside a section is body content of an append-only section
+# and stays byte-protected. Applied to canonicalise's output as well as to a raw file, where the
+# heading has already been lowercased — `/^## /` matches either spelling.
+#
+# A sentinel line, not a deletion, so the bullet still has to be present: removing it outright
+# drops a line from the comparison and E-PREAMBLE-REWRITTEN still fires.
+mask_status_bullet() {
+  LC_ALL=C awk '
+    /^## / { seen = 1 }
+    !seen && /^[[:space:]]*(- )?(\*\*Status:\*\*|Status:)/ { print "<status>"; next }
+    { print }
+  '
+}
+
 # One file reduced to exactly what the three anti-rewrite rules below examine: the whole
 # canonicalised file minus the `## Status` body. Order-sensitive, and everything outside
 # canonicalise's marker table — every word of prose, all indentation and nesting outside
@@ -224,8 +268,13 @@ preamble() {
 # The heading line itself stays: `## Status` is a heading, and a heading is protected.
 # canonicalise has already lowercased it, so `## Status:` and `## status` both arrive here
 # as `## status` and the same test recognises either spelling.
+#
+# mask_status_bullet is the same exclusion for the other shape a record's status comes in. It is
+# applied here rather than inside canonicalise because canonicalise is the definition of a marker
+# and is also renumbered_elsewhere's content comparison — discarding a status value there would
+# let a deleted record be excused by a sibling differing from it only in status.
 protected_shape() {
-  canonicalise "$1" | awk '
+  canonicalise "$1" | mask_status_bullet | awk '
     /^## / { in_status = ($0 == "## status"); print; next }
     !in_status { print }
   '
@@ -268,7 +317,7 @@ check_sections() {
 check_status() {
   local file=$1 label=$2 pass=$3
   local status_block banner banner_count banner_date today banner_int today_int
-  status_block=$(section_body "$file" "## Status")
+  status_block=$(status_region "$file")
 
   banner=$(printf '%s\n' "$status_block" | grep "$BANNER_PREFIX" || true)
   if [ -n "$banner" ]; then
@@ -430,9 +479,15 @@ check_headings_intact() {
 
 # The lines between the H1 and the first `## ` belong to no section at all, so section_body
 # never reaches them either — it is where a pre-template record keeps its metadata bullets.
+#
+# Compared through mask_status_bullet, for the reason protected_shape drops the `## Status` body:
+# the status value is not protected in either shape. Both call sites are needed. The allowance in
+# front of this rule answers a marker-only diff, and the realistic supersession commit changes the
+# bullet *and* adds the banner line beneath it, which is not marker-only and lands here.
 check_preamble_intact() {
   local tmp=$1 path=$2 removed
-  removed=$(diff <(preamble "$tmp") <(preamble "$path") | grep -c '^<' || true)
+  removed=$(diff <(preamble "$tmp" | mask_status_bullet) <(preamble "$path" | mask_status_bullet) |
+    grep -c '^<' || true)
   if [ "$removed" -gt 0 ]; then
     err_full "E-PREAMBLE-REWRITTEN: $path drops $removed line(s) between the title and the first section that the base ref had"
   fi

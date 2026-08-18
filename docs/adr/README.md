@@ -25,8 +25,14 @@ implementation"; those ADRs live here.
 - Move an ADR to **Superseded by NNNN** when a later ADR fully replaces it.
   Do not rewrite the accepted decision — write a new ADR that supersedes it.
   Record the supersession in the superseded record as a one-line banner beneath
-  its existing status (form below). Its link must resolve to a sibling record;
-  the records CI gate checks both.
+  its existing status (form below), and set the status itself to
+  `Superseded by [ADR-NNNN](NNNN-slug.md)` in the same change. The records CI
+  gate checks the banner's form, its date, and that its link resolves to a
+  sibling record — in the `## Status` section, or in the preamble for a
+  pre-0504 record that keeps its status as a bullet there
+  ([ADR-0564](0564-the-status-region-is-where-a-record-keeps-its-status.md)).
+  A record's status value is the one part of it the gate does not hold
+  immutable, in either shape.
 - A merged ADR is append-only outside `## Status`. When later evidence or a
   follow-up decision qualifies its reasoning, append a block to the level-2
   section it qualifies with the heading

@@ -234,6 +234,34 @@ adr_dir() {
   printf '%s' "$dir"
 }
 
+# write_legacy_adr <dir> <name> <status-lines>
+#
+# An ADR in the pre-0504 shape: no `## Status` section at all, the status carried as a metadata
+# bullet in the preamble instead. That shape is what grandfathers a record, and it is the shape
+# the corpus this gate was adopted into holds 483 of. <status-lines> is written verbatim, so a
+# case can put a supersession banner beneath the bullet the way the ADR README prescribes.
+write_legacy_adr() {
+  local dir=$1 name=$2 status=$3
+  cat >"$dir/docs/adr/$name" <<EOF
+# ${name%%-*} — a pre-template decision
+
+$status
+- **Date:** 2026-01-01
+
+## Context
+
+Why this came up.
+
+## Decision
+
+What we decided.
+
+## Consequences
+
+What follows from it.
+EOF
+}
+
 # migrator_dir <name> — a committed repo whose one record carries every legacy marker shape
 # at once, with the migrator installed beside the checker. Beside is not incidental: the
 # migrator sources the checker out of its own directory for canonicalise and the allowance.
@@ -1826,6 +1854,69 @@ MD
   banner="> **Superseded by [0009](0009-nowhere.md)** (2026-01-02)"
   printf '\n## Status\n\nAccepted (2026-01-01)\n%s\n' "$banner" >>"$d/docs/adr/0001-legacy.md"
   run_case "dangling link on a legacy ADR is an error" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The case above appends a `## Status` section to the fixture before asserting, so it proves
+  # nothing about a record that never grows one — and a pre-0504 record does not. There the
+  # banner sits in the preamble, `check_supersede_link` reads an empty `## Status` body, and
+  # E-SUPERSEDE-DANGLING cannot fire at all: the gate checked the banner on none of the 483
+  # records most likely to acquire one (#1976, ADR 0564).
+  d="$SCRATCH/adr_legacy_preamble_dangling"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Superseded by [ADR-0009](0009-nowhere.md)
+> **Superseded by [0009](0009-nowhere.md)** (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "dangling banner with no Status section" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The supersession docs/adr/README.md prescribes, on the shape the corpus actually has. Setting
+  # the bullet rewrites a preamble line, which was E-PREAMBLE-REWRITTEN through err_full — a
+  # finding W-LEGACY-SHAPE deliberately cannot downgrade — so the gate refused the one edit that
+  # keeps a superseded record's status honest. A status value is not a protected region.
+  d="$SCRATCH/adr_legacy_status_superseded"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted"
+  write_adr "$d" "0002-later.md" "Accepted (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  write_legacy_adr "$d" "0001-legacy.md" \
+    "- **Status:** Superseded by [ADR-0002](0002-later.md)"
+  run_case "legacy status bullet set to superseded" 0 - "$d" BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The same supersession as one realistic commit: the bullet *and* the banner beneath it. Adding
+  # a line is not a marker-only change, so this one is not excused by the allowance in front of
+  # the three rules — it reaches check_preamble_intact, which has to know the same thing.
+  d="$SCRATCH/adr_legacy_status_and_banner"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted"
+  write_adr "$d" "0002-later.md" "Accepted (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  write_legacy_adr "$d" "0001-legacy.md" \
+    "- **Status:** Superseded by [ADR-0002](0002-later.md)
+> **Superseded by [0002](0002-later.md)** (2026-01-02)"
+  run_case "legacy status bullet and banner in one change" 0 - "$d" BASE_SHA="$b" \
+    RECORD_PROFILES=adr
+
+  # The allowance is the preamble's, not the word "Status"'s. A line that looks like a status
+  # bullet but sits inside a section is body content of an append-only section and stays
+  # byte-protected — without this, one masking rule applied file-wide would gut it silently.
+  d="$SCRATCH/adr_status_line_in_section"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted"
+  printf -- '- Status: reported by the poller, not by the record.\n' \
+    >>"$d/docs/adr/0001-legacy.md"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  sed 's/^- Status: reported by the poller.*$/- Status: whatever we say it is./' \
+    "$d/docs/adr/0001-legacy.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
+  run_case "a Status line inside a section stays protected" 1 E-REWRITE "$d" \
     BASE_SHA="$b" RECORD_PROFILES=adr
 
   # And W-INDEX-TABLE must not inherit `downgrade` from the record loop, which would leave it
