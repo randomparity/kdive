@@ -124,6 +124,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Admit conditional capture publication
 - Activate capture publication protocol
 - Install capture publication protocol 4
+- Add the CaptureReaper port and its disabled wiring
+- Persist reap-once capture convergence in migration 0115
+- Reclaim orphaned traffic captures to convergence
+- Wire the capture sweep with both providers disabled
 
 ### Changed
 
@@ -190,6 +194,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name both doc readers in the settable-symbol guard
 - Simplify capture launch cleanup
 - Remove unused capture parameters
+- Share one capture qom_id convention
 
 ### Documentation
 
@@ -646,6 +651,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the host-dump volume capture fence
 - State what the enforcement guard proves and what it does not
 - Record the measured cost of the AST scan
+- Record the cutover-generation shape the sweep reads
+- Record the unbounded provider call, and report reaped_captures
 
 ### Fixed
 
@@ -1076,6 +1083,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Do not count a declined dump volume as reaped
 - Apply adversarial-review findings to the dump-volume fence
 - Declare only the enforced component source kind
+- Close the fail-open cutover branch for a retried capture
+- Defer a fence-refused capture instead of skipping it
 
 ### Build
 
