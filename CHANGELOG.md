@@ -195,6 +195,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simplify capture launch cleanup
 - Remove unused capture parameters
 - Share one capture qom_id convention
+- Cut duplicated rationale from the reaping-latency diff
 
 ### Documentation
 
@@ -654,6 +655,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the cutover-generation shape the sweep reads
 - Record the unbounded provider call, and report reaped_captures
 - Regenerate the reference for KDIVE_APT_TIMEOUT_S
+- Decide the reaping-latency bound as a lane budget plus a connect gate
+- Correct the lane-order, prior-disclosure, and knob-interaction claims
+- Add the implementation plan and the second-round design fixes
+- Start the lane deadline after the candidate list, not before it
 
 ### Fixed
 
@@ -1088,6 +1093,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Defer a fence-refused capture instead of skipping it
 - Bound the apt install with a timeout, then retry it
 - Make the apt timeout actually reach dpkg, and bound the repair
+- Bound the two host-state reaping lanes
+- Share one deadline across a host's resolved addresses
+- Declare the connect gate for the server, and name its failures
+- Keep the composed pkipath out of the gate's errors
+- Check no_verify on the gate and strip userinfo from its errors
 
 ### Build
 
