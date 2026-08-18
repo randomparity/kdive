@@ -61,9 +61,13 @@ both lanes, so a spent budget can only prevent the *next* transaction from openi
 unwind one that is open.
 
 Setting: `KDIVE_RECONCILER_LANE_BUDGET_SECONDS`, integer seconds, default 10, read by the
-`reconciler` and `server` processes (`ops.reconcile_now` runs `reconcile_once` too, so a brake set
-on only one of them would leave the other unbounded). Reaches the lanes through a new
-`ReconcileConfig.lane_budget` field.
+`reconciler` process. Reaches the lanes through a new `ReconcileConfig.lane_budget` field.
+`ops.reconcile_now`'s on-demand pass builds its own `ReconcileConfig` in
+`src/kdive/mcp/tools/ops/reconcile/reconcile.py` and reads no reconciler setting — it already
+inherits the compiled-in defaults for `capture_settle`, `capture_reap_batch`, the retry pair and
+`dump_volume_grace`, so it inherits this one the same way. It is bounded there, just not tunable
+there; making that path setting-aware is a separate change to every reconciler knob, not to this
+bound.
 
 Full limit contract, which must appear in the ADR, the setting's `help`, and the docstring of each
 lane: unit **seconds**; reference clock the **reconciler process's monotonic clock**; scope **per
@@ -75,8 +79,9 @@ draining raises this or the reconcile interval**.
 
 The setting's parser rejects a non-positive value, so no operator can set a budget that attempts
 nothing and thereby disable both sweeps. The lanes carry no sentinel for it; the parser is the
-guard, and the default of 10 is a third of `DEFAULT_INTERVAL` (30 s) so both lanes at their budget
-still leave two thirds of an interval for the rest of the catalog.
+guard, and the default of 10 is a third of `DEFAULT_INTERVAL` (30 s) so both lanes spending their
+whole budget still leaves a third of an interval — minus each lane's in-flight-candidate
+overshoot — for the rest of the catalog.
 
 ### Limit 2 — reaper connect gate
 
@@ -102,7 +107,10 @@ or removes them from the declared inventory**.
 The endpoint comes from the URI the reaper is about to open. `validate_remote_uri` already
 guarantees the scheme is `qemu+tls`, so the port defaults to libvirt's TLS port 16514 when the URI
 carries none. A URI with no host is a configuration error the gate reports rather than probing
-`localhost`.
+`localhost`. That configuration error reaches the operator only through `_enter_host`'s
+unreachable-host warning, which logs `exc_info=True` — so the message and the URI are in the
+traceback, but the headline reads like a down host. ADR-0565 accepts that rather than narrowing
+every reaper's failure isolation.
 
 ### What is deliberately not bounded
 
@@ -111,6 +119,19 @@ libvirtd's RPC — is still unbounded and still holds its transaction for as lon
 1 caps the blast radius at one candidate per lane per pass. ADR-0565 records the two escalations it
 weighed for that residual (`virConnectSetKeepAlive`, and ADR-0558's supervised-child shape) and
 takes neither.
+
+The dump-volume lane's `list_dump_volumes` fan-out runs *before* the loop and is therefore not
+preemptible by the budget: a lane's pass ceiling is its budget, plus the candidate in flight when
+the budget expires, plus that one un-budgeted listing. R1 is unaffected because the listing runs
+with the connection idle rather than idle-in-transaction — `reap_stale_host_dump_volume_leases`
+closes its own transaction before returning, and `reap_orphaned_dump_volumes` asserts
+`require_top_level_transaction` for that reason.
+
+`leaked_domains` and `leaked_probe_guests` open through the same reaper seam and so get the connect
+gate, but no budget: both make their provider calls *outside* the locked transaction
+(`repair_leaked_domains` closes its `(SYSTEM, system_id)` block before `reaper.destroy`;
+`repair_leaked_probe_guests` destroys between two separate transactions), so neither has the
+idle-in-transaction hazard #1980 names.
 
 The two limits also multiply: a lane advances roughly `budget ÷ per-candidate cost` candidates per
 pass, and per-candidate cost rises by the connect timeout for each unreachable host the fan-out
@@ -123,7 +144,7 @@ walks. ADR-0565 records the relation and why it is left to the operator rather t
 | `src/kdive/config/core_settings.py` | declare `RECONCILER_LANE_BUDGET_SECONDS` |
 | `src/kdive/providers/remote_libvirt/settings.py` | declare `REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS` |
 | `src/kdive/providers/remote_libvirt/connection/reachability_gate.py` | new — parse the endpoint, bounded TCP probe, typed failure |
-| `src/kdive/providers/remote_libvirt/reaping/connections.py` | `open_libvirt_reaper` calls the gate before `libvirt.open` |
+| `src/kdive/providers/remote_libvirt/reaping/connections.py` | `open_libvirt_reaper` calls the gate before `libvirt.open`; also the opener for `RemoteLibvirtInfraReaper` |
 | `src/kdive/reconciler/cleanup/provider_reaping.py` | the two lanes take `budget`, check it between candidates; R4's comment updates |
 | `src/kdive/reconciler/loop.py` | `ReconcileConfig.lane_budget`, threaded into both lane repairs |
 | `src/kdive/processes/reconciler.py` | read the setting into `ReconcileConfig` |
@@ -131,14 +152,36 @@ walks. ADR-0565 records the relation and why it is left to the operator rather t
 
 ## Testing
 
-- **R2 (the load-bearing test)** — a database test per lane. The lane runs with a budget shorter
-  than the provider call. The fake reaper does its work inside `asyncio.shield`, so a cancellation
-  of the awaiting coroutine does not stop it — the same asymmetry a `to_thread` worker has. After
-  the budget has expired, the shielded work asks a **second** connection whether the lane's lock is
-  still held (`pg_try_advisory_xact_lock` on the same key must fail while the lane holds it), and
-  records the answer. Assertions: the recorded answer is "still held", the candidate is marked
-  reclaimed, and the lane counts it. Under an `asyncio.timeout`-around-the-call rewrite the
-  transaction unwinds first and the recorded answer flips, so the test reddens.
+- **R2 (the load-bearing test)** — a database test per lane, in `tests/reconciler/`. The lane runs
+  with a budget an order of magnitude shorter than the provider call, so the budget expires early in
+  the call and the observation below is taken long after any competing rollback would have
+  completed. The fake reaper does its work inside `asyncio.shield`, so cancelling the awaiting
+  coroutine does not stop it — the same asymmetry a `to_thread` worker has.
+
+  The observation is taken at the **end** of the shielded work, not at budget expiry: the fake sleeps
+  past the budget by a stated margin, then asks a **second** pooled connection whether the lane's
+  lock is still held, and records the answer. "Still held" is
+  `SELECT pg_try_advisory_xact_lock(<key>)` returning false inside a transaction on that second
+  connection. The key differs per lane and must be taken from `kdive.db.locks`, not re-derived:
+  - capture lane — `CAPTURE_JOB_FENCE_KEY_SQL`, i.e.
+    `hashtextextended('kdive:job:' || job_id::text, 1951)`. It is deliberately not `_lock_key`; a
+    test that reached for `_lock_key` here would probe a key nobody holds and fail on a good tree.
+  - dump-volume lane — `_lock_key(LockScope.SYSTEM, system_id)`.
+
+  Assertions, in order of what each proves: **(1)** the recorded answer is "still held" — this is the
+  R2 evidence, and under an `asyncio.timeout`-around-the-call rewrite the transaction has unwound by
+  then and the answer flips; **(2)** the lane still counts the candidate and (capture lane) marks the
+  row reclaimed — which proves the call was allowed to finish, but not on its own that no transaction
+  ended mid-call, since `_dispatch_capture` and `_delete_if_still_orphaned` both catch `Exception`
+  and would turn a `TimeoutError` into a defer.
+
+  The dump-volume fixture must satisfy every precondition on the locked path or the lane never takes
+  the lock and the probe observes a lock nobody held: a volume name carrying a parseable System UUID,
+  `mtime_epoch_s` older than `grace`, no live `host_dump_volume_lease` row for that System, and no
+  active capture job for it.
+
+  Mutation-verify both: break the bound so it does release the lock mid-call, watch the test redden,
+  restore, clear `__pycache__`, and confirm green.
 - **Budget gates between candidates, never during one** — with two candidates and a budget spent by
   the first, exactly one provider call is dispatched and the second candidate is untouched (no
   reap-state row written for it).
@@ -147,8 +190,9 @@ walks. ADR-0565 records the relation and why it is left to the operator rather t
 - **Budget not spent** — the full batch is attempted, unchanged from today.
 - **Connect gate** — `require_reachable` succeeds against a real listening socket on `127.0.0.1:0`;
   raises `TRANSPORT_FAILURE` when the injected connector raises `TimeoutError` or `OSError`; the
-  endpoint parser resolves an explicit port, defaults to 16514, and rejects a host-less URI. A test
-  that `open_libvirt_reaper` calls the gate before the libvirt opener.
+  endpoint parser resolves an explicit port, defaults to 16514, and raises `CONFIGURATION_ERROR` for
+  a host-less URI rather than probing `localhost`. A test that `open_libvirt_reaper` calls the gate
+  before the libvirt opener.
 - **Fan-out still isolates** — a host whose gate fails is skipped and the remaining hosts are still
   swept (the existing `map_over_fleet` / `find_over_fleet` behavior, re-proved through the gate).
 

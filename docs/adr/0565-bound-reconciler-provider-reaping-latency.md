@@ -76,8 +76,11 @@ budget has expired that shielded work asks a second database connection whether 
 still held.
 
 `KDIVE_RECONCILER_LANE_BUDGET_SECONDS`, default 10, is the operator's knob. The default is a third
-of `DEFAULT_INTERVAL` (30 s), so both lanes at their budget still leave two thirds of an interval
-for the rest of the catalog.
+of `DEFAULT_INTERVAL` (30 s), so both lanes spending their whole budget still leaves a third of an
+interval — minus each lane's in-flight-candidate overshoot — for the rest of the catalog. It is read
+by the `reconciler` process. `ops.reconcile_now`'s on-demand pass keeps the compiled-in default, as
+it already does for `capture_settle`, `capture_reap_batch`, the retry pair, and `dump_volume_grace`;
+that path builds its own `ReconcileConfig` and reads no reconciler setting.
 
 - **Unit** — seconds.
 - **Reference clock** — the reconciler process's monotonic clock. Not the database clock: this
@@ -125,15 +128,31 @@ remote-libvirt path would change every provider plane's failure timing for a haz
 report.
 
 Both lanes get both limits. The lane budget applies to each lane directly. The connect gate applies
-to every connection the shared reaper seam (`remote_libvirt_reaper_connections`) opens — the
-dump-volume reaper today, and #1947's remote capture reaper when it lands.
+to every connection the shared reaper seam (`remote_libvirt_reaper_connections`) opens: the
+dump-volume reaper, `RemoteLibvirtInfraReaper` — which backs the `leaked_domains` and
+`leaked_probe_guests` lanes — and #1947's remote capture reaper when it lands.
 
 ## Consequences
 
 - One unreachable declared host costs a reaping lane the connect timeout per provider call instead
-  of ~130 s, and no lane can consume more than its budget plus one candidate of the pass. The lanes
-  placed after the reaping lanes are delayed by that bounded amount rather than an untunable one,
-  and the `SYSTEM`-lock hold that `runs.bind` queues behind shrinks by the same factor.
+  of ~130 s. The lanes placed after the reaping lanes are delayed by that bounded amount rather than
+  an untunable one, and the `SYSTEM`-lock hold that `runs.bind` queues behind shrinks by the same
+  factor.
+- **The budget does not preempt the dump-volume lane's fleet listing.** `list_dump_volumes` runs
+  before the loop, so it precedes the first budget check, and it is itself a whole-fleet fan-out —
+  up to `connect_timeout × declared_hosts` with the gate, and still unbounded on a post-handshake
+  stall. A lane's pass ceiling is therefore its budget, plus the candidate in flight when the budget
+  expires, plus that one un-budgeted listing. R1 survives it only because the listing runs with the
+  connection idle rather than idle-in-transaction: `reap_stale_host_dump_volume_leases` closes its
+  own transaction before returning, and `reap_orphaned_dump_volumes` asserts
+  `require_top_level_transaction` for exactly that reason.
+- **Two more lanes get the gate and no budget.** `leaked_domains` and `leaked_probe_guests` open
+  their connections through the same reaper seam, so their connects are bounded too. They get no
+  budget because they do not have the hazard #1980 names: both make their provider calls *outside*
+  the locked transaction — `repair_leaked_domains` closes its `(SYSTEM, system_id)` block before
+  `reaper.destroy`, and `repair_leaked_probe_guests` destroys between two separate transactions — so
+  neither holds a connection idle-in-transaction across a provider call. They still contribute
+  unbounded time to a pass, which is a smaller and different problem than this one.
 - **The two knobs multiply, and the relation is the operator's to keep.** A lane advances roughly
   `budget ÷ per-candidate cost` candidates per pass, and per-candidate cost rises by the connect
   timeout for each unreachable host the fan-out walks. With the defaults, one down host costs 5 s per
@@ -156,6 +175,12 @@ dump-volume reaper today, and #1947's remote capture reaper when it lands.
 - **The gate is a check-then-act.** A host that accepts TCP at probe time and dies before
   `libvirt.open` is back to the unbounded case. The window is one round trip wide and the outcome is
   the pre-existing behavior, so the gate is an improvement rather than a guarantee.
+- **A URI the gate rejects as malformed is reported through the unreachable-host channel.**
+  `_enter_host` catches every exception from the opener and logs "skipped an unreachable host", so a
+  URI carrying no host reads at a glance like a down host, on every pass. Accepted rather than fixed
+  here: the log carries `exc_info=True`, so the gate's `CONFIGURATION_ERROR` message and the URI it
+  names do reach the operator in the traceback, and narrowing that seam's isolation is a change to
+  every reaper's failure handling rather than to this bound.
 - **The gate adds one TCP connect per host per reaper call.** On a reachable host that is an extra
   connection libvirtd accepts and sees closed before the TLS handshake, which its log records.
 - **A permanently failing first dump-volume candidate can now truncate the lane silently.** The
