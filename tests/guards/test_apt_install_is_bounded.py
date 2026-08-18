@@ -1,4 +1,9 @@
-"""Guard: CI's apt installs are bounded, retried, and written down exactly once (ADR-0566).
+"""Guard: CI's apt installs are bounded and retried, and every workflow job declares a timeout.
+
+Two guarantees, one record (ADR-0566), because one is why the other exists. The apt half is
+bounded, retried and written down exactly once. The job half — the `declares_a_timeout` test
+below — began as its backstop and is now the repo-wide rule for every workflow, apt or not
+(#1983); a workflow author who trips a red check from this file is most likely tripping that.
 
 `Install libvirt build headers` wedged for 13 and 33 minutes on two runs in one afternoon
 against a ~15s normal (#1978), and each time a human had to notice and cancel the job. The
@@ -6,8 +11,8 @@ failure is a **stall**, not a non-zero exit — `apt-get` never returned — so 
 half of the fix is the hard `timeout` in `scripts/apt-install.sh`, and the retry is what keeps a
 timeout from being fatal on a merely slow mirror.
 
-Four of these tests are static: they read the workflows, the script and the `justfile` and
-assert the wiring. The other four actually **run** the script — against a stub `apt-get` that
+Five of these tests are static: they read the workflows, the script and the `justfile` and
+assert the wiring. The other five actually **run** the script — against a stub `apt-get` that
 hangs, that fails, and that succeeds, plus a malformed budget — because a wiring assertion
 cannot tell whether the timeout fires. That is the whole claim, and asserting the absence of a
 bare `apt-get` would pass just as happily over a script that hangs forever. Those runs also
@@ -15,8 +20,11 @@ record the argv every stub was handed, so the options that make the bound work �
 `--kill-after`, `sudo`, `DPkg::Use-Pty=0` — are under test rather than merely present in the
 file.
 
-Stdlib + pytest only, matching `test_prepull_images_match_fixtures.py`: this reads the tree and
-runs one shell script, not the project.
+Stdlib, `pyyaml` and pytest: this reads the tree and runs one shell script, not the project.
+`pyyaml` is a declared dependency and is how `tests/scripts/test_live_workflow_shape.py` already
+reads these same workflow files — the job-level checks below need a real parser, because a
+regex that recognises a job key by its line shape cannot see one carrying a trailing comment,
+and reports it as bounded. Everything the *script* is tested with stays stdlib.
 """
 
 from __future__ import annotations
@@ -27,6 +35,8 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+
+import yaml
 
 _ROOT = Path(__file__).resolve().parents[2]
 _APT_SCRIPT = _ROOT / "scripts" / "apt-install.sh"
@@ -69,10 +79,13 @@ _DERIVED_ATTEMPTS = re.compile(
     r"^(?:readonly\s+)?ATTEMPTS=\$\(\(\$\{#BACKOFF_S\[@\]\}\s*\+\s*1\)\)", re.MULTILINE
 )
 
-#: A job key: two-space indent under the top-level `jobs:` mapping.
-_JOBS_BLOCK = re.compile(r"^jobs:$", re.MULTILINE)
-_JOB_KEY = re.compile(r"^  (?P<job>[A-Za-z0-9_-]+):$", re.MULTILINE)
-_JOB_TIMEOUT = re.compile(r"^    timeout-minutes:\s*(?P<minutes>\d+)\s*$", re.MULTILINE)
+#: The GitHub Actions default. Declaring it bounds nothing — 360 *is* the default this guard
+#: exists to close — and that holds on every runner, which is why the comparison is `>=`.
+#: (It is also the hosted-runner execution ceiling, so a hosted job cannot enforce more. That
+#: half is not universal: `live.yml`'s `native` job is self-hosted, where a larger value would
+#: be enforced. It is at 90 today, so nothing turns on it; the reason above is the one that
+#: does.)
+_ACTIONS_DEFAULT_TIMEOUT_MINUTES = 360
 
 #: `apt-install +PACKAGES:` and the body line that runs the script.
 _JUST_RECIPE = re.compile(
@@ -80,21 +93,27 @@ _JUST_RECIPE = re.compile(
 )
 
 
-def _jobs(text: str) -> dict[str, str]:
-    """Split a workflow into ``{job name: that job's YAML}``.
+def _jobs(path: Path) -> dict[str, object]:
+    """Parse a workflow into ``{job name: that job's mapping}``.
+
+    The values are typed `object`, not `dict`, because nothing here has validated them — a
+    malformed workflow can put anything under a job key, and claiming `dict` would move that
+    check from the callers, which do it, into a signature, which cannot.
 
     Per job, not per file: a `timeout-minutes` on one job says nothing about the wedge budget
     of the job beside it, and a whole-file search would count it for both.
+
+    `yaml.safe_load` rather than a line-anchored regex over the text. A regex that recognises a
+    job by `^  name:$` cannot see `  wedgeable:  # added later` or `  "wedgeable":` — both
+    ordinary YAML — and a job it cannot see is a job it reports as bounded. That failure is
+    silent in both directions: it never lands in `missing`, and the job floor below only
+    catches jobs that *disappear*, never ones that were never visible. `pyyaml` is a declared
+    dependency and `tests/scripts/test_live_workflow_shape.py` already parses these same files
+    with it, so this is one parser where the tree had two.
     """
-    block = _JOBS_BLOCK.search(text)
-    if block is None:
-        return {}
-    body = text[block.end() :]
-    bounds = list(_JOB_KEY.finditer(body))
-    ends = [*(match.start() for match in bounds[1:]), len(body)]
-    return {
-        match.group("job"): body[match.end() : end] for match, end in zip(bounds, ends, strict=True)
-    }
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    jobs = document.get("jobs", {}) if isinstance(document, dict) else {}
+    return jobs if isinstance(jobs, dict) else {}
 
 
 def _workflow_text(name: str) -> str:
@@ -140,35 +159,104 @@ def test_no_workflow_installs_packages_with_a_bare_apt_get() -> None:
     )
 
 
-def test_every_job_in_a_package_installing_workflow_declares_a_timeout() -> None:
-    """A hard timeout inside the script bounds one step; `timeout-minutes` bounds the rest."""
-    # Derived, not hardcoded: any workflow that reaches the shared script is a workflow whose
-    # jobs can be wedged by an apt step, including one added after this guard was written.
-    names = sorted(
-        {path.name for path in _workflow_files() if _SHARED_SCRIPT.search(path.read_text("utf-8"))}
-        | set(_APT_WORKFLOWS)
+def test_every_job_in_every_workflow_declares_a_timeout() -> None:
+    """A hard timeout inside the script bounds one step; `timeout-minutes` bounds the rest.
+
+    Every workflow, not only the package-installing ones (#1983). The 360-minute default is a
+    property of GitHub Actions, not of `apt-get`: a job that wedges on a registry push or an
+    emulated build burns the same six hours, and scoping this to `_APT_WORKFLOWS` left five
+    workflows on the default with nothing to say so.
+
+    **What this does not check, so a green run is not read as more than it is.** ADR-0566's
+    convention has two halves — a value *sized from the job's observed runtime*, and that figure
+    written in a comment beside it — and only the first is mechanised here, as presence and as a
+    real bound. Nothing ties a declared number to any measurement: a job whose true cost is 15
+    seconds can carry 300 with no comment and pass. Checking for a comment would only ever prove
+    a `#` is present, never that its figure is current or true, so the provenance half of the
+    convention is held by review and by ADR-0566, not by this test. `records.yml` is the one job
+    already carrying a value with no observation written down.
+    """
+    paths = _workflow_files()
+    # Non-empty first: "every job declares a timeout" is also true of a directory with no
+    # workflows in it, and of a glob that stopped matching either spelling.
+    assert paths, (
+        f"no workflow files matched {_WORKFLOW_GLOBS} under {_WORKFLOWS.relative_to(_ROOT)}, so "
+        "this guard is asserting nothing (ADR-0566, #1983)."
     )
 
     missing: list[str] = []
+    unbounded: list[str] = []
     checked = 0
-    for name in names:
-        jobs = _jobs(_workflow_text(name))
-        assert jobs, f"no jobs parsed out of {name} — the workflow layout changed (ADR-0566)"
-        for job_name, body in jobs.items():
+    for path in paths:
+        # `_workflow_text` first only for its message: it names an *emptied* workflow as such,
+        # where `assert jobs` one line down would report the same file as a layout change. Both
+        # are loud; this one is right.
+        _workflow_text(path.name)
+        jobs = _jobs(path)
+        assert jobs, f"no jobs parsed out of {path.name} — the workflow layout changed (ADR-0566)"
+        for job_name, job in jobs.items():
             checked += 1
-            if not _JOB_TIMEOUT.search(body):
-                missing.append(f"{name}:{job_name}")
+            uses = job.get("uses") if isinstance(job, dict) else None
+            if uses is not None:
+                # A job that calls a reusable workflow cannot declare `timeout-minutes` —
+                # actionlint (`just lint-workflows`, on the same `just ci` chain as this test)
+                # rejects it, and so does GitHub. Requiring it here would deadlock the first
+                # such job against the repo's other gate. What makes the skip safe is that the
+                # callee is a workflow this guard also reads, so assert that rather than
+                # assuming it: an out-of-repo callee's jobs are invisible here and run on the
+                # default, which is the one way this exemption becomes the hole it exists to
+                # avoid. This is the guard's only skip, so it fails loudly instead of silently.
+                assert str(uses).startswith("./"), (
+                    f"{path.name}:{job_name} calls the out-of-repo reusable workflow {uses!r}. "
+                    "Its jobs are not in this repo, so nothing here can check their "
+                    "`timeout-minutes` and they run on the 360-minute Actions default, while "
+                    "this guard reports the repo as bounded. A local callee (`./.github/...`) "
+                    "is covered because this guard reads it directly (ADR-0566, #1983)."
+                )
+                continue
+            declared = job.get("timeout-minutes") if isinstance(job, dict) else None
+            if declared is None:
+                missing.append(f"{path.name}:{job_name}")
+            # `(int, float)` because GitHub's schema for this key is a float, so `0.5` is legal
+            # and is a *tighter* bound than any integer. `not isinstance(declared, bool)` because
+            # `bool` subclasses `int`: `timeout-minutes: true` parses to `True`, and `True >= 360`
+            # is False — the one spelling that would slip past the check this assertion exists to
+            # be. actionlint rejects it too, but not from this file.
+            elif (
+                not isinstance(declared, int | float)
+                or isinstance(declared, bool)
+                or declared >= _ACTIONS_DEFAULT_TIMEOUT_MINUTES
+            ):
+                unbounded.append(f"{path.name}:{job_name}={declared!r}")
 
-    # The real count across these four workflows is 11. `>= len(names)` would be satisfied by a
-    # parser that found one job per file and silently stopped checking the other seven.
-    assert checked >= 11, (
-        f"only {checked} job(s) parsed across {names}; the parser has drifted and this guard is "
-        "checking a fraction of what it claims to (ADR-0566)."
+    # The real count across the ten workflows is 17. `>= len(paths)` would be satisfied by a
+    # parser that found one job per file and silently stopped checking the other seven. It is a
+    # tripwire for that regression, not a coverage assertion, and it goes slack as jobs are
+    # added — at 20 jobs a parser hiding three of them still clears 17. An exact count would
+    # redden on every legitimate new job, which is churn this buys nothing for.
+    assert checked >= 17, (
+        f"only {checked} job(s) parsed across {[path.name for path in paths]}. Either the parser "
+        "has drifted and this guard is checking a fraction of what it claims to, or a workflow "
+        "or job was removed — if that removal was intended, lower this floor in the same change "
+        "(ADR-0566)."
     )
     assert not missing, (
         f"{missing} declare no job-level `timeout-minutes`, so a wedged step there runs to the "
         "360-minute GitHub Actions default. That is what made #1978 cost a full CI cycle each "
-        "time it fired. Size it from the job's observed runtime with headroom (ADR-0566)."
+        "time it fired. Size it from the job's observed runtime with headroom, and put the "
+        "observed figure in a comment beside it. This rule covers every workflow, not only the "
+        "package-installing ones ADR-0566 records — and where ADR-0566's sizing adds the apt "
+        "script's ~11-minute worst case, a job with no apt step does not carry that term "
+        "(ADR-0566, #1983)."
+    )
+    # Presence is not a bound. Without this, a job could satisfy the assertion above by
+    # declaring exactly the default the assertion's own message names.
+    assert not unbounded, (
+        f"{unbounded} declare a `timeout-minutes` that is not a plain number below the "
+        f"{_ACTIONS_DEFAULT_TIMEOUT_MINUTES}-minute Actions default. At the default it bounds "
+        "nothing — the job is as wedgeable as it was before it was declared — and on a hosted "
+        "runner nothing above it is enforceable either. Size it from the job's observed runtime "
+        "(ADR-0566, #1983)."
     )
 
 

@@ -39,6 +39,8 @@ jobs:
   sync:
     name: regenerate Unreleased
     runs-on: ubuntu-latest
+    # Observed ~30s across the last 20 runs; no apt step (ADR-0566, #1983).
+    timeout-minutes: 10
     permissions:
       contents: read  # the push uses the deploy key over SSH, not GITHUB_TOKEN
     steps:
