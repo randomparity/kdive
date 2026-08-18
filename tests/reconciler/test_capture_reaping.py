@@ -585,10 +585,17 @@ def test_a_live_owner_fence_defers_the_row_without_a_provider_call(migrated_url:
 
             assert await _reap(migrated_url, {_REMOTE: reaper}) == 0
             assert reaper.seen == []
-            assert await _reap_state(conn, job_id) is None
+            # Deferred, not skipped: an unmarked row would sort ahead of every real candidate on
+            # every later pass and hold its batch slot for as long as the owner stays wedged.
+            assert await _reap_state(conn, job_id) == (1, True, False)
 
             await owner.execute(
                 "SELECT pg_advisory_unlock(hashtextextended('kdive:job:' || %s::text, 1951))",
+                (job_id,),
+            )
+            await conn.execute(
+                "UPDATE capture_reap_state SET retry_after = now() - interval '1 second' "
+                "WHERE job_id = %s",
                 (job_id,),
             )
 
@@ -1008,5 +1015,35 @@ def test_the_attempt_linked_branch_reads_only_the_jobs_current_attempt(migrated_
 
             assert await _reap(migrated_url, {_REMOTE: reaper}) == 0
             assert reaper.seen == []
+
+    asyncio.run(_run())
+
+
+def test_wedged_fenced_rows_do_not_hold_the_batch_against_eligible_work(migrated_url: str) -> None:
+    """A batch full of fenced rows must not starve a reclaimable one on every later pass."""
+    reaper = _Reaper()
+
+    async def _run() -> None:
+        async with (
+            await _connect(migrated_url) as conn,
+            await _connect(migrated_url) as owner,
+        ):
+            for _ in range(2):
+                _, wedged_run = await _seed_chain(conn)
+                wedged_job = await _seed_capture_job(conn, wedged_run)
+                await owner.execute(
+                    "SELECT pg_advisory_lock(hashtextextended('kdive:job:' || %s::text, 1951))",
+                    (wedged_job,),
+                )
+            _, healthy_run = await _seed_chain(conn)
+            healthy_job = await _seed_capture_job(conn, healthy_run)
+
+            # The batch is the size of the wedged set, so on the first pass the fenced rows can
+            # fill it entirely and the healthy row may not be reached at all.
+            assert await _reap(migrated_url, {_REMOTE: reaper}, batch=2) == 0
+
+            # Having taken deadlines, they drop behind the untouched row and it is reached next.
+            assert await _reap(migrated_url, {_REMOTE: reaper}, batch=2) == 1
+            assert [capture.job_id for capture in reaper.seen] == [healthy_job]
 
     asyncio.run(_run())

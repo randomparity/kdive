@@ -518,21 +518,29 @@ async def _reclaim_capture(
     from before it inspects host state through the completion write, or a live owner could create
     state after an absence-tolerant reap already marked the attempt done.
 
-    A refused fence is skipped without a deadline write. It means a live owner is operating right
-    now, which is transient by construction and will resolve into evidence this sweep reads; a
-    backoff would postpone the row for a condition that clears on its own. Every other non-reclaim
-    outcome does get a deadline, so it cannot come back every pass ahead of untried candidates.
+    Every non-reclaim outcome writes a retry deadline, a refused fence included. Skipping one
+    without a deadline looks harmless — contention is someone else's live work, not a failure — but
+    an unmarked row sorts in the leading untouched group on every pass, so a handful of jobs whose
+    owners are paused or partitioned would fill the batch permanently and no eligible row would
+    ever be reached. That is exactly the starvation ADR-0556 forbids an ineligible row from
+    causing.
+
+    Backoff is the right shape for it rather than an over-punishment, because a fence held on a row
+    this sweep can see means a wedged owner, not a busy one: selection only reaches terminal jobs
+    past the settle window, and a healthy worker releases the fence when its job leaves ``running``
+    — long before then.
     """
     require_top_level_transaction(conn, "the orphaned capture sweep's per-row fence")
     job_id, system_id = row["job_id"], row["system_id"]
     async with conn.transaction():
         if not await try_capture_job_fence(conn, job_id):
             _log.info(
-                "reconciler: capture job %s (system %s) is fenced by a live owner; deferring to "
-                "the next pass",
+                "reconciler: capture job %s (system %s) is fenced by a live owner; deferring "
+                "without a provider call",
                 job_id,
                 system_id,
             )
+            await _defer_capture(conn, job_id, retry_base=retry_base, retry_cap=retry_cap)
             return False
         capture = _orphaned_capture(row)
         if capture is None:
