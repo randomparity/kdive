@@ -101,7 +101,14 @@ check_supersede_link() {
   local file=$1 label=$2 link
   while IFS= read -r link; do
     [ -n "$link" ] || continue
-    if [ ! -f "$RECORD_DIR/$link" ]; then
+    # The target is checked against the record grammar before it is joined to RECORD_DIR, not
+    # after. The extractor captures anything but `)`, so a banner may name `../../README.md` — a
+    # path that exists, resolves, and is not a record. BANNER_PATTERN would refuse it, but through
+    # `err`, which downgrades on exactly the grandfathered records this rule was widened to reach,
+    # so the form check cannot be what stands between a traversal and a green run.
+    if ! printf '%s' "$link" | grep -qE '^[0-9]{4}-[a-z0-9-]+\.md$'; then
+      err_full "E-SUPERSEDE-DANGLING: $label: supersession banner names '$link', which is not a record filename in $RECORD_DIR"
+    elif [ ! -f "$RECORD_DIR/$link" ]; then
       err_full "E-SUPERSEDE-DANGLING: $label: supersession banner names $RECORD_DIR/$link, which is not a record here"
     fi
   done < <(status_region "$file" |

@@ -1936,20 +1936,57 @@ MD
   run_case "a fenced Status heading does not hide the banner" 1 E-SUPERSEDE-DANGLING "$d" \
     BASE_SHA="$b" RECORD_PROFILES=adr
 
-  # One status, one masked line. A second `Status:`-labelled bullet is prose that happens to start
-  # with the label, and unprotecting it would let a change add such a bullet carrying a paragraph
-  # in one commit and gut it in the next, both green — an erasure route through the allowance.
+  # The allowance covers a record's status, and a record has one. Adding a second `Status:`-labelled
+  # line is what the mask cannot bound on its own — preamble additions are unconstrained, so a
+  # change could park a paragraph under the label here and gut it in the next PR with both runs
+  # green, and the inserted line would meanwhile make the record's real status unamendable.
   d="$SCRATCH/adr_legacy_second_status_line"
   new_adr_repo "$d"
-  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
-- Status: superseded for runtime assembly only; the build lane still follows this record."
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted"
   git -C "$d" add -A
   git -C "$d" commit -qm base
   b=$(base_of "$d")
-  sed 's/^- Status: superseded for runtime.*$/- Status: nothing to see here./' \
+  sed 's/^- \*\*Status:\*\* Accepted$/- **Status:** Accepted\
+- Status: the build lane still follows this record, whatever the bullet above says./' \
     "$d/docs/adr/0001-legacy.md" >"$d/.rec"
   mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
-  run_case "a second status-shaped bullet is still protected" 1 E-PREAMBLE-REWRITTEN "$d" \
+  run_case "adding a second status bullet is ambiguous" 1 E-STATUS-AMBIGUOUS "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # And a record that already had two must stay amendable. Holding a later PR to a shape it did
+  # not create is the deadlock grandfathering exists for, so the rule reports only what the change
+  # introduces — the same split W-DUP-PREEXISTING makes for a collision.
+  #
+  # The real status is the *second* line here, which is what makes this the freeze case rather
+  # than a duplicate of the one above: a mask that covered only the first match would spend the
+  # allowance on the line above and leave the record's actual status unamendable for good.
+  d="$SCRATCH/adr_legacy_two_at_base"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- Status: an older duplicate nobody removed.
+- **Status:** Accepted"
+  write_adr "$d" "0002-later.md" "Accepted (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  sed 's|^- \*\*Status:\*\* Accepted$|- **Status:** Superseded by [ADR-0002](0002-later.md)|' \
+    "$d/docs/adr/0001-legacy.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
+  run_case "two status bullets at base stay amendable" 0 - "$d" BASE_SHA="$b" \
+    RECORD_PROFILES=adr
+
+  # The extractor captures anything but `)`, so the target is checked against the record grammar
+  # before it is joined to RECORD_DIR. A traversal names a path that exists and resolves and is
+  # not a record; BANNER_PATTERN would refuse it, but through `err`, which downgrades on exactly
+  # the grandfathered records this rule was widened to reach.
+  d="$SCRATCH/adr_legacy_traversal_link"
+  new_adr_repo "$d"
+  printf 'top level\n' >"$d/README.md"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
+> **Superseded by [0009](../../README.md)** (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "a traversal banner target is not a record" 1 E-SUPERSEDE-DANGLING "$d" \
     BASE_SHA="$b" RECORD_PROFILES=adr
 
   # And the mask is anchored at column one, so an indented sub-bullet is not a candidate at all.

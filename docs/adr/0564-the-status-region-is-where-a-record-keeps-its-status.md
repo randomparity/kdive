@@ -85,9 +85,11 @@ the `## Status` body, and `check_preamble_intact` — the one rule that examines
 compares both sides through a reduction that does the same for a status bullet:
 
 ```sh
+STATUS_BULLET_RE='^(- )?(\*\*Status:\*\*|Status:)'
+
 mask_status_bullet() {   # fed `preamble` output, which already stops at the first `## `
-  LC_ALL=C awk '
-    !seen && /^(- )?(\*\*Status:\*\*|Status:)/ { seen = 1; print "<status>"; next }
+  LC_ALL=C awk -v re="$STATUS_BULLET_RE" '
+    $0 ~ re { print "<status>"; next }
     { print }
   '
 }
@@ -98,17 +100,22 @@ line from both sides of the comparison and `E-PREAMBLE-REWRITTEN` still fires. A
 inside a section is body content of an append-only section, stays byte-protected, and never
 reaches this filter.
 
-The first match only, anchored at column one. A record has one status, and every record in the
-corpus carries exactly one such line, so a second one is prose that happens to start with the
-label. Masking every match would let a change add a `Status:` bullet carrying a paragraph in one
-commit and gut it in the next, both green — an erasure route straight through the allowance, since
-`check_preamble_intact` counts removals and never objects to the addition.
+Every match, anchored at column one — not the first. Masking one would make the allowance
+positional, and a preamble *addition* is unconstrained: `check_preamble_intact` counts removals
+and never objects to a new line. So a single inserted `Status:`-prefixed line above the real
+bullet would silently take the allowance and freeze that record's status for good — the
+supersession edit fails afterwards, and so does removing the inserted line, with no remedy inside
+the gate. That is this defect, reintroduced per record and reachable by anyone, which is not a
+trade a fix for it may make.
 
-First by position, not by which line is really the status. A `Status:`-prefixed prose line placed
-above the status bullet consumes the allowance and leaves the bullet protected. That is the loud
-direction — the prescribed supersession edit then reports `E-PREAMBLE-REWRITTEN` and the author
-moves the line — so position is enough, and a rule that tried to identify the *real* status line
-would need a heuristic over prose.
+What masking every match would otherwise cost is the other direction: a change could park a
+paragraph under a `Status:` label in one commit and gut it in the next, both green. The bound is
+a rule rather than a narrower mask — `E-STATUS-AMBIGUOUS` fires when a change takes a record's
+preamble to more than one `Status:`-labelled line, so the parking commit is refused and the set
+the mask covers stays at one. It reports only what the change *introduces*, the way
+`W-DUP-PREEXISTING` splits a number collision: a record that already had two must stay amendable,
+because holding a later PR to a shape it did not create is the deadlock grandfathering exists for.
+One regex serves the mask and the rule, so the two cannot disagree about which lines are covered.
 
 One call site, not two. `marker_only_change` — the shortcut in front of the three anti-rewrite
 rules — is left as strict as it was, because a status-bullet edit it declines simply arrives at
@@ -127,7 +134,18 @@ in status.
   banner beneath it, in one commit. ADR-0430 takes that shape in this change, so its status now
   agrees with ADR-0563.
 - A dangling supersession banner on a pre-0504 record is `E-SUPERSEDE-DANGLING` at full severity,
-  as it already was on a conforming one — `err_full`, not downgradable.
+  as it already was on a conforming one — `err_full`, not downgradable. The banner's target is
+  checked against the record filename grammar *before* it is joined to `RECORD_DIR`: the extractor
+  captures anything but `)`, so `(../../README.md)` names a path that exists, resolves, and is not
+  a record. `BANNER_PATTERN` would refuse it, but through `err`, which downgrades on exactly the
+  grandfathered records this rule was widened to reach — so the form check cannot be what stands
+  between a traversal and a green run.
+- The gate checks the *banner's* link. `docs/adr/README.md` also prescribes naming the superseding
+  ADR in the status line itself, and no rule resolves that second link: the extractor matches the
+  banner form only, and the corpus writes the status line's link as
+  `[ADR-NNNN]`. A typo there is caught by review, not by the gate. Extending the extractor to both
+  spellings and both line shapes is tracked separately rather than folded in here, because it
+  changes what is read on all 483 grandfathered records.
 - The four grandfathered supersessions (ADR-0137, 0161, 0265, 0282) write their banner as
   `[ADR-0316]` rather than `[0316]`, with prose appended after the date, so their banner is not
   `BANNER_PATTERN`. Their one `W-LEGACY-SHAPE` line changes from `(E-STATUS)` to
@@ -135,11 +153,16 @@ in status.
   gains no warning and loses none — a measured 1720 before and after — and no error is
   introduced, because the link extractor does not recognise that spelling either. The banner
   form the README prescribes stays the single canonical one.
-- A merged record may now rewrite the value of the **first** column-one `Status:`-labelled line
-  in its preamble to anything. That is the same latitude the `## Status` body has always had, and
-  the same argument covers it: a status is state, not a claim the record makes. Nothing else
-  moves — a `Date:` or `Deciders:` bullet, any *later* `Status:`-labelled preamble line, an
-  indented one, and a `Status:` line inside any section all stay byte-protected.
+- A merged record may now rewrite the value of any column-one `Status:`-labelled line in its
+  preamble. For a record with one such line — every record in the corpus — that is its status, and
+  the same argument the `## Status` body has always answered to covers it: a status is state, not
+  a claim the record makes. It is not the *same* latitude, though. A conforming `## Status` body is
+  held to `Proposed`/`Deferred`/`Accepted|Rejected|Superseded (YYYY-MM-DD)` by
+  `profile_check_status` at full severity; the bullet is checked only by
+  `scripts/check_adr_status.py`, which validates the leading keyword and permits any trailing
+  qualifier. The bullet is the looser of the two, and `E-STATUS-AMBIGUOUS` is what stops that
+  looseness spreading to a second line. Nothing else moves — a `Date:` or `Deciders:` bullet, an
+  indented `Status:` line, and a `Status:` line inside any section all stay byte-protected.
 - A deferral record's status still comes from its `## Status` section. A resolution banner in the
   preamble is judged for form, count and date, but does not stand in for the status word, so such
   a record cannot become conforming by growing one line above its first heading.

@@ -248,24 +248,22 @@ status_region() {
 #
 # Anchored at column one and on the field label, not on the word: an unanchored match would mask
 # any metadata bullet that merely mentions a status, and the preamble is where a pre-template
-# record keeps its provenance.
+# record keeps its provenance. One definition, read by the mask and by the ambiguity rule that
+# bounds it, so the two cannot disagree about which lines the allowance covers.
+STATUS_BULLET_RE='^(- )?(\*\*Status:\*\*|Status:)'
 #
-# The first match only. A record has one status, and every record in the corpus this was written
-# against carries exactly one such line, so a second one is prose that happens to start with the
-# label — and unprotecting it would let a change add a `Status:` bullet carrying a paragraph in
-# one commit and gut it in the next, both green. Masking one line keeps the allowance the size of
-# the thing it is for.
+# Every match, not the first. Masking one would make the allowance positional, and a preamble
+# *addition* is unconstrained — check_preamble_intact counts only removals — so one inserted
+# `Status:`-prefixed line above the real bullet would silently consume the allowance and freeze
+# that record's status for good: the supersession edit fails afterwards, and so does removing the
+# inserted line, with no remedy inside the gate. That is the defect this record exists to remove,
+# reintroduced per record. E-STATUS-AMBIGUOUS below is what keeps the set to one instead.
 #
-# First by position, not by which line is really the status: a `Status:`-prefixed prose line
-# placed above the status bullet consumes the allowance, leaving the bullet protected. That
-# direction is loud — the prescribed supersession edit then reports E-PREAMBLE-REWRITTEN and the
-# author moves the line — rather than a silent hole, which is why position is enough.
-#
-# A sentinel line, not a deletion, so the bullet still has to be present: removing it outright
-# drops a line from the comparison and E-PREAMBLE-REWRITTEN still fires.
+# A sentinel line, not a deletion, so a masked line still has to be present: removing one drops a
+# line from the comparison and E-PREAMBLE-REWRITTEN still fires.
 mask_status_bullet() {
-  LC_ALL=C awk '
-    !seen && /^(- )?(\*\*Status:\*\*|Status:)/ { seen = 1; print "<status>"; next }
+  LC_ALL=C awk -v re="$STATUS_BULLET_RE" '
+    $0 ~ re { print "<status>"; next }
     { print }
   '
 }
@@ -515,7 +513,18 @@ check_headings_intact() {
 # marker-only allowance in front of this rule does not need to know, since a status-bullet edit
 # it declines simply arrives here and is accepted.
 check_preamble_intact() {
-  local tmp=$1 path=$2 removed
+  local tmp=$1 path=$2 removed base_bullets tree_bullets
+  # The allowance covers a record's status, and a record has one. A second such line makes "the
+  # status" ambiguous and is the vector the mask cannot bound on its own: preamble additions are
+  # unconstrained, so a change could park a paragraph under a `Status:` label in one commit and
+  # gut it in the next with both runs green. Reported only when the change *introduces* it, the
+  # way W-DUP-PREEXISTING splits a collision — a record that already had two must stay fixable,
+  # and holding a later PR to a shape it did not create is the deadlock grandfathering exists for.
+  base_bullets=$(preamble "$tmp" | grep -cE "$STATUS_BULLET_RE" || true)
+  tree_bullets=$(preamble "$path" | grep -cE "$STATUS_BULLET_RE" || true)
+  if [ "$tree_bullets" -gt 1 ] && [ "$tree_bullets" -gt "$base_bullets" ]; then
+    err_full "E-STATUS-AMBIGUOUS: $path: $tree_bullets 'Status:' lines above the first section — a record has one status, and the allowance that lets it change covers one line"
+  fi
   removed=$(diff <(preamble "$tmp" | mask_status_bullet) <(preamble "$path" | mask_status_bullet) |
     grep -c '^<' || true)
   if [ "$removed" -gt 0 ]; then
