@@ -74,9 +74,12 @@ _DERIVED_ATTEMPTS = re.compile(
     r"^(?:readonly\s+)?ATTEMPTS=\$\(\(\$\{#BACKOFF_S\[@\]\}\s*\+\s*1\)\)", re.MULTILINE
 )
 
-#: The GitHub Actions default, and the hosted-runner ceiling. A declared value at or above it
-#: bounds nothing: 360 *is* the default this guard exists to close, and anything higher is
-#: unenforceable, so the number in the file would be describing a limit that never arrives.
+#: The GitHub Actions default. Declaring it bounds nothing — 360 *is* the default this guard
+#: exists to close — and that holds on every runner, which is why the comparison is `>=`.
+#: (It is also the hosted-runner execution ceiling, so a hosted job cannot enforce more. That
+#: half is not universal: `live.yml`'s `native` job is self-hosted, where a larger value would
+#: be enforced. It is at 90 today, so nothing turns on it; the reason above is the one that
+#: does.)
 _ACTIONS_DEFAULT_TIMEOUT_MINUTES = 360
 
 #: `apt-install +PACKAGES:` and the body line that runs the script.
@@ -154,6 +157,15 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
     property of GitHub Actions, not of `apt-get`: a job that wedges on a registry push or an
     emulated build burns the same six hours, and scoping this to `_APT_WORKFLOWS` left five
     workflows on the default with nothing to say so.
+
+    **What this does not check, so a green run is not read as more than it is.** ADR-0566's
+    convention has two halves — a value *sized from the job's observed runtime*, and that figure
+    written in a comment beside it — and only the first is mechanised here, as presence and as a
+    real bound. Nothing ties a declared number to any measurement: a job whose true cost is 15
+    seconds can carry 300 with no comment and pass. Checking for a comment would only ever prove
+    a `#` is present, never that its figure is current or true, so the provenance half of the
+    convention is held by review and by ADR-0566, not by this test. `records.yml` is the one job
+    already carrying a value with no observation written down.
     """
     paths = _workflow_files()
     # Non-empty first: "every job declares a timeout" is also true of a directory with no
@@ -174,6 +186,13 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
         assert jobs, f"no jobs parsed out of {path.name} — the workflow layout changed (ADR-0566)"
         for job_name, job in jobs.items():
             checked += 1
+            if isinstance(job, dict) and "uses" in job:
+                # A job that calls a reusable workflow cannot declare `timeout-minutes` —
+                # actionlint (`just lint-workflows`, on the same `just ci` chain as this test)
+                # rejects it, and so does GitHub. Requiring it here would deadlock the first
+                # such job against the repo's other gate. Nothing is lost: a caller's runtime
+                # is the callee's, and a callee in this repo is a workflow this guard reads.
+                continue
             declared = job.get("timeout-minutes") if isinstance(job, dict) else None
             if declared is None:
                 missing.append(f"{path.name}:{job_name}")
@@ -197,10 +216,12 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
     assert not unbounded, (
         f"{unbounded} declare a `timeout-minutes` that is not a plain number below the "
         f"{_ACTIONS_DEFAULT_TIMEOUT_MINUTES}-minute Actions default. At the default it bounds "
-        "nothing — the job is as wedgeable as it was before it was declared — and above it the "
-        "value is not enforceable at all, so the number would be describing a limit that never "
-        "arrives. Size it from the job's observed runtime (ADR-0566, #1983)."
+        "nothing — the job is as wedgeable as it was before it was declared — and on a hosted "
+        "runner nothing above it is enforceable either. Size it from the job's observed runtime "
+        "(ADR-0566, #1983)."
     )
+    # Non-empty first, for the same reason as everything else here: "every declaration carries a
+    # comment" is trivially true of a tree with no declarations in it.
 
 
 def test_apt_retry_shape_matches_the_prepull_script() -> None:
