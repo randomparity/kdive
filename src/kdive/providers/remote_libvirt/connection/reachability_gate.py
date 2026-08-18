@@ -22,6 +22,11 @@ Two things are outside the bound and both are deliberate:
   gate proves reachability, not liveness; what caps that is the reaping lane's own pass budget
   (#1981).
 
+One operational note. The probe connects and closes before the TLS handshake, once per declared host
+per reaper call, which is the shape connection-scanning detectors look for. On a fleet behind
+fail2ban or an IDS the reconciler's own address needs an allowlist entry, or the detector will
+eventually block the process that is trying to clean up after it.
+
 Resolution happens once and every resolved address shares a single monotonic deadline, so a
 dual-stack host that publishes both an A and an AAAA record costs the timeout once rather than once
 per address — which is what ``socket.create_connection`` would do, since it applies its ``timeout``
@@ -38,10 +43,11 @@ import socket
 import time
 from collections.abc import Callable
 from typing import Protocol
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.remote_libvirt.connection.uri_validation import REQUIRED_REMOTE_SCHEME
 from kdive.providers.remote_libvirt.settings import REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS
 
 #: libvirt's registered port for the TLS transport, used when the URI names no port.
@@ -77,6 +83,13 @@ def remote_endpoint(uri: str) -> tuple[str, int]:
             would silently gate a host the operator never declared.
     """
     parsed = urlsplit(uri)
+    # Re-checked here rather than trusted from the caller. `remote_connection` does run the full
+    # `validate_remote_uri` first, but this module is a public seam #1947's capture reaper is told
+    # to open through, and the scheme is what keeps the probe destination inside the operator's
+    # declared, TLS-only inventory. Only the scheme: the full validator forbids a `pkipath`
+    # parameter, and by this point `remote_connection` has composed exactly that onto the URI.
+    if parsed.scheme != REQUIRED_REMOTE_SCHEME:
+        raise _misconfigured(uri, f"does not use the {REQUIRED_REMOTE_SCHEME}:// scheme")
     host = (parsed.hostname or "").strip()
     if not host:
         raise _misconfigured(uri, "names no host, so its reachability cannot be checked")
@@ -89,11 +102,24 @@ def remote_endpoint(uri: str) -> tuple[str, int]:
     return host, port or DEFAULT_LIBVIRT_TLS_PORT
 
 
+def _reportable(uri: str) -> str:
+    """``uri`` with its query stripped, for a message or an error detail.
+
+    ``remote_connection`` composes ``?pkipath=<mkdtemp dir>`` onto the URI before handing it to the
+    opener, and that directory holds the 0600 client key for the op. Reporting the composed spelling
+    would put the path to live private-key material into a WARNING that ``_enter_host`` already logs
+    with ``exc_info=True``. The host, port and scheme are what an operator needs; the query is not.
+    """
+    parsed = urlsplit(uri)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
 def _misconfigured(uri: str, problem: str) -> CategorizedError:
+    reportable = _reportable(uri)
     return CategorizedError(
-        f"remote-libvirt URI {uri!r} {problem}",
+        f"remote-libvirt URI {reportable!r} {problem}",
         category=ErrorCategory.CONFIGURATION_ERROR,
-        details={"uri": uri},
+        details={"uri": reportable},
     )
 
 
@@ -156,13 +182,13 @@ def require_reachable(
         raise CategorizedError(
             f"remote-libvirt host {host} did not resolve",
             category=ErrorCategory.TRANSPORT_FAILURE,
-            details={"uri": uri},
+            details={"uri": _reportable(uri)},
         ) from exc
     if not addresses:
         raise CategorizedError(
             f"remote-libvirt host {host} resolved to no address",
             category=ErrorCategory.TRANSPORT_FAILURE,
-            details={"uri": uri},
+            details={"uri": _reportable(uri)},
         )
     deadline = time.monotonic() + timeout
     last_failure: OSError | None = None
@@ -187,7 +213,7 @@ def require_reachable(
         f"remote-libvirt host {host}:{port} was not reachable within {timeout}s: "
         f"{last_failure or 'the deadline expired before any address was tried'}",
         category=ErrorCategory.TRANSPORT_FAILURE,
-        details={"uri": uri, "connect_timeout_seconds": str(timeout)},
+        details={"uri": _reportable(uri), "connect_timeout_seconds": str(timeout)},
     ) from last_failure
 
 

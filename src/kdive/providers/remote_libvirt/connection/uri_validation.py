@@ -6,7 +6,9 @@ from urllib.parse import unquote, urlsplit
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
-_REQUIRED_SCHEME = "qemu+tls"
+#: The only transport a remote-libvirt URI may name (ADR-0077). Public because the reachability
+#: gate re-checks it on the URI it is about to probe, and a second copy of the literal could drift.
+REQUIRED_REMOTE_SCHEME = "qemu+tls"
 
 
 def _query_param_names(query: str) -> set[str]:
@@ -34,7 +36,7 @@ def validate_remote_uri(uri: str) -> None:
             in any casing or ``;``-separated spelling libvirt would accept.
     """
     parsed = urlsplit(uri)
-    if parsed.scheme != _REQUIRED_SCHEME:
+    if parsed.scheme != REQUIRED_REMOTE_SCHEME:
         raise CategorizedError(
             f"remote-libvirt URI {uri!r} must use the qemu+tls:// scheme",
             category=ErrorCategory.CONFIGURATION_ERROR,

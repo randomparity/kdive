@@ -206,6 +206,46 @@ def test_the_refusal_carries_the_last_address_failure_rather_than_claiming_a_tim
     assert isinstance(excinfo.value.__cause__, ConnectionRefusedError)
 
 
+def test_a_non_tls_scheme_is_refused_before_anything_is_probed() -> None:
+    """The gate re-validates rather than trusting its caller.
+
+    ``remote_connection`` does validate first, but this is a public seam #1947's capture reaper is
+    told to open through, and the scheme check is what keeps the probe destination inside the
+    operator's declared, TLS-only inventory.
+    """
+    probed: list[object] = []
+
+    def connect(address: tuple[str, int], _timeout: float) -> ProbeSocket:
+        probed.append(address)
+        raise AssertionError("must not be reached")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        require_reachable("qemu+tcp://plain.example/system", timeout=1.0, connect=connect)
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert probed == []
+
+
+def test_a_failure_never_reports_the_composed_pkipath() -> None:
+    """The opener is handed ``?pkipath=<mkdtemp dir>``, and that directory holds the 0600 key.
+
+    ``_enter_host`` logs the gate's raise with ``exc_info=True``, so anything in the message or the
+    details reaches the operator log.
+    """
+    pki = "/tmp/kdive-remote-pki-secret"  # noqa: S108 - a literal path, not a real one
+    uri = f"qemu+tls://down.example/system?pkipath={pki}"
+
+    def connect(_address: tuple[str, int], _timeout: float) -> ProbeSocket:
+        raise TimeoutError("timed out")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        require_reachable(
+            uri, timeout=1.0, connect=connect, resolve=lambda _h, port: [("192.0.2.1", port)]
+        )
+    rendered = str(excinfo.value) + repr(excinfo.value.details)
+    assert pki not in rendered
+    assert "down.example" in rendered
+
+
 def test_the_timeout_comes_from_the_operator_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS", "9")
     config.load()

@@ -230,6 +230,11 @@ operator-settable bound.
   `qemu+tls` scheme, with `no_verify` and an operator-set `pkipath` forbidden. The gate parses only
   the host and port out of that already-validated URI and sends no bytes; it cannot reach a
   destination the subsequent `libvirt.open` would not have reached anyway.
+- **Second boundary added** — an implicit DNS lookup, from the same operator-declared host name.
+  Its control is **none**: `getaddrinfo` takes no timeout, so this crossing is unbounded and sits
+  ahead of the gate's own deadline. Stated rather than omitted because silence reads as coverage;
+  what caps its effect on a pass is the lane budget, and declaring hosts by IP literal removes the
+  crossing entirely.
 - **Actors** — the operator who declares the inventory, and the reconciler process itself. No
   untrusted actor supplies an input to either limit: both are `KDIVE_*` settings, snapshotted at
   process start by `Registry.load`, and neither is reachable from an MCP tool argument.
@@ -245,7 +250,19 @@ operator-settable bound.
   that something accepted a TCP connection, and TLS mutual authentication remains the sole control
   over who the reconciler is talking to. It does not defend against a host that accepts and stalls;
   that is a denial-of-availability bounded by limit 1, not by the gate.
-- **Existing guardrail relied on** — `validate_remote_uri`, unchanged.
+- **Existing guardrail relied on** — `validate_remote_uri`, unchanged, which `remote_connection`
+  runs before it composes the per-op pkipath. The gate additionally re-checks the **scheme** itself,
+  because it is a public seam #1947's capture reaper is told to open through and a caller that
+  skipped validation would otherwise choose the probe's destination. Only the scheme: the full
+  validator forbids a `pkipath` parameter, and by the time the opener is called `remote_connection`
+  has composed exactly that onto the URI, so re-running the whole validator here would reject every
+  production call.
+- **Leak control** — the URI the gate receives carries `?pkipath=<mkdtemp dir>`, and that directory
+  holds the op's 0600 client key. Every message and error detail the gate emits is stripped to
+  scheme, host and path first, because `_enter_host` logs the raise with `exc_info=True`.
+- **Operational side effect** — the probe connects and closes before the TLS handshake, once per
+  declared host per reaper call. That is the shape connection-scanning detectors match, so a fleet
+  behind fail2ban or an IDS needs the reconciler's address allowlisted.
 
 ## Out of scope
 
