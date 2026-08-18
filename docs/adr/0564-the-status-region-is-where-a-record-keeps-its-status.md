@@ -99,18 +99,18 @@ in status.
 ## Consequences
 
 - The supersession `docs/adr/README.md` prescribes is reachable for a pre-0504 record: set the
-  status bullet to `Superseded by [ADR-NNNN](NNNN-slug.md)` and add the banner beneath it, in one
-  commit. `docs/adr/0430-remote-libvirt-kernel-vmlinux-component-source.md` takes that shape in
-  this change, so its status now agrees with ADR-0563.
+  status bullet to `Superseded by` followed by a link to the superseding record, and add the
+  banner beneath it, in one commit. ADR-0430 takes that shape in this change, so its status now
+  agrees with ADR-0563.
 - A dangling supersession banner on a pre-0504 record is `E-SUPERSEDE-DANGLING` at full severity,
   as it already was on a conforming one — `err_full`, not downgradable.
 - The four grandfathered supersessions (ADR-0137, 0161, 0265, 0282) write their banner as
-  `> **Superseded by [ADR-0316](…)** … — <prose>`, which is not `BANNER_PATTERN`. Their one
-  `W-LEGACY-SHAPE` line changes from `(E-STATUS)` to `(E-BANNER-FORM)`, since `check_status`
-  returns after reporting a malformed banner. The corpus gains no warning and loses none — a
-  measured 1720 before and after — and no error is introduced, because the link extractor does
-  not recognise the `[ADR-NNNN]` spelling either. The banner form the README prescribes stays
-  the single canonical one.
+  `[ADR-0316]` rather than `[0316]`, with prose appended after the date, so their banner is not
+  `BANNER_PATTERN`. Their one `W-LEGACY-SHAPE` line changes from `(E-STATUS)` to
+  `(E-BANNER-FORM)`, since `check_status` returns after reporting a malformed banner. The corpus
+  gains no warning and loses none — a measured 1720 before and after — and no error is
+  introduced, because the link extractor does not recognise that spelling either. The banner
+  form the README prescribes stays the single canonical one.
 - A merged record may now rewrite its status bullet's value to anything. That is the same
   latitude the `## Status` body has always had, and the same argument covers it: a status is
   state, not a claim the record makes. Nothing else in the preamble moves — a `Date:` or
