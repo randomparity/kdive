@@ -47,21 +47,24 @@ Name the region a record keeps its status in, and read every status rule from it
 ```sh
 status_region() {   # check-records.sh
   local file=$1
-  if grep -qxF '## Status' "$file"; then
-    section_body "$file" '## Status'
-  else
-    preamble "$file"
-  fi
+  preamble "$file"
+  section_body "$file" '## Status'
 }
 ```
 
-A record written to the current template has a `## Status` section; a pre-0504 record has a
-preamble. `check_status` (engine) and `check_supersede_link` (`profiles/adr.sh`) both read
-`status_region` instead of `section_body … "## Status"`, so banner form, banner count, banner
-date and banner link resolution apply to a legacy record's banner the same way they apply to a
-conforming one. `check_supersede_link` checks every banner link it finds rather than the first,
-because `E-BANNER-COUNT` is downgradable on a grandfathered record and a second dangling link
-would otherwise pass.
+Both regions, unconditionally, rather than a branch on which shape the record is in. A branch
+needs a predicate, and every cheap one is forgeable from inside the record it judges: a
+`## Status` line quoted in a fenced example satisfies `grep -qxF`, `section_body` then returns the
+fence, and the preamble's real banner goes unread — this defect, reopened by a documentation
+snippet. The union has no such input, and it costs nothing: a conforming record's preamble is
+empty, and a pre-0504 record has no `## Status` body.
+
+`check_status` (engine) and `check_supersede_link` (`profiles/adr.sh`) both read `status_region`
+instead of `section_body … "## Status"`, so banner form, banner count, banner date and banner link
+resolution apply to a legacy record's banner the same way they apply to a conforming one.
+`check_supersede_link` checks every banner link it finds rather than the first, because
+`E-BANNER-COUNT` is downgradable on a grandfathered record and a second dangling link would
+otherwise pass.
 
 `profile_check_status` keeps reading `## Status` and is deliberately left alone. It is what makes
 a pre-0504 record non-conforming at the base ref, and therefore what grandfathers it; routing it
@@ -75,7 +78,7 @@ compares both sides through a reduction that does the same for a status bullet:
 ```sh
 mask_status_bullet() {   # fed `preamble` output, which already stops at the first `## `
   LC_ALL=C awk '
-    /^[[:space:]]*(- )?(\*\*Status:\*\*|Status:)/ { print "<status>"; next }
+    !seen && /^(- )?(\*\*Status:\*\*|Status:)/ { seen = 1; print "<status>"; next }
     { print }
   '
 }
@@ -85,6 +88,12 @@ The sentinel is a line, not a deletion, so the bullet still has to be *there*: r
 line from both sides of the comparison and `E-PREAMBLE-REWRITTEN` still fires. A `Status:` line
 inside a section is body content of an append-only section, stays byte-protected, and never
 reaches this filter.
+
+The first match only, anchored at column one. A record has one status, and every record in the
+corpus carries exactly one such line, so a second one is prose that happens to start with the
+label. Masking every match would let a change add a `Status:` bullet carrying a paragraph in one
+commit and gut it in the next, both green — an erasure route straight through the allowance, since
+`check_preamble_intact` counts removals and never objects to the addition.
 
 One call site, not two. `marker_only_change` — the shortcut in front of the three anti-rewrite
 rules — is left as strict as it was, because a status-bullet edit it declines simply arrives at
@@ -111,14 +120,16 @@ in status.
   gains no warning and loses none — a measured 1720 before and after — and no error is
   introduced, because the link extractor does not recognise that spelling either. The banner
   form the README prescribes stays the single canonical one.
-- A merged record may now rewrite its status bullet's value to anything. That is the same
-  latitude the `## Status` body has always had, and the same argument covers it: a status is
-  state, not a claim the record makes. Nothing else in the preamble moves — a `Date:` or
-  `Deciders:` bullet, and a `Status:` line inside any section, stay byte-protected.
-- `migrate-records.sh` checks its own output with `marker_only_change`, so it inherits permission
-  to rewrite a status bullet. It has no transform that does: `migrate_status` only edits inside
-  `## Status`, and its header states it will not lift a preamble bullet into a section. No
-  behaviour change, but the permission is now wider than the tool uses.
+- A merged record may now rewrite the value of its **first** status bullet to anything. That is
+  the same latitude the `## Status` body has always had, and the same argument covers it: a status
+  is state, not a claim the record makes. Nothing else moves — a `Date:` or `Deciders:` bullet, a
+  second `Status:`-labelled preamble line, an indented one, and a `Status:` line inside any
+  section all stay byte-protected.
+- `migrate-records.sh` checks its own output with `marker_only_change`, which this change leaves
+  untouched, so the migrator gains no permission it did not have: a transform that rewrote a status
+  bullet would still fail its `E-SELF-CHECK` and refuse to write. It has no such transform —
+  `migrate_status` only edits inside `## Status`, and its header states it will not lift a preamble
+  bullet into a section — so nothing about the migrator changes.
 - ADR-0504's "that banner is the only edit a merged ADR permits" describes the convention, not
   the gate: the gate has never protected the `## Status` body, and this change makes the pre-0504
   shape behave the way the current shape already did. No amendment to 0504 is needed for a
@@ -131,6 +142,11 @@ in status.
   `renumbered_elsewhere`'s content comparison, so it would widen the look-alike-sibling hole the
   `<n>` sentinel already had to be fenced against. It also misnames the thing: a status value is
   not a marker, and `canonicalise`'s header calls itself the single definition of one.
+- **Branch `status_region` on whether the record has a `## Status` heading**, which reads as the
+  narrower rule. The predicate is forgeable from inside the record being judged — a fenced
+  `## Status` example anywhere in the body satisfies it — and the failure is silent: the gate reads
+  the wrong region and reports nothing. The union needs no predicate and no transition rule for a
+  record that grows or loses the heading mid-change.
 - **Grant a one-time allowance for the ADR-0430 edit** — a path exemption, an env flag, or a
   commit-message escape. The gate's own header rejects this shape of fix: the marker-only
   allowance is a property of the diff precisely so there is no escape hatch to forget to remove,

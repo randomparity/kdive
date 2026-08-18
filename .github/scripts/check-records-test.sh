@@ -1898,6 +1898,59 @@ MD
     printf 'FAIL %s\n' "$(sed -n 's/^::error:://p' "$d/.err" | head -1)"
   fi
 
+  # status_region reads both regions unconditionally rather than branching on whether the record
+  # has the heading, because every cheap predicate for that branch is forgeable from inside the
+  # record it judges. A `## Status` line inside a fenced example satisfies `grep -qxF`, section_body
+  # then returns the fence, and the preamble's real banner goes unread — this hole, reopened by a
+  # documentation snippet.
+  d="$SCRATCH/adr_legacy_fenced_status"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
+> **Superseded by [0009](0009-nowhere.md)** (2026-01-02)"
+  {
+    printf '\nThe shape a record written today uses:\n\n'
+    printf '%s\n' '```text'
+    printf '## Status\n\nAccepted (2026-01-01)\n'
+    printf '%s\n' '```'
+  } >>"$d/docs/adr/0001-legacy.md"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "a fenced Status heading does not hide the banner" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # One status, one masked line. A second `Status:`-labelled bullet is prose that happens to start
+  # with the label, and unprotecting it would let a change add such a bullet carrying a paragraph
+  # in one commit and gut it in the next, both green — an erasure route through the allowance.
+  d="$SCRATCH/adr_legacy_second_status_line"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
+- Status: superseded for runtime assembly only; the build lane still follows this record."
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  sed 's/^- Status: superseded for runtime.*$/- Status: nothing to see here./' \
+    "$d/docs/adr/0001-legacy.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
+  run_case "a second status-shaped bullet is still protected" 1 E-PREAMBLE-REWRITTEN "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # And the mask is anchored at column one, so an indented sub-bullet is not a candidate at all.
+  # It would otherwise be the first match on a record like this one and consume the allowance,
+  # which unprotects the sub-bullet and re-protects the status the allowance exists for.
+  d="$SCRATCH/adr_legacy_indented_status"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "  - Status: the build lane still follows this record.
+- **Status:** Accepted"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  sed 's/^  - Status: the build lane.*$/  - Status: nothing to see here./' \
+    "$d/docs/adr/0001-legacy.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
+  run_case "an indented status-shaped bullet is protected" 1 E-PREAMBLE-REWRITTEN "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
   # Reading one link is not enough on this shape. E-BANNER-COUNT is downgradable, so a second
   # banner on a grandfathered record is a warning rather than a stop, and the first one here
   # resolves — so a rule that took the first link and returned would pass the run at exit 0 with

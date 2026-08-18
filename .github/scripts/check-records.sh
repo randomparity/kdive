@@ -216,20 +216,21 @@ preamble() {
 # of a corpus — which is how a supersession banner on such a record went unvalidated. See ADR
 # 0564.
 #
-# The heading test is `grep -qxF '## Status'`, the same exact-match check_sections uses: a record
-# spelling it `## status` or `## Status:` already reports E-SECTION-MISSING, and a second, looser
-# notion of "has a Status section" here would disagree with that.
+# Both regions, unconditionally, rather than a branch on whether the record has the heading. A
+# branch needs a predicate, and every cheap one is forgeable from inside the record it judges: a
+# `## Status` line quoted in a fenced example makes `grep -qxF` say yes, section_body then returns
+# the fence, and the preamble's real banner goes unread — the hole this function exists to close,
+# reopened by a documentation snippet. The union has no such input. A conforming record's preamble
+# is empty, so it contributes nothing there; a pre-template record has no `## Status` body, so it
+# contributes nothing on the other side.
 #
 # profile_check_status is deliberately *not* routed through this. It is what makes a pre-template
 # record non-conforming at the base ref, and therefore what grandfathers it; widening it would
 # flip most such records to conforming and hold them to full severity on every other rule at once.
 status_region() {
   local file=$1
-  if grep -qxF '## Status' "$file"; then
-    section_body "$file" '## Status'
-  else
-    preamble "$file"
-  fi
+  preamble "$file"
+  section_body "$file" '## Status'
 }
 
 # A pre-template record's status bullet, reduced to a sentinel. A status *value* is the one thing
@@ -245,15 +246,21 @@ status_region() {
 # looks like a status bullet but sits inside a section is body content of an append-only section,
 # stays byte-protected, and never reaches here.
 #
-# Anchored at the start of the line and on the field label, not on the word: an unanchored match
-# would mask any metadata bullet that merely mentions a status, and the preamble is where a
-# pre-template record keeps its provenance.
+# Anchored at column one and on the field label, not on the word: an unanchored match would mask
+# any metadata bullet that merely mentions a status, and the preamble is where a pre-template
+# record keeps its provenance.
+#
+# The first match only. A record has one status, and every record in the corpus this was written
+# against carries exactly one such line, so a second one is prose that happens to start with the
+# label — and unprotecting it would let a change add a `Status:` bullet carrying a paragraph in
+# one commit and gut it in the next, both green. Masking one line keeps the allowance the size of
+# the thing it is for.
 #
 # A sentinel line, not a deletion, so the bullet still has to be present: removing it outright
 # drops a line from the comparison and E-PREAMBLE-REWRITTEN still fires.
 mask_status_bullet() {
   LC_ALL=C awk '
-    /^[[:space:]]*(- )?(\*\*Status:\*\*|Status:)/ { print "<status>"; next }
+    !seen && /^(- )?(\*\*Status:\*\*|Status:)/ { seen = 1; print "<status>"; next }
     { print }
   '
 }
