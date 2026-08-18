@@ -19,10 +19,10 @@ jobs:
     name: build · notes · github release
     runs-on: ubuntu-latest
     # Observed 12s and 17s — the two tagged releases that have succeeded, v0.2.0 and v0.4.0; two
-    # further runs failed early and measure nothing. No apt step. Sized well above that rather
-    # than near it: two observations is a small sample, and the job has since gained a
-    # full-history checkout and `just build` that neither of them ran, so its observed figure is
-    # the weakest of the five here. A cut-off release is worse than a late one (ADR-0566, #1983).
+    # further runs failed early and measure nothing. Both ran today's steps, so they are
+    # representative. No apt step. Sized well above them anyway: two runs months apart is the
+    # thinnest sample of the five here, and a cut-off release is worse than a late one, so the
+    # headroom is bought where it is cheapest (ADR-0566, #1983).
     timeout-minutes: 20
     steps:
       - name: Checkout (full history + tags)

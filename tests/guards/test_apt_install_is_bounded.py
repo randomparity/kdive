@@ -184,8 +184,9 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
     unbounded: list[str] = []
     checked = 0
     for path in paths:
-        # `_workflow_text` first: it is what fails an emptied workflow with a message, where
-        # `yaml.safe_load` would return None and this loop would skip the file in silence.
+        # `_workflow_text` first only for its message: it names an *emptied* workflow as such,
+        # where `assert jobs` one line down would report the same file as a layout change. Both
+        # are loud; this one is right.
         _workflow_text(path.name)
         jobs = _jobs(path)
         assert jobs, f"no jobs parsed out of {path.name} — the workflow layout changed (ADR-0566)"
@@ -230,14 +231,19 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
     # added — at 20 jobs a parser hiding three of them still clears 17. An exact count would
     # redden on every legitimate new job, which is churn this buys nothing for.
     assert checked >= 17, (
-        f"only {checked} job(s) parsed across {[path.name for path in paths]}; the parser has "
-        "drifted and this guard is checking a fraction of what it claims to (ADR-0566)."
+        f"only {checked} job(s) parsed across {[path.name for path in paths]}. Either the parser "
+        "has drifted and this guard is checking a fraction of what it claims to, or a workflow "
+        "or job was removed — if that removal was intended, lower this floor in the same change "
+        "(ADR-0566)."
     )
     assert not missing, (
         f"{missing} declare no job-level `timeout-minutes`, so a wedged step there runs to the "
         "360-minute GitHub Actions default. That is what made #1978 cost a full CI cycle each "
         "time it fired. Size it from the job's observed runtime with headroom, and put the "
-        "observed figure in a comment beside it (ADR-0566, #1983)."
+        "observed figure in a comment beside it. This rule covers every workflow, not only the "
+        "package-installing ones ADR-0566 records — and where ADR-0566's sizing adds the apt "
+        "script's ~11-minute worst case, a job with no apt step does not carry that term "
+        "(ADR-0566, #1983)."
     )
     # Presence is not a bound. Without this, a job could satisfy the assertion above by
     # declaring exactly the default the assertion's own message names.
