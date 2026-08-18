@@ -113,7 +113,11 @@ timeout raises `TRANSPORT_FAILURE` from the opener, which `_enter_host` already 
 unreachable-host case it logs and skips. libvirt is never called for such a host, so the OS SYN
 retry budget is never entered.
 
-`KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS`, default 5, is the operator's knob.
+`KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS`, default 5, is the operator's knob. It is declared
+for the `reconciler` **and** the `server`: `ops.reconcile_now` builds the same dump-volume and infra
+reapers, so the gate reads the value there too, and a setting declared for only one of them would
+let a malformed value pass `config validate` at server startup and then surface from inside a
+fan-out — where `_enter_host` logs it as one more unreachable host, on every pass.
 
 - **Unit** — seconds.
 - **Reference clock** — the reconciler process's monotonic clock, which every address of one host

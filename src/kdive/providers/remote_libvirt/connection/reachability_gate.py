@@ -144,6 +144,12 @@ def require_reachable(
     resolver = resolve if resolve is not None else _resolve_addresses
     try:
         addresses = resolver(host, port)
+    except UnicodeError as exc:
+        # `getaddrinfo` puts a name IDNA cannot encode — an over-long label, say — through the
+        # 'idna' codec, which raises a ValueError subclass rather than an OSError. That is an
+        # operator typo, not a down host, and saying so is the difference between a fix and a
+        # fruitless ping.
+        raise _misconfigured(uri, "names a host that is not an encodable domain name") from exc
     except OSError as exc:
         # To a reaper an unresolvable host and an unreachable one are the same outcome, so they take
         # the same category and the fan-out isolates both the same way.
@@ -152,25 +158,37 @@ def require_reachable(
             category=ErrorCategory.TRANSPORT_FAILURE,
             details={"uri": uri},
         ) from exc
+    if not addresses:
+        raise CategorizedError(
+            f"remote-libvirt host {host} resolved to no address",
+            category=ErrorCategory.TRANSPORT_FAILURE,
+            details={"uri": uri},
+        )
     deadline = time.monotonic() + timeout
+    last_failure: OSError | None = None
     for address in addresses:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         try:
             probe = opener(address, remaining)
-        except OSError:
+        except OSError as exc:
             # TimeoutError is an OSError subclass, so an unanswered SYN and a refused connection
             # take the same path. Try the next address: a dual-stack host whose IPv6 route is dead
-            # is still reachable over IPv4.
+            # is still reachable over IPv4. The last failure is kept because a refused connect
+            # (libvirtd down on a live host), an unroutable one, and an expired deadline need three
+            # different operator fixes, and reporting all three as a timeout would name the wrong
+            # one.
+            last_failure = exc
             continue
         probe.close()
         return
     raise CategorizedError(
-        f"remote-libvirt host {host}:{port} did not accept a connection within {timeout}s",
+        f"remote-libvirt host {host}:{port} was not reachable within {timeout}s: "
+        f"{last_failure or 'the deadline expired before any address was tried'}",
         category=ErrorCategory.TRANSPORT_FAILURE,
         details={"uri": uri, "connect_timeout_seconds": str(timeout)},
-    )
+    ) from last_failure
 
 
 __all__ = [

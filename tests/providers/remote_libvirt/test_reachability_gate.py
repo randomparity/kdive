@@ -170,6 +170,42 @@ def test_an_unanswered_or_refused_endpoint_raises_transport_failure(failure: OSE
     assert "down.example" in str(excinfo.value)
 
 
+def test_a_name_idna_cannot_encode_is_a_configuration_error() -> None:
+    """The sibling of the malformed-port case: a ValueError, not an OSError, out of getaddrinfo.
+
+    ``getaddrinfo`` puts the name through the 'idna' codec, which raises ``UnicodeError`` for an
+    over-long label. Left uncaught it reaches ``_enter_host``'s blanket handler and is logged as one
+    more unreachable host, hiding an operator typo behind a network diagnosis.
+    """
+    with pytest.raises(CategorizedError) as excinfo:
+        require_reachable(f"qemu+tls://{'a' * 64}.example.com/system", timeout=1.0)
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_a_host_resolving_to_no_address_is_a_transport_failure() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        require_reachable("qemu+tls://empty.example/system", timeout=1.0, resolve=lambda _h, _p: [])
+    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert "no address" in str(excinfo.value)
+
+
+def test_the_refusal_carries_the_last_address_failure_rather_than_claiming_a_timeout() -> None:
+    """A refused connect, an unroutable one, and an expired deadline need three different fixes."""
+
+    def connect(_address: tuple[str, int], _timeout: float) -> ProbeSocket:
+        raise ConnectionRefusedError("Connection refused")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        require_reachable(
+            "qemu+tls://up-but-silent.example/system",
+            timeout=1.0,
+            connect=connect,
+            resolve=lambda _h, port: [("192.0.2.1", port)],
+        )
+    assert "Connection refused" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, ConnectionRefusedError)
+
+
 def test_the_timeout_comes_from_the_operator_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS", "9")
     config.load()

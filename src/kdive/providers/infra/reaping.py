@@ -131,7 +131,8 @@ class CaptureReaper(Protocol):
     parameter, so the only thing bounding an unreachable host is the reachability gate on that
     seam's opener (ADR-0565). A reaper that calls ``open_libvirt_protocol`` itself compiles and
     passes its tests while holding the fence for the kernel's ~130 s TCP connect timeout per
-    unreachable declared host. Nothing enforces this mechanically; #1947 and #1948 own it.
+    unreachable declared host. Nothing enforces this mechanically; #1947 owns it. (#1948's
+    local-libvirt reaper connects over ``qemu:///system`` and does not use this seam.)
     """
 
     async def reclaim_capture(self, capture: OrphanedCapture) -> bool: ...
