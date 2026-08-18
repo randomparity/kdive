@@ -318,6 +318,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "only to the never-started managed worker create; operators do not set it manually.",
     ),
     ExternalEnvVar(
+        "KDIVE_APT_TIMEOUT_S",
+        "script",
+        "60",
+        "Positive whole-second wall-clock bound for each `apt-get install` in "
+        "scripts/apt-install.sh; `apt-get update` is capped at 60s independently. Raised by "
+        "live.yml for its larger host-dep set (ADR-0566, #1978).",
+    ),
+    ExternalEnvVar(
         "KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS",
         "script",
         "600",
