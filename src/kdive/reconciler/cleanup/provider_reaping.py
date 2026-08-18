@@ -91,10 +91,11 @@ _CAPTURE_JOB_KIND_VALUE = JobKind.CAPTURE_TRAFFIC.value
 # * Evidence is either attempt-linked or cutover-covered, never absent. The first branch demands
 #   the job's authoritative attempt be provably quiescent *and* publication-closed *and*
 #   spool-disposed, so no fenced attempt can publish after a reap marks it complete. The second
-#   accepts a job with no attempt link at all only when the durable cutover generation is
-#   complete and the job was created no later than the committed cutoff — the rows that predate
-#   supervision and can therefore never grow an attempt link. After the cutoff a missing link is
-#   fail-closed.
+#   accepts a job that has never had *any* supervised attempt, and then only when the durable
+#   cutover generation is complete and the job was created no later than the committed cutoff —
+#   the rows that predate supervision and can therefore never grow an attempt link. A job that
+#   ever created an operation has left that population for good and is governed by its own
+#   attempt's evidence, even across a retry. After the cutoff a missing link is fail-closed.
 #
 #   ADR-0556 describes that generation as recorded per provider kind. The table 0112 created and
 #   0113 extended is a singleton, with one `complete` flag covering both kinds, so the predicate
@@ -135,9 +136,15 @@ WHERE j.kind = %(kind)s
             AND o.spool_disposed_at IS NOT NULL
       )
       OR (
+          -- Deliberately NOT qualified by `o.job_attempt = j.attempt`, unlike the branch above.
+          -- This asks whether the job ever had a supervised attempt, because that is what decides
+          -- whether it belongs to the pre-cutover population at all. Qualifying it by the current
+          -- attempt would fail open on a retry: a job whose attempt 1 is still publishing and
+          -- whose attempt 2 died before creating its own operation has no row for `j.attempt`, so
+          -- a qualified NOT EXISTS is TRUE and the row is dispatched while attempt 1 can still
+          -- commit an artifact and still needs its object.
           NOT EXISTS (
-              SELECT 1 FROM capture_operations AS o
-              WHERE o.job_id = j.id AND o.job_attempt = j.attempt
+              SELECT 1 FROM capture_operations AS o WHERE o.job_id = j.id
           )
           AND EXISTS (
               SELECT 1 FROM capture_operation_cutoff AS c

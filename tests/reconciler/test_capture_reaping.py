@@ -119,6 +119,7 @@ async def _seed_capture_job(
     state: JobState = JobState.FAILED,
     updated_ago: timedelta = _PAST_SETTLE,
     before_cutoff: bool = True,
+    attempt: int = 1,
 ) -> UUID:
     """Insert one ``capture_traffic`` job whose payload is the real validated model.
 
@@ -136,11 +137,12 @@ async def _seed_capture_job(
     )
     cursor = await conn.execute(
         "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, authorizing, dedup_key, "  # noqa: S608
-        f"    created_at, updated_at) VALUES ('capture_traffic', %s, %s, 1, 3, %s, %s, {created}, "
+        f"    created_at, updated_at) VALUES ('capture_traffic', %s, %s, %s, 5, %s, %s, {created}, "
         "    now() - %s) RETURNING id",
         (
             Jsonb(payload.model_dump(mode="json")),
             state.value,
+            attempt,
             Jsonb({"principal": "p", "agent_session": None, "project": "proj"}),
             str(uuid4()),
             updated_ago,
@@ -715,6 +717,7 @@ async def _seed_supervised_attempt(
     *,
     publication_state: str = "discarded",
     spool_disposed: bool = True,
+    job_attempt: int = 1,
 ) -> None:
     """Link one exited supervised attempt to ``job_id`` with the publication state given."""
     incarnation = f"worker-{uuid4().hex[:12]}"
@@ -738,10 +741,11 @@ async def _seed_supervised_attempt(
         "    state, exit_outcome, exited_at, process_absent, provider_quiescence, "
         "    publication_state, publication_object_key, publication_tombstone_version, "
         "    publication_started_at, publication_closed_at, spool_disposed_at) "
-        "VALUES (%s, 1, %s, %s, %s, %s, 'kdive-guest', repeat('a', 64), %s, 'h', "
+        "VALUES (%s, %s, %s, %s, %s, %s, 'kdive-guest', repeat('a', 64), %s, 'h', "
         "    'exited', 'exited', now(), true, %s, %s, %s, %s, %s, %s, %s)",
         (
             job_id,
+            job_attempt,
             incarnation,
             row[1],
             row[0],
@@ -916,5 +920,93 @@ def test_the_sweep_runs_under_the_real_reconciler_role(migrated_url: str) -> Non
                 assert await _reap_state(admin, job_id) == (1, False, True)
             finally:
                 await admin.execute(SQL("DROP ROLE IF EXISTS {}").format(Identifier(login)))
+
+    asyncio.run(_run())
+
+
+def test_a_retried_job_is_still_governed_by_an_earlier_attempts_open_product(
+    migrated_url: str,
+) -> None:
+    """Cutover coverage must mean "no supervised attempt at all", not "none for this attempt".
+
+    A capture queued across the 0113 upgrade survives its cutover (0112 only cancels running
+    rows), so it sits behind ``cutoff_at``. Attempt 1 opens a supervised operation and its worker
+    dies with publication still ``pending`` and the spool undisposed; the job retries to attempt 2,
+    dies before creating its own operation, and exhausts its retries into ``failed``. The
+    attempt-linked branch cannot admit it — there is no row for attempt 2 — so if the cutover
+    branch only asks about the *current* attempt, the row is dispatched while attempt 1's
+    publication can still commit an artifact and still needs its object.
+    """
+    reaper = _Reaper()
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            system_id, run_id = await _seed_chain(conn)
+            job_id = await _seed_capture_job(conn, run_id, before_cutoff=True, attempt=2)
+            await _seed_supervised_attempt(
+                conn,
+                job_id,
+                system_id,
+                publication_state="pending",
+                spool_disposed=False,
+                job_attempt=1,
+            )
+
+            assert await _reap(migrated_url, {_REMOTE: reaper}) == 0
+            assert reaper.seen == []
+            assert await _reap_state(conn, job_id) is None
+
+    asyncio.run(_run())
+
+
+def test_a_retried_job_whose_earlier_attempt_closed_is_still_not_cutover_covered(
+    migrated_url: str,
+) -> None:
+    """A job that ever had a supervised attempt has left the pre-cutover population for good.
+
+    Attempt 1 closed cleanly, so nothing is at risk — but the job is no longer one of the rows
+    that "predate supervision and can never grow an attempt link", and admitting it through the
+    cutover branch would be admitting it on absence of evidence for attempt 2 rather than on
+    evidence. It becomes eligible when its own attempt closes, not before.
+    """
+    reaper = _Reaper()
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            system_id, run_id = await _seed_chain(conn)
+            job_id = await _seed_capture_job(conn, run_id, before_cutoff=True, attempt=2)
+            await _seed_supervised_attempt(conn, job_id, system_id, job_attempt=1)
+
+            assert await _reap(migrated_url, {_REMOTE: reaper}) == 0
+            assert reaper.seen == []
+
+            await _seed_supervised_attempt(conn, job_id, system_id, job_attempt=2)
+
+            assert await _reap(migrated_url, {_REMOTE: reaper}) == 1
+            assert [capture.job_id for capture in reaper.seen] == [job_id]
+
+    asyncio.run(_run())
+
+
+def test_the_attempt_linked_branch_reads_only_the_jobs_current_attempt(migrated_url: str) -> None:
+    """A closed attempt 1 must not vouch for an open attempt 2 on the same job."""
+    reaper = _Reaper()
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            system_id, run_id = await _seed_chain(conn)
+            job_id = await _seed_capture_job(conn, run_id, before_cutoff=False, attempt=2)
+            await _seed_supervised_attempt(conn, job_id, system_id, job_attempt=1)
+            await _seed_supervised_attempt(
+                conn,
+                job_id,
+                system_id,
+                publication_state="pending",
+                spool_disposed=False,
+                job_attempt=2,
+            )
+
+            assert await _reap(migrated_url, {_REMOTE: reaper}) == 0
+            assert reaper.seen == []
 
     asyncio.run(_run())
