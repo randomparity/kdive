@@ -188,6 +188,53 @@ async def try_advisory_xact_lock(conn: AsyncConnection, scope: LockScope, key: U
     return bool(row is not None and row[0])
 
 
+#: The per-job capture ownership fence key, as SQL (ADR-0556, ADR-0558).
+#:
+#: A capture worker holds the **session** form of this key from before it clears prior completion
+#: until after detach and destination reclaim, so process death releases it while a paused or
+#: partitioned live worker keeps it. ADR-0556's reaper must acquire *the same* fence before it
+#: inspects or removes host state, which is only true if both derive an identical bigint — so the
+#: expression lives here once and both call sites interpolate it. It deliberately does not go
+#: through :func:`_lock_key`: the fence predates that scheme on the worker side, and re-keying it
+#: would silently unfence every in-flight capture at the deploy that changed it.
+CAPTURE_JOB_FENCE_KEY_SQL = "hashtextextended('kdive:job:' || %s::text, 1951)"
+
+
+async def try_capture_job_fence(conn: AsyncConnection, job_id: UUID) -> bool:
+    """Take the transaction form of a capture job's ownership fence, or report ``False``.
+
+    The reaper's half of :data:`CAPTURE_JOB_FENCE_KEY_SQL`. PostgreSQL puts the session and
+    transaction forms in one lock space, so a live worker's session hold refuses this try and the
+    row is deferred without a provider call — which is the positive ownership boundary ADR-0556
+    relies on instead of the settle duration. Non-blocking for the reason
+    :func:`try_advisory_xact_lock` is: a reconciler pass has no deadline and must not queue behind
+    a capture that may run for its whole configured duration.
+
+    Args:
+        conn: An async connection with an open transaction.
+        job_id: The capture job whose provider state the caller is about to touch.
+
+    Returns:
+        Whether this transaction now holds the job's fence.
+
+    Raises:
+        RuntimeError: After the attempt, the connection is not in a transaction — so a granted
+            lock has already auto-released and a ``True`` would be a lie.
+    """
+    cur = await conn.execute(
+        f"SELECT pg_try_advisory_xact_lock({CAPTURE_JOB_FENCE_KEY_SQL})",  # noqa: S608
+        (job_id,),
+    )
+    row = await cur.fetchone()
+    if conn.info.transaction_status != TransactionStatus.INTRANS:
+        raise RuntimeError(
+            "try_capture_job_fence must run inside an open transaction; any lock it took has "
+            "already auto-released because no transaction is in progress (ADR-0005). Wrap the "
+            "call in `async with conn.transaction()` or use a non-autocommit connection."
+        )
+    return bool(row is not None and row[0])
+
+
 @asynccontextmanager
 async def scoped_session_advisory_lock(
     conn: AsyncConnection, scope: LockScope, key: UUID | str

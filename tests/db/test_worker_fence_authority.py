@@ -45,6 +45,7 @@ _ORDINARY_TABLES = {
     "audit_log",
     "budgets",
     "build_artifact_gc_cursors",
+    "capture_reap_state",
     "component_uploads",
     "cost_class_coefficients",
     "debug_sessions",
@@ -80,6 +81,7 @@ _SERVER_MUTATIONS = {
     "INSERT": _ORDINARY_TABLES
     - {
         "build_artifact_gc_cursors",
+        "capture_reap_state",
         "host_dump_volume_leases",
         "investigation_build_gc_cursor",
         "investigation_build_tombstones",
@@ -89,6 +91,7 @@ _SERVER_MUTATIONS = {
     - {
         "audit_log",
         "build_artifact_gc_cursors",
+        "capture_reap_state",
         "host_dump_volume_leases",
         "investigation_build_gc_cursor",
         "investigation_build_tombstones",
@@ -189,6 +192,7 @@ _RECONCILER_SELECT = _ORDINARY_TABLES - {"audit_log", "platform_audit_log", "too
 _RECONCILER_MUTATIONS = {
     "INSERT": {
         "artifacts",
+        "capture_reap_state",
         "cost_class_coefficients",
         "image_catalog",
         "investigation_build_tombstones",
@@ -201,6 +205,7 @@ _RECONCILER_MUTATIONS = {
         "allocations",
         "budgets",
         "build_artifact_gc_cursors",
+        "capture_reap_state",
         "cost_class_coefficients",
         "debug_sessions",
         "egress_probe_guests",

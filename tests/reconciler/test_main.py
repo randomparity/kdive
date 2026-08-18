@@ -67,6 +67,7 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     """`_run_reconciler` opens a pool, constructs a Reconciler, runs, closes."""
     from kdive import __main__
     from kdive.providers.assembly import composition
+    from kdive.providers.infra.reaping import NullCaptureReaper
     from kdive.reconciler import loop
 
     events: list[str] = []
@@ -109,6 +110,7 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     expected_reaper = object()
     expected_resetter = object()
     expected_dump_volume_reaper = object()
+    expected_capture_reapers = {"remote-libvirt": NullCaptureReaper()}
     expected_registry = SecretRegistry()
     sentinel_store = cast(ObjectStore, object())
     constructed: dict[str, object] = {}
@@ -172,6 +174,9 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
         def build_reconciler_dump_volume_reaper(self) -> object:
             return expected_dump_volume_reaper
 
+        def build_reconciler_capture_reapers(self) -> object:
+            return expected_capture_reapers
+
         async def build_reconciler_console_hosting(
             self,
             *,
@@ -191,6 +196,7 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
         config = cast(ReconcileConfig, kw["config"])
         constructed["resetter"] = config.resetter
         constructed["dump_volume_reaper"] = config.dump_volume_reaper
+        constructed["capture_reapers"] = config.capture_reapers
         constructed["debug_session_telemetry"] = config.debug_session_telemetry
         constructed["system_object_hosting_gate"] = config.system_object_hosting_gate
         constructed["upload_store"] = config.upload_store
@@ -213,6 +219,7 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     assert constructed["reaper"] is expected_reaper
     assert constructed["resetter"] is expected_resetter
     assert constructed["dump_volume_reaper"] is expected_dump_volume_reaper
+    assert constructed["capture_reapers"] is expected_capture_reapers
     assert constructed["system_object_hosting_gate"] is expected_hosting
     assert constructed["object_store"] is sentinel_store
     assert constructed["upload_store"] is sentinel_store

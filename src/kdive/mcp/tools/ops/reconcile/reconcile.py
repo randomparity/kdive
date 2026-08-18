@@ -14,8 +14,9 @@ Gated ``platform_operator`` (a cross-project control action) and audited to
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
@@ -26,6 +27,7 @@ from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platf
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.providers.infra.reaping import (
+    CaptureReaper,
     DumpVolumeReaper,
     InfraReaper,
     NullDumpVolumeReaper,
@@ -49,6 +51,9 @@ from kdive.services.images.retention import ImageSweepStore
 
 # A module-level singleton so it can be a stateless default arg (ruff B008).
 _NULL_DUMP_VOLUME_REAPER: DumpVolumeReaper = NullDumpVolumeReaper()
+
+# No capture reaper by default: an empty registry keeps every kind out of selection (ADR-0556).
+_NO_CAPTURE_REAPERS: Mapping[str, CaptureReaper] = MappingProxyType({})
 
 _RECONCILE_TOOL = "ops.reconcile_now"
 _RECONCILE_OBJECT_ID = "reconcile"
@@ -77,6 +82,10 @@ class ReconcileRepairPorts:
     upload_store: ReconcileUploadStore
     image_store: ImageSweepStore
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
+    #: ``Resource kind -> CaptureReaper`` for the ADR-0556 capture sweep. Threaded through so an
+    #: on-demand pass runs the same lanes as the periodic loop; a kind wired ``NullCaptureReaper``
+    #: is excluded from selection either way.
+    capture_reapers: Mapping[str, CaptureReaper] = _NO_CAPTURE_REAPERS
 
 
 async def reconcile_now(
@@ -115,6 +124,7 @@ async def reconcile_now(
                 upload_store=ports.upload_store,
                 image_store=ports.image_store,
                 dump_volume_reaper=ports.dump_volume_reaper,
+                capture_reapers=ports.capture_reapers,
             ),
         )
         async with pool.connection() as conn, conn.transaction():
@@ -155,6 +165,7 @@ def _reconcile_response(report: ReconcileReport) -> ToolResponse:
         "dangling_images": report.dangling_images,
         "expired_private_images": report.expired_private_images,
         "reaped_dump_volumes": report.reaped_dump_volumes,
+        "reaped_captures": report.reaped_captures,
         "failures": ",".join(report.failures),
     }
     return ToolResponse.success(

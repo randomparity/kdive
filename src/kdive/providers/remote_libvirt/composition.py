@@ -45,7 +45,12 @@ from kdive.providers.infra.console_hosting import (
     ConsoleHostingLoop,
     RunningSystems,
 )
-from kdive.providers.infra.reaping import DumpVolumeReaper, InfraReaper
+from kdive.providers.infra.reaping import (
+    CaptureReaper,
+    DumpVolumeReaper,
+    InfraReaper,
+    NullCaptureReaper,
+)
 from kdive.providers.ports.traffic import RemoteCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.remote_libvirt import stage_volume
 from kdive.providers.remote_libvirt.config import (
@@ -214,6 +219,16 @@ def build_dump_volume_reaper(*, secret_registry: SecretRegistry) -> DumpVolumeRe
 
 def build_infra_reaper(*, secret_registry: SecretRegistry) -> InfraReaper:
     return RemoteLibvirtInfraReaper.from_env(secret_registry=secret_registry)
+
+
+def build_capture_reaper() -> CaptureReaper:
+    """Build remote-libvirt's orphaned-capture reaper: disabled wiring for now (ADR-0556).
+
+    #1947 replaces this with the concrete reaper that binds to the row's Resource under ADR-0187
+    and deletes the named storage volume after detaching the capture object. Until it lands this
+    kind is ineligible for dispatch and cannot produce a completion marker.
+    """
+    return NullCaptureReaper()
 
 
 def resource_name_for_system(conninfo: str, system_id: UUID) -> str:

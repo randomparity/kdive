@@ -29,7 +29,7 @@ from kdive.providers.core.runtime import (
     ResourceBindingCapabilities,
     RootfsCapabilities,
 )
-from kdive.providers.infra.reaping import InfraReaper
+from kdive.providers.infra.reaping import CaptureReaper, InfraReaper, NullCaptureReaper
 from kdive.providers.local_libvirt.config import local_guest_egress_for_resource
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
@@ -135,6 +135,17 @@ def _discovery_target() -> DiscoveryRegistrationTarget:
 def build_reaper() -> InfraReaper:
     """Build the local-libvirt reconciler reaper (ADR-0111); opens no connection here."""
     return LibvirtInfraReaper.from_env()
+
+
+def build_capture_reaper() -> CaptureReaper:
+    """Build local-libvirt's orphaned-capture reaper: disabled wiring for now (ADR-0556).
+
+    Local-libvirt's destination is a worker-owned runtime path, not a storage-pool volume, so
+    #1948 must first settle whether the process performing reconciliation can reach it at all —
+    a colocated reconciler reaper or a worker-side execution of the same port contract. Until it
+    does, this kind is ineligible for dispatch and cannot produce a completion marker.
+    """
+    return NullCaptureReaper()
 
 
 def build_rootfs_build_plane(*, workspace: Path | None = None) -> LocalLibvirtRootfsBuildPlane:

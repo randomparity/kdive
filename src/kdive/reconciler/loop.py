@@ -21,6 +21,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
+from types import MappingProxyType
 from typing import Any, Protocol, cast
 
 from psycopg import AsyncConnection
@@ -37,6 +38,7 @@ from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.infra.reaping import (
+    CaptureReaper,
     DumpVolumeReaper,
     InfraReaper,
     NullDumpVolumeReaper,
@@ -98,6 +100,10 @@ DEFAULT_QUEUE_MAX_WAIT = allocation_repairs.DEFAULT_QUEUE_MAX_WAIT
 DEFAULT_CRASHED_IDLE_GRACE = allocation_repairs.DEFAULT_CRASHED_IDLE_GRACE
 DEFAULT_IDEMPOTENCY_RETENTION = idempotency.DEFAULT_IDEMPOTENCY_RETENTION
 DEFAULT_DUMP_VOLUME_GRACE = provider_reaping.DEFAULT_DUMP_VOLUME_GRACE
+DEFAULT_CAPTURE_SETTLE = provider_reaping.DEFAULT_CAPTURE_SETTLE
+DEFAULT_CAPTURE_REAP_BATCH = provider_reaping.DEFAULT_CAPTURE_REAP_BATCH
+DEFAULT_CAPTURE_RETRY_BASE = provider_reaping.DEFAULT_CAPTURE_RETRY_BASE
+DEFAULT_CAPTURE_RETRY_CAP = provider_reaping.DEFAULT_CAPTURE_RETRY_CAP
 DEFAULT_REPORT_ARTIFACT_RETENTION = artifact_retention.DEFAULT_REPORT_ARTIFACT_RETENTION
 DEFAULT_INVESTIGATION_CLEANUP_GRACE = artifact_retention.DEFAULT_INVESTIGATION_CLEANUP_GRACE
 DEFAULT_BUILD_ARTIFACT_RETENTION = artifact_retention.DEFAULT_BUILD_ARTIFACT_RETENTION
@@ -119,6 +125,7 @@ _sweep_unowned_investigation_rootfs_staging = (
 _promote_pending = allocation_promotion.promote_pending
 _reap_console_collectors = provider_reaping.reap_console_collectors
 _reap_orphaned_dump_volumes = provider_reaping.reap_orphaned_dump_volumes
+_reap_orphaned_captures = provider_reaping.reap_orphaned_captures
 _repair_leaked_domains = provider_reaping.repair_leaked_domains
 _repair_leaked_probe_guests = provider_reaping.repair_leaked_probe_guests
 _reap_orphaned_active_allocations = allocation_repairs.reap_orphaned_active_allocations
@@ -151,6 +158,11 @@ _NULL_RESETTER: TransportResetter = NullResetter()
 # The default dump-volume reaper (ADR-0094): a module-level singleton so it can be a
 # stateless default argument without a per-call construction (ruff B008).
 _NULL_DUMP_VOLUME_REAPER: DumpVolumeReaper = NullDumpVolumeReaper()
+
+# The default capture-reaper registry: empty, not a mapping of Null reapers (ADR-0556). A
+# deployment that composes no provider must reap no capture, and an empty registry makes that a
+# selection property rather than something a no-op call has to be trusted to honour.
+_NO_CAPTURE_REAPERS: Mapping[str, CaptureReaper] = MappingProxyType({})
 
 
 class ReconcileUploadStore(
@@ -233,6 +245,7 @@ class ReconcileReport:
     local_system_object_versions_deleted: int = 0
     remote_system_object_versions_deleted: int = 0
     reaped_dump_volumes: int = 0
+    reaped_captures: int = 0
     reaped_runtime_resources: int = 0
     investigation_artifacts_gc_count: int = 0
     expired_build_artifacts_gc_count: int = 0
@@ -280,6 +293,21 @@ class ReconcileConfig:
     investigation_rootfs_retention: timedelta = DEFAULT_INVESTIGATION_ROOTFS_RETENTION
     queue_max_wait: timedelta = DEFAULT_QUEUE_MAX_WAIT
     dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE
+    #: ``Resource kind -> CaptureReaper`` for the ADR-0556 orphaned-capture sweep. A kind wired to
+    #: ``NullCaptureReaper`` is disabled: it is excluded from selection, so its rows are never
+    #: dispatched and never marked complete. Both capture-capable kinds ship disabled; #1947 and
+    #: #1948 each register their own concrete reaper.
+    capture_reapers: Mapping[str, CaptureReaper] = _NO_CAPTURE_REAPERS
+    #: How long a terminal capture row sits untouched before the sweep considers it. Pacing, not a
+    #: safety fence — the per-job ownership fence is what keeps a live worker's state safe.
+    capture_settle: timedelta = DEFAULT_CAPTURE_SETTLE
+    #: Candidates per pass, so the historical backlog the migration exposes drains over several
+    #: intervals instead of opening one hypervisor connection per row at once.
+    capture_reap_batch: int = DEFAULT_CAPTURE_REAP_BATCH
+    #: First retry delay after an attempt that did not reclaim, and the ceiling its doubling stops
+    #: at, both measured on the database clock.
+    capture_retry_base: timedelta = DEFAULT_CAPTURE_RETRY_BASE
+    capture_retry_cap: timedelta = DEFAULT_CAPTURE_RETRY_CAP
     #: How long a `crashed` System's crash investigation must show no activity before its
     #: still-`active` allocation is reclaimed (ADR-0480). The operator's brake on the one repair
     #: that can end a live investigation: raise it where investigations idle for long stretches.
@@ -483,6 +511,23 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
             )
         ),
     ),
+    # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted capture job and is
+    # therefore what puts a stranded capture into the terminal state this sweep selects on. Placed
+    # beside the dump-volume sweep because both reclaim provider host state a job row still owns,
+    # but the two share no state and either order would be correct.
+    _RepairCatalogEntry(
+        "reaped_captures",
+        lambda _r, c, _g: (
+            lambda conn: _reap_orphaned_captures(
+                conn,
+                c.capture_reapers,
+                settle=c.capture_settle,
+                batch=c.capture_reap_batch,
+                retry_base=c.capture_retry_base,
+                retry_cap=c.capture_retry_cap,
+            )
+        ),
+    ),
     # Collects for table growth, not for exposure (ADR-0502): the orphan sweep's classify honours a
     # lease only while its holder is live, so a lease this pass has not yet reached already fences
     # nothing and running late costs no correctness — unlike the ADR-0444 window reaper. The growth
@@ -570,6 +615,7 @@ _REPORT_FIELDS: tuple[str, ...] = (
     "local_system_object_versions_deleted",
     "remote_system_object_versions_deleted",
     "reaped_dump_volumes",
+    "reaped_captures",
     "reaped_runtime_resources",
     "investigation_artifacts_gc_count",
     "expired_build_artifacts_gc_count",

@@ -161,6 +161,7 @@ def build_reconcile_config(
         system_object_hosting_gate=system_object_hosting_gate,
         resetter=provider_composition.build_reconciler_transport_resetter(),
         dump_volume_reaper=provider_composition.build_reconciler_dump_volume_reaper(),
+        capture_reapers=provider_composition.build_reconciler_capture_reapers(),
         heartbeat=heartbeat,
         telemetry=ReconcilerTelemetry(
             tracer=telemetry.tracer_provider.get_tracer("kdive.reconciler"),
