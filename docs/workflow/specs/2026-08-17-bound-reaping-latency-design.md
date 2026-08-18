@@ -1,16 +1,28 @@
 # Bound provider-call latency in the reconciler's two host-state reaping lanes (#1980)
 
 Decision record: [ADR-0565](../../adr/0565-bound-reconciler-provider-reaping-latency.md).
-Prior disclosures of the residual this closes: [ADR-0556](../../adr/0556-reclaim-orphaned-captures-across-providers.md),
-[ADR-0562](../../adr/0562-host-dump-volume-capture-lease-fence.md).
+Prior disclosure of the residual this closes:
+[ADR-0562](../../adr/0562-host-dump-volume-capture-lease-fence.md) *Consequences*, for the
+dump-volume lane. The capture lane carries its disclosure in `_dispatch_capture`'s docstring
+rather than in [ADR-0556](../../adr/0556-reclaim-orphaned-captures-across-providers.md), which
+records the ownership fence the bound must not break but not the latency residual.
 
 ## Problem
 
 `reap_orphaned_captures` and `reap_orphaned_dump_volumes` each await a provider call from inside a
 transaction holding an advisory lock, with no deadline on the call and no deadline on the lane. One
 unreachable declared libvirt host holds a pooled Postgres connection idle-in-transaction for the
-operating system's TCP connect timeout (~130 s), once per unreachable host per provider call, and
-`_run_repair_plan` runs the lanes sequentially, so every later lane in the pass waits behind it.
+operating system's TCP connect timeout (~130 s), once per unreachable host per provider call.
+`_run_repair_plan` runs the catalog sequentially, so every lane placed *after* the reaping lanes
+waits behind it — the write-lease collection, the upload sweeps, the artifact-GC lanes, the
+rootfs-reclaim lanes, the console-collector sweep, and the image sweeps. Allocation expiry and
+System repair are placed *before* the reaping lanes; what reaches them is the `SYSTEM` lock, via
+`services/runs/bind.py`'s `_bind_locked`, which blocks on `SYSTEM` while holding `ALLOCATION`.
+
+The capture lane is dormant today — both provider kinds ship a `NullCaptureReaper` pending #1947 and
+#1948, and `dispatchable_capture_kinds` excludes them from selection — so only the dump-volume lane
+exercises the hazard right now. The budget is a forward guard for the lane whose batch of 25 will
+make it 25 times larger.
 
 An `asyncio.timeout` around the call is not available as a fix: the reapers drive synchronous
 libvirt clients through `asyncio.to_thread`, so cancelling the await abandons the worker thread and
@@ -48,7 +60,7 @@ The placement is the whole of R2: the check is lexically outside every `conn.tra
 both lanes, so a spent budget can only prevent the *next* transaction from opening. It can never
 unwind one that is open.
 
-Setting: `KDIVE_RECONCILER_LANE_BUDGET_SECONDS`, integer seconds, default 30, read by the
+Setting: `KDIVE_RECONCILER_LANE_BUDGET_SECONDS`, integer seconds, default 10, read by the
 `reconciler` and `server` processes (`ops.reconcile_now` runs `reconcile_once` too, so a brake set
 on only one of them would leave the other unbounded). Reaches the lanes through a new
 `ReconcileConfig.lane_budget` field.
@@ -61,8 +73,10 @@ batch allows — not counted as a failure, logged at INFO with the unattempted c
 action **none required, the next pass re-derives the remainder; an operator whose backlog is not
 draining raises this or the reconcile interval**.
 
-A budget of zero or less is treated as no budget at all — every candidate is attempted. The lane
-must not degrade to "attempt nothing", which would silently disable both sweeps.
+The setting's parser rejects a non-positive value, so no operator can set a budget that attempts
+nothing and thereby disable both sweeps. The lanes carry no sentinel for it; the parser is the
+guard, and the default of 10 is a third of `DEFAULT_INTERVAL` (30 s) so both lanes at their budget
+still leave two thirds of an interval for the rest of the catalog.
 
 ### Limit 2 — reaper connect gate
 
@@ -76,9 +90,9 @@ Setting: `KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS`, integer seconds, defaul
 `worker` and `reconciler` processes (the provider settings module's existing reader set).
 
 Full limit contract: unit **seconds**; reference clock the **host kernel's socket timer**; scope
-**per host, per reaper connection attempt** — a fan-out over N declared hosts can spend it N times,
-so one provider call inside a fenced transaction is bounded at `connect_timeout × declared_hosts`
-for the connect portion plus the reachable host's RPC time; consequence of violation **that host is
+**per host, per reaper connection attempt** — a fan-out spends it once per *unreachable* host it
+walks before it finds the target, so the all-hosts-down worst case for one provider call is
+`connect_timeout × declared_hosts`; consequence of violation **that host is
 treated as unreachable for this call — logged and skipped, the fan-out continues to the next
 declared host, the capture lane defers the row behind its backoff and the dump-volume lane leaves
 the volume for the next pass, neither counted as a fault**; recovery action **none required by a
@@ -94,9 +108,13 @@ carries none. A URI with no host is a configuration error the gate reports rathe
 
 A host that completes the TCP handshake and then stalls — in the TLS handshake, or in a wedged
 libvirtd's RPC — is still unbounded and still holds its transaction for as long as it stalls. Limit
-1 caps the blast radius at one candidate per lane per pass. Bounding a stalled RPC needs a
-terminable provider operation (ADR-0558's supervised-child shape), which ADR-0565 records as the
-escalation and does not take.
+1 caps the blast radius at one candidate per lane per pass. ADR-0565 records the two escalations it
+weighed for that residual (`virConnectSetKeepAlive`, and ADR-0558's supervised-child shape) and
+takes neither.
+
+The two limits also multiply: a lane advances roughly `budget ÷ per-candidate cost` candidates per
+pass, and per-candidate cost rises by the connect timeout for each unreachable host the fan-out
+walks. ADR-0565 records the relation and why it is left to the operator rather than derived.
 
 ## Files
 
@@ -124,7 +142,8 @@ escalation and does not take.
 - **Budget gates between candidates, never during one** — with two candidates and a budget spent by
   the first, exactly one provider call is dispatched and the second candidate is untouched (no
   reap-state row written for it).
-- **Budget of zero or less disables the budget** — every candidate is attempted.
+- **The setting rejects a non-positive budget** — `config.validate` fails on `0` and on `-1`,
+  naming the setting.
 - **Budget not spent** — the full batch is attempted, unchanged from today.
 - **Connect gate** — `require_reachable` succeeds against a real listening socket on `127.0.0.1:0`;
   raises `TRANSPORT_FAILURE` when the injected connector raises `TimeoutError` or `OSError`; the
@@ -139,18 +158,22 @@ The change is security-relevant only in that it adds one outbound network action
 operator-settable bound.
 
 - **Boundary added** — an outbound TCP connect from the reconciler to a libvirt host. The
-  destination is taken from `RemoteLibvirtConfig.uri`, which is operator-declared inventory that
-  `validate_remote_uri` already fail-closes to the `qemu+tls` scheme with `no_verify` and operator
-  `pkipath` forbidden. The gate parses only the host and port out of that already-validated URI and
-  sends no bytes; it cannot reach a destination the subsequent `libvirt.open` would not have
-  reached anyway.
+  destination is taken from the URI `open_libvirt_reaper` is about to open, which
+  `remote_connection` has already passed through `validate_remote_uri` — fail-closed to the
+  `qemu+tls` scheme, with `no_verify` and an operator-set `pkipath` forbidden. The gate parses only
+  the host and port out of that already-validated URI and sends no bytes; it cannot reach a
+  destination the subsequent `libvirt.open` would not have reached anyway.
 - **Actors** — the operator who declares the inventory, and the reconciler process itself. No
   untrusted actor supplies an input to either limit: both are `KDIVE_*` settings, snapshotted at
   process start by `Registry.load`, and neither is reachable from an MCP tool argument.
 - **Control per boundary** — the destination is constrained by the existing URI validation; the
   probe is bounded by the new timeout; a failure is reported as `TRANSPORT_FAILURE` naming the URI,
-  which the codebase already logs for an unreachable host, and carries no secret (the TLS material
-  is never touched by the gate — the pkipath is materialized after it).
+  which the codebase already logs for an unreachable host, and carries no secret. The gate runs
+  *inside* `materialized_pkipath` — `remote_connection` materializes the per-op pkipath and then
+  calls the injected `open_connection` — so an unreachable host costs one materialize-and-delete
+  cycle of TLS material on worker-local storage before the gate refuses. The gate reads none of that
+  material, and `materialized_pkipath`'s `finally` deletes the directory on the refusal path exactly
+  as it does on a libvirt connect failure.
 - **Out of scope** — the gate is not a security control and must not be read as one: it proves only
   that something accepted a TCP connection, and TLS mutual authentication remains the sole control
   over who the reconciler is talking to. It does not defend against a host that accepts and stalls;

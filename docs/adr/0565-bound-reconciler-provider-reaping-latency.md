@@ -14,20 +14,31 @@ and neither the call nor the lane has a deadline:
 - the ADR-0562 dump-volume lane — `reaper.delete_dump_volume` inside `_delete_if_still_orphaned`'s
   `(SYSTEM, system_id)`-locked transaction.
 
-`_run_repair_plan` runs the lanes sequentially, one pooled connection each, with no per-lane
-deadline. One unreachable declared host therefore holds a connection idle-in-transaction and delays
-every later lane in the pass — allocation expiry, System repair, artifact GC.
+The capture lane is dormant today: `dispatchable_capture_kinds` excludes any kind with no concrete
+reaper, and both kinds ship disabled pending #1947 and #1948. So only the dump-volume lane holds a
+connection across a provider call right now, and the budget below is a forward guard for the lane
+whose batch will make the hazard 25 times larger.
+
+The delay is not confined to the lanes themselves. `_run_repair_plan` runs the catalog sequentially,
+one pooled connection each, so a stalled reaping lane delays every lane placed after it — the write-
+lease collection, the upload sweeps, the four artifact-GC lanes, the rootfs-reclaim lanes, the
+console-collector sweep, and the image sweeps. Allocation expiry and System repair are placed
+*before* the reaping lanes and are not delayed by plan order; what reaches them is the lock, which
+ADR-0562 already traced: `services/runs/bind.py`'s `_bind_locked` blocks on `SYSTEM` while holding
+`ALLOCATION`, so a bind queued behind the dump-volume lane's hold queues everything waiting on that
+allocation — `allocations.release` and the next pass's expired-allocation repair among them.
 
 The remote-libvirt reapers fan out over the whole declared fleet (`map_over_fleet` /
 `find_over_fleet`), opening one connection per host, and `open_libvirt_protocol` is a bare
 `libvirt.open(uri)`. libvirt's remote driver extracts a fixed set of URI parameters — `name`,
 `command`, `socket`, `auth`, `sshauth`, `netcat`, `keyfile`, `pkipath`, `known_hosts`,
 `known_hosts_verify`, `tls_priority`, `mode`, `proxy`, `no_sanity`, `no_verify` — and no timeout is
-among them. A connect timeout has been an upstream wishlist item, not a knob. So the worst case for
+among them; a connect timeout has been an upstream wishlist item, not a knob. So the worst case for
 one unreachable host is the operating system's TCP connect timeout (`tcp_syn_retries`, ~130 s on
 Linux by default), once per unreachable declared host, and it is not a value an operator can tune.
 ADR-0562 disclosed exactly this and named the fix direction — give the transport a connect timeout —
-without deciding it. ADR-0556 disclosed the same residual for the capture lane. #1980 owns the
+without deciding it. The capture lane carries the same disclosure in
+`provider_reaping.py`'s `_dispatch_capture` docstring rather than in ADR-0556. #1980 owns the
 decision for both.
 
 The obvious fix is unavailable. Wrapping the provider call in `asyncio.timeout` does not bound
@@ -52,15 +63,21 @@ call.
 `reap_orphaned_dump_volumes` each take a `budget: timedelta`, start a monotonic deadline at the top
 of the lane, and check it **before** opening the next candidate's transaction. A spent budget ends
 the lane's pass and returns the count reclaimed so far; the unattempted candidates are re-derived on
-the next pass. The check never runs while a transaction is open, so no transaction can be ended by
-the budget while a provider call may still be mutating host state — that is the property #1980
-requires be proved by a test rather than asserted in a comment, and
-`tests/reconciler/cleanup/test_provider_reaping_budget.py` proves it against a real fence: the fake
-reaper observes, from a second connection, that the fence is still held after the budget has
-expired, and observes it from work shielded against cancellation, so an `asyncio.timeout` rewrite of
-this decision reddens the test.
+the next pass.
 
-`KDIVE_RECONCILER_LANE_BUDGET_SECONDS`, default 30, is the operator's knob.
+The check is lexically outside every `conn.transaction()` block in both lanes. A spent budget can
+therefore only stop the *next* transaction from opening; it can never unwind one that is open, so it
+cannot end a transaction while a provider call may still be mutating host state. #1980 requires that
+property be proved by a test rather than asserted here, and the proof must be one that reddens if
+the implementation is rewritten to cancel an in-flight call: the lane runs with a budget shorter
+than the provider call, the fake reaper does its work inside `asyncio.shield` so cancelling the
+awaiting coroutine does not stop it — the same asymmetry a `to_thread` worker has — and after the
+budget has expired that shielded work asks a second database connection whether the lane's lock is
+still held.
+
+`KDIVE_RECONCILER_LANE_BUDGET_SECONDS`, default 10, is the operator's knob. The default is a third
+of `DEFAULT_INTERVAL` (30 s), so both lanes at their budget still leave two thirds of an interval
+for the rest of the catalog.
 
 - **Unit** — seconds.
 - **Reference clock** — the reconciler process's monotonic clock. Not the database clock: this
@@ -74,6 +91,10 @@ this decision reddens the test.
 - **Recovery action** — none is required: the next pass re-derives the remaining candidates. An
   operator whose backlog is not draining raises the budget or the reconcile interval.
 
+The setting's parser rejects a non-positive value, so there is no operator-reachable way to set a
+budget that attempts nothing. #1980 asked for a configurable bound, not a switch that disables both
+sweeps.
+
 **2. A bounded reachability gate on every remote-libvirt reaper connection.** `open_libvirt_reaper`
 — the opener every fleet-fan-out reaper uses — first opens and immediately closes a plain TCP
 connection to the URI's host and port with a bounded timeout. A host that does not accept within the
@@ -85,9 +106,10 @@ retry budget is never entered.
 
 - **Unit** — seconds.
 - **Reference clock** — the host kernel's socket timer, via the Python socket timeout.
-- **Scope** — per host, per reaper connection attempt. A fan-out over N declared hosts can spend it
-  N times, so one provider call inside a fenced transaction is bounded at
-  `connect_timeout × declared_hosts` for the connect portion, plus the reachable host's RPC time.
+- **Scope** — per host, per reaper connection attempt. A fan-out walks the declared hosts, so one
+  provider call spends the timeout once per *unreachable* host it walks before it finds the target,
+  plus the reachable hosts' RPC time. The all-hosts-down worst case is
+  `connect_timeout × declared_hosts`.
 - **Consequence of violation** — that host is treated as unreachable for this call: logged and
   skipped, the fan-out continues to the next declared host. The capture lane defers the row behind
   its backoff deadline; the dump-volume lane leaves the volume for the next pass. Neither is counted
@@ -103,46 +125,53 @@ remote-libvirt path would change every provider plane's failure timing for a haz
 report.
 
 Both lanes get both limits. The lane budget applies to each lane directly. The connect gate applies
-to every connection the shared reaper seam (`remote_libvirt_reaper_connections`) opens, which is
-what the dump-volume reaper uses today and what #1947's remote capture reaper will use when it
-lands.
+to every connection the shared reaper seam (`remote_libvirt_reaper_connections`) opens — the
+dump-volume reaper today, and #1947's remote capture reaper when it lands.
 
 ## Consequences
 
-- One unreachable declared host costs the capture lane `connect_timeout × declared_hosts` per
-  candidate instead of ~130 s per host, and cannot consume more than the lane budget plus one
-  candidate of the pass. The later lanes in `_run_repair_plan` — allocation expiry, System repair,
-  artifact GC — are delayed by that bounded amount rather than an untunable one.
+- One unreachable declared host costs a reaping lane the connect timeout per provider call instead
+  of ~130 s, and no lane can consume more than its budget plus one candidate of the pass. The lanes
+  placed after the reaping lanes are delayed by that bounded amount rather than an untunable one,
+  and the `SYSTEM`-lock hold that `runs.bind` queues behind shrinks by the same factor.
+- **The two knobs multiply, and the relation is the operator's to keep.** A lane advances roughly
+  `budget ÷ per-candidate cost` candidates per pass, and per-candidate cost rises by the connect
+  timeout for each unreachable host the fan-out walks. With the defaults, one down host costs 5 s per
+  candidate and the capture lane attempts about two candidates per pass instead of 25 — a slower
+  drain than a healthy fleet, though still far faster than the ~130 s per candidate it replaces. A
+  fleet whose hosts are *all* down spends the budget on the first candidate, which is the correct
+  outcome: nothing was reclaimable that pass. An operator running a large backlog against a degraded
+  fleet raises the budget.
 - **The gate bounds the connect, not the call.** A host that completes the TCP handshake and then
   stalls — in the TLS handshake, or in a wedged libvirtd's RPC — is still unbounded, and still holds
   its transaction for as long as it stalls. What limits the blast radius there is the lane budget:
-  such a host costs the pass one candidate, not the whole batch. Bounding a stalled RPC needs a
-  terminable provider operation, which is ADR-0558's supervised-child shape, scoped to the
-  `capture_traffic` job handler; extending it to reaping is a larger decision than #1980's hazard
-  justifies and is not taken here.
-- **The gate adds one TCP connect per host per reaper call.** On a reachable host that is an extra
-  connection libvirtd accepts and sees closed before the TLS handshake, which its log records. That
-  noise is the price of not entering the kernel's SYN retry budget, and it is bounded by the number
-  of reaper calls a pass makes.
+  such a host costs the pass one candidate, not the whole batch. Bounding a stalled RPC is left to
+  its own decision; the two shapes considered for it are in the rejected list.
+- **The gate runs after the per-op pkipath is materialized**, because it sits in the injected
+  `open_connection` seam that `remote_connection` calls from inside `materialized_pkipath`. An
+  unreachable host therefore still costs one materialize-and-delete cycle of TLS material on
+  worker-local storage. The gate itself never reads that material. The placement is deliberate: the
+  opener is the seam every reaper test already replaces, so the gate is production-only without
+  adding a parameter to the fan-out helpers.
 - **The gate is a check-then-act.** A host that accepts TCP at probe time and dies before
   `libvirt.open` is back to the unbounded case. The window is one round trip wide and the outcome is
-  the pre-existing behavior, so the gate is strictly an improvement rather than a guarantee.
+  the pre-existing behavior, so the gate is an improvement rather than a guarantee.
+- **The gate adds one TCP connect per host per reaper call.** On a reachable host that is an extra
+  connection libvirtd accepts and sees closed before the TLS handshake, which its log records.
 - **A permanently failing first dump-volume candidate can now truncate the lane silently.** The
-  dump-volume lane is stateless — it re-lists volumes in provider order every pass — so a volume
-  that always consumes the budget starves the ones behind it. Before this decision that volume
-  stalled the whole pass instead, so this is not a regression, but the INFO line naming the
-  unattempted count is the whole of the signal, the same drift hazard ADR-0562 already discloses for
-  its per-System skips. The capture lane does not share it: every attempted candidate writes a
-  backoff deadline, so a failing row sorts behind the untouched ones on the next pass.
-- **Two knobs, not one.** They bound different scopes and differ by an order of magnitude in
-  practice, so collapsing them would make one of the two meaningless. Each carries the full
-  five-part limit contract above, in the ADR, in the generated config reference, and in the code
-  that reads it.
-- The `reaped_captures` and `reaped_dump_volumes` counters keep their meaning: a candidate the
-  budget left unattempted is not counted, exactly as a deferred or declined one is not.
+  dump-volume lane is stateless — it re-lists volumes in provider order every pass — so a volume that
+  always consumes the budget starves the ones behind it. Before this decision that volume stalled the
+  whole pass instead, so this is not a regression, but the INFO line naming the unattempted count is
+  the whole of the signal, the same drift hazard ADR-0562 discloses for its per-System skips. The
+  capture lane does not share it: every attempted candidate writes a backoff deadline, so a failing
+  row sorts behind the untouched ones on the next pass.
+- **Two knobs, not one.** They bound different scopes and differ by an order of magnitude, so
+  collapsing them would make one of the two meaningless.
+- The `reaped_captures` and `reaped_dump_volumes` counters keep their meaning: a candidate the budget
+  left unattempted is not counted, exactly as a deferred or declined one is not.
 - No migration, no schema change, no MCP tool-surface change, no RBAC change. Two additive settings,
-  one additive `ReconcileConfig` field, and one signature change on each of the two lane functions
-  (a required keyword `budget`).
+  one additive `ReconcileConfig` field, and one required keyword (`budget`) on each of the two lane
+  functions.
 
 ## Considered & rejected
 
@@ -150,10 +179,10 @@ lands.
   synchronous libvirt work running in a `to_thread` worker. The transaction unwinds and releases the
   ownership fence or the System lock while the abandoned thread is still mutating host state —
   precisely what ADR-0556 forbids. It trades a latency problem for an ownership violation.
-- **Do nothing; keep the residual.** The capture sweep is explicitly designed around hosts that may
-  be unreachable, and its per-row backoff assumes a pass completes in a bounded time so the deadline
-  it writes means something. An untunable ~130 s per unreachable host, up to 25 times per pass,
-  makes that assumption false on exactly the fleets the sweep exists for.
+- **Do nothing; keep the residual.** The capture sweep is designed around hosts that may be
+  unreachable, and its per-row backoff assumes a pass completes in a bounded time so the deadline it
+  writes means something. An untunable ~130 s per unreachable host, up to 25 times per pass, makes
+  that assumption false on exactly the fleets the sweep exists for.
 - **A `statement_timeout` on the reconciler connection.** Bounds a SQL statement, and the hold here
   is spent in a provider call between statements, with the connection idle-in-transaction. It would
   not fire.
@@ -162,10 +191,23 @@ lands.
 - **A connect timeout as a libvirt URI parameter.** libvirt's remote driver extracts a fixed
   parameter set and no timeout is in it; an unrecognized parameter is passed through to the back end
   rather than honored. There is nothing to set.
-- **Extending ADR-0558's supervised child process to reaping.** It is the only shape that bounds a
-  stalled RPC rather than a stalled connect, and it is genuinely more than #1980's hazard needs: a
-  supervisor, a quiescence protocol, and a spool per reaper call, for a lane whose dominant failure
-  is a host that never answers. Recorded as the escalation if the connect gate proves insufficient.
+- **A per-pass cache of hosts the gate found unreachable.** Would collapse the multiplication above
+  from `connect_timeout × hosts × candidates` to `connect_timeout × hosts` per pass. Rejected because
+  the reaper objects are built once at composition and the `DumpVolumeReaper` / `CaptureReaper` ports
+  expose no pass boundary to scope such a cache to; a time-scoped one instead adds a third duration
+  knob for a hazard the lane budget already caps. Worth revisiting if the budget proves to be spent
+  on re-probing rather than on work.
+- **`virConnectSetKeepAlive` on the reaper connection.** Detects a peer that stops answering and
+  fails pending RPCs, which is the post-handshake stall the gate does not cover. Rejected for now on
+  two grounds: it needs the server side to have keepalive enabled and reports failure — potentially
+  closing the connection — against a peer that does not, which is a fail-closed change to every
+  existing deployment's reaper path; and it detects a *dead* peer, not a live libvirtd whose storage
+  call is blocked, which is the stall shape a reaping lane actually meets. It is the cheaper of the
+  two escalations if the residual proves load-bearing.
+- **Extending ADR-0558's supervised child process to reaping.** The other escalation, and the only
+  shape that bounds a live-but-blocked peer. Genuinely more than #1980's hazard needs: a supervisor,
+  a quiescence protocol, and a spool per reaper call, for a lane whose dominant failure is a host
+  that never answers.
 - **Deriving the lane budget from the reconcile interval instead of a new setting.** Ties the two
   together: an operator lengthening the interval to reduce load would silently lengthen the hold on
   the System lock that every `runs.bind` waits behind. The knobs answer different questions.
