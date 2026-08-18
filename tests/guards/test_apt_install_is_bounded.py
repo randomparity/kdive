@@ -15,8 +15,11 @@ record the argv every stub was handed, so the options that make the bound work �
 `--kill-after`, `sudo`, `DPkg::Use-Pty=0` — are under test rather than merely present in the
 file.
 
-Stdlib + pytest only, matching `test_prepull_images_match_fixtures.py`: this reads the tree and
-runs one shell script, not the project.
+Stdlib, `pyyaml` and pytest: this reads the tree and runs one shell script, not the project.
+`pyyaml` is a declared dependency and is how `tests/scripts/test_live_workflow_shape.py` already
+reads these same workflow files — the job-level checks below need a real parser, because a
+regex that recognises a job key by its line shape cannot see one carrying a trailing comment,
+and reports it as bounded. Everything the *script* is tested with stays stdlib.
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+
+import yaml
 
 _ROOT = Path(__file__).resolve().parents[2]
 _APT_SCRIPT = _ROOT / "scripts" / "apt-install.sh"
@@ -69,10 +74,10 @@ _DERIVED_ATTEMPTS = re.compile(
     r"^(?:readonly\s+)?ATTEMPTS=\$\(\(\$\{#BACKOFF_S\[@\]\}\s*\+\s*1\)\)", re.MULTILINE
 )
 
-#: A job key: two-space indent under the top-level `jobs:` mapping.
-_JOBS_BLOCK = re.compile(r"^jobs:$", re.MULTILINE)
-_JOB_KEY = re.compile(r"^  (?P<job>[A-Za-z0-9_-]+):$", re.MULTILINE)
-_JOB_TIMEOUT = re.compile(r"^    timeout-minutes:\s*(?P<minutes>\d+)\s*$", re.MULTILINE)
+#: The GitHub Actions default, and the hosted-runner ceiling. A declared value at or above it
+#: bounds nothing: 360 *is* the default this guard exists to close, and anything higher is
+#: unenforceable, so the number in the file would be describing a limit that never arrives.
+_ACTIONS_DEFAULT_TIMEOUT_MINUTES = 360
 
 #: `apt-install +PACKAGES:` and the body line that runs the script.
 _JUST_RECIPE = re.compile(
@@ -80,21 +85,23 @@ _JUST_RECIPE = re.compile(
 )
 
 
-def _jobs(text: str) -> dict[str, str]:
-    """Split a workflow into ``{job name: that job's YAML}``.
+def _jobs(path: Path) -> dict[str, dict[str, object]]:
+    """Parse a workflow into ``{job name: that job's mapping}``.
 
     Per job, not per file: a `timeout-minutes` on one job says nothing about the wedge budget
     of the job beside it, and a whole-file search would count it for both.
+
+    `yaml.safe_load` rather than a line-anchored regex over the text. A regex that recognises a
+    job by `^  name:$` cannot see `  wedgeable:  # added later` or `  "wedgeable":` — both
+    ordinary YAML — and a job it cannot see is a job it reports as bounded. That failure is
+    silent in both directions: it never lands in `missing`, and the job floor below only
+    catches jobs that *disappear*, never ones that were never visible. `pyyaml` is a declared
+    dependency and `tests/scripts/test_live_workflow_shape.py` already parses these same files
+    with it, so this is one parser where the tree had two.
     """
-    block = _JOBS_BLOCK.search(text)
-    if block is None:
-        return {}
-    body = text[block.end() :]
-    bounds = list(_JOB_KEY.finditer(body))
-    ends = [*(match.start() for match in bounds[1:]), len(body)]
-    return {
-        match.group("job"): body[match.end() : end] for match, end in zip(bounds, ends, strict=True)
-    }
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    jobs = document.get("jobs", {}) if isinstance(document, dict) else {}
+    return jobs if isinstance(jobs, dict) else {}
 
 
 def _workflow_text(name: str) -> str:
@@ -157,14 +164,21 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
     )
 
     missing: list[str] = []
+    unbounded: list[str] = []
     checked = 0
     for path in paths:
-        jobs = _jobs(_workflow_text(path.name))
+        # `_workflow_text` first: it is what fails an emptied workflow with a message, where
+        # `yaml.safe_load` would return None and this loop would skip the file in silence.
+        _workflow_text(path.name)
+        jobs = _jobs(path)
         assert jobs, f"no jobs parsed out of {path.name} — the workflow layout changed (ADR-0566)"
-        for job_name, body in jobs.items():
+        for job_name, job in jobs.items():
             checked += 1
-            if not _JOB_TIMEOUT.search(body):
+            declared = job.get("timeout-minutes") if isinstance(job, dict) else None
+            if declared is None:
                 missing.append(f"{path.name}:{job_name}")
+            elif not isinstance(declared, int) or declared >= _ACTIONS_DEFAULT_TIMEOUT_MINUTES:
+                unbounded.append(f"{path.name}:{job_name}={declared!r}")
 
     # The real count across the ten workflows is 17. `>= len(paths)` would be satisfied by a
     # parser that found one job per file and silently stopped checking the other seven.
@@ -177,6 +191,15 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
         "360-minute GitHub Actions default. That is what made #1978 cost a full CI cycle each "
         "time it fired. Size it from the job's observed runtime with headroom, and put the "
         "observed figure in a comment beside it (ADR-0566, #1983)."
+    )
+    # Presence is not a bound. Without this, a job could satisfy the assertion above by
+    # declaring exactly the default the assertion's own message names.
+    assert not unbounded, (
+        f"{unbounded} declare a `timeout-minutes` that is not a plain number below the "
+        f"{_ACTIONS_DEFAULT_TIMEOUT_MINUTES}-minute Actions default. At the default it bounds "
+        "nothing — the job is as wedgeable as it was before it was declared — and above it the "
+        "value is not enforceable at all, so the number would be describing a limit that never "
+        "arrives. Size it from the job's observed runtime (ADR-0566, #1983)."
     )
 
 
