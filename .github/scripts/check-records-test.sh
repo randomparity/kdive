@@ -38,6 +38,11 @@ fi
 passed=0
 failed=0
 
+# Opt-out for the two cases whose fixture breaks a tool on purpose — a chmod 000 directory and a
+# stub mktemp — so the tool's own message on stderr is the expected outcome rather than noise.
+# Every other case asserts that the checker's stderr carries nothing but its own coded findings.
+EXPECT_TOOL_STDERR=""
+
 # A fresh repo containing one valid record, committed, with BASE pointing at it.
 new_repo() {
   local dir=$1
@@ -136,7 +141,15 @@ run_case() {
     why="exit=$got but $code never fired"
   elif [ "$code" = "-" ] && grep -q '::error::' "$dir/.err"; then
     why="unexpected error: $(sed -n 's/^::error:://p' "$dir/.err" | head -1)"
+  elif [ -z "$EXPECT_TOOL_STDERR" ] && grep -qv '^::' "$dir/.err"; then
+    # Every line the checker writes to stderr is a coded finding; anything else came from a tool
+    # it invoked. An `awk -v` whose value carried backslashes warned on every run of this suite
+    # for the life of a defect nobody saw, because nothing looked at stderr it had not asked for.
+    why="foreign stderr: $(grep -v '^::' "$dir/.err" | head -1)"
   fi
+  # Set per case and cleared after each one, the way the checker scopes its own EMIT_MODE: a case
+  # that leaked the opt-out would silence every case after it, which is the failure this rule is.
+  EXPECT_TOOL_STDERR=""
 
   if [ -z "$why" ]; then
     passed=$((passed + 1))
@@ -232,6 +245,35 @@ adr_dir() {
   git -C "$dir" add -A
   git -C "$dir" commit -qm base
   printf '%s' "$dir"
+}
+
+# write_legacy_adr <dir> <name> <preamble-lines>
+#
+# An ADR in the pre-0504 shape: no `## Status` section at all, the status carried as a metadata
+# bullet in the preamble instead. That shape is what grandfathers a record, and it is the shape
+# the corpus this gate was adopted into holds 483 of. <preamble-lines> is written verbatim above
+# the `- **Date:**` bullet, so a case can put a supersession banner beneath the status the way
+# the ADR README prescribes, or add a second metadata bullet of its own.
+write_legacy_adr() {
+  local dir=$1 name=$2 preamble=$3
+  cat >"$dir/docs/adr/$name" <<EOF
+# ${name%%-*} — a pre-template decision
+
+$preamble
+- **Date:** 2026-01-01
+
+## Context
+
+Why this came up.
+
+## Decision
+
+What we decided.
+
+## Consequences
+
+What follows from it.
+EOF
 }
 
 # migrator_dir <name> — a committed repo whose one record carries every legacy marker shape
@@ -1173,6 +1215,7 @@ EOF
     d=$(case_dir unreadable_dir)
     b=$(base_of "$d")
     chmod 000 "$d/docs/debt"
+    EXPECT_TOOL_STDERR=1
     run_case "record directory unreadable" 1 E-ENUM "$d" BASE_SHA="$b"
     chmod 755 "$d/docs/debt"
   fi
@@ -1380,6 +1423,7 @@ echo "mktemp: stub failure (check-records-test.sh forcing E-TMPFILE)" >&2
 exit 1
 STUB
   chmod +x "$d.bin/mktemp"
+  EXPECT_TOOL_STDERR=1
   run_case "temp file unavailable" 1 E-TMPFILE "$d" BASE_SHA="$b" PATH="$d.bin:$PATH"
 
   # A profile that sets its variables but defines no status hook. Without this check the
@@ -1631,6 +1675,23 @@ SH
   write_adr "$d" "0001-first.md" "Accepted (2026-01-01)" "> **Superseded by 0002**"
   run_case "malformed ADR banner" 1 E-BANNER-FORM "$d" BASE_SHA="$b" RECORD_PROFILES=adr
 
+  # BANNER_REPLACES_STATUS is a deferral-profile property, and the status region reaches the
+  # preamble — so a banner one line above the first heading must not stand in for the record's
+  # status. It would skip profile_check_status entirely, and in the base pass that flips the
+  # record's verdict to conforming: one line would both stop its status being validated and
+  # revoke the grandfathering that line's own shape is the reason for.
+  d=$(case_dir debt_preamble_banner)
+  b=$(base_of "$d")
+  {
+    head -1 "$d/docs/debt/0001-valid.md"
+    printf '\n> **Resolved by nothing at all** (2026-01-01)\n'
+    tail -n +2 "$d/docs/debt/0001-valid.md"
+  } >"$d/.rec"
+  mv "$d/.rec" "$d/docs/debt/0001-valid.md"
+  sed 's/^Open$/Pending/' "$d/docs/debt/0001-valid.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/debt/0001-valid.md"
+  run_case "a preamble banner does not stand in for Status" 1 E-STATUS "$d" BASE_SHA="$b"
+
   # The same contract on the deferral profile, which has never had a case for it: the two
   # patterns are per-profile values, so one profile's routing proves nothing about the other's.
   d=$(case_dir debt_banner_form)
@@ -1826,6 +1887,268 @@ MD
   banner="> **Superseded by [0009](0009-nowhere.md)** (2026-01-02)"
   printf '\n## Status\n\nAccepted (2026-01-01)\n%s\n' "$banner" >>"$d/docs/adr/0001-legacy.md"
   run_case "dangling link on a legacy ADR is an error" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The case above appends a `## Status` section to the fixture before asserting, so it proves
+  # nothing about a record that never grows one — and a pre-0504 record does not. There the
+  # banner sits in the preamble, `check_supersede_link` reads an empty `## Status` body, and
+  # E-SUPERSEDE-DANGLING cannot fire at all: the gate checked the banner on none of the 483
+  # records most likely to acquire one (#1976, ADR 0564).
+  d="$SCRATCH/adr_legacy_preamble_dangling"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Superseded by [ADR-0009](0009-nowhere.md)
+> **Superseded by [0009](0009-nowhere.md)** (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "dangling banner with no Status section" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The banner rules in check_status reach a preamble banner too, not only the link rule in the
+  # profile: without that, a legacy record could carry a banner of any shape at all and the gate
+  # would report nothing about it. Bespoke, because a record with no `## Status` is non-conforming
+  # by definition, so this finding is always downgraded and run_case asserts on the code itself.
+  d="$SCRATCH/adr_legacy_banner_form"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
+> **Superseded by 0002**"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  printf '  %-4s %-44s ' "" "malformed banner with no Status section"
+  if (cd "$d" && env -u GITHUB_ACTIONS RECORD_PROFILES=adr BASE_SHA="$b" \
+    ./.github/scripts/check-records.sh) >"$d/.out" 2>"$d/.err"; then
+    if grep -q '::warning::W-LEGACY-SHAPE: .*(E-BANNER-FORM)$' "$d/.err"; then
+      passed=$((passed + 1))
+      printf 'ok   exit=0 E-BANNER-FORM reported, downgraded\n'
+    else
+      failed=$((failed + 1))
+      printf 'FAIL the preamble banner was never judged\n'
+    fi
+  else
+    failed=$((failed + 1))
+    printf 'FAIL %s\n' "$(sed -n 's/^::error:://p' "$d/.err" | head -1)"
+  fi
+
+  # status_region reads both regions unconditionally rather than branching on whether the record
+  # has the heading, because every cheap predicate for that branch is forgeable from inside the
+  # record it judges. A `## Status` line inside a fenced example satisfies `grep -qxF`, section_body
+  # then returns the fence, and the preamble's real banner goes unread — this hole, reopened by a
+  # documentation snippet.
+  d="$SCRATCH/adr_legacy_fenced_status"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
+> **Superseded by [0009](0009-nowhere.md)** (2026-01-02)"
+  {
+    printf '\nThe shape a record written today uses:\n\n'
+    printf '%s\n' '```text'
+    printf '## Status\n\nAccepted (2026-01-01)\n'
+    printf '%s\n' '```'
+  } >>"$d/docs/adr/0001-legacy.md"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "a fenced Status heading does not hide the banner" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The allowance covers a record's status, and a record has one. Adding a second `Status:`-labelled
+  # line is what the mask cannot bound on its own — preamble additions are unconstrained, so a
+  # change could park a paragraph under the label here and gut it in the next PR with both runs
+  # green, and the inserted line would meanwhile make the record's real status unamendable.
+  d="$SCRATCH/adr_legacy_second_status_line"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  sed 's/^- \*\*Status:\*\* Accepted$/- **Status:** Accepted\
+- Status: the build lane still follows this record, whatever the bullet above says./' \
+    "$d/docs/adr/0001-legacy.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
+  run_case "adding a second status bullet is ambiguous" 1 E-STATUS-AMBIGUOUS "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # And a record that already had two must stay amendable. Holding a later PR to a shape it did
+  # not create is the deadlock grandfathering exists for, so the rule reports only what the change
+  # introduces — the same split W-DUP-PREEXISTING makes for a collision.
+  #
+  # The real status is the *second* line here, which is what makes this the freeze case rather
+  # than a duplicate of the one above: a mask that covered only the first match would spend the
+  # allowance on the line above and leave the record's actual status unamendable for good.
+  d="$SCRATCH/adr_legacy_two_at_base"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- Status: an older duplicate nobody removed.
+- **Status:** Accepted"
+  write_adr "$d" "0002-later.md" "Accepted (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  sed 's|^- \*\*Status:\*\* Accepted$|- **Status:** Superseded by [ADR-0002](0002-later.md)|' \
+    "$d/docs/adr/0001-legacy.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
+  run_case "two status bullets at base stay amendable" 0 - "$d" BASE_SHA="$b" \
+    RECORD_PROFILES=adr
+
+  # The extractor captures anything but `)`, so the target is checked against the record grammar
+  # before it is joined to RECORD_DIR. A traversal names a path that exists and resolves and is
+  # not a record; BANNER_PATTERN would refuse it, but through `err`, which downgrades on exactly
+  # the grandfathered records this rule was widened to reach.
+  d="$SCRATCH/adr_legacy_traversal_link"
+  new_adr_repo "$d"
+  printf 'top level\n' >"$d/README.md"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
+> **Superseded by [0009](../../README.md)** (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "a traversal banner target is not a record" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The mask and the counter have to classify the same lines — that invariant is the only reason
+  # E-STATUS-AMBIGUOUS can bound the mask, and nothing checked it. They are two regex engines
+  # reading one pattern: the counter is an ERE, the mask is awk, and `awk -v` runs its value
+  # through escape processing first, which once degraded the mask to "any line beginning Status"
+  # while the counter stayed strict. `Statusx:` and `StatusZZZ:` are the discriminating inputs —
+  # labels that start with the word without being the field. The expected count is pinned, so two
+  # engines that agree on nothing do not pass this by both matching zero.
+  d="$SCRATCH/mask_counter_agreement"
+  mkdir -p "$d"
+  cat >"$d/lines.txt" <<'MD'
+- **Status:** Accepted
+- **Status rationale:** prose a later change must not be able to rewrite
+- **Statusx:** x
+StatusZZZ: x
+Status: bare
+  - Status: indented
+- **Date:** 2026-01-01
+MD
+  printf '  %-4s %-44s ' "" "mask and counter classify the same lines"
+  if (
+    # shellcheck source=/dev/null
+    . "$CHECKER"
+    masked=$(mask_status_bullet <"$d/lines.txt" | grep -c '^<status>$' || true)
+    counted=$(grep -cE "$STATUS_BULLET_RE" "$d/lines.txt" || true)
+    [ "$masked" = "$counted" ] && [ "$masked" = 2 ]
+  ) 2>"$d/.err" && [ ! -s "$d/.err" ]; then
+    passed=$((passed + 1))
+    printf 'ok   both engines select 2 lines\n'
+  else
+    failed=$((failed + 1))
+    printf 'FAIL disagreement, wrong count, or a tool warned: %s\n' "$(head -1 "$d/.err")"
+  fi
+
+  # What that disagreement costs, end to end: a merged record carries a `Status`-prefixed label the
+  # counter does not count, and a later change rewrites the prose under it. A mask that honours the
+  # label reduces both sides to the sentinel and the rewrite is invisible, while E-STATUS-AMBIGUOUS
+  # cannot object because by its own reading the record has one status.
+  d="$SCRATCH/adr_legacy_status_lookalike"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
+- **Status rationale:** the build lane was measured before this decision was accepted."
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  sed 's|^- \*\*Status rationale:\*\* .*$|- **Status rationale:** n/a|' \
+    "$d/docs/adr/0001-legacy.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
+  run_case "a Status-prefixed label is not the status" 1 E-PREAMBLE-REWRITTEN "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # And the mask is anchored at column one, so an indented sub-bullet is not a candidate at all.
+  # It would otherwise be the first match on a record like this one and consume the allowance,
+  # which unprotects the sub-bullet and re-protects the status the allowance exists for.
+  d="$SCRATCH/adr_legacy_indented_status"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "  - Status: the build lane still follows this record.
+- **Status:** Accepted"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  sed 's/^  - Status: the build lane.*$/  - Status: nothing to see here./' \
+    "$d/docs/adr/0001-legacy.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
+  run_case "an indented status-shaped bullet is protected" 1 E-PREAMBLE-REWRITTEN "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # Reading one link is not enough on this shape. E-BANNER-COUNT is downgradable, so a second
+  # banner on a grandfathered record is a warning rather than a stop, and the first one here
+  # resolves — so a rule that took the first link and returned would pass the run at exit 0 with
+  # a banner naming a record that does not exist.
+  d="$SCRATCH/adr_legacy_second_banner"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Superseded by [ADR-0002](0002-later.md)
+> **Superseded by [0002](0002-later.md)** (2026-01-02)
+> **Superseded by [0009](0009-nowhere.md)** (2026-01-03)"
+  write_adr "$d" "0002-later.md" "Accepted (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "second banner's dangling link is still read" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The supersession docs/adr/README.md prescribes, on the shape the corpus actually has. Setting
+  # the bullet rewrites a preamble line, which was E-PREAMBLE-REWRITTEN through err_full — a
+  # finding W-LEGACY-SHAPE deliberately cannot downgrade — so the gate refused the one edit that
+  # keeps a superseded record's status honest. A status value is not a protected region.
+  d="$SCRATCH/adr_legacy_status_superseded"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted"
+  write_adr "$d" "0002-later.md" "Accepted (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  write_legacy_adr "$d" "0001-legacy.md" \
+    "- **Status:** Superseded by [ADR-0002](0002-later.md)"
+  run_case "legacy status bullet set to superseded" 0 - "$d" BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The same supersession as one realistic commit: the bullet *and* the banner beneath it. Adding
+  # a line is not a marker-only change, so this one is not excused by the allowance in front of
+  # the three rules — it reaches check_preamble_intact, which has to know the same thing.
+  d="$SCRATCH/adr_legacy_status_and_banner"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted"
+  write_adr "$d" "0002-later.md" "Accepted (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  write_legacy_adr "$d" "0001-legacy.md" \
+    "- **Status:** Superseded by [ADR-0002](0002-later.md)
+> **Superseded by [0002](0002-later.md)** (2026-01-02)"
+  run_case "legacy status bullet and banner in one change" 0 - "$d" BASE_SHA="$b" \
+    RECORD_PROFILES=adr
+
+  # The bullet the mask names, anchored at the start of the line. The Deciders bullet carries the
+  # word "Status" in its text on purpose: a pattern one character wider matches every preamble
+  # bullet, and an unanchored one matches any line that mentions a status at all. Either way the
+  # region a pre-template record keeps its provenance in stops being guarded.
+  d="$SCRATCH/adr_legacy_other_bullet"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
+- **Deciders:** the Status review group"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  sed 's/^- \*\*Deciders:\*\* .*$/- **Deciders:** a later Status review group/' \
+    "$d/docs/adr/0001-legacy.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
+  run_case "a non-status preamble bullet is still protected" 1 E-PREAMBLE-REWRITTEN "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The allowance is the preamble's, not the word "Status"'s. A line that looks like a status
+  # bullet but sits inside a section is body content of an append-only section and stays
+  # byte-protected — without this, one masking rule applied file-wide would gut it silently.
+  d="$SCRATCH/adr_status_line_in_section"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted"
+  printf -- '- Status: reported by the poller, not by the record.\n' \
+    >>"$d/docs/adr/0001-legacy.md"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  sed 's/^- Status: reported by the poller.*$/- Status: whatever we say it is./' \
+    "$d/docs/adr/0001-legacy.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0001-legacy.md"
+  run_case "a Status line inside a section stays protected" 1 E-REWRITE "$d" \
     BASE_SHA="$b" RECORD_PROFILES=adr
 
   # And W-INDEX-TABLE must not inherit `downgrade` from the record loop, which would leave it

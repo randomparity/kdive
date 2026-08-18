@@ -209,6 +209,71 @@ preamble() {
   awk '/^## / { exit } NR > 1 { print }' "$1"
 }
 
+# Where a record keeps its status. A record written to the current template keeps it in a
+# `## Status` section; a pre-template record keeps it as a metadata bullet in the preamble, which
+# belongs to no section and which section_body therefore never reaches. Every status rule has to
+# read whichever region the record has, or it silently checks nothing for the pre-template half
+# of a corpus — which is how a supersession banner on such a record went unvalidated. See ADR
+# 0564.
+#
+# Both regions, unconditionally, rather than a branch on whether the record has the heading. A
+# branch needs a predicate, and every cheap one is forgeable from inside the record it judges: a
+# `## Status` line quoted in a fenced example makes `grep -qxF` say yes, section_body then returns
+# the fence, and the preamble's real banner goes unread — the hole this function exists to close,
+# reopened by a documentation snippet. The union has no such input. A conforming record's preamble
+# is empty, so it contributes nothing there; a pre-template record has no `## Status` body, so it
+# contributes nothing on the other side.
+#
+# profile_check_status is deliberately *not* routed through this. It is what makes a pre-template
+# record non-conforming at the base ref, and therefore what grandfathers it; widening it would
+# flip most such records to conforming and hold them to full severity on every other rule at once.
+status_region() {
+  local file=$1
+  preamble "$file"
+  section_body "$file" '## Status'
+}
+
+# A pre-template record's status bullet, reduced to a sentinel. A status *value* is the one thing
+# a merged record is meant to change: protected_shape already drops the `## Status` body for
+# exactly that reason, and a record that keeps its status in the preamble instead has to get the
+# same allowance, or the supersession docs/adr/README.md prescribes is the single edit the gate
+# refuses. See ADR 0564.
+#
+# Preamble-scoped by its caller, not by a test of its own: it is fed `preamble` output, which
+# already stops at the first `## `. A second stop condition here would be a guard that cannot
+# fire — a false guarantee, by the same argument date_to_int makes about its own missing
+# invalid-input branch — so the contract is stated instead: pass this a preamble. A line that
+# looks like a status bullet but sits inside a section is body content of an append-only section,
+# stays byte-protected, and never reaches here.
+#
+# Anchored at column one and on the field label, not on the word: an unanchored match would mask
+# any metadata bullet that merely mentions a status, and the preamble is where a pre-template
+# record keeps its provenance. One definition, read by the mask and by the ambiguity rule that
+# bounds it, so the two cannot disagree about which lines the allowance covers.
+STATUS_BULLET_RE='^(- )?(\*\*Status:\*\*|Status:)'
+#
+# Every match, not the first. Masking one would make the allowance positional, and a preamble
+# *addition* is unconstrained — check_preamble_intact counts only removals — so one inserted
+# `Status:`-prefixed line above the real bullet would silently consume the allowance and freeze
+# that record's status for good: the supersession edit fails afterwards, and so does removing the
+# inserted line, with no remedy inside the gate. That is the defect this record exists to remove,
+# reintroduced per record. E-STATUS-AMBIGUOUS below is what keeps the set to one instead.
+#
+# A sentinel line, not a deletion, so a masked line still has to be present: removing one drops a
+# line from the comparison and E-PREAMBLE-REWRITTEN still fires.
+# Passed through the environment, not `-v`. `-v` runs the value through awk's escape processing
+# first, so `\*` arrives as a plain `*` and the pattern silently degrades to one that matches any
+# line beginning `Status` — asterisks and colon optional. The counter below is a real ERE and
+# keeps the backslashes, so the two disagree about which lines the allowance covers, which is
+# exactly what makes E-STATUS-AMBIGUOUS unable to bound the mask. ENVIRON[] bypasses that pass and
+# is portable across gawk, mawk and BSD awk.
+mask_status_bullet() {
+  STATUS_BULLET_RE="$STATUS_BULLET_RE" LC_ALL=C awk '
+    $0 ~ ENVIRON["STATUS_BULLET_RE"] { print "<status>"; next }
+    { print }
+  '
+}
+
 # One file reduced to exactly what the three anti-rewrite rules below examine: the whole
 # canonicalised file minus the `## Status` body. Order-sensitive, and everything outside
 # canonicalise's marker table — every word of prose, all indentation and nesting outside
@@ -224,6 +289,12 @@ preamble() {
 # The heading line itself stays: `## Status` is a heading, and a heading is protected.
 # canonicalise has already lowercased it, so `## Status:` and `## status` both arrive here
 # as `## status` and the same test recognises either spelling.
+#
+# A pre-template record's status bullet is *not* excluded here, even though its value is equally
+# unprotected (see mask_status_bullet). Excluding it would only widen the marker-only shortcut in
+# front of the three rules; the rule that actually examines the preamble does the masking itself,
+# so a status-bullet edit falls through this predicate and is accepted there. Being stricter here
+# than the rules are is safe in the one direction that matters — it makes them run.
 protected_shape() {
   canonicalise "$1" | awk '
     /^## / { in_status = ($0 == "## status"); print; next }
@@ -267,8 +338,9 @@ check_sections() {
 # counts zero, and misroutes to E-STATUS.
 check_status() {
   local file=$1 label=$2 pass=$3
-  local status_block banner banner_count banner_date today banner_int today_int
-  status_block=$(section_body "$file" "## Status")
+  local status_block status_body banner banner_count banner_date today banner_int today_int
+  status_block=$(status_region "$file")
+  status_body=$(section_body "$file" '## Status')
 
   banner=$(printf '%s\n' "$status_block" | grep "$BANNER_PREFIX" || true)
   if [ -n "$banner" ]; then
@@ -288,7 +360,18 @@ check_status() {
     if [ "$banner_int" -gt "$today_int" ]; then
       err "E-BANNER-FUTURE: $label: resolution banner is dated in the future ($banner_date)"
     fi
-    [ "$BANNER_REPLACES_STATUS" = yes ] && return 0
+    # Keyed to the `## Status` body, not to the whole status region. A banner replaces the status
+    # for a kind that says so, and the body is the only place such a kind declares one — a banner
+    # above the first heading would otherwise skip profile_check_status, and for a pre-template
+    # record that flips its base-ref verdict to conforming. One line above the H1 would both stop
+    # its status being validated and revoke its grandfathering, which is the opposite of both.
+    # A here-string rather than a pipe into `grep -q`: under `pipefail` an early-exiting grep can
+    # SIGPIPE its producer, and the pipeline's non-zero status would then read as "no banner" on
+    # the very input that has one. The section is two lines, so it has never bitten elsewhere in
+    # this file — but a rule that silently inverts is not one to leave to buffer sizes.
+    if [ "$BANNER_REPLACES_STATUS" = yes ] && grep -q "$BANNER_PREFIX" <<<"$status_body"; then
+      return 0
+    fi
   fi
 
   profile_check_status "$file" "$label" "$pass"
@@ -430,9 +513,26 @@ check_headings_intact() {
 
 # The lines between the H1 and the first `## ` belong to no section at all, so section_body
 # never reaches them either — it is where a pre-template record keeps its metadata bullets.
+#
+# Compared through mask_status_bullet, for the reason protected_shape drops the `## Status` body:
+# the status value is not protected in either shape. This is the only place it is masked — the
+# marker-only allowance in front of this rule does not need to know, since a status-bullet edit
+# it declines simply arrives here and is accepted.
 check_preamble_intact() {
-  local tmp=$1 path=$2 removed
-  removed=$(diff <(preamble "$tmp") <(preamble "$path") | grep -c '^<' || true)
+  local tmp=$1 path=$2 removed base_bullets tree_bullets
+  # The allowance covers a record's status, and a record has one. A second such line makes "the
+  # status" ambiguous and is the vector the mask cannot bound on its own: preamble additions are
+  # unconstrained, so a change could park a paragraph under a `Status:` label in one commit and
+  # gut it in the next with both runs green. Reported only when the change *introduces* it, the
+  # way W-DUP-PREEXISTING splits a collision — a record that already had two must stay fixable,
+  # and holding a later PR to a shape it did not create is the deadlock grandfathering exists for.
+  base_bullets=$(preamble "$tmp" | grep -cE "$STATUS_BULLET_RE" || true)
+  tree_bullets=$(preamble "$path" | grep -cE "$STATUS_BULLET_RE" || true)
+  if [ "$tree_bullets" -gt 1 ] && [ "$tree_bullets" -gt "$base_bullets" ]; then
+    err_full "E-STATUS-AMBIGUOUS: $path: $tree_bullets 'Status:' lines above the first section — a record has one status, and the allowance that lets it change covers one line"
+  fi
+  removed=$(diff <(preamble "$tmp" | mask_status_bullet) <(preamble "$path" | mask_status_bullet) |
+    grep -c '^<' || true)
   if [ "$removed" -gt 0 ]; then
     err_full "E-PREAMBLE-REWRITTEN: $path drops $removed line(s) between the title and the first section that the base ref had"
   fi

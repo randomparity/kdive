@@ -1,6 +1,6 @@
 # ADR 0430 — Remote-libvirt accepts a supplied KERNEL + VMLINUX component source
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0563](0563-component-source-declarations-narrow-to-the-enforced-kind.md)
 > **Superseded by [0563](0563-component-source-declarations-narrow-to-the-enforced-kind.md)** (2026-08-17)
 - **Date:** 2026-07-23
 - **Deciders:** kdive maintainers

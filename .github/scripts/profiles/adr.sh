@@ -87,15 +87,32 @@ check_title_number() {
 # A deferral banner names free text, which is unverifiable; an ADR banner names a sibling record
 # by path, so it can be resolved. Not blob-local — it reads the sibling set — so it is a
 # tree-pass rule, and it reports through err_full because a grandfathered record must not soften
-# it: the likeliest record to acquire a banner here is the one pre-template ADR.
+# it: the likeliest record to acquire a banner here is a pre-template ADR.
+#
+# status_region rather than the `## Status` body, because that is precisely the record kind this
+# rule exists for and a pre-template one has no such section — the body came back empty, the
+# guard returned, and the banner on every one of them went unchecked (ADR 0564, #1976).
+#
+# Every link, not the first: E-BANNER-COUNT is downgradable, so on a grandfathered record a
+# second banner is a warning, and reading one link would let its dangling target through. Fed by
+# a process substitution rather than a pipe, so err_full runs in the current shell where the
+# assignment to `failed` survives.
 check_supersede_link() {
   local file=$1 label=$2 link
-  link=$(section_body "$file" "## Status" |
-    sed -n 's/^> \*\*Superseded by \[[0-9]\{4\}\](\([^)]*\)).*/\1/p' | head -1)
-  [ -n "$link" ] || return 0
-  if [ ! -f "$RECORD_DIR/$link" ]; then
-    err_full "E-SUPERSEDE-DANGLING: $label: supersession banner names $RECORD_DIR/$link, which is not a record here"
-  fi
+  while IFS= read -r link; do
+    [ -n "$link" ] || continue
+    # The target is checked against the record grammar before it is joined to RECORD_DIR, not
+    # after. The extractor captures anything but `)`, so a banner may name `../../README.md` — a
+    # path that exists, resolves, and is not a record. BANNER_PATTERN would refuse it, but through
+    # `err`, which downgrades on exactly the grandfathered records this rule was widened to reach,
+    # so the form check cannot be what stands between a traversal and a green run.
+    if ! printf '%s' "$link" | grep -qE '^[0-9]{4}-[a-z0-9-]+\.md$'; then
+      err_full "E-SUPERSEDE-DANGLING: $label: supersession banner names '$link', which is not a record filename in $RECORD_DIR"
+    elif [ ! -f "$RECORD_DIR/$link" ]; then
+      err_full "E-SUPERSEDE-DANGLING: $label: supersession banner names $RECORD_DIR/$link, which is not a record here"
+    fi
+  done < <(status_region "$file" |
+    sed -n 's/^> \*\*Superseded by \[[0-9]\{4\}\](\([^)]*\)).*/\1/p')
 }
 
 profile_check_extra() {
