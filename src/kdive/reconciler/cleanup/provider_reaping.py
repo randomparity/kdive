@@ -346,6 +346,10 @@ async def reap_orphaned_dump_volumes(
     would degrade to a savepoint that commits nothing. With an empty volume list the pass would then
     return ``0`` having silently discarded that work, never reaching the per-volume assertion.
 
+    The per-volume provider call is unbounded in time, the same residual #1980 tracks for the
+    ADR-0556 capture lane; both hold a locked transaction across a call that an unreachable host
+    can stall.
+
     Returns:
         The number of volumes deleted. Skips — a contended System, a live holder, a volume in the
         grace window, a volume whose identity changed, a volume no reachable host held — are not
@@ -583,6 +587,18 @@ def _orphaned_capture(row: dict[str, Any]) -> OrphanedCapture | None:
 async def _dispatch_capture(
     reaper: CaptureReaper, capture: OrphanedCapture, *, system_id: UUID
 ) -> bool:
+    """Call one reaper, converting a raise into the same deferral a decline gets.
+
+    Deliberately unbounded in time, which is a known residual tracked in #1980: an unreachable host
+    holds this pass's connection idle-in-transaction for however long its transport takes to give
+    up, and the pass runs up to ``capture_reap_batch`` of these in sequence. An ``asyncio.timeout``
+    here would be worse than the problem — a reaper drives a synchronous libvirt client in a worker
+    thread, so cancelling the await abandons the thread rather than stopping it, and the fenced
+    transaction would then end while the provider was still mutating host state. ADR-0556 forbids
+    exactly that: lock release alone is not evidence that provider mutation stopped. Bounding it
+    safely needs a terminable provider operation, which #1980 owns for this lane and the
+    dump-volume lane together.
+    """
     try:
         return await reaper.reclaim_capture(capture)
     except Exception:  # noqa: BLE001 - one capture's failure must not starve the rest of the pass

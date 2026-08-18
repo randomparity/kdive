@@ -165,6 +165,7 @@ def _reconcile_response(report: ReconcileReport) -> ToolResponse:
         "dangling_images": report.dangling_images,
         "expired_private_images": report.expired_private_images,
         "reaped_dump_volumes": report.reaped_dump_volumes,
+        "reaped_captures": report.reaped_captures,
         "failures": ",".join(report.failures),
     }
     return ToolResponse.success(
