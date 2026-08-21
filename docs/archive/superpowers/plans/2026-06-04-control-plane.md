@@ -145,50 +145,57 @@ This is test infrastructure for Tasks 4–6; no standalone test.
 In `tests/providers/local_libvirt/conftest.py`, add to `FakeDomain` (after `metadata`):
 
 ```python
-    calls: list[str] = field(default_factory=list)
-    raise_on: dict[str, int] = field(default_factory=dict)
+calls: list[str] = field(default_factory=list)
+raise_on: dict[str, int] = field(default_factory=dict)
 
-    def _maybe_raise(self, op: str) -> None:
-        code = self.raise_on.get(op)
-        if code is not None:
-            raise libvirt_error(code)
 
-    def create(self) -> int:
-        self.calls.append("create")
-        self._maybe_raise("create")
-        return 0
+def _maybe_raise(self, op: str) -> None:
+    code = self.raise_on.get(op)
+    if code is not None:
+        raise libvirt_error(code)
 
-    def destroy(self) -> int:
-        self.calls.append("destroy")
-        self._maybe_raise("destroy")
-        return 0
 
-    def reset(self, flags: int = 0) -> int:
-        self.calls.append("reset")
-        self._maybe_raise("reset")
-        return 0
+def create(self) -> int:
+    self.calls.append("create")
+    self._maybe_raise("create")
+    return 0
 
-    def reboot(self, flags: int = 0) -> int:
-        self.calls.append("reboot")
-        self._maybe_raise("reboot")
-        return 0
 
-    def injectNMI(self, flags: int = 0) -> int:
-        self.calls.append("injectNMI")
-        self._maybe_raise("injectNMI")
-        return 0
+def destroy(self) -> int:
+    self.calls.append("destroy")
+    self._maybe_raise("destroy")
+    return 0
+
+
+def reset(self, flags: int = 0) -> int:
+    self.calls.append("reset")
+    self._maybe_raise("reset")
+    return 0
+
+
+def reboot(self, flags: int = 0) -> int:
+    self.calls.append("reboot")
+    self._maybe_raise("reboot")
+    return 0
+
+
+def injectNMI(self, flags: int = 0) -> int:
+    self.calls.append("injectNMI")
+    self._maybe_raise("injectNMI")
+    return 0
 ```
 
 Add a `lookupByName` to `FakeLibvirtConn` so the control provider can resolve a domain:
 
 ```python
-    lookup: dict[str, FakeDomain] = field(default_factory=dict)
+lookup: dict[str, FakeDomain] = field(default_factory=dict)
 
-    def lookupByName(self, name: str) -> FakeDomain:
-        domain = self.lookup.get(name)
-        if domain is None:
-            raise libvirt_error(libvirt.VIR_ERR_NO_DOMAIN)
-        return domain
+
+def lookupByName(self, name: str) -> FakeDomain:
+    domain = self.lookup.get(name)
+    if domain is None:
+        raise libvirt_error(libvirt.VIR_ERR_NO_DOMAIN)
+    return domain
 ```
 
 (`field` and `libvirt` are already imported in this conftest.)
@@ -258,7 +265,8 @@ def test_power_maps_to_libvirt_call(action: PowerAction, expected_call: str) -> 
 
 def test_power_on_already_running_swallowed() -> None:
     domain = FakeDomain(
-        domain_name="kdive-x", system_id="x",
+        domain_name="kdive-x",
+        system_id="x",
         raise_on={"create": libvirt.VIR_ERR_OPERATION_INVALID},
     )
     control, _ = _control(domain)
@@ -267,7 +275,8 @@ def test_power_on_already_running_swallowed() -> None:
 
 def test_power_off_not_running_swallowed() -> None:
     domain = FakeDomain(
-        domain_name="kdive-x", system_id="x",
+        domain_name="kdive-x",
+        system_id="x",
         raise_on={"destroy": libvirt.VIR_ERR_OPERATION_INVALID},
     )
     control, _ = _control(domain)
@@ -283,7 +292,8 @@ def test_power_absent_domain_is_control_failure() -> None:
 
 def test_power_other_libvirt_error_is_control_failure() -> None:
     domain = FakeDomain(
-        domain_name="kdive-x", system_id="x",
+        domain_name="kdive-x",
+        system_id="x",
         raise_on={"reset": libvirt.VIR_ERR_INTERNAL_ERROR},
     )
     control, _ = _control(domain)
@@ -424,9 +434,7 @@ class LocalLibvirtControl:
         except libvirt.libvirtError as exc:
             raise self._control_failure("looking up", domain_name) from exc
 
-    def _apply_power(
-        self, domain: _LibvirtDomain, domain_name: str, action: PowerAction
-    ) -> None:
+    def _apply_power(self, domain: _LibvirtDomain, domain_name: str, action: PowerAction) -> None:
         try:
             if action is PowerAction.ON:
                 self._idempotent(domain.create, "starting", domain_name)
@@ -446,7 +454,9 @@ class LocalLibvirtControl:
         except libvirt.libvirtError as exc:
             if exc.get_error_code() != libvirt.VIR_ERR_OPERATION_INVALID:
                 raise
-            _log.info("%s domain %s: already in target state; treating as success", verb, domain_name)
+            _log.info(
+                "%s domain %s: already in target state; treating as success", verb, domain_name
+            )
 
     @staticmethod
     def _control_failure(verb: str, domain_name: str) -> CategorizedError:
@@ -499,7 +509,8 @@ def test_force_crash_absent_domain_is_control_failure() -> None:
 
 def test_force_crash_libvirt_error_is_control_failure() -> None:
     domain = FakeDomain(
-        domain_name="kdive-x", system_id="x",
+        domain_name="kdive-x",
+        system_id="x",
         raise_on={"injectNMI": libvirt.VIR_ERR_INTERNAL_ERROR},
     )
     control, _ = _control(domain)
@@ -592,7 +603,9 @@ def _profile(*, destructive_ops: list[str] | None = None) -> dict[str, Any]:
     return data
 
 
-def _ctx(role: Role | None = Role.OPERATOR, *, projects: tuple[str, ...] = ("proj",)) -> RequestContext:
+def _ctx(
+    role: Role | None = Role.OPERATOR, *, projects: tuple[str, ...] = ("proj",)
+) -> RequestContext:
     roles = {"proj": role} if role is not None else {}
     return RequestContext(principal="user-1", agent_session="s", projects=projects, roles=roles)
 
@@ -607,32 +620,51 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
         await pool.close()
 
 
-async def _granted_allocation(pool: AsyncConnectionPool, *, scope: dict[str, Any] | None = None) -> str:
+async def _granted_allocation(
+    pool: AsyncConnectionPool, *, scope: dict[str, Any] | None = None
+) -> str:
     disc = LocalLibvirtDiscovery(
         host_uri="qemu:///system", connect=lambda: FakeLibvirtConn(), concurrent_allocation_cap=2
     )
     async with pool.connection() as conn:
-        res = await register_local_libvirt_resource(conn, disc, pool="local-libvirt", cost_class="local")
+        res = await register_local_libvirt_resource(
+            conn, disc, pool="local-libvirt", cost_class="local"
+        )
         alloc = await ALLOCATIONS.insert(
             conn,
             Allocation(
-                id=uuid4(), created_at=_DT, updated_at=_DT, principal="user-1", project="proj",
-                resource_id=res.id, state=AllocationState.GRANTED, capability_scope=scope or {},
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project="proj",
+                resource_id=res.id,
+                state=AllocationState.GRANTED,
+                capability_scope=scope or {},
             ),
         )
     return str(alloc.id)
 
 
 async def _seed_system(
-    pool: AsyncConnectionPool, alloc_id: str, state: SystemState,
-    *, destructive_ops: list[str] | None = None, domain_name: str | None = None,
+    pool: AsyncConnectionPool,
+    alloc_id: str,
+    state: SystemState,
+    *,
+    destructive_ops: list[str] | None = None,
+    domain_name: str | None = None,
 ) -> str:
     async with pool.connection() as conn:
         system = await SYSTEMS.insert(
             conn,
             System(
-                id=uuid4(), created_at=_DT, updated_at=_DT, principal="user-1", project="proj",
-                allocation_id=UUID(alloc_id), state=state,
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project="proj",
+                allocation_id=UUID(alloc_id),
+                state=state,
                 provisioning_profile=_profile(destructive_ops=destructive_ops),
                 domain_name=domain_name,
             ),
@@ -705,7 +737,9 @@ def test_power_without_operator_raises(migrated_url: str) -> None:
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
             with pytest.raises(AuthorizationError):
-                await control_tools.power_system(pool, _ctx(Role.VIEWER), system_id=sys_id, action="off")
+                await control_tools.power_system(
+                    pool, _ctx(Role.VIEWER), system_id=sys_id, action="off"
+                )
 
     asyncio.run(_run())
 
@@ -717,7 +751,9 @@ def test_power_handler_calls_provider_and_audits(migrated_url: str) -> None:
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY, domain_name="kdive-x")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
-                    conn, JobKind.POWER, {"system_id": sys_id, "action": "reset"},
+                    conn,
+                    JobKind.POWER,
+                    {"system_id": sys_id, "action": "reset"},
                     {"principal": "user-1", "agent_session": "s", "project": "proj"},
                     f"{sys_id}:power:reset:{uuid4()}",
                 )
@@ -778,7 +814,11 @@ from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.local_libvirt.lifecycle.control import Controller, LocalLibvirtControl, PowerAction
+from kdive.providers.local_libvirt.lifecycle.control import (
+    Controller,
+    LocalLibvirtControl,
+    PowerAction,
+)
 from kdive.providers.local_libvirt.lifecycle.provisioning import domain_name_for
 from kdive.security import audit
 from kdive.security.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
@@ -842,8 +882,11 @@ async def power_system(
             if system.state not in _STARTED_SYSTEM:
                 return _config_error(system_id, data={"current_status": system.state.value})
             job = await queue.enqueue(
-                conn, JobKind.POWER, {"system_id": system_id, "action": power_action.value},
-                _authorizing(ctx, system.project), f"{system_id}:power:{power_action.value}:{uuid4()}",
+                conn,
+                JobKind.POWER,
+                {"system_id": system_id, "action": power_action.value},
+                _authorizing(ctx, system.project),
+                f"{system_id}:power:{power_action.value}:{uuid4()}",
             )
         return _system_job_envelope(job, uid)
 
@@ -856,14 +899,20 @@ async def power_handler(conn: AsyncConnection, job: Job, control: Controller) ->
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
             raise CategorizedError(
-                "power target system is gone", category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                "power target system is gone",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id)},
             )
         control.power(_domain_name(system), action)
         await audit.record(
-            conn, _ctx_from_job(job, system.project), tool="control.power", object_kind="systems",
-            object_id=system_id, transition=f"power:{action.value}",
-            args={"system_id": str(system_id), "action": action.value}, project=system.project,
+            conn,
+            _ctx_from_job(job, system.project),
+            tool="control.power",
+            object_kind="systems",
+            object_id=system_id,
+            transition=f"power:{action.value}",
+            args={"system_id": str(system_id), "action": action.value},
+            project=system.project,
         )
     return str(system_id)
 ```
@@ -906,7 +955,9 @@ async def _crash(pool: AsyncConnectionPool, ctx: RequestContext, sys_id: str):
 
 
 def _admin_ctx() -> RequestContext:
-    return RequestContext(principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.ADMIN})
+    return RequestContext(
+        principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.ADMIN}
+    )
 
 
 @pytest.mark.parametrize(
@@ -925,8 +976,15 @@ def test_force_crash_denied_returns_authorization_denied(
             scope, ops = _admin(scope_ok, opt_in)
             alloc_id = await _granted_allocation(pool, scope=scope)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY, destructive_ops=ops)
-            ctx = _admin_ctx() if is_admin else RequestContext(
-                principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.OPERATOR}
+            ctx = (
+                _admin_ctx()
+                if is_admin
+                else RequestContext(
+                    principal="user-1",
+                    agent_session="s",
+                    projects=("proj",),
+                    roles={"proj": Role.OPERATOR},
+                )
             )
             resp = await _crash(pool, ctx, sys_id)
             assert resp.status == "error" and resp.error_category == "authorization_denied"
@@ -948,12 +1006,15 @@ def test_force_crash_allowed_enqueues_job(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool, scope={"destructive_ops": ["force_crash"]})
-            sys_id = await _seed_system(pool, alloc_id, SystemState.READY, destructive_ops=["force_crash"])
+            sys_id = await _seed_system(
+                pool, alloc_id, SystemState.READY, destructive_ops=["force_crash"]
+            )
             resp = await _crash(pool, _admin_ctx(), sys_id)
             assert resp.status == "queued"
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    "SELECT count(*) AS n FROM jobs WHERE dedup_key = %s", (f"{sys_id}:force_crash",)
+                    "SELECT count(*) AS n FROM jobs WHERE dedup_key = %s",
+                    (f"{sys_id}:force_crash",),
                 )
                 row = await cur.fetchone()
         assert row is not None and row["n"] == 1
@@ -965,7 +1026,9 @@ def test_force_crash_non_ready_system_is_config_error(migrated_url: str) -> None
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool, scope={"destructive_ops": ["force_crash"]})
-            sys_id = await _seed_system(pool, alloc_id, SystemState.CRASHED, destructive_ops=["force_crash"])
+            sys_id = await _seed_system(
+                pool, alloc_id, SystemState.CRASHED, destructive_ops=["force_crash"]
+            )
             resp = await _crash(pool, _admin_ctx(), sys_id)
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "crashed"
@@ -1009,16 +1072,24 @@ async def force_crash_system(
             except DestructiveOpDenied as denied:
                 async with conn.transaction():
                     await audit.record(
-                        conn, ctx, tool="control.force_crash", object_kind="systems",
-                        object_id=uid, transition="force_crash:denied",
-                        args={"system_id": system_id, "missing": denied.missing}, project=system.project,
+                        conn,
+                        ctx,
+                        tool="control.force_crash",
+                        object_kind="systems",
+                        object_id=uid,
+                        transition="force_crash:denied",
+                        args={"system_id": system_id, "missing": denied.missing},
+                        project=system.project,
                     )
                 return ToolResponse.failure(system_id, ErrorCategory.AUTHORIZATION_DENIED)
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
             job = await queue.enqueue(
-                conn, JobKind.FORCE_CRASH, {"system_id": system_id},
-                _authorizing(ctx, system.project), f"{system_id}:force_crash",
+                conn,
+                JobKind.FORCE_CRASH,
+                {"system_id": system_id},
+                _authorizing(ctx, system.project),
+                f"{system_id}:force_crash",
             )
         return _system_job_envelope(job, uid)
 ```
@@ -1052,8 +1123,16 @@ Append to `tests/mcp/test_control_tools.py` (helpers seed a Run + DebugSession s
 ```python
 # (merge into the existing top-of-file imports)
 from kdive.db.repositories import DEBUG_SESSIONS, INVESTIGATIONS, RUNS  # + ALLOCATIONS, SYSTEMS
-from kdive.domain.models import DebugSession, Investigation, Run  # + Allocation, Job, JobKind, System
-from kdive.domain.state import DebugSessionState, InvestigationState, RunState  # + AllocationState, SystemState
+from kdive.domain.models import (
+    DebugSession,
+    Investigation,
+    Run,
+)  # + Allocation, Job, JobKind, System
+from kdive.domain.state import (
+    DebugSessionState,
+    InvestigationState,
+    RunState,
+)  # + AllocationState, SystemState
 ```
 
 Then append the helpers and tests:
@@ -1062,21 +1141,42 @@ Then append the helpers and tests:
 async def _seed_live_session(pool: AsyncConnectionPool, sys_id: str) -> str:
     async with pool.connection() as conn:
         inv = await INVESTIGATIONS.insert(
-            conn, Investigation(
-                id=uuid4(), created_at=_DT, updated_at=_DT, principal="user-1", project="proj",
-                title="t", state=InvestigationState.ACTIVE,
+            conn,
+            Investigation(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project="proj",
+                title="t",
+                state=InvestigationState.ACTIVE,
             ),
         )
         run = await RUNS.insert(
-            conn, Run(
-                id=uuid4(), created_at=_DT, updated_at=_DT, principal="user-1", project="proj",
-                investigation_id=inv.id, system_id=UUID(sys_id), state=RunState.RUNNING, build_profile={},
+            conn,
+            Run(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project="proj",
+                investigation_id=inv.id,
+                system_id=UUID(sys_id),
+                state=RunState.RUNNING,
+                build_profile={},
             ),
         )
         session = await DEBUG_SESSIONS.insert(
-            conn, DebugSession(
-                id=uuid4(), created_at=_DT, updated_at=_DT, principal="user-1", project="proj",
-                run_id=run.id, state=DebugSessionState.LIVE, transport="gdbstub",
+            conn,
+            DebugSession(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project="proj",
+                run_id=run.id,
+                state=DebugSessionState.LIVE,
+                transport="gdbstub",
             ),
         )
     return str(session.id)
@@ -1085,8 +1185,11 @@ async def _seed_live_session(pool: AsyncConnectionPool, sys_id: str) -> str:
 async def _enqueue_crash(pool: AsyncConnectionPool, sys_id: str) -> Job:
     async with pool.connection() as conn:
         return await queue.enqueue(
-            conn, JobKind.FORCE_CRASH, {"system_id": sys_id},
-            {"principal": "user-1", "agent_session": "s", "project": "proj"}, f"{sys_id}:force_crash",
+            conn,
+            JobKind.FORCE_CRASH,
+            {"system_id": sys_id},
+            {"principal": "user-1", "agent_session": "s", "project": "proj"},
+            f"{sys_id}:force_crash",
         )
 
 
@@ -1153,7 +1256,9 @@ def test_force_crash_handler_terminal_system_does_not_crash(migrated_url: str) -
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.TORN_DOWN, domain_name="kdive-x")
+            sys_id = await _seed_system(
+                pool, alloc_id, SystemState.TORN_DOWN, domain_name="kdive-x"
+            )
             job = await _enqueue_crash(pool, sys_id)
             ctrl = _FakeControl()
             async with pool.connection() as conn:
@@ -1203,7 +1308,8 @@ async def force_crash_handler(conn: AsyncConnection, job: Job, control: Controll
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
             raise CategorizedError(
-                "force_crash target system is gone", category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                "force_crash target system is gone",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id)},
             )
         if system.state in _TERMINAL_SYSTEM:
@@ -1212,9 +1318,14 @@ async def force_crash_handler(conn: AsyncConnection, job: Job, control: Controll
         if system.state is SystemState.READY:
             await SYSTEMS.update_state(conn, system_id, SystemState.CRASHED)
             await audit.record(
-                conn, _ctx_from_job(job, system.project), tool="control.force_crash",
-                object_kind="systems", object_id=system_id, transition="ready->crashed",
-                args={"system_id": str(system_id)}, project=system.project,
+                conn,
+                _ctx_from_job(job, system.project),
+                tool="control.force_crash",
+                object_kind="systems",
+                object_id=system_id,
+                transition="ready->crashed",
+                args={"system_id": str(system_id)},
+                project=system.project,
             )
         await _detach_sessions(conn, job, system)
     return str(system_id)
@@ -1233,9 +1344,14 @@ async def _detach_sessions(conn: AsyncConnection, job: Job, system: System) -> N
         rows = await cur.fetchall()
     for session_id, _old in rows:
         await audit.record(
-            conn, _ctx_from_job(job, system.project), tool="control.force_crash",
-            object_kind="debug_sessions", object_id=session_id, transition="live->detached",
-            args={"system_id": str(system.id)}, project=system.project,
+            conn,
+            _ctx_from_job(job, system.project),
+            tool="control.force_crash",
+            object_kind="debug_sessions",
+            object_id=session_id,
+            transition="live->detached",
+            args={"system_id": str(system.id)},
+            project=system.project,
         )
 ```
 

@@ -392,13 +392,14 @@ git commit -m "feat(remote): add by-name + fleet remote config resolvers (#395)"
   - `runtime.py`: add field `for_resource: Callable[[str], "ProviderRuntime"] = lambda self_runtime: ...`. Since a frozen dataclass can't easily reference `self` in a default, implement it as a **method** that reads an optional stored `_rebind: Callable[[str], ProviderRuntime] | None = None`:
 
 ```python
-    rebind_for_resource: Callable[[str], "ProviderRuntime"] | None = None
+rebind_for_resource: Callable[[str], "ProviderRuntime"] | None = None
 
-    def for_resource(self, resource_name: str) -> "ProviderRuntime":
-        """Return a runtime bound to ``resource_name``; default identity (no per-resource config)."""
-        if self.rebind_for_resource is None:
-            return self
-        return self.rebind_for_resource(resource_name)
+
+def for_resource(self, resource_name: str) -> "ProviderRuntime":
+    """Return a runtime bound to ``resource_name``; default identity (no per-resource config)."""
+    if self.rebind_for_resource is None:
+        return self
+    return self.rebind_for_resource(resource_name)
 ```
 
   - `remote_composition.build_runtime`: accept `config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory` (keep the singleton as the unbound default so an unbound runtime still works exactly as today — it is deleted only in B8). Thread `config_factory` into every **class-(a) lifecycle port** `build_runtime` constructs. Set `rebind_for_resource=lambda name: build_runtime(secret_registry=secret_registry, config_factory=lambda: remote_config_for_resource(name))`.

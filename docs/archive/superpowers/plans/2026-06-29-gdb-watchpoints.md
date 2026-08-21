@@ -62,50 +62,52 @@ class GdbWatchpointRef(ProviderModel):
 - [ ] **Step 2: Add Protocol methods** on `GdbMiEngine` (after `disassemble`, before the class ends):
 
 ```python
-    def set_watchpoint(
-        self,
-        attachment: GdbMiAttachment,
-        *,
-        symbol: str | None,
-        address: int | None,
-        byte_count: int,
-    ) -> GdbWatchpointRef:
-        """Set a hardware **write** watchpoint on a bare symbol or explicit address.
+def set_watchpoint(
+    self,
+    attachment: GdbMiAttachment,
+    *,
+    symbol: str | None,
+    address: int | None,
+    byte_count: int,
+) -> GdbWatchpointRef:
+    """Set a hardware **write** watchpoint on a bare symbol or explicit address.
 
-        Exactly one of ``symbol`` / ``address`` must be given; ``byte_count`` must be one of
-        ``{1, 2, 4, 8}``. The watch expression is constructed from the resolved numeric address,
-        never a caller expression.
+    Exactly one of ``symbol`` / ``address`` must be given; ``byte_count`` must be one of
+    ``{1, 2, 4, 8}``. The watch expression is constructed from the resolved numeric address,
+    never a caller expression.
 
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_byte_count`` for an unsupported size,
-                ``bad_target`` when not exactly one of symbol/address is given, ``bad_address`` for
-                an out-of-range address, ``bad_symbol_name`` (via ``resolve_symbol``) for a
-                non-identifier name (all before any MI command); ``DEBUG_ATTACH_FAILURE`` /
-                ``inferior_running`` when the target is running, ``watchpoint_unsupported`` when the
-                target refuses the watchpoint at set time, ``no_watchpoint_record`` for a malformed
-                ``-break-watch`` result, or for other gdb/MI command failures;
-                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
-        """
-        ...
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_byte_count`` for an unsupported size,
+            ``bad_target`` when not exactly one of symbol/address is given, ``bad_address`` for
+            an out-of-range address, ``bad_symbol_name`` (via ``resolve_symbol``) for a
+            non-identifier name (all before any MI command); ``DEBUG_ATTACH_FAILURE`` /
+            ``inferior_running`` when the target is running, ``watchpoint_unsupported`` when the
+            target refuses the watchpoint at set time, ``no_watchpoint_record`` for a malformed
+            ``-break-watch`` result, or for other gdb/MI command failures;
+            ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+    """
+    ...
 
-    def list_watchpoints(self, attachment: GdbMiAttachment) -> list[GdbWatchpointRef]:
-        """List watchpoints (only watchpoints, not breakpoints) through gdb/MI.
 
-        Raises:
-            CategorizedError: ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures or
-                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
-        """
-        ...
+def list_watchpoints(self, attachment: GdbMiAttachment) -> list[GdbWatchpointRef]:
+    """List watchpoints (only watchpoints, not breakpoints) through gdb/MI.
 
-    def clear_watchpoint(self, attachment: GdbMiAttachment, number: str) -> None:
-        """Clear a watchpoint by number through gdb/MI.
+    Raises:
+        CategorizedError: ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures or
+            ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+    """
+    ...
 
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_watchpoint_id`` for a non-numeric id,
-                ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures, or ``INFRASTRUCTURE_FAILURE``
-                for command timeouts.
-        """
-        ...
+
+def clear_watchpoint(self, attachment: GdbMiAttachment, number: str) -> None:
+    """Clear a watchpoint by number through gdb/MI.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_watchpoint_id`` for a non-numeric id,
+            ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures, or ``INFRASTRUCTURE_FAILURE``
+            for command timeouts.
+    """
+    ...
 ```
 
 - [ ] **Step 3: Do not commit or run the `ty` gate yet.** Extending the Protocol makes `ty` red tree-wide until the shared engine (Task 2) and `FaultInjectDebugEngine` (Task 3) both implement the methods — and the `ty` pre-commit hook is whole-tree, so a partial commit is blocked. Leave these changes staged/unstaged and proceed to Task 2; the single green commit lands at the end of Task 3 (see "Commit grouping" in Global Constraints). You may run `just lint` (ruff is file-scoped and stays green) but **not** `just type` until Task 3.
@@ -383,103 +385,108 @@ _NO_WATCHPOINT_RE = re.compile(
 - [ ] **Step 5: Add the engine methods** in the disassembly section (after `_redact_instruction`), a new `# --- watchpoints (ADR-0277)` block:
 
 ```python
-    def set_watchpoint(
-        self,
-        attachment: GdbMiAttachment,
-        *,
-        symbol: str | None = None,
-        address: int | None = None,
-        byte_count: int = DEFAULT_WATCH_BYTES,
-    ) -> GdbWatchpointRef:
-        """Set a hardware **write** watchpoint on a symbol/address window (ADR-0277).
+def set_watchpoint(
+    self,
+    attachment: GdbMiAttachment,
+    *,
+    symbol: str | None = None,
+    address: int | None = None,
+    byte_count: int = DEFAULT_WATCH_BYTES,
+) -> GdbWatchpointRef:
+    """Set a hardware **write** watchpoint on a symbol/address window (ADR-0277).
 
-        Validates the size and target before any MI command, constructs the numeric write-watch
-        expression ``*(char(*)[N])0x<addr>`` (no caller text), issues ``-break-watch``, and parses
-        the ``wpt`` result into a redacted ref.
-        """
-        if not isinstance(byte_count, int) or byte_count not in WATCH_BYTE_SIZES:
-            raise _config_error(
-                f"byte_count must be one of {list(WATCH_BYTE_SIZES)}",
-                code="bad_byte_count",
-                details={"byte_count": byte_count, "supported": list(WATCH_BYTE_SIZES)},
-            )
-        start = self._resolve_target(attachment, symbol=symbol, address=address)
-        expression = f"*(char(*)[{byte_count}])0x{start:x}"
-        records = self._watchpoint_command(attachment, f"-break-watch {expression}")
-        return self._watchpoint_ref(records)
-
-    def list_watchpoints(self, attachment: GdbMiAttachment) -> list[GdbWatchpointRef]:
-        """List watchpoints only (filtering out breakpoints) from ``-break-list`` (ADR-0277)."""
-        return [
-            self._watchpoint_ref_from(entry)
-            for entry in breakpoint_rows(self.execute_mi_command(attachment, "-break-list"))
-            if _is_watchpoint_row(entry)
-        ]
-
-    def clear_watchpoint(self, attachment: GdbMiAttachment, number: str) -> None:
-        """Delete a watchpoint by ``number`` via ``-break-delete`` (ADR-0277)."""
-        if not _BREAK_ID_RE.match(number):
-            raise _config_error(
-                f"watchpoint id must be numeric, got {number!r}",
-                code="bad_watchpoint_id",
-                details={"number": number},
-            )
-        self.execute_mi_command(attachment, f"-break-delete {number}")
-
-    def _watchpoint_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]:
-        """Issue a watch command, classifying running-target then unsupported gdb ``^error``s.
-
-        Running-target is checked first so a message that also names a watchpoint is not
-        misclassified as ``watchpoint_unsupported``; other gdb errors pass through.
-        """
-        try:
-            return self.execute_mi_command(attachment, command)
-        except CategorizedError as exc:
-            if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
-                payload = exc.details.get("payload")
-                msg = payload.get("msg") if isinstance(payload, dict) else None
-                if isinstance(msg, str):
-                    if _RUNNING_RE.search(msg):
-                        raise CategorizedError(
-                            "gdb/MI cannot set the watchpoint while the inferior is running",
-                            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                            details={"code": "inferior_running", "command": command},
-                        ) from exc
-                    if _NO_WATCHPOINT_RE.search(msg):
-                        raise CategorizedError(
-                            "gdb/MI target cannot support the requested watchpoint",
-                            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                            details={"code": "watchpoint_unsupported", "command": command},
-                        ) from exc
-            raise
-
-    def _watchpoint_ref(self, records: list[MiRecord]) -> GdbWatchpointRef:
-        entry = result_payload_dict(records).get("wpt")
-        if not isinstance(entry, dict):
-            raise CategorizedError(
-                "gdb/MI -break-watch returned no watchpoint record",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"code": "no_watchpoint_record"},
-            )
-        return self._watchpoint_ref_from(entry)
-
-    def _watchpoint_ref_from(self, entry: dict[str, Any]) -> GdbWatchpointRef:
-        expression = entry.get("exp") if isinstance(entry.get("exp"), str) else None
-        if expression is None and isinstance(entry.get("what"), str):
-            expression = entry.get("what")
-        enabled_raw = entry.get("enabled")
-        enabled = enabled_raw == "y" if isinstance(enabled_raw, str) else None
-        return GdbWatchpointRef.model_validate(
-            self._redactor().redact_value(
-                {
-                    "number": str(entry.get("number")),
-                    "type": entry.get("type") if isinstance(entry.get("type"), str) else None,
-                    "expr": expression,
-                    "addr": entry.get("addr") if isinstance(entry.get("addr"), str) else None,
-                    "enabled": enabled,
-                }
-            )
+    Validates the size and target before any MI command, constructs the numeric write-watch
+    expression ``*(char(*)[N])0x<addr>`` (no caller text), issues ``-break-watch``, and parses
+    the ``wpt`` result into a redacted ref.
+    """
+    if not isinstance(byte_count, int) or byte_count not in WATCH_BYTE_SIZES:
+        raise _config_error(
+            f"byte_count must be one of {list(WATCH_BYTE_SIZES)}",
+            code="bad_byte_count",
+            details={"byte_count": byte_count, "supported": list(WATCH_BYTE_SIZES)},
         )
+    start = self._resolve_target(attachment, symbol=symbol, address=address)
+    expression = f"*(char(*)[{byte_count}])0x{start:x}"
+    records = self._watchpoint_command(attachment, f"-break-watch {expression}")
+    return self._watchpoint_ref(records)
+
+
+def list_watchpoints(self, attachment: GdbMiAttachment) -> list[GdbWatchpointRef]:
+    """List watchpoints only (filtering out breakpoints) from ``-break-list`` (ADR-0277)."""
+    return [
+        self._watchpoint_ref_from(entry)
+        for entry in breakpoint_rows(self.execute_mi_command(attachment, "-break-list"))
+        if _is_watchpoint_row(entry)
+    ]
+
+
+def clear_watchpoint(self, attachment: GdbMiAttachment, number: str) -> None:
+    """Delete a watchpoint by ``number`` via ``-break-delete`` (ADR-0277)."""
+    if not _BREAK_ID_RE.match(number):
+        raise _config_error(
+            f"watchpoint id must be numeric, got {number!r}",
+            code="bad_watchpoint_id",
+            details={"number": number},
+        )
+    self.execute_mi_command(attachment, f"-break-delete {number}")
+
+
+def _watchpoint_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]:
+    """Issue a watch command, classifying running-target then unsupported gdb ``^error``s.
+
+    Running-target is checked first so a message that also names a watchpoint is not
+    misclassified as ``watchpoint_unsupported``; other gdb errors pass through.
+    """
+    try:
+        return self.execute_mi_command(attachment, command)
+    except CategorizedError as exc:
+        if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
+            payload = exc.details.get("payload")
+            msg = payload.get("msg") if isinstance(payload, dict) else None
+            if isinstance(msg, str):
+                if _RUNNING_RE.search(msg):
+                    raise CategorizedError(
+                        "gdb/MI cannot set the watchpoint while the inferior is running",
+                        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                        details={"code": "inferior_running", "command": command},
+                    ) from exc
+                if _NO_WATCHPOINT_RE.search(msg):
+                    raise CategorizedError(
+                        "gdb/MI target cannot support the requested watchpoint",
+                        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                        details={"code": "watchpoint_unsupported", "command": command},
+                    ) from exc
+        raise
+
+
+def _watchpoint_ref(self, records: list[MiRecord]) -> GdbWatchpointRef:
+    entry = result_payload_dict(records).get("wpt")
+    if not isinstance(entry, dict):
+        raise CategorizedError(
+            "gdb/MI -break-watch returned no watchpoint record",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"code": "no_watchpoint_record"},
+        )
+    return self._watchpoint_ref_from(entry)
+
+
+def _watchpoint_ref_from(self, entry: dict[str, Any]) -> GdbWatchpointRef:
+    expression = entry.get("exp") if isinstance(entry.get("exp"), str) else None
+    if expression is None and isinstance(entry.get("what"), str):
+        expression = entry.get("what")
+    enabled_raw = entry.get("enabled")
+    enabled = enabled_raw == "y" if isinstance(enabled_raw, str) else None
+    return GdbWatchpointRef.model_validate(
+        self._redactor().redact_value(
+            {
+                "number": str(entry.get("number")),
+                "type": entry.get("type") if isinstance(entry.get("type"), str) else None,
+                "expr": expression,
+                "addr": entry.get("addr") if isinstance(entry.get("addr"), str) else None,
+                "enabled": enabled,
+            }
+        )
+    )
 ```
 
 And add the module-level row predicate near `_NO_WATCHPOINT_RE`'s usage (module function, after the class or with the other helpers at file end):
@@ -530,40 +537,42 @@ def test_debug_engine_watchpoints_round_trip(tmp_path: Path) -> None:
 - [ ] **Step 3: Implement** in `FaultInjectDebugEngine`. Add `GdbWatchpointRef` to the `kdive.providers.ports.debug` import; add `self._watchpoints: dict[Path, dict[str, GdbWatchpointRef]] = {}` to `__init__` (the `self._next`/`self._lock` are shared); add the methods:
 
 ```python
-    def set_watchpoint(
-        self,
-        attachment: GdbMiAttachment,
-        *,
-        symbol: str | None = None,
-        address: int | None = None,
-        byte_count: int = 8,
-    ) -> GdbWatchpointRef:
-        del symbol
-        with self._lock:
-            number = str(self._next)
-            self._next += 1
-            target = address if address is not None else 0xFFFFFFFF81000000
-            ref = GdbWatchpointRef(
-                number=number,
-                type="hw watchpoint",
-                expr=f"*(char(*)[{byte_count}])0x{target:x}",
-                enabled=True,
-            )
-            self._watchpoints.setdefault(attachment.transcript_path, {})[number] = ref
-            return ref
+def set_watchpoint(
+    self,
+    attachment: GdbMiAttachment,
+    *,
+    symbol: str | None = None,
+    address: int | None = None,
+    byte_count: int = 8,
+) -> GdbWatchpointRef:
+    del symbol
+    with self._lock:
+        number = str(self._next)
+        self._next += 1
+        target = address if address is not None else 0xFFFFFFFF81000000
+        ref = GdbWatchpointRef(
+            number=number,
+            type="hw watchpoint",
+            expr=f"*(char(*)[{byte_count}])0x{target:x}",
+            enabled=True,
+        )
+        self._watchpoints.setdefault(attachment.transcript_path, {})[number] = ref
+        return ref
 
-    def list_watchpoints(self, attachment: GdbMiAttachment) -> list[GdbWatchpointRef]:
-        with self._lock:
-            return list(self._watchpoints.get(attachment.transcript_path, {}).values())
 
-    def clear_watchpoint(self, attachment: GdbMiAttachment, number: str) -> None:
-        with self._lock:
-            bucket = self._watchpoints.get(attachment.transcript_path)
-            if bucket is None:
-                return
-            bucket.pop(number, None)
-            if not bucket:
-                self._watchpoints.pop(attachment.transcript_path, None)
+def list_watchpoints(self, attachment: GdbMiAttachment) -> list[GdbWatchpointRef]:
+    with self._lock:
+        return list(self._watchpoints.get(attachment.transcript_path, {}).values())
+
+
+def clear_watchpoint(self, attachment: GdbMiAttachment, number: str) -> None:
+    with self._lock:
+        bucket = self._watchpoints.get(attachment.transcript_path)
+        if bucket is None:
+            return
+        bucket.pop(number, None)
+        if not bucket:
+            self._watchpoints.pop(attachment.transcript_path, None)
 ```
 
 - [ ] **Step 4: Run to verify it passes** — same pytest command. Expected: PASS.
@@ -777,7 +786,9 @@ def _register_debug_set_watchpoint(
         meta=_gdbmi_maturity(),
     )
     async def debug_set_watchpoint(
-        session_id: Annotated[str, Field(description="The live DebugSession to set a watchpoint on.")],
+        session_id: Annotated[
+            str, Field(description="The live DebugSession to set a watchpoint on.")
+        ],
         symbol: Annotated[
             str | None,
             Field(description="Bare C symbol to watch for writes (or use address)."),

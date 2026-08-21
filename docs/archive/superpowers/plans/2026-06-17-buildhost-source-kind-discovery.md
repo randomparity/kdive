@@ -231,8 +231,9 @@ together.
 2. Confirm failure (tool not registered).
 3. Implement `_register_runs_profile_examples(app, pool)`:
    ```python
-   @app.tool(name="runs.profile_examples", annotations=_docmeta.read_only(),
-             meta={"maturity": "implemented"})
+   @app.tool(
+       name="runs.profile_examples", annotations=_docmeta.read_only(), meta={"maturity": "implemented"}
+   )
    async def runs_profile_examples() -> ToolResponse:
        """Return a ready-to-edit build profile per registered build host. Requires a token."""
        current_context()  # auth-only (ADR-0117): token presence as defence-in-depth.

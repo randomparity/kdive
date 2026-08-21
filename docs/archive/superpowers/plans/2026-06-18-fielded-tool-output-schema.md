@@ -96,7 +96,9 @@ def test_sweep_restores_data_and_logs_no_parse_error() -> None:
     _advertise_envelope_output_schema(app)
     data, errors, structured = _call_and_capture(app, "scalar.one")
     assert data is not None  # parse succeeded (model instance), not nulled
-    assert structured is not None and structured["object_id"] == "obj-1"  # structured_content restored
+    assert (
+        structured is not None and structured["object_id"] == "obj-1"
+    )  # structured_content restored
     assert errors == []  # no parse-error log
 
 
@@ -256,6 +258,7 @@ git commit  # test(mcp): pin the real build_app surface to the fielded output sc
 - [ ] **Step 2: Add the `DOC_RESOURCES` entry.** Append to the tuple in `src/kdive/mcp/resources/registrar.py`:
 
 ```python
+(
     DocResource(
         uri="resource://kdive/docs/guide/response-envelope.md",
         source="docs/guide/response-envelope.md",
@@ -268,6 +271,7 @@ git commit  # test(mcp): pin the real build_app surface to the fielded output sc
             "advertised tool outputSchema (ADR-0170)."
         ),
     ),
+)
 ```
 
 - [ ] **Step 3: Generate the snapshot.**

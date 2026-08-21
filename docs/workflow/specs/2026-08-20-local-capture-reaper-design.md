@@ -64,11 +64,13 @@ reaper's structure (standalone, narrow protocols, blocking core offloaded with
 
 ```python
 class _CaptureConn(Protocol):
-    def lookupByName(self, name: str) -> object: ...   # noqa: N802
+    def lookupByName(self, name: str) -> object: ...  # noqa: N802
     def close(self) -> int: ...
+
 
 type CaptureConnect = Callable[[], _CaptureConn]
 type CaptureMonitor = Callable[[object, str, int], str]
+
 
 class LocalLibvirtCaptureReaper:
     def __init__(self, *, connect: CaptureConnect, monitor: CaptureMonitor) -> None: ...
@@ -76,6 +78,7 @@ class LocalLibvirtCaptureReaper:
     def from_env(cls) -> LocalLibvirtCaptureReaper:
         """KDIVE_LIBVIRT_URI (default qemu:///system) + libvirt_qemu.qemuMonitorCommand;
         lazy import of the QEMU binding; opens no connection."""
+
     async def reclaim_capture(self, capture: OrphanedCapture) -> bool: ...
 ```
 

@@ -204,8 +204,10 @@ def test_retryable_derived_on_failure() -> None:
 def test_retryable_is_never_caller_set() -> None:
     # A caller-supplied value is overwritten by the derived one.
     forced = ToolResponse(
-        object_id="id", status="error",
-        error_category=ErrorCategory.CONFIGURATION_ERROR.value, retryable=True,
+        object_id="id",
+        status="error",
+        error_category=ErrorCategory.CONFIGURATION_ERROR.value,
+        retryable=True,
     )
     assert forced.retryable is False  # configuration_error is terminal
 
@@ -435,8 +437,13 @@ def test_failed_envelope_reports_failure_category_else_infrastructure() -> None:
     from kdive.mcp.tools.lifecycle.allocations import _envelope_for_allocation
 
     base = dict(
-        id=uuid4(), created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
-        principal="p", agent_session="s", project="proj", state=AllocationState.FAILED,
+        id=uuid4(),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+        principal="p",
+        agent_session="s",
+        project="proj",
+        state=AllocationState.FAILED,
     )
     # NULL cause -> the unchanged infrastructure_failure fallback.
     null_cause = _envelope_for_allocation(Allocation(**base))
@@ -647,9 +654,7 @@ async def _queue_position(conn: AsyncConnection, alloc: Allocation) -> int:
     else:
         return 1  # A requested row with no target is degenerate; report "next in line".
     async with conn.cursor() as cur:
-        await cur.execute(
-            query, {"target": target, "created_at": alloc.created_at, "id": alloc.id}
-        )
+        await cur.execute(query, {"target": target, "created_at": alloc.created_at, "id": alloc.id})
         row = await cur.fetchone()
     ahead = int(row[0]) if row is not None else 0
     return ahead + 1
@@ -689,18 +694,16 @@ def _envelope_for_allocation(
 Wire `get_allocation` to compute the position in the same connection (replace its body's connection block):
 
 ```python
-    with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn:
-            alloc = await ALLOCATIONS.get(conn, uid)
-            if alloc is None or alloc.project not in ctx.projects:
-                return _not_found(allocation_id)
-            require_role(ctx, alloc.project, Role.VIEWER)
-            position = (
-                await _queue_position(conn, alloc)
-                if alloc.state is AllocationState.REQUESTED
-                else None
-            )
-        return _envelope_for_allocation(alloc, queue_position=position)
+with bind_context(principal=ctx.principal):
+    async with pool.connection() as conn:
+        alloc = await ALLOCATIONS.get(conn, uid)
+        if alloc is None or alloc.project not in ctx.projects:
+            return _not_found(allocation_id)
+        require_role(ctx, alloc.project, Role.VIEWER)
+        position = (
+            await _queue_position(conn, alloc) if alloc.state is AllocationState.REQUESTED else None
+        )
+    return _envelope_for_allocation(alloc, queue_position=position)
 ```
 
 (`list_allocations` is unchanged — it deliberately omits the hint to avoid an N+1 query.)
@@ -869,20 +872,21 @@ async def wait_allocation(
 Register the tool inside `register` (alongside the other `@app.tool`s):
 
 ```python
-    @app.tool(
-        name="allocations.wait",
-        annotations=_docmeta.read_only(),
-        meta={"maturity": "implemented"},
-    )
-    async def allocations_wait(
-        allocation_id: Annotated[
-            str, Field(description="The Allocation to poll until it leaves the requested (queued) state.")
-        ],
-        timeout_s: Annotated[
-            float, Field(description="Maximum seconds to wait (capped at 300).")
-        ] = 30.0,
-    ) -> ToolResponse:
-        return await wait_allocation(pool, current_context(), allocation_id, timeout_s)
+@app.tool(
+    name="allocations.wait",
+    annotations=_docmeta.read_only(),
+    meta={"maturity": "implemented"},
+)
+async def allocations_wait(
+    allocation_id: Annotated[
+        str,
+        Field(description="The Allocation to poll until it leaves the requested (queued) state."),
+    ],
+    timeout_s: Annotated[
+        float, Field(description="Maximum seconds to wait (capped at 300).")
+    ] = 30.0,
+) -> ToolResponse:
+    return await wait_allocation(pool, current_context(), allocation_id, timeout_s)
 ```
 
 - [ ] **Step 4: Map the new tool to its covering test**

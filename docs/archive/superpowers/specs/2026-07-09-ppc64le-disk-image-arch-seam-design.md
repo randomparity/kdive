@@ -41,14 +41,16 @@ New module `src/kdive/domain/platform/arch_traits.py`:
 @dataclass(frozen=True, slots=True)
 class ArchTraits:
     arch: str
-    machine: str          # libvirt <os machine=>:      q35 / pseries
-    console_device: str   # console=<x> token + /dev/<x>: ttyS0 / hvc0
-    pin_nic_slot: bool     # q35 needs explicit addr=0x10; pseries auto-assigns
+    machine: str  # libvirt <os machine=>:      q35 / pseries
+    console_device: str  # console=<x> token + /dev/<x>: ttyS0 / hvc0
+    pin_nic_slot: bool  # q35 needs explicit addr=0x10; pseries auto-assigns
+
 
 _TRAITS = {
-    "x86_64":  ArchTraits("x86_64",  "q35",     "ttyS0", pin_nic_slot=True),
-    "ppc64le": ArchTraits("ppc64le", "pseries", "hvc0",  pin_nic_slot=False),
+    "x86_64": ArchTraits("x86_64", "q35", "ttyS0", pin_nic_slot=True),
+    "ppc64le": ArchTraits("ppc64le", "pseries", "hvc0", pin_nic_slot=False),
 }
+
 
 def arch_traits(arch: str) -> ArchTraits:
     """Resolve platform traits for a profile arch.

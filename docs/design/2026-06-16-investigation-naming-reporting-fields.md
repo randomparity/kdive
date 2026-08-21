@@ -119,7 +119,7 @@ investigations.set(investigation_id, title?, description?)
 data = {
     "project": inv.project,
     "title": inv.title,
-    "description": inv.description,          # may be None
+    "description": inv.description,  # may be None
     "external_refs": [r.model_dump() for r in inv.external_refs],
     "state": inv.state.value,
     "last_run_at": inv.last_run_at.isoformat() if inv.last_run_at else None,

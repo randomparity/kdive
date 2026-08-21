@@ -229,10 +229,8 @@ async def _record_expected_crash(
 Then replace the inline expected-crash block in `_run_boot_and_capture_outcome` (currently the `if artifact is not None and artifact.data and _expected_crash_matches(...)` arm that returns the dict) so it delegates:
 
 ```python
-        if artifact is not None and artifact.data and _expected_crash_matches(run, artifact.data):
-            return await _record_expected_crash(
-                conn, job_ctx, run, system_id, profile_policy, artifact
-            )
+if artifact is not None and artifact.data and _expected_crash_matches(run, artifact.data):
+    return await _record_expected_crash(conn, job_ctx, run, system_id, profile_policy, artifact)
 ```
 
 `_run_boot_and_capture_outcome` already receives `profile_policy`; no signature change.

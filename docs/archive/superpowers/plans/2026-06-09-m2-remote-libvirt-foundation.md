@@ -231,9 +231,7 @@ def test_configured_detection_tracks_uri(monkeypatch: pytest.MonkeyPatch) -> Non
         "KDIVE_REMOTE_LIBVIRT_CA_CERT_REF",
     ],
 )
-def test_missing_env_is_configuration_error(
-    monkeypatch: pytest.MonkeyPatch, missing: str
-) -> None:
+def test_missing_env_is_configuration_error(monkeypatch: pytest.MonkeyPatch, missing: str) -> None:
     _set_env(monkeypatch, **{missing: None})
     with pytest.raises(CategorizedError) as exc:
         remote_config_from_env()
@@ -293,7 +291,9 @@ from kdive.providers.remote_libvirt.transport import validate_remote_uri
 
 _URI_ENV = "KDIVE_REMOTE_LIBVIRT_URI"
 _CLIENT_CERT_REF_ENV = "KDIVE_REMOTE_LIBVIRT_CLIENT_CERT_REF"
-_CLIENT_KEY_REF_ENV = "KDIVE_REMOTE_LIBVIRT_CLIENT_KEY_REF"  # pragma: allowlist secret - env var name
+_CLIENT_KEY_REF_ENV = (
+    "KDIVE_REMOTE_LIBVIRT_CLIENT_KEY_REF"  # pragma: allowlist secret - env var name
+)
 _CA_CERT_REF_ENV = "KDIVE_REMOTE_LIBVIRT_CA_CERT_REF"
 _CAP_ENV = "KDIVE_REMOTE_LIBVIRT_ALLOCATION_CAP"
 _DEFAULT_CAP = 1
@@ -781,7 +781,10 @@ from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRe
 from kdive.providers.remote_libvirt.discovery import RemoteLibvirtDiscovery
 
 # Reuse _RecordingBackend and _FakeConn from test_transport via a tiny conftest.py
-from tests.providers.remote_libvirt.conftest import _FakeConn, _RecordingBackend  # adjust to fixtures
+from tests.providers.remote_libvirt.conftest import (
+    _FakeConn,
+    _RecordingBackend,
+)  # adjust to fixtures
 
 
 def test_list_resources_returns_remote_record(tmp_path: Path) -> None:
@@ -1067,6 +1070,7 @@ class UnimplementedProvisioner:
 
     def teardown(self, system_id) -> None:
         _unimplemented("provisioning")
+
     # ...mirror every Provisioner protocol method
 ```
 
@@ -1365,9 +1369,7 @@ def gate_repo(tmp_path: Path) -> Path:
 
 def _run_gate(repo: Path) -> subprocess.CompletedProcess[str]:
     script = Path(__file__).resolve().parents[2] / "scripts" / "m2_portability_gate.py"
-    return subprocess.run(
-        ["python3", str(script)], cwd=repo, capture_output=True, text=True
-    )
+    return subprocess.run(["python3", str(script)], cwd=repo, capture_output=True, text=True)
 
 
 def test_gate_fails_on_non_allowlisted_core_touch(gate_repo: Path) -> None:

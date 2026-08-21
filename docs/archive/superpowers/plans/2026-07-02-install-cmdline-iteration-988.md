@@ -53,13 +53,18 @@ from kdive.jobs.payloads import InstallPayload, PayloadValidationError, dump_pay
 
 _RID = "11111111-1111-1111-1111-111111111111"
 
+
 def test_install_payload_round_trips_cmdline():
-    dumped = dump_payload(JobKind.INSTALL, InstallPayload(run_id=_RID, cmdline="  dhash_entries=1 "))
+    dumped = dump_payload(
+        JobKind.INSTALL, InstallPayload(run_id=_RID, cmdline="  dhash_entries=1 ")
+    )
     assert dumped == {"run_id": _RID, "cmdline": "dhash_entries=1"}  # stripped
+
 
 def test_install_payload_omits_absent_cmdline():
     dumped = dump_payload(JobKind.INSTALL, InstallPayload(run_id=_RID))
     assert dumped == {"run_id": _RID}  # exclude_none drops cmdline
+
 
 def test_install_payload_rejects_blank_cmdline():
     with pytest.raises(ValueError):
@@ -129,13 +134,16 @@ import pytest
 from kdive.domain.capture import CaptureMethod
 from kdive.services.runs.steps import cmdline_for
 
+
 @pytest.mark.asyncio
 async def test_cmdline_for_override_replaces_build_extra(build_result_conn):
     # build_result_conn: a conn whose run has build result cmdline="dhash_entries=9"
     conn, run = build_result_conn
-    out = await cmdline_for(conn, run, CaptureMethod.HOST_DUMP, root_cmdline="root=/dev/vda",
-                            override="dhash_entries=1")
+    out = await cmdline_for(
+        conn, run, CaptureMethod.HOST_DUMP, root_cmdline="root=/dev/vda", override="dhash_entries=1"
+    )
     assert out == "console=ttyS0 root=/dev/vda dhash_entries=1"  # 9 replaced by 1
+
 
 @pytest.mark.asyncio
 async def test_cmdline_for_no_override_uses_build_extra(build_result_conn):
@@ -156,7 +164,11 @@ Expected: FAIL — `cmdline_for() got an unexpected keyword argument 'override'`
 ```python
 # src/kdive/services/runs/steps.py
 async def cmdline_for(
-    conn: AsyncConnection, run: Run, method: CaptureMethod, *, root_cmdline: str | None,
+    conn: AsyncConnection,
+    run: Run,
+    method: CaptureMethod,
+    *,
+    root_cmdline: str | None,
     override: str | None = None,
 ) -> str:
     """Compose the boot cmdline (ADR-0183, ADR-0299).
@@ -208,25 +220,47 @@ git commit -m "feat(988): cmdline_for override replaces the build-baked extra"
 @pytest.mark.asyncio
 async def test_recycle_terminal_resets_succeeded_job_with_new_payload(queue_conn):
     conn = queue_conn
-    j1 = await enqueue(conn, JobKind.INSTALL, InstallPayload(run_id=_RID, cmdline="a=1"),
-                       _authorizing(), f"{_RID}:install")
-    await mark_succeeded(conn, j1.id, result_ref="old-result")  # helper: state=succeeded + result_ref
-    j2 = await enqueue(conn, JobKind.INSTALL, InstallPayload(run_id=_RID, cmdline="a=2"),
-                       _authorizing(), f"{_RID}:install", recycle_terminal=True)
+    j1 = await enqueue(
+        conn,
+        JobKind.INSTALL,
+        InstallPayload(run_id=_RID, cmdline="a=1"),
+        _authorizing(),
+        f"{_RID}:install",
+    )
+    await mark_succeeded(
+        conn, j1.id, result_ref="old-result"
+    )  # helper: state=succeeded + result_ref
+    j2 = await enqueue(
+        conn,
+        JobKind.INSTALL,
+        InstallPayload(run_id=_RID, cmdline="a=2"),
+        _authorizing(),
+        f"{_RID}:install",
+        recycle_terminal=True,
+    )
     assert j2.id == j1.id
     assert j2.state is JobState.QUEUED
-    assert j2.payload["cmdline"] == "a=2"        # payload overwritten
-    assert j2.result_ref is None                 # success field cleared
+    assert j2.payload["cmdline"] == "a=2"  # payload overwritten
+    assert j2.result_ref is None  # success field cleared
+
 
 @pytest.mark.asyncio
 async def test_recycle_terminal_leaves_running_job_untouched(queue_conn):
     conn = queue_conn
-    j1 = await enqueue(conn, JobKind.INSTALL, InstallPayload(run_id=_RID), _authorizing(), f"{_RID}:install")
+    j1 = await enqueue(
+        conn, JobKind.INSTALL, InstallPayload(run_id=_RID), _authorizing(), f"{_RID}:install"
+    )
     await mark_running(conn, j1.id)
-    j2 = await enqueue(conn, JobKind.INSTALL, InstallPayload(run_id=_RID, cmdline="a=2"),
-                       _authorizing(), f"{_RID}:install", recycle_terminal=True)
-    assert j2.state is JobState.RUNNING           # in-flight not resurrected
-    assert "cmdline" not in j2.payload            # payload untouched
+    j2 = await enqueue(
+        conn,
+        JobKind.INSTALL,
+        InstallPayload(run_id=_RID, cmdline="a=2"),
+        _authorizing(),
+        f"{_RID}:install",
+        recycle_terminal=True,
+    )
+    assert j2.state is JobState.RUNNING  # in-flight not resurrected
+    assert "cmdline" not in j2.payload  # payload untouched
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -266,10 +300,16 @@ async def _has_step_row(conn: AsyncConnection, run_id: UUID, step: str) -> bool:
         await cur.execute("SELECT 1 FROM run_steps WHERE run_id = %s AND step = %s", (run_id, step))
         return await cur.fetchone() is not None
 
-# inside _enqueue_step, under the held lock:
+        # inside _enqueue_step, under the held lock:
         recycle = not await _has_step_row(conn, run.id, step)
-        job = await queue.enqueue(conn, kind, RunPayload(run_id=str(run.id)), job_authorizing(ctx, run.project),
-                                  f"{run.id}:{step}", recycle_terminal=recycle)
+        job = await queue.enqueue(
+            conn,
+            kind,
+            RunPayload(run_id=str(run.id)),
+            job_authorizing(ctx, run.project),
+            f"{run.id}:{step}",
+            recycle_terminal=recycle,
+        )
 ```
 
 Read the row-presence inside the same `advisory_xact_lock(RUN, run.id)` transaction the enqueue already holds, so presence and enqueue are atomic.
@@ -312,9 +352,12 @@ async def test_install_handler_uses_payload_cmdline_override(install_env):
     job = _install_job(run_id, cmdline="dhash_entries=1")
     await install_handler(conn, job, resolver=resolver)
     assert install_env.captured_request.cmdline.endswith("dhash_entries=1")
-    assert install_env.captured_request.cmdline.count("dhash_entries") == 1  # replaced, not appended
+    assert (
+        install_env.captured_request.cmdline.count("dhash_entries") == 1
+    )  # replaced, not appended
     row = await _install_step_result(conn, run_id)
     assert row["cmdline"] == "dhash_entries=1"  # recorded applied extra
+
 
 @pytest.mark.asyncio
 async def test_install_handler_no_override_records_build_extra(install_env_build_extra):
@@ -338,7 +381,9 @@ In `install_handler`: `payload = load_payload(job, InstallPayload)`; `override =
 build_result = await existing_build_result(conn, run_id)
 build_extra = build_result.cmdline if build_result is not None else None
 applied_extra = override if override is not None else build_extra  # already-normalized
-await complete_run_step(conn, run_id, "install", {"system_id": str(system_id), "cmdline": applied_extra})
+await complete_run_step(
+    conn, run_id, "install", {"system_id": str(system_id), "cmdline": applied_extra}
+)
 ```
 
 (`InstallPayload` strips `override`; the build-baked extra is stored stripped.) Add `installed_cmdline: str | None = None` to `StepProgress` and read it in `step_progress` from the `install` row's `result["cmdline"]` (mirror how the `boot` row's result is read at steps.py:208-217).
@@ -389,10 +434,12 @@ async def test_install_rejects_platform_owned_cmdline(runs_env):
     assert resp.data["reason"] == "cmdline_overrides_platform_args"
     assert resp.data["token"] == "root="
 
+
 @pytest.mark.asyncio
 async def test_install_rejects_blank_cmdline(runs_env):
     resp = await install_run(pool, ctx, run_id, cmdline="   ")
     assert resp.data["reason"] == "cmdline_blank"
+
 
 @pytest.mark.asyncio
 async def test_install_enqueues_install_payload_with_cmdline(runs_env):
@@ -400,19 +447,22 @@ async def test_install_enqueues_install_payload_with_cmdline(runs_env):
     job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
     assert job.payload["cmdline"] == "dhash_entries=1"
 
+
 @pytest.mark.asyncio
 async def test_install_differing_cmdline_restages_install_and_boot(runs_env_installed_booted):
     # install step succeeded with recorded cmdline "dhash_entries=1" (via Task 4); boot succeeded
     resp = await install_run(pool, ctx, run_id, cmdline="dhash_entries=2")
     assert resp.error_category is None
-    assert await _row_absent(conn, run_id, "boot")          # boot ledger deleted
+    assert await _row_absent(conn, run_id, "boot")  # boot ledger deleted
     job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
     assert job.state is JobState.QUEUED and job.payload["cmdline"] == "dhash_entries=2"
+
 
 @pytest.mark.asyncio
 async def test_install_same_cmdline_is_noop(runs_env_installed_booted):
     resp = await install_run(pool, ctx, run_id, cmdline="dhash_entries=1")  # equals recorded
-    assert await _row_present(conn, run_id, "boot")          # boot NOT recycled
+    assert await _row_present(conn, run_id, "boot")  # boot NOT recycled
+
 
 @pytest.mark.asyncio
 async def test_install_rejected_while_boot_running(runs_env_boot_running):
@@ -489,6 +539,7 @@ async def test_runs_get_surfaces_installed_cmdline(runs_env_installed):
     resp = await get_run(pool, ctx, run_id, resolver=resolver)  # install applied "dhash_entries=1"
     assert resp.data["installed_cmdline"] == "dhash_entries=1"
 
+
 @pytest.mark.asyncio
 async def test_runs_get_installed_cmdline_null_before_install(runs_env_built):
     resp = await get_run(pool, ctx, run_id, resolver=resolver)
@@ -536,6 +587,7 @@ def test_runs_install_cmdline_field_names_platform_tokens(tool_schema):
     for token in ("console=ttyS0", "root=/dev/vda", "crashkernel=256M", "nokaslr"):
         assert token in field
     assert "replace" in field.lower()
+
 
 def test_runs_boot_doc_points_to_install_for_iteration(tool_schema):
     doc = tool_schema("runs.boot")["description"] if ... else runs_boot_docstring()

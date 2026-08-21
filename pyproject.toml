@@ -41,7 +41,7 @@ Changelog = "https://github.com/randomparity/kdive/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
-  "ruff==0.15.22",
+  "ruff==0.16.2",
   "ty==0.0.62",
   "pytest==9.1.1",
   "pytest-xdist==3.8.0",

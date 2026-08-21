@@ -53,7 +53,9 @@
 
 ```python
 def test_render_includes_pvpanic_and_on_crash_preserve_when_preserve_set() -> None:
-    profile = _profile_with(preserve_on_crash=True)  # existing helper / dict→ProvisioningProfile.parse
+    profile = _profile_with(
+        preserve_on_crash=True
+    )  # existing helper / dict→ProvisioningProfile.parse
     xml = render_domain_xml(uuid4(), profile, disk_path="/d.qcow2", gdb_port=1234)
     root = ET.fromstring(xml)
     assert root.findtext("on_crash") == "preserve"
@@ -118,22 +120,31 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ```python
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy  # confirm class name
+from kdive.providers.local_libvirt.profile_policy import (
+    LocalLibvirtProfilePolicy,
+)  # confirm class name
+
 
 def _profile(gdbstub: bool, crashkernel: str | None = None) -> ProvisioningProfile:
     # Build via ProvisioningProfile.parse mirroring an existing local profile fixture;
     # set provider.local_libvirt.debug.gdbstub and (optionally) .crashkernel.
     ...
 
+
 def test_gdbstub_provisioned_true_when_flag_set() -> None:
     assert LocalLibvirtProfilePolicy().gdbstub_provisioned(_profile(gdbstub=True)) is True
 
+
 def test_gdbstub_provisioned_true_even_when_kdump_is_primary() -> None:
     p = _profile(gdbstub=True, crashkernel="256M")
-    assert LocalLibvirtProfilePolicy().gdbstub_provisioned(p) is True  # not masked by capture_method
+    assert (
+        LocalLibvirtProfilePolicy().gdbstub_provisioned(p) is True
+    )  # not masked by capture_method
+
 
 def test_gdbstub_provisioned_false_when_flag_unset() -> None:
     assert LocalLibvirtProfilePolicy().gdbstub_provisioned(_profile(gdbstub=False)) is False
+
 
 def test_host_dump_provisioned_tracks_preserve_on_crash() -> None:
     pol = LocalLibvirtProfilePolicy()
@@ -150,43 +161,47 @@ def test_host_dump_provisioned_tracks_preserve_on_crash() -> None:
 - [ ] **Step 3: Implement.** In `runtime.py` `ProfilePolicy` Protocol add both:
 
 ```python
-    def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
-        """Whether the System has a gdbstub endpoint (independent of capture_method)."""
-        ...
+def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
+    """Whether the System has a gdbstub endpoint (independent of capture_method)."""
+    ...
 
-    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
-        """Whether a host-side memory dump is available on a preserved crash."""
-        ...
+
+def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
+    """Whether a host-side memory dump is available on a preserved crash."""
+    ...
 ```
 
 In `local_libvirt/profile_policy.py`:
 
 ```python
-    def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
-        return profile.provider.local_libvirt.debug.gdbstub
+def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
+    return profile.provider.local_libvirt.debug.gdbstub
 
-    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
-        return profile.provider.local_libvirt.debug.preserve_on_crash
+
+def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
+    return profile.provider.local_libvirt.debug.preserve_on_crash
 ```
 
 In `remote_libvirt/profile_policy.py` (remote unconditionally provisions gdbstub — ADR-0083, `capture_method` returns GDBSTUB absent crashkernel; the remote section has no preserve flag, so no host_dump):
 
 ```python
-    def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
-        return True
+def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
+    return True
 
-    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
-        return False
+
+def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
+    return False
 ```
 
 In `fault_inject/profile_policy.py` (the test/failure provider has neither endpoint):
 
 ```python
-    def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
-        return False
+def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
+    return False
 
-    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
-        return False
+
+def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
+    return False
 ```
 
 - [ ] **Step 4: Run, verify green + types.** `uv run python -m pytest tests/providers/local_libvirt/test_profile_policy.py -q` → PASS. `just type` (the Protocol + 3 impls must satisfy structurally). `just lint`.
@@ -228,12 +243,15 @@ def test_generic_panic_matches_on_kernel_panic_line() -> None:
     console = b"[ 1.45] Kernel panic - not syncing: VFS: Unable to mount root fs\n"
     assert runs_boot._generic_panic_matches(console) is True
 
+
 def test_generic_panic_no_match_on_clean_console() -> None:
     assert runs_boot._generic_panic_matches(b"[ 0.5] booting\n[ 2.0] systemd\n") is False
+
 
 def test_generic_panic_fails_closed_when_search_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(*_a: object, **_k: object) -> object:
         raise ArtifactSearchInputError("forced")
+
     monkeypatch.setattr(runs_boot, "search_text", _boom)
     assert runs_boot._generic_panic_matches(b"Kernel panic - not syncing\n") is False
 ```
@@ -276,29 +294,47 @@ Pure unit (no IO):
 class _Pol:
     def __init__(self, gdbstub: bool, host_dump: bool) -> None:
         self._g, self._h = gdbstub, host_dump
-    def gdbstub_provisioned(self, _profile: object) -> bool: return self._g
-    def host_dump_provisioned(self, _profile: object) -> bool: return self._h
+
+    def gdbstub_provisioned(self, _profile: object) -> bool:
+        return self._g
+
+    def host_dump_provisioned(self, _profile: object) -> bool:
+        return self._h
+
 
 def test_available_capture_without_preserve() -> None:
-    assert runs_boot._available_capture(_Pol(True, False), cast(ProvisioningProfile, object())) == ["gdbstub", "console"]
+    assert runs_boot._available_capture(_Pol(True, False), cast(ProvisioningProfile, object())) == [
+        "gdbstub",
+        "console",
+    ]
+
 
 def test_available_capture_with_preserve() -> None:
-    assert runs_boot._available_capture(_Pol(True, True), cast(ProvisioningProfile, object())) == ["gdbstub", "console", "host_dump"]
+    assert runs_boot._available_capture(_Pol(True, True), cast(ProvisioningProfile, object())) == [
+        "gdbstub",
+        "console",
+        "host_dump",
+    ]
 ```
 
 `_gdbstub_reachable` with a fake connector (no real socket):
 
 ```python
 class _Conn:
-    def __init__(self, raises: bool) -> None: self._raises = raises
+    def __init__(self, raises: bool) -> None:
+        self._raises = raises
+
     def open_transport(self, _s: object, _k: object) -> object:
         if self._raises:
             raise CategorizedError("no stub", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
         return object()
+
     def close_transport(self, _h: object) -> None: ...
+
 
 def test_gdbstub_reachable_true_when_open_succeeds() -> None:
     assert runs_boot._gdbstub_reachable(cast(Connector, _Conn(raises=False)), uuid4()) is True
+
 
 def test_gdbstub_reachable_false_when_open_raises() -> None:
     assert runs_boot._gdbstub_reachable(cast(Connector, _Conn(raises=True)), uuid4()) is False
@@ -318,14 +354,20 @@ The recording helper, monkeypatching the IO seams (`_capture_console_artifact` �
 - [ ] **Step 7: Implement the branch.** Change `_run_boot_and_capture_outcome` to accept `connector: Connector` and `profile_policy: ProfilePolicy`, and update `boot_handler` to pass `binding.runtime.connector` and `binding.runtime.profile_policy`. In the `except CategorizedError as exc:` block, after the existing expected-crash `return` and before `raise`, add:
 
 ```python
-        if exc.category is ErrorCategory.READINESS_FAILURE:
-            crash = await _record_crash_halted_live(
-                conn, job_ctx, run, system_id, connector, profile_policy,
-                secret_registry, artifact_store,
-            )
-            if crash is not None:
-                return crash
-        raise
+if exc.category is ErrorCategory.READINESS_FAILURE:
+    crash = await _record_crash_halted_live(
+        conn,
+        job_ctx,
+        run,
+        system_id,
+        connector,
+        profile_policy,
+        secret_registry,
+        artifact_store,
+    )
+    if crash is not None:
+        return crash
+raise
 ```
 
 Add the helper (keep it ≤100 lines / complexity ≤8 — extract `_available_capture` and `_gdbstub_reachable`):
@@ -421,11 +463,13 @@ def test_start_session_admits_gdbstub_for_crashed_halted_live(migrated_url: str)
     resp = await _start_session(pool, _ctx(), run_id=run_id, transport="gdbstub")
     assert resp.status == "ok"  # session opened (use the same assertion the happy-path test uses)
 
+
 def test_start_session_rejects_drgn_live_for_crashed_halted_live(migrated_url: str) -> None:
     ...
     resp = await _start_session(pool, _ctx(), run_id=run_id, transport="drgn-live")
     assert resp.error_category is ErrorCategory.CONFIGURATION_ERROR
     assert resp.data["reason"] == "crashed_not_ssh_debuggable"
+
 
 def test_crashed_halted_live_system_stays_ready(migrated_url: str) -> None:
     # assert the seeded System row is still SystemState.READY after start_session (no transition)

@@ -172,10 +172,13 @@ kdive-drgn run-script [timeout_sec]   # reads the drgn script from STDIN
   class LiveScriptOutput(NamedTuple):
       output: str
       truncated: bool
+
+
   class LiveIntrospector(Protocol):
       def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput: ...
-      def run_script(self, *, transport_handle: str, script: str,
-                     timeout_sec: float) -> LiveScriptOutput: ...
+      def run_script(
+          self, *, transport_handle: str, script: str, timeout_sec: float
+      ) -> LiveScriptOutput: ...
   ```
 - Realized in `LocalLibvirtLiveIntrospect` (SSH, ADR-0219) and `RemoteLibvirtLiveIntrospect`
   (guest-agent, ADR-0083). Both validate the handle (loopback-ssh / non-blank domain) exactly as

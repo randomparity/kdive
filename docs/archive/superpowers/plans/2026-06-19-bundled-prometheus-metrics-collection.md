@@ -69,7 +69,9 @@ observability:
 
 ```python
 def _obs_docs(*set_args: str) -> list[dict[str, Any]]:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "bundledObservability=true", *set_args)
+    res = _template(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y", "bundledObservability=true", *set_args
+    )
     assert res.returncode == 0, res.stderr
     return [d for d in yaml.safe_load_all(res.stdout) if isinstance(d, dict)]
 
@@ -80,7 +82,8 @@ def _obs_kind(docs: list[dict[str, Any]], kind: str) -> dict[str, Any]:
 
 def _scrape_config(docs: list[dict[str, Any]]) -> dict[str, Any]:
     cm = next(
-        d for d in docs
+        d
+        for d in docs
         if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-prometheus-config")
     )
     return yaml.safe_load(cm["data"]["prometheus.yml"])
@@ -118,7 +121,9 @@ def test_observability_scrape_config_uses_annotation_relabeling() -> None:
     assert keep["source_labels"] == ["__meta_kubernetes_pod_annotation_prometheus_io_scrape"]
     assert keep["regex"] == "true"
     paths = [r for r in rels if r.get("target_label") == "__metrics_path__"]
-    assert paths and paths[0]["source_labels"] == ["__meta_kubernetes_pod_annotation_prometheus_io_path"]
+    assert paths and paths[0]["source_labels"] == [
+        "__meta_kubernetes_pod_annotation_prometheus_io_path"
+    ]
     addr = next(r for r in rels if r.get("target_label") == "__address__")
     assert "__meta_kubernetes_pod_annotation_prometheus_io_port" in addr["source_labels"]
     assert "__meta_kubernetes_pod_ip" in addr["source_labels"]
@@ -310,9 +315,20 @@ def _services_with_obs_profile() -> dict[str, Any]:
     # `docker compose config` drops profile-gated services unless the profile is active, so
     # render with `--profile obs` to make the prometheus service appear in the model.
     res = subprocess.run(
-        ["docker", "compose", "-f", str(_COMPOSE_FILE), "--profile", "obs",
-         "config", "--format", "json"],
-        capture_output=True, text=True, timeout=60,
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(_COMPOSE_FILE),
+            "--profile",
+            "obs",
+            "config",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert res.returncode == 0, f"compose config invalid: {res.stderr}"
     return json.loads(res.stdout)["services"]
@@ -408,8 +424,9 @@ def test_observability_scrape_config_passes_promtool() -> None:
     with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=True) as fh:
         yaml.safe_dump(cm_yaml, fh)
         fh.flush()
-        res = subprocess.run(["promtool", "check", "config", fh.name],
-                             capture_output=True, text=True, check=False)
+        res = subprocess.run(
+            ["promtool", "check", "config", fh.name], capture_output=True, text=True, check=False
+        )
     assert res.returncode == 0, res.stdout + res.stderr
 ```
 
@@ -419,8 +436,12 @@ Compose side:
 def test_prometheus_static_config_passes_promtool() -> None:
     if shutil.which("promtool") is None:
         pytest.skip("promtool not installed")
-    res = subprocess.run(["promtool", "check", "config", str(_PROM_CONFIG)],
-                         capture_output=True, text=True, check=False)
+    res = subprocess.run(
+        ["promtool", "check", "config", str(_PROM_CONFIG)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     assert res.returncode == 0, res.stdout + res.stderr
 ```
 

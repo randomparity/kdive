@@ -109,20 +109,24 @@ def test_cloud_init_helper_writes_nocloud_seed(tmp_path: Path) -> None:
 
 def test_cloud_init_helper_enables_full_pipeline_and_seeds_machine_id(tmp_path: Path) -> None:
     j = " ".join(cloud_init_first_boot_args(_ci_ctx(tmp_path, is_cloud_image=True)))
-    for unit in ("cloud-init-local.service", "cloud-init.service",
-                 "cloud-config.service", "cloud-final.service"):
+    for unit in (
+        "cloud-init-local.service",
+        "cloud-init.service",
+        "cloud-config.service",
+        "cloud-final.service",
+    ):
         assert unit in j
     assert f"systemctl unmask {CLOUD_INIT_UNITS}" in j
     assert f"systemctl enable {CLOUD_INIT_UNITS}" in j
     assert "rm -f /etc/cloud/cloud-init.disabled" in j  # harmless if absent (debian path)
-    assert f"/etc/machine-id:{SEED_MACHINE_ID}" in j     # seeded on every image now
+    assert f"/etc/machine-id:{SEED_MACHINE_ID}" in j  # seeded on every image now
 
 
 def test_cloud_init_helper_installs_cloud_init_only_on_non_cloud_base(tmp_path: Path) -> None:
     cloud = " ".join(cloud_init_first_boot_args(_ci_ctx(tmp_path, is_cloud_image=True)))
     scratch = " ".join(cloud_init_first_boot_args(_ci_ctx(tmp_path, is_cloud_image=False)))
-    assert "--install cloud-init" not in cloud       # ships cloud-init already
-    assert "--install cloud-init" in scratch         # virt-builder base needs it installed
+    assert "--install cloud-init" not in cloud  # ships cloud-init already
+    assert "--install cloud-init" in scratch  # virt-builder base needs it installed
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -163,9 +167,9 @@ CLOUD_INIT_UNITS = (
 # self-check (rootfs_build.py) is the guard that asserts none remain.
 _STRIP_NET_DISABLE_CMD = (
     "for f in /etc/cloud/cloud.cfg.d/*.cfg; do "
-    "[ -e \"$f\" ] || continue; "
+    '[ -e "$f" ] || continue; '
     "grep -qs 'config:[[:space:]]*disabled' \"$f\" && grep -qs 'network' \"$f\" "
-    "&& rm -f \"$f\"; done; true"
+    '&& rm -f "$f"; done; true'
 )
 
 
@@ -198,11 +202,16 @@ def cloud_init_first_boot_args(ctx: CustomizeContext) -> list[str]:
     argv += _staged_upload(_NOCLOUD_META_DATA, ".md", f"{NOCLOUD_SEED_DIR}/meta-data", ctx.cleanup)
     argv += _staged_upload(_NOCLOUD_USER_DATA, ".ud", f"{NOCLOUD_SEED_DIR}/user-data", ctx.cleanup)
     argv += [
-        "--run-command", _STRIP_NET_DISABLE_CMD,
-        "--run-command", "rm -f /etc/cloud/cloud-init.disabled",
-        "--run-command", f"systemctl unmask {CLOUD_INIT_UNITS}",
-        "--run-command", f"systemctl enable {CLOUD_INIT_UNITS}",
-        "--write", f"/etc/machine-id:{SEED_MACHINE_ID}",  # pragma: allowlist secret
+        "--run-command",
+        _STRIP_NET_DISABLE_CMD,
+        "--run-command",
+        "rm -f /etc/cloud/cloud-init.disabled",
+        "--run-command",
+        f"systemctl unmask {CLOUD_INIT_UNITS}",
+        "--run-command",
+        f"systemctl enable {CLOUD_INIT_UNITS}",
+        "--write",
+        f"/etc/machine-id:{SEED_MACHINE_ID}",  # pragma: allowlist secret
     ]
     return argv
 ```
@@ -303,9 +312,9 @@ git commit -m "refactor(962): drop the NetworkManager SSH-NIC keyfile (cloud-ini
 def test_rhel_argv_bakes_cloud_init_and_stops_masking(tmp_path: Path) -> None:
     argv = RhelFamily().customize_argv(_ctx(tmp_path, is_cloud_image=True))
     j = " ".join(argv)
-    assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in j       # authoritative drop-in
+    assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in j  # authoritative drop-in
     assert "systemctl enable cloud-init-local.service" in j  # full pipeline enabled
-    assert "systemctl mask cloud-init" not in j              # no longer masked
+    assert "systemctl mask cloud-init" not in j  # no longer masked
 
 
 def test_rhel_argv_still_injects_key_and_selinux(tmp_path: Path) -> None:
@@ -339,41 +348,41 @@ from kdive.images.families._fedora_customize import (  # extend the existing imp
 ```
 
 ```python
-    def customize_argv(self, ctx: CustomizeContext) -> list[str]:
-        """Build the virt-customize argv that turns the base image into a kdive-ready rootfs."""
-        argv: list[str] = []
-        if _el_major(ctx.distro, ctx.version) == 8 and "drgn" in ctx.packages:
-            argv += ["--run-command", _ENABLE_EPEL_CMD]
+def customize_argv(self, ctx: CustomizeContext) -> list[str]:
+    """Build the virt-customize argv that turns the base image into a kdive-ready rootfs."""
+    argv: list[str] = []
+    if _el_major(ctx.distro, ctx.version) == 8 and "drgn" in ctx.packages:
+        argv += ["--run-command", _ENABLE_EPEL_CMD]
+    argv += [
+        "--install",
+        ",".join(ctx.packages),
+        "--run-command",
+        "systemctl enable sshd.service",
+    ]
+    if "kexec-tools" in ctx.packages:
         argv += [
-            "--install",
-            ",".join(ctx.packages),
             "--run-command",
-            "systemctl enable sshd.service",
+            "systemctl enable kdump.service",
+            "--write",
+            f"{KDUMP_SYSCTL_PATH}:{KDUMP_SYSCTL_CONTENT}",
+            "--run-command",
+            KDUMP_FINAL_ACTION_CMD,
         ]
-        if "kexec-tools" in ctx.packages:
-            argv += [
-                "--run-command",
-                "systemctl enable kdump.service",
-                "--write",
-                f"{KDUMP_SYSCTL_PATH}:{KDUMP_SYSCTL_CONTENT}",
-                "--run-command",
-                KDUMP_FINAL_ACTION_CMD,
-            ]
-        argv += cloud_init_first_boot_args(ctx)   # replaces the mask + machine-id block
-        argv += debug_image_args(ctx.packages, ctx.cleanup)
-        if ctx.kind == "debug":
-            argv += makedumpfile_version_marker_args()
-        argv += [
-            "--ssh-inject",
-            f"root:file:{ctx.authorized_key}",
-            "--upload",
-            f"{ctx.readiness_unit_path}:/etc/systemd/system/{READINESS_MARKER}.service",
-            "--run-command",
-            f"systemctl enable {READINESS_MARKER}.service",
-            "--run-command",
-            _SELINUX_PERMISSIVE_SED,
-        ]
-        return argv
+    argv += cloud_init_first_boot_args(ctx)  # replaces the mask + machine-id block
+    argv += debug_image_args(ctx.packages, ctx.cleanup)
+    if ctx.kind == "debug":
+        argv += makedumpfile_version_marker_args()
+    argv += [
+        "--ssh-inject",
+        f"root:file:{ctx.authorized_key}",
+        "--upload",
+        f"{ctx.readiness_unit_path}:/etc/systemd/system/{READINESS_MARKER}.service",
+        "--run-command",
+        f"systemctl enable {READINESS_MARKER}.service",
+        "--run-command",
+        _SELINUX_PERMISSIVE_SED,
+    ]
+    return argv
 ```
 
 Delete `_CLOUD_INIT_MASK` and the now-unused `SEED_MACHINE_ID` import from `rhel.py` (the seed moved into the helper). Update the module docstring's "masks cloud-init and seeds `/etc/machine-id`" sentence to "enables cloud-init via a baked NoCloud seed (ADR-0288)".
@@ -409,8 +418,8 @@ def test_debian_argv_bakes_cloud_init_drops_sshd_keygen(tmp_path: Path) -> None:
     j = " ".join(argv)
     assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in j
     assert "systemctl enable cloud-init-local.service" in j
-    assert "cloud-init.disabled" not in j            # no longer disabled
-    assert "kdive-sshd-keygen" not in j              # cloud-init generates host keys
+    assert "cloud-init.disabled" not in j  # no longer disabled
+    assert "kdive-sshd-keygen" not in j  # cloud-init generates host keys
     assert "ssh-keygen -A" not in j
 ```
 
@@ -427,7 +436,7 @@ from kdive.images.families._fedora_customize import (  # extend the existing imp
     KDUMP_SYSCTL_CONTENT,
     KDUMP_SYSCTL_PATH,
     READINESS_MARKER,
-    SEED_MACHINE_ID,   # remove if now unused after the block below is deleted
+    SEED_MACHINE_ID,  # remove if now unused after the block below is deleted
     cloud_init_first_boot_args,
     drgn_helper_args,
     makedumpfile_version_marker_args,
@@ -435,36 +444,36 @@ from kdive.images.families._fedora_customize import (  # extend the existing imp
 ```
 
 ```python
-    def customize_argv(self, ctx: CustomizeContext) -> list[str]:
-        """Build the virt-customize argv that turns the Debian base into a kdive-ready rootfs."""
-        argv: list[str] = [
-            "--install",
-            ",".join(ctx.packages),
-            "--run-command",
-            "systemctl enable ssh.service",
-        ]
-        if "kdump-tools" in ctx.packages:
-            argv += [
-                "--run-command",
-                "systemctl enable kdump-tools.service",
-                "--run-command",
-                _USE_KDUMP_CMD,
-                "--write",
-                f"{KDUMP_SYSCTL_PATH}:{KDUMP_SYSCTL_CONTENT}",
-            ]
-        argv += cloud_init_first_boot_args(ctx)   # cloud-init owns network + host keys now
-        if ctx.kind == "debug":
-            argv += drgn_helper_args()
-            argv += makedumpfile_version_marker_args()
+def customize_argv(self, ctx: CustomizeContext) -> list[str]:
+    """Build the virt-customize argv that turns the Debian base into a kdive-ready rootfs."""
+    argv: list[str] = [
+        "--install",
+        ",".join(ctx.packages),
+        "--run-command",
+        "systemctl enable ssh.service",
+    ]
+    if "kdump-tools" in ctx.packages:
         argv += [
-            "--ssh-inject",
-            f"root:file:{ctx.authorized_key}",
-            "--upload",
-            f"{ctx.readiness_unit_path}:/etc/systemd/system/{READINESS_MARKER}.service",
             "--run-command",
-            f"systemctl enable {READINESS_MARKER}.service",
+            "systemctl enable kdump-tools.service",
+            "--run-command",
+            _USE_KDUMP_CMD,
+            "--write",
+            f"{KDUMP_SYSCTL_PATH}:{KDUMP_SYSCTL_CONTENT}",
         ]
-        return argv
+    argv += cloud_init_first_boot_args(ctx)  # cloud-init owns network + host keys now
+    if ctx.kind == "debug":
+        argv += drgn_helper_args()
+        argv += makedumpfile_version_marker_args()
+    argv += [
+        "--ssh-inject",
+        f"root:file:{ctx.authorized_key}",
+        "--upload",
+        f"{ctx.readiness_unit_path}:/etc/systemd/system/{READINESS_MARKER}.service",
+        "--run-command",
+        f"systemctl enable {READINESS_MARKER}.service",
+    ]
+    return argv
 ```
 
 Remove the `import tempfile` / `Callable` / `run_guestfs_tool` bits only if they become unused (the `normalize` method still uses `tempfile` + `run_guestfs_tool`, so keep them). Update the module docstring's cloud-init-disable / sshd-keygen sentences to reflect ADR-0288 (cloud-init enabled via a baked NoCloud seed; host keys from cloud-init's ssh module).
@@ -513,11 +522,12 @@ guestfish.
 Add to the `_Recorder` dataclass (alongside the other `list[...]` fields):
 
 ```python
-    verify_calls: list[Path] = field(default_factory=list)
+verify_calls: list[Path] = field(default_factory=list)
 
-    def verify_cloud_init(self, qcow2: Path) -> None:
-        self.order.append("verify")
-        self.verify_calls.append(qcow2)
+
+def verify_cloud_init(self, qcow2: Path) -> None:
+    self.order.append("verify")
+    self.verify_calls.append(qcow2)
 ```
 
 Update `_tools` to accept and forward the seam (defaulting to the recorder's stub so no test
@@ -668,12 +678,17 @@ Seed the `demo` project's budget + quota so the first `allocations.request` is g
 
 ```python
 import psycopg, os
+
 with psycopg.connect(os.environ["KDIVE_DATABASE_URL"]) as c:
-    c.execute("INSERT INTO budgets (project, limit_kcu) VALUES ('demo','1000000') "
-              "ON CONFLICT (project) DO UPDATE SET limit_kcu=EXCLUDED.limit_kcu")
-    c.execute("INSERT INTO quotas (project, max_concurrent_allocations, max_concurrent_systems) "
-              "VALUES ('demo',4,4) ON CONFLICT (project) DO UPDATE SET "
-              "max_concurrent_allocations=4, max_concurrent_systems=4")
+    c.execute(
+        "INSERT INTO budgets (project, limit_kcu) VALUES ('demo','1000000') "
+        "ON CONFLICT (project) DO UPDATE SET limit_kcu=EXCLUDED.limit_kcu"
+    )
+    c.execute(
+        "INSERT INTO quotas (project, max_concurrent_allocations, max_concurrent_systems) "
+        "VALUES ('demo',4,4) ON CONFLICT (project) DO UPDATE SET "
+        "max_concurrent_allocations=4, max_concurrent_systems=4"
+    )
     c.commit()
 ```
 

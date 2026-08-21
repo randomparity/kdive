@@ -121,6 +121,8 @@ already minted, so unit tests inject fakes and the real libvirt/object-store pat
 ```python
 class Installer(Protocol):
     def install(self, system_id: UUID, kernel_ref: str, *, cmdline: str) -> None: ...
+
+
 class Booter(Protocol):
     def boot(self, system_id: UUID) -> None: ...
 ```

@@ -519,7 +519,9 @@ def test_fetch_records_method_in_dedup_key(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await seed_crashed_system(pool)
-            resp = await vmcore_tools.fetch_vmcore(pool, _ctx(), system_id=sys_id, method="host_dump")
+            resp = await vmcore_tools.fetch_vmcore(
+                pool, _ctx(), system_id=sys_id, method="host_dump"
+            )
             assert resp.status == "queued"
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
@@ -728,24 +730,29 @@ Expected: FAIL — no console artifact row.
 
 In `runs.py`, add imports (`read_console_log`, `console_log_path`, `object_store_from_env`, `Sensitivity`, `Redactor`) and wrap the step call (replacing the bare `await _run_step_locked(conn, run_id, "boot", _do)` at `runs.py:825`):
 ```python
-    try:
-        await _run_step_locked(conn, run_id, "boot", _do)
-    finally:
-        raw = await asyncio.to_thread(read_console_log, console_log_path(run.system_id))
-        redacted = Redactor().redact_text(raw.decode("utf-8", "replace")).encode("utf-8")
-        stored = await asyncio.to_thread(
-            lambda: object_store_from_env().put_artifact(
-                "local", "systems", str(run.system_id), "console",
-                data=redacted, sensitivity=Sensitivity.REDACTED, retention_class="console",
-            )
+try:
+    await _run_step_locked(conn, run_id, "boot", _do)
+finally:
+    raw = await asyncio.to_thread(read_console_log, console_log_path(run.system_id))
+    redacted = Redactor().redact_text(raw.decode("utf-8", "replace")).encode("utf-8")
+    stored = await asyncio.to_thread(
+        lambda: object_store_from_env().put_artifact(
+            "local",
+            "systems",
+            str(run.system_id),
+            "console",
+            data=redacted,
+            sensitivity=Sensitivity.REDACTED,
+            retention_class="console",
         )
-        async with conn.transaction():  # own transaction: independent of the (possibly failed) step
-            if await _existing_console_key(conn, run.system_id) is None:  # idempotent on replay
-                await ARTIFACTS.insert(
-                    conn,
-                    register_artifact_row(stored, owner_kind="systems", owner_id=run.system_id),
-                )
-    return str(run_id)
+    )
+    async with conn.transaction():  # own transaction: independent of the (possibly failed) step
+        if await _existing_console_key(conn, run.system_id) is None:  # idempotent on replay
+            await ARTIFACTS.insert(
+                conn,
+                register_artifact_row(stored, owner_kind="systems", owner_id=run.system_id),
+            )
+return str(run_id)
 ```
 Add `_existing_console_key` next to it (a `…/console` LIKE query, mirroring `_existing_raw_key` in `vmcore.py:155`). The `finally` re-raises the boot error after registering, so the worker still dead-letters a real `boot_timeout` while the console is captured.
 
@@ -823,7 +830,9 @@ def test_install_skips_kdump_check_and_omits_initrd(tmp_path: Path) -> None:
         staging_root=tmp_path,
     )
     # CONSOLE + no initrd_ref: kdump_check skipped, no initrd fetched, no <initrd> rendered.
-    installer.install(uuid4(), uuid4(), "ref", cmdline="console=ttyS0", method=CaptureMethod.CONSOLE)
+    installer.install(
+        uuid4(), uuid4(), "ref", cmdline="console=ttyS0", method=CaptureMethod.CONSOLE
+    )
     assert conn.defined_xml is not None
     assert "<initrd>" not in conn.defined_xml
 ```
@@ -839,25 +848,31 @@ Add `method: CaptureMethod` and `initrd_ref: str | None = None` params to `insta
 initrd only when given; gate the kdump preflight on the method; pass `initrd_path` (or `None`)
 into the renderer:
 ```python
-    def install(
-        self, system_id: UUID, run_id: UUID, kernel_ref: str, *,
-        cmdline: str, method: CaptureMethod = CaptureMethod.HOST_DUMP, initrd_ref: str | None = None,
-    ) -> None:
-        staging_dir = self._staging_root / str(system_id) / str(run_id)
-        staging_dir.mkdir(parents=True, exist_ok=True)
-        kernel_path = staging_dir / "kernel"
-        self._fetch_kernel(kernel_ref, kernel_path)
-        initrd_path: Path | None = None
-        if initrd_ref is not None:
-            initrd_path = staging_dir / "initrd"
-            self._fetch_initrd(initrd_ref, initrd_path)
-        if method is CaptureMethod.KDUMP and not self._kdump_check(system_id):
-            raise CategorizedError(
-                "kdump capture service/initramfs not present on the staged System",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"system_id": str(system_id)},
-            )
-        # … open conn; pass initrd_path (may be None) to _render_direct_kernel_xml …
+def install(
+    self,
+    system_id: UUID,
+    run_id: UUID,
+    kernel_ref: str,
+    *,
+    cmdline: str,
+    method: CaptureMethod = CaptureMethod.HOST_DUMP,
+    initrd_ref: str | None = None,
+) -> None:
+    staging_dir = self._staging_root / str(system_id) / str(run_id)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    kernel_path = staging_dir / "kernel"
+    self._fetch_kernel(kernel_ref, kernel_path)
+    initrd_path: Path | None = None
+    if initrd_ref is not None:
+        initrd_path = staging_dir / "initrd"
+        self._fetch_initrd(initrd_ref, initrd_path)
+    if method is CaptureMethod.KDUMP and not self._kdump_check(system_id):
+        raise CategorizedError(
+            "kdump capture service/initramfs not present on the staged System",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"system_id": str(system_id)},
+        )
+    # … open conn; pass initrd_path (may be None) to _render_direct_kernel_xml …
 ```
 In `_render_direct_kernel_xml`, render `<initrd>` only when `initrd_path is not None`. The
 defaults keep the existing `install_handler` call site (`runs.py`) compiling unchanged — it

@@ -188,6 +188,7 @@ def _open_get(self, key: str, etag: str | None) -> tuple[Any, Sensitivity, str]:
         ) from err
     return resp, sensitivity, retention_class
 
+
 def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact:
     # (keep the existing docstring verbatim)
     resp, sensitivity, retention_class = self._open_get(key, etag)
@@ -196,6 +197,7 @@ def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArti
     except (BotoCoreError, ClientError) as err:
         raise _infrastructure_error("get_object", key, err) from err
     return artifact_types.FetchedArtifact(data, sensitivity, retention_class)
+
 
 @contextmanager
 def get_artifact_stream(
@@ -269,10 +271,11 @@ def test_extract_kernel_bundle_maps_mid_stream_reader_fault_to_infrastructure_fa
         def readinto(self, buf):
             # serve `prefix` bytes, then raise the store's mapped error
             ...
+
     with pytest.raises(CategorizedError) as exc:
         extract_kernel_bundle(_FaultReader(prefix, "k"), kernel_dest, modules_dest)
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert exc.value.details.get("key") == "k"          # store's detail, NOT the extractor's generic one
+    assert exc.value.details.get("key") == "k"  # store's detail, NOT the extractor's generic one
     assert "s3_error_code" in exc.value.details
 ```
 
@@ -338,12 +341,16 @@ class _ObjectStreamReader(Protocol):
     ) -> AbstractContextManager[StreamedArtifact]: ...
 
 
-def _stream_object(store: _ObjectStreamReader, ref: str) -> AbstractContextManager[StreamedArtifact]:
+def _stream_object(
+    store: _ObjectStreamReader, ref: str
+) -> AbstractContextManager[StreamedArtifact]:
     """Open a streaming read of the system-produced key ``ref`` (unconditional, ADR-0054/0400)."""
     return store.get_artifact_stream(ref, None)
 
 
-def _real_stream(ref: str) -> AbstractContextManager[StreamedArtifact]:  # pragma: no cover - live_vm
+def _real_stream(
+    ref: str,
+) -> AbstractContextManager[StreamedArtifact]:  # pragma: no cover - live_vm
     return _stream_object(object_store_from_env(), ref)
 ```
 

@@ -354,7 +354,10 @@ def test_multipart_reassembly_primitives_round_trip():
         "local/runs/x/vmlinux", uid, part_number=1, source_key="local/runs/x/vmlinux.part0001"
     )
     assert etag1 == "etag-1"
-    assert client.calls[1][1]["CopySource"] == {"Bucket": "bucket", "Key": "local/runs/x/vmlinux.part0001"}
+    assert client.calls[1][1]["CopySource"] == {
+        "Bucket": "bucket",
+        "Key": "local/runs/x/vmlinux.part0001",
+    }
     final = store.complete_multipart_upload("local/runs/x/vmlinux", uid, [(1, "etag-1")])
     assert final == "final-etag"
     assert client.calls[2][1]["MultipartUpload"] == {"Parts": [{"PartNumber": 1, "ETag": "etag-1"}]}
@@ -394,9 +397,7 @@ def create_multipart_upload(
     return resp["UploadId"]
 
 
-def upload_part_copy(
-    self, key: str, upload_id: str, *, part_number: int, source_key: str
-) -> str:
+def upload_part_copy(self, key: str, upload_id: str, *, part_number: int, source_key: str) -> str:
     """Copy ``source_key`` into part ``part_number`` of ``key``'s multipart upload.
 
     A server-side copy — no bytes transit the process. Returns the part ETag.
@@ -538,7 +539,9 @@ def test_single_over_5gib_rejected_size_out_of_range():
 
 def test_chunked_well_formed_accepted():
     decl = {
-        "name": "vmlinux", "sha256": "whole", "size_bytes": _5GIB + 100,
+        "name": "vmlinux",
+        "sha256": "whole",
+        "size_bytes": _5GIB + 100,
         "chunks": [
             {"sha256": "c0", "size_bytes": _5GIB},
             {"sha256": "c1", "size_bytes": 100},
@@ -551,7 +554,9 @@ def test_chunked_well_formed_accepted():
 
 def test_chunked_non_final_below_min_part_rejected():
     decl = {
-        "name": "vmlinux", "sha256": "w", "size_bytes": 1024 + 10,
+        "name": "vmlinux",
+        "sha256": "w",
+        "size_bytes": 1024 + 10,
         "chunks": [{"sha256": "c0", "size_bytes": 1024}, {"sha256": "c1", "size_bytes": 10}],
     }
     out = _validate_artifact_declarations("rid", [decl], _ALLOWED, _CAP)
@@ -560,7 +565,9 @@ def test_chunked_non_final_below_min_part_rejected():
 
 def test_chunked_sum_mismatch_rejected():
     decl = {
-        "name": "vmlinux", "sha256": "w", "size_bytes": 999,
+        "name": "vmlinux",
+        "sha256": "w",
+        "size_bytes": 999,
         "chunks": [{"sha256": "c0", "size_bytes": _5GIB}, {"sha256": "c1", "size_bytes": 100}],
     }
     out = _validate_artifact_declarations("rid", [decl], _ALLOWED, _CAP)
@@ -568,11 +575,13 @@ def test_chunked_sum_mismatch_rejected():
 
 
 def test_chunked_effective_config_rejected():
-    decl = {"name": "effective_config", "sha256": "w", "size_bytes": 100,
-            "chunks": [{"sha256": "c0", "size_bytes": 100}]}
-    out = _validate_artifact_declarations(
-        "rid", [decl], frozenset({"effective_config"}), _CAP
-    )
+    decl = {
+        "name": "effective_config",
+        "sha256": "w",
+        "size_bytes": 100,
+        "chunks": [{"sha256": "c0", "size_bytes": 100}],
+    }
+    out = _validate_artifact_declarations("rid", [decl], frozenset({"effective_config"}), _CAP)
     assert isinstance(out, ToolResponse) and out.data["reason"] == "size_out_of_range"
 ```
 
@@ -690,6 +699,7 @@ Expected: FAIL (one URL minted at `<name>`, not per chunk).
 # uploads.py — _materialize_uploads: branch on entry.chunks
 from kdive.provider_components.artifacts import chunk_key  # add import
 
+
 def _materialize_uploads(entries, *, kind, owner_id, store):
     uploads: list[_MaterializedUpload] = []
     expires_in = _presign_ttl_seconds()
@@ -697,21 +707,42 @@ def _materialize_uploads(entries, *, kind, owner_id, store):
     for entry in entries:
         if entry.chunks is None:
             key = artifact_key(_TENANT, kind, str(owner_id), entry.name)
-            uploads.append(_materialize_one(store, key, entry.sha256, entry.size_bytes,
-                                             entry, part_number=None, expires_in=expires_in))
+            uploads.append(
+                _materialize_one(
+                    store,
+                    key,
+                    entry.sha256,
+                    entry.size_bytes,
+                    entry,
+                    part_number=None,
+                    expires_in=expires_in,
+                )
+            )
         else:
             for i, c in enumerate(entry.chunks, start=1):
                 key = chunk_key(prefix, entry.name, i)
-                uploads.append(_materialize_one(store, key, c.sha256, c.size_bytes,
-                                                entry, part_number=i, expires_in=expires_in))
+                uploads.append(
+                    _materialize_one(
+                        store,
+                        key,
+                        c.sha256,
+                        c.size_bytes,
+                        entry,
+                        part_number=i,
+                        expires_in=expires_in,
+                    )
+                )
     return uploads
 
 
 def _materialize_one(store, key, sha256, size_bytes, entry, *, part_number, expires_in):
     presigned = store.presign_put(
         PresignPutRequest(
-            key=key, sha256=sha256, size_bytes=size_bytes,
-            sensitivity=Sensitivity.SENSITIVE, retention_class=_RETENTION_CLASS,
+            key=key,
+            sha256=sha256,
+            size_bytes=size_bytes,
+            sensitivity=Sensitivity.SENSITIVE,
+            retention_class=_RETENTION_CLASS,
             expires_in=expires_in,
         )
     )
@@ -721,13 +752,15 @@ def _materialize_one(store, key, sha256, size_bytes, entry, *, part_number, expi
 Extend `_MaterializedUpload` with a `part_number: int | None` field. In `_upload_response`, add to `data`:
 
 ```python
-        data={
-            "name": upload.entry.name,
-            "artifact_name": upload.entry.name,
-            "expires_in": str(_presign_ttl_seconds()),
-            **({"part_number": str(upload.part_number)} if upload.part_number is not None else {}),
-            **upload.presigned.required_headers,
-        },
+data = (
+    {
+        "name": upload.entry.name,
+        "artifact_name": upload.entry.name,
+        "expires_in": str(_presign_ttl_seconds()),
+        **({"part_number": str(upload.part_number)} if upload.part_number is not None else {}),
+        **upload.presigned.required_headers,
+    },
+)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -861,6 +894,7 @@ class _FakeStore:
 
     def head(self, key):
         from kdive.provider_components.artifacts import HeadResult
+
         # chunk heads match the manifest declared below
         sizes = {".part0001": (6, "c0"), ".part0002": (4, "c1")}
         for suffix, (size, sha) in sizes.items():
@@ -887,14 +921,14 @@ class _FakeStore:
 
 
 def _entry():
-    return ManifestEntry("vmlinux", "whole", 10,
-                         chunks=(ChunkEntry("c0", 6), ChunkEntry("c1", 4)))
+    return ManifestEntry("vmlinux", "whole", 10, chunks=(ChunkEntry("c0", 6), ChunkEntry("c1", 4)))
 
 
 def test_reassemble_verifies_copies_in_order_completes():
     store = _FakeStore()
-    reassemble_chunked(store, prefix="local/runs/x/", final_key="local/runs/x/vmlinux",
-                       entry=_entry())
+    reassemble_chunked(
+        store, prefix="local/runs/x/", final_key="local/runs/x/vmlinux", entry=_entry()
+    )
     kinds = [e[0] for e in store.events]
     assert kinds == ["create", "copy", "copy", "complete"]
     assert store.events[1][1] == 1 and store.events[2][1] == 2
@@ -904,8 +938,9 @@ def test_reassemble_verifies_copies_in_order_completes():
 def test_reassemble_aborts_on_copy_failure():
     store = _FakeStore(fail_copy_at=2)
     with pytest.raises(CategorizedError):
-        reassemble_chunked(store, prefix="local/runs/x/", final_key="local/runs/x/vmlinux",
-                           entry=_entry())
+        reassemble_chunked(
+            store, prefix="local/runs/x/", final_key="local/runs/x/vmlinux", entry=_entry()
+        )
     assert ("abort", "local/runs/x/vmlinux") in store.events
 ```
 
@@ -934,8 +969,12 @@ class ReassemblyStore(Protocol):
     """The object-store ops reassembly needs (HEAD + the four multipart primitives)."""
 
     def head(self, key: str): ...
-    def create_multipart_upload(self, key: str, *, sensitivity: Sensitivity, retention_class: str) -> str: ...
-    def upload_part_copy(self, key: str, upload_id: str, *, part_number: int, source_key: str) -> str: ...
+    def create_multipart_upload(
+        self, key: str, *, sensitivity: Sensitivity, retention_class: str
+    ) -> str: ...
+    def upload_part_copy(
+        self, key: str, upload_id: str, *, part_number: int, source_key: str
+    ) -> str: ...
     def complete_multipart_upload(self, key: str, upload_id: str, parts) -> str: ...
     def abort_multipart_upload(self, key: str, upload_id: str) -> None: ...
 
@@ -1079,7 +1118,9 @@ class ExternalBuildStore(Protocol):
     def get_range(self, key: str, *, start: int, length: int) -> bytes: ...
     def delete(self, key: str) -> None: ...
     def create_multipart_upload(self, key: str, *, sensitivity, retention_class: str) -> str: ...
-    def upload_part_copy(self, key: str, upload_id: str, *, part_number: int, source_key: str) -> str: ...
+    def upload_part_copy(
+        self, key: str, upload_id: str, *, part_number: int, source_key: str
+    ) -> str: ...
     def complete_multipart_upload(self, key: str, upload_id: str, parts) -> str: ...
     def abort_multipart_upload(self, key: str, upload_id: str) -> None: ...
 ```
@@ -1330,13 +1371,19 @@ async def _cleanup_chunks_and_manifest(
 Update the call site in `complete_build` (the final `return`):
 
 ```python
-                return await _finalize_external_build(
-                    conn, ctx, run, validated.output, cmdline, keys, validated.heads,
-                    store=self.object_store_factory(),
-                    entries=manifest_row.entries,
-                    prefix=manifest_row.prefix,
-                    chunked=has_chunks,
-                )
+return await _finalize_external_build(
+    conn,
+    ctx,
+    run,
+    validated.output,
+    cmdline,
+    keys,
+    validated.heads,
+    store=self.object_store_factory(),
+    entries=manifest_row.entries,
+    prefix=manifest_row.prefix,
+    chunked=has_chunks,
+)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**

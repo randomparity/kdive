@@ -146,6 +146,7 @@ async def _serve_once(banner: bytes) -> tuple[str, int, asyncio.AbstractServer]:
             writer.write(banner)
             await writer.drain()
         writer.close()
+
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     host, port = server.sockets[0].getsockname()[:2]
     return host, port, server
@@ -183,6 +184,7 @@ async def test_probe_retries_until_sshd_binds() -> None:
     # bounded retry tolerates the readiness (sshd-bind) race instead of a false "unreachable".
     host = "127.0.0.1"
     import socket
+
     s = socket.socket()
     s.bind((host, 0))
     port = s.getsockname()[1]
@@ -190,19 +192,26 @@ async def test_probe_retries_until_sshd_binds() -> None:
 
     async def bind_late() -> asyncio.AbstractServer:
         await asyncio.sleep(0.4)
+
         async def handle(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
-            w.write(b"SSH-2.0-x\r\n"); await w.drain(); w.close()
+            w.write(b"SSH-2.0-x\r\n")
+            await w.drain()
+            w.close()
+
         return await asyncio.start_server(handle, host, port)
 
     server_task = asyncio.create_task(bind_late())
     result = await _real_probe(host, port, deadline_s=3.0)
     server = await server_task
-    server.close(); await server.wait_closed()
+    server.close()
+    await server.wait_closed()
     assert result == ReachResult(True, "reachable")
 
 
 def test_serialize_verdict_is_compact_and_redacted() -> None:
-    raw = serialize_reach_verdict(ReachResult(False, "no SSH banner"), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00")
+    raw = serialize_reach_verdict(
+        ReachResult(False, "no SSH banner"), "127.0.0.1", 22001, "2026-07-02T00:00:00+00:00"
+    )
     assert raw == (
         '{"reachable":false,"checked_at":"2026-07-02T00:00:00+00:00",'
         '"endpoint":{"host":"127.0.0.1","port":22001},"detail":"no SSH banner"}'
@@ -251,7 +260,9 @@ class ReachResult:
 type ProbeFn = Callable[[str, int], Awaitable[ReachResult]]
 
 
-async def _real_probe(host: str, port: int, *, deadline_s: float = _PROBE_DEADLINE_S) -> ReachResult:
+async def _real_probe(
+    host: str, port: int, *, deadline_s: float = _PROBE_DEADLINE_S
+) -> ReachResult:
     """Probe ``host:port`` for an SSH banner, retrying connection-level failures until ``deadline_s``.
 
     Returns ``reachable`` iff a banner beginning ``SSH-`` arrives; ``no SSH banner`` when a
@@ -282,8 +293,10 @@ async def _real_probe(host: str, port: int, *, deadline_s: float = _PROBE_DEADLI
             writer.close()
             with suppress(OSError):
                 await writer.wait_closed()
-        return ReachResult(True, "reachable") if banner.startswith(b"SSH-") else ReachResult(
-            False, "no SSH banner"
+        return (
+            ReachResult(True, "reachable")
+            if banner.startswith(b"SSH-")
+            else ReachResult(False, "no SSH banner")
         )
 
 

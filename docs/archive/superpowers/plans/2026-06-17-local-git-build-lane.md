@@ -49,6 +49,7 @@ Tests live in `tests/` mirroring the package tree.
 ```python
 def test_local_build_remote_allowlist_setting_registered() -> None:
     from kdive.config.core_settings import ALL_SETTINGS, LOCAL_BUILD_REMOTE_ALLOWLIST
+
     assert LOCAL_BUILD_REMOTE_ALLOWLIST in ALL_SETTINGS
     assert LOCAL_BUILD_REMOTE_ALLOWLIST.name == "KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST"
     assert LOCAL_BUILD_REMOTE_ALLOWLIST.processes == frozenset({"worker"})
@@ -113,14 +114,17 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.shared.build_host.git_source import validate_git_arg
 
+
 def test_validate_git_arg_rejects_leading_dash() -> None:
     with pytest.raises(CategorizedError) as exc:
         validate_git_arg("--upload-pack=evil", "remote")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
+
 def test_validate_git_arg_rejects_control_char() -> None:
     with pytest.raises(CategorizedError):
         validate_git_arg("https://github.com/x\n", "remote")
+
 
 def test_validate_git_arg_accepts_plain() -> None:
     validate_git_arg("https://github.com/torvalds/linux", "remote")
@@ -139,6 +143,7 @@ Add a regression assertion in the existing shell_transport test (or the new git_
 
 ```python
 """Git-source validation and the local-build remote allowlist (ADR-0162)."""
+
 from __future__ import annotations
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
@@ -146,6 +151,7 @@ _UNSAFE_CHARS = frozenset(
     "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
     "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
 )
+
 
 def validate_git_arg(value: str, field: str) -> None:
     """Reject a git remote/ref that could parse as an option or inject via control chars."""
@@ -199,29 +205,38 @@ from kdive.providers.shared.build_host.git_source import remote_allowed
 
 ALLOW = ("github.com/myorg", "git.example.com")
 
-@pytest.mark.parametrize("remote", [
-    "https://github.com/myorg/linux",
-    "https://github.com/myorg/linux.git",
-    "https://GitHub.com/myorg/linux",          # host case-insensitive
-    "git@git.example.com:team/linux.git",       # scp-like, host-only entry
-    "ssh://git.example.com/team/linux",
-    "git://git.example.com/team/linux",
-])
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        "https://github.com/myorg/linux",
+        "https://github.com/myorg/linux.git",
+        "https://GitHub.com/myorg/linux",  # host case-insensitive
+        "git@git.example.com:team/linux.git",  # scp-like, host-only entry
+        "ssh://git.example.com/team/linux",
+        "git://git.example.com/team/linux",
+    ],
+)
 def test_remote_allowed_accepts(remote: str) -> None:
     assert remote_allowed(remote, ALLOW) is True
 
-@pytest.mark.parametrize("remote", [
-    "https://github.com.evil.com/myorg/linux",  # not a substring match
-    "https://github.com/myorg-evil/linux",      # path boundary
-    "https://github.com/other/linux",           # wrong path on path-scoped entry
-    "https://gitlab.com/myorg/linux",           # host not listed
-    "file:///etc/passwd",                        # scheme rejected
-    "http://git.example.com/team/linux",        # http not eligible
-    "ext::sh -c id",                             # helper transport / not a host
-    "",
-])
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        "https://github.com.evil.com/myorg/linux",  # not a substring match
+        "https://github.com/myorg-evil/linux",  # path boundary
+        "https://github.com/other/linux",  # wrong path on path-scoped entry
+        "https://gitlab.com/myorg/linux",  # host not listed
+        "file:///etc/passwd",  # scheme rejected
+        "http://git.example.com/team/linux",  # http not eligible
+        "ext::sh -c id",  # helper transport / not a host
+        "",
+    ],
+)
 def test_remote_allowed_rejects(remote: str) -> None:
     assert remote_allowed(remote, ALLOW) is False
+
 
 def test_remote_allowed_empty_allowlist_denies_all() -> None:
     assert remote_allowed("https://github.com/myorg/linux", ()) is False
@@ -243,6 +258,7 @@ from kdive.config.core_settings import LOCAL_BUILD_REMOTE_ALLOWLIST
 
 _ELIGIBLE_SCHEMES = frozenset({"https", "ssh", "git"})
 
+
 def parse_remote(remote: str) -> tuple[str, str, str]:
     """Return (scheme, host, path) for a git remote; ('', '', '') if unparseable."""
     if "://" in remote:
@@ -256,6 +272,7 @@ def parse_remote(remote: str) -> tuple[str, str, str]:
         return "ssh", host, "/" + path
     return "", "", ""
 
+
 def _entry_matches(host: str, path: str, entry: str) -> bool:
     entry = entry.strip().lower()
     if not entry:
@@ -268,12 +285,14 @@ def _entry_matches(host: str, path: str, entry: str) -> bool:
     prefix = "/" + entry_path
     return path == prefix or path.startswith(prefix + "/")
 
+
 def remote_allowed(remote: str, allowlist: Sequence[str]) -> bool:
     """True iff the remote's scheme is eligible and its host/path matches an allowlist entry."""
     scheme, host, path = parse_remote(remote)
     if scheme not in _ELIGIBLE_SCHEMES or not host:
         return False
     return any(_entry_matches(host, path, entry) for entry in allowlist)
+
 
 def local_build_remote_allowlist_from_env() -> tuple[str, ...]:
     """Read the worker's local-build remote allowlist; () when unset/empty (lane off)."""
@@ -323,6 +342,7 @@ from kdive.providers.shared.build_host import workspace as build_host_workspace
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
+
 def _git_profile() -> ServerBuildProfile:
     return ServerBuildProfile(
         schema_version=1,
@@ -331,17 +351,22 @@ def _git_profile() -> ServerBuildProfile:
         ),
     )
 
+
 def test_real_checkout_git_source_invokes_clone_tree(monkeypatch, tmp_path) -> None:
     seen = {}
     monkeypatch.setattr(
-        build_host_workspace, "clone_tree",
+        build_host_workspace,
+        "clone_tree",
         lambda source, ws, allow, *, run_id, secret_registry: seen.update(
             remote=source.remote, allow=tuple(allow)
         ),
     )
     monkeypatch.setattr(build_host_workspace, "merge_config", lambda *a, **k: None)
     build_host_workspace.real_checkout(
-        "/unused", _git_profile(), tmp_path / "ws", b"",
+        "/unused",
+        _git_profile(),
+        tmp_path / "ws",
+        b"",
         run_id=__import__("uuid").uuid4(),
         secret_registry=SecretRegistry(),
         allowlist=("github.com/myorg",),
@@ -349,24 +374,32 @@ def test_real_checkout_git_source_invokes_clone_tree(monkeypatch, tmp_path) -> N
     assert seen["remote"] == "https://github.com/myorg/linux"
     assert seen["allow"] == ("github.com/myorg",)
 
+
 def test_clone_tree_rejects_disallowed_remote(tmp_path) -> None:
     source = GitSourceRef(remote="https://gitlab.com/x/linux", ref="v6.9")
     with pytest.raises(CategorizedError) as exc:
         build_host_workspace.clone_tree(
-            source, tmp_path / "ws", ("github.com/myorg",),
-            run_id=__import__("uuid").uuid4(), secret_registry=SecretRegistry(),
+            source,
+            tmp_path / "ws",
+            ("github.com/myorg",),
+            run_id=__import__("uuid").uuid4(),
+            secret_registry=SecretRegistry(),
         )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     # No URL echo into either the message or the details (details may be None).
     assert "gitlab.com" not in str(exc.value)
     assert "gitlab.com" not in repr(exc.value.details)
 
+
 def test_clone_tree_empty_allowlist_reports_lane_disabled(tmp_path) -> None:
     source = GitSourceRef(remote="https://github.com/myorg/linux", ref="v6.9")
     with pytest.raises(CategorizedError) as exc:
         build_host_workspace.clone_tree(
-            source, tmp_path / "ws", (),
-            run_id=__import__("uuid").uuid4(), secret_registry=SecretRegistry(),
+            source,
+            tmp_path / "ws",
+            (),
+            run_id=__import__("uuid").uuid4(),
+            secret_registry=SecretRegistry(),
         )
     assert "disabled" in str(exc.value).lower()
 ```
@@ -389,19 +422,37 @@ Add imports: `from collections.abc import Sequence`, `from kdive.profiles.build 
 GIT_CLONE_TIMEOUT_S = 10 * 60
 
 # Closed ambient escape hatches so the allowlist bounds the actual connection (ADR-0162).
-_GIT_HARDENED_ENV = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
-                     "GIT_PROTOCOL_FROM_USER": "0", "GIT_TERMINAL_PROMPT": "0"}
-_GIT_HARDENED_FLAGS = ["-c", "http.followRedirects=false", "-c", "protocol.allow=never",
-                       "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always",
-                       "-c", "protocol.git.allow=always"]
+_GIT_HARDENED_ENV = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_PROTOCOL_FROM_USER": "0",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+_GIT_HARDENED_FLAGS = [
+    "-c",
+    "http.followRedirects=false",
+    "-c",
+    "protocol.allow=never",
+    "-c",
+    "protocol.https.allow=always",
+    "-c",
+    "protocol.ssh.allow=always",
+    "-c",
+    "protocol.git.allow=always",
+]
 
-def _run_git(args: list[str], *, cwd: Path | None, run_id: UUID) -> subprocess.CompletedProcess[str]:
+
+def _run_git(
+    args: list[str], *, cwd: Path | None, run_id: UUID
+) -> subprocess.CompletedProcess[str]:
     """Run `git <hardened flags> <args>` with redirects/ambient config/helpers disabled."""
     try:
         return subprocess.run(
             ["git", *_GIT_HARDENED_FLAGS, *args],
             cwd=str(cwd) if cwd else None,
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
             timeout=GIT_CLONE_TIMEOUT_S,
             env={**os.environ, **_GIT_HARDENED_ENV, "LC_ALL": "C"},
         )
@@ -410,9 +461,14 @@ def _run_git(args: list[str], *, cwd: Path | None, run_id: UUID) -> subprocess.C
     except OSError as exc:
         raise launch_failure("git", exc, category=ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
 
+
 def clone_tree(
-    source: GitSourceRef, workspace: Path, allowlist: Sequence[str],
-    *, run_id: UUID, secret_registry: SecretRegistry,
+    source: GitSourceRef,
+    workspace: Path,
+    allowlist: Sequence[str],
+    *,
+    run_id: UUID,
+    secret_registry: SecretRegistry,
 ) -> None:
     """Clone `source.remote` at `source.ref` into `workspace` (ADR-0162), allowlist-gated."""
     validate_git_arg(source.remote, "remote")
@@ -430,8 +486,9 @@ def clone_tree(
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     if shutil.which("git") is None:
-        raise CategorizedError("git is required to clone a kernel source",
-                               category=ErrorCategory.MISSING_DEPENDENCY)
+        raise CategorizedError(
+            "git is required to clone a kernel source", category=ErrorCategory.MISSING_DEPENDENCY
+        )
     shutil.rmtree(workspace, ignore_errors=True)
     try:
         workspace.mkdir(parents=True, exist_ok=True)
@@ -439,44 +496,82 @@ def clone_tree(
         raise workspace_failure("mkdir", "build_workspace", exc) from exc
     init = _run_git(["init", str(workspace)], cwd=None, run_id=run_id)
     if init.returncode != 0:
-        raise CategorizedError("git init failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                               details={"stderr": redacted_tail(init.stderr, secret_registry)})
-    fetch = _run_git(["-C", str(workspace), "fetch", "--depth", "1", source.remote, source.ref],
-                     cwd=None, run_id=run_id)
+        raise CategorizedError(
+            "git init failed",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"stderr": redacted_tail(init.stderr, secret_registry)},
+        )
+    fetch = _run_git(
+        ["-C", str(workspace), "fetch", "--depth", "1", source.remote, source.ref],
+        cwd=None,
+        run_id=run_id,
+    )
     if fetch.returncode != 0:
-        raise CategorizedError("git fetch failed", category=ErrorCategory.CONFIGURATION_ERROR,
-                               details={"stderr": redacted_tail(fetch.stderr, secret_registry)})
-    verify = _run_git(["-C", str(workspace), "rev-parse", "--verify", "--quiet", "FETCH_HEAD"],
-                      cwd=None, run_id=run_id)
+        raise CategorizedError(
+            "git fetch failed",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"stderr": redacted_tail(fetch.stderr, secret_registry)},
+        )
+    verify = _run_git(
+        ["-C", str(workspace), "rev-parse", "--verify", "--quiet", "FETCH_HEAD"],
+        cwd=None,
+        run_id=run_id,
+    )
     if verify.returncode != 0:
-        raise CategorizedError("git fetch produced no FETCH_HEAD (the fetch did not complete)",
-                               category=ErrorCategory.TRANSPORT_FAILURE,
-                               details={"stderr": redacted_tail(fetch.stderr, secret_registry)})
+        raise CategorizedError(
+            "git fetch produced no FETCH_HEAD (the fetch did not complete)",
+            category=ErrorCategory.TRANSPORT_FAILURE,
+            details={"stderr": redacted_tail(fetch.stderr, secret_registry)},
+        )
     checkout = _run_git(["-C", str(workspace), "checkout", "FETCH_HEAD"], cwd=None, run_id=run_id)
     if checkout.returncode != 0:
-        raise CategorizedError("git checkout FETCH_HEAD failed",
-                               category=ErrorCategory.CONFIGURATION_ERROR,
-                               details={"stderr": redacted_tail(checkout.stderr, secret_registry)})
+        raise CategorizedError(
+            "git checkout FETCH_HEAD failed",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"stderr": redacted_tail(checkout.stderr, secret_registry)},
+        )
 ```
 
 Update `real_checkout` to dispatch and `make_checkout` to thread the allowlist:
 
 ```python
-def real_checkout(kernel_src, profile, workspace, fragment_bytes, *, run_id, secret_registry,
-                  allowlist: Sequence[str] = ()) -> None:
+def real_checkout(
+    kernel_src,
+    profile,
+    workspace,
+    fragment_bytes,
+    *,
+    run_id,
+    secret_registry,
+    allowlist: Sequence[str] = (),
+) -> None:
     if is_git_source(profile):
-        clone_tree(profile.kernel_source_ref.git, workspace, allowlist,
-                   run_id=run_id, secret_registry=secret_registry)
+        clone_tree(
+            profile.kernel_source_ref.git,
+            workspace,
+            allowlist,
+            run_id=run_id,
+            secret_registry=secret_registry,
+        )
     else:
         sync_tree(kernel_src, workspace, secret_registry)
     merge_config(fragment_bytes, workspace, run_id)
     if profile.patch_ref is not None:
         apply_patch(profile.patch_ref, workspace, secret_registry)
 
+
 def make_checkout(kernel_src, secret_registry, *, allowlist: Sequence[str] = ()) -> Checkout:
     def _checkout(run_id, profile, workspace, fragment_bytes) -> None:
-        real_checkout(kernel_src, profile, workspace, fragment_bytes,
-                      run_id=run_id, secret_registry=secret_registry, allowlist=allowlist)
+        real_checkout(
+            kernel_src,
+            profile,
+            workspace,
+            fragment_bytes,
+            run_id=run_id,
+            secret_registry=secret_registry,
+            allowlist=allowlist,
+        )
+
     return _checkout
 ```
 
@@ -512,12 +607,14 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```python
 def test_from_env_threads_remote_allowlist(monkeypatch) -> None:
     from kdive.providers.local_libvirt import build as local_build
+
     captured = {}
     monkeypatch.setenv("KDIVE_BUILD_WORKSPACE", "/tmp/ws")
     monkeypatch.setenv("KDIVE_KERNEL_SRC", "/srv/linux")
     monkeypatch.setenv("KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST", "github.com/myorg, git.example.com")
     monkeypatch.setattr(
-        local_build._build_workspace, "make_checkout",
+        local_build._build_workspace,
+        "make_checkout",
         lambda kernel_src, secret_registry, *, allowlist: captured.update(allow=tuple(allowlist)),
     )
     local_build.LocalLibvirtBuild.from_env(secret_registry=SecretRegistry())
@@ -534,9 +631,11 @@ Expected: FAIL (allowlist not passed).
 Add import `from kdive.providers.shared.build_host.git_source import local_build_remote_allowlist_from_env`, then:
 
 ```python
-        checkout=_build_workspace.make_checkout(
-            kernel_src, secret_registry, allowlist=local_build_remote_allowlist_from_env()
-        ),
+checkout = (
+    _build_workspace.make_checkout(
+        kernel_src, secret_registry, allowlist=local_build_remote_allowlist_from_env()
+    ),
+)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**

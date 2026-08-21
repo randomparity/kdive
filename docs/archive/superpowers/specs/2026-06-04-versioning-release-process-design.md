@@ -172,6 +172,7 @@ reports `X.Y.Z+g<sha>`, a dev-built wheel `X.Y.Z-dev+g<sha>`, a live checkout vi
 
 ```python
 from kdive.version import package_version
+
 __version__ = package_version()
 ```
 

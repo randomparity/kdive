@@ -41,6 +41,7 @@ A new function alongside `wait_for_agent`, sharing its `Monotonic`/`Sleep` seams
 type NetworkProbe = Callable[[], bool]
 type TimeoutDetail = Callable[[], dict[str, object]]
 
+
 def wait_for_network(
     probe: NetworkProbe,
     domain_name: str,
@@ -119,7 +120,7 @@ injectable so a deployment with a tighter bound can lower them (Finding D).
 `yield`:
 
 ```python
-wait_for_agent(...)                       # unchanged
+wait_for_agent(...)  # unchanged
 transport = GuestExecBuildTransport(...)  # unchanged
 self._wait_for_network(transport, domain_name)
 yield transport

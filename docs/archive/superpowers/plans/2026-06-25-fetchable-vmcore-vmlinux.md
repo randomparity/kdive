@@ -51,8 +51,11 @@ import pytest
 from uuid import UUID, uuid4
 from kdive.db.artifact_queries import run_fetch_context, system_project
 
+
 @pytest.mark.asyncio
-async def test_run_fetch_context_returns_row_fields(pg_pool):  # pg_pool: the testcontainers pool fixture
+async def test_run_fetch_context_returns_row_fields(
+    pg_pool,
+):  # pg_pool: the testcontainers pool fixture
     run_id = await seed_run_on_system(pg_pool, debuginfo_ref="proj/runs/r/vmlinux")
     async with pg_pool.connection() as conn:
         ctx = await run_fetch_context(conn, UUID(run_id))
@@ -75,16 +78,19 @@ Expected: FAIL with `ImportError: cannot import name 'run_fetch_context'`.
 ```python
 from dataclasses import dataclass
 
+
 @dataclass(frozen=True, slots=True)
 class RunFetchContext:
     project: str
     system_id: UUID | None
     debuginfo_ref: str | None
 
+
 _RUN_FETCH_CONTEXT_SQL: LiteralString = (
     "SELECT project, system_id, debuginfo_ref FROM runs WHERE id = %s"
 )
 _SYSTEM_PROJECT_SQL: LiteralString = "SELECT project FROM systems WHERE id = %s"
+
 
 async def run_fetch_context(conn: AsyncConnection, run_id: UUID) -> RunFetchContext | None:
     """Return the Run's project, bound System id, and vmlinux ref, or ``None`` if absent."""
@@ -99,6 +105,7 @@ async def run_fetch_context(conn: AsyncConnection, run_id: UUID) -> RunFetchCont
         system_id=row["system_id"],
         debuginfo_ref=str(ref) if isinstance(ref, str) and ref else None,
     )
+
 
 async def system_project(conn: AsyncConnection, system_id: UUID) -> str | None:
     """Return a System's owning project, or ``None`` if the row is absent."""
@@ -142,10 +149,18 @@ git commit -m "feat(artifacts): add run_fetch_context + system_project readers (
 7. **Audit inside its own transaction** — `audit.record` does not open a transaction (its docstring: the caller composes it with the audited transition in one `conn.transaction()`). This tool has no state transition, so wrap the audit write explicitly so the row commits:
    ```python
    async with conn.transaction():
-       await audit.record(conn, ctx, AuditEvent(
-           tool="artifacts.fetch_raw", object_kind="runs", object_id=uid,
-           transition="fetch_raw", args={"run_id": run_id, "asset": asset.value},
-           project=run.project))
+       await audit.record(
+           conn,
+           ctx,
+           AuditEvent(
+               tool="artifacts.fetch_raw",
+               object_kind="runs",
+               object_id=uid,
+               transition="fetch_raw",
+               args={"run_id": run_id, "asset": asset.value},
+               project=run.project,
+           ),
+       )
    ```
    The audited `project` is always `run.project` (which step 2 confirmed is in `ctx.projects`, so `audit.record`'s misattribution guard passes for both assets).
 8. Return `ToolResponse.success(run_id, "available", suggested_next_actions=["artifacts.fetch_raw"], refs={"download_uri": url}, data={"asset": asset.value, "size_bytes": str(head.size_bytes), "ttl": str(ttl)})`.
@@ -160,22 +175,32 @@ from kdive.mcp.auth import RequestContext
 from kdive.security.authz.rbac import Role
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 
+
 class _FakeStore:
     """A fake object store with head + presign_get (mirrors test_artifacts_tools._SearchStore)."""
+
     url = "https://signed.example/download"
+
     def __init__(self, *, exists: bool = True, size: int = 4096) -> None:
-        self._head = HeadResult(size_bytes=size, checksum_sha256=None, etag="e",
-                                sensitivity=None) if exists else None
+        self._head = (
+            HeadResult(size_bytes=size, checksum_sha256=None, etag="e", sensitivity=None)
+            if exists
+            else None
+        )
         self.presigned_keys: list[str] = []
+
     def head(self, key: str) -> HeadResult | None:
         return self._head
+
     def presign_get(self, key: str, *, expires_in: int) -> str:
         self.presigned_keys.append(key)
         return self.url
 
+
 def _ctx(role: Role | None = Role.CONTRIBUTOR, *, projects=("proj",)) -> RequestContext:
     roles = {"proj": role} if role is not None else {}
     return RequestContext(principal="u", agent_session="s", projects=projects, roles=roles)
+
 
 async def _seed_raw_vmcore_row(pool, system_id: str, project: str = "proj") -> None:
     """Insert a raw vmcore artifact row for a System (no seed helper does this)."""
@@ -195,26 +220,32 @@ import pytest
 from uuid import UUID
 from kdive.mcp.tools.catalog.artifacts.raw_fetch import RawAsset, fetch_raw
 
+
 @pytest.mark.asyncio
 async def test_fetch_raw_vmlinux_presigns_url(pg_pool):
     run_id = await seed_run_on_system(pg_pool, debuginfo_ref="proj/runs/r/vmlinux")
     store = _FakeStore()
-    resp = await fetch_raw(pg_pool, _ctx(), run_id=run_id, asset=RawAsset.VMLINUX,
-                           store_factory=lambda: store)
+    resp = await fetch_raw(
+        pg_pool, _ctx(), run_id=run_id, asset=RawAsset.VMLINUX, store_factory=lambda: store
+    )
     assert resp.status == "available"
     assert resp.refs["download_uri"] == store.url
     assert resp.data["asset"] == "vmlinux"
     assert "content" not in resp.data
 
+
 @pytest.mark.asyncio
 async def test_fetch_raw_vmcore_presigns_url(pg_pool):
     run_id = await seed_run_on_system(pg_pool, debuginfo_ref="proj/runs/r/vmlinux")
     async with pg_pool.connection() as conn:
-        ctx = await __import__("kdive.db.artifact_queries", fromlist=["run_fetch_context"]).run_fetch_context(conn, UUID(run_id))
+        ctx = await __import__(
+            "kdive.db.artifact_queries", fromlist=["run_fetch_context"]
+        ).run_fetch_context(conn, UUID(run_id))
     await _seed_raw_vmcore_row(pg_pool, str(ctx.system_id))
     store = _FakeStore()
-    resp = await fetch_raw(pg_pool, _ctx(), run_id=run_id, asset=RawAsset.VMCORE,
-                           store_factory=lambda: store)
+    resp = await fetch_raw(
+        pg_pool, _ctx(), run_id=run_id, asset=RawAsset.VMCORE, store_factory=lambda: store
+    )
     assert resp.status == "available"
     assert resp.data["asset"] == "vmcore"
     assert store.presigned_keys == [f"proj/systems/{ctx.system_id}/vmcore-host_dump"]
@@ -318,15 +349,21 @@ def _register_artifacts_fetch_raw(app: FastMCP, pool: AsyncConnectionPool) -> No
         meta=_docmeta.maturity_meta(
             "partial",
             reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
-            detail=("Presigns a Run's raw vmcore/vmlinux; those objects only exist after a "
-                    "live build/capture path runs, exercised under the gated live markers."),
-            promotion=("A non-gated test presigns an asset a real run produced, or a recorded "
-                       "live_stack run does."),
+            detail=(
+                "Presigns a Run's raw vmcore/vmlinux; those objects only exist after a "
+                "live build/capture path runs, exercised under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test presigns an asset a real run produced, or a recorded "
+                "live_stack run does."
+            ),
         ),
     )
     async def artifacts_fetch_raw(
         run_id: Annotated[str, Field(description="The Run whose raw asset to fetch.")],
-        asset: Annotated[raw_fetch.RawAsset, Field(description="Which raw asset: vmcore or vmlinux.")],
+        asset: Annotated[
+            raw_fetch.RawAsset, Field(description="Which raw asset: vmcore or vmlinux.")
+        ],
     ) -> ToolResponse:
         """Mint a presigned download URL for a Run's raw vmcore or vmlinux. Requires contributor."""
         return await raw_fetch.fetch_raw(pool, current_context(), run_id=run_id, asset=asset)

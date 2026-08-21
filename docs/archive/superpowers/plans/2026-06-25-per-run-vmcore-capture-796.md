@@ -101,7 +101,9 @@ together or `ty`/tests go red. Work the sub-steps in order; only run guardrails 
   async def raw_vmcore_key(conn: AsyncConnection, run_id: UUID) -> str | None:
       """Return the Run's raw ``vmcore-{method}`` object key, or ``None`` (ADR-0244)."""
       async with conn.cursor(row_factory=dict_row) as cur:
-          await cur.execute(_RAW_VMCORE_KEY_SQL, (run_id, _RAW_VMCORE_KEY_LIKE, _REDACTED_VMCORE_LIKE))
+          await cur.execute(
+              _RAW_VMCORE_KEY_SQL, (run_id, _RAW_VMCORE_KEY_LIKE, _REDACTED_VMCORE_LIKE)
+          )
           row = await cur.fetchone()
       return None if row is None else str(row["object_key"])
   ```
@@ -143,12 +145,18 @@ together or `ty`/tests go red. Work the sub-steps in order; only run guardrails 
         async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
             run = await RUNS.get(conn, run_id)
             if run is None or run.system_id is None:
-                raise CategorizedError("capture target run is gone or unbound",
-                    category=ErrorCategory.INFRASTRUCTURE_FAILURE, details={"run_id": str(run_id)})
+                raise CategorizedError(
+                    "capture target run is gone or unbound",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"run_id": str(run_id)},
+                )
             system = await SYSTEMS.get(conn, run.system_id)
             if system is None:
-                raise CategorizedError("capture target system is gone",
-                    category=ErrorCategory.INFRASTRUCTURE_FAILURE, details={"system_id": str(run.system_id)})
+                raise CategorizedError(
+                    "capture target system is gone",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"system_id": str(run.system_id)},
+                )
             existing = await raw_vmcore_key(conn, run_id)
             if existing is not None:
                 ensure_method_match(existing, method, run_id)  # details key -> run_id
@@ -186,7 +194,7 @@ together or `ty`/tests go red. Work the sub-steps in order; only run guardrails 
   In `src/kdive/mcp/tools/catalog/artifacts/raw_fetch.py` `_resolve_key`, the `vmcore` branch:
   ```python
   require_role(ctx, run.project, Role.CONTRIBUTOR)
-  key = await raw_vmcore_key(conn, uid)   # uid = the Run UUID
+  key = await raw_vmcore_key(conn, uid)  # uid = the Run UUID
   if key is None:
       return _config_error(run_id, data={"reason": "vmcore_unavailable"})
   return key

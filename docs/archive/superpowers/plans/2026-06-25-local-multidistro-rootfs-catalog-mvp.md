@@ -108,18 +108,26 @@ source = { kind = "cloud-image", url = "https://download.fedoraproject.org/pub/f
 import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.rootfs_catalog import (
-    CloudImageSource, VirtBuilderSource, load_rootfs_catalog, resolve_rootfs_entry,
+    CloudImageSource,
+    VirtBuilderSource,
+    load_rootfs_catalog,
+    resolve_rootfs_entry,
 )
+
 
 def test_loads_both_fedora_entries():
     cat = load_rootfs_catalog()
     assert {"fedora-kdive-ready-43", "fedora-kdive-ready-44"} <= set(cat)
 
+
 def test_virt_builder_and_cloud_image_sources_parse():
     cat = load_rootfs_catalog()
     assert isinstance(cat["fedora-kdive-ready-43"].source, VirtBuilderSource)
     f44 = cat["fedora-kdive-ready-44"].source
-    assert isinstance(f44, CloudImageSource) and f44.url.endswith(".qcow2") and len(f44.sha256) == 64
+    assert (
+        isinstance(f44, CloudImageSource) and f44.url.endswith(".qcow2") and len(f44.sha256) == 64
+    )
+
 
 def test_resolve_unknown_name_is_config_error():
     with pytest.raises(CategorizedError) as e:
@@ -159,31 +167,63 @@ def test_resolve_unknown_name_is_config_error():
 def test_cloud_image_sha256_match(tmp_path):
     data = b"qcow2-bytes"
     src = CloudImageSource(url="https://x/y.qcow2", sha256=hashlib.sha256(data).hexdigest())
-    def dl(url, dest): dest.write_bytes(data)
-    acquire_base(src, tmp_path/"scratch", releasever="44", arch="x86_64",
-                 virt_builder=_unused, downloader=dl)  # no raise
+
+    def dl(url, dest):
+        dest.write_bytes(data)
+
+    acquire_base(
+        src,
+        tmp_path / "scratch",
+        releasever="44",
+        arch="x86_64",
+        virt_builder=_unused,
+        downloader=dl,
+    )  # no raise
+
 
 def test_cloud_image_sha256_mismatch_fails_closed(tmp_path):
-    src = CloudImageSource(url="https://x/y.qcow2", sha256="0"*64)
-    def dl(url, dest): dest.write_bytes(b"other")
+    src = CloudImageSource(url="https://x/y.qcow2", sha256="0" * 64)
+
+    def dl(url, dest):
+        dest.write_bytes(b"other")
+
     with pytest.raises(CategorizedError) as e:
-        acquire_base(src, tmp_path/"s", releasever="44", arch="x86_64",
-                     virt_builder=_unused, downloader=dl)
+        acquire_base(
+            src, tmp_path / "s", releasever="44", arch="x86_64", virt_builder=_unused, downloader=dl
+        )
     assert e.value.details["reason"] == "base_sha256_mismatch"
 
+
 def test_unreachable_url_named(tmp_path):
-    src = CloudImageSource(url="https://x/missing.qcow2", sha256="0"*64)
-    def dl(url, dest): raise FileNotFoundError("404")
+    src = CloudImageSource(url="https://x/missing.qcow2", sha256="0" * 64)
+
+    def dl(url, dest):
+        raise FileNotFoundError("404")
+
     with pytest.raises(CategorizedError) as e:
-        acquire_base(src, tmp_path/"s", releasever="44", arch="x86_64",
-                     virt_builder=_unused, downloader=dl)
-    assert e.value.details["reason"] == "base_unreachable" and "missing.qcow2" in str(e.value.details)
+        acquire_base(
+            src, tmp_path / "s", releasever="44", arch="x86_64", virt_builder=_unused, downloader=dl
+        )
+    assert e.value.details["reason"] == "base_unreachable" and "missing.qcow2" in str(
+        e.value.details
+    )
+
 
 def test_virt_builder_source_invokes_template(tmp_path):
     calls = {}
-    def vb(*, template, output): calls["t"] = template; Path(output).write_bytes(b"x")
-    acquire_base(VirtBuilderSource(template="fedora-43"), tmp_path/"s",
-                 releasever="43", arch="x86_64", virt_builder=vb, downloader=_unused)
+
+    def vb(*, template, output):
+        calls["t"] = template
+        Path(output).write_bytes(b"x")
+
+    acquire_base(
+        VirtBuilderSource(template="fedora-43"),
+        tmp_path / "s",
+        releasever="43",
+        arch="x86_64",
+        virt_builder=vb,
+        downloader=_unused,
+    )
     assert calls["t"] == "fedora-43"
 ```
 
@@ -215,9 +255,14 @@ def test_virt_builder_source_invokes_template(tmp_path):
 # tests/images/families/test_rhel.py — sketch
 def test_rhel_debug_argv_enables_kdump_and_sshd(tmp_path):
     fam = RhelFamily()
-    ctx = CustomizeContext(kind="debug", packages=fam.packages("debug"),
-                           authorized_key=tmp_path/"key.pub", readiness_unit_path=tmp_path/"u.service",
-                           is_cloud_image=True, cleanup=[])
+    ctx = CustomizeContext(
+        kind="debug",
+        packages=fam.packages("debug"),
+        authorized_key=tmp_path / "key.pub",
+        readiness_unit_path=tmp_path / "u.service",
+        is_cloud_image=True,
+        cleanup=[],
+    )
     argv = fam.customize_argv(ctx)
     j = " ".join(argv)
     assert "kdump-utils" in j and "makedumpfile" in j
@@ -225,28 +270,46 @@ def test_rhel_debug_argv_enables_kdump_and_sshd(tmp_path):
     assert "systemctl enable sshd.service" in argv
     assert "99-kdive-kdump.conf" in j and "unknown_nmi_panic=1" in j
 
+
 def test_rhel_cloud_image_disables_cloud_init_and_seeds_machine_id(tmp_path):
     fam = RhelFamily()
-    ctx = CustomizeContext(kind="debug", packages=fam.packages("debug"),
-                           authorized_key=tmp_path/"k", readiness_unit_path=tmp_path/"u",
-                           is_cloud_image=True, cleanup=[])
+    ctx = CustomizeContext(
+        kind="debug",
+        packages=fam.packages("debug"),
+        authorized_key=tmp_path / "k",
+        readiness_unit_path=tmp_path / "u",
+        is_cloud_image=True,
+        cleanup=[],
+    )
     argv = fam.customize_argv(ctx)
     assert any("cloud-init" in a for a in argv)
     # machine-id seed (else first-boot preset-all disables kdump on Fedora Cloud)
     assert any("/etc/machine-id" in a for a in argv)
 
+
 def test_rhel_virt_builder_source_skips_machine_id_seed(tmp_path):
     fam = RhelFamily()
-    ctx = CustomizeContext(kind="debug", packages=fam.packages("debug"),
-                           authorized_key=tmp_path/"k", readiness_unit_path=tmp_path/"u",
-                           is_cloud_image=False, cleanup=[])
+    ctx = CustomizeContext(
+        kind="debug",
+        packages=fam.packages("debug"),
+        authorized_key=tmp_path / "k",
+        readiness_unit_path=tmp_path / "u",
+        is_cloud_image=False,
+        cleanup=[],
+    )
     assert not any("/etc/machine-id" in a for a in fam.customize_argv(ctx))
+
 
 def test_rhel_virt_builder_source_skips_cloud_init(tmp_path):
     fam = RhelFamily()
-    ctx = CustomizeContext(kind="debug", packages=fam.packages("debug"),
-                           authorized_key=tmp_path/"k", readiness_unit_path=tmp_path/"u",
-                           is_cloud_image=False, cleanup=[])
+    ctx = CustomizeContext(
+        kind="debug",
+        packages=fam.packages("debug"),
+        authorized_key=tmp_path / "k",
+        readiness_unit_path=tmp_path / "u",
+        is_cloud_image=False,
+        cleanup=[],
+    )
     assert not any("cloud-init" in a for a in fam.customize_argv(ctx))
 ```
 

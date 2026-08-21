@@ -81,11 +81,13 @@ new contract wording.
 In `src/kdive/mcp/tools/catalog/artifacts/uploads.py`, change the collection response data:
 
 ```python
-        data={
-            "owner_kind": spec.owner_kind,
-            "manifest_mode": "replace",
-            "replaces_prior_manifest": True,
-        },
+data = (
+    {
+        "owner_kind": spec.owner_kind,
+        "manifest_mode": "replace",
+        "replaces_prior_manifest": True,
+    },
+)
 ```
 
 In `_upload_response()`, add structured headers before the flattened fields:

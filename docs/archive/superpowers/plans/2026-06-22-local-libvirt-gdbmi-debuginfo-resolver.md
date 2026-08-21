@@ -33,6 +33,7 @@ runs in `asyncio.to_thread` and owns no async pool (spec §2).
   ```python
   _DEBUGINFO_REF_SQL: LiteralString = "SELECT debuginfo_ref FROM runs WHERE id = %s"
 
+
   def debuginfo_ref_for_run_sync(conn: Connection, run_id: UUID) -> str | None:
       """Return the Run's published debuginfo (vmlinux) object key, or None.
 
@@ -75,6 +76,7 @@ before `GdbMiEngine().attach(...)` (spec §1, §2).
    type _ReadDebuginfoRef = Callable[[str], str | None]
    type _FetchObject = Callable[[str], bytes]
 
+
    class DebuginfoResolver:
        """Resolve + materialize a Run's debuginfo (vmlinux) for the gdb-MI attach seam.
 
@@ -83,7 +85,9 @@ before `GdbMiEngine().attach(...)` (spec §1, §2).
        unit-tested with fakes and only the IO seams are live.
        """
 
-       def __init__(self, *, read_debuginfo_ref: _ReadDebuginfoRef, fetch_object: _FetchObject) -> None:
+       def __init__(
+           self, *, read_debuginfo_ref: _ReadDebuginfoRef, fetch_object: _FetchObject
+       ) -> None:
            self._read_debuginfo_ref = read_debuginfo_ref
            self._fetch_object = fetch_object
 

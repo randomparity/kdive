@@ -11,8 +11,8 @@ onto the selected build host. For a non-`LOCAL` host it enters a **synchronous**
 context manager on the event loop and offloads only the inner `builder.build(...)`:
 
 ```python
-with factory(host, secret_registry, run_id, source) as transport:   # on the loop
-    return await _run_over_transport(capable, transport, ...)        # build() offloaded
+with factory(host, secret_registry, run_id, source) as transport:  # on the loop
+    return await _run_over_transport(capable, transport, ...)  # build() offloaded
 ```
 
 The ephemeral-libvirt factory's `__enter__` blocks the loop for minutes (VM provision + three
@@ -74,9 +74,11 @@ is the thread-identity assertion (not an import/setup error).
       with factory(host, secret_registry, run_id, source) as transport:
           git_remote, git_ref = _git_coords(parsed, run_id)
           bound = bind_over_transport(
-              builder, transport,
+              builder,
+              transport,
               host_workspace_root=host.workspace_root,
-              git_remote=git_remote, git_ref=git_ref,
+              git_remote=git_remote,
+              git_ref=git_ref,
               secret_registry=secret_registry,
           )
           return bound.build(run_id, parsed)
@@ -90,8 +92,12 @@ is the thread-identity assertion (not an import/setup error).
   ```python
   return await asyncio.to_thread(
       _build_over_transport_session,
-      capable, factory,
-      host=host, run_id=run_id, parsed=parsed, source=source,
+      capable,
+      factory,
+      host=host,
+      run_id=run_id,
+      parsed=parsed,
+      source=source,
       secret_registry=secret_registry,
   )
   ```

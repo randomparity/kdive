@@ -138,7 +138,10 @@ def _capture_output(sys_id: str, method: CaptureMethod = CaptureMethod.HOST_DUMP
         f"local/systems/{sys_id}/vmcore-{method.value}", "e1", Sensitivity.SENSITIVE, "vmcore"
     )
     red = StoredArtifact(
-        f"local/systems/{sys_id}/vmcore-{method.value}-redacted", "e2", Sensitivity.REDACTED, "vmcore"
+        f"local/systems/{sys_id}/vmcore-{method.value}-redacted",
+        "e2",
+        Sensitivity.REDACTED,
+        "vmcore",
     )
     return CaptureOutput(raw=raw, redacted=red, vmcore_build_id="deadbeef")
 ```
@@ -191,7 +194,7 @@ Update the surface-wide redaction guard `test_no_raw_vmcore_key_in_any_read_resp
 `tests/mcp/test_introspect_tools.py` — `_seed_vmcore_row` insert (line 76-77) and the `endswith` assertion (line 104):
 
 ```python
-            (sys_id, f"local/systems/{sys_id}/vmcore-host_dump"),
+((sys_id, f"local/systems/{sys_id}/vmcore-host_dump"),)
 ```
 
 ```python
@@ -248,9 +251,9 @@ non-vacuous form (identical to `test_vmcore_tools.py:471`):
 must not silently go vacuous) — line 525:
 
 ```python
-                assert all(
-                    not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs
-                ), "raw vmcore leaked (#1)"
+assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs), (
+    "raw vmcore leaked (#1)"
+)
 ```
 
 - [ ] **Step 6: Sweep for missed sites, then run the FULL suite**

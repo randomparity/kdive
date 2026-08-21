@@ -42,8 +42,15 @@ def test_stack_frames_extracts_frame_rows() -> None:
             message="done",
             payload={
                 "stack": [
-                    {"frame": {"level": "0", "func": "panic", "addr": "0xffffffff81000000",
-                               "file": "kernel/panic.c", "line": "42"}},
+                    {
+                        "frame": {
+                            "level": "0",
+                            "func": "panic",
+                            "addr": "0xffffffff81000000",
+                            "file": "kernel/panic.c",
+                            "line": "42",
+                        }
+                    },
                     {"frame": {"level": "1", "func": "do_exit"}},
                 ]
             },
@@ -165,22 +172,35 @@ through the Protocol.
 Add to `tests/providers/local_libvirt/test_debug_gdbmi.py` a new section. Import `GdbBacktrace` from `kdive.providers.ports.debug` and `MAX_BACKTRACE_FRAMES` is already imported pattern — add `from kdive.providers.shared.debug_common.gdbmi import ... ` updates as needed (the module already exports via `__all__`; access `gdbmi.MAX_BACKTRACE_FRAMES`).
 
 ```python
-def _stack_controller(frames: list[dict[str, object]], command: str = "-stack-list-frames") \
-        -> _FakeMiController:
+def _stack_controller(
+    frames: list[dict[str, object]], command: str = "-stack-list-frames"
+) -> _FakeMiController:
     return _FakeMiController(
-        responses={command: [
-            {"type": "result", "message": "done",
-             "payload": {"stack": [{"frame": f} for f in frames]}}
-        ]}
+        responses={
+            command: [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {"stack": [{"frame": f} for f in frames]},
+                }
+            ]
+        }
     )
 
 
 def test_backtrace_returns_structured_frames(tmp_path: Path) -> None:
-    controller = _stack_controller([
-        {"level": "0", "func": "panic", "addr": "0xffffffff81000000",
-         "file": "kernel/panic.c", "line": "42"},
-        {"level": "1", "func": "do_exit", "addr": "0xffffffff81001000"},
-    ])
+    controller = _stack_controller(
+        [
+            {
+                "level": "0",
+                "func": "panic",
+                "addr": "0xffffffff81000000",
+                "file": "kernel/panic.c",
+                "line": "42",
+            },
+            {"level": "1", "func": "do_exit", "addr": "0xffffffff81001000"},
+        ]
+    )
     bt = _engine().backtrace(_attachment(controller, tmp_path), max_frames=64)
     assert bt.truncated is False
     assert [f.level for f in bt.frames] == [0, 1]
@@ -217,23 +237,30 @@ def test_backtrace_raises_no_frames_on_empty_stack(tmp_path: Path) -> None:
 
 
 def test_backtrace_raises_no_frames_on_malformed_stack(tmp_path: Path) -> None:
-    controller = _FakeMiController(responses={
-        "-stack-list-frames": [
-            {"type": "result", "message": "done", "payload": {"stack": "garbage"}}
-        ]
-    })
+    controller = _FakeMiController(
+        responses={
+            "-stack-list-frames": [
+                {"type": "result", "message": "done", "payload": {"stack": "garbage"}}
+            ]
+        }
+    )
     with pytest.raises(CategorizedError) as exc:
         _engine().backtrace(_attachment(controller, tmp_path), max_frames=64)
     assert exc.value.details["code"] == "no_frames"
 
 
 def test_backtrace_classifies_running_inferior(tmp_path: Path) -> None:
-    controller = _FakeMiController(responses={
-        "-stack-list-frames": [
-            {"type": "result", "message": "error",
-             "payload": {"msg": "Cannot execute this command while the target is running."}}
-        ]
-    })
+    controller = _FakeMiController(
+        responses={
+            "-stack-list-frames": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Cannot execute this command while the target is running."},
+                }
+            ]
+        }
+    )
     with pytest.raises(CategorizedError) as exc:
         _engine().backtrace(_attachment(controller, tmp_path), max_frames=64)
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
@@ -241,11 +268,13 @@ def test_backtrace_classifies_running_inferior(tmp_path: Path) -> None:
 
 
 def test_backtrace_passes_through_other_gdb_errors(tmp_path: Path) -> None:
-    controller = _FakeMiController(responses={
-        "-stack-list-frames": [
-            {"type": "result", "message": "error", "payload": {"msg": "No stack."}}
-        ]
-    })
+    controller = _FakeMiController(
+        responses={
+            "-stack-list-frames": [
+                {"type": "result", "message": "error", "payload": {"msg": "No stack."}}
+            ]
+        }
+    )
     with pytest.raises(CategorizedError) as exc:
         _engine().backtrace(_attachment(controller, tmp_path), max_frames=64)
     # Not reclassified: a non-running gdb error keeps the generic command-failure shape.
@@ -301,12 +330,17 @@ def test_read_frame_raises_no_frame_at_level(tmp_path: Path) -> None:
 
 
 def test_read_frame_classifies_running_inferior(tmp_path: Path) -> None:
-    controller = _FakeMiController(responses={
-        "-stack-list-frames 0 0": [
-            {"type": "result", "message": "error",
-             "payload": {"msg": "Selected thread is running."}}
-        ]
-    })
+    controller = _FakeMiController(
+        responses={
+            "-stack-list-frames 0 0": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Selected thread is running."},
+                }
+            ]
+        }
+    )
     with pytest.raises(CategorizedError) as exc:
         _engine().read_frame(_attachment(controller, tmp_path), level=0)
     assert exc.value.details["code"] == "inferior_running"
@@ -334,70 +368,74 @@ _RUNNING_RE = re.compile(r"running", re.IGNORECASE)
 4. Add the methods (place after `resolve_symbol`, before the interactive-execution section):
 
 ```python
-    # --- stack walking (ADR-0275) ---------------------------------------------------------
+# --- stack walking (ADR-0275) ---------------------------------------------------------
 
-    def backtrace(
-        self, attachment: GdbMiAttachment, *, max_frames: int = MAX_BACKTRACE_FRAMES
-    ) -> GdbBacktrace:
-        """Walk the stopped inferior's stack, bounded to ``max_frames`` (ADR-0275)."""
-        if not isinstance(max_frames, int) or max_frames < 1 or max_frames > MAX_BACKTRACE_FRAMES:
-            raise _config_error(
-                f"max_frames must be between 1 and {MAX_BACKTRACE_FRAMES}",
-                code="bad_frame_count",
-                details={"max_frames": max_frames},
-            )
-        rows = stack_frames(self._stack_command(attachment, "-stack-list-frames"))
-        if not rows:
-            raise CategorizedError(
-                "gdb/MI returned no stack frames",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"code": "no_frames"},
-            )
-        parsed = [self._frame_from(row) for row in rows]
-        truncated = len(parsed) > max_frames
-        frames = [self._redact_frame(frame) for frame in parsed[:max_frames]]
-        return GdbBacktrace(frames=frames, truncated=truncated)
 
-    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
-        """Inspect one selected stack frame by ``level`` (ADR-0275).
+def backtrace(
+    self, attachment: GdbMiAttachment, *, max_frames: int = MAX_BACKTRACE_FRAMES
+) -> GdbBacktrace:
+    """Walk the stopped inferior's stack, bounded to ``max_frames`` (ADR-0275)."""
+    if not isinstance(max_frames, int) or max_frames < 1 or max_frames > MAX_BACKTRACE_FRAMES:
+        raise _config_error(
+            f"max_frames must be between 1 and {MAX_BACKTRACE_FRAMES}",
+            code="bad_frame_count",
+            details={"max_frames": max_frames},
+        )
+    rows = stack_frames(self._stack_command(attachment, "-stack-list-frames"))
+    if not rows:
+        raise CategorizedError(
+            "gdb/MI returned no stack frames",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"code": "no_frames"},
+        )
+    parsed = [self._frame_from(row) for row in rows]
+    truncated = len(parsed) > max_frames
+    frames = [self._redact_frame(frame) for frame in parsed[:max_frames]]
+    return GdbBacktrace(frames=frames, truncated=truncated)
 
-        ``level`` is gated only to a non-negative int; an out-of-range level is answered by gdb
-        as ``no_frame_at_level``, not a config error, so ``read_frame`` can reach a frame past the
-        ``backtrace`` response cap (a deep kernel stack).
-        """
-        if not isinstance(level, int) or level < 0:
-            raise _config_error(
-                f"frame level must be a non-negative integer, got {level!r}",
-                code="bad_frame_level",
-                details={"level": level},
-            )
-        rows = stack_frames(self._stack_command(attachment, f"-stack-list-frames {level} {level}"))
-        if not rows:
-            raise CategorizedError(
-                "gdb/MI returned no frame at the requested level",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"code": "no_frame_at_level", "level": level},
-            )
-        return self._redact_frame(self._frame_from(rows[0]))
 
-    def _stack_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]:
-        """Run a stack MI command, reclassifying a running-target gdb error to ``inferior_running``."""
-        try:
-            return self.execute_mi_command(attachment, command)
-        except CategorizedError as exc:
-            if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
-                payload = exc.details.get("payload")
-                msg = payload.get("msg") if isinstance(payload, dict) else None
-                if isinstance(msg, str) and _RUNNING_RE.search(msg):
-                    raise CategorizedError(
-                        "gdb/MI cannot walk the stack while the inferior is running",
-                        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                        details={"code": "inferior_running", "command": command},
-                    ) from exc
-            raise
+def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
+    """Inspect one selected stack frame by ``level`` (ADR-0275).
 
-    def _redact_frame(self, frame: GdbFrame) -> GdbFrame:
-        return GdbFrame.model_validate(self._redactor().redact_value(frame.model_dump(mode="json")))
+    ``level`` is gated only to a non-negative int; an out-of-range level is answered by gdb
+    as ``no_frame_at_level``, not a config error, so ``read_frame`` can reach a frame past the
+    ``backtrace`` response cap (a deep kernel stack).
+    """
+    if not isinstance(level, int) or level < 0:
+        raise _config_error(
+            f"frame level must be a non-negative integer, got {level!r}",
+            code="bad_frame_level",
+            details={"level": level},
+        )
+    rows = stack_frames(self._stack_command(attachment, f"-stack-list-frames {level} {level}"))
+    if not rows:
+        raise CategorizedError(
+            "gdb/MI returned no frame at the requested level",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"code": "no_frame_at_level", "level": level},
+        )
+    return self._redact_frame(self._frame_from(rows[0]))
+
+
+def _stack_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]:
+    """Run a stack MI command, reclassifying a running-target gdb error to ``inferior_running``."""
+    try:
+        return self.execute_mi_command(attachment, command)
+    except CategorizedError as exc:
+        if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
+            payload = exc.details.get("payload")
+            msg = payload.get("msg") if isinstance(payload, dict) else None
+            if isinstance(msg, str) and _RUNNING_RE.search(msg):
+                raise CategorizedError(
+                    "gdb/MI cannot walk the stack while the inferior is running",
+                    category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                    details={"code": "inferior_running", "command": command},
+                ) from exc
+        raise
+
+
+def _redact_frame(self, frame: GdbFrame) -> GdbFrame:
+    return GdbFrame.model_validate(self._redactor().redact_value(frame.model_dump(mode="json")))
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -436,23 +474,24 @@ methods, which is the precondition Task 5 needs before it adds the methods to th
 In `src/kdive/providers/fault_inject/debug/gdb.py`, add `GdbBacktrace` to the port import, then add to `FaultInjectDebugEngine` (after `interrupt`):
 
 ```python
-    def backtrace(
-        self, attachment: GdbMiAttachment, *, max_frames: int = 64
-    ) -> GdbBacktrace:
-        del attachment, max_frames
-        return GdbBacktrace(
-            frames=[
-                GdbFrame(level=0, func="panic", addr="0xffffffff81000000",
-                         file="kernel/panic.c", line=1),
-                GdbFrame(level=1, func="do_exit", addr="0xffffffff81001000"),
-            ],
-            truncated=False,
-        )
+def backtrace(self, attachment: GdbMiAttachment, *, max_frames: int = 64) -> GdbBacktrace:
+    del attachment, max_frames
+    return GdbBacktrace(
+        frames=[
+            GdbFrame(
+                level=0, func="panic", addr="0xffffffff81000000", file="kernel/panic.c", line=1
+            ),
+            GdbFrame(level=1, func="do_exit", addr="0xffffffff81001000"),
+        ],
+        truncated=False,
+    )
 
-    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
-        del attachment
-        return GdbFrame(level=level, func="panic", addr="0xffffffff81000000",
-                        file="kernel/panic.c", line=1)
+
+def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
+    del attachment
+    return GdbFrame(
+        level=level, func="panic", addr="0xffffffff81000000", file="kernel/panic.c", line=1
+    )
 ```
 
 Also add `GdbFrame` to the import if not present (the module currently imports `GdbBreakpointRef`, `GdbMiAttachment`, `GdbStopRecord`).
@@ -471,7 +510,9 @@ def test_fault_inject_engine_backtrace_and_read_frame() -> None:
 
     engine = FaultInjectDebugEngine()
     attachment = GdbMiAttachment(
-        controller=_SyntheticGdbController(), rsp_host="127.0.0.1", rsp_port=1234,
+        controller=_SyntheticGdbController(),
+        rsp_host="127.0.0.1",
+        rsp_port=1234,
         transcript_path=Path("/tmp/fi-transcript.jsonl"),
     )
     bt = engine.backtrace(attachment, max_frames=64)
@@ -515,29 +556,30 @@ carry the methods, so adding them to the Protocol keeps `ty` green at every Prot
 assignment site. In `src/kdive/providers/ports/debug.py`, in the `GdbMiEngine` Protocol, add:
 
 ```python
-    def backtrace(self, attachment: GdbMiAttachment, *, max_frames: int) -> GdbBacktrace:
-        """Walk the stopped inferior's stack through gdb/MI, bounded to ``max_frames``.
+def backtrace(self, attachment: GdbMiAttachment, *, max_frames: int) -> GdbBacktrace:
+    """Walk the stopped inferior's stack through gdb/MI, bounded to ``max_frames``.
 
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_frame_count`` for an out-of-range
-                ``max_frames`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
-                ``inferior_running`` when the target is running, ``no_frames`` when gdb returns
-                no usable frame data, or for other gdb/MI command failures;
-                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
-        """
-        ...
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_frame_count`` for an out-of-range
+            ``max_frames`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
+            ``inferior_running`` when the target is running, ``no_frames`` when gdb returns
+            no usable frame data, or for other gdb/MI command failures;
+            ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+    """
+    ...
 
-    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
-        """Inspect one selected stack frame by ``level`` through gdb/MI.
 
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_frame_level`` for a negative or
-                non-integer ``level`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
-                ``inferior_running`` when the target is running, ``no_frame_at_level`` when no
-                frame exists at ``level``, or for other gdb/MI command failures;
-                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
-        """
-        ...
+def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
+    """Inspect one selected stack frame by ``level`` through gdb/MI.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_frame_level`` for a negative or
+            non-integer ``level`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
+            ``inferior_running`` when the target is running, ``no_frame_at_level`` when no
+            frame exists at ``level``, or for other gdb/MI command failures;
+            ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+    """
+    ...
 ```
 
 Run `just type` — expected PASS (every implementer already conforms).
@@ -556,18 +598,36 @@ def test_backtrace_returns_walked(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
-            controller = _FakeMiController({
-                "-stack-list-frames": [
-                    {"type": "result", "message": "done", "payload": {"stack": [
-                        {"frame": {"level": "0", "func": "panic", "addr": "0xffffffff81000000",
-                                   "file": "kernel/panic.c", "line": "42"}},
-                        {"frame": {"level": "1", "func": "do_exit"}},
-                    ]}}
-                ]
-            })
+            controller = _FakeMiController(
+                {
+                    "-stack-list-frames": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {
+                                "stack": [
+                                    {
+                                        "frame": {
+                                            "level": "0",
+                                            "func": "panic",
+                                            "addr": "0xffffffff81000000",
+                                            "file": "kernel/panic.c",
+                                            "line": "42",
+                                        }
+                                    },
+                                    {"frame": {"level": "1", "func": "do_exit"}},
+                                ]
+                            },
+                        }
+                    ]
+                }
+            )
             runtime = _runtime(_CountingAttach(controller))
             resp = await run_engine_op(
-                pool, _ctx(), session_id, runtime,
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
                 _op_for("backtrace", runtime, session_id, max_frames=64),
             )
         assert resp.status == "walked"
@@ -584,15 +644,25 @@ def test_backtrace_running_inferior_is_categorized(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
-            controller = _FakeMiController({
-                "-stack-list-frames": [
-                    {"type": "result", "message": "error",
-                     "payload": {"msg": "Cannot execute this command while the target is running."}}
-                ]
-            })
+            controller = _FakeMiController(
+                {
+                    "-stack-list-frames": [
+                        {
+                            "type": "result",
+                            "message": "error",
+                            "payload": {
+                                "msg": "Cannot execute this command while the target is running."
+                            },
+                        }
+                    ]
+                }
+            )
             runtime = _runtime(_CountingAttach(controller))
             resp = await run_engine_op(
-                pool, _ctx(), session_id, runtime,
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
                 _op_for("backtrace", runtime, session_id, max_frames=64),
             )
         assert resp.status == "error"
@@ -606,16 +676,33 @@ def test_read_frame_returns_read(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
-            controller = _FakeMiController({
-                "-stack-list-frames 2 2": [
-                    {"type": "result", "message": "done", "payload": {"stack": [
-                        {"frame": {"level": "2", "func": "schedule", "addr": "0xffffffff8100a000"}}
-                    ]}}
-                ]
-            })
+            controller = _FakeMiController(
+                {
+                    "-stack-list-frames 2 2": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {
+                                "stack": [
+                                    {
+                                        "frame": {
+                                            "level": "2",
+                                            "func": "schedule",
+                                            "addr": "0xffffffff8100a000",
+                                        }
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                }
+            )
             runtime = _runtime(_CountingAttach(controller))
             resp = await run_engine_op(
-                pool, _ctx(), session_id, runtime,
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
                 _op_for("read_frame", runtime, session_id, level=2),
             )
         assert resp.status == "read"
@@ -688,12 +775,17 @@ def _register_debug_backtrace(
         ],
         max_frames: Annotated[
             int,
-            Field(description="Maximum frames to return (1-64); the backtrace is truncated past it."),
+            Field(
+                description="Maximum frames to return (1-64); the backtrace is truncated past it."
+            ),
         ] = 64,
     ) -> ToolResponse:
         """Walk the stopped kernel's stack on a live DebugSession. Requires contributor."""
         return await run_engine_op(
-            pool, current_context(), session_id, runtime,
+            pool,
+            current_context(),
+            session_id,
+            runtime,
             _backtrace_op(session_id, max_frames),
         )
 
@@ -713,7 +805,10 @@ def _register_debug_read_frame(
     ) -> ToolResponse:
         """Inspect one selected stack frame on a live DebugSession. Requires contributor."""
         return await run_engine_op(
-            pool, current_context(), session_id, runtime,
+            pool,
+            current_context(),
+            session_id,
+            runtime,
             _read_frame_op(session_id, level),
         )
 ```

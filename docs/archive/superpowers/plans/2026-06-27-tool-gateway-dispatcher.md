@@ -121,17 +121,21 @@ import pytest
 from kdive.jobs.handlers.runs import composite
 from kdive.jobs.payloads import BuildInstallBootPayload
 
+
 class _Recorder:
     def __init__(self, fail_on=None):
         self.calls = []
         self.fail_on = fail_on
+
     def make(self, phase):
         async def _h(conn, job, **kwargs):
             self.calls.append(phase)
             if phase == self.fail_on:
                 raise RuntimeError(f"{phase} boom")
             return None
+
         return _h
+
 
 @pytest.mark.asyncio
 async def test_runs_three_phases_in_order(monkeypatch, fake_conn, make_job):
@@ -139,10 +143,13 @@ async def test_runs_three_phases_in_order(monkeypatch, fake_conn, make_job):
     monkeypatch.setattr(composite, "build_handler", rec.make("build"))
     monkeypatch.setattr(composite, "install_handler", rec.make("install"))
     monkeypatch.setattr(composite, "boot_handler", rec.make("boot"))
-    job = make_job(kind="build_install_boot",
-                   payload={"run_id": "<uuid>", "cmdline": None, "build_host_id": "<uuid>"})
+    job = make_job(
+        kind="build_install_boot",
+        payload={"run_id": "<uuid>", "cmdline": None, "build_host_id": "<uuid>"},
+    )
     await composite.composite_handler(fake_conn, job, ports=fake_ports)
     assert rec.calls == ["build", "install", "boot"]
+
 
 @pytest.mark.asyncio
 async def test_short_circuits_on_install_failure(monkeypatch, fake_conn, make_job):
@@ -150,12 +157,14 @@ async def test_short_circuits_on_install_failure(monkeypatch, fake_conn, make_jo
     monkeypatch.setattr(composite, "build_handler", rec.make("build"))
     monkeypatch.setattr(composite, "install_handler", rec.make("install"))
     monkeypatch.setattr(composite, "boot_handler", rec.make("boot"))
-    job = make_job(kind="build_install_boot",
-                   payload={"run_id": "<uuid>", "cmdline": None, "build_host_id": "<uuid>"})
+    job = make_job(
+        kind="build_install_boot",
+        payload={"run_id": "<uuid>", "cmdline": None, "build_host_id": "<uuid>"},
+    )
     with pytest.raises(composite.CompositePhaseError) as ei:
         await composite.composite_handler(fake_conn, job, ports=fake_ports)
     assert ei.value.failed_phase == "install"
-    assert rec.calls == ["build", "install"]   # boot never runs
+    assert rec.calls == ["build", "install"]  # boot never runs
 ```
 
 (Use the repo's existing job/handler test fixtures — find them with `rg -n "make_job|fake_conn|RunHandlerPorts" tests/jobs`. If none fit, build minimal fakes: a `Job` with `.kind`, `.payload`, `.id`, and a connection double the executors tolerate when monkeypatched out.)
@@ -226,19 +235,26 @@ def _phase_job(job: Job, payload) -> Job:
     return job.model_copy(update={"payload": payload.model_dump(mode="json")})
 
 
-async def composite_handler(conn: AsyncConnection, job: Job, *, ports: RunHandlerPorts) -> str | None:
+async def composite_handler(
+    conn: AsyncConnection, job: Job, *, ports: RunHandlerPorts
+) -> str | None:
     base = BuildInstallBootPayload.model_validate(job.payload)
     run_id = base.run_id
 
-    build_job = _phase_job(job, BuildPayload(run_id=run_id, cmdline=base.cmdline,
-                                             build_host_id=base.build_host_id))
+    build_job = _phase_job(
+        job, BuildPayload(run_id=run_id, cmdline=base.cmdline, build_host_id=base.build_host_id)
+    )
     run_only = _phase_job(job, RunPayload(run_id=run_id))
 
     try:
-        await build_handler(conn, build_job, resolver=ports.resolver,
-                            secret_registry=ports.secret_registry,
-                            transport_factories=ports.transport_factories,
-                            build_phase_recorder=ports.build_phase_recorder)
+        await build_handler(
+            conn,
+            build_job,
+            resolver=ports.resolver,
+            secret_registry=ports.secret_registry,
+            transport_factories=ports.transport_factories,
+            build_phase_recorder=ports.build_phase_recorder,
+        )
     except Exception as exc:  # noqa: BLE001 - re-tagged with the failed phase, re-raised
         raise CompositePhaseError("build", exc) from exc
     try:
@@ -246,9 +262,13 @@ async def composite_handler(conn: AsyncConnection, job: Job, *, ports: RunHandle
     except Exception as exc:  # noqa: BLE001
         raise CompositePhaseError("install", exc) from exc
     try:
-        await boot_handler(conn, run_only, resolver=ports.resolver,
-                           secret_registry=ports.secret_registry,
-                           artifact_store=ports.artifact_store)
+        await boot_handler(
+            conn,
+            run_only,
+            resolver=ports.resolver,
+            secret_registry=ports.secret_registry,
+            artifact_store=ports.artifact_store,
+        )
     except Exception as exc:  # noqa: BLE001
         raise CompositePhaseError("boot", exc) from exc
     return None
@@ -311,10 +331,11 @@ Read `src/kdive/mcp/tools/lifecycle/runs/server_build.py` end to end. The compos
 @pytest.mark.asyncio
 async def test_enqueues_one_build_install_boot_job(operator_ctx, seeded_bound_run, pool):
     resp = await call_tool("runs.build_install_boot", {"run_id": str(seeded_bound_run.id)})
-    assert resp.structured_content["status"] == "accepted"   # match runs.build envelope
+    assert resp.structured_content["status"] == "accepted"  # match runs.build envelope
     jobs = await fetch_jobs(pool, run_id=seeded_bound_run.id)
     assert [j.kind for j in jobs] == ["build_install_boot"]
-    assert jobs[0].payload["build_host_id"]                  # admission ran
+    assert jobs[0].payload["build_host_id"]  # admission ran
+
 
 @pytest.mark.asyncio
 async def test_requires_operator(viewer_ctx, seeded_bound_run):
@@ -334,20 +355,32 @@ Expected: FAIL — tool `runs.build_install_boot` not registered.
 Create `src/kdive/mcp/tools/lifecycle/runs/composite.py` with a handler that mirrors `server_build.build_run` but builds `BuildInstallBootPayload` and enqueues `JobKind.BUILD_INSTALL_BOOT`. Register it in `registrar.py` next to `runs.build`:
 
 ```python
-@app.tool(name="runs.build_install_boot", annotations=_docmeta.mutating(),
-          meta={"maturity": "implemented"})
+@app.tool(
+    name="runs.build_install_boot",
+    annotations=_docmeta.mutating(),
+    meta={"maturity": "implemented"},
+)
 async def runs_build_install_boot(
-    run_id: Annotated[str, Field(description="A created, bound, not-yet-built Run to drive "
-                                 "build->install->boot as one job.")],
+    run_id: Annotated[
+        str,
+        Field(
+            description="A created, bound, not-yet-built Run to drive "
+            "build->install->boot as one job."
+        ),
+    ],
     cmdline: Annotated[str | None, Field(description="Kernel debug args (as runs.build).")] = None,
     idempotency_key: Annotated[str | None, Field(description="Replay-safe key.")] = None,
 ) -> ToolResponse:
     """Build, install, and boot a bound Run as a single pollable job (#866)."""
     ctx = current_context()
     return await with_runtime_for_run_target_kind(
-        pool, resolver, ctx, run_id,
+        pool,
+        resolver,
+        ctx,
+        run_id,
         lambda runtime: _composite_handlers(runtime).build_install_boot(
-            pool, ctx, run_id, cmdline=cmdline, idempotency_key=idempotency_key),
+            pool, ctx, run_id, cmdline=cmdline, idempotency_key=idempotency_key
+        ),
         required_role=Role.OPERATOR,
     )
 ```
@@ -401,7 +434,8 @@ git commit -m "feat(mcp): runs.build_install_boot composite tool (#866)"
 @pytest.mark.asyncio
 async def test_invoke_dispatches_to_inner_tool(viewer_ctx):
     resp = await call_tool("tools.invoke", {"name": "session.whoami", "arguments": {}})
-    assert resp.structured_content["data"]["principal"]      # whoami ran
+    assert resp.structured_content["data"]["principal"]  # whoami ran
+
 
 @pytest.mark.asyncio
 async def test_unknown_inner_name_is_configuration_error(viewer_ctx):
@@ -409,17 +443,20 @@ async def test_unknown_inner_name_is_configuration_error(viewer_ctx):
     assert resp.structured_content["error"]["category"] == "configuration_error"
     assert "tools.search" in resp.structured_content["error"]["message"]
 
+
 @pytest.mark.asyncio
 async def test_bad_arguments_is_configuration_error(viewer_ctx):
     # runs.get requires run_id; omit it
     resp = await call_tool("tools.invoke", {"name": "runs.get", "arguments": {}})
     assert resp.structured_content["error"]["category"] == "configuration_error"
 
+
 @pytest.mark.asyncio
 async def test_inner_authorization_denial_propagates(viewer_ctx, seeded_bound_run):
     # control.force_crash is admin-only; viewer must be denied identically to a direct call
-    resp = await call_tool("tools.invoke",
-                           {"name": "control.force_crash", "arguments": {"run_id": "..."}})
+    resp = await call_tool(
+        "tools.invoke", {"name": "control.force_crash", "arguments": {"run_id": "..."}}
+    )
     assert resp.structured_content["error"]["category"] == "authorization_denied"
 ```
 
@@ -440,21 +477,23 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastmcp import FastMCP
-from fastmcp.exceptions import NotFoundError   # verify exact path
+from fastmcp.exceptions import NotFoundError  # verify exact path
 from fastmcp.tools import ToolResult
 from pydantic import Field, ValidationError
 
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.responses import configuration_error   # verify exact name
+from kdive.mcp.responses import configuration_error  # verify exact name
 
 
 def register(app: FastMCP) -> None:
-    @app.tool(name="tools.invoke", annotations=_docmeta.destructive(),
-              meta={"maturity": "implemented"})
+    @app.tool(
+        name="tools.invoke", annotations=_docmeta.destructive(), meta={"maturity": "implemented"}
+    )
     async def tools_invoke(
         name: Annotated[str, Field(description="The tool to call (from tools.search).")],
-        arguments: Annotated[dict[str, Any] | None,
-                             Field(description="Arguments object for that tool.")] = None,
+        arguments: Annotated[
+            dict[str, Any] | None, Field(description="Arguments object for that tool.")
+        ] = None,
     ) -> ToolResult:
         """Call any registered tool by name (gateway dispatch, ADR-0268)."""
         try:
@@ -462,11 +501,13 @@ def register(app: FastMCP) -> None:
         except NotFoundError:
             return configuration_error(
                 reason="unknown_tool",
-                message=f"No tool named {name!r}; discover tools with tools.search.")
+                message=f"No tool named {name!r}; discover tools with tools.search.",
+            )
         except ValidationError as exc:
             return configuration_error(
                 reason="invalid_arguments",
-                message=f"Arguments for {name!r} failed validation: {exc.errors()}")
+                message=f"Arguments for {name!r} failed validation: {exc.errors()}",
+            )
 ```
 
 Adjust `configuration_error(...)`'s signature to the repo's actual helper (it may return a `ToolResponse`; ensure the return type is compatible with what FastMCP expects from a tool — check how other tools build error envelopes). Do **not** add `tools.invoke` to `_docmeta.DESTRUCTIVE_TOOLS`.
@@ -518,11 +559,13 @@ async def test_query_ranks_relevant_tool_first(operator_ctx):
     names = [m["name"] for m in resp.structured_content["data"]["matches"]]
     assert "runs.boot" in names
 
+
 @pytest.mark.asyncio
 async def test_namespace_browse_returns_plane(operator_ctx):
     resp = await call_tool("tools.search", {"namespace": "debug", "limit": 50})
     names = {m["name"] for m in resp.structured_content["data"]["matches"]}
     assert {"debug.read_memory", "debug.set_breakpoint"} <= names
+
 
 @pytest.mark.asyncio
 async def test_payload_is_capped(operator_ctx):
@@ -530,11 +573,13 @@ async def test_payload_is_capped(operator_ctx):
     assert len(resp.structured_content["data"]["matches"]) == 3
     assert resp.structured_content["data"]["truncated"] is True
 
+
 @pytest.mark.asyncio
 async def test_results_rbac_filtered(viewer_ctx):
     resp = await call_tool("tools.search", {"query": "force crash"})
     names = {m["name"] for m in resp.structured_content["data"]["matches"]}
-    assert "control.force_crash" not in names   # admin-only, hidden from a viewer
+    assert "control.force_crash" not in names  # admin-only, hidden from a viewer
+
 
 @pytest.mark.asyncio
 async def test_match_includes_full_input_schema(operator_ctx):
@@ -565,13 +610,14 @@ async def tools_search(
 ) -> ToolResponse:
     """Find tools by capability or namespace; returns full schemas to build a tools.invoke call."""
     ctx = current_context()
-    candidates = _rbac_visible_tools(app, ctx)              # reuse exposure.tool_visible
+    candidates = _rbac_visible_tools(app, ctx)  # reuse exposure.tool_visible
     ranked = _rank(candidates, query=query, namespace=namespace)  # deterministic lexical
     matches = ranked[:limit]
     if not matches and query:
         _log.info("tool_search_miss", extra={"query": query})
-    return success(data={"matches": [_describe(t) for t in matches],
-                         "truncated": len(ranked) > limit})
+    return success(
+        data={"matches": [_describe(t) for t in matches], "truncated": len(ranked) > limit}
+    )
 ```
 
 `_SEARCH_LIMIT_MAX` is the hard cap (e.g. 25). `_describe` serializes name + description + the same input schema `list_tools` emits. Ranking is deterministic lexical over name + description + `TOOL_KEYWORDS`.
@@ -616,14 +662,16 @@ git commit -m "feat(mcp): tools.search discovery + curated keyword index (#866)"
 async def test_invoke_writes_one_usage_row_keyed_to_inner(operator_ctx, pool):
     await call_tool("tools.invoke", {"name": "session.whoami", "arguments": {}})
     rows = await fetch_usage_rows(pool)
-    assert [r.tool for r in rows] == ["session.whoami"]   # not tools.invoke
+    assert [r.tool for r in rows] == ["session.whoami"]  # not tools.invoke
+
 
 @pytest.mark.asyncio
-async def test_denied_invoke_writes_one_denial_row_keyed_to_inner(viewer_ctx, pool, seeded_bound_run):
-    await call_tool("tools.invoke",
-                    {"name": "control.force_crash", "arguments": {"run_id": "..."}})
+async def test_denied_invoke_writes_one_denial_row_keyed_to_inner(
+    viewer_ctx, pool, seeded_bound_run
+):
+    await call_tool("tools.invoke", {"name": "control.force_crash", "arguments": {"run_id": "..."}})
     denials = await fetch_audit_denials(pool)
-    assert [d.tool for d in denials] == ["control.force_crash"]   # exactly one, inner-keyed
+    assert [d.tool for d in denials] == ["control.force_crash"]  # exactly one, inner-keyed
 ```
 
 (Use the existing usage/denial test helpers — `tests/mcp/middleware/test_usage.py`, `test_denial_audit.py`.)
@@ -686,7 +734,8 @@ In `tests/mcp/middleware/test_exposure.py`:
 async def test_gateway_off_returns_full_rbac_catalog(operator_ctx, monkeypatch):
     monkeypatch.delenv("KDIVE_MCP_TOOL_GATEWAY", raising=False)
     tools = await list_tools(operator_ctx)
-    assert len(tools) > 20            # full RBAC-scoped catalog, not the core set
+    assert len(tools) > 20  # full RBAC-scoped catalog, not the core set
+
 
 @pytest.mark.asyncio
 async def test_gateway_on_returns_core_intersect_rbac(operator_ctx, monkeypatch):
@@ -694,6 +743,7 @@ async def test_gateway_on_returns_core_intersect_rbac(operator_ctx, monkeypatch)
     names = {t.name for t in await list_tools(operator_ctx)}
     assert names <= CORE_TOOLS
     assert {"tools.search", "tools.invoke", "runs.build_install_boot"} <= names
+
 
 @pytest.mark.asyncio
 async def test_gateway_on_fails_open_on_error(operator_ctx, monkeypatch):
@@ -715,11 +765,20 @@ In `src/kdive/mcp/exposure.py`:
 #: The default-listed core set when the gateway is on (ADR-0268). Tunable from tool_invocation
 #: data. Everything else is reachable via tools.search + tools.invoke. CORE_TOOLS must be a subset
 #: of the live registry (guard test in tests/mcp/core/test_app.py).
-CORE_TOOLS: frozenset[str] = frozenset({
-    "tools.search", "tools.invoke", "session.whoami",
-    "runs.build_install_boot", "runs.create", "runs.get", "runs.list",
-    "allocations.request", "allocations.wait", "systems.provision",
-})
+CORE_TOOLS: frozenset[str] = frozenset(
+    {
+        "tools.search",
+        "tools.invoke",
+        "session.whoami",
+        "runs.build_install_boot",
+        "runs.create",
+        "runs.get",
+        "runs.list",
+        "allocations.request",
+        "allocations.wait",
+        "systems.provision",
+    }
+)
 ```
 
 - [ ] **Step 4: Chain the flag into `on_list_tools`**
@@ -788,8 +847,9 @@ Expected: FAIL — no `instructions` on the app.
 In `tool_index.py` add `NAMESPACE_TOC: dict[str, str]` (one-liner per namespace) and `build_instructions()` returning the gateway-pattern paragraph + the TOC. In `app.py`:
 
 ```python
-    app: FastMCP = FastMCP(name="kdive", auth=verifier or build_verifier(),
-                           instructions=build_instructions())
+app: FastMCP = FastMCP(
+    name="kdive", auth=verifier or build_verifier(), instructions=build_instructions()
+)
 ```
 
 - [ ] **Step 4: Run to verify pass**
@@ -821,6 +881,7 @@ adds the remaining guard the spec requires: `CORE_TOOLS` is a subset of the live
 ```python
 def test_core_tools_subset_of_registry() -> None:
     from kdive.mcp.exposure import CORE_TOOLS
+
     app = build_app(_pool(), verifier=_verifier(), secret_registry=SecretRegistry())
     registered = {t.name for t in envelope_module.registered_tools(app)}
     assert CORE_TOOLS <= registered, f"core not registered: {sorted(CORE_TOOLS - registered)}"

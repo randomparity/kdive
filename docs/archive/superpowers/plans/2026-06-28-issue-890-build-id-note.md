@@ -26,7 +26,9 @@ Change `_elf_with_build_id` in
 `tests/providers/local_libvirt/test_validate_external_artifacts.py`:
 
 ```python
-def _elf_with_build_id(build_id: bytes, *, note_section_name: bytes = b".note.gnu.build-id") -> bytes:
+def _elf_with_build_id(
+    build_id: bytes, *, note_section_name: bytes = b".note.gnu.build-id"
+) -> bytes:
     """Minimal ELF64-LE blob carrying a GNU build-id SHT_NOTE section."""
     note = struct.pack("<III", 4, len(build_id), 3) + b"GNU\x00" + build_id
     shstrtab = b"\x00.shstrtab\x00" + note_section_name + b"\x00"

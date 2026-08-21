@@ -70,7 +70,9 @@ class Role(StrEnum):
     OPERATOR = "operator"
     ADMIN = "admin"
 
+
 _RANK: dict[Role, int] = {Role.VIEWER: 0, Role.OPERATOR: 1, Role.ADMIN: 2}
+
 
 def roles_from_claims(claims: Mapping[str, object]) -> dict[str, Role]: ...
 def require_role(ctx: RequestContext, project: str, role: Role) -> None: ...
@@ -96,10 +98,10 @@ def require_role(ctx: RequestContext, project: str, role: Role) -> None: ...
 
   ```python
   if project not in ctx.projects:
-      raise AuthorizationError(...)          # not a member
-  held = ctx.roles.get(project)              # Role | None
+      raise AuthorizationError(...)  # not a member
+  held = ctx.roles.get(project)  # Role | None
   if held is None or _RANK[held] < _RANK[role]:
-      raise AuthorizationError(...)          # no role, or role too low
+      raise AuthorizationError(...)  # no role, or role too low
   ```
 
   `held is None` (member granted via `projects` but carrying no role on it) and
@@ -125,7 +127,8 @@ async def record(
     project: str,
 ) -> UUID: ...
 
-def args_digest(args: Mapping[str, object]) -> str: ...   # sha256 hex
+
+def args_digest(args: Mapping[str, object]) -> str: ...  # sha256 hex
 ```
 
 - **`args_digest(args)`** — `hashlib.sha256` of a canonical JSON encoding:
@@ -173,10 +176,12 @@ def args_digest(args: Mapping[str, object]) -> str: ...   # sha256 hex
 ```python
 @dataclass(frozen=True)
 class DestructiveOp:
-    kind: str               # "force_crash" | "power" | "teardown" | …
+    kind: str  # "force_crash" | "power" | "teardown" | …
     profile_opt_in: bool = False
 
+
 _DESTRUCTIVE_OPS_KEY = "destructive_ops"
+
 
 def assert_destructive_allowed(
     ctx: RequestContext, allocation: Allocation, op: DestructiveOp
@@ -269,9 +274,12 @@ to a hashable-but-compared mapping is a deliberate choice, not an accident.
 ### Errors
 
 ```python
-class AuthorizationError(Exception): ...                 # rbac.py
-class DestructiveOpDenied(AuthorizationError):           # gate.py
+class AuthorizationError(Exception): ...  # rbac.py
+
+
+class DestructiveOpDenied(AuthorizationError):  # gate.py
     def __init__(self, missing: list[str]) -> None: ...
+
     missing: list[str]
 ```
 

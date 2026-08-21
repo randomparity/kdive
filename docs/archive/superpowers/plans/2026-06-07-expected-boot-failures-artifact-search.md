@@ -418,22 +418,24 @@ async def _create_locked(
 Add the field to `Run(...)`:
 
 ```python
-expected_boot_failure=expected_boot_failure,
+expected_boot_failure = (expected_boot_failure,)
 ```
 
 Add success data:
 
 ```python
-        data={
-            "project": project,
-            "investigation_id": str(inv_uid),
-            "system_id": str(sys_uid),
-            **(
-                {"expected_boot_failure": expected_boot_failure["kind"]}
-                if expected_boot_failure is not None
-                else {}
-            ),
-        },
+data = (
+    {
+        "project": project,
+        "investigation_id": str(inv_uid),
+        "system_id": str(sys_uid),
+        **(
+            {"expected_boot_failure": expected_boot_failure["kind"]}
+            if expected_boot_failure is not None
+            else {}
+        ),
+    },
+)
 ```
 
 - [ ] **Step 4: Expose expected boot failure in `runs.get`**
@@ -467,14 +469,16 @@ Use this shape:
 ```python
 expected_boot_failure: Annotated[
     dict[str, Any] | None,
-    Field(description="Optional expected boot failure, e.g. {'kind':'console_crash','pattern':'Oops|__d_lookup'}."),
-] = None,
+    Field(
+        description="Optional expected boot failure, e.g. {'kind':'console_crash','pattern':'Oops|__d_lookup'}."
+    ),
+] = (None,)
 ```
 
 Pass it through:
 
 ```python
-expected_boot_failure=expected_boot_failure,
+expected_boot_failure = (expected_boot_failure,)
 ```
 
 - [ ] **Step 6: Run tests to verify they pass**
@@ -1226,13 +1230,16 @@ def _expected_crash_matches(run: Run, redacted_console: bytes) -> bool:
     if not isinstance(pattern, str):
         return False
     try:
-        return search_text(
-            redacted_console,
-            pattern=pattern,
-            before_lines=0,
-            after_lines=0,
-            max_matches=1,
-        ).match_count > 0
+        return (
+            search_text(
+                redacted_console,
+                pattern=pattern,
+                before_lines=0,
+                after_lines=0,
+                max_matches=1,
+            ).match_count
+            > 0
+        )
     except ArtifactSearchInputError:
         return False
 ```
@@ -1277,7 +1284,7 @@ async def boot_handler(conn: AsyncConnection, job: Job, booter: Booter) -> str |
             "boot target run is gone",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"run_id": str(run_id)},
-    )
+        )
     job_ctx = job_context_from_job(job, run.project)
 
     async def _record_boot_audit() -> None:

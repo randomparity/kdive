@@ -80,9 +80,13 @@ class BuildSandbox:
 
     def run(self, argv, *, env=None, **kwargs) -> CompletedProcess:
         return subprocess.run(
-            argv, user=self.uid, group=self.gid,
-            extra_groups=list(self.extra_groups), umask=self.umask,
-            env=self._child_env(env), **kwargs,
+            argv,
+            user=self.uid,
+            group=self.gid,
+            extra_groups=list(self.extra_groups),
+            umask=self.umask,
+            env=self._child_env(env),
+            **kwargs,
         )
 
     def _child_env(self, env):

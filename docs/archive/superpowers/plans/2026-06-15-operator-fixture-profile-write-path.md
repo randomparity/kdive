@@ -163,10 +163,7 @@ async def validate_fixtures_tool(path: Path | None = None) -> ToolResponse:
             data={"path": str(resolved), "reason": reason},
         )
     profiles: list[JsonValue] = sorted(
-        (
-            {"provider": p.provider, "name": p.name, "arch": p.arch}
-            for p in catalog.profiles
-        ),
+        ({"provider": p.provider, "name": p.name, "arch": p.arch} for p in catalog.profiles),
         key=lambda r: (r["provider"], r["name"], r["arch"]),
     )
     return ToolResponse.success(

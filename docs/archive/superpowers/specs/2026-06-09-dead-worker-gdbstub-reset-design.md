@@ -79,6 +79,7 @@ class TransportResetter(Protocol):
         self, *, transport: str, transport_handle: str | None, domain_name: str | None
     ) -> None: ...
 
+
 class NullResetter:
     async def reset(self, *, transport, transport_handle, domain_name) -> None:
         return None

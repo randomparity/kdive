@@ -68,11 +68,16 @@ unit-tested with a fake drgn program; the real drgn path runs only under the exi
 
 ```python
 class IntrospectOutput(NamedTuple):
-    tasks: dict[str, object]; modules: dict[str, object]
-    sysinfo: dict[str, object]; truncated: bool
+    tasks: dict[str, object]
+    modules: dict[str, object]
+    sysinfo: dict[str, object]
+    truncated: bool
+
+
 class VmcoreIntrospector(Protocol):
-    def from_vmcore(self, *, vmcore_ref: str, debuginfo_ref: str,
-                    expected_build_id: str) -> IntrospectOutput: ...
+    def from_vmcore(
+        self, *, vmcore_ref: str, debuginfo_ref: str, expected_build_id: str
+    ) -> IntrospectOutput: ...
 ```
 
 The helpers use fixed in-tree caps (no caller args in M0: `tasks` blocked-only, `limit=200`)

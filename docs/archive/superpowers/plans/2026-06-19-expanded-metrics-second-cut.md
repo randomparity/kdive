@@ -113,14 +113,14 @@ class BuildPhase(StrEnum):
 - [ ] **Step 5: Extend the allowlist + its test.** Add the four keys to `ALLOWED_LABEL_KEYS` after the ADR-0190 block:
 
 ```python
-        # ADR-0191 (#610 second cut): build sub-phase timings (build_phase), vmcore capture
-        # method (capture_method), debug-session transport (transport), and the
-        # deployment-bounded build-host fleet label (build_host) — bounded by the operator's
-        # build_hosts table, the one non-enum allowlist key (ADR-0191 §1).
-        "build_phase",
-        "capture_method",
-        "transport",
-        "build_host",
+# ADR-0191 (#610 second cut): build sub-phase timings (build_phase), vmcore capture
+# method (capture_method), debug-session transport (transport), and the
+# deployment-bounded build-host fleet label (build_host) — bounded by the operator's
+# build_hosts table, the one non-enum allowlist key (ADR-0191 §1).
+("build_phase",)
+("capture_method",)
+("transport",)
+("build_host",)
 ```
 
 Add to `tests/observability/test_label_allowlist.py` an assertion that these four keys are present (mirror the existing membership assertions for the ADR-0190 keys).
@@ -212,13 +212,14 @@ def take_provider_kind() -> str | None:
 - [ ] **Step 7: Implement.** In `resolver.py`, after `runtime_for_run` (line ~143), add (mirroring `binding_for_session`):
 
 ```python
-    async def binding_for_system(self, conn: AsyncConnection, system_id: UUID) -> ProviderBinding:
-        kind, name = await self._kind_and_name(conn, _KIND_FOR_SYSTEM, system_id, "system")
-        return ProviderBinding(kind=kind, runtime=self.resolve(kind).for_resource(name))
+async def binding_for_system(self, conn: AsyncConnection, system_id: UUID) -> ProviderBinding:
+    kind, name = await self._kind_and_name(conn, _KIND_FOR_SYSTEM, system_id, "system")
+    return ProviderBinding(kind=kind, runtime=self.resolve(kind).for_resource(name))
 
-    async def binding_for_run(self, conn: AsyncConnection, run_id: UUID) -> ProviderBinding:
-        kind, name = await self._kind_and_name(conn, _KIND_FOR_RUN, run_id, "run")
-        return ProviderBinding(kind=kind, runtime=self.resolve(kind).for_resource(name))
+
+async def binding_for_run(self, conn: AsyncConnection, run_id: UUID) -> ProviderBinding:
+    kind, name = await self._kind_and_name(conn, _KIND_FOR_RUN, run_id, "run")
+    return ProviderBinding(kind=kind, runtime=self.resolve(kind).for_resource(name))
 ```
 
 Refactor `runtime_for_system`/`runtime_for_run` to delegate (`return (await self.binding_for_system(...)).runtime`) so there is one resolution path, matching how `runtime_for_session` delegates to `binding_for_session`.
@@ -512,7 +513,8 @@ Plus a non-DB gauge-callback test mirroring `tests/reconciler` fleet tests: buil
 
 ```python
 # leases (LEFT JOIN so a 0-lease host still emits)
-"SELECT h.name, count(l.run_id) FROM build_hosts h "
+"SELECT h.name, count(l.run_id) FROM build_hosts h"
+
 "LEFT JOIN build_host_leases l ON l.build_host_id = h.id GROUP BY h.name"
 # capacity + reachable
 "SELECT name, max_concurrent, state FROM build_hosts"
@@ -770,15 +772,16 @@ class ConsoleTelemetry:
 ```
 
 ```python
-    def record_time_to_claim(self, job_kind: str, seconds: float) -> None:
-        """Record enqueue→claim latency (no-op when disabled or seconds < 0)."""
-        if self._enabled and seconds >= 0.0:
-            self._time_to_claim.record(seconds, {"job_kind": job_kind})
+def record_time_to_claim(self, job_kind: str, seconds: float) -> None:
+    """Record enqueue→claim latency (no-op when disabled or seconds < 0)."""
+    if self._enabled and seconds >= 0.0:
+        self._time_to_claim.record(seconds, {"job_kind": job_kind})
 
-    def record_job_retry(self, job_kind: str) -> None:
-        """Count one non-terminal requeue (no-op when disabled)."""
-        if self._enabled:
-            self._retries.add(1, {"job_kind": job_kind})
+
+def record_job_retry(self, job_kind: str) -> None:
+    """Count one non-terminal requeue (no-op when disabled)."""
+    if self._enabled:
+        self._retries.add(1, {"job_kind": job_kind})
 ```
 
 - [ ] **Step 4: Run** → PASS.

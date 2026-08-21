@@ -324,9 +324,7 @@ def test_mark_boot_window_zero_when_no_parts(monkeypatch: pytest.MonkeyPatch) ->
     assert asyncio.run(_run_mark(uuid4())) == 0
 
 
-def test_snapshot_slices_to_boot_window(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_snapshot_slices_to_boot_window(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
     # Prior boot wrote parts 0..1 (ending in a panic); this boot's window starts at the mark.
     store = FakeObjectStore()
     monkeypatch.setattr(snapshot_mod, "object_store_from_env", lambda: store)
@@ -370,39 +368,40 @@ Expected: FAIL — `RemoteLibvirtConsoleSnapshotter` has no attribute `mark_boot
 In `src/kdive/providers/remote_libvirt/console/snapshot.py`, replace the `snapshot` method and add `mark_boot_window`:
 
 ```python
-    async def mark_boot_window(self, system_id: UUID) -> int:
-        """Return the next part index for ``system_id`` — this boot's window starts here.
+async def mark_boot_window(self, system_id: UUID) -> int:
+    """Return the next part index for ``system_id`` — this boot's window starts here.
 
-        Read from the S3 part-index list (not the collector's memory), so it is unaffected by a
-        collector restart/reconnect: ``_take_index`` keeps part indices monotonic (ADR-0241).
-        """
+    Read from the S3 part-index list (not the collector's memory), so it is unaffected by a
+    collector restart/reconnect: ``_take_index`` keeps part indices monotonic (ADR-0241).
+    """
 
-        def _next_index() -> int:
-            store = object_store_from_env()
-            parts = RemoteConsolePartStore(store, "")
-            existing = parts.list_part_indices(system_id)
-            return (max(existing) + 1) if existing else 0
-
-        return await asyncio.to_thread(_next_index)
-
-    async def snapshot(
-        self, conn: AsyncConnection, system_id: UUID, run_id: UUID, start_index: int = 0
-    ) -> ConsoleSnapshot | None:
-        """Persist a ``console-<run>`` artifact from this boot's parts (index ``>= start_index``).
-
-        Returns ``None`` when the boot window has no parts yet. The blocking S3 work runs in a
-        worker thread; the row is upserted on ``conn`` so it commits with the boot step.
-        """
+    def _next_index() -> int:
         store = object_store_from_env()
-        # The conninfo is unused on this path: this snapshotter writes the per-Run `artifacts` row
-        # on the boot handler's `conn` (below), never via the part store's own teardown row path.
         parts = RemoteConsolePartStore(store, "")
-        data = await asyncio.to_thread(parts.assemble, system_id, start_index)
-        if not data:
-            return None
-        stored = await asyncio.to_thread(parts.put_run_console, system_id, run_id, data)
-        artifact_id = await _upsert_run_console_row(conn, system_id, stored)
-        return ConsoleSnapshot(artifact_id, stored.key, data)
+        existing = parts.list_part_indices(system_id)
+        return (max(existing) + 1) if existing else 0
+
+    return await asyncio.to_thread(_next_index)
+
+
+async def snapshot(
+    self, conn: AsyncConnection, system_id: UUID, run_id: UUID, start_index: int = 0
+) -> ConsoleSnapshot | None:
+    """Persist a ``console-<run>`` artifact from this boot's parts (index ``>= start_index``).
+
+    Returns ``None`` when the boot window has no parts yet. The blocking S3 work runs in a
+    worker thread; the row is upserted on ``conn`` so it commits with the boot step.
+    """
+    store = object_store_from_env()
+    # The conninfo is unused on this path: this snapshotter writes the per-Run `artifacts` row
+    # on the boot handler's `conn` (below), never via the part store's own teardown row path.
+    parts = RemoteConsolePartStore(store, "")
+    data = await asyncio.to_thread(parts.assemble, system_id, start_index)
+    if not data:
+        return None
+    stored = await asyncio.to_thread(parts.put_run_console, system_id, run_id, data)
+    artifact_id = await _upsert_run_console_row(conn, system_id, stored)
+    return ConsoleSnapshot(artifact_id, stored.key, data)
 ```
 
 Note: `asyncio.to_thread(parts.assemble, system_id, start_index)` passes `start_index` positionally.

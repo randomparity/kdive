@@ -59,6 +59,7 @@ poll loop in `lifecycle/readiness.py` plus an in-guest default-route probe gate 
   type NetworkProbe = Callable[[], bool]
   type TimeoutDetail = Callable[[], dict[str, object]]
 
+
   def wait_for_network(
       probe: NetworkProbe,
       domain_name: str,
@@ -429,9 +430,7 @@ def test_session_network_never_ready_raises_and_tears_down(tmp_path: Any) -> Non
     conn = _conn_with_base()
     agent, _state = _agent_route_after(10_000)
     # Route never appears; small network timeout so the fake clock reaches the deadline quickly.
-    vm = _build_vm_with_agent(
-        conn, tmp_path, agent, network_timeout_s=5.0, network_poll_s=1.0
-    )
+    vm = _build_vm_with_agent(conn, tmp_path, agent, network_timeout_s=5.0, network_poll_s=1.0)
     with pytest.raises(CategorizedError) as exc, vm.session(_BASE_VOLUME, run_id=RUN_ID):
         pass
     assert exc.value.category == ErrorCategory.PROVISIONING_FAILURE

@@ -174,8 +174,9 @@ def test_different_key_does_not_block(postgres_url: str) -> None:
             async with a.transaction(), advisory_xact_lock(a, LockScope.ALLOCATION, _KEY):
 
                 async def acquire_b() -> str:
-                    async with b.transaction(), advisory_xact_lock(
-                        b, LockScope.ALLOCATION, uuid4()
+                    async with (
+                        b.transaction(),
+                        advisory_xact_lock(b, LockScope.ALLOCATION, uuid4()),
                     ):
                         return "acquired"
 
@@ -374,8 +375,14 @@ _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
 def _resource(**kw: object) -> Resource:
     base: dict[str, object] = dict(
-        id=uuid4(), created_at=_DT, updated_at=_DT, kind=ResourceKind.LOCAL_LIBVIRT,
-        pool="p", cost_class="c", status=ResourceStatus.AVAILABLE, host_uri="qemu:///system",
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        kind=ResourceKind.LOCAL_LIBVIRT,
+        pool="p",
+        cost_class="c",
+        status=ResourceStatus.AVAILABLE,
+        host_uri="qemu:///system",
     )
     base.update(kw)
     return Resource.model_validate(base)
@@ -383,8 +390,13 @@ def _resource(**kw: object) -> Resource:
 
 def _allocation(resource_id: UUID, **kw: object) -> Allocation:
     base: dict[str, object] = dict(
-        id=uuid4(), created_at=_DT, updated_at=_DT, principal="alice", project="proj",
-        resource_id=resource_id, state=AllocationState.REQUESTED,
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="alice",
+        project="proj",
+        resource_id=resource_id,
+        state=AllocationState.REQUESTED,
     )
     base.update(kw)
     return Allocation.model_validate(base)
@@ -392,8 +404,14 @@ def _allocation(resource_id: UUID, **kw: object) -> Allocation:
 
 def _system(allocation_id: UUID, **kw: object) -> System:
     base: dict[str, object] = dict(
-        id=uuid4(), created_at=_DT, updated_at=_DT, principal="alice", project="proj",
-        allocation_id=allocation_id, state=SystemState.DEFINED, provisioning_profile={"k": "v"},
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="alice",
+        project="proj",
+        allocation_id=allocation_id,
+        state=SystemState.DEFINED,
+        provisioning_profile={"k": "v"},
     )
     base.update(kw)
     return System.model_validate(base)
@@ -401,8 +419,13 @@ def _system(allocation_id: UUID, **kw: object) -> System:
 
 def _investigation(**kw: object) -> Investigation:
     base: dict[str, object] = dict(
-        id=uuid4(), created_at=_DT, updated_at=_DT, principal="alice", project="proj",
-        title="t", state=InvestigationState.OPEN,
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="alice",
+        project="proj",
+        title="t",
+        state=InvestigationState.OPEN,
     )
     base.update(kw)
     return Investigation.model_validate(base)
@@ -410,8 +433,14 @@ def _investigation(**kw: object) -> Investigation:
 
 def _run(investigation_id: UUID, system_id: UUID, **kw: object) -> Run:
     base: dict[str, object] = dict(
-        id=uuid4(), created_at=_DT, updated_at=_DT, principal="alice", project="proj",
-        investigation_id=investigation_id, system_id=system_id, state=RunState.CREATED,
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="alice",
+        project="proj",
+        investigation_id=investigation_id,
+        system_id=system_id,
+        state=RunState.CREATED,
         build_profile={"cfg": 1},
     )
     base.update(kw)
@@ -420,8 +449,14 @@ def _run(investigation_id: UUID, system_id: UUID, **kw: object) -> Run:
 
 def _debug_session(run_id: UUID, **kw: object) -> DebugSession:
     base: dict[str, object] = dict(
-        id=uuid4(), created_at=_DT, updated_at=_DT, principal="alice", project="proj",
-        run_id=run_id, state=DebugSessionState.ATTACH, transport="gdb",
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="alice",
+        project="proj",
+        run_id=run_id,
+        state=DebugSessionState.ATTACH,
+        transport="gdb",
     )
     base.update(kw)
     return DebugSession.model_validate(base)
@@ -429,8 +464,14 @@ def _debug_session(run_id: UUID, **kw: object) -> DebugSession:
 
 def _job(**kw: object) -> Job:
     base: dict[str, object] = dict(
-        id=uuid4(), created_at=_DT, updated_at=_DT, kind=JobKind.BUILD, state=JobState.QUEUED,
-        max_attempts=3, authorizing={"principal": "alice"}, dedup_key=str(uuid4()),
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        kind=JobKind.BUILD,
+        state=JobState.QUEUED,
+        max_attempts=3,
+        authorizing={"principal": "alice"},
+        dedup_key=str(uuid4()),
     )
     base.update(kw)
     return Job.model_validate(base)
@@ -438,8 +479,15 @@ def _job(**kw: object) -> Job:
 
 def _artifact(owner_id: UUID, **kw: object) -> Artifact:
     base: dict[str, object] = dict(
-        id=uuid4(), created_at=_DT, updated_at=_DT, owner_kind="system", owner_id=owner_id,
-        object_key="k", etag="e", sensitivity=Sensitivity.REDACTED, retention_class="default",
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        owner_kind="system",
+        owner_id=owner_id,
+        object_key="k",
+        etag="e",
+        sensitivity=Sensitivity.REDACTED,
+        retention_class="default",
     )
     base.update(kw)
     return Artifact.model_validate(base)
@@ -465,9 +513,7 @@ def test_roundtrip_every_object(migrated_url: str) -> None:
 
             inv = await INVESTIGATIONS.insert(
                 conn,
-                _investigation(
-                    external_refs=[ExternalRef(tracker="bz", id="1", url="http://x")]
-                ),
+                _investigation(external_refs=[ExternalRef(tracker="bz", id="1", url="http://x")]),
             )
             assert await INVESTIGATIONS.get(conn, inv.id) == inv
 
@@ -572,7 +618,9 @@ def test_json_columns_match_schema(migrated_url: str) -> None:
                     (repo._table,),
                 )
                 actual = {row[0] for row in await cur.fetchall()}
-                assert repo._json_columns == actual, f"{repo._table}: {repo._json_columns} != {actual}"
+                assert repo._json_columns == actual, (
+                    f"{repo._table}: {repo._json_columns} != {actual}"
+                )
 
     asyncio.run(_run_test())
 ```
@@ -727,7 +775,10 @@ class StatefulRepository(Repository[M], Generic[M, S]):
 
 
 RESOURCES = StatefulRepository(
-    Resource, "resources", ResourceStatus, state_column="status",
+    Resource,
+    "resources",
+    ResourceStatus,
+    state_column="status",
     json_columns=frozenset({"capabilities"}),
 )
 ALLOCATIONS = StatefulRepository(
@@ -741,9 +792,7 @@ INVESTIGATIONS = StatefulRepository(
 )
 RUNS = StatefulRepository(Run, "runs", RunState, json_columns=frozenset({"build_profile"}))
 DEBUG_SESSIONS = StatefulRepository(DebugSession, "debug_sessions", DebugSessionState)
-JOBS = StatefulRepository(
-    Job, "jobs", JobState, json_columns=frozenset({"payload", "authorizing"})
-)
+JOBS = StatefulRepository(Job, "jobs", JobState, json_columns=frozenset({"payload", "authorizing"}))
 ARTIFACTS = Repository(Artifact, "artifacts")
 ```
 

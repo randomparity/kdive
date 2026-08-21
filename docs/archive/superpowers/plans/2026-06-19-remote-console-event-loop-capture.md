@@ -67,11 +67,11 @@ def test_would_block_keeps_stream_open_and_captures_later_data() -> None:
     assert collector.pump_once() is False  # would-block: no data, stream kept
     assert stream.closed is False
     assert opener.opens == 1
-    assert collector.pump_once() is True   # "booting\n" on the same stream
+    assert collector.pump_once() is True  # "booting\n" on the same stream
     assert collector.pump_once() is False  # would-block again, still no drop
     assert stream.closed is False
-    assert collector.pump_once() is True   # "emergency\n"
-    assert opener.opens == 1               # never reopened
+    assert collector.pump_once() is True  # "emergency\n"
+    assert opener.opens == 1  # never reopened
     collector.finalize()
     assert store.artifact == b"booting\nemergency\n"
 ```
@@ -159,7 +159,9 @@ class _FakeLibvirtStream:
 
 
 def _wrapped(value: object) -> _RemoteConsoleStream:
-    return _RemoteConsoleStream(conn=object(), stream=_FakeLibvirtStream(value), closer=lambda: None)
+    return _RemoteConsoleStream(
+        conn=object(), stream=_FakeLibvirtStream(value), closer=lambda: None
+    )
 
 
 def test_recv_maps_would_block_to_none() -> None:
@@ -251,8 +253,8 @@ def test_registers_and_spawns_once_idempotent() -> None:
     mod.ensure_libvirt_event_loop(register=register, run=lambda: None, spawn=spawn)
     mod.ensure_libvirt_event_loop(register=register, run=lambda: None, spawn=spawn)
 
-    assert registers == [1]          # registered exactly once
-    assert len(spawns) == 1          # run-thread started exactly once
+    assert registers == [1]  # registered exactly once
+    assert len(spawns) == 1  # run-thread started exactly once
     _reset()
 
 

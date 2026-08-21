@@ -19,8 +19,8 @@ actual `builder.build(...)` was offloaded via `asyncio.to_thread`, but the synch
 *session* that wraps it was entered on the event loop:
 
 ```python
-with factory(host, secret_registry, run_id, source) as transport:   # __enter__ on the loop
-    return await _run_over_transport(...)                            # build() offloaded
+with factory(host, secret_registry, run_id, source) as transport:  # __enter__ on the loop
+    return await _run_over_transport(...)  # build() offloaded
 ```
 
 For the ephemeral-libvirt build host, `factory(...)` is `ephemeral_build_session`, whose
@@ -48,7 +48,13 @@ call, so none of it executes on the event-loop thread:
 ```python
 return await asyncio.to_thread(
     _build_over_transport_session,
-    builder, factory, host=..., run_id=..., parsed=..., source=..., secret_registry=...,
+    builder,
+    factory,
+    host=...,
+    run_id=...,
+    parsed=...,
+    source=...,
+    secret_registry=...,
 )
 ```
 

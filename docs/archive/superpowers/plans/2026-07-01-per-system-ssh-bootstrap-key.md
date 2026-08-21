@@ -151,6 +151,7 @@ def test_materialized_private_key_cleans_up_on_exception() -> None:
 # Required extra imports: `import asyncio`; `from psycopg import AsyncConnection`;
 # `from psycopg_pool import AsyncConnectionPool`.
 
+
 async def _seed_system(conn: AsyncConnection) -> UUID:
     """Seed the resources -> allocations -> systems FK chain; return the system_id.
 
@@ -376,9 +377,7 @@ async def load_system_bootstrap_private_key(
 async def delete_system_bootstrap_key(conn: AsyncConnection, system_id: UUID) -> None:
     """Delete the System's bootstrap key row; idempotent (absent row is a no-op)."""
     async with conn.cursor() as cur:
-        await cur.execute(
-            "DELETE FROM system_bootstrap_keys WHERE system_id = %s", (system_id,)
-        )
+        await cur.execute("DELETE FROM system_bootstrap_keys WHERE system_id = %s", (system_id,))
 
 
 @contextlib.contextmanager
@@ -515,7 +514,9 @@ def inject_authorized_key_argv(overlay_path: str, pubkey_file: str) -> list[str]
     ]
 
 
-def _real_inject_authorized_key(overlay_path: str, pubkey: str) -> None:  # pragma: no cover - live_vm
+def _real_inject_authorized_key(
+    overlay_path: str, pubkey: str
+) -> None:  # pragma: no cover - live_vm
     """Inject ``pubkey`` into the overlay's ``/root/.ssh/authorized_keys`` via libguestfs."""
     scratch = Path(tempfile.mkdtemp(prefix="kdive-inject-"))
     try:
@@ -554,6 +555,7 @@ In `provisioning.py`, add the parameter and run customizers after `prepare_overl
 
 ```python
 from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import OverlayCustomizer
+
 
 def provision(
     self,
@@ -694,8 +696,10 @@ from kdive.prereqs.system_bootstrap_key import (
     materialized_private_key,
 )
 
+
 def build_authorize_argv(port: int, key_path: str) -> list[str]:
     return ["ssh", "-i", key_path, "-o", "BatchMode=yes", ...]  # rest unchanged
+
 
 async def authorize_ssh_key_handler(conn, job, *, resolver, ssh_exec=_real_ssh_exec):
     ...

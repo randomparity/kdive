@@ -41,11 +41,12 @@ Three forces bound the implementation shapes, which the spec leaves open:
    ```python
    class OwnedDomain(Protocol):
        name: str
-       system_id: UUID | None   # parsed from the libvirt metadata tag; None = untagged
+       system_id: UUID | None  # parsed from the libvirt metadata tag; None = untagged
+
 
    class InfraReaper(Protocol):
        async def list_owned(self) -> list[OwnedDomain]: ...
-       async def destroy(self, name: str) -> None: ...   # idempotent: absent domain is a no-op
+       async def destroy(self, name: str) -> None: ...  # idempotent: absent domain is a no-op
    ```
 
    Tests inject a fake; the local-libvirt provider implements `InfraReaper` when it

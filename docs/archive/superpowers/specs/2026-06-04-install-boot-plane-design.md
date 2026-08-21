@@ -104,8 +104,9 @@ class Installer(Protocol):
     # run_id keys the per-Run staging path (§5.2); cmdline is the gated command line (§5.1).
     def install(self, system_id: UUID, run_id: UUID, kernel_ref: str, *, cmdline: str) -> None: ...
 
+
 class Booter(Protocol):
-    def boot(self, system_id: UUID) -> None: ...          # boot + readiness preflight
+    def boot(self, system_id: UUID) -> None: ...  # boot + readiness preflight
 ```
 
 `LocalLibvirtInstall` satisfies both (one class owns the domain redefine + boot +

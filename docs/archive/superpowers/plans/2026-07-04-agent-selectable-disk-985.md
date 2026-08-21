@@ -88,7 +88,9 @@ def test_disk_ceiling_none_when_absent_or_invalid():
 def test_require_disk_ceiling_fails_closed_when_absent():
     rid = uuid.uuid4()
     with pytest.raises(CategorizedError) as exc:
-        ResourceCapabilities.from_mapping({}).require_disk_ceiling(resource_id=rid, resource_name="h1")
+        ResourceCapabilities.from_mapping({}).require_disk_ceiling(
+            resource_id=rid, resource_name="h1"
+        )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["key"] == DISK_GB_KEY
 ```
@@ -159,14 +161,17 @@ from kdive.domain.accounting.cost import validate_disk_against_resource
 from kdive.domain.errors import CategorizedError, ErrorCategory
 # build a Resource whose capabilities advertise disk_gb=50 (reuse the module's Resource factory/fixture)
 
+
 def test_disk_at_ceiling_is_admitted(resource_with_disk_ceiling_50):
     validate_disk_against_resource(50, resource_with_disk_ceiling_50)  # no raise
+
 
 def test_disk_over_ceiling_is_configuration_error(resource_with_disk_ceiling_50):
     with pytest.raises(CategorizedError) as exc:
         validate_disk_against_resource(51, resource_with_disk_ceiling_50)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["field"] == "disk_gb"
+
 
 def test_none_disk_skips_check(resource_with_disk_ceiling_50):
     validate_disk_against_resource(None, resource_with_disk_ceiling_50)  # no raise
@@ -241,10 +246,12 @@ def test_discovery_advertises_disk_ceiling_from_host_storage(monkeypatch):
     import shutil
     import types
     from kdive.domain.catalog.resource_capabilities import DISK_GB_KEY
+
     # discovery reads only `.total`, so a SimpleNamespace suffices (avoid the private
     # shutil._ntuple_diskusage).
     monkeypatch.setattr(
-        shutil, "disk_usage",
+        shutil,
+        "disk_usage",
         lambda p: types.SimpleNamespace(total=200 * 1024**3, used=0, free=200 * 1024**3),
     )
     disco = _discovery_with_fake_conn(vcpus=8, memory_mb=16384)  # existing test helper
@@ -268,6 +275,7 @@ Add a private helper and a capabilities entry:
 
 ```python
 _BYTES_PER_GB = 1024**3
+
 
 def _host_disk_ceiling_gb() -> int:
     """Total capacity (GB) of the storage backing per-System overlays (ADR-0312).
@@ -318,6 +326,7 @@ from kdive.providers.local_libvirt.lifecycle.storage import ProvisioningFiles, P
 
 _BASE_BYTES = 6 * 1024**3
 
+
 def _files(created, resize_calls, exists=False):
     return ProvisioningFiles(
         make_overlay=lambda base, overlay: None,
@@ -326,11 +335,13 @@ def _files(created, resize_calls, exists=False):
         resize_overlay=lambda overlay, gb: resize_calls.append((overlay, gb)),
     )
 
+
 def test_grows_overlay_when_disk_exceeds_base():
     calls = []
     files = _files(created=True, resize_calls=calls)
     files.prepare_overlay(_SYS_ID, base="/b.qcow2", disk_gb=60)
     assert calls == [(f"/var/lib/kdive/rootfs/{_SYS_ID}-overlay.qcow2", 60)]
+
 
 def test_no_resize_at_or_below_base():
     calls = []
@@ -340,11 +351,13 @@ def test_no_resize_at_or_below_base():
     files.prepare_overlay(_SYS_ID, base="/b.qcow2", disk_gb=3)  # < base
     assert calls == []
 
+
 def test_no_resize_on_reuse_path():
     calls = []
     files = _files(created=True, resize_calls=calls, exists=True)  # overlay already present
     files.prepare_overlay(_SYS_ID, base="/b.qcow2", disk_gb=60)
     assert calls == []  # never touch a reused/live overlay
+
 
 def test_none_disk_never_resizes():
     calls = []
@@ -362,6 +375,7 @@ Use a real `UUID` for `_SYS_ID` matching the existing test module's convention.
 ```python
 _BYTES_PER_GB = 1024**3
 
+
 def _real_overlay_virtual_size(overlay: str) -> int:
     """Return the overlay's qcow2 virtual size in bytes via `qemu-img info`."""
     qemu_img = shutil.which(_QEMU_IMG)
@@ -373,16 +387,22 @@ def _real_overlay_virtual_size(overlay: str) -> int:
         )
     result = subprocess.run(  # noqa: S603 - resolved qemu-img; overlay is argv data
         [qemu_img, "info", "--output=json", overlay],
-        capture_output=True, text=True, timeout=_QEMU_IMG_TIMEOUT_S, check=False,
+        capture_output=True,
+        text=True,
+        timeout=_QEMU_IMG_TIMEOUT_S,
+        check=False,
     )
     if result.returncode != 0:
         raise CategorizedError(
             "qemu-img failed to read the overlay virtual size",
             category=ErrorCategory.PROVISIONING_FAILURE,
-            details={**_overlay_error_details("overlay_info", overlay, tool=_QEMU_IMG),
-                     "stderr": result.stderr[-_QEMU_IMG_ERROR_TAIL_CHARS:]},
+            details={
+                **_overlay_error_details("overlay_info", overlay, tool=_QEMU_IMG),
+                "stderr": result.stderr[-_QEMU_IMG_ERROR_TAIL_CHARS:],
+            },
         )
     import json
+
     return int(json.loads(result.stdout)["virtual-size"])
 
 
@@ -397,15 +417,20 @@ def _real_resize_overlay(overlay: str, disk_gb: int) -> None:
         )
     result = subprocess.run(  # noqa: S603 - resolved qemu-img; overlay is argv data
         [qemu_img, "resize", overlay, f"{disk_gb}G"],
-        capture_output=True, text=True, timeout=_QEMU_IMG_TIMEOUT_S, check=False,
+        capture_output=True,
+        text=True,
+        timeout=_QEMU_IMG_TIMEOUT_S,
+        check=False,
     )
     if result.returncode != 0:
         raise CategorizedError(
             "qemu-img failed to resize the per-System rootfs overlay",
             category=ErrorCategory.PROVISIONING_FAILURE,
-            details={**_overlay_error_details("resize_overlay", overlay, tool=_QEMU_IMG),
-                     "disk_gb": disk_gb,
-                     "stderr": result.stderr[-_QEMU_IMG_ERROR_TAIL_CHARS:]},
+            details={
+                **_overlay_error_details("resize_overlay", overlay, tool=_QEMU_IMG),
+                "disk_gb": disk_gb,
+                "stderr": result.stderr[-_QEMU_IMG_ERROR_TAIL_CHARS:],
+            },
         )
 ```
 
@@ -426,20 +451,21 @@ On `ProvisioningFiles`:
 Change `prepare_overlay`:
 
 ```python
-    def prepare_overlay(self, system_id: UUID, *, base: str, disk_gb: int | None) -> PreparedOverlay:
-        overlay = overlay_path(system_id)
-        created = not self.overlay_exists(overlay)
-        if created:
-            self.make_overlay(base, overlay)
-            self._grow_if_requested(overlay, disk_gb)
-        return PreparedOverlay(path=overlay, created=created)
+def prepare_overlay(self, system_id: UUID, *, base: str, disk_gb: int | None) -> PreparedOverlay:
+    overlay = overlay_path(system_id)
+    created = not self.overlay_exists(overlay)
+    if created:
+        self.make_overlay(base, overlay)
+        self._grow_if_requested(overlay, disk_gb)
+    return PreparedOverlay(path=overlay, created=created)
 
-    def _grow_if_requested(self, overlay: str, disk_gb: int | None) -> None:
-        if disk_gb is None:
-            return
-        target = disk_gb * _BYTES_PER_GB
-        if target > self.overlay_virtual_size(overlay):
-            self.resize_overlay(overlay, disk_gb)
+
+def _grow_if_requested(self, overlay: str, disk_gb: int | None) -> None:
+    if disk_gb is None:
+        return
+    target = disk_gb * _BYTES_PER_GB
+    if target > self.overlay_virtual_size(overlay):
+        self.resize_overlay(overlay, disk_gb)
 ```
 
 Note: a resize failure raises before the domain is defined, so the existing `cleanup_overlay_if_created` in the provisioner's failure path reclaims the just-created overlay.
@@ -534,6 +560,7 @@ git commit -m "feat(985): enable cloud-init resize_rootfs + guard in build self-
 ```python
 # tests/db/test_migration_0061_debug_shape.py
 """Migration 0061 seeds the curated 'debug' system shape (#985, ADR-0312)."""
+
 import psycopg
 
 

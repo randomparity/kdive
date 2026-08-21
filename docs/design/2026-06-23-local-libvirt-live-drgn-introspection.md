@@ -67,7 +67,9 @@ Replace (not deprecate — CLAUDE.md "replace, don't deprecate") the two `None` 
 (`open_live_program`, `run_helper`) with one injected seam:
 
 ```python
-type _RunLiveHelper = Callable[[str, str], dict[str, object]]  # (transport_handle, helper) -> section
+type _RunLiveHelper = Callable[
+    [str, str], dict[str, object]
+]  # (transport_handle, helper) -> section
 ```
 
 `from_env()` wires the real `_real_run_live_helper`; a unit test injects a fake that returns a

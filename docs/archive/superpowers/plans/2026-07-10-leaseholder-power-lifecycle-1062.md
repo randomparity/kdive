@@ -365,9 +365,10 @@ Expected: FAIL — the note does not mention `destructive_ops` yet.
 - [ ] **Step 3: Implement.** In `profile_examples.py`, append one sentence to `_REPLACE_NOTE`:
 
 ```python
-    "The provider destructive_ops list opts into force_crash (deliberate kernel crash / "
-    "fault injection) and reprovision only — leave it empty unless you need those; "
-    "power/reboot no longer require it (ADR-0320)."
+"The provider destructive_ops list opts into force_crash (deliberate kernel crash /"
+
+"fault injection) and reprovision only — leave it empty unless you need those; "
+"power/reboot no longer require it (ADR-0320)."
 ```
 
   In `provisioning.py`, update the **two** class docstrings that describe `destructive_ops` — the local-libvirt section (~line 115-119) and `RemoteLibvirtProfile` (~line 164-165) — to: "opts into `force_crash` and `reprovision` (deny-by-default); power is contributor lifecycle and is not gated by it (ADR-0320)." The `FaultInjectProfile` class docstring does not mention `destructive_ops` and its field is a bare `Field(default_factory=list)`; leave it unchanged (no third docstring exists).

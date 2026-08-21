@@ -126,13 +126,21 @@ class _FakeTransport:
 def test_bytes_source_puts_with_tenant_owner_sensitivity() -> None:
     store = _FakeStore()
     stored = publish_artifact_source(
-        store, _RUN, "kernel", ArtifactBytes(b"img"),
-        tenant="local", sensitivity=Sensitivity.SENSITIVE, retention_class="build",
+        store,
+        _RUN,
+        "kernel",
+        ArtifactBytes(b"img"),
+        tenant="local",
+        sensitivity=Sensitivity.SENSITIVE,
+        retention_class="build",
     )
     assert store.presigns == []
     [req] = store.puts
     assert (req.tenant, req.owner_kind, req.owner_id, req.name) == (
-        "local", "runs", str(_RUN), "kernel"
+        "local",
+        "runs",
+        str(_RUN),
+        "kernel",
     )
     assert req.data == b"img"
     assert req.sensitivity is Sensitivity.SENSITIVE
@@ -147,8 +155,13 @@ def test_remote_file_presigns_base64_sha256_and_uploads() -> None:
     transport.files[path] = content
 
     stored = publish_artifact_source(
-        store, _RUN, "kernel", ArtifactRemoteFile(path=path, transport=transport),
-        tenant="remote-libvirt", sensitivity=Sensitivity.SENSITIVE, retention_class="build",
+        store,
+        _RUN,
+        "kernel",
+        ArtifactRemoteFile(path=path, transport=transport),
+        tenant="remote-libvirt",
+        sensitivity=Sensitivity.SENSITIVE,
+        retention_class="build",
     )
 
     assert store.puts == []
@@ -172,8 +185,13 @@ def test_remote_file_sha256sum_nonzero_is_build_failure() -> None:
     transport.files["/p"] = b"x"
     with pytest.raises(CategorizedError) as caught:
         publish_artifact_source(
-            store, _RUN, "kernel", ArtifactRemoteFile(path="/p", transport=transport),
-            tenant="local", sensitivity=Sensitivity.SENSITIVE, retention_class="build",
+            store,
+            _RUN,
+            "kernel",
+            ArtifactRemoteFile(path="/p", transport=transport),
+            tenant="local",
+            sensitivity=Sensitivity.SENSITIVE,
+            retention_class="build",
         )
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
 ```
@@ -423,11 +441,12 @@ git commit -m "refactor(build): remote-libvirt publish uses neutral helper"
 In `_Seams` replace `read_kernel_image`/`read_vmlinux` with:
 
 ```python
-    def read_kernel_source(self, workspace: Path) -> ArtifactSource:
-        return ArtifactBytes(b"bzImage-bytes")
+def read_kernel_source(self, workspace: Path) -> ArtifactSource:
+    return ArtifactBytes(b"bzImage-bytes")
 
-    def read_vmlinux_source(self, workspace: Path) -> ArtifactSource:
-        return ArtifactBytes(b"vmlinux-bytes")
+
+def read_vmlinux_source(self, workspace: Path) -> ArtifactSource:
+    return ArtifactBytes(b"vmlinux-bytes")
 ```
 
 Update `_builder` and the three direct `LocalLibvirtBuild(...)` constructions (helper at ~147,
@@ -482,27 +501,28 @@ with `read_kernel_source`/`read_vmlinux_source` (typed `_ReadArtifactSource`); t
 `build()` and `publish()`:
 
 ```python
-    def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput:
-        """Build a kernel and store two artifacts; return their refs and the build-id."""
-        workspace = self._orchestrator.build_workspace(run_id, profile)
-        build_id = self._read_build_id(workspace)
-        kernel = self.publish(run_id, "kernel", self._read_kernel_source(workspace))
-        vmlinux = self.publish(run_id, "vmlinux", self._read_vmlinux_source(workspace))
-        return BuildOutput(kernel_ref=kernel.key, debuginfo_ref=vmlinux.key, build_id=build_id)
+def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput:
+    """Build a kernel and store two artifacts; return their refs and the build-id."""
+    workspace = self._orchestrator.build_workspace(run_id, profile)
+    build_id = self._read_build_id(workspace)
+    kernel = self.publish(run_id, "kernel", self._read_kernel_source(workspace))
+    vmlinux = self.publish(run_id, "vmlinux", self._read_vmlinux_source(workspace))
+    return BuildOutput(kernel_ref=kernel.key, debuginfo_ref=vmlinux.key, build_id=build_id)
 
-    def publish(self, run_id: UUID, name: str, source: ArtifactSource) -> StoredArtifact:
-        """Publish one build artifact; bytes PUT directly, host files via presigned PUT."""
-        if self._store is None:
-            self._store = self._store_factory()
-        return publish_artifact_source(
-            self._store,
-            run_id,
-            name,
-            source,
-            tenant=self._tenant,
-            sensitivity=Sensitivity.SENSITIVE,
-            retention_class=_RETENTION_CLASS,
-        )
+
+def publish(self, run_id: UUID, name: str, source: ArtifactSource) -> StoredArtifact:
+    """Publish one build artifact; bytes PUT directly, host files via presigned PUT."""
+    if self._store is None:
+        self._store = self._store_factory()
+    return publish_artifact_source(
+        self._store,
+        run_id,
+        name,
+        source,
+        tenant=self._tenant,
+        sensitivity=Sensitivity.SENSITIVE,
+        retention_class=_RETENTION_CLASS,
+    )
 ```
 
 Delete the old `_put`. Add `over_transport` (mirrors remote, no modules/bundle):
@@ -655,7 +675,9 @@ def test_over_transport_publishes_bzimage_and_vmlinux_via_presign(tmp_path: Path
     profile = BuildProfile.parse(
         {
             "schema_version": 1,
-            "kernel_source_ref": {"git": {"remote": "https://git.example/linux.git", "ref": "v6.9"}},
+            "kernel_source_ref": {
+                "git": {"remote": "https://git.example/linux.git", "ref": "v6.9"}
+            },
             "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
         }
     )

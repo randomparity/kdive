@@ -127,9 +127,7 @@ class _FakeStore:
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         self.writes.append(request)
-        return StoredArtifact(
-            request.key(), "etag", request.sensitivity, request.retention_class
-        )
+        return StoredArtifact(request.key(), "etag", request.sensitivity, request.retention_class)
 
 
 class _FakeConn:
@@ -158,7 +156,9 @@ def _backend() -> RecordingBackend:
     return RecordingBackend()
 
 
-def _install(handler: _Handler, store: _FakeStore, registry: SecretRegistry) -> RemoteLibvirtInstall:
+def _install(
+    handler: _Handler, store: _FakeStore, registry: SecretRegistry
+) -> RemoteLibvirtInstall:
     return RemoteLibvirtInstall(
         secret_registry=registry,
         config_factory=_config,
@@ -613,72 +613,76 @@ Expected: FAIL — `AttributeError: 'RemoteLibvirtInstall' object has no attribu
 Insert after `install()` (before `_agent_exec`):
 
 ```python
-    def boot(self, system_id: UUID) -> None:
-        """Reboot into the installed kernel and confirm a fresh boot by boot_id change.
+def boot(self, system_id: UUID) -> None:
+    """Reboot into the installed kernel and confirm a fresh boot by boot_id change.
 
-        Reads the guest's pre-reboot boot_id, runs the helper's atomic select-``kdive``-slot +
-        detached reboot, then polls boot_id until it differs from the baseline — proving a real
-        boot transition (a stale agent connection cannot fake a new boot_id, ADR-0082 §3).
+    Reads the guest's pre-reboot boot_id, runs the helper's atomic select-``kdive``-slot +
+    detached reboot, then polls boot_id until it differs from the baseline — proving a real
+    boot transition (a stale agent connection cannot fake a new boot_id, ADR-0082 §3).
 
-        Raises:
-            CategorizedError: ``INSTALL_FAILURE`` for a domain lookup fault or a non-zero
-                boot-id baseline read; ``TRANSPORT_FAILURE`` when the guest agent is unreachable
-                before the reboot; ``BOOT_TIMEOUT`` when no fresh boot_id appears within the boot
-                window (a panic/hang manifests as the agent never reconnecting).
-        """
-        config = self._config_factory()
-        agent_exec = self._agent_exec(self._boot_timeout_s)
-        with self._connection(config) as conn:
-            domain = self._lookup(conn, domain_name_for(system_id))
-            baseline = self._read_boot_id(agent_exec, domain, system_id)
-            self._trigger_reboot(agent_exec, domain)
-            self._await_fresh_boot(agent_exec, domain, baseline, system_id)
+    Raises:
+        CategorizedError: ``INSTALL_FAILURE`` for a domain lookup fault or a non-zero
+            boot-id baseline read; ``TRANSPORT_FAILURE`` when the guest agent is unreachable
+            before the reboot; ``BOOT_TIMEOUT`` when no fresh boot_id appears within the boot
+            window (a panic/hang manifests as the agent never reconnecting).
+    """
+    config = self._config_factory()
+    agent_exec = self._agent_exec(self._boot_timeout_s)
+    with self._connection(config) as conn:
+        domain = self._lookup(conn, domain_name_for(system_id))
+        baseline = self._read_boot_id(agent_exec, domain, system_id)
+        self._trigger_reboot(agent_exec, domain)
+        self._await_fresh_boot(agent_exec, domain, baseline, system_id)
 
-    def _read_boot_id(self, agent_exec: GuestAgentExec, domain: _Domain, system_id: UUID) -> str:
-        result = agent_exec.run(domain, [_HELPER, "boot-id"])
-        if result.exit_status != 0:
-            raise CategorizedError(
-                "could not read the guest boot-id baseline",
-                category=ErrorCategory.INSTALL_FAILURE,
-                details={"system_id": str(system_id), "exit_status": result.exit_status},
-            )
-        return result.stdout.decode("utf-8", errors="replace").strip()
 
-    def _trigger_reboot(self, agent_exec: GuestAgentExec, domain: _Domain) -> None:
-        """Run the helper's atomic select+detached-reboot; a lost agent is the expected signal."""
-        try:
-            agent_exec.run(domain, [_HELPER, "boot"])
-        except CategorizedError as exc:
-            if exc.category not in _REBOOT_EXPECTED:
-                raise
+def _read_boot_id(self, agent_exec: GuestAgentExec, domain: _Domain, system_id: UUID) -> str:
+    result = agent_exec.run(domain, [_HELPER, "boot-id"])
+    if result.exit_status != 0:
+        raise CategorizedError(
+            "could not read the guest boot-id baseline",
+            category=ErrorCategory.INSTALL_FAILURE,
+            details={"system_id": str(system_id), "exit_status": result.exit_status},
+        )
+    return result.stdout.decode("utf-8", errors="replace").strip()
 
-    def _await_fresh_boot(
-        self, agent_exec: GuestAgentExec, domain: _Domain, baseline: str, system_id: UUID
-    ) -> None:
-        deadline = self._monotonic() + self._boot_timeout_s
-        while True:
-            current = self._poll_boot_id(agent_exec, domain)
-            if current is not None and current != baseline:
-                return
-            if self._monotonic() >= deadline:
-                raise CategorizedError(
-                    "system did not reboot into a fresh kernel within the boot window",
-                    category=ErrorCategory.BOOT_TIMEOUT,
-                    details={"system_id": str(system_id), "timeout_s": self._boot_timeout_s},
-                )
-            self._sleep(self._boot_poll_s)
 
-    def _poll_boot_id(self, agent_exec: GuestAgentExec, domain: _Domain) -> str | None:
-        """One post-reboot boot-id read; ``None`` means "agent down / not ready, keep polling"."""
-        try:
-            result = agent_exec.run(domain, [_HELPER, "boot-id"])
-        except CategorizedError as exc:
-            if exc.category in _REBOOT_EXPECTED:
-                return None
+def _trigger_reboot(self, agent_exec: GuestAgentExec, domain: _Domain) -> None:
+    """Run the helper's atomic select+detached-reboot; a lost agent is the expected signal."""
+    try:
+        agent_exec.run(domain, [_HELPER, "boot"])
+    except CategorizedError as exc:
+        if exc.category not in _REBOOT_EXPECTED:
             raise
-        if result.exit_status != 0:
+
+
+def _await_fresh_boot(
+    self, agent_exec: GuestAgentExec, domain: _Domain, baseline: str, system_id: UUID
+) -> None:
+    deadline = self._monotonic() + self._boot_timeout_s
+    while True:
+        current = self._poll_boot_id(agent_exec, domain)
+        if current is not None and current != baseline:
+            return
+        if self._monotonic() >= deadline:
+            raise CategorizedError(
+                "system did not reboot into a fresh kernel within the boot window",
+                category=ErrorCategory.BOOT_TIMEOUT,
+                details={"system_id": str(system_id), "timeout_s": self._boot_timeout_s},
+            )
+        self._sleep(self._boot_poll_s)
+
+
+def _poll_boot_id(self, agent_exec: GuestAgentExec, domain: _Domain) -> str | None:
+    """One post-reboot boot-id read; ``None`` means "agent down / not ready, keep polling"."""
+    try:
+        result = agent_exec.run(domain, [_HELPER, "boot-id"])
+    except CategorizedError as exc:
+        if exc.category in _REBOOT_EXPECTED:
             return None
-        return result.stdout.decode("utf-8", errors="replace").strip()
+        raise
+    if result.exit_status != 0:
+        return None
+    return result.stdout.decode("utf-8", errors="replace").strip()
 ```
 
 - [ ] **Step 4: Run the full install/boot suite to verify it passes**
@@ -708,8 +712,8 @@ git commit -m "feat: add RemoteLibvirtInstall.boot boot-id readiness (ADR-0082)"
 In `tests/providers/remote_libvirt/test_planes.py`, delete these two parametrize lines:
 
 ```python
-        lambda: planes.UnimplementedInstaller().install(_INSTALL),
-        lambda: planes.UnimplementedInstaller().boot(uuid4()),
+(lambda: planes.UnimplementedInstaller().install(_INSTALL),)
+(lambda: planes.UnimplementedInstaller().boot(uuid4()),)
 ```
 
 `_INSTALL`/`InstallRequest` are now unused in that test — remove the `InstallRequest` import and the `_INSTALL` sentinel too.

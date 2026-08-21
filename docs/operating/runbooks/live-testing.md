@@ -216,8 +216,9 @@ copy-pasting the boot/teardown dance:
 ```python
 from kdive.testing.live_vm import boot_throwaway_domain
 
-with boot_throwaway_domain(rootfs, arch=arch, name=unique, mode=uri,
-                           wait_for="panic", console_log=log_path) as domain:
+with boot_throwaway_domain(
+    rootfs, arch=arch, name=unique, mode=uri, wait_for="panic", console_log=log_path
+) as domain:
     ...  # run one provider op against a live domain; teardown is guaranteed
 ```
 

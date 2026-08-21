@@ -68,8 +68,9 @@ from kdive.domain.state import JobState
 from kdive.mcp.responses import ToolResponse
 
 
-def _job(state: JobState, *, result_ref: str | None = None,
-         error_category: ErrorCategory | None = None) -> Job:
+def _job(
+    state: JobState, *, result_ref: str | None = None, error_category: ErrorCategory | None = None
+) -> Job:
     return Job(
         id=uuid4(),
         kind="build",
@@ -189,9 +190,7 @@ class ToolResponse(BaseModel):
         if is_failed and self.error_category is None:
             raise ValueError(f"status {self.status!r} requires an error_category")
         if not is_failed and self.error_category is not None:
-            raise ValueError(
-                f"error_category set on non-failure status {self.status!r}"
-            )
+            raise ValueError(f"error_category set on non-failure status {self.status!r}")
         return self
 
     @classmethod
@@ -328,11 +327,8 @@ def test_verifier_accepts_valid_and_rejects_iss_aud_expiry() -> None:
 
 
 def test_context_from_claims_full() -> None:
-    ctx = context_from_claims(
-        {"sub": "user-9", "agent_session": "sess-x", "projects": ["a", "b"]}
-    )
-    assert ctx == RequestContext(principal="user-9", agent_session="sess-x",
-                                 projects=("a", "b"))
+    ctx = context_from_claims({"sub": "user-9", "agent_session": "sess-x", "projects": ["a", "b"]})
+    assert ctx == RequestContext(principal="user-9", agent_session="sess-x", projects=("a", "b"))
 
 
 def test_context_from_claims_optional_fields_absent() -> None:
@@ -463,8 +459,7 @@ def context_from_claims(claims: Mapping[str, object]) -> RequestContext:
     if not isinstance(raw_projects, (list, tuple)):
         raise AuthError("projects claim is not a list")
     projects = tuple(str(p) for p in raw_projects)
-    return RequestContext(principal=subject, agent_session=agent_session,
-                          projects=projects)
+    return RequestContext(principal=subject, agent_session=agent_session, projects=projects)
 
 
 def current_context() -> RequestContext:
@@ -701,6 +696,7 @@ def test_wait_loops_until_terminal(migrated_url: str) -> None:
     """Exercise the sleep-then-re-poll branch: a concurrent task cancels the job
     after one poll interval, and wait must return the canceled envelope having
     looped at least once (timeout long enough to require a real poll)."""
+
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
@@ -786,8 +782,7 @@ _TERMINAL = {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED}
 
 
 def _error(object_id: str, category: ErrorCategory) -> ToolResponse:
-    return ToolResponse(object_id=object_id, status="error",
-                        error_category=category.value)
+    return ToolResponse(object_id=object_id, status="error", error_category=category.value)
 
 
 def _as_uuid(job_id: str) -> UUID | None:
@@ -797,8 +792,7 @@ def _as_uuid(job_id: str) -> UUID | None:
         return None
 
 
-async def get_job(pool: AsyncConnectionPool, ctx: RequestContext,
-                  job_id: str) -> ToolResponse:
+async def get_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str) -> ToolResponse:
     """Return the job's handle envelope, or an error envelope if absent/malformed."""
     uid = _as_uuid(job_id)
     if uid is None:
@@ -810,8 +804,9 @@ async def get_job(pool: AsyncConnectionPool, ctx: RequestContext,
     return ToolResponse.from_job(job)
 
 
-async def wait_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str,
-                   timeout_s: float) -> ToolResponse:
+async def wait_job(
+    pool: AsyncConnectionPool, ctx: RequestContext, job_id: str, timeout_s: float
+) -> ToolResponse:
     """Poll until the job is terminal or ``timeout_s`` (clamped) elapses.
 
     Each poll acquires and releases a pool connection (holds none while sleeping).
@@ -831,8 +826,7 @@ async def wait_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str,
         await asyncio.sleep(POLL_INTERVAL_S)
 
 
-async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext,
-                     job_id: str) -> ToolResponse:
+async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str) -> ToolResponse:
     """Transition the job to ``canceled`` (cooperative); error on a terminal job."""
     uid = _as_uuid(job_id)
     if uid is None:
@@ -847,8 +841,9 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext,
     return ToolResponse.from_job(job)
 
 
-async def list_jobs(pool: AsyncConnectionPool, ctx: RequestContext, *,
-                    limit: int) -> list[ToolResponse]:
+async def list_jobs(
+    pool: AsyncConnectionPool, ctx: RequestContext, *, limit: int
+) -> list[ToolResponse]:
     """Return the newest jobs (capped), each as an envelope, isolating bad rows."""
     capped = max(1, min(limit, MAX_LIST_LIMIT))
     async with pool.connection() as conn:
@@ -990,9 +985,7 @@ from kdive.mcp.auth import build_verifier
 from kdive.mcp.tools import jobs
 
 # Tool seam: each plane exposes register(app, pool); build_app calls them all.
-_PLANE_REGISTRARS: tuple[Callable[[FastMCP, AsyncConnectionPool], None], ...] = (
-    jobs.register,
-)
+_PLANE_REGISTRARS: tuple[Callable[[FastMCP, AsyncConnectionPool], None], ...] = (jobs.register,)
 
 # Handler seam: each plane exposes register_handlers(registry); the worker calls
 # them all. jobs.* register no JobHandler (they are read/cancel tools, not kinds),
@@ -1000,8 +993,7 @@ _PLANE_REGISTRARS: tuple[Callable[[FastMCP, AsyncConnectionPool], None], ...] = 
 _HANDLER_REGISTRARS: tuple[Callable[[HandlerRegistry], None], ...] = ()
 
 
-def build_app(pool: AsyncConnectionPool, *,
-              verifier: JWTVerifier | None = None) -> FastMCP:
+def build_app(pool: AsyncConnectionPool, *, verifier: JWTVerifier | None = None) -> FastMCP:
     """Construct the FastMCP app and register every plane's tools.
 
     Args:

@@ -149,7 +149,7 @@ def parse_positive_coeff(value: object) -> Decimal:
     """
     try:
         parsed = Decimal(str(value))
-    except (InvalidOperation, DecimalException, ValueError, TypeError):
+    except InvalidOperation, DecimalException, ValueError, TypeError:
         raise ValueError(f"coeff {value!r} is not a number") from None
     if not parsed.is_finite() or parsed <= 0:
         raise ValueError(f"coeff {value!r} must be a finite number > 0")
@@ -477,9 +477,7 @@ def test_file_value_overrides_existing_row_and_flags_drift(migrated_url: str) ->
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
             # Seed a runtime override that differs from the file.
-            async with await psycopg.AsyncConnection.connect(
-                migrated_url, autocommit=True
-            ) as seed:
+            async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
                 await seed.execute(
                     "INSERT INTO cost_class_coefficients (cost_class, coeff) "
                     "VALUES ('remote', 9.0) "
@@ -724,14 +722,24 @@ def _recorder(name: str, calls: list[str]):
 
 def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
-    for name in ("reconcile_images", "reconcile_coefficients", "reconcile_resources", "reconcile_build_hosts"):
+    for name in (
+        "reconcile_images",
+        "reconcile_coefficients",
+        "reconcile_resources",
+        "reconcile_build_hosts",
+    ):
         monkeypatch.setattr(reconcile_pipeline, name, _recorder(name, calls))
 
     asyncio.run(reconcile_pipeline.reconcile_all(object(), object(), object()))
 
     # The load-bearing invariant: a host's price is upserted before its row is reconciled.
     assert calls.index("reconcile_coefficients") < calls.index("reconcile_resources")
-    assert calls == ["reconcile_images", "reconcile_coefficients", "reconcile_resources", "reconcile_build_hosts"]
+    assert calls == [
+        "reconcile_images",
+        "reconcile_coefficients",
+        "reconcile_resources",
+        "reconcile_build_hosts",
+    ]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -994,9 +1002,7 @@ async def _all_coefficients(conn: AsyncConnection) -> list[tuple[str, Decimal]]:
 
 def _render_toml(rows: list[tuple[str, Decimal]]) -> str:
     """Render rows as ``[[cost_class]]`` blocks; coeff is a quoted string (exact round-trip)."""
-    blocks = [
-        f'[[cost_class]]\nname = "{name}"\ncoeff = "{coeff}"\n' for name, coeff in rows
-    ]
+    blocks = [f'[[cost_class]]\nname = "{name}"\ncoeff = "{coeff}"\n' for name, coeff in rows]
     return "\n".join(blocks)
 
 

@@ -394,7 +394,9 @@ Append to `tests/providers/fault_inject/test_secret_console.py`:
 import pytest
 
 
-def test_for_op_binds_backend_to_the_op_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_for_op_binds_backend_to_the_op_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(tmp_path))
     ref = _sentinel_ref(tmp_path)
     registry = SecretRegistry()

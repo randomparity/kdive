@@ -472,7 +472,9 @@ async def install_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: st
             if system is None:  # defensive: runs.system_id is NOT NULL REFERENCES systems(id)
                 return _config_error(run_id, data={"reason": "system_gone"})
             method = _install_method_for(system)
-            if method is CaptureMethod.KDUMP and _CRASHKERNEL_TOKEN not in _cmdline_for(run, method):
+            if method is CaptureMethod.KDUMP and _CRASHKERNEL_TOKEN not in _cmdline_for(
+                run, method
+            ):
                 return _config_error(run_id, data={"reason": "cmdline_missing_crashkernel"})
             return await _enqueue_step(conn, ctx, run, JobKind.INSTALL, "install", "runs.install")
 ```
@@ -482,37 +484,38 @@ async def install_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: st
 In `install_handler` (lines 761-780), replace the block from `run_id = UUID(...)` through the `installer.install(...)` call with:
 
 ```python
-    run_id = UUID(job.payload["run_id"])
-    run = await RUNS.get(conn, run_id)
-    if run is None or run.kernel_ref is None:
-        raise CategorizedError(
-            "install target run is gone or unbuilt (no kernel_ref)",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"run_id": str(run_id)},
-        )
-    system = await SYSTEMS.get(conn, run.system_id)
-    if system is None:  # defensive: runs.system_id is NOT NULL REFERENCES systems(id)
-        raise CategorizedError(
-            "install target system is gone",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"run_id": str(run_id), "system_id": str(run.system_id)},
-        )
-    method = _install_method_for(system)
-    kernel_ref = run.kernel_ref
-    cmdline = _cmdline_for(run, method)
-    initrd_ref = await _installed_initrd_ref(conn, run_id)
-    job_ctx = _ctx_from_job(job, run.project)
+run_id = UUID(job.payload["run_id"])
+run = await RUNS.get(conn, run_id)
+if run is None or run.kernel_ref is None:
+    raise CategorizedError(
+        "install target run is gone or unbuilt (no kernel_ref)",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"run_id": str(run_id)},
+    )
+system = await SYSTEMS.get(conn, run.system_id)
+if system is None:  # defensive: runs.system_id is NOT NULL REFERENCES systems(id)
+    raise CategorizedError(
+        "install target system is gone",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"run_id": str(run_id), "system_id": str(run.system_id)},
+    )
+method = _install_method_for(system)
+kernel_ref = run.kernel_ref
+cmdline = _cmdline_for(run, method)
+initrd_ref = await _installed_initrd_ref(conn, run_id)
+job_ctx = _ctx_from_job(job, run.project)
 
-    async def _do() -> dict[str, Any]:
-        await asyncio.to_thread(
-            installer.install,
-            run.system_id,
-            run_id,
-            kernel_ref,
-            cmdline=cmdline,
-            method=method,
-            initrd_ref=initrd_ref,
-        )
+
+async def _do() -> dict[str, Any]:
+    await asyncio.to_thread(
+        installer.install,
+        run.system_id,
+        run_id,
+        kernel_ref,
+        cmdline=cmdline,
+        method=method,
+        initrd_ref=initrd_ref,
+    )
 ```
 
 Delete the now-wrong comment block at the old `runs.py:774-777` (the `# `method`/`initrd_ref` are left at their defaults …` paragraph) — the behavior it described is replaced.

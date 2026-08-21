@@ -230,9 +230,7 @@ class ProvisioningProfile(_ProfileBase):
             return cls.model_validate(data)
         except ValidationError as exc:
             details: dict[str, object] = {
-                "errors": exc.errors(
-                    include_url=False, include_input=False, include_context=False
-                ),
+                "errors": exc.errors(include_url=False, include_input=False, include_context=False),
             }
             raise CategorizedError(
                 "invalid provisioning profile",
@@ -297,8 +295,16 @@ def _expect_configuration_error(data: dict[str, Any]) -> None:
 
 @pytest.mark.parametrize(
     "field",
-    ["schema_version", "arch", "vcpu", "memory_mb", "disk_gb", "boot_method",
-     "kernel_source_ref", "provider"],
+    [
+        "schema_version",
+        "arch",
+        "vcpu",
+        "memory_mb",
+        "disk_gb",
+        "boot_method",
+        "kernel_source_ref",
+        "provider",
+    ],
 )
 def test_missing_core_field_raises_configuration_error(field: str) -> None:
     data = _valid()

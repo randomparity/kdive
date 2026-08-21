@@ -54,36 +54,50 @@
 ```python
 def _instance(**over):
     base = dict(
-        name="rl", cost_class="c", uri="qemu+tls://h/system", gdb_addr="10.0.0.1",
-        gdbstub_range="47000:47099", client_cert_ref="c", client_key_ref="k",
-        ca_cert_ref="a", base_image="img", vcpus=2, memory_mb=2048,
+        name="rl",
+        cost_class="c",
+        uri="qemu+tls://h/system",
+        gdb_addr="10.0.0.1",
+        gdbstub_range="47000:47099",
+        client_cert_ref="c",
+        client_key_ref="k",
+        ca_cert_ref="a",
+        base_image="img",
+        vcpus=2,
+        memory_mb=2048,
     )
     base.update(over)
     return RemoteLibvirtInstance(**base)
+
 
 def test_ssh_parity_inactive_when_unset():
     cfg = _build_config(_instance())
     assert cfg.ssh_parity_active is False
     assert cfg.ssh_addr is None
 
+
 def test_ssh_parity_active_parses_range():
     cfg = _build_config(_instance(ssh_addr="10.0.0.1", ssh_range="47100:47199"))
     assert cfg.ssh_parity_active is True
     assert (cfg.ssh_port_min, cfg.ssh_port_max) == (47100, 47199)
+
 
 def test_half_configured_ssh_is_error():
     with pytest.raises(CategorizedError) as ei:
         _build_config(_instance(ssh_addr="10.0.0.1"))
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
 
+
 def test_ssh_range_inverted_is_error():
     with pytest.raises(CategorizedError):
         _build_config(_instance(ssh_addr="10.0.0.1", ssh_range="500:400"))
+
 
 def test_overlap_with_gdb_range_on_same_addr_is_error():
     with pytest.raises(CategorizedError) as ei:
         _build_config(_instance(ssh_addr="10.0.0.1", ssh_range="47050:47150"))
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
+
 
 def test_overlap_allowed_on_distinct_addr():
     cfg = _build_config(_instance(ssh_addr="10.0.0.2", ssh_range="47050:47150"))
@@ -106,18 +120,19 @@ Run: `uv run python -m pytest tests/providers/remote_libvirt/test_config.py -q`
 - [ ] **Step 4: Config dataclass + property.** In `config.py` `RemoteLibvirtConfig` add fields after `gdb_port_max`:
 
 ```python
-    ssh_addr: str | None = None
-    ssh_port_min: int | None = None
-    ssh_port_max: int | None = None
+ssh_addr: str | None = None
+ssh_port_min: int | None = None
+ssh_port_max: int | None = None
 
-    @property
-    def ssh_parity_active(self) -> bool:
-        """True when the operator declared an SSH forward (ssh_addr + a parsed range)."""
-        return (
-            self.ssh_addr is not None
-            and self.ssh_port_min is not None
-            and self.ssh_port_max is not None
-        )
+
+@property
+def ssh_parity_active(self) -> bool:
+    """True when the operator declared an SSH forward (ssh_addr + a parsed range)."""
+    return (
+        self.ssh_addr is not None
+        and self.ssh_port_min is not None
+        and self.ssh_port_max is not None
+    )
 ```
 
 - [ ] **Step 5: Parse + validate.** Add `_parse_ssh_range` (mirror `_parse_gdbstub_range` but a single port may span 1 — no reserved probe), and in `_build_config` after the gdb range parse:
@@ -223,12 +238,21 @@ git commit -m "feat(remote): config-gated ssh_addr/ssh_range for SSH parity"
 
 ```python
 def test_render_appends_ssh_hostfwd_when_set():
-    xml = render_domain_xml(SID, profile, pool="p", volume="v", gdb_addr="10.0.0.1",
-                            gdb_port=47001, ssh_addr="10.0.0.1", ssh_port=47101)
+    xml = render_domain_xml(
+        SID,
+        profile,
+        pool="p",
+        volume="v",
+        gdb_addr="10.0.0.1",
+        gdb_port=47001,
+        ssh_addr="10.0.0.1",
+        ssh_port=47101,
+    )
     assert "-netdev" in xml
     assert "hostfwd=tcp:10.0.0.1:47101-:22" in xml
     assert "virtio-net-pci,netdev=kdivessh" in xml
     assert recorded_ssh_port(xml) == 47101
+
 
 def test_render_omits_ssh_hostfwd_when_unset():
     xml = render_domain_xml(SID, profile, pool="p", volume="v", gdb_addr="10.0.0.1", gdb_port=47001)
@@ -332,22 +356,28 @@ git commit -m "feat(remote): render per-System SSH hostfwd NIC + recorded-port r
 ```python
 def test_inject_runs_shell_with_key_on_stdin():
     calls = []
+
     def fake_agent(domain, command, timeout, flags):
         calls.append(json.loads(command))
         if '"guest-exec"' in command:
             return json.dumps({"return": {"pid": 7}})
         return json.dumps({"return": {"exited": True, "exitcode": 0}})
-    RemoteBootstrapKeyInjector(agent_command=fake_agent).inject(_Dom("kdive-x"), "ssh-ed25519 AAAA k")
+
+    RemoteBootstrapKeyInjector(agent_command=fake_agent).inject(
+        _Dom("kdive-x"), "ssh-ed25519 AAAA k"
+    )
     spawn = calls[0]["arguments"]
     assert spawn["path"] == "/bin/sh"
     assert spawn["arg"][0] == "-c"
     assert base64.b64decode(spawn["input-data"]).decode() == "ssh-ed25519 AAAA k"
+
 
 def test_inject_nonzero_exit_raises_provisioning_failure():
     def fake_agent(domain, command, timeout, flags):
         if '"guest-exec"' in command:
             return json.dumps({"return": {"pid": 7}})
         return json.dumps({"return": {"exited": True, "exitcode": 1}})
+
     with pytest.raises(CategorizedError) as ei:
         RemoteBootstrapKeyInjector(agent_command=fake_agent).inject(_Dom("kdive-x"), "k")
     assert ei.value.category is ErrorCategory.PROVISIONING_FAILURE
@@ -368,6 +398,7 @@ worker-composed `/bin/sh -c` hop with the key on stdin (never in argv) — the A
 authorize-script shape — allowlist {'/bin/sh'}. A bounded exception to ADR-0078's debug-target
 no-shell rule (precedent ADR-0100), documented in ADR-0291.
 """
+
 from __future__ import annotations
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -396,7 +427,10 @@ class RemoteBootstrapKeyInjector:
     """Write the bootstrap public key into a remote guest's root authorized_keys."""
 
     def __init__(
-        self, *, agent_command: AgentCommand = qemu_agent_command, timeout_s: float = _INJECT_TIMEOUT_S
+        self,
+        *,
+        agent_command: AgentCommand = qemu_agent_command,
+        timeout_s: float = _INJECT_TIMEOUT_S,
     ) -> None:
         self._agent_command = agent_command
         self._timeout_s = timeout_s
@@ -502,13 +536,16 @@ async def _bootstrap_key_material(
 In both `provision_handler` and `reprovision_handler`:
 
 ```python
-    customizers, pubkey = await _bootstrap_key_material(conn, system_id, runtime)
-    domain_name = await asyncio.to_thread(
-        functools.partial(
-            provisioner.provision, system_id, profile,
-            overlay_customizers=customizers, bootstrap_pubkey=pubkey,
-        )
+customizers, pubkey = await _bootstrap_key_material(conn, system_id, runtime)
+domain_name = await asyncio.to_thread(
+    functools.partial(
+        provisioner.provision,
+        system_id,
+        profile,
+        overlay_customizers=customizers,
+        bootstrap_pubkey=pubkey,
     )
+)
 ```
 
 (and the `reprovision` call likewise). Delete the old `_bootstrap_key_customizers` if now unused.
@@ -550,9 +587,13 @@ Run: `uv run python -m pytest tests/providers/remote_libvirt/lifecycle/test_prov
   - `provision`: **keep** the `del overlay_customizers` line (remote ignores the pre-boot overlay seam — it injects post-agent over guest-agent instead). Accept `bootstrap_pubkey: str | None = None`. Build the SSH forward as **one optional bundle** so a single `is not None` check narrows all three fields (ty does not narrow through the `ssh_parity_active` bool property, and `allocate_gdb_port` requires `int`):
 
 ```python
-        ssh_forward: tuple[str, int, int] | None = None
-        if config.ssh_addr is not None and config.ssh_port_min is not None and config.ssh_port_max is not None:
-            ssh_forward = (config.ssh_addr, config.ssh_port_min, config.ssh_port_max)
+ssh_forward: tuple[str, int, int] | None = None
+if (
+    config.ssh_addr is not None
+    and config.ssh_port_min is not None
+    and config.ssh_port_max is not None
+):
+    ssh_forward = (config.ssh_addr, config.ssh_port_min, config.ssh_port_max)
 ```
 
   Pass `ssh_forward` into `_define_and_start` (it allocates the port inside the attempt loop). After `wait_for_agent`, inject:
@@ -566,14 +607,17 @@ Run: `uv run python -m pytest tests/providers/remote_libvirt/lifecycle/test_prov
   - `_define_and_start`: accept `ssh_forward: tuple[str, int, int] | None`. On each attempt, when the bundle is present, unpack it (`ssh_addr, ssh_min, ssh_max = ssh_forward` — this narrows all three to non-optional), allocate the ssh port from a **per-attempt ssh `tried` set** (mirror the gdb `tried` set), and thread `ssh_addr`/`ssh_port` into `render_domain_xml`; on a start failure, add **both** the just-tried gdb and ssh ports to their respective `tried` sets so a squatted ssh port advances too (spec §4.1 — do not allocate the ssh port once outside the loop). Keep `_define_and_start` ≤100 lines / complexity ≤8 — extract a `_render(attempt_ports)` helper if needed:
 
 ```python
-            ssh_port = None
-            if ssh_forward is not None:
-                ssh_addr, ssh_min, ssh_max = ssh_forward  # narrows str,int,int
-                ssh_port = allocate_gdb_port(
-                    used_ssh_ports(conn), own_name=domain_name,
-                    port_min=ssh_min, port_max=ssh_max, exclude=ssh_tried,
-                )
-            # ... render with ssh_addr/ssh_port; on start failure: gdb_tried.add(port); ssh_tried.add(ssh_port)
+ssh_port = None
+if ssh_forward is not None:
+    ssh_addr, ssh_min, ssh_max = ssh_forward  # narrows str,int,int
+    ssh_port = allocate_gdb_port(
+        used_ssh_ports(conn),
+        own_name=domain_name,
+        port_min=ssh_min,
+        port_max=ssh_max,
+        exclude=ssh_tried,
+    )
+# ... render with ssh_addr/ssh_port; on start failure: gdb_tried.add(port); ssh_tried.add(ssh_port)
 ```
 
   - `reprovision`: pass `bootstrap_pubkey` through to `provision` (already does for `overlay_customizers`).
@@ -604,8 +648,16 @@ git commit -m "feat(remote): allocate+render SSH port and inject bootstrap key o
 
 ```python
 def test_recorded_ssh_endpoint_reads_port_from_xml():
-    xml = render_domain_xml(SID, profile, pool="p", volume="v", gdb_addr="10.0.0.1",
-                            gdb_port=47001, ssh_addr="10.0.0.1", ssh_port=47101)
+    xml = render_domain_xml(
+        SID,
+        profile,
+        pool="p",
+        volume="v",
+        gdb_addr="10.0.0.1",
+        gdb_port=47001,
+        ssh_addr="10.0.0.1",
+        ssh_port=47101,
+    )
     connect = RemoteLibvirtConnect(
         config_factory=lambda: _cfg(ssh_addr="10.0.0.1", ssh_range="47100:47199"),
         open_connection=lambda uri: _FakeConn({domain_name_for(SID): xml}),
@@ -613,9 +665,11 @@ def test_recorded_ssh_endpoint_reads_port_from_xml():
     )
     assert connect.recorded_ssh_endpoint(SystemHandle(domain_name_for(SID))) == ("10.0.0.1", 47101)
 
+
 def test_recorded_ssh_endpoint_none_when_parity_inactive():
     connect = RemoteLibvirtConnect(config_factory=lambda: _cfg())  # no ssh_addr
     assert connect.recorded_ssh_endpoint(SystemHandle("kdive-x")) is None
+
 
 def test_recorded_ssh_endpoint_does_not_raise_missing_dependency():
     # Regression for the challenge finding: must be a real read, not the gdb stub shape.
@@ -629,33 +683,36 @@ Run: `uv run python -m pytest tests/providers/remote_libvirt/lifecycle/test_conn
 - [ ] **Step 3: Implement.** Add injected `open_connection` + `secret_backend_factory` to `RemoteLibvirtConnect.__init__` (mirroring `RemoteLibvirtLiveIntrospect`), and:
 
 ```python
-    def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
-        """Return the recorded (ssh_addr, ssh_port), or None when SSH parity is inactive (ADR-0291).
+def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
+    """Return the recorded (ssh_addr, ssh_port), or None when SSH parity is inactive (ADR-0291).
 
-        Reads the per-System hostfwd port from the live domain XML over TLS — a real worker read
-        (authorize_ssh_key/ssh_info call this on the live path), not a live_vm stub.
-        """
-        config = self._config_factory()
-        if not config.ssh_parity_active:
-            return None
-        port = self._read_ssh_port(config, str(system))
-        if port is None:
-            return None
-        return (config.ssh_addr, port)
+    Reads the per-System hostfwd port from the live domain XML over TLS — a real worker read
+    (authorize_ssh_key/ssh_info call this on the live path), not a live_vm stub.
+    """
+    config = self._config_factory()
+    if not config.ssh_parity_active:
+        return None
+    port = self._read_ssh_port(config, str(system))
+    if port is None:
+        return None
+    return (config.ssh_addr, port)
 
-    def _read_ssh_port(self, config: RemoteLibvirtConfig, domain_name: str) -> int | None:
-        with remote_connection(
-            config, self._secret_backend_factory(), open_connection=self._open_connection
-        ) as conn:
-            try:
-                domain = conn.lookupByName(domain_name)
-            except libvirt.libvirtError as exc:
-                if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
-                    return None
-                raise CategorizedError("looking up domain for ssh endpoint",
-                                       category=ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
-            return recorded_ssh_port_strict(domain.XMLDesc(), operation="ssh endpoint",
-                                            domain=domain_name)
+
+def _read_ssh_port(self, config: RemoteLibvirtConfig, domain_name: str) -> int | None:
+    with remote_connection(
+        config, self._secret_backend_factory(), open_connection=self._open_connection
+    ) as conn:
+        try:
+            domain = conn.lookupByName(domain_name)
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                return None
+            raise CategorizedError(
+                "looking up domain for ssh endpoint", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            ) from exc
+        return recorded_ssh_port_strict(
+            domain.XMLDesc(), operation="ssh endpoint", domain=domain_name
+        )
 ```
 
 Keep the `# pragma: no cover - live_vm` only on the real `_open_libvirt` default (the socket open), not on the parse/orchestration. Update `from_env(cls, *, secret_registry, config_factory=...)` to build `secret_backend_factory=lambda: secret_backend_from_env(registry=secret_registry)` and `composition.py:329` to `RemoteLibvirtConnect.from_env(secret_registry=secret_registry, config_factory=config_factory)`.
@@ -687,6 +744,7 @@ def test_build_authorize_argv_uses_given_host():
     argv = build_authorize_argv("10.0.0.1", 47101, "/tmp/k")
     assert "root@10.0.0.1" in argv
     assert "47101" in argv
+
 
 def test_build_authorize_argv_local_loopback_unchanged():
     argv = build_authorize_argv("127.0.0.1", 2222, "/tmp/k")

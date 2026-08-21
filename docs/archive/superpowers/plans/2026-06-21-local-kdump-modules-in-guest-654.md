@@ -215,25 +215,27 @@ def test_build_skips_modules_ref_when_config_not_kdump_capable(tmp_path: Path) -
 Add these seam methods to the `_Seams` dataclass:
 
 ```python
-    modules_install_returncode: int = 0
-    modules_install_calls: int = 0
+modules_install_returncode: int = 0
+modules_install_calls: int = 0
 
-    def run_modules_install(self, workspace: Path, mod_root: Path) -> int:
-        self.modules_install_calls += 1
-        self.call_order.append("modules_install")
-        return self.modules_install_returncode
 
-    def make_modules_bundle(self, workspace: Path, mod_root: Path) -> ArtifactSource:
-        return ArtifactBytes(b"modules-bundle")
+def run_modules_install(self, workspace: Path, mod_root: Path) -> int:
+    self.modules_install_calls += 1
+    self.call_order.append("modules_install")
+    return self.modules_install_returncode
+
+
+def make_modules_bundle(self, workspace: Path, mod_root: Path) -> ArtifactSource:
+    return ArtifactBytes(b"modules-bundle")
 ```
 
 And pass them in `_builder(...)`:
 
 ```python
-        run_modules_install=seams.run_modules_install,
-        make_modules_bundle=seams.make_modules_bundle,
-        staging_factory=lambda: tmp_path / "modroot",
-        staging_cleanup=lambda _p: None,
+run_modules_install = (seams.run_modules_install,)
+make_modules_bundle = (seams.make_modules_bundle,)
+staging_factory = (lambda: tmp_path / "modroot",)
+staging_cleanup = (lambda _p: None,)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -280,48 +282,47 @@ def _config_is_kdump_capable(config_text: str) -> bool:
 Replace the body of `build()` so it reads the resolved config after `build_workspace`, and (when kdump-capable) runs `modules_install`, packages, and publishes a `modules` artifact:
 
 ```python
-    def build(
-        self,
-        run_id: UUID,
-        profile: ServerBuildProfile,
-        *,
-        recorder: BuildPhaseRecorder = DISABLED_RECORDER,
-        provider: str = "",
-    ) -> BuildOutput:
-        workspace = self._orchestrator.workspace_path(run_id)
-        try:
-            self._orchestrator.build_workspace(
-                run_id, profile, recorder=recorder, provider=provider
-            )
-            with recorder.phase(BuildPhase.ARTIFACT, provider):
-                build_id = self._read_build_id(workspace)
-                kernel = self.publish(run_id, "kernel", self._read_kernel_source(workspace))
-                vmlinux = self.publish(run_id, "vmlinux", self._read_vmlinux_source(workspace))
-                modules_ref = self._maybe_publish_modules(run_id, workspace, recorder, provider)
-            return BuildOutput(
-                kernel_ref=kernel.key,
-                debuginfo_ref=vmlinux.key,
-                build_id=build_id,
-                modules_ref=modules_ref,
-            )
-        finally:
-            self._orchestrator.cleanup_workspace(workspace)
+def build(
+    self,
+    run_id: UUID,
+    profile: ServerBuildProfile,
+    *,
+    recorder: BuildPhaseRecorder = DISABLED_RECORDER,
+    provider: str = "",
+) -> BuildOutput:
+    workspace = self._orchestrator.workspace_path(run_id)
+    try:
+        self._orchestrator.build_workspace(run_id, profile, recorder=recorder, provider=provider)
+        with recorder.phase(BuildPhase.ARTIFACT, provider):
+            build_id = self._read_build_id(workspace)
+            kernel = self.publish(run_id, "kernel", self._read_kernel_source(workspace))
+            vmlinux = self.publish(run_id, "vmlinux", self._read_vmlinux_source(workspace))
+            modules_ref = self._maybe_publish_modules(run_id, workspace, recorder, provider)
+        return BuildOutput(
+            kernel_ref=kernel.key,
+            debuginfo_ref=vmlinux.key,
+            build_id=build_id,
+            modules_ref=modules_ref,
+        )
+    finally:
+        self._orchestrator.cleanup_workspace(workspace)
 
-    def _maybe_publish_modules(
-        self, run_id: UUID, workspace: Path, recorder: BuildPhaseRecorder, provider: str
-    ) -> str | None:
-        """Run modules_install + publish a modules tarball iff the kernel is crash-dump-capable."""
-        if not _config_is_kdump_capable(self._orchestrator.read_config(workspace)):
-            return None
-        mod_root = self._staging_factory()
-        try:
-            with recorder.phase(BuildPhase.MODULES, provider):
-                if self._run_modules_install(workspace, mod_root) != 0:
-                    raise _build_exec.build_failure("make modules_install exited non-zero", run_id)
-                source = self._make_modules_bundle(workspace, mod_root)
-                return self.publish(run_id, "modules", source).key
-        finally:
-            self._staging_cleanup(mod_root)
+
+def _maybe_publish_modules(
+    self, run_id: UUID, workspace: Path, recorder: BuildPhaseRecorder, provider: str
+) -> str | None:
+    """Run modules_install + publish a modules tarball iff the kernel is crash-dump-capable."""
+    if not _config_is_kdump_capable(self._orchestrator.read_config(workspace)):
+        return None
+    mod_root = self._staging_factory()
+    try:
+        with recorder.phase(BuildPhase.MODULES, provider):
+            if self._run_modules_install(workspace, mod_root) != 0:
+                raise _build_exec.build_failure("make modules_install exited non-zero", run_id)
+            source = self._make_modules_bundle(workspace, mod_root)
+            return self.publish(run_id, "modules", source).key
+    finally:
+        self._staging_cleanup(mod_root)
 ```
 
 (`BuildPhase.MODULES` already exists — it is used by remote.)
@@ -338,7 +339,9 @@ _MODULE_BACKREF_LINKS = frozenset({"build", "source"})
 _MODULES_BUNDLE_NAME = "kdive-modules.tar.gz"
 
 
-def _local_modules_bundle(workspace: Path, mod_root: Path) -> ArtifactSource:  # pragma: no cover - live_vm
+def _local_modules_bundle(
+    workspace: Path, mod_root: Path
+) -> ArtifactSource:  # pragma: no cover - live_vm
     """Tar ``<mod_root>/lib/modules`` to gzip bytes, dropping absolute backref symlinks."""
     modules_root = mod_root / "lib" / "modules"
     buf = io.BytesIO()
@@ -346,8 +349,9 @@ def _local_modules_bundle(workspace: Path, mod_root: Path) -> ArtifactSource:  #
         for path in sorted(modules_root.rglob("*")):
             if path.is_symlink() and path.name in _MODULE_BACKREF_LINKS:
                 continue
-            tar.add(path, arcname="lib/modules/" + str(path.relative_to(modules_root)),
-                    recursive=False)
+            tar.add(
+                path, arcname="lib/modules/" + str(path.relative_to(modules_root)), recursive=False
+            )
     return ArtifactBytes(buf.getvalue())
 
 
@@ -356,8 +360,16 @@ def transport_modules_bundle(t: BuildTransport) -> _MakeModulesBundle:
 
     def _make(workspace: Path, mod_root: Path) -> ArtifactSource:
         bundle_path = str(workspace / _MODULES_BUNDLE_NAME)
-        argv = ["tar", "-czf", bundle_path, "--exclude=*/build", "--exclude=*/source",
-                "-C", str(mod_root), "lib/modules"]
+        argv = [
+            "tar",
+            "-czf",
+            bundle_path,
+            "--exclude=*/build",
+            "--exclude=*/source",
+            "-C",
+            str(mod_root),
+            "lib/modules",
+        ]
         result = t.run(argv, cwd=str(workspace), timeout_s=_build_exec.MAKE_TIMEOUT_S)
         if result.returncode != 0:
             raise CategorizedError(
@@ -372,6 +384,7 @@ def transport_modules_bundle(t: BuildTransport) -> _MakeModulesBundle:
 
 def _real_staging_factory() -> Path:  # pragma: no cover - live_vm
     import tempfile
+
     return Path(tempfile.mkdtemp(prefix="kdive-mod-"))
 ```
 
@@ -382,19 +395,19 @@ Add the imports `from kdive.domain.errors import CategorizedError, ErrorCategory
 In `from_env(...)`, add:
 
 ```python
-            run_modules_install=_build_exec.real_run_modules_install,
-            make_modules_bundle=_local_modules_bundle,
-            staging_factory=_real_staging_factory,
-            staging_cleanup=lambda p: shutil.rmtree(p, ignore_errors=True),
+run_modules_install = (_build_exec.real_run_modules_install,)
+make_modules_bundle = (_local_modules_bundle,)
+staging_factory = (_real_staging_factory,)
+staging_cleanup = (lambda p: shutil.rmtree(p, ignore_errors=True),)
 ```
 
 In `over_transport(...)`, add:
 
 ```python
-            run_modules_install=transport_run_modules_install(transport),
-            make_modules_bundle=transport_modules_bundle(transport),
-            staging_factory=lambda: host_root / "modroot",
-            staging_cleanup=lambda p: transport.cleanup(str(p)),
+run_modules_install = (transport_run_modules_install(transport),)
+make_modules_bundle = (transport_modules_bundle(transport),)
+staging_factory = (lambda: host_root / "modroot",)
+staging_cleanup = (lambda p: transport.cleanup(str(p)),)
 ```
 
 Add `transport_run_modules_install` to the existing `transport_seams` import.
@@ -529,15 +542,17 @@ from kdive.services.runs.steps import installed_initrd_ref, installed_modules_re
 ```
 
 ```python
-            InstallRequest(
-                system_id=system_id,
-                run_id=run_id,
-                kernel_ref=kernel_ref,
-                cmdline=cmdline,
-                method=method,
-                initrd_ref=initrd_ref,
-                modules_ref=modules_ref,
-            ),
+(
+    InstallRequest(
+        system_id=system_id,
+        run_id=run_id,
+        kernel_ref=kernel_ref,
+        cmdline=cmdline,
+        method=method,
+        initrd_ref=initrd_ref,
+        modules_ref=modules_ref,
+    ),
+)
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
@@ -579,24 +594,32 @@ def test_install_kdump_with_modules_ref_injects_and_no_initrd_rendered(tmp_path:
     inst = _install(conn=conn, staging_root=tmp_path, module_writer=writer, fetch_modules=fetch)
     inst.install(_request(method=CaptureMethod.KDUMP, modules_ref="runs/r/modules"))
     assert writer.injected
-    assert fetch.refs == ["runs/r/modules"]            # the modules tarball was fetched
-    assert events.index("destroy") < events.index("fetch") < events.index("inject")  # force-off first
+    assert fetch.refs == ["runs/r/modules"]  # the modules tarball was fetched
+    assert (
+        events.index("destroy") < events.index("fetch") < events.index("inject")
+    )  # force-off first
     assert len(conn.defined_xml) == 1
-    assert "<initrd>" not in conn.defined_xml[0]        # production boot has no initrd
+    assert "<initrd>" not in conn.defined_xml[0]  # production boot has no initrd
 
 
-def test_install_kdump_modules_ref_force_off_precedes_mount_even_if_inject_fails(tmp_path: Path) -> None:
+def test_install_kdump_modules_ref_force_off_precedes_mount_even_if_inject_fails(
+    tmp_path: Path,
+) -> None:
     # The corruption guard must fire before the writer touches the overlay, regardless of outcome.
     conn = _conn_with_existing()
     events: list[str] = []
     writer = _FakeModuleWriter(events, fail=True)
-    inst = _install(conn=conn, staging_root=tmp_path, module_writer=writer,
-                    fetch_modules=_RecordingFetch(events))
+    inst = _install(
+        conn=conn,
+        staging_root=tmp_path,
+        module_writer=writer,
+        fetch_modules=_RecordingFetch(events),
+    )
     with pytest.raises(CategorizedError) as caught:
         inst.install(_request(method=CaptureMethod.KDUMP, modules_ref="runs/r/modules"))
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert events[0] == "destroy"   # force-off happened before the failed inject
-    assert conn.defined_xml == []   # nothing redefined
+    assert events[0] == "destroy"  # force-off happened before the failed inject
+    assert conn.defined_xml == []  # nothing redefined
 
 
 def test_install_kdump_with_neither_modules_nor_initrd_is_config_error(tmp_path: Path) -> None:
@@ -620,8 +643,9 @@ class _FakeModuleWriter:
     def inject(self, overlay: str, modules_tar: Path) -> None:
         self.events.append("inject")
         if self.fail:
-            raise CategorizedError("synthetic inject failure",
-                                   category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+            raise CategorizedError(
+                "synthetic inject failure", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
         self.injected = True
 
 
@@ -692,6 +716,7 @@ class _RealGuestModuleWriter:  # pragma: no cover - live_vm
 
     def inject(self, overlay: str, modules_tar: Path) -> None:
         import guestfs  # noqa: PLC0415 - optional system binding, imported at call time
+
         g = guestfs.GUESTFS(python_return_dict=True)
         try:
             g.add_drive_opts(overlay, format="qcow2", readonly=0)
@@ -703,7 +728,8 @@ class _RealGuestModuleWriter:  # pragma: no cover - live_vm
             g.command(["depmod", "-a", _modules_version(g)])
             ...
         finally:
-            g.shutdown(); g.close()
+            g.shutdown()
+            g.close()
 ```
 
 (Exact clobber/version/sentinel mechanics are live-validated; mark the whole class `# pragma: no cover - live_vm`. Absent `guestfs` import → `MISSING_DEPENDENCY` mirroring `retrieve.py`/ADR-0203.)

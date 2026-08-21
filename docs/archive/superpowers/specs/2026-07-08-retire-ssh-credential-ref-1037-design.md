@@ -110,9 +110,7 @@ Replace `_resolve_credential` (ref-based) with a bootstrap-key seed for drgn-liv
 
 ```python
 try:
-    await load_system_bootstrap_private_key(
-        conn, system.id, secret_registry=self._secret_registry
-    )
+    await load_system_bootstrap_private_key(conn, system.id, secret_registry=self._secret_registry)
 except CategorizedError as exc:
     return ToolResponse.failure_from_error(str(system.id), exc)
 ```

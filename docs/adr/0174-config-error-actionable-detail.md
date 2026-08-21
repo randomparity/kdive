@@ -84,8 +84,12 @@ from a reason token plus an optional `accepted_values` list and an optional fixe
 
 ```python
 config_error_reason(object_id, ConfigErrorReason.INVALID_UUID, detail="…")
-config_error_reason(object_id, ConfigErrorReason.INVALID_STATE,
-                    accepted_values=[s.value for s in SystemState], detail="…")
+config_error_reason(
+    object_id,
+    ConfigErrorReason.INVALID_STATE,
+    accepted_values=[s.value for s in SystemState],
+    detail="…",
+)
 ```
 
 The reason and accepted values land in `data` (machine-actionable, never suppressed for

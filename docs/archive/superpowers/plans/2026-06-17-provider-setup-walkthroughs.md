@@ -285,8 +285,11 @@ def test_default_path_runs_seed_demo(tmp_path: Path) -> None:
 
 def test_audited_path_runs_mcp_helper_not_seed_demo(tmp_path: Path) -> None:
     _bindir, env, calllog = _healthy_local(tmp_path)
-    env |= {"KDIVE_SETUP_AUDITED": "1", "KDIVE_MCP_BASE": "http://localhost:8000/mcp",
-            "KDIVE_TOKEN": "T"}
+    env |= {
+        "KDIVE_SETUP_AUDITED": "1",
+        "KDIVE_MCP_BASE": "http://localhost:8000/mcp",
+        "KDIVE_TOKEN": "T",
+    }
     result = _run(env)
     assert result.returncode == 0, result.stderr
     logged = calllog.read_text()
@@ -303,8 +306,11 @@ def test_preflight_failure_aborts(tmp_path: Path) -> None:
     _stub(bindir, "qemu-img", "exit 0")
     calllog = tmp_path / "python.log"
     _stub(bindir, "python3", f'echo "$@" >> "{calllog}"\nexit 0')
-    env = {"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path),
-           "KDIVE_KVM_NODE": str(tmp_path / "absent")}  # unreadable -> preflight fails
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "KDIVE_KVM_NODE": str(tmp_path / "absent"),
+    }  # unreadable -> preflight fails
     result = _run(env)
     assert result.returncode != 0
     # Onboarding must not run when the preflight aborts.
@@ -620,6 +626,7 @@ Expected: FAIL — lists the seven new tokens as undocumented (run this after Ta
 In `src/kdive/config/external_env.py`, add to the `EXTERNAL_ENV_VARS` tuple, in the `# --- operator shell scripts ---` block:
 
 ```python
+(
     ExternalEnvVar(
         "KDIVE_PYTHON",
         "script",
@@ -627,6 +634,8 @@ In `src/kdive/config/external_env.py`, add to the `EXTERNAL_ENV_VARS` tuple, in 
         "Python interpreter the setup-*-libvirt.sh scripts invoke (set to the project venv, "
         "e.g. /opt/kdive/.venv/bin/python, when not running inside the venv).",
     ),
+)
+(
     ExternalEnvVar(
         "KDIVE_SETUP_AUDITED",
         "script",
@@ -634,36 +643,47 @@ In `src/kdive/config/external_env.py`, add to the `EXTERNAL_ENV_VARS` tuple, in 
         "When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of "
         "seed-demo (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN).",
     ),
+)
+(
     ExternalEnvVar(
         "KDIVE_MCP_BASE",
         "script",
         None,
         "Server MCP endpoint (must end in /mcp) the setup-*-libvirt.sh onboarding calls target.",
     ),
+)
+(
     ExternalEnvVar(
         "KDIVE_PROJECT",
         "script",
         "demo",
         "Project the setup-*-libvirt.sh scripts onboard.",
     ),
+)
+(
     ExternalEnvVar(
         "KDIVE_LIMIT_KCU",
         "script",
         "1000000",
         "Budget ceiling (KCU) the setup-*-libvirt.sh scripts set for the project.",
     ),
+)
+(
     ExternalEnvVar(
         "KDIVE_MAX_ALLOC",
         "script",
         "4",
         "max_concurrent_allocations quota the setup-*-libvirt.sh scripts set.",
     ),
+)
+(
     ExternalEnvVar(
         "KDIVE_MAX_SYS",
         "script",
         "4",
         "max_concurrent_systems quota the setup-*-libvirt.sh scripts set.",
     ),
+)
 ```
 
 - [ ] **Step 3: Verify the env guard passes**

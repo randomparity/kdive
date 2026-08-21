@@ -303,7 +303,9 @@ def test_render_omits_initrd_when_absent_and_emits_it_when_present() -> None:
     assert _safe_fromstring(_render()).find("os/initrd") is None
     initrd = Path("/var/lib/kdive/rootfs/x-baseline/initrd")
     root = _safe_fromstring(
-        render_domain_xml(_SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL, initrd_path=initrd)
+        render_domain_xml(
+            _SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL, initrd_path=initrd
+        )
     )
     assert root.findtext("os/initrd") == str(initrd)
 ```
@@ -319,6 +321,7 @@ Expected: FAIL (new tests + the direct callers now expect a `<kernel>` the code 
 Add the import and constant near the top:
 ```python
 from pathlib import Path
+
 ...
 _BASELINE_CMDLINE = "root=/dev/vda console=ttyS0 rw"
 ```
@@ -510,7 +513,9 @@ def test_provision_extracts_baseline_and_renders_kernel() -> None:
     )
     prov.provision(_SYS, _profile())
 
-    assert calls == [(Path("/var/lib/kdive/rootfs/base.qcow2"), Path(storage_module.baseline_dir(_SYS)))]
+    assert calls == [
+        (Path("/var/lib/kdive/rootfs/base.qcow2"), Path(storage_module.baseline_dir(_SYS)))
+    ]
     root = _safe_fromstring(conn.recorded_xml[-1])
     assert root.findtext("os/kernel") == f"{storage_module.baseline_dir(_SYS)}/kernel"
     assert root.findtext("os/cmdline") == "root=/dev/vda console=ttyS0 rw"
@@ -581,9 +586,9 @@ from kdive.providers.local_libvirt.lifecycle.storage import (
 ```
 `__init__`: add param + default:
 ```python
-        extract_baseline_kernel: ExtractBaselineKernel | None = None,
-        ...
-        self._extract_baseline_kernel = extract_baseline_kernel or _real_extract_baseline_kernel
+extract_baseline_kernel: ExtractBaselineKernel | None = (None,)
+...
+self._extract_baseline_kernel = extract_baseline_kernel or _real_extract_baseline_kernel
 ```
 In `provision()`, after `base = self._materialize_rootfs(...)` and before/after `prepare_overlay`:
 ```python
@@ -603,21 +608,22 @@ In `provision()`, after `base = self._materialize_rootfs(...)` and before/after 
 ```
 Add the helper:
 ```python
-    def _prepare_baseline_kernel(self, system_id: UUID, base: str) -> BaselineKernel:
-        """Extract the rootfs's baseline kernel once; reuse an already-extracted directory.
+def _prepare_baseline_kernel(self, system_id: UUID, base: str) -> BaselineKernel:
+    """Extract the rootfs's baseline kernel once; reuse an already-extracted directory.
 
-        Mirrors the overlay's create-only-when-absent contract (ADR-0060/0272): a present
-        baseline directory (the atomic all-or-nothing marker) is reused so a provision retry never
-        re-mounts the base. Presence is checked through the injected ``baseline_exists`` seam (like
-        ``overlay_exists``), so the reuse path is unit-testable without touching the real filesystem.
-        """
-        dest = Path(baseline_dir(system_id))
-        if self._files.baseline_exists(str(dest)):
-            initrd = dest / "initrd"
-            return BaselineKernel(
-                kernel=dest / "kernel", initrd=initrd if self._files.baseline_exists(str(initrd)) else None
-            )
-        return self._extract_baseline_kernel(Path(base), dest)
+    Mirrors the overlay's create-only-when-absent contract (ADR-0060/0272): a present
+    baseline directory (the atomic all-or-nothing marker) is reused so a provision retry never
+    re-mounts the base. Presence is checked through the injected ``baseline_exists`` seam (like
+    ``overlay_exists``), so the reuse path is unit-testable without touching the real filesystem.
+    """
+    dest = Path(baseline_dir(system_id))
+    if self._files.baseline_exists(str(dest)):
+        initrd = dest / "initrd"
+        return BaselineKernel(
+            kernel=dest / "kernel",
+            initrd=initrd if self._files.baseline_exists(str(initrd)) else None,
+        )
+    return self._extract_baseline_kernel(Path(base), dest)
 ```
 In `teardown()`, after `self._files.remove_overlay_for_domain(domain_name)`:
 ```python

@@ -245,11 +245,21 @@ def _uri_set(env) -> bool:
     return bool(env.get("KDIVE_REMOTE_LIBVIRT_URI"))
 
 
-URI = Setting(name="KDIVE_REMOTE_LIBVIRT_URI", parse=_str, group="remote-libvirt",
-              processes=frozenset({"worker", "reconciler"}))
-CA = Setting(name="KDIVE_REMOTE_LIBVIRT_CA_CERT_REF", parse=_str, secret=True,
-             group="remote-libvirt", processes=frozenset({"worker", "reconciler"}),
-             required_when=_uri_set, suggest="set the CA cert secret ref")
+URI = Setting(
+    name="KDIVE_REMOTE_LIBVIRT_URI",
+    parse=_str,
+    group="remote-libvirt",
+    processes=frozenset({"worker", "reconciler"}),
+)
+CA = Setting(
+    name="KDIVE_REMOTE_LIBVIRT_CA_CERT_REF",
+    parse=_str,
+    secret=True,
+    group="remote-libvirt",
+    processes=frozenset({"worker", "reconciler"}),
+    required_when=_uri_set,
+    suggest="set the CA cert secret ref",
+)
 
 
 def test_required_when_false_does_not_require_optional_provider_setting() -> None:
@@ -281,33 +291,32 @@ Expected: FAIL with `AttributeError: 'Registry' object has no attribute 'validat
 - [ ] **Step 3: Write minimal implementation** — add to `Registry`:
 
 ```python
-    def validate(self, process: str) -> None:
-        """Fail fast on settings this process requires that are missing/malformed.
+def validate(self, process: str) -> None:
+    """Fail fast on settings this process requires that are missing/malformed.
 
-        Startup time (a): settings whose `required_when` holds for the snapshot and
-        whose `processes` include `process`. Parse errors surface here too.
-        """
-        env = self._env()
-        missing: list[str] = []
-        for s in self._settings:
-            if process not in s.processes:
-                continue
-            present = s.name in env or s.default is not None
-            if s.required_when(env) and not present:
-                missing.append(s.name)
-                continue
-            if s.name in env:
-                self.get(s)  # raises CONFIGURATION_ERROR on a malformed value
-        if missing:
-            lines = "\n".join(
-                f"  - {n}: {self._by_name[n].suggest or 'required for this process'}"
-                for n in missing
-            )
-            raise CategorizedError(
-                f"missing required configuration for {process}:\n{lines}",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"process": process, "missing": missing},
-            )
+    Startup time (a): settings whose `required_when` holds for the snapshot and
+    whose `processes` include `process`. Parse errors surface here too.
+    """
+    env = self._env()
+    missing: list[str] = []
+    for s in self._settings:
+        if process not in s.processes:
+            continue
+        present = s.name in env or s.default is not None
+        if s.required_when(env) and not present:
+            missing.append(s.name)
+            continue
+        if s.name in env:
+            self.get(s)  # raises CONFIGURATION_ERROR on a malformed value
+    if missing:
+        lines = "\n".join(
+            f"  - {n}: {self._by_name[n].suggest or 'required for this process'}" for n in missing
+        )
+        raise CategorizedError(
+            f"missing required configuration for {process}:\n{lines}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"process": process, "missing": missing},
+        )
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -377,20 +386,38 @@ def _str(raw: str) -> str:
 _ALL = frozenset({"server", "worker", "reconciler", "migrate"})
 
 DATABASE_URL = Setting(
-    name="KDIVE_DATABASE_URL", parse=_str, group="database", processes=_ALL,
+    name="KDIVE_DATABASE_URL",
+    parse=_str,
+    group="database",
+    processes=_ALL,
     required_when=lambda env: True,
     help="Postgres DSN for the system-of-record.",
     suggest="e.g. postgresql://kdive:kdive@postgres:5432/kdive",  # pragma: allowlist secret — example DSN
 )
-HTTP_HOST = Setting(name="KDIVE_HTTP_HOST", parse=_str, default="127.0.0.1",
-                    group="http", processes=frozenset({"server"}),
-                    help="Bind host for the MCP server.")
-HTTP_PORT = Setting(name="KDIVE_HTTP_PORT", parse=_int, default="8000",
-                    group="http", processes=frozenset({"server"}),
-                    help="Bind port for the MCP server.")
-LOG_LEVEL = Setting(name="KDIVE_LOG_LEVEL", parse=_str, default="INFO",
-                    group="logging", processes=_ALL,
-                    help="Structured-logging level.")
+HTTP_HOST = Setting(
+    name="KDIVE_HTTP_HOST",
+    parse=_str,
+    default="127.0.0.1",
+    group="http",
+    processes=frozenset({"server"}),
+    help="Bind host for the MCP server.",
+)
+HTTP_PORT = Setting(
+    name="KDIVE_HTTP_PORT",
+    parse=_int,
+    default="8000",
+    group="http",
+    processes=frozenset({"server"}),
+    help="Bind port for the MCP server.",
+)
+LOG_LEVEL = Setting(
+    name="KDIVE_LOG_LEVEL",
+    parse=_str,
+    default="INFO",
+    group="logging",
+    processes=_ALL,
+    help="Structured-logging level.",
+)
 
 SETTINGS = [DATABASE_URL, HTTP_HOST, HTTP_PORT, LOG_LEVEL]
 ```
@@ -511,16 +538,27 @@ def _str(raw: str) -> str:
 
 def test_render_groups_and_redacts_secrets() -> None:
     settings = [
-        Setting(name="KDIVE_DATABASE_URL", parse=_str, group="database",
-                processes=frozenset({"server"}), help="DSN."),
-        Setting(name="KDIVE_REMOTE_LIBVIRT_CA_CERT_REF", parse=_str, secret=True,
-                group="remote-libvirt", processes=frozenset({"worker"}), help="CA ref."),
+        Setting(
+            name="KDIVE_DATABASE_URL",
+            parse=_str,
+            group="database",
+            processes=frozenset({"server"}),
+            help="DSN.",
+        ),
+        Setting(
+            name="KDIVE_REMOTE_LIBVIRT_CA_CERT_REF",
+            parse=_str,
+            secret=True,
+            group="remote-libvirt",
+            processes=frozenset({"worker"}),
+            help="CA ref.",
+        ),
     ]
     out = render(settings)
     assert "## database" in out
     assert "KDIVE_DATABASE_URL" in out
-    assert "secret (ref only)" in out          # the secret marker
-    assert "do not edit" in out                 # generated-file header
+    assert "secret (ref only)" in out  # the secret marker
+    assert "do not edit" in out  # generated-file header
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -537,6 +575,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'scripts.gen_config_re
 Pure core (`render`) over the Setting list; the CLI writes the file. Mirrors
 scripts/gen_tool_reference.py. Run via `just config-docs` / `just config-docs-check`.
 """
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -681,6 +720,7 @@ Stdlib-only `ast` walk over the source tree so CI runs it without a synced env
 (`just config-guard`). Catches os.environ.get(...), os.environ[...], os.getenv(...).
 Exit 0 clean, 1 on violations.
 """
+
 from __future__ import annotations
 
 import ast
@@ -712,7 +752,11 @@ def _env_var(call_or_sub: ast.AST) -> str | None:
     # os.environ.get("KDIVE_X") / os.getenv("KDIVE_X")
     if isinstance(call_or_sub, ast.Call) and isinstance(call_or_sub.func, ast.Attribute):
         attr = call_or_sub.func
-        is_get = attr.attr == "get" and isinstance(attr.value, ast.Attribute) and attr.value.attr == "environ"
+        is_get = (
+            attr.attr == "get"
+            and isinstance(attr.value, ast.Attribute)
+            and attr.value.attr == "environ"
+        )
         is_getenv = attr.attr == "getenv"
         if (is_get or is_getenv) and call_or_sub.args:
             return _literal(call_or_sub.args[0])
@@ -745,7 +789,10 @@ def main() -> int:
         rel = v.file.relative_to(_ROOT)
         print(f"{rel}:{v.line}: {v.variable} read outside kdive.config", file=sys.stderr)
     if violations:
-        print(f"{len(violations)} stray KDIVE_* env read(s); route through kdive.config", file=sys.stderr)
+        print(
+            f"{len(violations)} stray KDIVE_* env read(s); route through kdive.config",
+            file=sys.stderr,
+        )
         return 1
     return 0
 
@@ -818,17 +865,40 @@ def _uri_set(env) -> bool:
 
 
 SETTINGS = [
-    Setting(name="KDIVE_REMOTE_LIBVIRT_URI", parse=str, group="remote-libvirt",
-            processes=_RT, help="qemu+tls host URI; presence enables the provider."),
-    Setting(name="KDIVE_REMOTE_LIBVIRT_CLIENT_CERT_REF", parse=str, secret=True,
-            group="remote-libvirt", processes=_RT, required_when=_uri_set,
-            suggest="client cert secret ref"),
-    Setting(name="KDIVE_REMOTE_LIBVIRT_CLIENT_KEY_REF", parse=str, secret=True,
-            group="remote-libvirt", processes=_RT, required_when=_uri_set,
-            suggest="client key secret ref"),
-    Setting(name="KDIVE_REMOTE_LIBVIRT_CA_CERT_REF", parse=str, secret=True,
-            group="remote-libvirt", processes=_RT, required_when=_uri_set,
-            suggest="CA cert secret ref"),
+    Setting(
+        name="KDIVE_REMOTE_LIBVIRT_URI",
+        parse=str,
+        group="remote-libvirt",
+        processes=_RT,
+        help="qemu+tls host URI; presence enables the provider.",
+    ),
+    Setting(
+        name="KDIVE_REMOTE_LIBVIRT_CLIENT_CERT_REF",
+        parse=str,
+        secret=True,
+        group="remote-libvirt",
+        processes=_RT,
+        required_when=_uri_set,
+        suggest="client cert secret ref",
+    ),
+    Setting(
+        name="KDIVE_REMOTE_LIBVIRT_CLIENT_KEY_REF",
+        parse=str,
+        secret=True,
+        group="remote-libvirt",
+        processes=_RT,
+        required_when=_uri_set,
+        suggest="client key secret ref",
+    ),
+    Setting(
+        name="KDIVE_REMOTE_LIBVIRT_CA_CERT_REF",
+        parse=str,
+        secret=True,
+        group="remote-libvirt",
+        processes=_RT,
+        required_when=_uri_set,
+        suggest="CA cert secret ref",
+    ),
     # storage-pool, network, machine, gdb addr/port-range: parse=str/int, not required_when.
 ]
 ```
@@ -884,16 +954,16 @@ logging → validate → dispatch. `config.load()` must come **before** anything
 including the logging bootstrap (ADR-0087 decision 4's early bootstrap phase):
 
 ```python
-    import kdive.config as config
-    from kdive.config.core_settings import LOG_LEVEL
+import kdive.config as config
+from kdive.config.core_settings import LOG_LEVEL
 
-    args = build_parser().parse_args(argv)
-    config.load()                                   # snapshot first — before any get()
-    level = args.log_level or config.get(LOG_LEVEL)  # --log-level flag wins when passed
-    configure_logging(level, secret_registry=secret_registry)
-    if args.command in {"server", "worker", "reconciler", "migrate"}:
-        config.validate(args.command)
-    # ... existing dispatch ...
+args = build_parser().parse_args(argv)
+config.load()  # snapshot first — before any get()
+level = args.log_level or config.get(LOG_LEVEL)  # --log-level flag wins when passed
+configure_logging(level, secret_registry=secret_registry)
+if args.command in {"server", "worker", "reconciler", "migrate"}:
+    config.validate(args.command)
+# ... existing dispatch ...
 ```
 
 Drop the argparse default `os.environ.get("KDIVE_LOG_LEVEL", "INFO")` (change the `--log-level`
@@ -1457,7 +1527,7 @@ def test_renders_three_deployments_against_external_backends() -> None:
     res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
     assert res.returncode == 0, res.stderr
     assert res.stdout.count("kind: Deployment") == 3
-    assert "pre-install" in res.stdout            # external migrate hook phase
+    assert "pre-install" in res.stdout  # external migrate hook phase
 
 
 def test_bundled_without_ack_fails_to_render() -> None:
@@ -1585,6 +1655,7 @@ def test_stack_subcommand_is_gone() -> None:
 
 def test_run_stack_not_importable() -> None:
     import kdive.admin.bootstrap as b
+
     assert not hasattr(b, "run_stack")
 ```
 

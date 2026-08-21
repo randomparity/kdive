@@ -55,6 +55,7 @@ Out of scope (unchanged from C / the milestone):
 ```python
 class WritebackTarget(Protocol):
     target_kind: str  # "configmap" | "file" — for the response/audit, never the secret
+
     async def write(self, toml_text: str) -> None: ...
 ```
 

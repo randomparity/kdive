@@ -44,7 +44,9 @@ def _local_profile_doc() -> dict:
     return {
         "schema_version": 1,
         "arch": "x86_64",
-        "vcpu": 2, "memory_mb": 2048, "disk_gb": 10,
+        "vcpu": 2,
+        "memory_mb": 2048,
+        "disk_gb": 10,
         "boot_method": "direct-kernel",
         "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v6.9",
         "provider": {"local-libvirt": {"rootfs": {"kind": "local", "path": "/x.qcow2"}}},
@@ -55,7 +57,9 @@ def _remote_profile_doc() -> dict:
     return {
         "schema_version": 1,
         "arch": "x86_64",
-        "vcpu": 2, "memory_mb": 2048, "disk_gb": 10,
+        "vcpu": 2,
+        "memory_mb": 2048,
+        "disk_gb": 10,
         "boot_method": "disk-image",
         "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v6.9",
         "provider": {"remote-libvirt": {"base_image_volume": "base-fedora40"}},
@@ -200,8 +204,8 @@ In `src/kdive/providers/local_libvirt/lifecycle/connect.py`, split the kind cons
 
 ```python
 _GDBSTUB = "gdbstub"
-_DRGN_LIVE = "drgn-live"   # the accepted transport kind (ADR-0085)
-_SSH_SCHEME = "ssh"        # the handle scheme local emits (its realization)
+_DRGN_LIVE = "drgn-live"  # the accepted transport kind (ADR-0085)
+_SSH_SCHEME = "ssh"  # the handle scheme local emits (its realization)
 ```
 
 In `open_transport` (~81-98):
@@ -380,8 +384,11 @@ In `tests/mcp/debug/test_debug_tools.py`, migrate the existing `ssh` suite token
 ```python
 def _remote_profile() -> dict[str, Any]:
     return {
-        "schema_version": 1, "arch": "x86_64",
-        "vcpu": 4, "memory_mb": 4096, "disk_gb": 20,
+        "schema_version": 1,
+        "arch": "x86_64",
+        "vcpu": 4,
+        "memory_mb": 4096,
+        "disk_gb": 20,
         "boot_method": "disk-image",
         "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v6.9",
         "provider": {"remote-libvirt": {"base_image_volume": "base-fedora40"}},
@@ -433,8 +440,12 @@ def test_start_session_drgn_live_local_missing_ref_is_config_error(migrated_url:
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)  # local, no ssh ref
             run_id = await _seed_run(pool, sys_id)
             resp = await _start_session(
-                pool, _ctx(), run_id=run_id, transport="drgn-live",
-                connector=_FakeConnector(), secret_backend=_OrderRecordingBackend([]),
+                pool,
+                _ctx(),
+                run_id=run_id,
+                transport="drgn-live",
+                connector=_FakeConnector(),
+                secret_backend=_OrderRecordingBackend([]),
             )
             assert resp.status == "failed"
             assert resp.error_category is ErrorCategory.CONFIGURATION_ERROR
@@ -520,9 +531,9 @@ Update the `start_session` docstring (244-247) `transport="ssh"` → `transport=
 Add the two core files to `scripts/m2_portability_gate.py` `ALLOWED_FILES`:
 
 ```python
-        # drgn-live transport generalization (#215, ADR-0085): the deliberate core touch.
-        "src/kdive/mcp/tools/debug/sessions.py",
-        "src/kdive/mcp/tools/debug/introspect.py",
+# drgn-live transport generalization (#215, ADR-0085): the deliberate core touch.
+("src/kdive/mcp/tools/debug/sessions.py",)
+("src/kdive/mcp/tools/debug/introspect.py",)
 ```
 
 - [ ] **Step 4: Run tests (full affected suites — this commit renames shared scaffolding)**

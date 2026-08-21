@@ -184,10 +184,14 @@ class InventorySnapshot:
     build_hosts: tuple[BuildHostRow, ...]
     cost_classes: tuple[tuple[str, Decimal], ...]
 
-async def read_inventory_snapshot(conn: AsyncConnection) -> InventorySnapshot: ...
+
+async def read_inventory_snapshot(conn: AsyncConnection) -> InventorySnapshot:
+    ...
     # reads live config-owned rows, honors the ledger (removed omitted, detached uses live values)
 
-def serialize_inventory(snapshot: InventorySnapshot) -> str: ...
+
+def serialize_inventory(snapshot: InventorySnapshot) -> str:
+    ...
     # pure: snapshot -> deterministic systems.toml text (the function D persists)
 ```
 

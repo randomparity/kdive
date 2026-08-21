@@ -583,7 +583,9 @@ def _profile() -> dict[str, Any]:
     return copy.deepcopy(_PROFILE)
 
 
-def _ctx(role: Role | None = Role.OPERATOR, *, projects: tuple[str, ...] = ("proj",)) -> RequestContext:
+def _ctx(
+    role: Role | None = Role.OPERATOR, *, projects: tuple[str, ...] = ("proj",)
+) -> RequestContext:
     roles = {"proj": role} if role is not None else {}
     return RequestContext(principal="user-1", agent_session="s", projects=projects, roles=roles)
 
@@ -603,12 +605,19 @@ async def _granted_allocation(pool: AsyncConnectionPool, *, cap: int = 2) -> str
         host_uri="qemu:///system", connect=lambda: FakeLibvirtConn(), concurrent_allocation_cap=cap
     )
     async with pool.connection() as conn:
-        res = await register_local_libvirt_resource(conn, disc, pool="local-libvirt", cost_class="local")
+        res = await register_local_libvirt_resource(
+            conn, disc, pool="local-libvirt", cost_class="local"
+        )
         alloc = await ALLOCATIONS.insert(
             conn,
             Allocation(
-                id=uuid4(), created_at=_DT, updated_at=_DT, principal="user-1", project="proj",
-                resource_id=res.id, state=AllocationState.GRANTED,
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project="proj",
+                resource_id=res.id,
+                state=AllocationState.GRANTED,
             ),
         )
     return str(alloc.id)
@@ -619,8 +628,14 @@ async def _seed_system(pool: AsyncConnectionPool, alloc_id: str, state: SystemSt
         system = await SYSTEMS.insert(
             conn,
             System(
-                id=uuid4(), created_at=_DT, updated_at=_DT, principal="user-1", project="proj",
-                allocation_id=UUID(alloc_id), state=state, provisioning_profile=_profile(),
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project="proj",
+                allocation_id=UUID(alloc_id),
+                state=state,
+                provisioning_profile=_profile(),
             ),
         )
     return str(system.id)
@@ -757,7 +772,9 @@ def _envelope_for_system(system: System) -> ToolResponse:
     )
 
 
-async def get_system(pool: AsyncConnectionPool, ctx: RequestContext, system_id: str) -> ToolResponse:
+async def get_system(
+    pool: AsyncConnectionPool, ctx: RequestContext, system_id: str
+) -> ToolResponse:
     """Return a System the caller's project owns, or a not-found-shaped error."""
     uid = _as_uuid(system_id)
     if uid is None:
@@ -795,7 +812,9 @@ git commit -m "feat(systems): systems.get tool + module skeleton (#16)"
 Append to `tests/mcp/test_systems_tools.py`:
 
 ```python
-async def _provision(pool: AsyncConnectionPool, ctx: RequestContext, alloc_id: str, profile: dict[str, Any]):
+async def _provision(
+    pool: AsyncConnectionPool, ctx: RequestContext, alloc_id: str, profile: dict[str, Any]
+):
     return await systems_tools.provision_system(pool, ctx, allocation_id=alloc_id, profile=profile)
 
 
@@ -811,7 +830,10 @@ def test_provision_mints_system_active_allocation_and_job(migrated_url: str) -> 
                 sys_row = await cur.fetchone()
                 await cur.execute("SELECT state FROM allocations WHERE id = %s", (alloc_id,))
                 alloc_row = await cur.fetchone()
-                await cur.execute("SELECT count(*) AS n FROM jobs WHERE dedup_key = %s", (f"{alloc_id}:provision",))
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE dedup_key = %s",
+                    (f"{alloc_id}:provision",),
+                )
                 job_row = await cur.fetchone()
         assert sys_row is not None and sys_row["state"] == "provisioning"
         assert str(sys_row["allocation_id"]) == alloc_id
@@ -971,8 +993,11 @@ async def _provision_locked(
                         str(existing.id), data={"current_status": existing.state.value}
                     )
                 job = await queue.enqueue(
-                    conn, JobKind.PROVISION, {"system_id": str(existing.id)},
-                    _authorizing(ctx, alloc.project), f"{alloc_id}:provision",
+                    conn,
+                    JobKind.PROVISION,
+                    {"system_id": str(existing.id)},
+                    _authorizing(ctx, alloc.project),
+                    f"{alloc_id}:provision",
                 )
                 return _system_job_envelope(job, existing.id)
             if alloc.state is not AllocationState.GRANTED:
@@ -981,26 +1006,44 @@ async def _provision_locked(
             system = await SYSTEMS.insert(
                 conn,
                 System(
-                    id=uuid4(), created_at=now, updated_at=now,
-                    principal=ctx.principal, agent_session=ctx.agent_session, project=alloc.project,
-                    allocation_id=alloc_id, state=SystemState.PROVISIONING,
+                    id=uuid4(),
+                    created_at=now,
+                    updated_at=now,
+                    principal=ctx.principal,
+                    agent_session=ctx.agent_session,
+                    project=alloc.project,
+                    allocation_id=alloc_id,
+                    state=SystemState.PROVISIONING,
                     provisioning_profile=profile.model_dump(by_alias=True),
                 ),
             )
             await audit.record(
-                conn, ctx, tool="systems.provision", object_kind="systems", object_id=system.id,
-                transition="->provisioning", args={"allocation_id": str(alloc_id)},
+                conn,
+                ctx,
+                tool="systems.provision",
+                object_kind="systems",
+                object_id=system.id,
+                transition="->provisioning",
+                args={"allocation_id": str(alloc_id)},
                 project=alloc.project,
             )
             await ALLOCATIONS.update_state(conn, alloc_id, AllocationState.ACTIVE)
             await audit.record(
-                conn, ctx, tool="systems.provision", object_kind="allocations", object_id=alloc_id,
-                transition="granted->active", args={"allocation_id": str(alloc_id)},
+                conn,
+                ctx,
+                tool="systems.provision",
+                object_kind="allocations",
+                object_id=alloc_id,
+                transition="granted->active",
+                args={"allocation_id": str(alloc_id)},
                 project=alloc.project,
             )
             job = await queue.enqueue(
-                conn, JobKind.PROVISION, {"system_id": str(system.id)},
-                _authorizing(ctx, alloc.project), f"{alloc_id}:provision",
+                conn,
+                JobKind.PROVISION,
+                {"system_id": str(system.id)},
+                _authorizing(ctx, alloc.project),
+                f"{alloc_id}:provision",
             )
             return _system_job_envelope(job, system.id)
 ```
@@ -1056,7 +1099,9 @@ class _FakeProvisioning:
 async def _enqueue_provision(pool: AsyncConnectionPool, system_id: str, alloc_id: str) -> Job:
     async with pool.connection() as conn:
         return await queue.enqueue(
-            conn, JobKind.PROVISION, {"system_id": system_id},
+            conn,
+            JobKind.PROVISION,
+            {"system_id": system_id},
             {"principal": "user-1", "agent_session": "s", "project": "proj"},
             f"{alloc_id}:provision",
         )
@@ -1175,8 +1220,13 @@ async def _audit_transition(
     conn: AsyncConnection, job: Job, *, project: str, object_id: UUID, transition: str, tool: str
 ) -> None:
     await audit.record(
-        conn, _ctx_from_job(job, project), tool=tool, object_kind="systems",
-        object_id=object_id, transition=transition, args={"system_id": str(object_id)},
+        conn,
+        _ctx_from_job(job, project),
+        tool=tool,
+        object_kind="systems",
+        object_id=object_id,
+        transition=transition,
+        args={"system_id": str(object_id)},
         project=project,
     )
 
@@ -1205,8 +1255,12 @@ async def provision_handler(
         async with conn.transaction():
             await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
             await _audit_transition(
-                conn, job, project=system.project, object_id=system_id,
-                transition="provisioning->failed", tool="systems.provision",
+                conn,
+                job,
+                project=system.project,
+                object_id=system_id,
+                transition="provisioning->failed",
+                tool="systems.provision",
             )
         raise
     superseded = True
@@ -1222,8 +1276,12 @@ async def provision_handler(
                 )
         if not superseded:
             await _audit_transition(
-                conn, job, project=system.project, object_id=system_id,
-                transition="provisioning->ready", tool="systems.provision",
+                conn,
+                job,
+                project=system.project,
+                object_id=system_id,
+                transition="provisioning->ready",
+                tool="systems.provision",
             )
     if superseded:
         # A concurrent teardown drove the System terminal; clean up the domain we created.
@@ -1268,7 +1326,9 @@ def test_teardown_tool_enqueues_job(migrated_url: str) -> None:
             resp = await _teardown(pool, _ctx(), sys_id)
             assert resp.data["system_id"] == sys_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT count(*) AS n FROM jobs WHERE dedup_key = %s", (f"{sys_id}:teardown",))
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE dedup_key = %s", (f"{sys_id}:teardown",)
+                )
                 row = await cur.fetchone()
         assert row is not None and row["n"] == 1
 
@@ -1349,7 +1409,9 @@ def test_teardown_handler_already_torn_down_is_noop(migrated_url: str) -> None:
 async def _enqueue_teardown(pool: AsyncConnectionPool, system_id: str) -> Job:
     async with pool.connection() as conn:
         return await queue.enqueue(
-            conn, JobKind.TEARDOWN, {"system_id": system_id},
+            conn,
+            JobKind.TEARDOWN,
+            {"system_id": system_id},
             {"principal": "system:reconciler", "agent_session": None, "project": "proj"},
             f"{system_id}:teardown",
         )
@@ -1380,12 +1442,17 @@ async def teardown_system(
             require_role(ctx, system.project, Role.OPERATOR)
             if system.state is SystemState.TORN_DOWN:
                 return ToolResponse.success(
-                    system_id, "torn_down",
-                    suggested_next_actions=["systems.get"], data={"project": system.project},
+                    system_id,
+                    "torn_down",
+                    suggested_next_actions=["systems.get"],
+                    data={"project": system.project},
                 )
             job = await queue.enqueue(
-                conn, JobKind.TEARDOWN, {"system_id": str(uid)},
-                _authorizing(ctx, system.project), f"{uid}:teardown",
+                conn,
+                JobKind.TEARDOWN,
+                {"system_id": str(uid)},
+                _authorizing(ctx, system.project),
+                f"{uid}:teardown",
             )
         return _system_job_envelope(job, uid)
 
@@ -1404,8 +1471,12 @@ async def teardown_handler(
         old = system.state
         await SYSTEMS.update_state(conn, system_id, SystemState.TORN_DOWN)
         await _audit_transition(
-            conn, job, project=system.project, object_id=system_id,
-            transition=f"{old.value}->torn_down", tool="systems.teardown",
+            conn,
+            job,
+            project=system.project,
+            object_id=system_id,
+            transition=f"{old.value}->torn_down",
+            tool="systems.teardown",
         )
     provisioning.teardown(domain_name)  # outside the lock (slow libvirt call)
     return str(system_id)
@@ -1439,7 +1510,9 @@ Because `LocalLibvirtProvisioning.provision` is a **sync** method called from in
 Append to `tests/mcp/test_systems_tools.py`:
 
 ```python
-def test_provision_handler_superseded_midflight_tears_down_created_domain(migrated_url: str) -> None:
+def test_provision_handler_superseded_midflight_tears_down_created_domain(
+    migrated_url: str,
+) -> None:
     import psycopg
 
     class _RacingProvisioning(_FakeProvisioning):

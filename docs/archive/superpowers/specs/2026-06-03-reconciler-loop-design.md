@@ -73,13 +73,14 @@ The four repairs (parent spec):
 ```python
 @runtime_checkable
 class OwnedDomain(Protocol):
-    name: str                # libvirt domain name (the destroy handle)
-    system_id: UUID | None   # parsed from the libvirt metadata tag; None = untagged
+    name: str  # libvirt domain name (the destroy handle)
+    system_id: UUID | None  # parsed from the libvirt metadata tag; None = untagged
+
 
 @runtime_checkable
 class InfraReaper(Protocol):
     async def list_owned(self) -> list[OwnedDomain]: ...
-    async def destroy(self, name: str) -> None: ...   # idempotent: absent domain → no-op
+    async def destroy(self, name: str) -> None: ...  # idempotent: absent domain → no-op
 ```
 
 A strict subset of the parent spec's `DiscoveryPlane`. The reconciler holds an
@@ -92,11 +93,12 @@ idempotent so a domain already gone (reaped, or torn down between `list_owned` a
 ```python
 @dataclass(frozen=True, slots=True)
 class ReconcileReport:
-    orphaned_systems: int      # teardown jobs newly enqueued this pass (0 if already queued)
-    abandoned_jobs: int        # zombies dead-lettered
-    dead_sessions: int         # sessions detached
-    leaked_domains: int        # domains destroyed
+    orphaned_systems: int  # teardown jobs newly enqueued this pass (0 if already queued)
+    abandoned_jobs: int  # zombies dead-lettered
+    dead_sessions: int  # sessions detached
+    leaked_domains: int  # domains destroyed
     failures: tuple[str, ...]  # names of repairs that raised this pass (empty = all ran)
+
 
 async def reconcile_once(
     pool: AsyncConnectionPool,
@@ -317,12 +319,17 @@ domain.
 ```python
 class Reconciler:
     def __init__(
-        self, pool, reaper, *,
+        self,
+        pool,
+        reaper,
+        *,
         interval: timedelta = timedelta(seconds=30),
         debug_session_stale_after: timedelta = timedelta(minutes=2),
     ) -> None: ...
-    async def run_once(self) -> ReconcileReport: ...     # one pass
-    async def run(self, stop: asyncio.Event) -> None: ...  # loop; sleep interval; survive a transient error
+    async def run_once(self) -> ReconcileReport: ...  # one pass
+    async def run(
+        self, stop: asyncio.Event
+    ) -> None: ...  # loop; sleep interval; survive a transient error
 ```
 
 `run` mirrors `Worker.run` (#9): `while not stop.is_set(): try run_once except

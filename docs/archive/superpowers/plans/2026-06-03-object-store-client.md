@@ -253,9 +253,7 @@ class ObjectStore:
             )
         except ClientError as err:
             raise _infrastructure_error("put_object", key, err) from err
-        return StoredArtifact(
-            key, _normalize_etag(resp["ETag"]), sensitivity, retention_class
-        )
+        return StoredArtifact(key, _normalize_etag(resp["ETag"]), sensitivity, retention_class)
 
     def get_artifact(self, key: str, etag: str) -> FetchedArtifact:
         """Fetch the object at ``key`` iff its etag still matches ``etag``.
@@ -271,9 +269,7 @@ class ObjectStore:
                 (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
         """
         try:
-            resp = self._client.get_object(
-                Bucket=self._bucket, Key=key, IfMatch=f'"{etag}"'
-            )
+            resp = self._client.get_object(Bucket=self._bucket, Key=key, IfMatch=f'"{etag}"')
         except ClientError as err:
             status = err.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
             if status in _STALE_STATUSES:
@@ -296,9 +292,7 @@ class ObjectStore:
         return FetchedArtifact(resp["Body"].read(), sensitivity, retention_class)
 
 
-def register_artifact_row(
-    stored: StoredArtifact, *, owner_kind: str, owner_id: UUID
-) -> Artifact:
+def register_artifact_row(stored: StoredArtifact, *, owner_kind: str, owner_id: UUID) -> Artifact:
     """Build the ``artifacts`` row for a stored object (no database access).
 
     The sensitivity/retention come from ``stored`` so the row matches the object by
@@ -589,8 +583,7 @@ def minio_store() -> Iterator[ObjectStore]:
         pytest.skip(f"Docker unavailable for testcontainers: {exc}")
     try:
         endpoint = (
-            f"http://{container.get_container_host_ip()}:"
-            f"{container.get_exposed_port(_MINIO_PORT)}"
+            f"http://{container.get_container_host_ip()}:{container.get_exposed_port(_MINIO_PORT)}"
         )
         client = boto3.client(
             "s3",
@@ -647,9 +640,7 @@ def test_put_uses_the_key_scheme(minio_store: ObjectStore, key_ns: str) -> None:
     assert stored.key == f"{key_ns}/vmcore/oid/core"
 
 
-def test_sensitivity_persisted_as_object_metadata(
-    minio_store: ObjectStore, key_ns: str
-) -> None:
+def test_sensitivity_persisted_as_object_metadata(minio_store: ObjectStore, key_ns: str) -> None:
     stored = minio_store.put_artifact(
         key_ns,
         "transcript",
@@ -669,9 +660,7 @@ def test_sensitivity_persisted_as_object_metadata(
     assert raw["Metadata"]["retention-class"] == "transcript"
 
 
-def test_get_with_stale_etag_raises_stale_handle(
-    minio_store: ObjectStore, key_ns: str
-) -> None:
+def test_get_with_stale_etag_raises_stale_handle(minio_store: ObjectStore, key_ns: str) -> None:
     stored = minio_store.put_artifact(
         key_ns,
         "vmcore",
@@ -687,9 +676,7 @@ def test_get_with_stale_etag_raises_stale_handle(
     assert excinfo.value.category is ErrorCategory.STALE_HANDLE
 
 
-def test_get_missing_object_raises_stale_handle(
-    minio_store: ObjectStore, key_ns: str
-) -> None:
+def test_get_missing_object_raises_stale_handle(minio_store: ObjectStore, key_ns: str) -> None:
     with pytest.raises(CategorizedError) as excinfo:
         minio_store.get_artifact(f"{key_ns}/vmcore/none/missing", "abc123")
     assert excinfo.value.category is ErrorCategory.STALE_HANDLE
@@ -699,9 +686,7 @@ def test_get_object_without_metadata_raises_infrastructure_failure(
     minio_store: ObjectStore, key_ns: str
 ) -> None:
     key = f"{key_ns}/vmcore/sys-1/bare"
-    resp = minio_store._client.put_object(
-        Bucket=minio_store._bucket, Key=key, Body=b"no-metadata"
-    )
+    resp = minio_store._client.put_object(Bucket=minio_store._bucket, Key=key, Body=b"no-metadata")
     etag = resp["ETag"].strip('"')
 
     with pytest.raises(CategorizedError) as excinfo:

@@ -187,9 +187,7 @@ Expected: FAIL — value is None.
 In `_close_locked`, after `updated = await INVESTIGATIONS.update_state(conn, uid, InvestigationState.CLOSED)` and within the same `async with conn.transaction()` block, add:
 
 ```python
-        await conn.execute(
-            "UPDATE investigations SET cleanup_pending_at = now() WHERE id = %s", (uid,)
-        )
+await conn.execute("UPDATE investigations SET cleanup_pending_at = now() WHERE id = %s", (uid,))
 ```
 
 (The already-`CLOSED` early return at the top of `_close_locked` is unchanged, so a re-close
@@ -233,8 +231,12 @@ git commit -m "feat(investigations): mark cleanup_pending_at on close (#768)"
 
 ```python
 async def _seed_run_build_artifact(
-    conn, *, retention_class: str, owner_kind: str = "runs",
-    state: str = "closed", grace_age: timedelta = timedelta(days=2),
+    conn,
+    *,
+    retention_class: str,
+    owner_kind: str = "runs",
+    state: str = "closed",
+    grace_age: timedelta = timedelta(days=2),
 ) -> tuple[UUID, str]:
     """Insert investigation(closed, cleanup_pending_at past grace) + run + one artifact.
 
@@ -492,9 +494,9 @@ BUILD_ARTIFACT_RETENTION_DAYS = Setting(
 - [ ] **Step 2: Register both in `SETTINGS`** (after `REPORT_ARTIFACT_RETENTION_DAYS,`)
 
 ```python
-    REPORT_ARTIFACT_RETENTION_DAYS,
-    INVESTIGATION_CLEANUP_GRACE_DAYS,
-    BUILD_ARTIFACT_RETENTION_DAYS,
+(REPORT_ARTIFACT_RETENTION_DAYS,)
+(INVESTIGATION_CLEANUP_GRACE_DAYS,)
+(BUILD_ARTIFACT_RETENTION_DAYS,)
 ```
 
 - [ ] **Step 3: Regenerate docs**
@@ -590,19 +592,15 @@ Add `_gc_investigation_artifacts`, `_gc_expired_build_artifacts` to `__all__`.
     expired_build_artifacts_gc_count: int = 0
 ```
 ```python
-        investigation_artifacts_gc_count=counts.get("investigation_artifacts_gc_count", 0),
-        expired_build_artifacts_gc_count=counts.get("expired_build_artifacts_gc_count", 0),
+investigation_artifacts_gc_count = (counts.get("investigation_artifacts_gc_count", 0),)
+expired_build_artifacts_gc_count = (counts.get("expired_build_artifacts_gc_count", 0),)
 ```
 
 - [ ] **Step 4: Plumb settings in `__main__.py`** (inside the `ReconcileConfig(...)` near `report_artifact_retention=`)
 
 ```python
-                    investigation_cleanup_grace=timedelta(
-                        days=config.require(INVESTIGATION_CLEANUP_GRACE_DAYS)
-                    ),
-                    build_artifact_retention=timedelta(
-                        days=config.require(BUILD_ARTIFACT_RETENTION_DAYS)
-                    ),
+investigation_cleanup_grace = (timedelta(days=config.require(INVESTIGATION_CLEANUP_GRACE_DAYS)),)
+build_artifact_retention = (timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS)),)
 ```
 
 Add `INVESTIGATION_CLEANUP_GRACE_DAYS, BUILD_ARTIFACT_RETENTION_DAYS` to the `core_settings` import

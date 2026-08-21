@@ -209,8 +209,13 @@ from scripts.coverage_campaign.results import CellResult, merge_and_render
 
 
 def _row(tool: str) -> CensusRow:
-    return CensusRow(tool=tool, plane=tool.split(".")[0], maturity="implemented",
-                     annotation="read_only", destructive_member=False)
+    return CensusRow(
+        tool=tool,
+        plane=tool.split(".")[0],
+        maturity="implemented",
+        annotation="read_only",
+        destructive_member=False,
+    )
 
 
 def test_render_marks_pass_gap_and_na() -> None:

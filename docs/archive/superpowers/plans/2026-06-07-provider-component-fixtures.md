@@ -95,7 +95,11 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 
 def test_parse_local_ref_requires_absolute_path() -> None:
     ref = parse_component_ref(
-        {"kind": "local", "path": "/var/lib/kdive/rootfs/base.qcow2", "sha256": "sha256:" + "0" * 64}
+        {
+            "kind": "local",
+            "path": "/var/lib/kdive/rootfs/base.qcow2",
+            "sha256": "sha256:" + "0" * 64,
+        }
     )
     assert isinstance(ref, LocalComponentRef)
     assert ref.path == "/var/lib/kdive/rootfs/base.qcow2"
@@ -124,7 +128,9 @@ def test_parse_catalog_ref() -> None:
         {"kind": "url", "url": "https://example.invalid/x.qcow2"},
     ],
 )
-def test_parse_component_ref_maps_invalid_payloads_to_config_error(payload: dict[str, object]) -> None:
+def test_parse_component_ref_maps_invalid_payloads_to_config_error(
+    payload: dict[str, object],
+) -> None:
     with pytest.raises(CategorizedError) as caught:
         parse_component_ref(payload)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -152,7 +158,14 @@ from collections.abc import Mapping
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+)
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
@@ -224,7 +237,9 @@ def parse_component_ref(data: Mapping[str, object]) -> ComponentRef:
         raise CategorizedError(
             "invalid component reference",
             category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"errors": exc.errors(include_url=False, include_input=False, include_context=False)},
+            details={
+                "errors": exc.errors(include_url=False, include_input=False, include_context=False)
+            },
         ) from exc
 ```
 
@@ -474,9 +489,7 @@ class CmdlineRequirements(BaseModel):
 def validate_config_requirements(config_text: str, requirements: ConfigRequirements) -> None:
     values = _parse_config(config_text)
     missing = {
-        key: value
-        for key, value in requirements.required.items()
-        if values.get(key) != value
+        key: value for key, value in requirements.required.items() if values.get(key) != value
     }
     if missing:
         raise CategorizedError(
@@ -500,12 +513,20 @@ def validate_cmdline_requirements(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"missing": missing},
         )
-    platform = {prefix: _first_token_with_prefix(platform_cmdline, prefix) for prefix in requirements.protected_prefixes}
-    supplied = {prefix: _first_token_with_prefix(cmdline, prefix) for prefix in requirements.protected_prefixes}
+    platform = {
+        prefix: _first_token_with_prefix(platform_cmdline, prefix)
+        for prefix in requirements.protected_prefixes
+    }
+    supplied = {
+        prefix: _first_token_with_prefix(cmdline, prefix)
+        for prefix in requirements.protected_prefixes
+    }
     overrides = [
         prefix
         for prefix, platform_token in platform.items()
-        if platform_token is not None and supplied[prefix] is not None and supplied[prefix] != platform_token
+        if platform_token is not None
+        and supplied[prefix] is not None
+        and supplied[prefix] != platform_token
     ]
     if overrides:
         raise CategorizedError(
@@ -920,7 +941,9 @@ Create `src/kdive/providers/local_libvirt/materialize.py` with:
 
 ```python
 class ComponentStore(Protocol):
-    def get_visible_component(self, component_id: UUID, *, project: str) -> ProviderComponent | None:
+    def get_visible_component(
+        self, component_id: UUID, *, project: str
+    ) -> ProviderComponent | None:
         """Return an authorized provider component or None."""
 
 
@@ -939,7 +962,9 @@ def materialize_rootfs_base(
     object_store: ObjectStore | None,
 ) -> Path:
     if isinstance(ref, LocalComponentRef):
-        return validate_local_component_path(ref.path, allowed_roots=allowed_roots, sha256=ref.sha256)
+        return validate_local_component_path(
+            ref.path, allowed_roots=allowed_roots, sha256=ref.sha256
+        )
     if isinstance(ref, CatalogComponentRef):
         entry = load_fixture_catalog().rootfs_entry(ref.provider, ref.name)
         if isinstance(entry.source, LocalComponentRef):

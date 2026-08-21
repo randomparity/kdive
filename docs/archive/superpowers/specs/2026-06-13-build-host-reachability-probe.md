@@ -32,7 +32,7 @@ probing.
 
 ```python
 class BuildHostProber(Protocol):
-    async def probe(self, host: BuildHost) -> bool: ...   # True == reachable
+    async def probe(self, host: BuildHost) -> bool: ...  # True == reachable
 ```
 
 `SshBuildHostProber(secret_registry, *, probe_timeout_s=15)` implements it. `probe`

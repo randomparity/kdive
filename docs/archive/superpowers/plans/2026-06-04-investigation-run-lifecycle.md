@@ -143,7 +143,9 @@ def test_open_mints_investigation_and_audits(migrated_url: str) -> None:
             assert resp.status == "open"
             inv_id = resp.object_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state, title FROM investigations WHERE id = %s", (inv_id,))
+                await cur.execute(
+                    "SELECT state, title FROM investigations WHERE id = %s", (inv_id,)
+                )
                 row = await cur.fetchone()
                 await cur.execute(
                     "SELECT count(*) AS n FROM audit_log WHERE transition = '->open' "
@@ -216,7 +218,9 @@ def test_get_cross_project_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             opened = await _open(pool, _ctx(), project="proj", title="t")
-            resp = await inv_tools.get_investigation(pool, _ctx(projects=("other",)), opened.object_id)
+            resp = await inv_tools.get_investigation(
+                pool, _ctx(projects=("other",)), opened.object_id
+            )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
     asyncio.run(_run())
@@ -280,9 +284,7 @@ from kdive.security.rbac import Role, require_role
 
 _log = logging.getLogger(__name__)
 
-_TERMINAL_INVESTIGATION = frozenset(
-    {InvestigationState.CLOSED, InvestigationState.ABANDONED}
-)
+_TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
 
 
 def _config_error(object_id: str, *, data: dict[str, str] | None = None) -> ToolResponse:
@@ -339,7 +341,7 @@ async def open_investigation(
     with bind_context(principal=ctx.principal):
         try:
             refs = _parse_external_refs(external_refs)
-        except (ValidationError, TypeError):
+        except ValidationError, TypeError:
             return _config_error(project)
         now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
         async with pool.connection() as conn, conn.transaction():
@@ -583,7 +585,9 @@ def test_close_cross_project_is_not_found(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_close_backstop_maps_illegal_transition(monkeypatch: pytest.MonkeyPatch, migrated_url: str) -> None:
+def test_close_backstop_maps_illegal_transition(
+    monkeypatch: pytest.MonkeyPatch, migrated_url: str
+) -> None:
     # Force the IllegalTransition backstop: make update_state raise so the handler's
     # except-branch maps it to configuration_error rather than letting it escape.
     from kdive.db.repositories import INVESTIGATIONS
@@ -743,8 +747,12 @@ def test_link_upserts_changed_url(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
-            await inv_tools.link_external_ref(pool, _ctx(), inv_id, {"tracker": "bz", "id": "7", "url": "https://bz/7"})
-            await inv_tools.link_external_ref(pool, _ctx(), inv_id, {"tracker": "bz", "id": "7", "url": "https://bz/7-fixed"})
+            await inv_tools.link_external_ref(
+                pool, _ctx(), inv_id, {"tracker": "bz", "id": "7", "url": "https://bz/7"}
+            )
+            await inv_tools.link_external_ref(
+                pool, _ctx(), inv_id, {"tracker": "bz", "id": "7", "url": "https://bz/7-fixed"}
+            )
             refs = await _refs_of(pool, inv_id)()
         assert refs == {("bz", "7"): "https://bz/7-fixed"}  # one entry, url corrected
 
@@ -755,7 +763,9 @@ def test_unlink_by_natural_key_without_url(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
-            await inv_tools.link_external_ref(pool, _ctx(), inv_id, {"tracker": "bz", "id": "7", "url": "https://bz/7"})
+            await inv_tools.link_external_ref(
+                pool, _ctx(), inv_id, {"tracker": "bz", "id": "7", "url": "https://bz/7"}
+            )
             # No url, and a differing url, both unlink the (bz,7) entry.
             await inv_tools.unlink_external_ref(pool, _ctx(), inv_id, {"tracker": "bz", "id": "7"})
             refs = await _refs_of(pool, inv_id)()
@@ -768,7 +778,9 @@ def test_unlink_absent_is_idempotent_no_audit(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
-            resp = await inv_tools.unlink_external_ref(pool, _ctx(), inv_id, {"tracker": "bz", "id": "nope"})
+            resp = await inv_tools.unlink_external_ref(
+                pool, _ctx(), inv_id, {"tracker": "bz", "id": "nope"}
+            )
             assert resp.status == "open"
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
@@ -786,7 +798,9 @@ def test_link_on_closed_investigation_is_config_error(migrated_url: str) -> None
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             inv_id = await _seed_investigation(pool, InvestigationState.CLOSED)
-            resp = await inv_tools.link_external_ref(pool, _ctx(), inv_id, {"tracker": "bz", "id": "7", "url": "https://bz/7"})
+            resp = await inv_tools.link_external_ref(
+                pool, _ctx(), inv_id, {"tracker": "bz", "id": "7", "url": "https://bz/7"}
+            )
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "closed"
 
@@ -797,7 +811,9 @@ def test_link_malformed_ref_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
-            resp = await inv_tools.link_external_ref(pool, _ctx(), inv_id, {"tracker": "bz"})  # no id/url
+            resp = await inv_tools.link_external_ref(
+                pool, _ctx(), inv_id, {"tracker": "bz"}
+            )  # no id/url
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
     asyncio.run(_run())
@@ -815,10 +831,16 @@ def test_link_acquires_investigation_lock(migrated_url: str) -> None:
             inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
             uid = UUID(inv_id)
             async with await psycopg.AsyncConnection.connect(migrated_url) as holder:
-                async with holder.transaction(), advisory_xact_lock(holder, LockScope.INVESTIGATION, uid):
+                async with (
+                    holder.transaction(),
+                    advisory_xact_lock(holder, LockScope.INVESTIGATION, uid),
+                ):
                     task = asyncio.create_task(
                         inv_tools.link_external_ref(
-                            pool, _ctx(), inv_id, {"tracker": "bz", "id": "7", "url": "https://bz/7"}
+                            pool,
+                            _ctx(),
+                            inv_id,
+                            {"tracker": "bz", "id": "7", "url": "https://bz/7"},
                         )
                     )
                     await asyncio.sleep(0.3)
@@ -902,7 +924,8 @@ async def _unlink_locked(
         kept = [r for r in current.external_refs if (r.tracker, r.id) != key]
         if len(kept) != len(current.external_refs):
             await conn.execute(
-                "UPDATE investigations SET external_refs = %s WHERE id = %s", (_refs_jsonb(kept), uid)
+                "UPDATE investigations SET external_refs = %s WHERE id = %s",
+                (_refs_jsonb(kept), uid),
             )
             await audit.record(
                 conn,
@@ -960,13 +983,14 @@ async def unlink_external_ref(
 Add the two tool bindings inside `register`:
 
 ```python
-    @app.tool(name="investigations.link")
-    async def investigations_link(investigation_id: str, ref: dict[str, Any]) -> ToolResponse:
-        return await link_external_ref(pool, current_context(), investigation_id, ref)
+@app.tool(name="investigations.link")
+async def investigations_link(investigation_id: str, ref: dict[str, Any]) -> ToolResponse:
+    return await link_external_ref(pool, current_context(), investigation_id, ref)
 
-    @app.tool(name="investigations.unlink")
-    async def investigations_unlink(investigation_id: str, ref: dict[str, Any]) -> ToolResponse:
-        return await unlink_external_ref(pool, current_context(), investigation_id, ref)
+
+@app.tool(name="investigations.unlink")
+async def investigations_unlink(investigation_id: str, ref: dict[str, Any]) -> ToolResponse:
+    return await unlink_external_ref(pool, current_context(), investigation_id, ref)
 ```
 
 - [ ] **Step 4: Run tests + guardrails**
@@ -1036,7 +1060,6 @@ from kdive.security.rbac import Role
 > parametrized/raise tests.
 
 ```python
-
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _PROFILE: dict[str, Any] = {"kernel_source_ref": "git+https://git.kernel.org#v6.9"}
 
@@ -1134,7 +1157,9 @@ async def _seed_investigation(
     return str(inv.id)
 
 
-async def _seed_run(pool: AsyncConnectionPool, *, state: RunState, failure: ErrorCategory | None = None) -> str:
+async def _seed_run(
+    pool: AsyncConnectionPool, *, state: RunState, failure: ErrorCategory | None = None
+) -> str:
     inv_id = await _seed_investigation(pool)
     sys_id = await _seed_system(pool)
     async with pool.connection() as conn:
@@ -1170,7 +1195,9 @@ def test_get_created_run(migrated_url: str) -> None:
 def test_get_failed_run_renders_failure_category(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            run_id = await _seed_run(pool, state=RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE)
+            run_id = await _seed_run(
+                pool, state=RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE
+            )
             resp = await runs_tools.get_run(pool, _ctx(), run_id)
         assert resp.status == "error" and resp.error_category == "build_failure"
         assert resp.data["current_status"] == "failed"
@@ -1269,13 +1296,9 @@ from kdive.security.rbac import Role, require_role
 _log = logging.getLogger(__name__)
 
 _RUN_HOSTABLE = frozenset({SystemState.READY})
-_SYSTEM_GONE = frozenset(
-    {SystemState.TORN_DOWN, SystemState.FAILED, SystemState.CRASHED}
-)
+_SYSTEM_GONE = frozenset({SystemState.TORN_DOWN, SystemState.FAILED, SystemState.CRASHED})
 _ALLOC_HOSTABLE = frozenset({AllocationState.ACTIVE})
-_INVESTIGATION_OPEN_FOR_RUN = frozenset(
-    {InvestigationState.OPEN, InvestigationState.ACTIVE}
-)
+_INVESTIGATION_OPEN_FOR_RUN = frozenset({InvestigationState.OPEN, InvestigationState.ACTIVE})
 
 
 def _config_error(object_id: str, *, data: dict[str, str] | None = None) -> ToolResponse:
@@ -1299,9 +1322,7 @@ def _envelope_for_run(run: Run) -> ToolResponse:
     """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`."""
     if run.state is RunState.FAILED:
         category = run.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
-        return ToolResponse.failure(
-            str(run.id), category, data={"current_status": run.state.value}
-        )
+        return ToolResponse.failure(str(run.id), category, data={"current_status": run.state.value})
     if run.state in (RunState.CREATED, RunState.RUNNING):
         actions = ["runs.get", "runs.build"]
     else:
@@ -1400,7 +1421,9 @@ First add the two imports deferred from Task 5 to the top of `tests/mcp/test_run
 Then append to `tests/mcp/test_runs_tools.py`:
 
 ```python
-async def _create(pool: AsyncConnectionPool, ctx: RequestContext, inv_id: str, sys_id: str, profile=None):
+async def _create(
+    pool: AsyncConnectionPool, ctx: RequestContext, inv_id: str, sys_id: str, profile=None
+):
     return await runs_tools.create_run(
         pool, ctx, investigation_id=inv_id, system_id=sys_id, build_profile=profile or _profile()
     )
@@ -1450,7 +1473,9 @@ def test_create_second_run_no_second_flip(migrated_url: str) -> None:
                     (inv_id,),
                 )
                 flip = await cur.fetchone()
-                await cur.execute("SELECT count(*) AS n FROM runs WHERE investigation_id = %s", (inv_id,))
+                await cur.execute(
+                    "SELECT count(*) AS n FROM runs WHERE investigation_id = %s", (inv_id,)
+                )
                 runs = await cur.fetchone()
         assert flip is not None and flip["n"] == 1  # flipped exactly once
         assert runs is not None and runs["n"] == 2
@@ -1498,7 +1523,9 @@ def test_create_with_non_active_allocation_is_stale_handle(migrated_url: str) ->
 
 
 @pytest.mark.parametrize("state", [InvestigationState.CLOSED, InvestigationState.ABANDONED])
-def test_create_on_terminal_investigation_is_config_error(migrated_url: str, state: InvestigationState) -> None:
+def test_create_on_terminal_investigation_is_config_error(
+    migrated_url: str, state: InvestigationState
+) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             inv_id = await _seed_investigation(pool, state=state)
@@ -1518,9 +1545,13 @@ def test_create_cross_project_join_is_config_error(migrated_url: str) -> None:
             # Investigation seeded in another project for the same caller (multi-project ctx).
             other_inv = await _seed_investigation(pool, project="proj")
             async with pool.connection() as conn:
-                await conn.execute("UPDATE investigations SET project = 'p2' WHERE id = %s", (other_inv,))
+                await conn.execute(
+                    "UPDATE investigations SET project = 'p2' WHERE id = %s", (other_inv,)
+                )
             ctx = RequestContext(
-                principal="user-1", agent_session="s", projects=("proj", "p2"),
+                principal="user-1",
+                agent_session="s",
+                projects=("proj", "p2"),
                 roles={"proj": Role.OPERATOR, "p2": Role.OPERATOR},
             )
             resp = await runs_tools.create_run(
@@ -1612,7 +1643,10 @@ def test_create_blocks_on_held_investigation_lock(migrated_url: str) -> None:
             inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
             sys_id = await _seed_system(pool)
             async with await psycopg.AsyncConnection.connect(migrated_url) as holder:
-                async with holder.transaction(), advisory_xact_lock(holder, LockScope.INVESTIGATION, UUID(inv_id)):
+                async with (
+                    holder.transaction(),
+                    advisory_xact_lock(holder, LockScope.INVESTIGATION, UUID(inv_id)),
+                ):
                     task = asyncio.create_task(_create(pool, _ctx(), inv_id, sys_id))
                     await asyncio.sleep(0.3)
                     assert not task.done()  # blocked on the held INVESTIGATION lock

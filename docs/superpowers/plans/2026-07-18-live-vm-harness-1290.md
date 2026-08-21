@@ -398,7 +398,8 @@ def resolve_throwaway_contract(default_uri: str) -> EnvResolution[ThrowawayContr
             ),
         )
     return EnvResolution(
-        LiveVmEnvState.AVAILABLE, ThrowawayContract(rootfs=rootfs, libvirt_uri=_resolved_uri(default_uri))
+        LiveVmEnvState.AVAILABLE,
+        ThrowawayContract(rootfs=rootfs, libvirt_uri=_resolved_uri(default_uri)),
     )
 
 
@@ -678,9 +679,7 @@ def test_builder_direct_kernel_and_default_console_cmdline(tmp_path) -> None:
     kernel = tmp_path / "vmlinuz"
     kernel.write_bytes(b"k")
     root = _root(
-        throwaway_domain_xml(
-            name="a", arch="x86_64", disk_path="/d.qcow2", kernel_path=kernel
-        )
+        throwaway_domain_xml(name="a", arch="x86_64", disk_path="/d.qcow2", kernel_path=kernel)
     )
     assert root.find("./os/kernel").text == str(kernel)
     assert root.find("./os/cmdline").text == "root=/dev/vda console=ttyS0 rw"
@@ -874,7 +873,10 @@ def test_wait_for_ssh_true_when_probe_eventually_succeeds() -> None:
     def probe(_host: str, _port: int) -> bool:
         return next(seq)
 
-    assert wait_for_ssh("127.0.0.1", 2222, deadline_s=100.0, probe=probe, sleep=lambda _s: None) is True
+    assert (
+        wait_for_ssh("127.0.0.1", 2222, deadline_s=100.0, probe=probe, sleep=lambda _s: None)
+        is True
+    )
 
 
 def test_wait_for_ssh_false_at_deadline_when_probe_never_succeeds() -> None:
@@ -893,7 +895,10 @@ def test_wait_for_ssh_survives_probe_oserror() -> None:
             raise OSError("connection refused")
         return True
 
-    assert wait_for_ssh("127.0.0.1", 2222, deadline_s=100.0, probe=probe, sleep=lambda _s: None) is True
+    assert (
+        wait_for_ssh("127.0.0.1", 2222, deadline_s=100.0, probe=probe, sleep=lambda _s: None)
+        is True
+    )
 
 
 def test_prepare_session_runtime_none_for_system_mode(monkeypatch) -> None:
@@ -958,7 +963,9 @@ def _ssh_banner_verdict(buffer: bytes) -> bool | None:
     return None
 
 
-def ssh_banner_reachable(host: str, port: int, timeout_s: float = 2.0) -> bool:  # pragma: no cover - live_vm
+def ssh_banner_reachable(
+    host: str, port: int, timeout_s: float = 2.0
+) -> bool:  # pragma: no cover - live_vm
     """One connect + sshd identification-banner read; True iff the peer speaks SSH.
 
     The harness owns its own probe (rather than importing the provider-internal, live-only
@@ -1163,8 +1170,12 @@ def test_boot_yields_and_tears_down_in_order(tmp_path, monkeypatch) -> None:
         overlays.append(dest)
 
     with boot_throwaway_domain(
-        rootfs, arch="x86_64", name="kdive-t", mode="qemu:///system",
-        _connect=_fake_conn_factory(conn), _overlay=fake_overlay,
+        rootfs,
+        arch="x86_64",
+        name="kdive-t",
+        mode="qemu:///system",
+        _connect=_fake_conn_factory(conn),
+        _overlay=fake_overlay,
     ) as live:
         assert live.name == "kdive-t"
         assert conn.define_calls == 1
@@ -1181,8 +1192,12 @@ def test_boot_raises_before_define_on_ssh_without_port(tmp_path) -> None:
     rootfs.write_bytes(b"qcow2")
     with pytest.raises(CategorizedError):
         with boot_throwaway_domain(
-            rootfs, arch="x86_64", name="k", wait_for="ssh",
-            _connect=_fake_conn_factory(conn), _overlay=lambda b, d: d.write_bytes(b""),
+            rootfs,
+            arch="x86_64",
+            name="k",
+            wait_for="ssh",
+            _connect=_fake_conn_factory(conn),
+            _overlay=lambda b, d: d.write_bytes(b""),
         ):
             pass
     assert conn.define_calls == 0  # failed the precondition before defining
@@ -1195,8 +1210,12 @@ def test_boot_timeout_raises_and_tears_down(tmp_path, monkeypatch) -> None:
     rootfs.write_bytes(b"qcow2")
     with pytest.raises(LiveVmBootTimeout):
         with boot_throwaway_domain(
-            rootfs, arch="x86_64", name="k", wait_timeout_s=-1.0,
-            _connect=_fake_conn_factory(conn), _overlay=lambda b, d: d.write_bytes(b""),
+            rootfs,
+            arch="x86_64",
+            name="k",
+            wait_timeout_s=-1.0,
+            _connect=_fake_conn_factory(conn),
+            _overlay=lambda b, d: d.write_bytes(b""),
         ):
             pass
     assert conn.closed  # teardown still ran
@@ -1204,6 +1223,7 @@ def test_boot_timeout_raises_and_tears_down(tmp_path, monkeypatch) -> None:
 
 def test_boot_session_mode_restores_xdg_even_on_body_error(tmp_path, monkeypatch) -> None:
     import os as _os
+
     monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
     monkeypatch.setenv("XDG_CONFIG_HOME", "/original")
     conn = _FakeConn()
@@ -1211,8 +1231,12 @@ def test_boot_session_mode_restores_xdg_even_on_body_error(tmp_path, monkeypatch
     rootfs.write_bytes(b"qcow2")
     with pytest.raises(RuntimeError):
         with boot_throwaway_domain(
-            rootfs, arch="x86_64", name="k", mode="qemu:///session",
-            _connect=_fake_conn_factory(conn), _overlay=lambda b, d: d.write_bytes(b""),
+            rootfs,
+            arch="x86_64",
+            name="k",
+            mode="qemu:///session",
+            _connect=_fake_conn_factory(conn),
+            _overlay=lambda b, d: d.write_bytes(b""),
         ):
             raise RuntimeError("body boom")
     assert _os.environ["XDG_CONFIG_HOME"] == "/original"
@@ -1253,7 +1277,9 @@ class LiveVmBootTimeout(Exception):
     """A throwaway domain did not reach its wait condition before the deadline."""
 
 
-def _validate_wait(wait_for: str, *, ssh_hostfwd_port: int | None, console_log: Path | None) -> None:
+def _validate_wait(
+    wait_for: str, *, ssh_hostfwd_port: int | None, console_log: Path | None
+) -> None:
     if wait_for not in _VALID_WAITS:
         raise CategorizedError(
             f"unknown wait_for {wait_for!r}; expected one of {_VALID_WAITS}",
@@ -1335,7 +1361,10 @@ def boot_throwaway_domain(
         domain = conn.defineXML(xml)
         domain.create()
         if not _await_condition(
-            wait_for, domain, deadline_s=wait_timeout_s, ssh_port=ssh_hostfwd_port,
+            wait_for,
+            domain,
+            deadline_s=wait_timeout_s,
+            ssh_port=ssh_hostfwd_port,
             console_log=console_log,
         ):
             raise LiveVmBootTimeout(
@@ -1345,8 +1374,12 @@ def boot_throwaway_domain(
         if settle_s > 0:
             _sleep(settle_s)
         yield LiveDomain(
-            name=name, domain=domain, conn=conn, uri=mode,
-            ssh_port=ssh_hostfwd_port, console_log=console_log,
+            name=name,
+            domain=domain,
+            conn=conn,
+            uri=mode,
+            ssh_port=ssh_hostfwd_port,
+            console_log=console_log,
         )
     finally:
         if domain is not None:
@@ -1483,30 +1516,35 @@ git commit -m "test(live-vm): migrate snapshot live test onto boot_throwaway_dom
 Keep the free-port helper, the filter-dump attach/detach, and the pcap assertion. Replace the boot/overlay/XDG/teardown with:
 
 ```python
-    contract = require_live_vm_throwaway("qemu:///session", session_required=True)
-    ...
-    name = f"kdive-cap-live-{uuid.uuid4().hex[:12]}"
-    port = _free_port()
-    ...
-    capturer = LocalLibvirtTrafficCapture(
-        connect=lambda: libvirt.open(contract.libvirt_uri), monitor=libvirt_qemu.qemuMonitorCommand
-    )
-    with boot_throwaway_domain(
-        contract.rootfs, arch="x86_64", name=name, mode=contract.libvirt_uri,
-        ssh_hostfwd_port=port, wait_for="active", settle_s=2.0,
-    ) as live:
-        capturer.attach(name, qom_id=qom_id, dest_path=str(pcap_file), snaplen=128)
-        for _ in range(8):
-            with (
-                contextlib.suppress(OSError),
-                socket.create_connection(("127.0.0.1", port), timeout=1) as sock,
-            ):
-                sock.sendall(b"kdive-capture-probe\n")
-            time.sleep(0.2)
-        capturer.detach(name, qom_id=qom_id)
-        data = pcap_file.read_bytes()
-        assert count_pcap_packets(data) > 0, "filter-dump captured no packets"
-    # pcap_file / pcap_dir cleanup stays in this test (the harness owns only the domain + overlay)
+contract = require_live_vm_throwaway("qemu:///session", session_required=True)
+...
+name = f"kdive-cap-live-{uuid.uuid4().hex[:12]}"
+port = _free_port()
+...
+capturer = LocalLibvirtTrafficCapture(
+    connect=lambda: libvirt.open(contract.libvirt_uri), monitor=libvirt_qemu.qemuMonitorCommand
+)
+with boot_throwaway_domain(
+    contract.rootfs,
+    arch="x86_64",
+    name=name,
+    mode=contract.libvirt_uri,
+    ssh_hostfwd_port=port,
+    wait_for="active",
+    settle_s=2.0,
+) as live:
+    capturer.attach(name, qom_id=qom_id, dest_path=str(pcap_file), snaplen=128)
+    for _ in range(8):
+        with (
+            contextlib.suppress(OSError),
+            socket.create_connection(("127.0.0.1", port), timeout=1) as sock,
+        ):
+            sock.sendall(b"kdive-capture-probe\n")
+        time.sleep(0.2)
+    capturer.detach(name, qom_id=qom_id)
+    data = pcap_file.read_bytes()
+    assert count_pcap_packets(data) > 0, "filter-dump captured no packets"
+# pcap_file / pcap_dir cleanup stays in this test (the harness owns only the domain + overlay)
 ```
 
 Mark the test `@pytest.mark.live_vm` + `@pytest.mark.live_vm_throwaway`. Delete the now-dead inline `domain_xml`, the manual `XDG_CONFIG_HOME` short-path block (the harness owns it via `prepare_session_runtime`), and the `defineXML`/`create`/`finally` domain teardown. The pcap file/dir cleanup that is not the harness's concern stays (wrap it in a `finally` around the `with` or use `tempfile` context).

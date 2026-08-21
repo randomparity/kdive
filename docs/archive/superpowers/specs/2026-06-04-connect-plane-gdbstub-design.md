@@ -148,9 +148,10 @@ lock.
 
 ```python
 class TransportHandleData(NamedTuple):
-    kind: str          # "gdbstub"
-    host: str          # loopback IP literal
-    port: int          # 1..65535
+    kind: str  # "gdbstub"
+    host: str  # loopback IP literal
+    port: int  # 1..65535
+
 
 class Connector(Protocol):
     def open_transport(self, system: SystemHandle, kind: str) -> TransportHandle: ...

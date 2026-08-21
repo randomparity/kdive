@@ -39,9 +39,7 @@
 Add to `tests/images/planes/test_build_common.py` (the helper `_failed` pattern already exists in the file — define a small local factory):
 
 ```python
-def _stub_failed_run(
-    monkeypatch: pytest.MonkeyPatch, stderr: str, returncode: int = 1
-) -> None:
+def _stub_failed_run(monkeypatch: pytest.MonkeyPatch, stderr: str, returncode: int = 1) -> None:
     def _failed(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, returncode=returncode, stdout="", stderr=stderr)
 

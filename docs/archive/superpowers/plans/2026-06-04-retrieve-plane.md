@@ -160,11 +160,20 @@ class _FakeStore:
     fail_on: str | None = None
 
     def put_artifact(
-        self, tenant: str, kind: str, object_id: str, name: str, *,
-        data: bytes, sensitivity: Sensitivity, retention_class: str,
+        self,
+        tenant: str,
+        kind: str,
+        object_id: str,
+        name: str,
+        *,
+        data: bytes,
+        sensitivity: Sensitivity,
+        retention_class: str,
     ) -> StoredArtifact:
         if self.fail_on == name:
-            raise CategorizedError("synthetic put failure", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+            raise CategorizedError(
+                "synthetic put failure", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
         key = f"{tenant}/{kind}/{object_id}/{name}"
         self.puts.append((key, name, sensitivity, data))
         return StoredArtifact(key, "etag-" + name, sensitivity, retention_class)
@@ -238,8 +247,15 @@ class Retriever(Protocol):
 
 class _StorePort(Protocol):
     def put_artifact(
-        self, tenant: str, kind: str, object_id: str, name: str, *,
-        data: bytes, sensitivity: Sensitivity, retention_class: str,
+        self,
+        tenant: str,
+        kind: str,
+        object_id: str,
+        name: str,
+        *,
+        data: bytes,
+        sensitivity: Sensitivity,
+        retention_class: str,
     ) -> StoredArtifact: ...
 
 
@@ -255,7 +271,9 @@ class LocalLibvirtRetrieve:
     """The realized Retrieve port: kdump capture + crash postmortem (ADR-0031)."""
 
     def __init__(
-        self, *, tenant: str,
+        self,
+        *,
+        tenant: str,
         store_factory: Callable[[], _StorePort],
         wait_for_vmcore: _WaitForVmcore,
         read_vmcore_build_id: _ReadBuildId,
@@ -293,8 +311,13 @@ class LocalLibvirtRetrieve:
         if self._store is None:
             self._store = self._store_factory()
         return self._store.put_artifact(
-            self._tenant, "systems", str(system_id), name,
-            data=data, sensitivity=sens, retention_class=_RETENTION_CLASS,
+            self._tenant,
+            "systems",
+            str(system_id),
+            name,
+            data=data,
+            sensitivity=sens,
+            retention_class=_RETENTION_CLASS,
         )
 ```
 
@@ -335,8 +358,10 @@ def _crash_retriever(*, observed_build_id: str, crash: CrashResult) -> LocalLibv
 def test_run_returns_redacted_crash_output() -> None:
     crash = CrashResult(exit_status=0, stdout=b"$ log\npassword=hunter2\nok", stderr=b"")
     out = _crash_retriever(observed_build_id="deadbeef", crash=crash).run(
-        vmcore_ref="k/systems/s/vmcore", debuginfo_ref="k/runs/r/vmlinux",
-        expected_build_id="deadbeef", commands=["log"],
+        vmcore_ref="k/systems/s/vmcore",
+        debuginfo_ref="k/runs/r/vmlinux",
+        expected_build_id="deadbeef",
+        commands=["log"],
     )
     assert isinstance(out, CrashOutput)
     assert "hunter2" not in out.transcript and "[REDACTED]" in out.transcript
@@ -346,7 +371,10 @@ def test_run_build_id_mismatch_is_configuration_error() -> None:
     crash = CrashResult(exit_status=0, stdout=b"", stderr=b"")
     with pytest.raises(CategorizedError) as exc:
         _crash_retriever(observed_build_id="aaaa", crash=crash).run(
-            vmcore_ref="v", debuginfo_ref="d", expected_build_id="bbbb", commands=["log"],
+            vmcore_ref="v",
+            debuginfo_ref="d",
+            expected_build_id="bbbb",
+            commands=["log"],
         )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 ```
@@ -363,23 +391,25 @@ type _RunCrash = Callable[[Path, Path, str], "CrashResult"]
 and extend `__init__` (the crash seams default to `None`; `run` raises a clear error if invoked without them, which never happens in the wired path because `from_env`/tests supply them):
 
 ```python
-    def __init__(
-        self, *, tenant: str,
-        store_factory: Callable[[], _StorePort],
-        wait_for_vmcore: _WaitForVmcore,
-        read_vmcore_build_id: _ReadBuildId,
-        extract_redacted: _ExtractRedacted,
-        fetch_object: _FetchObject | None = None,
-        run_crash: _RunCrash | None = None,
-    ) -> None:
-        self._tenant = tenant
-        self._store_factory = store_factory
-        self._store: _StorePort | None = None
-        self._wait_for_vmcore = wait_for_vmcore
-        self._read_vmcore_build_id = read_vmcore_build_id
-        self._extract_redacted = extract_redacted
-        self._fetch_object = fetch_object
-        self._run_crash = run_crash
+def __init__(
+    self,
+    *,
+    tenant: str,
+    store_factory: Callable[[], _StorePort],
+    wait_for_vmcore: _WaitForVmcore,
+    read_vmcore_build_id: _ReadBuildId,
+    extract_redacted: _ExtractRedacted,
+    fetch_object: _FetchObject | None = None,
+    run_crash: _RunCrash | None = None,
+) -> None:
+    self._tenant = tenant
+    self._store_factory = store_factory
+    self._store: _StorePort | None = None
+    self._wait_for_vmcore = wait_for_vmcore
+    self._read_vmcore_build_id = read_vmcore_build_id
+    self._extract_redacted = extract_redacted
+    self._fetch_object = fetch_object
+    self._run_crash = run_crash
 ```
 
 In `run` (Step 3b), narrow the optionals at entry: `if self._fetch_object is None or self._run_crash is None: raise CategorizedError("crash seams not configured", category=ErrorCategory.MISSING_DEPENDENCY)` — keeps `ty` happy (no `None`-call) and documents the contract. The Task-2 helper is untouched; both task suites pass.
@@ -407,59 +437,67 @@ class CrashPostmortem(Protocol):
     """The handler-facing crash-postmortem port (realized M0 contract)."""
 
     def run(
-        self, *, vmcore_ref: str, debuginfo_ref: str,
-        expected_build_id: str, commands: list[str],
+        self,
+        *,
+        vmcore_ref: str,
+        debuginfo_ref: str,
+        expected_build_id: str,
+        commands: list[str],
     ) -> CrashOutput: ...
 ```
 
 And the `run` method on `LocalLibvirtRetrieve`:
 
 ```python
-    def run(
-        self, *, vmcore_ref: str, debuginfo_ref: str,
-        expected_build_id: str, commands: list[str],
-    ) -> CrashOutput:
-        """Symbolize the core against ``debuginfo_ref`` and run the crash command batch.
+def run(
+    self,
+    *,
+    vmcore_ref: str,
+    debuginfo_ref: str,
+    expected_build_id: str,
+    commands: list[str],
+) -> CrashOutput:
+    """Symbolize the core against ``debuginfo_ref`` and run the crash command batch.
 
-        Stages both objects to temp files, verifies the core's build-id matches
-        ``expected_build_id`` (provenance), runs ``crash`` over the injected seam, and
-        returns the parsed, **redacted** transcript.
+    Stages both objects to temp files, verifies the core's build-id matches
+    ``expected_build_id`` (provenance), runs ``crash`` over the injected seam, and
+    returns the parsed, **redacted** transcript.
 
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` on a build-id provenance mismatch;
-                ``MISSING_DEPENDENCY`` if the crash seams were not configured.
-        """
-        if self._fetch_object is None or self._run_crash is None:
-            raise CategorizedError(
-                "crash seams not configured on this Retriever",
-                category=ErrorCategory.MISSING_DEPENDENCY,
-            )
-        vmcore_bytes = self._fetch_object(vmcore_ref)
-        observed = self._read_vmcore_build_id(vmcore_bytes)
-        if observed != expected_build_id:
-            raise CategorizedError(
-                "captured vmcore build-id does not match the Run's debuginfo build-id",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"vmcore_ref": vmcore_ref},
-            )
-        vmlinux_bytes = self._fetch_object(debuginfo_ref)
-        with (
-            tempfile.NamedTemporaryFile(suffix=".vmcore") as core_file,
-            tempfile.NamedTemporaryFile(suffix=".vmlinux") as vmlinux_file,
-        ):
-            core_file.write(vmcore_bytes)
-            core_file.flush()
-            vmlinux_file.write(vmlinux_bytes)
-            vmlinux_file.flush()
-            script = "\n".join(commands) + "\nquit\n"
-            crash = self._run_crash(Path(vmlinux_file.name), Path(core_file.name), script)
-        redactor = Redactor()
-        transcript = redactor.redact_text(crash.stdout.decode("utf-8", "replace"))
-        return CrashOutput(
-            results={cmd: {"ran": True} for cmd in commands},
-            transcript=transcript,
-            truncated=False,
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` on a build-id provenance mismatch;
+            ``MISSING_DEPENDENCY`` if the crash seams were not configured.
+    """
+    if self._fetch_object is None or self._run_crash is None:
+        raise CategorizedError(
+            "crash seams not configured on this Retriever",
+            category=ErrorCategory.MISSING_DEPENDENCY,
         )
+    vmcore_bytes = self._fetch_object(vmcore_ref)
+    observed = self._read_vmcore_build_id(vmcore_bytes)
+    if observed != expected_build_id:
+        raise CategorizedError(
+            "captured vmcore build-id does not match the Run's debuginfo build-id",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"vmcore_ref": vmcore_ref},
+        )
+    vmlinux_bytes = self._fetch_object(debuginfo_ref)
+    with (
+        tempfile.NamedTemporaryFile(suffix=".vmcore") as core_file,
+        tempfile.NamedTemporaryFile(suffix=".vmlinux") as vmlinux_file,
+    ):
+        core_file.write(vmcore_bytes)
+        core_file.flush()
+        vmlinux_file.write(vmlinux_bytes)
+        vmlinux_file.flush()
+        script = "\n".join(commands) + "\nquit\n"
+        crash = self._run_crash(Path(vmlinux_file.name), Path(core_file.name), script)
+    redactor = Redactor()
+    transcript = redactor.redact_text(crash.stdout.decode("utf-8", "replace"))
+    return CrashOutput(
+        results={cmd: {"ran": True} for cmd in commands},
+        transcript=transcript,
+        truncated=False,
+    )
 ```
 
 If a `CrashResult` stub was added in Task 2 Step 4, replace it with this definition (do not duplicate).
@@ -568,8 +606,9 @@ _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _ctx(projects: tuple[str, ...] = ("proj",)) -> RequestContext:
-    return RequestContext(principal="u", agent_session="s", projects=projects,
-                          roles={"proj": Role.OPERATOR})
+    return RequestContext(
+        principal="u", agent_session="s", projects=projects, roles={"proj": Role.OPERATOR}
+    )
 
 
 @asynccontextmanager
@@ -717,7 +756,8 @@ async def artifacts_list(
         try:
             responses.append(
                 ToolResponse.success(
-                    str(row["id"]), "available",
+                    str(row["id"]),
+                    "available",
                     suggested_next_actions=["artifacts.get"],
                     refs={"object": row["object_key"]},
                 )
@@ -749,7 +789,8 @@ async def artifacts_get(
         if owner is None or owner["project"] not in ctx.projects:
             return _config_error(artifact_id)
         return ToolResponse.success(
-            artifact_id, "available",
+            artifact_id,
+            "available",
             suggested_next_actions=["artifacts.get"],
             refs={"object": row["object_key"]},
         )

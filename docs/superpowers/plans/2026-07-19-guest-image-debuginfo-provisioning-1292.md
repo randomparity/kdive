@@ -56,7 +56,9 @@ LIB = ROOT / "scripts" / "live-vm" / "lib.sh"
 BASH = shutil.which("bash")
 
 
-def _run(snippet: str, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    snippet: str, *args: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Source lib.sh, then run `snippet` with positional args $1.. — capturing output."""
     assert BASH is not None, "bash is required"
     return subprocess.run(
@@ -235,12 +237,14 @@ def test_kernel_build_id_reads_bare_elf_and_dies_on_empty(tmp_path: Path) -> Non
 def test_assert_same_fs_same_and_cross_device(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    _stub(bindir, "stat", 'echo 42')  # every path reports device 42
+    _stub(bindir, "stat", "echo 42")  # every path reports device 42
     env = {"PATH": f"{bindir}:/usr/bin:/bin"}
     same = _run('assert_same_fs "$1" "$2"', "/a", "/b", env=env)
     assert same.returncode == 0, same.stderr
     # `stat -c %d -- <path>` puts the path LAST, not at $3 (which is `--`). Key on the last arg.
-    _stub(bindir, "stat", 'for a; do last="$a"; done; case "$last" in */a) echo 1;; *) echo 2;; esac')
+    _stub(
+        bindir, "stat", 'for a; do last="$a"; done; case "$last" in */a) echo 1;; *) echo 2;; esac'
+    )
     env2 = {"PATH": f"{bindir}:/usr/bin:/bin"}
     cross = _run('assert_same_fs "$1" "$2"', "/a", "/b", env=env2)
     assert cross.returncode != 0 and "filesystem" in cross.stderr
@@ -352,7 +356,12 @@ def test_manifest_write_read_roundtrip(tmp_path: Path) -> None:
     m = tmp_path / "MANIFEST"
     _run(
         'write_manifest "$1" "$2" "$3" "$4" "$5" "$6"',
-        str(m), "kernel-6.1-nvr", "bid42", "rootsha", "kernsha", "dbgsha",
+        str(m),
+        "kernel-6.1-nvr",
+        "bid42",
+        "rootsha",
+        "kernsha",
+        "dbgsha",
     )
     assert _run('manifest_field "$1" "$2"', str(m), "kernel_nvr").stdout.strip() == "kernel-6.1-nvr"
     assert _run('manifest_field "$1" "$2"', str(m), "build_id").stdout.strip() == "bid42"
@@ -482,7 +491,9 @@ First add the shared production helper to `lib.sh`, then build `warm-store.sh` o
 - [ ] **Step 1: Write the failing test for `produce_rootfs_and_kernel` (append)**
 
 ```python
-def _produce_stubs(bindir: Path, build_id: str = "beef01", build_marker: Path | None = None) -> None:
+def _produce_stubs(
+    bindir: Path, build_id: str = "beef01", build_marker: Path | None = None
+) -> None:
     """Stub the host-only tools produce_rootfs_and_kernel drives: build-fs (via python3), the
     libguestfs kernel-extract pair, and eu-readelf."""
     mark = f'echo x >> "{build_marker}"; ' if build_marker else ""
@@ -668,9 +679,14 @@ def test_warm_store_force_rebuilds(tmp_path: Path) -> None:
     marker = tmp_path / "build.calls"
     _produce_stubs(bindir, build_marker=marker)
     _debuginfod_ok(bindir)
-    subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=_warm_env(bindir, store))
     subprocess.run(
-        [BASH, str(WARM)], capture_output=True, text=True, check=False,
+        [BASH, str(WARM)], capture_output=True, text=True, check=False, env=_warm_env(bindir, store)
+    )
+    subprocess.run(
+        [BASH, str(WARM)],
+        capture_output=True,
+        text=True,
+        check=False,
         env=_warm_env(bindir, store, KDIVE_WARM_STORE_FORCE="1"),
     )
     assert marker.read_text().count("x") == 2  # force skips the warm fast-path
@@ -813,7 +829,7 @@ def _stage_env(bindir: Path, stage: Path, **extra: str) -> dict[str, str]:
 
 def _stage_stubs(bindir: Path) -> None:
     _produce_stubs(bindir, build_id="cafe02")  # python3/virt-ls/virt-copy-out/eu-readelf
-    _stub(bindir, "df", 'echo Avail; echo 900000000000')  # plenty free
+    _stub(bindir, "df", "echo Avail; echo 900000000000")  # plenty free
 
 
 def _debuginfod_ok_stage(bindir: Path) -> None:
@@ -832,7 +848,10 @@ def test_stage_tcg_happy_path_emits_wiring(tmp_path: Path) -> None:
     _stage_stubs(bindir)
     _debuginfod_ok_stage(bindir)
     r = subprocess.run(
-        [BASH, str(STAGE)], capture_output=True, text=True, check=False,
+        [BASH, str(STAGE)],
+        capture_output=True,
+        text=True,
+        check=False,
         env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
     )
     assert r.returncode == 0, r.stderr
@@ -849,13 +868,19 @@ def test_stage_tcg_distinguishes_fetch_failure_tiers(tmp_path: Path) -> None:
     # Not-found (index lag): debuginfod-find exits 1.
     _stub(bindir, "debuginfod-find", "exit 1")
     lag = subprocess.run(
-        [BASH, str(STAGE)], capture_output=True, text=True, check=False,
+        [BASH, str(STAGE)],
+        capture_output=True,
+        text=True,
+        check=False,
         env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
     )
     assert lag.returncode != 0 and "not yet published" in lag.stderr
     # Infra not configured: DEBUGINFOD_URLS unset (fails before the build).
     infra = subprocess.run(
-        [BASH, str(STAGE)], capture_output=True, text=True, check=False,
+        [BASH, str(STAGE)],
+        capture_output=True,
+        text=True,
+        check=False,
         env=_stage_env(bindir, stage),  # no DEBUGINFOD_URLS
     )
     assert infra.returncode != 0 and "not configured" in infra.stderr
@@ -869,7 +894,10 @@ def test_stage_tcg_fails_loud_when_disk_too_full(tmp_path: Path) -> None:
     _stage_stubs(bindir)
     _stub(bindir, "df", "echo Avail; echo 10")  # only 10 bytes free
     r = subprocess.run(
-        [BASH, str(STAGE)], capture_output=True, text=True, check=False,
+        [BASH, str(STAGE)],
+        capture_output=True,
+        text=True,
+        check=False,
         env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
     )
     assert r.returncode != 0 and "free" in r.stderr

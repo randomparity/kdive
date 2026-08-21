@@ -81,7 +81,12 @@ unit-tested with fakes; the real host/`crash`/`makedumpfile` path runs only unde
 existing `live_vm` gate.
 
 ```python
-class CaptureOutput(NamedTuple): raw: StoredArtifact; redacted: StoredArtifact; vmcore_build_id: str
+class CaptureOutput(NamedTuple):
+    raw: StoredArtifact
+    redacted: StoredArtifact
+    vmcore_build_id: str
+
+
 class Retriever(Protocol):
     def capture(self, system_id: UUID) -> CaptureOutput: ...
 ```

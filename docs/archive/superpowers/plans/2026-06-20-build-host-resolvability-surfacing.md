@@ -52,13 +52,9 @@ def test_local_and_ssh_always_resolve(kind: BuildHostKind) -> None:
 
 
 def test_ephemeral_resolves_only_when_named_instance_declared() -> None:
-    assert (
-        build_host_resolves(BuildHostKind.EPHEMERAL_LIBVIRT, "ub24", ["ub24"]) is True
-    )
+    assert build_host_resolves(BuildHostKind.EPHEMERAL_LIBVIRT, "ub24", ["ub24"]) is True
     assert build_host_resolves(BuildHostKind.EPHEMERAL_LIBVIRT, "ub24", []) is False
-    assert (
-        build_host_resolves(BuildHostKind.EPHEMERAL_LIBVIRT, "ub24", ["other"]) is False
-    )
+    assert build_host_resolves(BuildHostKind.EPHEMERAL_LIBVIRT, "ub24", ["other"]) is False
 
 
 def test_declared_names_degrade_to_empty_on_config_error(
@@ -76,9 +72,7 @@ def test_declared_names_degrade_to_empty_on_config_error(
 def test_declared_names_passes_through_when_ok(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        build_host_selection, "remote_instance_names", lambda: ["a", "b"]
-    )
+    monkeypatch.setattr(build_host_selection, "remote_instance_names", lambda: ["a", "b"])
     assert declared_remote_instance_names() == ["a", "b"]
 ```
 
@@ -204,6 +198,7 @@ In `profile_examples.py`, change the signature and filter:
 
 ```python
 from collections.abc import Collection
+
 ...
 from kdive.services.runs.build_host_selection import (
     SourceKind,
@@ -340,33 +335,31 @@ from kdive.services.runs.build_host_selection import (
 In `list_build_hosts`, resolve the declared set once before building items, and add the field:
 
 ```python
-    declared = declared_remote_instance_names()
-    items = [
-        ToolResponse.success(
-            str(row["id"]),
-            "ok",
-            data={
-                "id": str(row["id"]),
-                "name": row["name"],
-                "kind": row["kind"],
-                "address": row["address"] or "",
-                "ssh_credential_ref": row["ssh_credential_ref"] or "",
-                "workspace_root": row["workspace_root"],
-                "max_concurrent": str(row["max_concurrent"]),
-                "enabled": str(row["enabled"]).lower(),
-                "state": row["state"],
-                "resolves": str(
-                    build_host_resolves(
-                        BuildHostKind(row["kind"]), row["name"], declared
-                    )
-                ).lower(),
-                "supported_source_kinds": [
-                    kind.value for kind in accepted_source_kinds(BuildHostKind(row["kind"]))
-                ],
-            },
-        )
-        for row in rows
-    ]
+declared = declared_remote_instance_names()
+items = [
+    ToolResponse.success(
+        str(row["id"]),
+        "ok",
+        data={
+            "id": str(row["id"]),
+            "name": row["name"],
+            "kind": row["kind"],
+            "address": row["address"] or "",
+            "ssh_credential_ref": row["ssh_credential_ref"] or "",
+            "workspace_root": row["workspace_root"],
+            "max_concurrent": str(row["max_concurrent"]),
+            "enabled": str(row["enabled"]).lower(),
+            "state": row["state"],
+            "resolves": str(
+                build_host_resolves(BuildHostKind(row["kind"]), row["name"], declared)
+            ).lower(),
+            "supported_source_kinds": [
+                kind.value for kind in accepted_source_kinds(BuildHostKind(row["kind"]))
+            ],
+        },
+    )
+    for row in rows
+]
 ```
 
 `declared_remote_instance_names()` is sync and reads the file once; call it before the comprehension (outside the loop) so the inventory is read once per list call, not per row.

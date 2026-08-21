@@ -114,7 +114,14 @@ async def _seed_host(pool):
         await conn.execute(
             "INSERT INTO build_hosts (id, name, kind, workspace_root, max_concurrent, "
             "enabled, state, base_image_volume) VALUES (%s, %s, %s, %s, %s, true, 'ready', %s)",
-            (host_id, f"eph-{host_id}", BuildHostKind.EPHEMERAL_LIBVIRT.value, "/build", 1, "base.qcow2"),
+            (
+                host_id,
+                f"eph-{host_id}",
+                BuildHostKind.EPHEMERAL_LIBVIRT.value,
+                "/build",
+                1,
+                "base.qcow2",
+            ),
         )
     return host_id
 
@@ -240,7 +247,8 @@ async def heartbeat(pool: AsyncConnectionPool, probe_id: UUID) -> None:
     """Advance the active-run heartbeat so the reaper never mistakes a live probe for a leak."""
     async with pool.connection() as conn, conn.transaction():
         await conn.execute(
-            "UPDATE buildhost_agent_probe_guests SET heartbeat_at = now() WHERE id = %s", (probe_id,)
+            "UPDATE buildhost_agent_probe_guests SET heartbeat_at = now() WHERE id = %s",
+            (probe_id,),
         )
 
 
@@ -396,8 +404,13 @@ git commit -m "feat(build-vm): add wait_network kwarg to EphemeralBuildVm.sessio
 # tests/diagnostics/test_buildhost_agent_check.py (append)
 import pytest
 from kdive.diagnostics.checks import (
-    BUILDHOST_AGENT_FIX, BuildHostAgentOutcome, BuildHostProbeResult,
-    CheckStatus, EphemeralLibvirtBuildHostAgentCheck, LocalKernelSrcCheck, WarmTreeSourceOutcome,
+    BUILDHOST_AGENT_FIX,
+    BuildHostAgentOutcome,
+    BuildHostProbeResult,
+    CheckStatus,
+    EphemeralLibvirtBuildHostAgentCheck,
+    LocalKernelSrcCheck,
+    WarmTreeSourceOutcome,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -406,6 +419,7 @@ pytestmark = pytest.mark.asyncio
 def _probe(results):
     async def probe():
         return list(results)
+
     return probe
 
 
@@ -419,10 +433,12 @@ async def test_buildhost_agent_all_ready_is_pass():
 
 async def test_buildhost_agent_unreachable_is_fail_with_fix_and_names_host():
     check = EphemeralLibvirtBuildHostAgentCheck(
-        probe=_probe([
-            BuildHostProbeResult("good", BuildHostAgentOutcome.AGENT_READY),
-            BuildHostProbeResult("broken", BuildHostAgentOutcome.AGENT_UNREACHABLE),
-        ])
+        probe=_probe(
+            [
+                BuildHostProbeResult("good", BuildHostAgentOutcome.AGENT_READY),
+                BuildHostProbeResult("broken", BuildHostAgentOutcome.AGENT_UNREACHABLE),
+            ]
+        )
     )
     r = await check.run()
     assert r.status is CheckStatus.FAIL
@@ -432,7 +448,13 @@ async def test_buildhost_agent_unreachable_is_fail_with_fix_and_names_host():
 
 async def test_buildhost_agent_only_host_unreachable_is_error_no_fix():
     check = EphemeralLibvirtBuildHostAgentCheck(
-        probe=_probe([BuildHostProbeResult("x", BuildHostAgentOutcome.HOST_UNREACHABLE, transport_error=True)])
+        probe=_probe(
+            [
+                BuildHostProbeResult(
+                    "x", BuildHostAgentOutcome.HOST_UNREACHABLE, transport_error=True
+                )
+            ]
+        )
     )
     r = await check.run()
     assert r.status is CheckStatus.ERROR and r.fix is None
@@ -447,10 +469,16 @@ async def test_buildhost_agent_no_hosts_is_error_configuration():
 
 async def test_buildhost_agent_mixed_unreachable_causes_is_configuration_error():
     check = EphemeralLibvirtBuildHostAgentCheck(
-        probe=_probe([
-            BuildHostProbeResult("t", BuildHostAgentOutcome.HOST_UNREACHABLE, transport_error=True),
-            BuildHostProbeResult("c", BuildHostAgentOutcome.HOST_UNREACHABLE, transport_error=False),
-        ])
+        probe=_probe(
+            [
+                BuildHostProbeResult(
+                    "t", BuildHostAgentOutcome.HOST_UNREACHABLE, transport_error=True
+                ),
+                BuildHostProbeResult(
+                    "c", BuildHostAgentOutcome.HOST_UNREACHABLE, transport_error=False
+                ),
+            ]
+        )
     )
     r = await check.run()
     assert r.status is CheckStatus.ERROR and r.failure_category == "configuration_error"
@@ -459,12 +487,14 @@ async def test_buildhost_agent_mixed_unreachable_causes_is_configuration_error()
 async def _outcome(value):
     async def probe():
         return value
+
     return probe
 
 
 async def _enabled(value):
     async def probe():
         return value
+
     return probe
 
 
@@ -600,7 +630,9 @@ class EphemeralLibvirtBuildHostAgentCheck(Check):
 
     async def run(self) -> CheckResult:
         results = await self._probe()
-        failed = [r.host_name for r in results if r.outcome is BuildHostAgentOutcome.AGENT_UNREACHABLE]
+        failed = [
+            r.host_name for r in results if r.outcome is BuildHostAgentOutcome.AGENT_UNREACHABLE
+        ]
         if failed:
             return CheckResult(
                 check_id=self.id,
@@ -625,7 +657,9 @@ class EphemeralLibvirtBuildHostAgentCheck(Check):
         )
 
     @staticmethod
-    def _error_detail(unreachable: list[BuildHostProbeResult], results: list[BuildHostProbeResult]) -> str:
+    def _error_detail(
+        unreachable: list[BuildHostProbeResult], results: list[BuildHostProbeResult]
+    ) -> str:
         if not results:
             return "no ephemeral_libvirt build host is registered; nothing to probe"
         names = ", ".join(sorted(r.host_name for r in unreachable))
@@ -682,28 +716,36 @@ pytestmark = pytest.mark.asyncio
 
 class _FakeSession:
     """Stands in for ephemeral_build_session: a context manager factory recording calls."""
+
     def __init__(self, *, raise_category=None, raise_after_agent=False, rc=0):
         self.raise_category = raise_category
         self.raise_after_agent = raise_after_agent
         self.rc = rc
 
-    def __call__(self, base_image_volume, secret_registry, *, run_id, source=None, wait_network=True):
+    def __call__(
+        self, base_image_volume, secret_registry, *, run_id, source=None, wait_network=True
+    ):
         outer = self
+
         class _CM:
             def __enter__(self_inner):
                 if outer.raise_category is not None:
                     raise CategorizedError("boom", category=outer.raise_category)
                 return _FakeTransport(outer)
+
             def __exit__(self_inner, *a):
                 return False
+
         return _CM()
 
 
 class _FakeTransport:
     def __init__(self, cfg):
         self._cfg = cfg
+
     def run(self, argv, *, cwd, timeout_s):
         from kdive.providers.ports.build_transport import CommandResult
+
         if self._cfg.raise_after_agent:
             raise CategorizedError("agent dropped", category=ErrorCategory.TRANSPORT_FAILURE)
         return CommandResult(returncode=self._cfg.rc, stdout="", stderr="")
@@ -850,7 +892,9 @@ async def _probe_one_host(
     except probes.ProbeInFlightError:
         return BuildHostProbeResult(host.name, BuildHostAgentOutcome.HOST_UNREACHABLE)
     except Exception:  # noqa: BLE001 - marker backend down → indeterminate, never a fail
-        _log.error("buildhost agent probe marker register failed for host=%s", host.name, exc_info=True)
+        _log.error(
+            "buildhost agent probe marker register failed for host=%s", host.name, exc_info=True
+        )
         return BuildHostProbeResult(host.name, BuildHostAgentOutcome.HOST_UNREACHABLE)
     beat = asyncio.create_task(_beat_until_cancelled(pool, probe_id))
     try:
@@ -881,9 +925,13 @@ def _blocking_probe(
             host.base_image_volume, secret_registry, run_id=run_id, source=None, wait_network=False
         ) as transport:
             try:
-                result = transport.run(_TRIVIAL_ARGV, cwd=_TRIVIAL_CWD, timeout_s=_TRIVIAL_TIMEOUT_S)
+                result = transport.run(
+                    _TRIVIAL_ARGV, cwd=_TRIVIAL_CWD, timeout_s=_TRIVIAL_TIMEOUT_S
+                )
             except CategorizedError:
-                _log.warning("buildhost agent probe exec dropped on host=%s", host.name, exc_info=True)
+                _log.warning(
+                    "buildhost agent probe exec dropped on host=%s", host.name, exc_info=True
+                )
                 return BuildHostAgentOutcome.AGENT_UNREACHABLE, False
             if result.returncode != 0:
                 return BuildHostAgentOutcome.AGENT_UNREACHABLE, False
@@ -895,7 +943,9 @@ def _blocking_probe(
             ErrorCategory.TRANSPORT_FAILURE,
             ErrorCategory.INFRASTRUCTURE_FAILURE,
         )
-        _log.warning("buildhost agent probe host=%s unreachable: %s", host.name, exc.category, exc_info=True)
+        _log.warning(
+            "buildhost agent probe host=%s unreachable: %s", host.name, exc.category, exc_info=True
+        )
         return BuildHostAgentOutcome.HOST_UNREACHABLE, transport_error
 
 
@@ -910,7 +960,9 @@ async def _release(pool: AsyncConnectionPool, probe_id: UUID, host_name: str) ->
     try:
         await probes.release(pool, probe_id)
     except Exception:  # noqa: BLE001 - release is best-effort; TTL is the backstop
-        _log.warning("buildhost agent probe marker release failed for host=%s", host_name, exc_info=True)
+        _log.warning(
+            "buildhost agent probe marker release failed for host=%s", host_name, exc_info=True
+        )
 
 
 async def _cancel(task: asyncio.Task[None]) -> None:
@@ -926,6 +978,7 @@ In `kernel_src.py` add:
 ```python
 from kdive.db.build_hosts import WORKER_LOCAL_ID, get_by_id
 
+
 def local_host_enabled_probe(
     pool: AsyncConnectionPool,
 ) -> Callable[[], Awaitable[bool]]:
@@ -940,7 +993,9 @@ def local_host_enabled_probe(
             async with pool.connection() as conn:
                 host = await get_by_id(conn, WORKER_LOCAL_ID)
         except Exception:  # noqa: BLE001 - fail open to enabled; never hide the latent failure
-            _log.warning("local_kernel_src enabled probe DB read failed; assuming enabled", exc_info=True)
+            _log.warning(
+                "local_kernel_src enabled probe DB read failed; assuming enabled", exc_info=True
+            )
             return True
         return host is None or host.enabled
 
@@ -982,13 +1037,16 @@ async def test_factory_assembles_buildhost_agent_check_when_opted_in(a_pool):
     ids = {c.id for c in svc._checks}  # or a public accessor if one exists
     assert "ephemeral_libvirt_buildhost_agent" in ids
 
+
 def test_factory_buildhost_agent_without_pool_raises():
     with pytest.raises(CategorizedError):
         default_service_factory(None, with_buildhost_agent=True, pool=None)
 
+
 async def test_buildhost_agent_service_uses_generous_per_check_timeout(a_pool):
     svc = default_service_factory(None, with_buildhost_agent=True, pool=a_pool)
     assert svc._timeout >= 180.0  # >= the wait_for_agent bound
+
 
 def test_default_factory_no_flag_keeps_tight_timeouts():
     svc = default_service_factory(None, pool=None)
@@ -1019,15 +1077,11 @@ Extend `_build_host_checks`:
 ```python
 def _build_host_checks(pool: AsyncConnectionPool | None) -> list[Check]:
     """Assemble the always-on server-vantage build-host preflight checks (ADR-0163, ADR-0167)."""
-    enabled_probe = (
-        kernel_src.local_host_enabled_probe(pool) if pool is not None else None
-    )
+    enabled_probe = kernel_src.local_host_enabled_probe(pool) if pool is not None else None
     if enabled_probe is None:
         return [LocalKernelSrcCheck(probe=kernel_src.warm_tree_source_probe())]
     return [
-        LocalKernelSrcCheck(
-            probe=kernel_src.warm_tree_source_probe(), enabled_probe=enabled_probe
-        )
+        LocalKernelSrcCheck(probe=kernel_src.warm_tree_source_probe(), enabled_probe=enabled_probe)
     ]
 ```
 
@@ -1110,6 +1164,7 @@ async def test_reaper_skips_build_vm_with_live_probe_heartbeat(migrated_pool, fa
         reaped = await reap_orphan_build_vms(conn, fake_reaper)
     assert reaped == 0 and fake_reaper.deleted == []
 
+
 async def test_reaper_reaps_build_vm_with_stale_probe_and_no_job(migrated_pool, fake_reaper):
     host_id = await _seed_eph_host(migrated_pool)
     run_id = uuid4()
@@ -1131,6 +1186,7 @@ Expected: FAIL (live-probe VM is reaped — the guard does not yet exist).
 
 ```python
 from kdive.db.buildhost_agent_probes import is_probe_live
+
 
 async def reap_orphan_build_vms(conn: AsyncConnection, reaper: BuildVmReaper) -> int:
     reaped = 0
@@ -1208,14 +1264,14 @@ Extend `_audit_args` to include `"with_buildhost_agent": with_buildhost_agent`. 
 Add the tool parameter:
 
 ```python
-        with_buildhost_agent: Annotated[
-            bool,
-            Field(
-                description="Opt into the heavy ephemeral_libvirt_buildhost_agent probe: provisions "
-                "a throwaway builder on each ephemeral_libvirt build host and checks its guest-agent "
-                "reachability. Audited distinctly; off by default."
-            ),
-        ] = False,
+with_buildhost_agent: Annotated[
+    bool,
+    Field(
+        description="Opt into the heavy ephemeral_libvirt_buildhost_agent probe: provisions "
+        "a throwaway builder on each ephemeral_libvirt build host and checks its guest-agent "
+        "reachability. Audited distinctly; off by default."
+    ),
+] = (False,)
 ```
 
 and pass it to `run_diagnostics(...)`.
@@ -1252,6 +1308,7 @@ def test_doctor_payload_includes_buildhost_agent_when_flag_set():
     args = argparse.Namespace(provider=None, with_egress=False, with_buildhost_agent=True)
     assert _build_payload(args) == {"with_buildhost_agent": True}  # match the real builder name
 
+
 def test_doctor_payload_omits_buildhost_agent_by_default():
     args = argparse.Namespace(provider=None, with_egress=False, with_buildhost_agent=False)
     assert "with_buildhost_agent" not in _build_payload(args)
@@ -1267,9 +1324,7 @@ Expected: FAIL.
 In `registry.py` `_doctor_parser`:
 
 ```python
-    parser.add_argument(
-        "--with-buildhost-agent", dest="with_buildhost_agent", action="store_true"
-    )
+parser.add_argument("--with-buildhost-agent", dest="with_buildhost_agent", action="store_true")
 ```
 
 In `doctor.py` payload builder, after the `with_egress` block:

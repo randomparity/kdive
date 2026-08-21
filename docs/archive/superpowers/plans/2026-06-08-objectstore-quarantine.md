@@ -421,7 +421,9 @@ def test_masking_is_the_registry_exact_value_path_not_the_pattern(tmp_path: Path
 
     seeded = SecretRegistry()
     seeded.register(_SENTINEL, scope="probe")
-    assert _SENTINEL not in Redactor(registry=seeded).redact_text(_quarantined_transcript(_SENTINEL))
+    assert _SENTINEL not in Redactor(registry=seeded).redact_text(
+        _quarantined_transcript(_SENTINEL)
+    )
 
 
 def test_value_registered_at_heal_write_and_gone_after(tmp_path: Path) -> None:
@@ -682,9 +684,7 @@ class FaultInjectQuarantineConsole:
             )
             self._backend.resolve(self._secret_ref)
             fetched = store.get_artifact(quarantined.key, quarantined.etag)
-            redacted = Redactor(registry=self._registry).redact_text(
-                fetched.data.decode("utf-8")
-            )
+            redacted = Redactor(registry=self._registry).redact_text(fetched.data.decode("utf-8"))
             healed = store.put_artifact(
                 ArtifactWriteRequest(
                     tenant=_TENANT,

@@ -67,18 +67,21 @@ class Plane(StrEnum):
     CONTROL = "control"
     RETRIEVE = "retrieve"
 
+
 class CleanupGuarantee(StrEnum):
     CLEAN_ROLLBACK = "clean-rollback"
     BEST_EFFORT = "best-effort"
     ORPHAN_FLAGGED = "orphan-flagged"
+
 
 @dataclass(frozen=True, slots=True)
 class OpContract:
     idempotent: bool
     destructive: bool
     cancelable: bool
-    long_running: bool          # True → routed as a job
+    long_running: bool  # True → routed as a job
     cleanup: CleanupGuarantee
+
 
 @dataclass(frozen=True, slots=True)
 class Capability:
@@ -87,12 +90,13 @@ class Capability:
     resource_kind: ResourceKind
     contract: OpContract
 
+
 @dataclass(frozen=True, slots=True)
 class BoundOp:
     provider_id: str
     operation: str
     contract: OpContract
-    call: Callable[..., object]   # the bound provider method
+    call: Callable[..., object]  # the bound provider method
 ```
 
 `CapabilityRegistry`:

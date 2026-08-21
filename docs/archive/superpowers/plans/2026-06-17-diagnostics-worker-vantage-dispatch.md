@@ -158,8 +158,12 @@ def test_roundtrip_preserves_three_state_and_fields():
     src = [
         CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt"),
         CheckResult(
-            GDBSTUB_ACL_ID, CheckStatus.FAIL, "blocked", fix="open the ACL",
-            provider="remote-libvirt", failure_category="configuration_error",
+            GDBSTUB_ACL_ID,
+            CheckStatus.FAIL,
+            "blocked",
+            fix="open the ACL",
+            provider="remote-libvirt",
+            failure_category="configuration_error",
         ),
     ]
     out = deserialize_results(serialize_results(src))
@@ -458,7 +462,7 @@ def _probe_sync(
         connector(host, port, context)
     except ssl.SSLCertVerificationError:
         return TlsProbeOutcome.INVALID
-    except (ConnectionRefusedError, TimeoutError, socket.timeout, OSError, ssl.SSLError):
+    except ConnectionRefusedError, TimeoutError, socket.timeout, OSError, ssl.SSLError:
         _log.warning("provider_tls handshake to %s:%s did not validate", host, port, exc_info=True)
         return TlsProbeOutcome.UNREACHABLE
     return TlsProbeOutcome.VALID
@@ -506,11 +510,11 @@ from kdive.diagnostics.gdbstub_acl import gdbstub_acl_probe
 @pytest.mark.parametrize(
     "raiser, expected",
     [
-        (None, True),                       # connect succeeds -> admits
-        (ConnectionRefusedError(), True),   # fast refusal -> SYN reached host -> admits
-        (TimeoutError(), False),            # DROP -> blocked
-        (socket.timeout(), False),          # DROP -> blocked
-        (OSError("dns"), None),             # indeterminate
+        (None, True),  # connect succeeds -> admits
+        (ConnectionRefusedError(), True),  # fast refusal -> SYN reached host -> admits
+        (TimeoutError(), False),  # DROP -> blocked
+        (socket.timeout(), False),  # DROP -> blocked
+        (OSError("dns"), None),  # indeterminate
     ],
 )
 async def test_probe_classifies(raiser, expected):
@@ -584,7 +588,7 @@ def _probe_sync(host: str, port: int, connector: AclConnector) -> bool | None:
         connector(host, port)
     except ConnectionRefusedError:
         return True
-    except (TimeoutError, socket.timeout):
+    except TimeoutError, socket.timeout:
         return False
     except OSError:
         _log.warning("gdbstub_acl probe to %s:%s was indeterminate", host, port, exc_info=True)
@@ -645,7 +649,8 @@ async def test_handler_runs_checks_and_serializes_inline():
         CheckResult(GDBSTUB_ACL_ID, CheckStatus.PASS, "ok", provider="remote-libvirt"),
     ]
     raw = await diagnostics_worker_check_handler(
-        conn=None, job=None,
+        conn=None,
+        job=None,
         config_factory=lambda: object(),
         build_checks=lambda _config: [_FakeCheck(r) for r in results],
     )
@@ -658,7 +663,10 @@ async def test_handler_propagates_config_error():
 
     with pytest.raises(CategorizedError):
         await diagnostics_worker_check_handler(
-            conn=None, job=None, config_factory=boom, build_checks=lambda _c: [],
+            conn=None,
+            job=None,
+            config_factory=boom,
+            build_checks=lambda _c: [],
         )
 ```
 
@@ -838,17 +846,21 @@ def _dispatcher(queue, *, clock_ticks):
 
 
 async def test_succeeded_returns_real_results():
-    out = serialize_results([
-        CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt"),
-        CheckResult(GDBSTUB_ACL_ID, CheckStatus.PASS, "ok", provider="remote-libvirt"),
-    ])
+    out = serialize_results(
+        [
+            CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt"),
+            CheckResult(GDBSTUB_ACL_ID, CheckStatus.PASS, "ok", provider="remote-libvirt"),
+        ]
+    )
     queue = _FakeQueue([_FakeJob(JobState.SUCCEEDED, result_ref=out)])
     results = await _dispatcher(queue, clock_ticks=[0.0, 0.1]).run_worker_checks()
     assert {r.status for r in results} == {CheckStatus.PASS}
 
 
 async def test_failed_maps_to_error_with_category():
-    queue = _FakeQueue([_FakeJob(JobState.FAILED, error_category=ErrorCategory.CONFIGURATION_ERROR)])
+    queue = _FakeQueue(
+        [_FakeJob(JobState.FAILED, error_category=ErrorCategory.CONFIGURATION_ERROR)]
+    )
     results = await _dispatcher(queue, clock_ticks=[0.0, 0.1]).run_worker_checks()
     assert all(r.status is CheckStatus.ERROR for r in results)
     assert {r.check_id for r in results} == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
@@ -901,7 +913,9 @@ from kdive.jobs.payloads import Authorizing, DiagnosticsWorkerCheckPayload
 _REMOTE_PROVIDER = "remote-libvirt"
 WORKER_DISPATCH_BUDGET = 15.0
 _POLL_INTERVAL_S = 0.25
-_TRANSPORT_FAILURE = "transport_failure"  # plain label, mirroring checks.py (no ErrorCategory import)
+_TRANSPORT_FAILURE = (
+    "transport_failure"  # plain label, mirroring checks.py (no ErrorCategory import)
+)
 _INTERNAL_ERROR = "internal_error"
 _TERMINAL = {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED}
 _WORKER_CHECK_IDS = (PROVIDER_TLS_ID, GDBSTUB_ACL_ID)
@@ -917,8 +931,13 @@ class WorkerCheckDispatcher(Protocol):
 
 def _unavailable(detail: str, category: str) -> list[CheckResult]:
     return [
-        CheckResult(check_id=cid, status=CheckStatus.ERROR, detail=detail,
-                    provider=_REMOTE_PROVIDER, failure_category=category)
+        CheckResult(
+            check_id=cid,
+            status=CheckStatus.ERROR,
+            detail=detail,
+            provider=_REMOTE_PROVIDER,
+            failure_category=category,
+        )
         for cid in _WORKER_CHECK_IDS
     ]
 
@@ -957,7 +976,11 @@ class JobWorkerCheckDispatcher:
     ) -> Job:
         async with self._require_pool().connection() as conn:
             return await job_queue.enqueue(
-                conn, JobKind.DIAGNOSTICS_WORKER_CHECK, payload, authorizing, dedup_key,
+                conn,
+                JobKind.DIAGNOSTICS_WORKER_CHECK,
+                payload,
+                authorizing,
+                dedup_key,
                 max_attempts=1,
             )
 
@@ -992,7 +1015,9 @@ class JobWorkerCheckDispatcher:
                 results = deserialize_results(job.result_ref)
             except ResultCodecError as exc:
                 _log.error("diagnostics job %s returned a malformed result: %s", job.id, exc)
-                return _unavailable("diagnostics worker returned a malformed result", _INTERNAL_ERROR)
+                return _unavailable(
+                    "diagnostics worker returned a malformed result", _INTERNAL_ERROR
+                )
             _log.info("diagnostics job %s succeeded", job.id)
             return results
         category = job.error_category.value if job.error_category else _INTERNAL_ERROR
@@ -1048,7 +1073,9 @@ async def test_dispatcher_results_replace_substitution():
             return [CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt")]
 
     service = DiagnosticsService(
-        checks=[], per_check_timeout=1.0, worker_dispatcher=_FakeDispatcher(),
+        checks=[],
+        per_check_timeout=1.0,
+        worker_dispatcher=_FakeDispatcher(),
     )
     report = await service.run()
     assert [r.check_id for r in report.results] == [PROVIDER_TLS_ID]
@@ -1059,7 +1086,12 @@ async def test_server_and_real_worker_results_compose_into_one_verdict():
     # Composition: a server-vantage check + a JobWorkerCheckDispatcher whose job SUCCEEDS with
     # serialized real results -> one verdict carrying both, no substitution (acceptance criterion 1).
     from kdive.diagnostics.checks import (
-        CheckResult, CheckStatus, GDBSTUB_ACL_ID, PROVIDER_TLS_ID, SECRET_REF_ID, Vantage,
+        CheckResult,
+        CheckStatus,
+        GDBSTUB_ACL_ID,
+        PROVIDER_TLS_ID,
+        SECRET_REF_ID,
+        Vantage,
     )
     from kdive.diagnostics.result_codec import serialize_results
     from kdive.diagnostics.service import DiagnosticsService
@@ -1077,11 +1109,19 @@ async def test_server_and_real_worker_results_compose_into_one_verdict():
         def __init__(self, state, result_ref):
             self.id, self.state, self.result_ref, self.error_category = "j", state, result_ref, None
 
-    serialized = serialize_results([
-        CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt"),
-        CheckResult(GDBSTUB_ACL_ID, CheckStatus.FAIL, "blocked", fix="open the ACL",
-                    provider="remote-libvirt", failure_category="configuration_error"),
-    ])
+    serialized = serialize_results(
+        [
+            CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt"),
+            CheckResult(
+                GDBSTUB_ACL_ID,
+                CheckStatus.FAIL,
+                "blocked",
+                fix="open the ACL",
+                provider="remote-libvirt",
+                failure_category="configuration_error",
+            ),
+        ]
+    )
 
     async def _enqueue(dedup_key, payload, authorizing):
         return _Job(JobState.QUEUED, None)
@@ -1090,10 +1130,16 @@ async def test_server_and_real_worker_results_compose_into_one_verdict():
         return _Job(JobState.SUCCEEDED, serialized)
 
     dispatcher = JobWorkerCheckDispatcher(
-        pool=None, enqueue_fn=_enqueue, get_fn=_get, clock=lambda: 0.0, dedup_suffix="x",
+        pool=None,
+        enqueue_fn=_enqueue,
+        get_fn=_get,
+        clock=lambda: 0.0,
+        dedup_suffix="x",
     )
     report = await DiagnosticsService(
-        checks=[_ServerCheck()], per_check_timeout=1.0, worker_dispatcher=dispatcher,
+        checks=[_ServerCheck()],
+        per_check_timeout=1.0,
+        worker_dispatcher=dispatcher,
     ).run()
     by_id = {r.check_id: r for r in report.results}
     assert set(by_id) == {SECRET_REF_ID, PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
@@ -1114,6 +1160,7 @@ In `service.py`:
 
 ```python
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from kdive.diagnostics.worker_dispatch import WorkerCheckDispatcher
 ```
@@ -1191,7 +1238,9 @@ Expected: FAIL.
 - `_register_diagnostics_tools` → bind the pool with an **explicit closure** (not `functools.partial`, which strict `ty` rejects against the parameterized `ServiceFactory` Protocol):
 
 ```python
-def _register_diagnostics_tools(app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly) -> None:
+def _register_diagnostics_tools(
+    app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
+) -> None:
     def _service_factory(provider: str | None, *, with_egress: bool = False) -> DiagnosticsService:
         return default_service_factory(provider, with_egress=with_egress, pool=pool)
 
@@ -1209,6 +1258,7 @@ def _register_diagnostics_handlers(
     _transport_factories: BuildHostTransportFactories | None,
 ) -> None:
     from kdive.jobs.handlers import diagnostics as diagnostics_handler
+
     diagnostics_handler.register_handlers(registry)
 ```
 

@@ -47,24 +47,42 @@ driving the script via `subprocess` with PATH stubs (and `pty` for the one inter
 ```python
 def test_advisory_shows_host_arch_first(tmp_path: Path) -> None:
     # x86_64 host, native + foreign emulator present, /dev/kvm accessible.
-    kvm = tmp_path / "kvm"; kvm.write_text("")
-    result = _run_with_uname("debian", "x86_64", ("qemu-system-x86_64", "qemu-system-ppc64"),
-                             tmp_path, extra_env={"KDIVE_KVM_NODE": str(kvm)})
+    kvm = tmp_path / "kvm"
+    kvm.write_text("")
+    result = _run_with_uname(
+        "debian",
+        "x86_64",
+        ("qemu-system-x86_64", "qemu-system-ppc64"),
+        tmp_path,
+        extra_env={"KDIVE_KVM_NODE": str(kvm)},
+    )
     out = result.stdout
     assert "Host architecture: x86_64 (supported kdive provisioning arch)" in out
     # host/native line precedes the foreign line
     assert out.index("guest arch x86_64:") < out.index("guest arch ppc64le:")
-    assert "guest arch x86_64: available natively via qemu-system-x86_64 (/dev/kvm accessible" in out
+    assert (
+        "guest arch x86_64: available natively via qemu-system-x86_64 (/dev/kvm accessible" in out
+    )
     assert "guest arch ppc64le: available via TCG only (qemu-system-ppc64)" in out
 
+
 def test_advisory_native_line_when_kvm_absent(tmp_path: Path) -> None:
-    result = _run_with_uname("debian", "x86_64", ("qemu-system-x86_64",), tmp_path,
-                             extra_env={"KDIVE_KVM_NODE": str(tmp_path / "nokvm")})
+    result = _run_with_uname(
+        "debian",
+        "x86_64",
+        ("qemu-system-x86_64",),
+        tmp_path,
+        extra_env={"KDIVE_KVM_NODE": str(tmp_path / "nokvm")},
+    )
     assert "guest arch x86_64: native emulator present, /dev/kvm not accessible" in result.stdout
+
 
 def test_advisory_native_line_when_qemu_absent(tmp_path: Path) -> None:
     result = _run_with_uname("debian", "x86_64", (), tmp_path)  # no native qemu stub
-    assert "guest arch x86_64: not available; install qemu-system-x86 for native guests" in result.stdout
+    assert (
+        "guest arch x86_64: not available; install qemu-system-x86 for native guests"
+        in result.stdout
+    )
 ```
 
 Note: extend `_run_with_uname` to accept `extra_env` (forward to `_run`); `_run` already
@@ -135,9 +153,9 @@ git commit -m "feat(scripts): show host arch first + native acceleration in advi
          body = (
              f'echo "sudo $@" >> "{log}"\n'
              'while [ "$1" = -n ] || [ "$1" = -v ]; do shift; done\n'
-             f'{"" if preflight_ok else "exit 1\\n"}'
-             '[ $# -eq 0 ] && exit 0\n'      # `sudo -v` (now empty) = credential preflight OK
-             '[ "$1" = true ] && exit 0\n'   # `sudo -n true` preflight OK
+             f"{'' if preflight_ok else 'exit 1\\n'}"
+             "[ $# -eq 0 ] && exit 0\n"  # `sudo -v` (now empty) = credential preflight OK
+             '[ "$1" = true ] && exit 0\n'  # `sudo -n true` preflight OK
              'exec "$@"\n'
          )
          _stub(bindir, "sudo", "#!/bin/sh\n" + body)
@@ -152,7 +170,8 @@ git commit -m "feat(scripts): show host arch first + native acceleration in advi
 
      ```python
      def _coreutils_dir(tmp_path):  # exposes ln/chmod/touch only, for fix-effect tests
-         d = tmp_path / "coreutils"; d.mkdir()
+         d = tmp_path / "coreutils"
+         d.mkdir()
          for name in ("ln", "chmod", "touch"):
              os.symlink(shutil.which(name), d / name)
          return d
@@ -174,20 +193,30 @@ git commit -m "feat(scripts): show host arch first + native acceleration in advi
   effect (install log), so the flag is verified directly, not only via the install side effect.
 
 ```python
-def _bin(tmp_path):  # helper: bindir with uv+pkg-config present so Required is otherwise satisfiable
-    b = tmp_path / "bin"; b.mkdir()
-    _stub(b, "uv", "#!/bin/sh\nexit 0\n"); _stub(b, "pkg-config", "#!/bin/sh\nexit 0\n")
+def _bin(
+    tmp_path,
+):  # helper: bindir with uv+pkg-config present so Required is otherwise satisfiable
+    b = tmp_path / "bin"
+    b.mkdir()
+    _stub(b, "uv", "#!/bin/sh\nexit 0\n")
+    _stub(b, "pkg-config", "#!/bin/sh\nexit 0\n")
     return b
+
 
 def test_non_tty_without_yes_stays_report_only(tmp_path):
     """No -y and piped stdin => no install command ever runs (report-only contract)."""
-    b = _bin(tmp_path); log = tmp_path / "apt.log"
-    _stub(b, "apt-get", f'echo "$@" >> "{log}"\nexit 0'); _stub(b, "sudo", f'echo "$@" >> "{log}"\nexit 0')
+    b = _bin(tmp_path)
+    log = tmp_path / "apt.log"
+    _stub(b, "apt-get", f'echo "$@" >> "{log}"\nexit 0')
+    _stub(b, "sudo", f'echo "$@" >> "{log}"\nexit 0')
     _run("debian", str(b), tmp_path)  # missing recommended/future deps, but no fix offered
     assert not log.exists()
 
+
 def test_yes_installs_with_refresh_and_noninteractive_flag_and_sudo_n(tmp_path):
-    b = _bin(tmp_path); log = tmp_path / "cmd.log"; sudolog = tmp_path / "sudo.log"
+    b = _bin(tmp_path)
+    log = tmp_path / "cmd.log"
+    sudolog = tmp_path / "sudo.log"
     _stub(b, "apt-get", f'echo "apt-get $@" >> "{log}"\nexit 0')
     _sudo_stub(b, sudolog)  # strips -n/-v, passes the real cmd through
     _run("debian", str(b), tmp_path, args=["-y"])
@@ -196,17 +225,21 @@ def test_yes_installs_with_refresh_and_noninteractive_flag_and_sudo_n(tmp_path):
     assert "apt-get install -y" in logged
     assert "sudo -n" in sudolog.read_text()  # non-root path uses sudo -n under -y
 
+
 def test_yes_sudo_preflight_failure_skips_with_message_no_hang(tmp_path):
-    b = _bin(tmp_path); log = tmp_path / "cmd.log"
+    b = _bin(tmp_path)
+    log = tmp_path / "cmd.log"
     _stub(b, "apt-get", f'echo installed >> "{log}"\nexit 0')
     _sudo_stub(b, tmp_path / "sudo.log", preflight_ok=False)  # sudo -n true fails (no NOPASSWD)
     r = _run("debian", str(b), tmp_path, args=["-y"])
     assert "passwordless sudo" in r.stderr
     assert not log.exists()  # install never attempted
 
+
 def test_yes_install_failure_reported_not_fatal(tmp_path):
     b = _bin(tmp_path)
-    _stub(b, "apt-get", 'exit 100'); _sudo_stub(b, tmp_path / "sudo.log")
+    _stub(b, "apt-get", "exit 100")
+    _sudo_stub(b, tmp_path / "sudo.log")
     r = _run("debian", str(b), tmp_path, args=["-y"])
     assert "failed to install" in r.stderr  # reported
     # script did not abort mid-run: the advisory still printed. _bin stubs no `uname`, so
@@ -214,10 +247,13 @@ def test_yes_install_failure_reported_not_fatal(tmp_path):
     # (a "guest arch" line is only emitted for a supported host arch).
     assert "not a supported kdive provisioning arch" in r.stdout
 
+
 def test_manual_hint_tools_not_auto_installed_under_yes(tmp_path):
-    b = _bin(tmp_path); log = tmp_path / "curl.log"
-    _stub(b, "curl", f'echo ran >> "{log}"\nexit 0'); _sudo_stub(b, tmp_path / "sudo.log")
-    _stub(b, "apt-get", 'exit 0')
+    b = _bin(tmp_path)
+    log = tmp_path / "curl.log"
+    _stub(b, "curl", f'echo ran >> "{log}"\nexit 0')
+    _sudo_stub(b, tmp_path / "sudo.log")
+    _stub(b, "apt-get", "exit 0")
     _run("debian", str(b), tmp_path, args=["-y"])
     assert not log.exists()  # uv/rustup/just/prek curl|sh never executed
 ```
@@ -227,15 +263,19 @@ Re-verify test (materialize a missing binary so the post-install re-probe finds 
 ```python
 def test_reverify_after_install_exits_zero(tmp_path):
     """A required item missing at start, created by the install stub, is found on re-probe → exit 0."""
-    b = tmp_path / "bin"; b.mkdir()
-    _stub(b, "uv", "#!/bin/sh\nexit 0\n")           # required manual-hint tool present
+    b = tmp_path / "bin"
+    b.mkdir()
+    _stub(b, "uv", "#!/bin/sh\nexit 0\n")  # required manual-hint tool present
     _sudo_stub(b, tmp_path / "sudo.log")
     # pkg-config is MISSING initially (so Required is unsatisfied); the install "creates" it,
     # and the new pkg-config exits 0 so the header probes pass too.
-    _stub(b, "apt-get",
-          f'printf "#!/bin/sh\\nexit 0\\n" > "{b}/pkg-config"; chmod 0755 "{b}/pkg-config"; exit 0')
+    _stub(
+        b,
+        "apt-get",
+        f'printf "#!/bin/sh\\nexit 0\\n" > "{b}/pkg-config"; chmod 0755 "{b}/pkg-config"; exit 0',
+    )
     r = _run("debian", f"{b}:{_coreutils_dir(tmp_path)}", tmp_path, args=["-y"])  # chmod available
-    assert r.returncode == 0, r.stderr            # Required satisfied after the fix + re-probe
+    assert r.returncode == 0, r.stderr  # Required satisfied after the fix + re-probe
     assert "re-checking after fixes" in r.stderr
     # the re-check section shows no Required 'missing' line
     recheck = r.stderr.split("re-checking after fixes")[1]
@@ -246,30 +286,47 @@ Interactive (pty) test:
 
 ```python
 import os, pty
+
+
 def test_interactive_accept_uses_plain_sudo(tmp_path):
     """A TTY operator who answers 'y' gets plain sudo (password allowed), not sudo -n.
 
     Env is pinned so the prompt count is deterministic: KDIVE_PYTHON at a stubbed venv that
     imports guestfs (GUESTFS_STATE=ok → no guestfs prompt), so only Recommended + Future prompt.
     """
-    b = _bin(tmp_path); log = tmp_path / "cmd.log"; sudolog = tmp_path / "sudo.log"
+    b = _bin(tmp_path)
+    log = tmp_path / "cmd.log"
+    sudolog = tmp_path / "sudo.log"
     _stub(b, "apt-get", f'echo installed >> "{log}"\nexit 0')
     _sudo_stub(b, sudolog)
-    venv_py = _stub_python(b, "venv-python", imports_ok=True)  # guestfs importable → no guestfs prompt
-    os_release = tmp_path / "os-release"; os_release.write_text("ID=debian\n")
-    env = {"PATH": str(b), "KDIVE_OS_RELEASE": str(os_release), "HOME": str(tmp_path),
-           "KDIVE_PYTHON": str(venv_py)}
+    venv_py = _stub_python(
+        b, "venv-python", imports_ok=True
+    )  # guestfs importable → no guestfs prompt
+    os_release = tmp_path / "os-release"
+    os_release.write_text("ID=debian\n")
+    env = {
+        "PATH": str(b),
+        "KDIVE_OS_RELEASE": str(os_release),
+        "HOME": str(tmp_path),
+        "KDIVE_PYTHON": str(venv_py),
+    }
     mo, so = pty.openpty()
     # Feed generously more y's than prompts; extras are harmless, a shortfall would hang.
     os.write(mo, b"y\n" * 6)
-    proc = subprocess.Popen([BASH, str(SCRIPT)], stdin=so, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, env=env, text=True)
+    proc = subprocess.Popen(
+        [BASH, str(SCRIPT)],
+        stdin=so,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+    )
     os.close(so)
     out, err = proc.communicate(timeout=30)  # drains pipes concurrently (no deadlock)
     os.close(mo)
     logged = sudolog.read_text()
-    assert "sudo -v" in logged        # interactive credential preflight is plain sudo -v
-    assert "sudo -n" not in logged    # never the non-interactive flavor at a TTY
+    assert "sudo -v" in logged  # interactive credential preflight is plain sudo -v
+    assert "sudo -n" not in logged  # never the non-interactive flavor at a TTY
     assert "installed" in log.read_text()
 ```
 
@@ -446,22 +503,30 @@ git commit -m "feat(scripts): opt-in package install (-y/interactive, sudo, per 
 
 ```python
 def _sys_site(tmp_path, *, present):  # a fake system dist-packages dir
-    d = tmp_path / "dist-packages"; d.mkdir()
+    d = tmp_path / "dist-packages"
+    d.mkdir()
     if present:
-        (d / "guestfs.py").write_text(""); (d / "libguestfsmod.cpython-314.so").write_text("")
+        (d / "guestfs.py").write_text("")
+        (d / "libguestfsmod.cpython-314.so").write_text("")
     return d
+
 
 def test_installed_but_unlinked_shows_symlink_not_install_hint(tmp_path):
     """Package present system-wide, venv can't import => symlink remedy, NOT an install hint."""
     b = _bin(tmp_path)
-    venv_py = _stub_python(b, "venv-python", imports_ok=False)   # venv can't import guestfs
+    venv_py = _stub_python(b, "venv-python", imports_ok=False)  # venv can't import guestfs
     # KDIVE_GUESTFS_SYS_SITE points probe at a dir that HAS the binding (package present)
     sys_site = _sys_site(tmp_path, present=True)
-    r = _run("debian", str(b), tmp_path,
-             extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site)})
-    assert "python3-guestfs" in r.stderr        # still surfaced
+    r = _run(
+        "debian",
+        str(b),
+        tmp_path,
+        extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site)},
+    )
+    assert "python3-guestfs" in r.stderr  # still surfaced
     assert "apt install python3-guestfs" not in r.stderr  # NOT as a missing-package install
-    assert "symlink" in r.stderr                # the real remedy
+    assert "symlink" in r.stderr  # the real remedy
+
 
 def test_guestfs_skips_when_py_is_not_a_venv(tmp_path):
     """A system (non-venv) ${PY} must never be symlinked into."""
@@ -470,62 +535,115 @@ def test_guestfs_skips_when_py_is_not_a_venv(tmp_path):
     sysython = b / "sys-python"
     sysython.write_text('#!/bin/sh\ncase "$*" in *base_prefix*) exit 1;; *) exit 1;; esac\n')
     sysython.chmod(0o755)
-    sys_site = _sys_site(tmp_path, present=True); link_target = tmp_path / "should-not-appear"
-    r = _run("debian", str(b), tmp_path, args=["-y"],
-             extra_env={"KDIVE_PYTHON": str(sysython), "KDIVE_GUESTFS_SYS_SITE": str(sys_site)})
+    sys_site = _sys_site(tmp_path, present=True)
+    link_target = tmp_path / "should-not-appear"
+    r = _run(
+        "debian",
+        str(b),
+        tmp_path,
+        args=["-y"],
+        extra_env={"KDIVE_PYTHON": str(sysython), "KDIVE_GUESTFS_SYS_SITE": str(sys_site)},
+    )
     assert "skip" in r.stderr.lower()  # Fix 2 skipped; no symlink attempted
+
 
 def test_yes_links_guestfs_when_package_present_and_venv_ok_abi(tmp_path):
     """-y with matching ABI creates the symlink into the venv site-packages."""
     # venv-python: reports it IS a venv, matching minor, and site path under tmp
-    site = tmp_path / "venv-site"; site.mkdir()
+    site = tmp_path / "venv-site"
+    site.mkdir()
     venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14", is_venv=True)
     sys_site = _sys_site(tmp_path, present=True)
     b = _bin(tmp_path)
-    r = _run("debian", f"{b}:{_coreutils_dir(tmp_path)}", tmp_path, args=["-y"],  # ln available
-             extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
-                        "KDIVE_SYSTEM_PY_MINOR": "3.14"})
+    r = _run(
+        "debian",
+        f"{b}:{_coreutils_dir(tmp_path)}",
+        tmp_path,
+        args=["-y"],  # ln available
+        extra_env={
+            "KDIVE_PYTHON": str(venv_py),
+            "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+            "KDIVE_SYSTEM_PY_MINOR": "3.14",
+        },
+    )
     assert (site / "guestfs.py").is_symlink()
     assert list(site.glob("libguestfsmod*.so"))
 
+
 def test_abi_mismatch_fails_loud_no_symlink(tmp_path):
-    site = tmp_path / "venv-site"; site.mkdir()
+    site = tmp_path / "venv-site"
+    site.mkdir()
     venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14", is_venv=True)
-    sys_site = _sys_site(tmp_path, present=True); b = _bin(tmp_path)
-    r = _run("debian", str(b), tmp_path, args=["-y"],
-             extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
-                        "KDIVE_SYSTEM_PY_MINOR": "3.12"})
+    sys_site = _sys_site(tmp_path, present=True)
+    b = _bin(tmp_path)
+    r = _run(
+        "debian",
+        str(b),
+        tmp_path,
+        args=["-y"],
+        extra_env={
+            "KDIVE_PYTHON": str(venv_py),
+            "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+            "KDIVE_SYSTEM_PY_MINOR": "3.12",
+        },
+    )
     assert "3.12" in r.stderr and "3.14" in r.stderr  # both versions reported
-    assert not (site / "guestfs.py").exists()          # no broken link
+    assert not (site / "guestfs.py").exists()  # no broken link
+
 
 def test_link_is_idempotent(tmp_path):
     # pre-create a correct link, run -y again => no abort, still linked
     ...  # ln -sf / skip-if-correct; assert returncode 0 and link present
 
+
 def test_fresh_host_installs_then_links_in_one_run(tmp_path):
     """Package ABSENT at start; -y installs it, then the same run links it (re-probe closes the gap)."""
-    site = tmp_path / "venv-site"; site.mkdir()
+    site = tmp_path / "venv-site"
+    site.mkdir()
     venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14")
-    sys_site = _sys_site(tmp_path, present=False)   # binding absent initially
-    b = _bin(tmp_path); _sudo_stub(b, tmp_path / "sudo.log")
+    sys_site = _sys_site(tmp_path, present=False)  # binding absent initially
+    b = _bin(tmp_path)
+    _sudo_stub(b, tmp_path / "sudo.log")
     # the install stub materializes guestfs.py + the .so into sys_site (as a real install would);
     # `: >` file redirection is a builtin (no touch needed), production ln uses the coreutils dir.
-    _stub(b, "apt-get",
-          f': > "{sys_site}/guestfs.py"; : > "{sys_site}/libguestfsmod.cpython-314.so"; exit 0')
-    r = _run("debian", f"{b}:{_coreutils_dir(tmp_path)}", tmp_path, args=["-y"],
-             extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
-                        "KDIVE_SYSTEM_PY_MINOR": "3.14"})
-    assert (site / "guestfs.py").is_symlink()       # linked in the SAME run
+    _stub(
+        b,
+        "apt-get",
+        f': > "{sys_site}/guestfs.py"; : > "{sys_site}/libguestfsmod.cpython-314.so"; exit 0',
+    )
+    r = _run(
+        "debian",
+        f"{b}:{_coreutils_dir(tmp_path)}",
+        tmp_path,
+        args=["-y"],
+        extra_env={
+            "KDIVE_PYTHON": str(venv_py),
+            "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+            "KDIVE_SYSTEM_PY_MINOR": "3.14",
+        },
+    )
+    assert (site / "guestfs.py").is_symlink()  # linked in the SAME run
+
 
 def test_symlink_only_fix_clears_the_hint(tmp_path):
     """Binding present+unlinked, all else present: a -y link clears the 'symlink' hint in the re-check."""
-    site = tmp_path / "venv-site"; site.mkdir()
+    site = tmp_path / "venv-site"
+    site.mkdir()
     venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14")
     sys_site = _sys_site(tmp_path, present=True)
-    b = _bin(tmp_path); _sudo_stub(b, tmp_path / "sudo.log")
-    r = _run("debian", f"{b}:{_coreutils_dir(tmp_path)}", tmp_path, args=["-y"],  # ln available
-             extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
-                        "KDIVE_SYSTEM_PY_MINOR": "3.14"})
+    b = _bin(tmp_path)
+    _sudo_stub(b, tmp_path / "sudo.log")
+    r = _run(
+        "debian",
+        f"{b}:{_coreutils_dir(tmp_path)}",
+        tmp_path,
+        args=["-y"],  # ln available
+        extra_env={
+            "KDIVE_PYTHON": str(venv_py),
+            "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+            "KDIVE_SYSTEM_PY_MINOR": "3.14",
+        },
+    )
     assert (site / "guestfs.py").is_symlink()
     # after the link, the re-check must not still tell the operator to symlink (FIX_ATTEMPTED set)
     recheck = r.stderr.split("re-checking after fixes")[1]

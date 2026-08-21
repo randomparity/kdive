@@ -58,9 +58,7 @@ _LIB = Path(__file__).resolve().parents[2] / "scripts" / "live-stack" / "lib.sh"
 def _resolved_py(env_kdive_python: str | None) -> str:
     prelude = f'export KDIVE_PYTHON="{env_kdive_python}"\n' if env_kdive_python is not None else ""
     script = f'{prelude}source "{_LIB}"\nprintf "%s" "$py"\n'
-    out = subprocess.run(
-        ["bash", "-c", script], capture_output=True, text=True, check=True
-    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
     return out.stdout
 
 
@@ -155,15 +153,15 @@ _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "live-vm" / "preflig
 
 def _run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     full = {"PATH": os.environ["PATH"], **env}
-    return subprocess.run(
-        ["bash", str(_SCRIPT), *args], capture_output=True, text=True, env=full
-    )
+    return subprocess.run(["bash", str(_SCRIPT), *args], capture_output=True, text=True, env=full)
 
 
 def test_throwaway_ok_when_rootfs_exists(tmp_path: Path) -> None:
     rootfs = tmp_path / "rootfs.qcow2"
     rootfs.write_bytes(b"x")
-    r = _run(["throwaway"], {"KDIVE_LIVE_VM_ROOTFS": str(rootfs), "KDIVE_LIBVIRT_URI": "qemu:///session"})
+    r = _run(
+        ["throwaway"], {"KDIVE_LIVE_VM_ROOTFS": str(rootfs), "KDIVE_LIBVIRT_URI": "qemu:///session"}
+    )
     assert r.returncode == 0, r.stderr
 
 
@@ -185,10 +183,15 @@ def test_tcg_fails_without_ppc64le_emulator(tmp_path: Path) -> None:
     tree = tmp_path / "linux"
     tree.mkdir()
     env = {
-        "KDIVE_STACK_BASE_URL": "http://x", "KDIVE_OIDC_ISSUER": "http://x",
-        "KDIVE_DATABASE_URL": "postgresql://x", "KDIVE_S3_ENDPOINT_URL": "http://x",
-        "KDIVE_S3_BUCKET": "b", "AWS_ACCESS_KEY_ID": "k", "AWS_SECRET_ACCESS_KEY": "s",
-        "KDIVE_GUEST_IMAGE_PPC64LE": str(img), "KDIVE_KERNEL_SRC": str(tree),
+        "KDIVE_STACK_BASE_URL": "http://x",
+        "KDIVE_OIDC_ISSUER": "http://x",
+        "KDIVE_DATABASE_URL": "postgresql://x",
+        "KDIVE_S3_ENDPOINT_URL": "http://x",
+        "KDIVE_S3_BUCKET": "b",
+        "AWS_ACCESS_KEY_ID": "k",
+        "AWS_SECRET_ACCESS_KEY": "s",
+        "KDIVE_GUEST_IMAGE_PPC64LE": str(img),
+        "KDIVE_KERNEL_SRC": str(tree),
         "PATH": "/nonexistent",  # no qemu-system-ppc64
     }
     r = _run(["tcg"], env)
@@ -320,7 +323,9 @@ _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "live-vm" / "mint-sy
 
 def _run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", str(_SCRIPT)], capture_output=True, text=True,
+        ["bash", str(_SCRIPT)],
+        capture_output=True,
+        text=True,
         env={"PATH": os.environ["PATH"], **env},
     )
 

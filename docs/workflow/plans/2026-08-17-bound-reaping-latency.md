@@ -41,8 +41,10 @@ Decision: `docs/adr/0565-bound-reconciler-provider-reaping-latency.md`.
 **Interfaces produced** (later tasks and tests rely on these exact names):
 
 ```python
-REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS: Setting          # settings.py
-DEFAULT_LIBVIRT_TLS_PORT: int = 16514                    # reachability_gate.py
+REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS: Setting  # settings.py
+DEFAULT_LIBVIRT_TLS_PORT: int = 16514  # reachability_gate.py
+
+
 def remote_endpoint(uri: str) -> tuple[str, int]: ...
 def require_reachable(
     uri: str,
@@ -74,15 +76,25 @@ gate reads no TLS material. `just lint` and `just type` green.
 **Interfaces produced**:
 
 ```python
-DEFAULT_LANE_BUDGET: timedelta = timedelta(seconds=10)   # provider_reaping.py
+DEFAULT_LANE_BUDGET: timedelta = timedelta(seconds=10)  # provider_reaping.py
+
+
 async def reap_orphaned_dump_volumes(
     conn, reaper, grace: timedelta, *, budget: timedelta = DEFAULT_LANE_BUDGET
 ) -> int: ...
 async def reap_orphaned_captures(
-    conn, reapers, *, settle, batch, retry_base, retry_cap,
+    conn,
+    reapers,
+    *,
+    settle,
+    batch,
+    retry_base,
+    retry_cap,
     budget: timedelta = DEFAULT_LANE_BUDGET,
 ) -> int: ...
-RECONCILER_LANE_BUDGET_SECONDS: Setting                  # core_settings.py
+
+
+RECONCILER_LANE_BUDGET_SECONDS: Setting  # core_settings.py
 ```
 
 The `budget` keyword is **defaulted**, not required: a caller must not be able to obtain an

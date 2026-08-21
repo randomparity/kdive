@@ -83,7 +83,8 @@ class IntrospectOutput(NamedTuple):
     tasks: dict[str, object]
     modules: dict[str, object]
     sysinfo: dict[str, object]
-    truncated: bool          # any helper hit its cap, or the report hit the byte cap
+    truncated: bool  # any helper hit its cap, or the report hit the byte cap
+
 
 class VmcoreIntrospector(Protocol):
     def from_vmcore(

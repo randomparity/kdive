@@ -450,9 +450,12 @@ validated against: its root filesystem is **btrfs with subvolumes**, it has a se
 ```python
 class FamilyCustomizer(Protocol):
     family: str
+
     def packages(self, kind: str) -> tuple[str, ...]: ...
     def customize_argv(self, ctx: CustomizeContext) -> list[str]: ...
-    def normalize(self, qcow2: Path) -> None: ...   # per-family fstab/MAC normalize + SELinux/AppArmor
+    def normalize(
+        self, qcow2: Path
+    ) -> None: ...  # per-family fstab/MAC normalize + SELinux/AppArmor
 ```
 
 `customize_argv` returns the family-specific `virt-customize` fragment; the shared pipeline

@@ -112,7 +112,7 @@ upsert keeps that early commit safe under concurrent provisions.
 QEMU never re-mutates a live disk:
 
 ```python
-type OverlayCustomizer = Callable[[str], None]   # (overlay_path) -> None
+type OverlayCustomizer = Callable[[str], None]  # (overlay_path) -> None
 ```
 
 - The handler builds `[inject_authorized_key(pubkey)]` and passes it in; `provision(system_id,

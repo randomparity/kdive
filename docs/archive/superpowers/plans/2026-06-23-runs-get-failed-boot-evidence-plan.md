@@ -63,6 +63,7 @@ the terminal state directly so the test isolates `failed_boot_attempt`'s read lo
 @dataclass(frozen=True, slots=True)
 class BootAttempt:
     """The terminally-failed boot job behind a deleted boot step (#750, ADR-0230)."""
+
     job_id: UUID
     error_category: ErrorCategory | None
 

@@ -39,18 +39,28 @@
 # tests/store/test_objectstore_content_encoding.py
 def test_put_records_content_encoding_and_head_reads_it(object_store):
     req = ArtifactWriteRequest(
-        tenant="t", owner_kind="systems", owner_id=str(uuid4()),
-        name="console-part-0-000000", data=b"x", sensitivity=Sensitivity.REDACTED,
-        retention_class="evidence", content_encoding="gzip",
+        tenant="t",
+        owner_kind="systems",
+        owner_id=str(uuid4()),
+        name="console-part-0-000000",
+        data=b"x",
+        sensitivity=Sensitivity.REDACTED,
+        retention_class="evidence",
+        content_encoding="gzip",
     )
     stored = object_store.put_artifact(req)
     head = object_store.head(stored.key)
     assert head is not None and head.content_encoding == "gzip"
 
+
 def test_put_without_content_encoding_heads_none(object_store):
     req = ArtifactWriteRequest(
-        tenant="t", owner_kind="systems", owner_id=str(uuid4()),
-        name="dmesg-redacted", data=b"x", sensitivity=Sensitivity.REDACTED,
+        tenant="t",
+        owner_kind="systems",
+        owner_id=str(uuid4()),
+        name="dmesg-redacted",
+        data=b"x",
+        sensitivity=Sensitivity.REDACTED,
         retention_class="evidence",
     )
     stored = object_store.put_artifact(req)
@@ -198,6 +208,7 @@ stateless across invocations, so the carry is persisted in the sidecar (Task 5).
 _ident = lambda b: b  # redaction stub (bytes->bytes) for non-secret tests
 S0 = RotationState(plaintext_offset=0, carry=b"", next_index=0, boot_gen=0, boot_id=None)
 
+
 def test_seals_full_threshold_parts_indexed_monotonically():
     data = b"A" * (ROTATION_THRESHOLD * 2 + 10)
     r = rotate(S0, data, "id1", _ident)
@@ -206,6 +217,7 @@ def test_seals_full_threshold_parts_indexed_monotonically():
     # the trailing < threshold remainder (plus the held-back overlap) is carried, not sealed
     assert len(r.next_state.carry) >= 10
     assert part_object_name(0, 1) == "console-part-0-000001"
+
 
 def test_secret_split_across_internal_part_boundary_is_redacted():
     # place the secret straddling the EMIT split (ROTATION_THRESHOLD - SEAM_OVERLAP) so the test
@@ -218,11 +230,13 @@ def test_secret_split_across_internal_part_boundary_is_redacted():
     joined = b"".join(p.redacted for p in r.parts)
     assert sensitive not in joined and sensitive not in r.next_state.carry
 
+
 def test_no_new_bytes_yields_no_parts_and_same_state():
     data = b"B" * ROTATION_THRESHOLD
     r1 = rotate(S0, data, "id1", _ident)
     r2 = rotate(r1.next_state, data, "id1", _ident)
     assert r2.parts == [] and r2.next_state.next_index == r1.next_state.next_index
+
 
 def test_retry_same_delta_produces_same_keys_idempotent():
     data = b"C" * (ROTATION_THRESHOLD * 2 + 5)
@@ -231,6 +245,7 @@ def test_retry_same_delta_produces_same_keys_idempotent():
     retry = rotate(S0, data, "id1", _ident)
     assert [(p.gen, p.index) for p in first.parts] == [(p.gen, p.index) for p in retry.parts]
 
+
 def test_boot_id_change_resets_and_bumps_generation():
     prior = RotationState(ROTATION_THRESHOLD * 3, b"leftover", 5, 0, "old")
     new = rotate(prior, b"D" * (ROTATION_THRESHOLD + 4), "new", _ident)
@@ -238,17 +253,19 @@ def test_boot_id_change_resets_and_bumps_generation():
     assert new.next_state.next_index >= 1 and all(p.gen == 1 for p in new.parts)
     assert new.parts[0].index == 0  # new generation re-indexes from 0
 
+
 def test_truncate_regrow_past_old_offset_detected_via_boot_id():
     # file already grew past old offset; size-only check would miss it, boot_id catches it
     prior = RotationState(ROTATION_THRESHOLD * 2, b"", 9, 0, "old")
     r = rotate(prior, b"E" * (ROTATION_THRESHOLD * 4), "new", _ident)
     assert r.next_state.boot_gen == 1 and r.parts[0].index == 0  # new boot's early console captured
 
+
 def test_secret_split_across_job_boundary_is_redacted():
     sensitive = b"ZZ-REDACT-ME-MARKER-ZZ"
     full = b"x" * (ROTATION_THRESHOLD - 5) + sensitive + b"y" * (ROTATION_THRESHOLD)
     redact = lambda b: b.replace(sensitive, b"[REDACTED]")
-    first = rotate(S0, full, "id1", redact)            # job 1 holds back the straddling region in carry
+    first = rotate(S0, full, "id1", redact)  # job 1 holds back the straddling region in carry
     second = rotate(first.next_state, full, "id1", redact)  # job 2 emits it, redacted
     joined = b"".join(p.redacted for p in first.parts + second.parts)
     assert sensitive not in joined  # never stored raw on either side of the seam
@@ -270,13 +287,14 @@ def test_secret_split_across_job_boundary_is_redacted():
      ```python
      class SeamRotator:
          def __init__(self, redact, threshold, seam_overlap, carry=b""): ...
-         def feed(self, data: bytes) -> None: ...          # append to buffer
-         def drain_parts(self) -> list[bytes]:             # emit redact(data[:split]) per the
+         def feed(self, data: bytes) -> None: ...  # append to buffer
+         def drain_parts(self) -> list[bytes]:  # emit redact(data[:split]) per the
              # collector's _rotate: while len(carry+buffer) crosses threshold, data = carry+buffer,
              # split = len(data) - seam_overlap, emit redact(data[:split]), carry = data[split:].
              ...
+
          @property
-         def carry(self) -> bytes: ...                     # the held-back raw overlap
+         def carry(self) -> bytes: ...  # the held-back raw overlap
      ```
      `rotate()` then: `r = SeamRotator(redact, ROTATION_THRESHOLD, SEAM_OVERLAP, carry=state.carry)`;
      `r.feed(file_bytes[offset:])`; `for blob in r.drain_parts(): parts.append(SealedPart(gen, index,

@@ -109,9 +109,7 @@ def test_resolve_source_rejects_directory() -> None:
 
 
 def test_resolve_test_paths_accepts_existing_paths() -> None:
-    assert resolve_test_paths(["tests/domain/test_errors.py"]) == [
-        "tests/domain/test_errors.py"
-    ]
+    assert resolve_test_paths(["tests/domain/test_errors.py"]) == ["tests/domain/test_errors.py"]
 
 
 def test_resolve_test_paths_rejects_missing_path() -> None:
@@ -229,9 +227,7 @@ from scripts.mutate import MARKER, render_config
 
 
 def test_render_config_scopes_mutation_and_copies_whole_package() -> None:
-    text = render_config(
-        "src/kdive/domain/errors.py", ["tests/domain/test_errors.py"]
-    )
+    text = render_config("src/kdive/domain/errors.py", ["tests/domain/test_errors.py"])
     assert text.startswith(MARKER)
     assert "[mutmut]" in text
     # whole package copied so imports resolve; mutation scoped to the one file
@@ -688,8 +684,14 @@ def _run_subprocess(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 def preflight_collect(test_paths: list[str], runner=_run_subprocess) -> None:
     """Cheap repo-root check: collect-only the scoped tests; abort on bad/empty path."""
     cmd = [
-        sys.executable, "-m", "pytest", "--co", "-q",
-        "-m", "not live_vm and not live_stack", *test_paths,
+        sys.executable,
+        "-m",
+        "pytest",
+        "--co",
+        "-q",
+        "-m",
+        "not live_vm and not live_stack",
+        *test_paths,
     ]
     result = runner(cmd)
     if result.returncode == 5:

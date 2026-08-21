@@ -93,14 +93,16 @@ omits the new `details` keys).
 
 1. Add a module-level constant near the other module constants (after `_DEFAULT_POLL_S`):
    ```python
-   _DETERMINISTIC_CONFIG_CODES: frozenset[int] = frozenset({
-       libvirt.VIR_ERR_ARGUMENT_UNSUPPORTED,
-       libvirt.VIR_ERR_ACCESS_DENIED,
-       libvirt.VIR_ERR_OPERATION_DENIED,
-       libvirt.VIR_ERR_NO_SUPPORT,
-       libvirt.VIR_ERR_OPERATION_UNSUPPORTED,
-       libvirt.VIR_ERR_CONFIG_UNSUPPORTED,
-   })
+   _DETERMINISTIC_CONFIG_CODES: frozenset[int] = frozenset(
+       {
+           libvirt.VIR_ERR_ARGUMENT_UNSUPPORTED,
+           libvirt.VIR_ERR_ACCESS_DENIED,
+           libvirt.VIR_ERR_OPERATION_DENIED,
+           libvirt.VIR_ERR_NO_SUPPORT,
+           libvirt.VIR_ERR_OPERATION_UNSUPPORTED,
+           libvirt.VIR_ERR_CONFIG_UNSUPPORTED,
+       }
+   )
    ```
    Add a short comment citing ADR-0159 and naming the "agent not configured / permission
    denied / unsupported" intent.

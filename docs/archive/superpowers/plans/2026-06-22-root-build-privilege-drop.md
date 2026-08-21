@@ -180,7 +180,9 @@ class BuildSandbox:
     home: str
     umask: int = 0o077
 
-    def run(self, argv: list[str], *, env: dict | None = None, **kwargs) -> subprocess.CompletedProcess:
+    def run(
+        self, argv: list[str], *, env: dict | None = None, **kwargs
+    ) -> subprocess.CompletedProcess:
         """Spawn ``argv`` demoted to this identity (child-side setuid/setgid + build-user env)."""
         return subprocess.run(
             argv,
@@ -258,9 +260,7 @@ import kdive.config as config
 
 
 def _fake_pwnam(name: str):
-    return types.SimpleNamespace(
-        pw_name=name, pw_uid=1000, pw_gid=2000, pw_dir="/home/builder"
-    )
+    return types.SimpleNamespace(pw_name=name, pw_uid=1000, pw_gid=2000, pw_dir="/home/builder")
 
 
 def test_resolve_non_root_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -290,7 +290,8 @@ def test_resolve_root_uid0_account_fails_closed(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(sb.os, "geteuid", lambda: 0)
     monkeypatch.setattr(config, "get", lambda s: "root")
     monkeypatch.setattr(
-        sb.pwd, "getpwnam",
+        sb.pwd,
+        "getpwnam",
         lambda n: types.SimpleNamespace(pw_name="root", pw_uid=0, pw_gid=0, pw_dir="/root"),
     )
     with pytest.raises(sb.CategorizedError):
@@ -460,8 +461,11 @@ def test_run_make_passes_sandbox_to_chokepoint(monkeypatch: pytest.MonkeyPatch) 
 def test_run_make_default_sandbox_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict = {}
     monkeypatch.setattr(
-        ex, "sandbox_run",
-        lambda sandbox, argv, **kw: seen.setdefault("sandbox", sandbox) or type("R", (), {"returncode": 0})(),
+        ex,
+        "sandbox_run",
+        lambda sandbox, argv, **kw: (
+            seen.setdefault("sandbox", sandbox) or type("R", (), {"returncode": 0})()
+        ),
     )
     ex.real_run_make(Path("/ws"))
     assert seen["sandbox"] is None
@@ -470,8 +474,11 @@ def test_run_make_default_sandbox_is_none(monkeypatch: pytest.MonkeyPatch) -> No
 def test_modules_install_threads_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict = {}
     monkeypatch.setattr(
-        ex, "sandbox_run",
-        lambda sandbox, argv, **kw: seen.update(sandbox=sandbox, argv=argv) or type("R", (), {"returncode": 0})(),
+        ex,
+        "sandbox_run",
+        lambda sandbox, argv, **kw: (
+            seen.update(sandbox=sandbox, argv=argv) or type("R", (), {"returncode": 0})()
+        ),
     )
     box = _box()
     ex.real_run_modules_install(Path("/ws"), Path("/mod"), sandbox=box)
@@ -490,7 +497,9 @@ from kdive.providers.shared.build_host.sandbox import BuildSandbox, sandbox_run
 Replace `real_run_make`:
 
 ```python
-def real_run_make(workspace: Path, sandbox: BuildSandbox | None = None) -> int:  # pragma: no cover - live_vm
+def real_run_make(
+    workspace: Path, sandbox: BuildSandbox | None = None
+) -> int:  # pragma: no cover - live_vm
     """Run the default parallel kernel build (demoted when a sandbox is active)."""
     try:
         return sandbox_run(
@@ -512,7 +521,9 @@ def real_run_make(workspace: Path, sandbox: BuildSandbox | None = None) -> int: 
 Replace `real_run_olddefconfig` / `real_run_modules_install`:
 
 ```python
-def real_run_olddefconfig(workspace: Path, sandbox: BuildSandbox | None = None) -> int:  # pragma: no cover
+def real_run_olddefconfig(
+    workspace: Path, sandbox: BuildSandbox | None = None
+) -> int:  # pragma: no cover
     return run_make_target(workspace, ["olddefconfig"], "make olddefconfig", sandbox=sandbox)
 
 
@@ -593,7 +604,9 @@ def _box() -> sb.BuildSandbox:
     return sb.BuildSandbox(uid=9, gid=9, extra_groups=(9,), user_name="b", home="/home/b")
 
 
-def test_write_fragment_owns_file_when_sandboxed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_write_fragment_owns_file_when_sandboxed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     owned: list = []
     box = _box()
     monkeypatch.setattr(box, "own", lambda p: owned.append(Path(p)))
@@ -608,7 +621,9 @@ def test_write_fragment_no_chown_without_sandbox(tmp_path: Path) -> None:
     assert (tmp_path / "kdump.config.fragment").read_bytes() == b"X"
 
 
-def test_sync_tree_adds_chown_under_sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sync_tree_adds_chown_under_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     seen: dict = {}
     monkeypatch.setattr(ws.shutil, "which", lambda t: "/usr/bin/rsync")
     monkeypatch.setattr(ws, "warm_tree_source_error", lambda src: None)
@@ -625,13 +640,18 @@ def test_sync_tree_adds_chown_under_sandbox(tmp_path: Path, monkeypatch: pytest.
     assert seen["owned"] == tmp_path
 
 
-def test_sync_tree_no_chown_without_sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sync_tree_no_chown_without_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     seen: dict = {}
     monkeypatch.setattr(ws.shutil, "which", lambda t: "/usr/bin/rsync")
     monkeypatch.setattr(ws, "warm_tree_source_error", lambda src: None)
     monkeypatch.setattr(
-        ws.subprocess, "run",
-        lambda argv, **kw: seen.update(argv=argv) or type("R", (), {"returncode": 0, "stderr": ""})(),
+        ws.subprocess,
+        "run",
+        lambda argv, **kw: (
+            seen.update(argv=argv) or type("R", (), {"returncode": 0, "stderr": ""})()
+        ),
     )
     ws.sync_tree("/warm", tmp_path)
     assert not any(a.startswith("--chown") for a in seen["argv"])
@@ -833,8 +853,14 @@ def real_checkout(
 ) -> None:
     git_source = git_source_of(profile)
     if git_source is not None:
-        clone_tree(git_source, workspace, allowlist, run_id=run_id,
-                   secret_registry=secret_registry, sandbox=sandbox)
+        clone_tree(
+            git_source,
+            workspace,
+            allowlist,
+            run_id=run_id,
+            secret_registry=secret_registry,
+            sandbox=sandbox,
+        )
     else:
         sync_tree(kernel_src, workspace, secret_registry, sandbox=sandbox)
     merge_config(fragment_bytes, workspace, run_id, sandbox=sandbox)
@@ -859,8 +885,14 @@ def make_checkout(
     ) -> None:
         sandbox = sandbox_provider.get() if sandbox_provider is not None else None
         real_checkout(
-            kernel_src, profile, workspace, fragment_bytes,
-            run_id=run_id, secret_registry=secret_registry, allowlist=allowlist, sandbox=sandbox,
+            kernel_src,
+            profile,
+            workspace,
+            fragment_bytes,
+            run_id=run_id,
+            secret_registry=secret_registry,
+            allowlist=allowlist,
+            sandbox=sandbox,
         )
 
     return _checkout
@@ -918,7 +950,10 @@ Run: `uv run python -m pytest tests/providers/local_libvirt/test_build.py::test_
 - [ ] **Step 2: Wire the provider in `from_env`.** In `build.py`, add imports:
 
 ```python
-from kdive.providers.shared.build_host.sandbox import SandboxProvider, resolve_build_sandbox_provider
+from kdive.providers.shared.build_host.sandbox import (
+    SandboxProvider,
+    resolve_build_sandbox_provider,
+)
 ```
 
 In `from_env`, build the provider and thread it:

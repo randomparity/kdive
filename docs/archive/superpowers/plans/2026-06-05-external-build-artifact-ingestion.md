@@ -52,19 +52,33 @@ class HeadResult(NamedTuple):
     checksum_sha256: str | None  # base64 of the SHA-256 digest, or None if not stored
     etag: str
 
+
 class PresignedUpload(NamedTuple):
     url: str
     required_headers: dict[str, str]  # headers the agent MUST send on the PUT
 
-def artifact_key(tenant: str, kind: str, object_id: str, name: str) -> str: ...   # public wrapper of _artifact_key
-def owner_prefix(tenant: str, kind: str, object_id: str) -> str: ...               # "{tenant}/{kind}/{object_id}/"
+
+def artifact_key(
+    tenant: str, kind: str, object_id: str, name: str
+) -> str: ...  # public wrapper of _artifact_key
+def owner_prefix(
+    tenant: str, kind: str, object_id: str
+) -> str: ...  # "{tenant}/{kind}/{object_id}/"
+
 
 class ObjectStore:
     def head(self, key: str) -> HeadResult | None: ...
     def get_range(self, key: str, *, start: int, length: int) -> bytes: ...
-    def presign_put(self, key: str, *, sha256: str, size_bytes: int,
-                    sensitivity: Sensitivity, retention_class: str,
-                    expires_in: int) -> PresignedUpload: ...
+    def presign_put(
+        self,
+        key: str,
+        *,
+        sha256: str,
+        size_bytes: int,
+        sensitivity: Sensitivity,
+        retention_class: str,
+        expires_in: int,
+    ) -> PresignedUpload: ...
     def list_prefix(self, prefix: str) -> list[str]: ...
     def delete(self, key: str) -> None: ...
 ```
@@ -91,13 +105,22 @@ class ManifestEntry(NamedTuple):
     sha256: str
     size_bytes: int
 
+
 class UploadManifest(NamedTuple):
     entries: tuple[ManifestEntry, ...]
     prefix: str
     deadline: datetime
 
-async def replace_manifest(conn, *, owner_kind: str, owner_id: UUID, prefix: str,
-                           entries: Sequence[ManifestEntry], ttl: timedelta) -> None: ...
+
+async def replace_manifest(
+    conn,
+    *,
+    owner_kind: str,
+    owner_id: UUID,
+    prefix: str,
+    entries: Sequence[ManifestEntry],
+    ttl: timedelta,
+) -> None: ...
 async def get_manifest(conn, owner_kind: str, owner_id: UUID) -> UploadManifest | None: ...
 async def delete_manifest(conn, owner_kind: str, owner_id: UUID) -> None: ...
 ```
@@ -109,12 +132,17 @@ async def delete_manifest(conn, owner_kind: str, owner_id: UUID) -> None: ...
 ```python
 class ValidatedUpload(NamedTuple):
     output: BuildOutput
-    heads: dict[str, HeadResult]   # name -> head, returned so finalize needs no second HEAD
+    heads: dict[str, HeadResult]  # name -> head, returned so finalize needs no second HEAD
 
-def validate_external_artifacts(store, *, manifest: Sequence[ManifestEntry],
-                                keys: Mapping[str, str],          # name -> object key
-                                declared_build_id: str | None) -> ValidatedUpload: ...
-def extract_build_id_ranged(store, key: str) -> str: ...          # ELF64-LE ranged build-id read
+
+def validate_external_artifacts(
+    store,
+    *,
+    manifest: Sequence[ManifestEntry],
+    keys: Mapping[str, str],  # name -> object key
+    declared_build_id: str | None,
+) -> ValidatedUpload: ...
+def extract_build_id_ranged(store, key: str) -> str: ...  # ELF64-LE ranged build-id read
 ```
 
 Returning `heads` from the single validation pass keeps `runs.complete_build` fully injectable — the tool writes the write-once `artifacts` rows from `ValidatedUpload.heads`, never calling the object store directly (so a unit test that injects a fake validator does no S3 IO).
@@ -237,9 +265,7 @@ def test_head_without_checksum_metadata_yields_none_checksum() -> None:
 
 
 def test_head_maps_transport_error_to_infrastructure_failure() -> None:
-    store = ObjectStore(
-        _HeadClient(EndpointConnectionError(endpoint_url="http://x")), "bucket"
-    )
+    store = ObjectStore(_HeadClient(EndpointConnectionError(endpoint_url="http://x")), "bucket")
     with pytest.raises(CategorizedError) as excinfo:
         store.head("t/runs/r1/kernel")
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -266,31 +292,29 @@ class HeadResult(NamedTuple):
 Add the method to `ObjectStore` (after `get_artifact`):
 
 ```python
-    def head(self, key: str) -> HeadResult | None:
-        """Return the object's size/checksum/etag, or ``None`` if it does not exist.
+def head(self, key: str) -> HeadResult | None:
+    """Return the object's size/checksum/etag, or ``None`` if it does not exist.
 
-        Requests ``ChecksumMode="ENABLED"`` so a checksum written at PUT is returned.
+    Requests ``ChecksumMode="ENABLED"`` so a checksum written at PUT is returned.
 
-        Raises:
-            CategorizedError: any non-404 store error
-                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
-        """
-        try:
-            resp = self._client.head_object(
-                Bucket=self._bucket, Key=key, ChecksumMode="ENABLED"
-            )
-        except ClientError as err:
-            status = err.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-            if status == 404:
-                return None
-            raise _infrastructure_error("head_object", key, err) from err
-        except BotoCoreError as err:
-            raise _infrastructure_error("head_object", key, err) from err
-        return HeadResult(
-            size_bytes=int(resp["ContentLength"]),
-            checksum_sha256=resp.get("ChecksumSHA256"),
-            etag=_normalize_etag(resp["ETag"]),
-        )
+    Raises:
+        CategorizedError: any non-404 store error
+            (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+    """
+    try:
+        resp = self._client.head_object(Bucket=self._bucket, Key=key, ChecksumMode="ENABLED")
+    except ClientError as err:
+        status = err.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if status == 404:
+            return None
+        raise _infrastructure_error("head_object", key, err) from err
+    except BotoCoreError as err:
+        raise _infrastructure_error("head_object", key, err) from err
+    return HeadResult(
+        size_bytes=int(resp["ContentLength"]),
+        checksum_sha256=resp.get("ChecksumSHA256"),
+        etag=_normalize_etag(resp["ETag"]),
+    )
 ```
 
 Add `HeadResult` to `__all__` if the module declares one (it does not currently; skip).
@@ -428,66 +452,65 @@ class PresignedUpload(NamedTuple):
 Add the two methods to `ObjectStore`:
 
 ```python
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
-        """Return ``length`` bytes of ``key`` starting at ``start`` (an HTTP ranged GET).
+def get_range(self, key: str, *, start: int, length: int) -> bytes:
+    """Return ``length`` bytes of ``key`` starting at ``start`` (an HTTP ranged GET).
 
-        Raises:
-            CategorizedError: the ranged read fails
-                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
-        """
-        end = start + length - 1
-        try:
-            resp = self._client.get_object(
-                Bucket=self._bucket, Key=key, Range=f"bytes={start}-{end}"
-            )
-            return resp["Body"].read()
-        except (BotoCoreError, ClientError) as err:
-            raise _infrastructure_error("get_range", key, err) from err
+    Raises:
+        CategorizedError: the ranged read fails
+            (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+    """
+    end = start + length - 1
+    try:
+        resp = self._client.get_object(Bucket=self._bucket, Key=key, Range=f"bytes={start}-{end}")
+        return resp["Body"].read()
+    except (BotoCoreError, ClientError) as err:
+        raise _infrastructure_error("get_range", key, err) from err
 
-    def presign_put(
-        self,
-        key: str,
-        *,
-        sha256: str,
-        size_bytes: int,
-        sensitivity: Sensitivity,
-        retention_class: str,
-        expires_in: int,
-    ) -> PresignedUpload:
-        """Mint a presigned PUT that signs the checksum + object metadata into the URL.
 
-        The agent must send the returned ``required_headers`` (the signed
-        ``x-amz-checksum-sha256`` and ``x-amz-meta-*`` metadata); S3 rejects a PUT whose
-        checksum disagrees with the signed value, and the metadata lands on the object so
-        the later install fetch (`get_artifact`) reads its sensitivity. ``size_bytes`` is
-        recorded by the caller's manifest and capped before this is called; presigned-PUT
-        length enforcement is asserted by the `live_stack` test (ADR-0048 §2).
+def presign_put(
+    self,
+    key: str,
+    *,
+    sha256: str,
+    size_bytes: int,
+    sensitivity: Sensitivity,
+    retention_class: str,
+    expires_in: int,
+) -> PresignedUpload:
+    """Mint a presigned PUT that signs the checksum + object metadata into the URL.
 
-        Raises:
-            CategorizedError: presigning fails
-                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
-        """
-        metadata = {"sensitivity": sensitivity.value, "retention-class": retention_class}
-        try:
-            url = self._client.generate_presigned_url(
-                "put_object",
-                Params={
-                    "Bucket": self._bucket,
-                    "Key": key,
-                    "ChecksumSHA256": sha256,
-                    "Metadata": metadata,
-                },
-                ExpiresIn=expires_in,
-                HttpMethod="PUT",
-            )
-        except (BotoCoreError, ClientError) as err:
-            raise _infrastructure_error("presign_put", key, err) from err
-        headers = {
-            "x-amz-checksum-sha256": sha256,
-            "x-amz-meta-sensitivity": sensitivity.value,
-            "x-amz-meta-retention-class": retention_class,
-        }
-        return PresignedUpload(url=url, required_headers=headers)
+    The agent must send the returned ``required_headers`` (the signed
+    ``x-amz-checksum-sha256`` and ``x-amz-meta-*`` metadata); S3 rejects a PUT whose
+    checksum disagrees with the signed value, and the metadata lands on the object so
+    the later install fetch (`get_artifact`) reads its sensitivity. ``size_bytes`` is
+    recorded by the caller's manifest and capped before this is called; presigned-PUT
+    length enforcement is asserted by the `live_stack` test (ADR-0048 §2).
+
+    Raises:
+        CategorizedError: presigning fails
+            (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+    """
+    metadata = {"sensitivity": sensitivity.value, "retention-class": retention_class}
+    try:
+        url = self._client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": self._bucket,
+                "Key": key,
+                "ChecksumSHA256": sha256,
+                "Metadata": metadata,
+            },
+            ExpiresIn=expires_in,
+            HttpMethod="PUT",
+        )
+    except (BotoCoreError, ClientError) as err:
+        raise _infrastructure_error("presign_put", key, err) from err
+    headers = {
+        "x-amz-checksum-sha256": sha256,
+        "x-amz-meta-sensitivity": sensitivity.value,
+        "x-amz-meta-retention-class": retention_class,
+    }
+    return PresignedUpload(url=url, required_headers=headers)
 ```
 
 Add the import: `Sensitivity` is already imported from `kdive.domain.models`. Good.
@@ -566,34 +589,35 @@ Expected: FAIL (`AttributeError: 'ObjectStore' object has no attribute 'list_pre
 Add to `ObjectStore`:
 
 ```python
-    def list_prefix(self, prefix: str) -> list[str]:
-        """Return every object key under ``prefix`` (paginated), or ``[]``.
+def list_prefix(self, prefix: str) -> list[str]:
+    """Return every object key under ``prefix`` (paginated), or ``[]``.
 
-        Raises:
-            CategorizedError: the listing fails
-                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
-        """
-        keys: list[str] = []
-        try:
-            paginator = self._client.get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
-                for obj in page.get("Contents", []):
-                    keys.append(obj["Key"])
-        except (BotoCoreError, ClientError) as err:
-            raise _infrastructure_error("list_objects_v2", prefix, err) from err
-        return keys
+    Raises:
+        CategorizedError: the listing fails
+            (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+    """
+    keys: list[str] = []
+    try:
+        paginator = self._client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                keys.append(obj["Key"])
+    except (BotoCoreError, ClientError) as err:
+        raise _infrastructure_error("list_objects_v2", prefix, err) from err
+    return keys
 
-    def delete(self, key: str) -> None:
-        """Delete ``key`` (idempotent — deleting an absent key is not an error).
 
-        Raises:
-            CategorizedError: the delete fails
-                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
-        """
-        try:
-            self._client.delete_object(Bucket=self._bucket, Key=key)
-        except (BotoCoreError, ClientError) as err:
-            raise _infrastructure_error("delete_object", key, err) from err
+def delete(self, key: str) -> None:
+    """Delete ``key`` (idempotent — deleting an absent key is not an error).
+
+    Raises:
+        CategorizedError: the delete fails
+            (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+    """
+    try:
+        self._client.delete_object(Bucket=self._bucket, Key=key)
+    except (BotoCoreError, ClientError) as err:
+        raise _infrastructure_error("delete_object", key, err) from err
 ```
 
 - [ ] **Step 4: Run to verify it passes**
@@ -654,9 +678,7 @@ def test_parse_external_requires_no_source_tree_fields() -> None:
 
 def test_external_profile_rejects_server_fields() -> None:
     with pytest.raises(CategorizedError) as excinfo:
-        BuildProfile.parse(
-            {"schema_version": 1, "source": "external", "config_ref": "cfg"}
-        )
+        BuildProfile.parse({"schema_version": 1, "source": "external", "config_ref": "cfg"})
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -881,13 +903,17 @@ async def test_replace_then_get_round_trips(pg_conn) -> None:
 async def test_replace_is_full_set_replacement(pg_conn) -> None:
     owner_id = uuid4()
     await replace_manifest(
-        pg_conn, owner_kind="runs", owner_id=owner_id,
+        pg_conn,
+        owner_kind="runs",
+        owner_id=owner_id,
         prefix=f"local/runs/{owner_id}/",
         entries=[ManifestEntry("kernel", "a", 1), ManifestEntry("vmlinux", "b", 2)],
         ttl=timedelta(hours=1),
     )
     await replace_manifest(
-        pg_conn, owner_kind="runs", owner_id=owner_id,
+        pg_conn,
+        owner_kind="runs",
+        owner_id=owner_id,
         prefix=f"local/runs/{owner_id}/",
         entries=[ManifestEntry("kernel", "a", 1)],
         ttl=timedelta(hours=1),
@@ -903,9 +929,12 @@ async def test_get_absent_returns_none(pg_conn) -> None:
 async def test_delete_removes_row(pg_conn) -> None:
     owner_id = uuid4()
     await replace_manifest(
-        pg_conn, owner_kind="runs", owner_id=owner_id,
+        pg_conn,
+        owner_kind="runs",
+        owner_id=owner_id,
         prefix=f"local/runs/{owner_id}/",
-        entries=[ManifestEntry("kernel", "a", 1)], ttl=timedelta(hours=1),
+        entries=[ManifestEntry("kernel", "a", 1)],
+        ttl=timedelta(hours=1),
     )
     await delete_manifest(pg_conn, "runs", owner_id)
     assert await get_manifest(pg_conn, "runs", owner_id) is None
@@ -1133,10 +1162,16 @@ Add focused failure-path tests (complete bodies):
 async def test_create_upload_rejects_non_external_run(migrated_url: str) -> None:
     async with _pool(migrated_url) as pool:
         # Seed a CREATED run whose profile is source="server".
-        run_id = ...  # seed with build_profile={"schema_version":1,"kernel_source_ref":"x","config_ref":"c"}
+        run_id = (
+            ...
+        )  # seed with build_profile={"schema_version":1,"kernel_source_ref":"x","config_ref":"c"}
         out = await artifacts_tools.create_upload(
-            pool, _ctx(), owner_kind="run", owner_id=str(run_id),
-            artifacts=[{"name": "kernel", "sha256": "a", "size_bytes": 1}], store=_FakeStore(),
+            pool,
+            _ctx(),
+            owner_kind="run",
+            owner_id=str(run_id),
+            artifacts=[{"name": "kernel", "sha256": "a", "size_bytes": 1}],
+            store=_FakeStore(),
         )
     assert out[0].error_category == ErrorCategory.CONFIGURATION_ERROR.value
 
@@ -1145,8 +1180,12 @@ async def test_create_upload_rejects_unknown_artifact_name_for_run(migrated_url:
     async with _pool(migrated_url) as pool:
         run_id = await _seed_external_run(pool)
         out = await artifacts_tools.create_upload(
-            pool, _ctx(), owner_kind="run", owner_id=str(run_id),
-            artifacts=[{"name": "rootfs", "sha256": "a", "size_bytes": 1}], store=_FakeStore(),
+            pool,
+            _ctx(),
+            owner_kind="run",
+            owner_id=str(run_id),
+            artifacts=[{"name": "rootfs", "sha256": "a", "size_bytes": 1}],
+            store=_FakeStore(),
         )
     assert out[0].error_category == ErrorCategory.CONFIGURATION_ERROR.value
 
@@ -1156,8 +1195,12 @@ async def test_create_upload_rejects_oversize_before_minting(migrated_url: str) 
         run_id = await _seed_external_run(pool)
         store = _FakeStore()
         out = await artifacts_tools.create_upload(
-            pool, _ctx(), owner_kind="run", owner_id=str(run_id),
-            artifacts=[{"name": "kernel", "sha256": "a", "size_bytes": 10**13}], store=store,
+            pool,
+            _ctx(),
+            owner_kind="run",
+            owner_id=str(run_id),
+            artifacts=[{"name": "kernel", "sha256": "a", "size_bytes": 10**13}],
+            store=store,
         )
     assert out[0].error_category == ErrorCategory.CONFIGURATION_ERROR.value
     assert store.calls == []  # no URL minted
@@ -1168,8 +1211,12 @@ async def test_create_upload_requires_operator(migrated_url: str) -> None:
         run_id = await _seed_external_run(pool)
         with pytest.raises(Exception):  # AuthorizationError from require_role
             await artifacts_tools.create_upload(
-                pool, _ctx(role=Role.VIEWER), owner_kind="run", owner_id=str(run_id),
-                artifacts=[{"name": "kernel", "sha256": "a", "size_bytes": 1}], store=_FakeStore(),
+                pool,
+                _ctx(role=Role.VIEWER),
+                owner_kind="run",
+                owner_id=str(run_id),
+                artifacts=[{"name": "kernel", "sha256": "a", "size_bytes": 1}],
+                store=_FakeStore(),
             )
 ```
 
@@ -1211,7 +1258,9 @@ _DEFAULT_MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024
 
 
 def _upload_ttl() -> timedelta:
-    return timedelta(seconds=int(os.environ.get("KDIVE_UPLOAD_TTL_SECONDS", _DEFAULT_UPLOAD_TTL_SECONDS)))
+    return timedelta(
+        seconds=int(os.environ.get("KDIVE_UPLOAD_TTL_SECONDS", _DEFAULT_UPLOAD_TTL_SECONDS))
+    )
 
 
 def _max_upload_bytes() -> int:
@@ -1296,7 +1345,9 @@ async def create_upload(
             try:
                 async with conn.transaction(), advisory_xact_lock(conn, lock_scope, uid):
                     if not await _owner_accepts_upload(conn, owner_kind, uid):
-                        return [_config_error(owner_id, data={"reason": "owner_not_accepting_upload"})]
+                        return [
+                            _config_error(owner_id, data={"reason": "owner_not_accepting_upload"})
+                        ]
                     uploads = [
                         (
                             e,
@@ -1313,8 +1364,12 @@ async def create_upload(
                         for e in entries
                     ]
                     await upload_manifest.replace_manifest(
-                        conn, owner_kind=kind, owner_id=uid, prefix=prefix,
-                        entries=entries, ttl=_upload_ttl(),
+                        conn,
+                        owner_kind=kind,
+                        owner_id=uid,
+                        prefix=prefix,
+                        entries=entries,
+                        ttl=_upload_ttl(),
                     )
             except CategorizedError as exc:  # presign failure rolls back the manifest write
                 return [ToolResponse.failure(owner_id, exc.category)]
@@ -1325,7 +1380,11 @@ async def create_upload(
             "upload_ready",
             suggested_next_actions=[next_action],
             refs={"upload_url": presigned.url},
-            data={"name": entry.name, "expires_in": str(_presign_ttl_seconds()), **presigned.required_headers},
+            data={
+                "name": entry.name,
+                "expires_in": str(_presign_ttl_seconds()),
+                **presigned.required_headers,
+            },
         )
         for entry, key, presigned in uploads
     ]
@@ -1455,12 +1514,15 @@ def test_missing_object_is_configuration_error() -> None:
 
 def test_checksum_mismatch_is_build_failure() -> None:
     store = _FakeStore(
-        {"k": _BZIMAGE_HEAD}, {"k": HeadResult(size_bytes=len(_BZIMAGE_HEAD), checksum_sha256="OTHER", etag="e")}
+        {"k": _BZIMAGE_HEAD},
+        {"k": HeadResult(size_bytes=len(_BZIMAGE_HEAD), checksum_sha256="OTHER", etag="e")},
     )
     with pytest.raises(CategorizedError) as e:
         validate_external_artifacts(
-            store, manifest=[ManifestEntry("kernel", "csum", len(_BZIMAGE_HEAD))],
-            keys={"kernel": "k"}, declared_build_id=None,
+            store,
+            manifest=[ManifestEntry("kernel", "csum", len(_BZIMAGE_HEAD))],
+            keys={"kernel": "k"},
+            declared_build_id=None,
         )
     assert e.value.category is ErrorCategory.BUILD_FAILURE
 
@@ -1470,8 +1532,10 @@ def test_bad_kernel_magic_is_build_failure() -> None:
     store = _FakeStore({"k": bad}, {"k": HeadResult(len(bad), "csum", "e")})
     with pytest.raises(CategorizedError) as e:
         validate_external_artifacts(
-            store, manifest=[ManifestEntry("kernel", "csum", len(bad))],
-            keys={"kernel": "k"}, declared_build_id=None,
+            store,
+            manifest=[ManifestEntry("kernel", "csum", len(bad))],
+            keys={"kernel": "k"},
+            declared_build_id=None,
         )
     assert e.value.category is ErrorCategory.BUILD_FAILURE
 
@@ -1479,10 +1543,16 @@ def test_bad_kernel_magic_is_build_failure() -> None:
 def test_happy_path_kernel_only_returns_build_output() -> None:
     store = _FakeStore({"k": _BZIMAGE_HEAD}, {"k": HeadResult(len(_BZIMAGE_HEAD), "csum", "e")})
     out = validate_external_artifacts(
-        store, manifest=[ManifestEntry("kernel", "csum", len(_BZIMAGE_HEAD))],
-        keys={"kernel": "k"}, declared_build_id=None,
+        store,
+        manifest=[ManifestEntry("kernel", "csum", len(_BZIMAGE_HEAD))],
+        keys={"kernel": "k"},
+        declared_build_id=None,
     )
-    assert out.output.kernel_ref == "k" and out.output.debuginfo_ref == "" and out.output.build_id == ""
+    assert (
+        out.output.kernel_ref == "k"
+        and out.output.debuginfo_ref == ""
+        and out.output.build_id == ""
+    )
     assert set(out.heads) == {"kernel"}
 
 
@@ -1495,7 +1565,10 @@ def test_build_id_mismatch_is_build_failure() -> None:
     with pytest.raises(CategorizedError) as e:
         validate_external_artifacts(
             store,
-            manifest=[ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)), ManifestEntry("vmlinux", "cv", len(blob))],
+            manifest=[
+                ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+                ManifestEntry("vmlinux", "cv", len(blob)),
+            ],
             keys={"kernel": "k", "vmlinux": "v"},
             declared_build_id="beef",  # != dead
         )
@@ -1511,7 +1584,10 @@ def test_vmlinux_without_declared_build_id_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as e:
         validate_external_artifacts(
             store,
-            manifest=[ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)), ManifestEntry("vmlinux", "cv", len(blob))],
+            manifest=[
+                ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+                ManifestEntry("vmlinux", "cv", len(blob)),
+            ],
             keys={"kernel": "k", "vmlinux": "v"},
             declared_build_id=None,
         )
@@ -1546,7 +1622,10 @@ def test_initrd_is_validated_and_returned_in_keys() -> None:
     )
     out = validate_external_artifacts(
         store,
-        manifest=[ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)), ManifestEntry("initrd", "ci", 42)],
+        manifest=[
+            ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+            ManifestEntry("initrd", "ci", 42),
+        ],
         keys={"kernel": "k", "initrd": "i"},
         declared_build_id=None,
     )
@@ -1705,13 +1784,17 @@ def _read_section(store: _ValidatorStore, sht: bytes, e_shentsize: int, index: i
     off = index * e_shentsize
     sh_offset = struct.unpack_from("<Q", sht, off + 0x18)[0]
     sh_size = struct.unpack_from("<Q", sht, off + 0x20)[0]
-    return store.get_range("", start=sh_offset, length=sh_size) if False else store.get_range  # placeholder
+    return (
+        store.get_range("", start=sh_offset, length=sh_size) if False else store.get_range
+    )  # placeholder
 ```
 
 *Fix the final helper — it must take the key. Correct `_read_section` to accept `key`:*
 
 ```python
-def _read_section(store: _ValidatorStore, key: str, sht: bytes, e_shentsize: int, index: int) -> bytes:
+def _read_section(
+    store: _ValidatorStore, key: str, sht: bytes, e_shentsize: int, index: int
+) -> bytes:
     off = index * e_shentsize
     sh_offset = struct.unpack_from("<Q", sht, off + 0x18)[0]
     sh_size = struct.unpack_from("<Q", sht, off + 0x20)[0]
@@ -1778,10 +1861,16 @@ class _FakeValidator:
 
 async def test_complete_build_finalizes_external_run(migrated_url: str) -> None:
     async with _pool(migrated_url) as pool:
-        run_id = await _seed_external_run_with_manifest(pool)  # CREATED external Run + upload_manifests row + objects
+        run_id = await _seed_external_run_with_manifest(
+            pool
+        )  # CREATED external Run + upload_manifests row + objects
         validator = _FakeValidator(BuildOutput("local/runs/%s/kernel" % run_id, "", ""))
         resp = await runs_tools.complete_build(
-            pool, _ctx(), str(run_id), build_id=None, cmdline="dhash_entries=1",
+            pool,
+            _ctx(),
+            str(run_id),
+            build_id=None,
+            cmdline="dhash_entries=1",
             validator=validator,
         )
     assert resp.status == "succeeded"
@@ -1794,8 +1883,12 @@ async def test_complete_build_is_idempotent(migrated_url: str) -> None:
     async with _pool(migrated_url) as pool:
         run_id = await _seed_external_run_with_manifest(pool)
         validator = _FakeValidator(BuildOutput("local/runs/%s/kernel" % run_id, "", ""))
-        first = await runs_tools.complete_build(pool, _ctx(), str(run_id), build_id=None, cmdline="c", validator=validator)
-        second = await runs_tools.complete_build(pool, _ctx(), str(run_id), build_id=None, cmdline="c", validator=validator)
+        first = await runs_tools.complete_build(
+            pool, _ctx(), str(run_id), build_id=None, cmdline="c", validator=validator
+        )
+        second = await runs_tools.complete_build(
+            pool, _ctx(), str(run_id), build_id=None, cmdline="c", validator=validator
+        )
     assert first.status == second.status == "succeeded"
     assert validator.calls == 1  # the short-read short-circuited the retry
 
@@ -1804,18 +1897,29 @@ async def test_complete_build_rejects_server_run(migrated_url: str) -> None:
     async with _pool(migrated_url) as pool:
         run_id = await _seed_server_run(pool)  # source="server"
         resp = await runs_tools.complete_build(
-            pool, _ctx(), str(run_id), build_id=None, cmdline="c", validator=_FakeValidator(BuildOutput("k", "", "")),
+            pool,
+            _ctx(),
+            str(run_id),
+            build_id=None,
+            cmdline="c",
+            validator=_FakeValidator(BuildOutput("k", "", "")),
         )
     assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
 
 
 async def test_complete_build_maps_validation_build_failure(migrated_url: str) -> None:
     from kdive.domain.errors import CategorizedError
+
     async with _pool(migrated_url) as pool:
         run_id = await _seed_external_run_with_manifest(pool)
         bad = CategorizedError("bad", category=ErrorCategory.BUILD_FAILURE)
         resp = await runs_tools.complete_build(
-            pool, _ctx(), str(run_id), build_id=None, cmdline="c", validator=_FakeValidator(bad),
+            pool,
+            _ctx(),
+            str(run_id),
+            build_id=None,
+            cmdline="c",
+            validator=_FakeValidator(bad),
         )
     assert resp.error_category == ErrorCategory.BUILD_FAILURE.value
 
@@ -1987,8 +2091,14 @@ async def _finalize_external_build(
             (output.kernel_ref, output.debuginfo_ref or None, run.id),
         )
         await audit.record(
-            conn, ctx, tool="runs.complete_build", object_kind="runs", object_id=run.id,
-            transition="created->succeeded", args={"run_id": str(run.id)}, project=run.project,
+            conn,
+            ctx,
+            tool="runs.complete_build",
+            object_kind="runs",
+            object_id=run.id,
+            transition="created->succeeded",
+            args={"run_id": str(run.id)},
+            project=run.project,
         )
         await upload_manifest.delete_manifest(conn, "runs", run.id)
     return _complete_envelope(run.id, result)
@@ -2005,18 +2115,23 @@ No `_TRANSITIONS[RunState]` change is required: `complete_build` writes the stat
 In `runs.py` `register(app, pool)`:
 
 ```python
-    @app.tool(
-        name="runs.complete_build",
-        annotations=_docmeta.mutating(),
-        meta={"maturity": "implemented"},
-    )
-    async def runs_complete_build(
-        run_id: Annotated[str, Field(description="The external-build Run to finalize.")],
-        cmdline: Annotated[str, Field(description="Kernel debug args, e.g. 'dhash_entries=1'.")],
-        build_id: Annotated[str | None, Field(description="GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive.")] = None,
-    ) -> ToolResponse:
-        """Validate an external Run's uploads and finalize it to succeeded. Operator only."""
-        return await complete_build(pool, current_context(), run_id, build_id=build_id, cmdline=cmdline)
+@app.tool(
+    name="runs.complete_build",
+    annotations=_docmeta.mutating(),
+    meta={"maturity": "implemented"},
+)
+async def runs_complete_build(
+    run_id: Annotated[str, Field(description="The external-build Run to finalize.")],
+    cmdline: Annotated[str, Field(description="Kernel debug args, e.g. 'dhash_entries=1'.")],
+    build_id: Annotated[
+        str | None,
+        Field(
+            description="GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive."
+        ),
+    ] = None,
+) -> ToolResponse:
+    """Validate an external Run's uploads and finalize it to succeeded. Operator only."""
+    return await complete_build(pool, current_context(), run_id, build_id=build_id, cmdline=cmdline)
 ```
 
 - [ ] **Step 6: Run, lint, type, commit**
@@ -2074,7 +2189,10 @@ async def test_reaps_uncommitted_objects_past_deadline_for_created_run(pg_conn) 
     run_id = await _seed_created_run(pg_conn)  # CREATED Run; helper per tests/reconciler patterns
     prefix = f"local/runs/{run_id}/"
     await upload_manifest.replace_manifest(
-        pg_conn, owner_kind="runs", owner_id=run_id, prefix=prefix,
+        pg_conn,
+        owner_kind="runs",
+        owner_id=run_id,
+        prefix=prefix,
         entries=[upload_manifest.ManifestEntry("kernel", "a", 1)],
         ttl=timedelta(seconds=-1),  # already past deadline
     )
@@ -2088,10 +2206,16 @@ async def test_reaps_uncommitted_objects_past_deadline_for_created_run(pg_conn) 
 async def test_exempts_committed_object(pg_conn) -> None:
     system_id = await _seed_defined_system(pg_conn)
     prefix = f"local/systems/{system_id}/"
-    await _insert_artifact_row(pg_conn, owner_kind="systems", owner_id=system_id, object_key=f"{prefix}rootfs")
+    await _insert_artifact_row(
+        pg_conn, owner_kind="systems", owner_id=system_id, object_key=f"{prefix}rootfs"
+    )
     await upload_manifest.replace_manifest(
-        pg_conn, owner_kind="systems", owner_id=system_id, prefix=prefix,
-        entries=[upload_manifest.ManifestEntry("rootfs", "a", 1)], ttl=timedelta(seconds=-1),
+        pg_conn,
+        owner_kind="systems",
+        owner_id=system_id,
+        prefix=prefix,
+        entries=[upload_manifest.ManifestEntry("rootfs", "a", 1)],
+        ttl=timedelta(seconds=-1),
     )
     store = _FakeStore({prefix: [f"{prefix}rootfs"]})
     await _repair_abandoned_uploads(pg_conn, store)
@@ -2102,8 +2226,12 @@ async def test_skips_owner_not_past_deadline(pg_conn) -> None:
     run_id = await _seed_created_run(pg_conn)
     prefix = f"local/runs/{run_id}/"
     await upload_manifest.replace_manifest(
-        pg_conn, owner_kind="runs", owner_id=run_id, prefix=prefix,
-        entries=[upload_manifest.ManifestEntry("kernel", "a", 1)], ttl=timedelta(hours=1),
+        pg_conn,
+        owner_kind="runs",
+        owner_id=run_id,
+        prefix=prefix,
+        entries=[upload_manifest.ManifestEntry("kernel", "a", 1)],
+        ttl=timedelta(hours=1),
     )
     store = _FakeStore({prefix: [f"{prefix}kernel"]})
     assert await _repair_abandoned_uploads(pg_conn, store) == 0
@@ -2114,8 +2242,12 @@ async def test_skips_finalized_owner(pg_conn) -> None:
     run_id = await _seed_succeeded_run(pg_conn)  # state='succeeded'
     prefix = f"local/runs/{run_id}/"
     await upload_manifest.replace_manifest(
-        pg_conn, owner_kind="runs", owner_id=run_id, prefix=prefix,
-        entries=[upload_manifest.ManifestEntry("kernel", "a", 1)], ttl=timedelta(seconds=-1),
+        pg_conn,
+        owner_kind="runs",
+        owner_id=run_id,
+        prefix=prefix,
+        entries=[upload_manifest.ManifestEntry("kernel", "a", 1)],
+        ttl=timedelta(seconds=-1),
     )
     store = _FakeStore({prefix: [f"{prefix}kernel"]})
     assert await _repair_abandoned_uploads(pg_conn, store) == 0
@@ -2126,8 +2258,12 @@ async def test_reap_one_owner_declines_renewed_manifest(pg_conn) -> None:
     run_id = await _seed_created_run(pg_conn)
     prefix = f"local/runs/{run_id}/"
     await upload_manifest.replace_manifest(
-        pg_conn, owner_kind="runs", owner_id=run_id, prefix=prefix,
-        entries=[upload_manifest.ManifestEntry("kernel", "a", 1)], ttl=timedelta(hours=1),  # future
+        pg_conn,
+        owner_kind="runs",
+        owner_id=run_id,
+        prefix=prefix,
+        entries=[upload_manifest.ManifestEntry("kernel", "a", 1)],
+        ttl=timedelta(hours=1),  # future
     )
     store = _FakeStore({prefix: [f"{prefix}kernel"]})
     # A stale candidate select could pick this owner; the locked re-read (future deadline)
@@ -2255,6 +2391,7 @@ In `src/kdive/__main__.py`, where the `Reconciler` is constructed, build an `Obj
 
 ```python
 from kdive.store.objectstore import object_store_from_env
+
 ...
 try:
     upload_store = object_store_from_env()
@@ -2313,8 +2450,12 @@ def test_presigned_put_rejects_checksum_mismatch(minio_store, key_ns: str) -> No
     wrong = _b64_sha256(b"different")
     key = f"{key_ns}/runs/r1/kernel"
     presigned = minio_store.presign_put(
-        key, sha256=wrong, size_bytes=len(payload),
-        sensitivity=Sensitivity.SENSITIVE, retention_class="build", expires_in=300,
+        key,
+        sha256=wrong,
+        size_bytes=len(payload),
+        sensitivity=Sensitivity.SENSITIVE,
+        retention_class="build",
+        expires_in=300,
     )
     resp = httpx.put(presigned.url, content=payload, headers=presigned.required_headers)
     assert resp.status_code >= 400  # the signed checksum disagrees with the body
@@ -2325,8 +2466,12 @@ def test_presigned_put_accepts_matching_upload(minio_store, key_ns: str) -> None
     checksum = _b64_sha256(payload)
     key = f"{key_ns}/runs/r1/kernel"
     presigned = minio_store.presign_put(
-        key, sha256=checksum, size_bytes=len(payload),
-        sensitivity=Sensitivity.SENSITIVE, retention_class="build", expires_in=300,
+        key,
+        sha256=checksum,
+        size_bytes=len(payload),
+        sensitivity=Sensitivity.SENSITIVE,
+        retention_class="build",
+        expires_in=300,
     )
     resp = httpx.put(presigned.url, content=payload, headers=presigned.required_headers)
     assert resp.status_code < 300
@@ -2380,12 +2525,18 @@ async def test_concurrent_complete_build_yields_one_ledger_row(migrated_url: str
         run_id = await _seed_external_run_with_manifest(pool)
         validator = _CountingValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
         results = await asyncio.gather(
-            runs_tools.complete_build(pool, _ctx(), str(run_id), build_id=None, cmdline="c", validator=validator),
-            runs_tools.complete_build(pool, _ctx(), str(run_id), build_id=None, cmdline="c", validator=validator),
+            runs_tools.complete_build(
+                pool, _ctx(), str(run_id), build_id=None, cmdline="c", validator=validator
+            ),
+            runs_tools.complete_build(
+                pool, _ctx(), str(run_id), build_id=None, cmdline="c", validator=validator
+            ),
         )
     assert all(r.status == "succeeded" for r in results)
     async with _pool(migrated_url) as pool, pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute("SELECT count(*) FROM run_steps WHERE run_id = %s AND step = 'build'", (run_id,))
+        await cur.execute(
+            "SELECT count(*) FROM run_steps WHERE run_id = %s AND step = 'build'", (run_id,)
+        )
         assert (await cur.fetchone())[0] == 1
         run = await RUNS.get(conn, run_id)
     assert run.state is RunState.SUCCEEDED
@@ -2449,19 +2600,28 @@ from kdive.profiles.provisioning import ProvisioningProfile
 
 def _profile(rootfs: dict) -> dict:
     return {
-        "schema_version": 1, "arch": "x86_64", "vcpu": 2, "memory_mb": 2048, "disk_gb": 10,
-        "boot_method": "direct-kernel", "kernel_source_ref": "git#v7.0",
+        "schema_version": 1,
+        "arch": "x86_64",
+        "vcpu": 2,
+        "memory_mb": 2048,
+        "disk_gb": 10,
+        "boot_method": "direct-kernel",
+        "kernel_source_ref": "git#v7.0",
         "provider": {"local-libvirt": {"rootfs": rootfs, "crashkernel": "256M"}},
     }
 
 
 def test_path_kind_parses() -> None:
-    parsed = ProvisioningProfile.parse(_profile({"kind": "path", "path": "/var/lib/kdive/rootfs/x.qcow2"}))
+    parsed = ProvisioningProfile.parse(
+        _profile({"kind": "path", "path": "/var/lib/kdive/rootfs/x.qcow2"})
+    )
     assert parsed.provider.local_libvirt.rootfs.kind == "path"
 
 
 def test_catalog_kind_parses() -> None:
-    parsed = ProvisioningProfile.parse(_profile({"kind": "catalog", "name": "fedora-cloud-base-43-x86_64"}))
+    parsed = ProvisioningProfile.parse(
+        _profile({"kind": "catalog", "name": "fedora-cloud-base-43-x86_64"})
+    )
     assert parsed.provider.local_libvirt.rootfs.name == "fedora-cloud-base-43-x86_64"
 
 
@@ -2694,6 +2854,7 @@ async def _commit_uploaded_rootfs(conn, system, profile) -> None:
     from kdive.store.objectstore import artifact_key, object_store_from_env, register_artifact_row
     from kdive.db import upload_manifest
     from kdive.domain.models import Sensitivity
+
     key = artifact_key("local", "systems", str(system.id), "rootfs")
     head = await asyncio.to_thread(object_store_from_env().head, key)
     if head is None:
@@ -2703,7 +2864,9 @@ async def _commit_uploaded_rootfs(conn, system, profile) -> None:
             details={"system_id": str(system.id)},
         )
     stored = StoredArtifact(key, head.etag, Sensitivity.SENSITIVE, "rootfs")
-    await ARTIFACTS.insert(conn, register_artifact_row(stored, owner_kind="systems", owner_id=system.id))
+    await ARTIFACTS.insert(
+        conn, register_artifact_row(stored, owner_kind="systems", owner_id=system.id)
+    )
     await upload_manifest.delete_manifest(conn, "systems", system.id)
 ```
 

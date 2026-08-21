@@ -294,22 +294,39 @@ async def seed_system(
     resource = await RESOURCES.insert(
         conn,
         Resource(
-            id=uuid4(), created_at=_DT, updated_at=_DT, kind=ResourceKind.LOCAL_LIBVIRT,
-            pool="p", cost_class="c", status=ResourceStatus.AVAILABLE, host_uri="qemu:///system",
+            id=uuid4(),
+            created_at=_DT,
+            updated_at=_DT,
+            kind=ResourceKind.LOCAL_LIBVIRT,
+            pool="p",
+            cost_class="c",
+            status=ResourceStatus.AVAILABLE,
+            host_uri="qemu:///system",
         ),
     )
     allocation = await ALLOCATIONS.insert(
         conn,
         Allocation(
-            id=uuid4(), created_at=_DT, updated_at=_DT, principal="alice", project="proj",
-            resource_id=resource.id, state=alloc_state,
+            id=uuid4(),
+            created_at=_DT,
+            updated_at=_DT,
+            principal="alice",
+            project="proj",
+            resource_id=resource.id,
+            state=alloc_state,
         ),
     )
     system = await SYSTEMS.insert(
         conn,
         System(
-            id=uuid4(), created_at=_DT, updated_at=_DT, principal="alice", project="proj",
-            allocation_id=allocation.id, state=system_state, provisioning_profile={"k": "v"},
+            id=uuid4(),
+            created_at=_DT,
+            updated_at=_DT,
+            principal="alice",
+            project="proj",
+            allocation_id=allocation.id,
+            state=system_state,
+            provisioning_profile={"k": "v"},
         ),
     )
     return system.id
@@ -322,15 +339,26 @@ async def seed_run(
     investigation = await INVESTIGATIONS.insert(
         conn,
         Investigation(
-            id=uuid4(), created_at=_DT, updated_at=_DT, principal="alice", project="proj",
-            title="t", state=InvestigationState.OPEN,
+            id=uuid4(),
+            created_at=_DT,
+            updated_at=_DT,
+            principal="alice",
+            project="proj",
+            title="t",
+            state=InvestigationState.OPEN,
         ),
     )
     run = await RUNS.insert(
         conn,
         Run(
-            id=uuid4(), created_at=_DT, updated_at=_DT, principal="alice", project="proj",
-            investigation_id=investigation.id, system_id=system_id, state=run_state,
+            id=uuid4(),
+            created_at=_DT,
+            updated_at=_DT,
+            principal="alice",
+            project="proj",
+            investigation_id=investigation.id,
+            system_id=system_id,
+            state=run_state,
             build_profile={"cfg": 1},
         ),
     )
@@ -352,8 +380,15 @@ async def seed_debug_session(
     session = await DEBUG_SESSIONS.insert(
         conn,
         DebugSession(
-            id=uuid4(), created_at=_DT, updated_at=_DT, principal="alice", project="proj",
-            run_id=run_id, state=state, transport="gdbstub", worker_heartbeat_at=None,
+            id=uuid4(),
+            created_at=_DT,
+            updated_at=_DT,
+            principal="alice",
+            project="proj",
+            run_id=run_id,
+            state=state,
+            transport="gdbstub",
+            worker_heartbeat_at=None,
         ),
     )
     if heartbeat_ago is not None:
@@ -447,9 +482,7 @@ def test_orphaned_system_enqueues_gc_teardown(migrated_url: str) -> None:
             count = await run_repair(pool, loop._repair_orphaned_systems)
         assert count == 1
         async with await connect(migrated_url) as check:
-            cur = await check.execute(
-                "SELECT state FROM systems WHERE id = %s", (system_id,)
-            )
+            cur = await check.execute("SELECT state FROM systems WHERE id = %s", (system_id,))
             assert (await cur.fetchone())[0] == "ready"  # System untouched
             cur = await check.execute(
                 "SELECT kind, authorizing FROM jobs WHERE dedup_key = %s",
@@ -564,8 +597,11 @@ async def _repair_orphaned_systems(conn: AsyncConnection) -> int:
                 conn,
                 JobKind.TEARDOWN,
                 {"system_id": str(system_id)},
-                {"principal": SYSTEM_RECONCILER_PRINCIPAL, "agent_session": None,
-                 "project": candidate["project"]},
+                {
+                    "principal": SYSTEM_RECONCILER_PRINCIPAL,
+                    "agent_session": None,
+                    "project": candidate["project"],
+                },
                 dedup_key,
             )
         if not already_queued:
@@ -627,8 +663,12 @@ def test_zombie_job_compensates_owning_run(migrated_url: str) -> None:
             system_id = await seed_system(seed)
             run_id = await seed_run(seed, system_id, run_state=RunState.RUNNING)
             await seed_running_job(
-                seed, "dk-run-zombie", payload={"run_id": str(run_id)},
-                lease_seconds=-60, attempt=3, max_attempts=3,
+                seed,
+                "dk-run-zombie",
+                payload={"run_id": str(run_id)},
+                lease_seconds=-60,
+                attempt=3,
+                max_attempts=3,
             )
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             await run_repair(pool, loop._repair_abandoned_jobs)
@@ -649,8 +689,12 @@ def test_zombie_without_run_id_leaves_runs_untouched(migrated_url: str) -> None:
             system_id = await seed_system(seed)
             run_id = await seed_run(seed, system_id, run_state=RunState.RUNNING)
             await seed_running_job(
-                seed, "dk-sys-zombie", payload={"system_id": str(system_id)},
-                lease_seconds=-60, attempt=3, max_attempts=3,
+                seed,
+                "dk-sys-zombie",
+                payload={"system_id": str(system_id)},
+                lease_seconds=-60,
+                attempt=3,
+                max_attempts=3,
             )
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             await run_repair(pool, loop._repair_abandoned_jobs)
@@ -767,7 +811,10 @@ def test_stale_live_session_detached(migrated_url: str) -> None:
             )
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             count = await run_repair(
-                pool, lambda conn: loop._repair_dead_sessions(conn, loop.DEFAULT_DEBUG_SESSION_STALE_AFTER)
+                pool,
+                lambda conn: loop._repair_dead_sessions(
+                    conn, loop.DEFAULT_DEBUG_SESSION_STALE_AFTER
+                ),
             )
         assert count == 1
         async with await connect(migrated_url) as check:
@@ -789,7 +836,10 @@ def test_recent_heartbeat_session_not_touched(migrated_url: str) -> None:
             )
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             count = await run_repair(
-                pool, lambda conn: loop._repair_dead_sessions(conn, loop.DEFAULT_DEBUG_SESSION_STALE_AFTER)
+                pool,
+                lambda conn: loop._repair_dead_sessions(
+                    conn, loop.DEFAULT_DEBUG_SESSION_STALE_AFTER
+                ),
             )
         assert count == 0
         async with await connect(migrated_url) as check:
@@ -811,7 +861,10 @@ def test_null_heartbeat_session_not_touched(migrated_url: str) -> None:
             )
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             count = await run_repair(
-                pool, lambda conn: loop._repair_dead_sessions(conn, loop.DEFAULT_DEBUG_SESSION_STALE_AFTER)
+                pool,
+                lambda conn: loop._repair_dead_sessions(
+                    conn, loop.DEFAULT_DEBUG_SESSION_STALE_AFTER
+                ),
             )
         assert count == 0
         async with await connect(migrated_url) as check:
@@ -933,9 +986,13 @@ def test_torn_down_row_with_inflight_teardown_not_reaped(migrated_url: str) -> N
         async with await connect(migrated_url) as seed:
             system_id = await seed_system(seed, system_state=SystemState.TORN_DOWN)
             await seed_running_job(
-                seed, f"{system_id}:teardown", kind="teardown",
+                seed,
+                f"{system_id}:teardown",
+                kind="teardown",
                 payload={"system_id": str(system_id)},
-                lease_seconds=300, attempt=1, max_attempts=3,
+                lease_seconds=300,
+                attempt=1,
+                max_attempts=3,
             )
         reaper = FakeReaper(_FakeDomain(name="vm-mid-teardown", system_id=system_id))
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
@@ -1007,7 +1064,8 @@ async def _repair_leaked_domains(conn: AsyncConnection, reaper: InfraReaper) -> 
         except Exception:  # noqa: BLE001 - one domain's failure must not strand the others
             _log.warning(
                 "reconciler: destroy of leaked domain %s failed; retry next pass",
-                domain.name, exc_info=True,
+                domain.name,
+                exc_info=True,
             )
             continue
         reaped += 1
@@ -1061,7 +1119,10 @@ def test_reconcile_once_counts_a_mixed_pass(migrated_url: str) -> None:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             report = await reconcile_once(pool, reaper)
         assert report == ReconcileReport(
-            orphaned_systems=1, abandoned_jobs=1, dead_sessions=1, leaked_domains=1,
+            orphaned_systems=1,
+            abandoned_jobs=1,
+            dead_sessions=1,
+            leaked_domains=1,
             failures=(),
         )
         assert reaper.destroyed == ["vm-leak"]
@@ -1142,7 +1203,10 @@ async def reconcile_once(
     continues — one repair never starves the others. Returns the partial counts.
     """
     counts: dict[str, int] = {
-        "orphaned_systems": 0, "abandoned_jobs": 0, "dead_sessions": 0, "leaked_domains": 0,
+        "orphaned_systems": 0,
+        "abandoned_jobs": 0,
+        "dead_sessions": 0,
+        "leaked_domains": 0,
     }
     failures: list[str] = []
 

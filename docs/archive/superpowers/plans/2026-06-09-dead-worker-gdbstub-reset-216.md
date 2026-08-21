@@ -174,7 +174,11 @@ class FakeResetter:
         self, *, transport: str, transport_handle: str | None, domain_name: str | None
     ) -> None:
         self.calls.append(
-            {"transport": transport, "transport_handle": transport_handle, "domain_name": domain_name}
+            {
+                "transport": transport,
+                "transport_handle": transport_handle,
+                "domain_name": domain_name,
+            }
         )
         if self._fail:
             raise RuntimeError("boom")
@@ -439,10 +443,12 @@ In `_repair_plan(...)` add a `resetter: TransportResetter` keyword parameter and
 dead-session spec lambda to:
 
 ```python
-        _RepairSpec(
-            "dead_sessions",
-            lambda conn: _repair_dead_sessions(conn, debug_session_stale_after, resetter),
-        ),
+(
+    _RepairSpec(
+        "dead_sessions",
+        lambda conn: _repair_dead_sessions(conn, debug_session_stale_after, resetter),
+    ),
+)
 ```
 
 In `reconcile_once(...)` add `resetter: TransportResetter = NullResetter()` to the signature and
@@ -457,10 +463,10 @@ In `Reconciler.__init__` add `resetter: TransportResetter = NullResetter()`, sto
 In `scripts/m2_portability_gate.py`, add to `ALLOWED_FILES` (after the `introspect.py` entry):
 
 ```python
-        # Dead-worker gdbstub reconciler reset (#216, ADR-0086): the deliberate, reviewed core
-        # touch that resets a stale session's transport through the injected TransportResetter
-        # port so a dead worker's single-client gdbstub stops blocking re-attach.
-        "src/kdive/reconciler/loop.py",
+# Dead-worker gdbstub reconciler reset (#216, ADR-0086): the deliberate, reviewed core
+# touch that resets a stale session's transport through the injected TransportResetter
+# port so a dead worker's single-client gdbstub stops blocking re-attach.
+("src/kdive/reconciler/loop.py",)
 ```
 
 - [ ] **Step 6: Run tests + the gate to verify green**

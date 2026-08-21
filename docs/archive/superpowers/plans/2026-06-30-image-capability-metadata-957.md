@@ -408,7 +408,9 @@ REGISTERED_SIGNALS: tuple[CapabilitySignal, ...] = (KDUMP_SIGNAL,)
 
 PLANNED_SIGNALS: tuple[PlannedSignal, ...] = (
     PlannedSignal(
-        "sysrq", "#952", "SysRq availability can report false success; needs a build-recorded operand"
+        "sysrq",
+        "#952",
+        "SysRq availability can report false success; needs a build-recorded operand",
     ),
     PlannedSignal(
         "ssh_reachable", "#956", "sshd/keygen liveness is broken; not an honest per-image fact yet"
@@ -419,7 +421,9 @@ PLANNED_SIGNALS: tuple[PlannedSignal, ...] = (
         "drgn liveness depends on provider introspection and profile ssh_credential_ref",
     ),
     PlannedSignal(
-        "direct_kernel_bootable", "#954", "direct-kernel provisionability is discovered only by failure"
+        "direct_kernel_bootable",
+        "#954",
+        "direct-kernel provisionability is discovered only by failure",
     ),
 )
 

@@ -80,15 +80,17 @@ Expected: FAIL with `KeyError: 'volume'`.
 In `src/kdive/mcp/tools/catalog/images.py`, `_row_envelope`, add one line to the `data` dict:
 
 ```python
-        data={
-            "provider": entry.provider,
-            "name": entry.name,
-            "arch": entry.arch,
-            "visibility": entry.visibility.value,
-            "owner": entry.owner or "",
-            "state": entry.state.value,
-            "volume": entry.volume or "",
-        },
+data = (
+    {
+        "provider": entry.provider,
+        "name": entry.name,
+        "arch": entry.arch,
+        "visibility": entry.visibility.value,
+        "owner": entry.owner or "",
+        "state": entry.state.value,
+        "volume": entry.volume or "",
+    },
+)
 ```
 
 - [ ] **Step 4: Run the `images_list` test to verify it passes**
@@ -240,8 +242,14 @@ def _backend():
 
 
 def _probe(
-    volumes, *, conn=None, config_exc=None, transport_exc=False, block=False,
-    timeout=5.0, tmp_path=None,
+    volumes,
+    *,
+    conn=None,
+    config_exc=None,
+    transport_exc=False,
+    block=False,
+    timeout=5.0,
+    tmp_path=None,
 ):
     import time
 
@@ -306,7 +314,9 @@ def test_empty_volumes_opens_nothing(tmp_path: Path) -> None:
 
     out = asyncio.run(
         staged_volumes.probe_staged_volumes(
-            [], config_factory=config_factory, open_connection=lambda uri: None,
+            [],
+            config_factory=config_factory,
+            open_connection=lambda uri: None,
             secret_backend_factory=_backend,
         )
     )
@@ -479,7 +489,9 @@ Add to `tests/mcp/catalog/test_resources_tools.py`. Insert a remote-libvirt reso
 from kdive.domain.models import ResourceKind  # add to imports if absent
 
 
-async def _register_remote(pool: AsyncConnectionPool, *, host_uri: str = "qemu+tls://h/system") -> str:
+async def _register_remote(
+    pool: AsyncConnectionPool, *, host_uri: str = "qemu+tls://h/system"
+) -> str:
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
             "INSERT INTO resources (kind, capabilities, pool, cost_class, status, host_uri) "
@@ -491,7 +503,11 @@ async def _register_remote(pool: AsyncConnectionPool, *, host_uri: str = "qemu+t
 
 
 async def _insert_remote_image(
-    pool: AsyncConnectionPool, *, name: str, volume: str, visibility: str = "public",
+    pool: AsyncConnectionPool,
+    *,
+    name: str,
+    volume: str,
+    visibility: str = "public",
     owner: str | None = None,
 ) -> None:
     async with pool.connection() as conn:
@@ -594,7 +610,10 @@ def test_describe_remote_excludes_other_projects_private_image(migrated_url: str
                 return dict.fromkeys(volumes, "staged")
 
             return await catalog_resources_tools.describe_resource(
-                pool, VIEWER_CTX, res_id, staged_probe=probe  # VIEWER_CTX is in 'proj', not proj-b
+                pool,
+                VIEWER_CTX,
+                res_id,
+                staged_probe=probe,  # VIEWER_CTX is in 'proj', not proj-b
             )
 
     resp = asyncio.run(_run())

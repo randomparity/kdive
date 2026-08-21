@@ -168,8 +168,9 @@ elif kind == "ephemeral_libvirt":
     if not (base_image_volume and base_image_volume.strip()):
         return _config_error(name, "ephemeral_libvirt build host requires a base_image_volume")
     if address or ssh_credential_ref:
-        return _config_error(name, "address/ssh_credential_ref are not valid for an "
-                                   "ephemeral_libvirt build host")
+        return _config_error(
+            name, "address/ssh_credential_ref are not valid for an ephemeral_libvirt build host"
+        )
     cols = ("name", "kind", "base_image_volume", "workspace_root", "max_concurrent")
     vals = (name, "ephemeral_libvirt", base_image_volume, workspace_root, max_concurrent)
 else:
@@ -266,6 +267,7 @@ class ShellBuildTransport:
 
     def write_bytes(self, path: str, data: bytes) -> None:
         raise NotImplementedError
+
     # run / read_text / read_bytes / clone / upload_file / cleanup: moved verbatim from ssh.
 ```
 
@@ -312,9 +314,16 @@ class GuestExecBuildTransport(ShellBuildTransport):
 
     _SHELL = "/bin/sh"
 
-    def __init__(self, *, domain: object, agent_command: AgentCommand,
-                 secret_registry: SecretRegistry, poll_s: float = 1.0,
-                 sleep: Sleep = time.sleep, monotonic: Monotonic = time.monotonic) -> None:
+    def __init__(
+        self,
+        *,
+        domain: object,
+        agent_command: AgentCommand,
+        secret_registry: SecretRegistry,
+        poll_s: float = 1.0,
+        sleep: Sleep = time.sleep,
+        monotonic: Monotonic = time.monotonic,
+    ) -> None:
         self._domain = domain
         self._agent_command = agent_command
         self._secret_registry = secret_registry
@@ -326,8 +335,10 @@ class GuestExecBuildTransport(ShellBuildTransport):
         return GuestAgentExec(
             agent_command=self._agent_command,
             allowed_programs=frozenset({self._SHELL}),
-            timeout_s=float(timeout_s), poll_s=self._poll_s,
-            sleep=self._sleep, monotonic=self._monotonic,
+            timeout_s=float(timeout_s),
+            poll_s=self._poll_s,
+            sleep=self._sleep,
+            monotonic=self._monotonic,
         )
 
     def _exec_shell(self, command: str, timeout_s: int) -> CommandResult:
@@ -349,8 +360,10 @@ class GuestExecBuildTransport(ShellBuildTransport):
             raise CategorizedError(
                 f"remote write_bytes failed for {path!r}",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"path": path,
-                         "stderr": redacted_tail(result.stderr, self._secret_registry)},
+                details={
+                    "path": path,
+                    "stderr": redacted_tail(result.stderr, self._secret_registry),
+                },
             )
 
     def upload_file(self, path: str, presigned: PresignedUpload) -> str:
@@ -401,8 +414,10 @@ class GuestExecBuildTransport(ShellBuildTransport):
 def build_domain_name(run_id: UUID) -> str:
     return f"kdive-build-{run_id}"
 
+
 def build_overlay_volume_name(run_id: UUID) -> str:
     return f"kdive-build-{run_id}.qcow2"
+
 
 def ensure_build_overlay(pool, base_image_volume: str, run_id: UUID):
     # mirror lifecycle.storage.ensure_overlay, but the overlay name is
@@ -425,8 +440,14 @@ def session(cls, host, secret_registry, *, run_id, **seams) -> Iterator[GuestExe
         overlay = ensure_build_overlay(pool, host.base_image_volume, run_id)
         try:
             domain = vm._define_and_start(conn, run_id, config=config, overlay_name=overlay.name)
-            wait_for_agent(conn, domain_name, monotonic=vm._monotonic, sleep=vm._sleep,
-                           timeout_s=vm._agent_timeout_s, poll_s=vm._agent_poll_s)
+            wait_for_agent(
+                conn,
+                domain_name,
+                monotonic=vm._monotonic,
+                sleep=vm._sleep,
+                timeout_s=vm._agent_timeout_s,
+                poll_s=vm._agent_poll_s,
+            )
             transport = GuestExecBuildTransport(
                 domain=conn.lookupByName(domain_name),
                 agent_command=qemu_agent_command,
@@ -434,7 +455,7 @@ def session(cls, host, secret_registry, *, run_id, **seams) -> Iterator[GuestExe
             )
             yield transport
         finally:
-            vm._teardown(conn, domain_name, config)   # destroy+undefine+delete overlay; best-effort
+            vm._teardown(conn, domain_name, config)  # destroy+undefine+delete overlay; best-effort
 ```
 
   `_define_and_start` mirrors provisioning's bounded define+start but with NO gdbstub port loop
@@ -473,6 +494,7 @@ def session(cls, host, secret_registry, *, run_id, **seams) -> Iterator[GuestExe
 # Patchable seam: tests substitute this to avoid a real libvirt provision.
 ephemeral_build_session = EphemeralBuildVm.session
 
+
 async def _run_build(conn, run, parsed, *, host, resolver, secret_registry) -> BuildOutput:
     run_id = run.id
     builder = (await _run_runtime(conn, run_id, resolver)).builder
@@ -480,13 +502,25 @@ async def _run_build(conn, run, parsed, *, host, resolver, secret_registry) -> B
         return await asyncio.to_thread(builder.build, run_id, parsed)
     if host.kind == "ssh":
         with ssh_build_transport_from_host(host, secret_registry) as transport:
-            bound = _build_over_ssh(builder, transport, host=host, parsed=parsed,
-                                    run_id=run_id, secret_registry=secret_registry)
+            bound = _build_over_ssh(
+                builder,
+                transport,
+                host=host,
+                parsed=parsed,
+                run_id=run_id,
+                secret_registry=secret_registry,
+            )
             return await asyncio.to_thread(bound.build, run_id, parsed)
     # ephemeral_libvirt
     with ephemeral_build_session(host, secret_registry, run_id=run_id) as transport:
-        bound = _build_over_transport_host(builder, transport, host=host, parsed=parsed,
-                                           run_id=run_id, secret_registry=secret_registry)
+        bound = _build_over_transport_host(
+            builder,
+            transport,
+            host=host,
+            parsed=parsed,
+            run_id=run_id,
+            secret_registry=secret_registry,
+        )
         return await asyncio.to_thread(bound.build, run_id, parsed)
 ```
 
@@ -544,6 +578,7 @@ async def build_vm_is_live(conn: AsyncConnection, run_id: UUID) -> bool:
     )
     return (await cur.fetchone()) is not None
 
+
 async def reap_orphan_build_vms(conn: AsyncConnection, reaper: BuildVmReaper) -> int:
     reaped = 0
     for vm in await reaper.list_build_vms():
@@ -566,11 +601,13 @@ async def reap_orphan_build_vms(conn: AsyncConnection, reaper: BuildVmReaper) ->
   (currently line 189):
 
 ```python
-        _RepairSpec(
-            "reaped_build_vms",
-            lambda conn: build_host_repairs.reap_orphan_build_vms(conn, config.build_vm_reaper),
-        ),
-        _RepairSpec("reclaimed_build_host_leases", _reclaim_build_host_leases),  # AFTER the reap
+(
+    _RepairSpec(
+        "reaped_build_vms",
+        lambda conn: build_host_repairs.reap_orphan_build_vms(conn, config.build_vm_reaper),
+    ),
+)
+(_RepairSpec("reclaimed_build_host_leases", _reclaim_build_host_leases),)  # AFTER the reap
 ```
 
   In `providers/composition.py` add `build_reconciler_build_vm_reaper()` returning a

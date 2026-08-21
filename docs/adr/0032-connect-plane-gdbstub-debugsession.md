@@ -87,7 +87,12 @@ the real host path runs only under `live_vm`. This mirrors `LocalLibvirtControl`
 `LocalLibvirtRetrieve`.
 
 ```python
-class TransportHandleData(NamedTuple): kind: str; host: str; port: int
+class TransportHandleData(NamedTuple):
+    kind: str
+    host: str
+    port: int
+
+
 class Connector(Protocol):
     def open_transport(self, system: SystemHandle, kind: str) -> TransportHandle: ...
     def close_transport(self, handle: TransportHandle) -> None: ...

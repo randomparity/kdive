@@ -316,7 +316,12 @@ def test_install_kdump_with_initrd_proceeds(tmp_path: Path) -> None:
     conn = _conn_with_existing()
     inst = _install(conn=conn, staging_root=tmp_path)
     inst.install(
-        _SYS, _RUN, _KERNEL_REF, cmdline=_CMDLINE, method=CaptureMethod.KDUMP, initrd_ref=_INITRD_REF
+        _SYS,
+        _RUN,
+        _KERNEL_REF,
+        cmdline=_CMDLINE,
+        method=CaptureMethod.KDUMP,
+        initrd_ref=_INITRD_REF,
     )
     assert len(conn.defined_xml) == 1
 ```
@@ -477,7 +482,7 @@ def _domain_exited(domain_name: str) -> bool:  # pragma: no cover - live_vm
             timeout=_DOMSTATE_PROBE_TIMEOUT,
             check=False,
         )
-    except (subprocess.SubprocessError, OSError):
+    except subprocess.SubprocessError, OSError:
         return False
     return proc.stdout.strip().lower() in _TERMINAL_DOMSTATES
 
