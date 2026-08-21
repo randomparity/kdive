@@ -45,12 +45,7 @@ from kdive.providers.infra.console_hosting import (
     ConsoleHostingLoop,
     RunningSystems,
 )
-from kdive.providers.infra.reaping import (
-    CaptureReaper,
-    DumpVolumeReaper,
-    InfraReaper,
-    NullCaptureReaper,
-)
+from kdive.providers.infra.reaping import CaptureReaper, DumpVolumeReaper, InfraReaper
 from kdive.providers.ports.traffic import RemoteCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.remote_libvirt import stage_volume
 from kdive.providers.remote_libvirt.config import (
@@ -89,6 +84,7 @@ from kdive.providers.remote_libvirt.lifecycle.traffic_capture import (
     open_libvirt_capture,
 )
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
+from kdive.providers.remote_libvirt.reaping.capture import RemoteLibvirtCaptureReaper
 from kdive.providers.remote_libvirt.reaping.domains import RemoteLibvirtInfraReaper
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 from kdive.providers.remote_libvirt.resource_details import project_resource_details
@@ -221,14 +217,14 @@ def build_infra_reaper(*, secret_registry: SecretRegistry) -> InfraReaper:
     return RemoteLibvirtInfraReaper.from_env(secret_registry=secret_registry)
 
 
-def build_capture_reaper() -> CaptureReaper:
-    """Build remote-libvirt's orphaned-capture reaper: disabled wiring for now (ADR-0556).
+def build_capture_reaper(*, secret_registry: SecretRegistry) -> CaptureReaper:
+    """Build remote-libvirt's orphaned-capture reaper (ADR-0556, #1947).
 
-    #1947 replaces this with the concrete reaper that binds to the row's Resource under ADR-0187
-    and deletes the named storage volume after detaching the capture object. Until it lands this
-    kind is ineligible for dispatch and cannot produce a completion marker.
+    The concrete reaper binds each row to its own declared ``[[remote_libvirt]]`` instance
+    (ADR-0187) and detaches the capture filter before deleting the pcap volume, so registering
+    it makes the ``remote-libvirt`` kind eligible for the sweep's dispatch and completion marks.
     """
-    return NullCaptureReaper()
+    return RemoteLibvirtCaptureReaper.from_env(secret_registry=secret_registry)
 
 
 def resource_name_for_system(conninfo: str, system_id: UUID) -> str:
