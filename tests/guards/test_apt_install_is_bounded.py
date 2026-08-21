@@ -175,6 +175,11 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
     a `#` is present, never that its figure is current or true, so the provenance half of the
     convention is held by review and by ADR-0566, not by this test. `records.yml` is the one job
     already carrying a value with no observation written down.
+
+    Two declared shapes bound nothing and are rejected outright (#1994). A non-positive value —
+    `timeout-minutes: 0` gets the job cancelled the moment it starts — and a local `uses:`
+    callee that resolves to no enumerated workflow file, which would exempt the job on the
+    strength of a callee that does not exist.
     """
     paths = _workflow_files()
     # Non-empty first: "every job declares a timeout" is also true of a directory with no
@@ -187,6 +192,9 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
     missing: list[str] = []
     unbounded: list[str] = []
     checked = 0
+    # Resolved once: the local-`uses:` exemption below is only as safe as the callee being
+    # one of these files, so membership is checked per exempted job against this set.
+    resolvable = {path.resolve() for path in paths}
     for path in paths:
         # `_workflow_text` first only for its message: it names an *emptied* workflow as such,
         # where `assert jobs` one line down would report the same file as a layout change. Both
@@ -201,30 +209,39 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
                 # A job that calls a reusable workflow cannot declare `timeout-minutes` —
                 # actionlint (`just lint-workflows`, on the same `just ci` chain as this test)
                 # rejects it, and so does GitHub. Requiring it here would deadlock the first
-                # such job against the repo's other gate. What makes the skip safe is that the
-                # callee is a workflow this guard also reads, so assert that rather than
-                # assuming it: an out-of-repo callee's jobs are invisible here and run on the
-                # default, which is the one way this exemption becomes the hole it exists to
-                # avoid. This is the guard's only skip, so it fails loudly instead of silently.
-                assert str(uses).startswith("./"), (
-                    f"{path.name}:{job_name} calls the out-of-repo reusable workflow {uses!r}. "
-                    "Its jobs are not in this repo, so nothing here can check their "
-                    "`timeout-minutes` and they run on the 360-minute Actions default, while "
-                    "this guard reports the repo as bounded. A local callee (`./.github/...`) "
-                    "is covered because this guard reads it directly (ADR-0566, #1983)."
+                # such job against the repo's other gate. This is the guard's only skip, so it
+                # fails loudly instead of silently. What makes the skip safe is that the callee
+                # is a workflow this guard also reads, so resolve it against the repository
+                # root — as GitHub does — and assert membership rather than assuming it
+                # (#1994): an out-of-repo callee's jobs are invisible here and run on the
+                # default, while a *local* callee that merely wears the `./` prefix but names a
+                # typo'd or removed file would exempt the job against nothing.
+                callee = (_ROOT / str(uses).removeprefix("./")).resolve()
+                assert callee in resolvable, (
+                    f"{path.name}:{job_name} exempts itself on the local reusable workflow "
+                    f"{uses!r}, which does not resolve to one of the enumerated workflow "
+                    "files. GitHub would error on the missing callee, but here the job's own "
+                    "`timeout-minutes` check would be silently skipped on the strength of a "
+                    "callee that does not exist (ADR-0566, #1994)."
                 )
                 continue
             declared = job.get("timeout-minutes") if isinstance(job, dict) else None
             if declared is None:
                 missing.append(f"{path.name}:{job_name}")
             # `(int, float)` because GitHub's schema for this key is a float, so `0.5` is legal
-            # and is a *tighter* bound than any integer. `not isinstance(declared, bool)` because
-            # `bool` subclasses `int`: `timeout-minutes: true` parses to `True`, and `True >= 360`
-            # is False — the one spelling that would slip past the check this assertion exists to
-            # be. actionlint rejects it too, but not from this file.
+            # and is a *tighter* bound than any integer. `not (declared > 0)` rather than
+            # `declared <= 0` so the comparison is total: a non-positive value bounds nothing a
+            # CI operator wants — `0` gets the job cancelled the moment it starts, a negative is
+            # not expressible intent — and NaN, which every ordered comparison answers False,
+            # would otherwise slip past both this and the default check (#1994, review).
+            # `not isinstance(declared, bool)` because `bool` subclasses `int`:
+            # `timeout-minutes: true` parses to `True`, and `True >= 360` is False — the one
+            # spelling that would slip past the check this assertion exists to be.
+            # actionlint rejects it too, but not from this file.
             elif (
                 not isinstance(declared, int | float)
                 or isinstance(declared, bool)
+                or not declared > 0
                 or declared >= _ACTIONS_DEFAULT_TIMEOUT_MINUTES
             ):
                 unbounded.append(f"{path.name}:{job_name}={declared!r}")
@@ -252,11 +269,12 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
     # Presence is not a bound. Without this, a job could satisfy the assertion above by
     # declaring exactly the default the assertion's own message names.
     assert not unbounded, (
-        f"{unbounded} declare a `timeout-minutes` that is not a plain number below the "
-        f"{_ACTIONS_DEFAULT_TIMEOUT_MINUTES}-minute Actions default. At the default it bounds "
-        "nothing — the job is as wedgeable as it was before it was declared — and on a hosted "
-        "runner nothing above it is enforceable either. Size it from the job's observed runtime "
-        "(ADR-0566, #1983)."
+        f"{unbounded} declare a `timeout-minutes` that is not a positive number below the "
+        f"{_ACTIONS_DEFAULT_TIMEOUT_MINUTES}-minute Actions default. Zero or negative bounds "
+        "nothing — a job declared `0` is cancelled as soon as it starts. At the default it "
+        "bounds nothing either — the job is as wedgeable as it was before it was declared — "
+        "and on a hosted runner nothing above it is enforceable. Size it from the job's "
+        "observed runtime (ADR-0566, #1983)."
     )
 
 
