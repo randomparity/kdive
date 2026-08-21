@@ -680,6 +680,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Address review findings — unlink logging, exact imports (#1948)
 - Fix order test, config import, dead clause; add baseline and rollback
 - Clarify prepare replacement scope in task 2 step 3
+- Cite ADR-0568 outcome in 0565 as append-only record edits
 
 ### Fixed
 
