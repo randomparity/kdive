@@ -39,7 +39,7 @@ behavioral backstop; no Python source file is in the reformat set.
 
 ## Consequences
 
-- The diff is ~207 files of pure formatter output plus the pin and lockfile — all Markdown;
+- The diff is ~199 files of pure formatter output plus the pin and lockfile — all Markdown;
   blame noise is real but concentrated in one commit. Naming that commit in a
   `.git-blame-ignore-revs` file is deliberately deferred to #2004 rather than landed in
   this PR; the deferral's cost is unignored blame across ~207 files for every PR merged
@@ -56,16 +56,19 @@ behavioral backstop; no Python source file is in the reformat set.
 - Docs fences are now format-gated, and the local guard does not cover them: the pre-commit
   `ruff-format` hook filters to python/pyi/jupyter, so from merge onward a prose edit that
   leaves a ```python fence out of 0.16 style reds CI with no local hook to catch it first.
-  Docs-only edits should run `uv run ruff format <touched>.md`; CI is the backstop. The
-  manually bumped rev also drifts again at the next ruff
+  Docs-only edits should run `uv run ruff format <touched>.md`; CI is the backstop.
+- The manually bumped pre-commit rev drifts again at the next ruff
   bump in `pyproject.toml`, noticed only when a local hook disagrees with the gate; accepted
   because no Dependabot ecosystem covers pre-commit revs and a watcher would cost more than
   the residual.
 - In-flight branches formatted under 0.15 red `format --check` once each until they rebase
   and reformat; only Dependabot's weekly cadence stops churning.
+- Merged ADRs are excluded from the formatter (`extend-exclude = ["docs/adr"]`, operator
+  decision 2026-08-21): the records gate enforces merged records as append-only, and fence
+  reformatting dropped lines inside protected sections of eight of them. Their fences stay
+  at legacy style; new records can still be written formatted-clean by hand.
 - Formatter style is now governed by 0.16.x output. The next formatter-style change repeats
-  this pattern: one dedicated reformat, never folded into a functional change.
-- The reformat touches ~207 Markdown docs files, so it must land alone or early in any
+- The reformat touches ~199 Markdown docs files, so it must land alone or early in any
   stack; rebasing functional work over it is a conflict-only exercise best avoided by
   merging it promptly.
 

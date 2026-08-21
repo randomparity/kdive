@@ -22,7 +22,9 @@ again.
   the commit shape forbids; afterwards `just lint` green (`ruff check .` reports nothing,
   `ruff format --check .` exits 0). Empirically (verified with `uvx ruff@0.16.2`) the
   reformat set is ~207 Markdown files — 0.16 formats Python code blocks in `.md` fences by
-  default — with no `.py` file in it; the spec's steps do not depend on that staying true,
+  default — with no `.py` file in it; `docs/adr` is subsequently excluded from the formatter
+  (operator decision 2026-08-21: the records gate forbids line loss in merged records), so
+  the landed set is ~199 files. The spec's steps do not depend on the mix staying true,
   but the diff inspection below is where it gets re-checked.
 - **R4 (commit shape)** — all reformatted files land in a single `style:` commit together
   with the pin and lockfile change; `git diff` against `main` contains no semantic edits.

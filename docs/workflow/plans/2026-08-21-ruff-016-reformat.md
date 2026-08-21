@@ -36,6 +36,10 @@ v0.15.15 → v0.16.2.
 - Diff hunks carry formatter output only. On this tree that means Markdown
   ```python fence normalization (comment spacing, blank lines); expected extension mix: all
   `.md`. Any identifier or literal change outside fences stops the ship.
+- `docs/adr` is excluded from the formatter (`extend-exclude = ["docs/adr"]` in
+  `[tool.ruff]`, operator decision 2026-08-21): the records gate forbids line loss in
+  merged records, and fence reformatting dropped lines in eight of them. Those files are
+  restored to their base content; the landed reformat set is ~199 `.md` files.
 - Guardrails (run from the worktree root): `just lint`, `just type`, `just test`,
   `uv lock --check`, `just check-mermaid`, `just adr-status-check`, `just docs-links`,
   `just docs-paths`, and finally `just ci` (the local aggregate mirroring CI's individually

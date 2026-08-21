@@ -11,10 +11,10 @@ Accepted (2026-07-30)
 ```python
 def require_role(ctx: RequestContext, project: str, role: Role) -> None:
     if project not in ctx.projects:
-        raise AuthorizationError(...)  # non-member — owned by nothing
+        raise AuthorizationError(...)          # non-member — owned by nothing
     held = ctx.roles.get(project)
     if not role_satisfies(held, role):
-        raise RoleDenied(...)  # rank-below — owned by DenialAuditMiddleware
+        raise RoleDenied(...)                  # rank-below — owned by DenialAuditMiddleware
 ```
 
 `middleware/denial_audit.py`'s `_DENIAL_TYPES` is `(RoleDenied, ProjectMembershipDenied)`. That
