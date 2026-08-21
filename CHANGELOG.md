@@ -698,6 +698,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inventory the secrets-baseline edge in the threat model (#2003)
 - State what each failed run bounds in timeout comment
 - Scope the representative claim to each run's failure point
+- Record the reviewed TLS-parameter set and its basis
 
 ### Fixed
 
@@ -1147,6 +1148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exclude merged ADRs from the formatter (ADR-0569)
 - Parse workflow YAML in the prepull-images guard, not regex job splits
 - Make the trailing-comment regression test reproduce the silent skip
+- Reject tls_priority= on the remote-libvirt URI
 
 ### Build
 
