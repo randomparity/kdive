@@ -505,8 +505,9 @@ and untouched here. No later task consumes this beyond the existing handler.
    Expected: the new pre-delete test **fails** (stale file still exists); the absent-file test
    passes (prepare already succeeds without a stale file).
 
-3. Implement in `LocalLibvirtTrafficCapture.prepare` — replace the body between
-   `prepare_pcap_dir(system_id)` and the `return` with the unlink, and extend the docstring:
+3. Implement in `LocalLibvirtTrafficCapture.prepare` — replace everything after the
+   `prepare_pcap_dir(system_id)` call, including the old `return` statement, with the complete
+   method shown below (it is the final content; the docstring is extended too):
 
    ```python
        def prepare(self, system_id: UUID, job_id: UUID) -> str:
