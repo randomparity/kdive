@@ -82,8 +82,9 @@ Steps:
 3. Run `uv run ruff format .` → rewrites the files.
 4. Verify idempotence and shape:
    - `uv run ruff format --check .` → `2892+ files already formatted`, exit 0.
-   - `git diff --name-only | sed 's/.*\.//' | sort | uniq -c` → only `md` (plus the three
-     Task-1 files if listed by full name rather than extension).
+   - `git diff --name-only | sed 's/.*\.//' | sort | uniq -c` → four buckets: `md` (the
+     reformat set) plus exactly one each `toml`, `lock`, `yaml` — sed reduces every dotted
+     name to its extension, so the three Task-1 files appear as extensions too.
    - `git diff -- '*.py'` → empty. No Python source changes.
    - Spot-check three hunks: `git diff -- docs/adr/0021-reconciler-loop-drift-repair.md`
      and two others of your choosing — comment-spacing and blank-line normalization inside
@@ -122,6 +123,10 @@ Steps:
    style commit and restart from Task 2. Never stack follow-up commits onto this dedicated
    change, and never hand-patch fence content merely to appease a failing check — like a
    new lint diagnostic, that failure needs disposition first.
+   A fence-content assertion failure (a test or docs guard asserting on reformatted fence
+   text) has no in-surface fix: stop and get an operator decision, with two viable
+   outcomes — the assertion is stale (its expectation fix lands as its own functional
+   commit after this change merges) or the reformat is wrong for that fence (revert).
 
 Acceptance criteria: one `style:` commit containing exactly the four kinds of content above;
 `just ci` green.
