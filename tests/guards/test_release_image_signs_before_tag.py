@@ -69,6 +69,12 @@ def test_push_step_publishes_by_digest_without_tags() -> None:
             f"the push step's `outputs:` must carry {required!r} — without it the step "
             f"either cannot push at all or publishes under a tag (ADR-0573); got {outputs!r}"
         )
+    # No allowed export token contains the substring `tag=`, so this also catches a
+    # `,tag=<name>` smuggled into the outputs string to re-tag at push time.
+    assert "tag=" not in outputs, (
+        "the push export must not carry a `tag=` field — tagging at push time "
+        "reintroduces the pre-sign ordering (ADR-0573)"
+    )
     assert "tags" not in with_block, (
         "the push step must not carry a `tags:` input — tagging here republishes the "
         "pre-sign ordering where an interruption strands a tagged unsigned digest (ADR-0573)"
