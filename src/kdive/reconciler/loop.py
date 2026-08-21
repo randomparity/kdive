@@ -296,8 +296,8 @@ class ReconcileConfig:
     dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE
     #: ``Resource kind -> CaptureReaper`` for the ADR-0556 orphaned-capture sweep. A kind wired to
     #: ``NullCaptureReaper`` is disabled: it is excluded from selection, so its rows are never
-    #: dispatched and never marked complete. Both capture-capable kinds ship disabled; #1947 and
-    #: #1948 each register their own concrete reaper.
+    #: dispatched and never marked complete. Both capture-capable kinds ship concrete reapers
+    #: (#1947 remote, #1948 local).
     capture_reapers: Mapping[str, CaptureReaper] = _NO_CAPTURE_REAPERS
     #: How long a terminal capture row sits untouched before the sweep considers it. Pacing, not a
     #: safety fence — the per-job ownership fence is what keeps a live worker's state safe.

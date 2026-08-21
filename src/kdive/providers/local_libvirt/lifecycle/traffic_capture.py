@@ -87,12 +87,29 @@ class LocalLibvirtTrafficCapture:
     def prepare(self, system_id: UUID, job_id: UUID) -> str:
         """Prepare the QEMU-writable per-System pcap dir and return the worker pcap path.
 
-        The confined qemu:///system hypervisor writes the filter-dump as the QEMU runtime user, so
-        the dir is owned to that user and SELinux-labelled ``svirt_image_t`` (ADR-0385); a genuine
-        write failure surfaces loudly at :meth:`fetch` via a short/absent file.
+        The confined qemu:///system hypervisor writes the filter-dump as the QEMU runtime user,
+        so the dir is owned to that user and SELinux-labelled ``svirt_image_t`` (ADR-0385); a
+        genuine write failure surfaces loudly at :meth:`fetch` via a short/absent file.
+
+        Pre-deletes this job's own stale pcap first (ADR-0567), so an at-least-once retry of a
+        job whose prior attempt died mid-capture starts from a clean file — job-keyed, never a
+        whole-System sweep, which would remove a concurrent capture's live file. Best-effort:
+        an absent file is the quiet common case; any other ``OSError`` (e.g. a permission
+        failure inside the QEMU-owned dir) is logged with the path — a file that could not be
+        removed is truncated by filter-dump on attach, and a job that dies anyway leaves the
+        file to the reconciler's capture reaper.
         """
         prepare_pcap_dir(system_id)
-        return str(pcap_path(system_id, job_id))
+        stale = pcap_path(system_id, job_id)
+        try:
+            stale.unlink(missing_ok=True)  # missing_ok already silences absence
+        except OSError as err:
+            _log.warning(
+                "stale pcap %s could not be removed; filter-dump truncates it on attach",
+                stale,
+                exc_info=err,
+            )
+        return str(stale)
 
     def attach(self, domain_name: str, *, qom_id: str, dest_path: str, snaplen: int) -> None:
         """Add a filter-dump on the SSH-forward netdev writing ``dest_path`` (idempotent re-attach).
