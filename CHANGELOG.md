@@ -681,6 +681,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix order test, config import, dead clause; add baseline and rollback
 - Clarify prepare replacement scope in task 2 step 3
 - Cite ADR-0568 outcome in 0565 as append-only record edits
+- Adopt the ruff 0.16 formatter output (ADR-0569)
+- Address ADR-0569 review findings
+- Reconcile evidence counts and name the shape check (ADR-0569)
+- Cover pre-commit ruff install and formatter-output wording (ADR-0569)
+- Record Markdown code-block formatting as the reformat surface (ADR-0569)
+- Record exclude-Markdown alternative; scope shape check to style commit (ADR-0569)
+- Proposed status, honest deferral framing, docs-gating consequence (ADR-0569)
+- Implementation plan for the ruff 0.16 reformat (#2003)
+- Schedule ADR ratification, post-commit shape re-check, token supersession
+- Pair-revert rollback, symlink ignore note, restore-based disposal
+- Post-commit gate-failure disposition; bound hook-disagreement loop
+- Correct extension-mix expectation; terminal path for fence-assertion failures
+- Arm hooks in fresh worktree; terminal path for fence-assertion failures
+- Accept ADR-0569 on merge ratification
+- Inventory the secrets-baseline edge in the threat model (#2003)
 
 ### Fixed
 
@@ -1127,6 +1142,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read the Status body from a here-string, not a pipe into grep -q
 - Bound the status allowance to one line instead of the first
 - Pass the status pattern through the environment, not awk -v
+- Exclude merged ADRs from the formatter (ADR-0569)
 
 ### Build
 
@@ -1155,6 +1171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Let ruff format the git argv
 - Apply ruff format to the new surplus-remedy test
 - Merge the split ports.traffic imports into two plain lines
+- Adopt ruff 0.16 formatter output (ADR-0569)
 
 ## [0.4.0] - 2026-07-23
 
