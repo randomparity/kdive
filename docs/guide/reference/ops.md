@@ -121,7 +121,11 @@ appear in
 The remote System-object version lane is skipped because this on-demand configuration has
 no console-hosting gate; that lane runs only in the periodic reconciler. Returns
 `data.repair_counts`, keyed by every cataloged repair kind, plus the human-readable scalar
-summary fields and comma-joined `data.failures`.
+summary fields and comma-joined `data.failures`. `data.captures_budget_unattempted` and
+`data.dump_volumes_budget_unattempted` report, per reaping lane, the candidates the lane's
+pass budget (ADR-0565) stopped it from starting this pass; 0 means the lane drained its
+worklist. These are signal, not failures — an unattempted candidate is never counted in
+`data.repair_counts.reaped_captures` or `reaped_dump_volumes`.
 
 This does not reconcile `systems.toml` into the catalog. For that pass, which can prune
 rows and free their object-store bytes, use `ops.reconcile_systems`.
