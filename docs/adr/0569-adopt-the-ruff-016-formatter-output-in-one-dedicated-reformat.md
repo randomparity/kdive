@@ -2,8 +2,7 @@
 
 ## Status
 
-Proposed (2026-08-21) — flips to Accepted in the implementing PR's final commit, per the
-docs/adr/README.md ratification rule.
+Accepted (2026-08-21)
 
 ## Context
 
