@@ -27,6 +27,21 @@ setup`; `just check-deps` reports any missing host packages. See the
 [cross-platform development guide](docs/development/cross-platform.md) for the
 per-arch prerequisites, container images, and POWER stack bring-up.
 
+## Skipping reformat commits in `git blame`
+
+The repo root keeps a [`.git-blame-ignore-revs`](.git-blame-ignore-revs) file
+naming whitespace-only reformat commits — currently the ruff 0.16 formatter
+adoption ([ADR-0569](docs/adr/0569-adopt-the-ruff-016-formatter-output-in-one-dedicated-reformat.md)).
+Point `git blame` at it once per clone so those mechanical diffs don't bury the
+real author of each line:
+
+```bash
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
+This is a local setting and is deliberately not committed; GitHub's blame view
+applies `.git-blame-ignore-revs` automatically.
+
 ## The development loop
 
 | task        | runs                                                       |
