@@ -14,8 +14,10 @@ again.
 - **R1 (pin)** — `pyproject.toml` dev group pins `"ruff==0.16.2"`. No other dependency
   entry changes.
 - **R2 (lock)** — `uv.lock` regenerated against the new pin; `uv lock --check` green.
-- **R3 (format)** — `just format` applied repo-wide under 0.16.2; afterwards `just lint`
-  green (`ruff check .` reports nothing, `ruff format --check .` exits 0).
+- **R3 (format)** — `uv run ruff format .` applied repo-wide under 0.16.2 — the formatter
+  alone, not `just format`, whose `ruff check --fix` half applies semantic lint autofixes
+  the commit shape forbids; afterwards `just lint` green (`ruff check .` reports nothing,
+  `ruff format --check .` exits 0).
 - **R4 (commit shape)** — all reformatted files land in a single `style:` commit together
   with the pin and lockfile change; `git diff` against `main` contains no semantic edits.
   Verified mechanically: the diff touches only formatting (see §Verification) and the full
@@ -31,10 +33,9 @@ again.
   to investigate, not to hand-patch (ruff's formatter is semantics-preserving by contract).
 
 ## Approach
-
-Mechanical, in order: bump the pin → `uv sync` (relocks and installs 0.16.2) → `just
-format` → inspect the diff shape → commit once → `just ci`. The only judgment call in the
-whole change is the diff inspection in §Verification; everything else is prescribed.
+Mechanical, in order: bump the pin → `uv sync` (relocks and installs 0.16.2) → `uv run
+ruff format .` → inspect the diff shape → commit once → `just ci`. The only judgment call
+in the whole change is the diff inspection in §Verification; everything else is prescribed.
 
 ## Verification
 
@@ -44,6 +45,10 @@ whole change is the diff inspection in §Verification; everything else is prescr
   formatter owns plus `pyproject.toml` and `uv.lock`; spot-check `git diff main -- '*.py'`
   hunks contain only whitespace/quote/string-prefix normalization, no identifier or literal
   changes. A hunk showing anything else stops the ship.
+- `uv run ruff check .` exits 0 under 0.16.2 before merge — the headline benefit (weekly
+  bumps merging) depends on the check half of `just lint`, not only the format half; a new
+  0.16 diagnostic against this tree stops the ship for disposition, not a hand-patch inside
+  the style commit.
 - `just ci` exits 0 (R3, R5).
 
 ## Threat model
