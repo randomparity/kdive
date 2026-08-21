@@ -19,7 +19,10 @@ jobs:
     name: build · notes · github release
     runs-on: ubuntu-latest
     # Observed 12s and 17s — the two tagged releases that have succeeded, v0.2.0 and v0.4.0; two
-    # further runs failed early and measure nothing. Both ran today's steps, so they are
+    # further runs failed at 11s and 26s — one in `Build artifacts`, one inside `Generate
+    # release notes` — so neither measures a completed release, though the 26s run bounds every
+    # step through the build plus most of the notes step: the largest figure in the sample.
+    # Both ran today's steps, so they are
     # representative. No apt step. Sized well above them anyway: two runs months apart is the
     # thinnest sample of the five here, and a cut-off release is worse than a late one, so the
     # headroom is bought where it is cheapest (ADR-0566, #1983).
