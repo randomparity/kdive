@@ -1153,6 +1153,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reject tls_priority= on the remote-libvirt URI
 - Resolve supersession links in status lines and [ADR-NNNN] spellings
 - Keep the supersede extractor portable to BSD sed
+- Pin generated-artifact gates to the working tree's src
 
 ### Build
 
