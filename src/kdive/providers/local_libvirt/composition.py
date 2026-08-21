@@ -29,7 +29,7 @@ from kdive.providers.core.runtime import (
     ResourceBindingCapabilities,
     RootfsCapabilities,
 )
-from kdive.providers.infra.reaping import CaptureReaper, InfraReaper, NullCaptureReaper
+from kdive.providers.infra.reaping import CaptureReaper, InfraReaper
 from kdive.providers.local_libvirt.config import local_guest_egress_for_resource
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
@@ -49,7 +49,10 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
 from kdive.providers.local_libvirt.lifecycle.snapshot import LocalLibvirtSnapshotter
 from kdive.providers.local_libvirt.lifecycle.traffic_capture import LocalLibvirtTrafficCapture
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
-from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
+from kdive.providers.local_libvirt.reaping import (
+    LibvirtInfraReaper,
+    LocalLibvirtCaptureReaper,
+)
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
@@ -138,14 +141,14 @@ def build_reaper() -> InfraReaper:
 
 
 def build_capture_reaper() -> CaptureReaper:
-    """Build local-libvirt's orphaned-capture reaper: disabled wiring for now (ADR-0556).
+    """Build local-libvirt's orphaned-capture reaper (ADR-0556, ADR-0567, #1948).
 
-    Local-libvirt's destination is a worker-owned runtime path, not a storage-pool volume, so
-    #1948 must first settle whether the process performing reconciliation can reach it at all —
-    a colocated reconciler reaper or a worker-side execution of the same port contract. Until it
-    does, this kind is ineligible for dispatch and cannot produce a completion marker.
+    Detaches the job's QOM filter over the local ``KDIVE_LIBVIRT_URI`` connection and unlinks
+    the job's pcap at the shared runtime-path convention. The reconciler for this kind is a
+    root process colocated with the worker on the kdive host (ADR-0567's prerequisite), so it
+    can reach both the hypervisor and the worker-owned path.
     """
-    return NullCaptureReaper()
+    return LocalLibvirtCaptureReaper.from_env()
 
 
 def build_rootfs_build_plane(*, workspace: Path | None = None) -> LocalLibvirtRootfsBuildPlane:

@@ -13,6 +13,7 @@ from kdive.providers.infra.reaping import (
     NullReaper,
     dispatchable_capture_kinds,
 )
+from kdive.providers.local_libvirt.reaping import LocalLibvirtCaptureReaper
 from kdive.providers.remote_libvirt.reaping.capture import RemoteLibvirtCaptureReaper
 from kdive.reconciler import loop
 from kdive.reconciler.cleanup import provider_reaping
@@ -93,8 +94,8 @@ def test_the_sweep_is_wired_with_its_configured_pacing_values(migrated_url: str)
     assert set(cast(dict, seen["reapers"])) == {"remote-libvirt"}
 
 
-def test_local_stays_disabled_while_remote_is_wired_concrete() -> None:
-    """ADR-0556: #1947 registers remote-libvirt's concrete reaper; #1948 still owes local's."""
+def test_both_capture_kinds_are_wired_concrete() -> None:
+    """ADR-0556/0567: #1947 registered remote's reaper; #1948 registers local's."""
     composition = ProviderComposition()
 
     reapers = composition.build_reconciler_capture_reapers(
@@ -102,9 +103,9 @@ def test_local_stays_disabled_while_remote_is_wired_concrete() -> None:
     )
 
     assert set(reapers) == _CAPTURE_KINDS
-    assert isinstance(reapers["local-libvirt"], NullCaptureReaper)
+    assert isinstance(reapers["local-libvirt"], LocalLibvirtCaptureReaper)
     assert isinstance(reapers["remote-libvirt"], RemoteLibvirtCaptureReaper)
-    assert dispatchable_capture_kinds(reapers) == frozenset({"remote-libvirt"})
+    assert dispatchable_capture_kinds(reapers) == _CAPTURE_KINDS
 
 
 def test_a_disabled_provider_contributes_no_capture_reaper() -> None:
