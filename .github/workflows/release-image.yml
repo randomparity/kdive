@@ -123,6 +123,7 @@ jobs:
           # release (X.Y.Z+g<sha>), a main push is not (X.Y.Z-dev+g<sha>).
           build-args: |
             KDIVE_COMMIT=${{ steps.prov.outputs.sha }}
+            KDIVE_RELEASE=${{ startsWith(github.ref, 'refs/tags/v') }}
           # Publish a multi-arch manifest on a release tag (ADR-0359): ppc64le builds under
           # QEMU emulation, which compiles the sdist-only deps (grpcio, drgn, libvirt-python)
           # from source and is the slow leg of the job. A main push builds amd64 only so :edge
