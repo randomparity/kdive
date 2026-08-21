@@ -56,7 +56,19 @@ def _step(steps: list[dict], name: str) -> dict:
 def test_push_step_publishes_by_digest_without_tags() -> None:
     push = _step(_publish_steps(), _PUSH_STEP)
     with_block = push.get("with") or {}
-    assert with_block.get("push") is True, "the release push step must still push"
+    # A bare `push: true` with no tag errors out in buildx ("tag is needed when pushing to
+    # registry"), so the only working digest-only form is the documented `outputs:` export.
+    outputs = with_block.get("outputs", "")
+    for required in (
+        "type=image",
+        f"name={_IMAGE}",
+        "push-by-digest=true",
+        "push=true",
+    ):
+        assert required in outputs, (
+            f"the push step's `outputs:` must carry {required!r} — without it the step "
+            f"either cannot push at all or publishes under a tag (ADR-0573); got {outputs!r}"
+        )
     assert "tags" not in with_block, (
         "the push step must not carry a `tags:` input — tagging here republishes the "
         "pre-sign ordering where an interruption strands a tagged unsigned digest (ADR-0573)"

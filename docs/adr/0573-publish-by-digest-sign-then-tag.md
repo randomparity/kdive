@@ -18,16 +18,19 @@ it: on a tag build, `:latest` has already moved onto the unsigned digest (#1991)
 The obvious cheap remedy — a failure/cancellation handler naming the stranded digest —
 cannot cover the dominant interruption mode. When a job-level `timeout-minutes` fires,
 GitHub terminates the runner; no later step runs, `if: always()` or otherwise. For a job
-bounded at up to 300 minutes (ADR-0574), timeout is exactly the interruption to defend
+bounded at up to 300 minutes (ADR-0571), timeout is exactly the interruption to defend
 against, so the ordering itself has to change.
 
 ## Decision
 
 We restructure `release-image.yml` into **push by digest → sign → apply tags**:
 
-1. **Push by digest only.** The build step runs `docker/build-push-action` with `push: true`
-   and **no `tags:` input**, so buildx publishes an untagged manifest at an immutable
-   `@sha256` digest and reports that digest in `steps.build.outputs.digest`. SBOM and
+1. **Push by digest only.** The build step runs `docker/build-push-action` with the
+   documented push-by-digest export —
+   `outputs: type=image,name=<image>,push-by-digest=true,name-canonical=true,push=true` —
+   so buildx publishes an untagged manifest at an immutable `@sha256` digest and reports
+   that digest in `steps.build.outputs.digest`. (A bare `push: true` with no tag does not
+   work: buildx refuses it with "tag is needed when pushing to registry".) SBOM and
    provenance attestations attach here exactly as before (they are bound to the digest via
    referrers, not to tags).
 2. **Sign the digest.** cosign keyless/OIDC signs `ghcr.io/randomparity/kdive@<digest>` —
@@ -43,7 +46,7 @@ This supersedes nothing: [ADR-0088](0088-deployment-packaging.md) decision 8's s
 (what gets signed, keyless/OIDC, on GHCR via tagged-release CI) is implemented unchanged;
 [ADR-0359](0359-multiarch-app-image.md)'s multi-arch releases and
 [ADR-0572](0572-edge-builds-amd64-only-releases-stay-multiarch.md)'s amd64-only `:edge`
-are untouched; the timeout bound remains [ADR-0574](0574-every-job-in-every-workflow-declares-a-timeout.md)'s.
+are untouched; the timeout bound remains [ADR-0571](0571-every-job-in-every-workflow-declares-a-timeout.md)'s.
 
 ## Consequences
 

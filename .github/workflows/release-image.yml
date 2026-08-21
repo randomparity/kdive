@@ -114,17 +114,19 @@ jobs:
           [ -n "$sha" ] || { echo "::error::empty provenance SHA from git rev-parse" >&2; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
-      # Push by digest only (ADR-0573): with no `tags:` input, buildx publishes an untagged
-      # manifest at an immutable @sha256 digest and reports it in `steps.build.outputs.digest`.
-      # The human-facing tags are applied by a later step, after cosign signs this digest —
-      # so a run cut off before then strands nothing reachable (#1991). Labels are baked into
-      # the image config here; they are metadata, not reachability.
+      # Push by digest only (ADR-0573): the `outputs:` form is buildx's documented
+      # push-by-digest export — a bare `push: true` with no tag errors out ("tag is needed
+      # when pushing to registry"), and this form publishes an untagged manifest at an
+      # immutable @sha256 digest and reports it in `steps.build.outputs.digest`. The
+      # human-facing tags are applied by a later step, after cosign signs this digest — so a
+      # run cut off before then strands nothing reachable (#1991). Labels are baked into the
+      # image config here; they are metadata, not reachability.
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          push: true
+          outputs: type=image,name=ghcr.io/randomparity/kdive,push-by-digest=true,name-canonical=true,push=true
           # Bake honest version provenance into the running image (ADR-0370): a v* tag is a
           # release (X.Y.Z+g<sha>), a main push is not (X.Y.Z-dev+g<sha>).
           build-args: |
