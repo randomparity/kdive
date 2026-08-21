@@ -19,13 +19,12 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import CaptureReaper, OrphanedCapture
-from kdive.providers.ports.traffic import capture_qom_id
+from kdive.providers.ports.traffic import capture_qom_id, pcap_volume_name
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
     TlsCertRefs,
     remote_config_for_resource,
 )
-from kdive.providers.remote_libvirt.lifecycle.traffic_capture import pcap_volume_name
 from kdive.providers.remote_libvirt.reaping.capture import (
     OpenCaptureReaperConnection,
     RemoteLibvirtCaptureReaper,

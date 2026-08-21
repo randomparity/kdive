@@ -37,10 +37,9 @@ import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import OrphanedCapture
-from kdive.providers.ports.traffic import capture_qom_id
+from kdive.providers.ports.traffic import capture_qom_id, pcap_volume_name
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_for_resource
 from kdive.providers.remote_libvirt.connection.transport import remote_connection
-from kdive.providers.remote_libvirt.lifecycle.traffic_capture import pcap_volume_name
 from kdive.providers.remote_libvirt.reaping.connections import open_libvirt_reaper
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env

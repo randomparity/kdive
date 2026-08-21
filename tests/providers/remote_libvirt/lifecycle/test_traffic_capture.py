@@ -17,12 +17,12 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.ports.traffic import pcap_volume_name
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.lifecycle.traffic_capture import (
     REMOTE_PCAP_WRITE_REMEDIATION,
     RemoteLibvirtTrafficCapture,
     discover_netdev_id,
-    pcap_volume_name,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
