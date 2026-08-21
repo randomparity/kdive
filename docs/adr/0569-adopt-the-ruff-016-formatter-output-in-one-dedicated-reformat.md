@@ -10,7 +10,9 @@ Accepted (2026-08-21)
 `ruff format --check .`. Ruff 0.16 changed formatter style — visibly, blank-line handling
 inside docstring code fences — so any tree formatted under 0.15 fails the check under 0.16:
 CI run 32313994208 on #1999's head reported `205 files would be reformatted, 2886 files
-already formatted`, reproduced locally as 207.
+already formatted`; a local reproduction counted 207. The two-count delta was never
+reconciled (the runs saw different trees); this change's own verification run supersedes
+both numbers.
 
 Dependabot's grouped `python-dependencies` bump carries ruff with everything else on its
 weekly cadence. Until the tree adopts the 0.16 output once, deliberately, every grouped bump
@@ -24,18 +26,21 @@ Adopt the ruff 0.16 formatter output in one dedicated, whitespace-only change: p
 formatter alone, deliberately not `just format`, whose `ruff check --fix` half applies
 semantic lint autofixes — and commit the result as a single mechanical `style:` commit
 verified by `just ci`. No functional changes mix in, so review reduces to confirming the
-commit shape is exactly that.
+commit shape is exactly that — mechanically: `uv run ruff format --check .` green
+(idempotence), and `git diff --name-only` against the parent commit listing only files the
+formatter touches plus `pyproject.toml` and `uv.lock`, with hunks carrying formatting
+normalization only.
 
 ## Consequences
 
 - The diff is ~207 files of pure formatter output plus the pin and lockfile. Blame noise is
   real but concentrated in one commit; adding that commit to a `.git-blame-ignore-revs`
-  file is a post-merge follow-up this change does not carry (the file cannot name its own
-  commit).
+  file is a post-merge follow-up tracked as #2004 — the file cannot name its own commit.
 - Future grouped Dependabot bumps carrying ruff 0.16.x patch/minor changes format clean and
   merge again, provided `ruff check .` stays clean under 0.16.2 — verified before this
   change merges, since `just lint` gates on the check before the format check. The weekly
-  failure mode ends.
+  format-check failure mode ends; a future ruff version promoting new lint rules can still
+  red a grouped bump via `ruff check`, which is lint-rule drift and outside this decision.
 - In-flight branches formatted under 0.15 red `format --check` once each until they rebase
   and reformat; only Dependabot's weekly cadence stops churning.
 - Formatter style is now governed by 0.16.x output. The next formatter-style change repeats
