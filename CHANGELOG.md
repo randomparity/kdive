@@ -129,6 +129,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reclaim orphaned traffic captures to convergence
 - Wire the capture sweep with both providers disabled
 - Remote-libvirt CaptureReaper detaches filter, then deletes volume
+- Local-libvirt CaptureReaper detaches filter, then unlinks pcap
+- Pre-delete this job's stale pcap in local prepare
+- Wire local-libvirt's capture reaper into the sweep
 
 ### Changed
 
@@ -665,6 +668,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Start the lane deadline after the candidate list, not before it
 - Keep placeholder supersession links inside fenced examples
 - Say which of the two supersession links the gate resolves
+- ADR-0567 and spec for the local-libvirt capture reaper (#1948)
+- Address review findings on 0567 observability, pre-delete, null option
+- State 0567 root-reconciler prerequisite, process placement, verification pointer
+- State local-libvirt host colocation as a deployment requirement
+- Pin filter-absence matcher, test construction, timeout posture (#1948)
+- Specify concurrent-absence flow and timeout residual condition (#1948)
+- Record matcher fragility, fence guard, micro-race, ci scope (#1948)
+- State domain-absence detection via typed VIR_ERR_NO_DOMAIN (#1948)
+- Implementation plan for the local-libvirt capture reaper (#1948)
+- Address review findings — unlink logging, exact imports (#1948)
+- Fix order test, config import, dead clause; add baseline and rollback
+- Clarify prepare replacement scope in task 2 step 3
 
 ### Fixed
 
