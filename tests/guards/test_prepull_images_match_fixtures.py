@@ -202,13 +202,17 @@ def test_a_trailing_comment_does_not_hide_a_job_from_the_guard(tmp_path: Path) -
     """The blind spot that motivated the real parser (#1993, sibling of PR #1992).
 
     A job key written with a trailing comment — `image-build:  # pulls the base layer` — is
-    ordinary YAML and invisible to a regex that recognises a job only by `^  name:$`. Under
-    the old splitter this workflow parsed to no jobs at all, so the ordering check above
-    silently skipped it instead of guarding it; this test pins the parser to seeing the job.
+    ordinary YAML but invisible to a regex that recognises a job only by `^  name:$`. Under
+    the old splitter the plain key before it parsed fine and this one was silently absorbed
+    into that job's text, so the ordering check saw one job where there were two and guarded
+    only the wrong one; this test pins the parser to seeing both.
     """
     workflow = tmp_path / "commented.yml"
     workflow.write_text(
         "jobs:\n"
+        "  lint:\n"
+        "    steps:\n"
+        "      - run: just lint\n"
         "  image-build:  # pulls the base layer\n"
         "    steps:\n"
         "      - run: just pull-test-images\n"
