@@ -27,11 +27,11 @@ implementation"; those ADRs live here.
   Record the supersession in the superseded record as a one-line banner beneath
   its existing status, and set the status itself to name the superseding ADR in
   the same change (both forms below). The records CI gate checks the banner's
-  form, its date, and that its link resolves to a sibling record — in the
-  `## Status` section, or in the preamble for a pre-0504 record that keeps its
-  status as a bullet there
-  ([ADR-0564](0564-the-status-region-is-where-a-record-keeps-its-status.md)).
-  The status line's *own* link is not gate-checked — keep it in step by hand.
+  form, its date, and that each link on a single line — the banner's and the
+  status line's own — resolves to a sibling record, in the `## Status` section
+  or in the preamble for a pre-0504 record that keeps its status as a bullet
+  there ([ADR-0564](0564-the-status-region-is-where-a-record-keeps-its-status.md));
+  a status bullet whose link wraps onto its own line is still kept in step by hand.
   A record's status value is the one part of it the gate does not hold
   immutable, in either shape, and a record may carry only one such line.
 - A merged ADR is append-only outside `## Status`. When later evidence or a

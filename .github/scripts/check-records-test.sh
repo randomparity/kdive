@@ -1904,6 +1904,68 @@ MD
   run_case "dangling banner with no Status section" 1 E-SUPERSEDE-DANGLING "$d" \
     BASE_SHA="$b" RECORD_PROFILES=adr
 
+  # The README prescribes recording a supersession twice: the banner, and the status itself
+  # naming the superseding ADR. The extractor read only banner lines, so a dangling link in
+  # the status line was invisible — on a pre-0504 record here there is no banner at all.
+  d="$SCRATCH/adr_legacy_statusline_dangling"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Superseded by [ADR-0009](0009-nowhere.md)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "dangling status-line link with no banner" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # Same gap in the other shape the status region takes: a record that grew a `## Status`
+  # section carries the status line — link included — inside it.
+  d="$SCRATCH/adr_status_section_statusline_dangling"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted"
+  printf '\n## Status\n\n- **Status:** Superseded by [ADR-0009](0009-nowhere.md)\n' \
+    >>"$d/docs/adr/0001-legacy.md"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "dangling status-line link in ## Status" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The four grandfathered banners write `[ADR-NNNN]`, not `[NNNN]` (ADR-0137, 0161, 0265,
+  # 0282), and the extractor read only the bare spelling, so their links were resolved by
+  # nothing. Dangling first, then resolving, so both the extraction and the absence of a
+  # false error are pinned.
+  d="$SCRATCH/adr_adr_spelling_dangling"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Accepted
+> **Superseded by [ADR-0009](0009-nowhere.md)** (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "dangling [ADR-NNNN] banner target" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
+  d="$SCRATCH/adr_statusline_resolves"
+  new_adr_repo "$d"
+  write_legacy_adr "$d" "0001-legacy.md" "- Status: Superseded by [ADR-0002](0002-later.md)
+- **Date:** 2026-01-01"
+  write_adr "$d" "0002-later.md" "Accepted (2026-01-02)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "resolving status-line links stay silent" 0 - "$d" BASE_SHA="$b" \
+    RECORD_PROFILES=adr
+
+  # A status line names the same kind of target a banner does, so it meets the same guard:
+  # grammar before the join to RECORD_DIR, or a traversal resolves instead of erroring.
+  d="$SCRATCH/adr_statusline_traversal_link"
+  new_adr_repo "$d"
+  printf 'top level\n' >"$d/README.md"
+  write_legacy_adr "$d" "0001-legacy.md" "- **Status:** Superseded by [ADR-0009](../../README.md)"
+  git -C "$d" add -A
+  git -C "$d" commit -qm base
+  b=$(base_of "$d")
+  run_case "a traversal status-line target is not a record" 1 E-SUPERSEDE-DANGLING "$d" \
+    BASE_SHA="$b" RECORD_PROFILES=adr
+
   # The banner rules in check_status reach a preamble banner too, not only the link rule in the
   # profile: without that, a legacy record could carry a banner of any shape at all and the gate
   # would report nothing about it. Bespoke, because a record with no `## Status` is non-conforming

@@ -93,6 +93,13 @@ check_title_number() {
 # rule exists for and a pre-template one has no such section — the body came back empty, the
 # guard returned, and the banner on every one of them went unchecked (ADR 0564, #1976).
 #
+# The README prescribes recording a supersession twice: a banner, and the status itself naming
+# the superseding ADR. The extractor therefore reads every `Superseded by [link](target)` in
+# the status region, not only banner lines: the banner shape (`> **Superseded by …`) and the
+# status-line shape (`- **Status:** Superseded by …`, or its unbolded preamble twin
+# `- Status: Superseded by …`), in both the `[NNNN]` and `[ADR-NNNN]` link spellings the
+# corpus carries (#1988).
+#
 # Every link, not the first: E-BANNER-COUNT is downgradable, so on a grandfathered record a
 # second banner is a warning, and reading one link would let its dangling target through. Fed by
 # a process substitution rather than a pipe, so err_full runs in the current shell where the
@@ -107,12 +114,17 @@ check_supersede_link() {
     # `err`, which downgrades on exactly the grandfathered records this rule was widened to reach,
     # so the form check cannot be what stands between a traversal and a green run.
     if ! printf '%s' "$link" | grep -qE '^[0-9]{4}-[a-z0-9-]+\.md$'; then
-      err_full "E-SUPERSEDE-DANGLING: $label: supersession banner names '$link', which is not a record filename in $RECORD_DIR"
+      err_full "E-SUPERSEDE-DANGLING: $label: supersession link names '$link', which is not a record filename in $RECORD_DIR"
     elif [ ! -f "$RECORD_DIR/$link" ]; then
-      err_full "E-SUPERSEDE-DANGLING: $label: supersession banner names $RECORD_DIR/$link, which is not a record here"
+      err_full "E-SUPERSEDE-DANGLING: $label: supersession link names $RECORD_DIR/$link, which is not a record here"
     fi
   done < <(status_region "$file" |
-    sed -n 's/^> \*\*Superseded by \[[0-9]\{4\}\](\([^)]*\)).*/\1/p')
+    # Three expressions rather than one with `\|` alternation: `\|` is a GNU extension, and
+    # under the BSD/macOS sed this gate also runs on it matches as a literal pipe — every
+    # extraction would silently miss. Each prefix excludes the others, so no line is read twice.
+    sed -n -e 's/^> \*\*Superseded by \[\(ADR-\)\{0,1\}[0-9]\{4\}\](\([^)]*\)).*/\2/p' \
+      -e 's/^- \*\*Status:\*\* Superseded by \[\(ADR-\)\{0,1\}[0-9]\{4\}\](\([^)]*\)).*/\2/p' \
+      -e 's/^- Status: Superseded by \[\(ADR-\)\{0,1\}[0-9]\{4\}\](\([^)]*\)).*/\2/p')
 }
 
 profile_check_extra() {
