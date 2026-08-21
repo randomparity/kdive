@@ -1,7 +1,8 @@
 """qemu+tls:// connection lifecycle for the remote-libvirt provider (ADR-0077).
 
 Mutual TLS, fail-closed: the worker presents a client cert and verifies the libvirtd
-server cert against the configured CA + hostname; ``no_verify`` is forbidden. Because
+server cert against the configured CA + hostname; ``no_verify`` and ``tls_priority`` are
+forbidden. Because
 ``SecretBackend.resolve`` returns strings while libvirt's TLS client reads on-disk
 files, each op materializes the resolved cert/key/CA into a private per-op pkipath
 (dir ``0700``, files ``0600``), points the URI at it via ``?pkipath=``, and deletes

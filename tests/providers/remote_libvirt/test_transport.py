@@ -57,6 +57,18 @@ def _config(uri: str = "qemu+tls://host.example/system") -> RemoteLibvirtConfig:
         # The name is everything before the FIRST '=': a value that itself contains '=' must
         # not shift the parsed name (split, not rsplit; maxsplit=1).
         "qemu+tls://host.example/system?no_verify=a=b",
+        # tls_priority names a GnuTLS priority string; an operator-supplied value such as
+        # NONE:+ANON-ECDH can downgrade the pinned mutual-TLS connection to anonymous or
+        # weak ciphers, so it is forbidden by the same fail-closed path as no_verify.
+        "qemu+tls://host.example/system?tls_priority=NONE:+ANON-ECDH",
+        # Same spelling rules as every other forbidden name: case-insensitive matching,
+        # ';' separators, and percent-unescaped names must not slip past either.
+        "qemu+tls://host.example/system?keepalive_interval=5;Tls_Priority=NONE:+ANON-ECDH",
+        "qemu+tls://host.example/system?tls%5Fpriority=NONE:+ANON-ECDH",
+        # libvirt honors a valueless name (empty string) and a duplicate name; the name-set
+        # check rejects both spellings without any per-case logic.
+        "qemu+tls://host.example/system?tls_priority",
+        "qemu+tls://host.example/system?tls_priority=NORMAL&tls_priority=NONE:+ANON-ECDH",
     ],
 )
 def test_validate_rejects_unsafe_uris(uri: str) -> None:
@@ -92,6 +104,15 @@ def test_validate_no_verify_error_message() -> None:
     assert str(excinfo.value) == (
         "no_verify is forbidden on the remote-libvirt URI: server-cert "
         "verification is mandatory (ADR-0077)"
+    )
+
+
+def test_validate_tls_priority_error_message() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        validate_remote_uri("qemu+tls://host.example/system?tls_priority=NONE:+ANON-ECDH")
+    assert str(excinfo.value) == (
+        "tls_priority is forbidden on the remote-libvirt URI: it can name "
+        "anonymous or weak GnuTLS ciphersuites (ADR-0077)"
     )
 
 
