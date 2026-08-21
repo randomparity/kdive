@@ -21,15 +21,18 @@ unmergeable for exactly this reason, and each following week repeats it.
 
 ## Decision
 
-Adopt the ruff 0.16 formatter output in one dedicated, whitespace-only change: pin
+Adopt the ruff 0.16 formatter output in one dedicated, formatter-output-only change: pin
 `ruff==0.16.2` in the dev group, relock `uv.lock`, run `uv run ruff format .` — the
 formatter alone, deliberately not `just format`, whose `ruff check --fix` half applies
 semantic lint autofixes — and commit the result as a single mechanical `style:` commit
 verified by `just ci`. No functional changes mix in, so review reduces to confirming the
 commit shape is exactly that — mechanically: `uv run ruff format --check .` green
 (idempotence), and `git diff --name-only` against the parent commit listing only files the
-formatter touches plus `pyproject.toml` and `uv.lock`, with hunks carrying formatting
-normalization only.
+formatter touches plus `pyproject.toml`, `uv.lock`, and the `.pre-commit-config.yaml`
+`rev:` line, with hunks carrying formatter output only. Formatter output is not strictly
+whitespace: 0.16's docstring-code-fence blank-line normalization edits string-literal
+contents, runtime-visible through help text and doctests — such hunks are expected in the
+diff, and the test run in `just ci` is their behavioral backstop.
 
 ## Consequences
 
@@ -41,6 +44,10 @@ normalization only.
   change merges, since `just lint` gates on the check before the format check. The weekly
   format-check failure mode ends; a future ruff version promoting new lint rules can still
   red a grouped bump via `ruff check`, which is lint-rule drift and outside this decision.
+- The repo's second ruff installation — the `ruff-pre-commit` hooks in
+  `.pre-commit-config.yaml`, invisible to Dependabot's ecosystems — moves v0.15.15 →
+  v0.16.2 in the same change, so the local `ruff-format` hook cannot revert adopted files
+  to 0.15 style and the hook and the gate run one version.
 - In-flight branches formatted under 0.15 red `format --check` once each until they rebase
   and reformat; only Dependabot's weekly cadence stops churning.
 - Formatter style is now governed by 0.16.x output. The next formatter-style change repeats

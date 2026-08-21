@@ -11,8 +11,10 @@ again.
 
 ## Requirements (trace to issue acceptance criteria)
 
-- **R1 (pin)** — `pyproject.toml` dev group pins `"ruff==0.16.2"`. No other dependency
-  entry changes.
+- **R1 (pins)** — `pyproject.toml` dev group pins `"ruff==0.16.2"` and
+  `.pre-commit-config.yaml` moves the `ruff-pre-commit` `rev:` v0.15.15 → v0.16.2
+  (operator decision, 2026-08-21: the local `ruff-format` hook at 0.15 would otherwise
+  revert adopted files to 0.15 style). No other dependency entry changes.
 - **R2 (lock)** — `uv.lock` regenerated against the new pin; `uv lock --check` green.
 - **R3 (format)** — `uv run ruff format .` applied repo-wide under 0.16.2 — the formatter
   alone, not `just format`, whose `ruff check --fix` half applies semantic lint autofixes
@@ -33,18 +35,23 @@ again.
   to investigate, not to hand-patch (ruff's formatter is semantics-preserving by contract).
 
 ## Approach
-Mechanical, in order: bump the pin → `uv sync` (relocks and installs 0.16.2) → `uv run
-ruff format .` → inspect the diff shape → commit once → `just ci`. The only judgment call
-in the whole change is the diff inspection in §Verification; everything else is prescribed.
+Mechanical, in order: bump the pin → bump the pre-commit rev → `uv sync` (relocks and
+installs 0.16.2) → `uv run ruff format .` → inspect the diff shape → commit once →
+`just ci`. The only judgment call in the whole change is the diff inspection in
+§Verification; everything else is prescribed.
 
 ## Verification
 
 - `uv lock --check` exits 0 (R2).
 - `git grep -n 'ruff==' pyproject.toml` shows exactly `ruff==0.16.2` (R1).
 - Diff-shape check for R4: `git diff main --stat` lists only `.py`/docs/config files the
-  formatter owns plus `pyproject.toml` and `uv.lock`; spot-check `git diff main -- '*.py'`
-  hunks contain only whitespace/quote/string-prefix normalization, no identifier or literal
-  changes. A hunk showing anything else stops the ship.
+  formatter owns plus `pyproject.toml`, `uv.lock`, and the `.pre-commit-config.yaml`
+  `rev:` line; spot-check `git diff main -- '*.py'` hunks carry formatter output only —
+  whitespace/quote/string-prefix normalization plus expected docstring-code-fence
+  blank-line edits (string-literal content, runtime-visible; the `just ci` test run backs
+  them). No identifier or other literal changes. Anything else stops the ship.
+- `.pre-commit-config.yaml` diff is exactly the `rev:` line, now `rev: v0.16.2` (R1);
+  `prek validate-config` or `prek run --help` unaffected — no hook id or arg changes.
 - `uv run ruff check .` exits 0 under 0.16.2 before merge — the headline benefit (weekly
   bumps merging) depends on the check half of `just lint`, not only the format half; a new
   0.16 diagnostic against this tree stops the ship for disposition, not a hand-patch inside
@@ -56,15 +63,17 @@ in the whole change is the diff inspection in §Verification; everything else is
 Dependency-change trigger, scoped honestly: this is a dev-tooling bump; no runtime surface
 changes.
 
-- **Boundary inventory** — one: the supply-chain edge where `uv sync` fetches ruff 0.16.2
-  from PyPI. Nothing is added to what the shipped service can reach; ruff does not ship in
-  any artifact.
-- **Actor model** — an attacker controlling PyPI package content (compromised release).
-  Trust placement: PyPI plus uv's lockfile hash verification, the same trust the repo
-  already extends to every other locked dependency.
+- **Boundary inventory** — two supply-chain edges: `uv sync` fetching ruff 0.16.2 from
+  PyPI, and prek fetching the `ruff-pre-commit` v0.16.2 hook repo from GitHub. Nothing is
+  added to what the shipped service can reach; neither ruff copy ships in any artifact.
+- **Actor model** — an attacker controlling PyPI package content or the hook repo's tag.
+  Trust placement: PyPI plus uv's lockfile hash verification for the first edge; for the
+  second, GitHub tag integrity on `astral-sh/ruff-pre-commit` — the same trust every other
+  pre-commit hook in this repo already extends, unchanged by moving the rev.
+
 - **Control per boundary** — `uv.lock` pins the exact version and hashes; `uv sync
-  --locked` (what CI runs) refuses a mismatched artifact. No new control needed; the
-  existing lockfile discipline covers the one boundary.
+  --locked` (what CI runs) refuses a mismatched artifact. The hook edge is controlled by
+  the pinned `rev:` tag on a first-party (astral-sh) repository; no new control added.
 - **Out of scope** — runtime dependency risk (none touched), CI action references
   (untouched), secrets (none involved).
 
