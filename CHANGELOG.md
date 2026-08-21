@@ -700,6 +700,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scope the representative claim to each run's failure point
 - Record the reviewed TLS-parameter set and its basis
 - Call the ignored commit formatter-output, not whitespace-only
+- Scope the records-gate link claim to single-line links
 
 ### Fixed
 
@@ -1150,6 +1151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Parse workflow YAML in the prepull-images guard, not regex job splits
 - Make the trailing-comment regression test reproduce the silent skip
 - Reject tls_priority= on the remote-libvirt URI
+- Resolve supersession links in status lines and [ADR-NNNN] spellings
+- Keep the supersede extractor portable to BSD sed
 
 ### Build
 
