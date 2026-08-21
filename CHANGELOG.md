@@ -1145,6 +1145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound the status allowance to one line instead of the first
 - Pass the status pattern through the environment, not awk -v
 - Exclude merged ADRs from the formatter (ADR-0569)
+- Parse workflow YAML in the prepull-images guard, not regex job splits
+- Make the trailing-comment regression test reproduce the silent skip
 
 ### Build
 
