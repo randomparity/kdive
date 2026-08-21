@@ -29,9 +29,11 @@ formatter alone, deliberately not `just format`, whose `ruff check --fix` half a
 semantic lint autofixes — and commit the result as a single mechanical `style:` commit
 verified by `just ci`. No functional changes mix in, so review reduces to confirming the
 commit shape is exactly that — mechanically: `uv run ruff format --check .` green
-(idempotence), and `git diff --name-only` against the parent commit listing only files the
+(idempotence), and `git diff --name-only` for the `style:` commit listing only files the
 formatter touches plus `pyproject.toml`, `uv.lock`, and the `.pre-commit-config.yaml`
-`rev:` line, with hunks carrying formatter output only. Formatter output here is not
+`rev:` line — the design-record files (this ADR, the spec and plan under `docs/workflow/`)
+land in their own commits outside that check. Hunks carry formatter output only. Formatter
+output here is not
 strictly whitespace: inside Markdown ```python fences it normalizes comment spacing and
 blank lines — edits to served-docs content, verified against the actual 0.16.2 run before
 merge. The test run in `just ci` remains the behavioral backstop; no Python source file is
@@ -85,3 +87,9 @@ in the reformat set.
   no new branch, but shares one diff with ten unrelated version bumps and loses the
   mechanical shape check that makes review trivial; the dedicated commit keeps review
   mechanical.
+- **Exclude `*.md` from the formatter (`extend-exclude`) and adopt 0.16.2 with a
+  near-zero diff.** Avoids the served-docs reformat, the blame noise, and the in-flight
+  rebase cost entirely, but it is the same standing-exception shape rejected above for the
+  Dependabot group: docs fences stay permanently unmanaged, and 0.16's default-on Markdown
+  formatting resurfaces the question at every future bump. One deliberate adoption beats a
+  permanent exception.

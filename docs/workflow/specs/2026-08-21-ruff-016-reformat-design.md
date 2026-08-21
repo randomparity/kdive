@@ -47,7 +47,9 @@ installs 0.16.2) → `uv run ruff format .` → inspect the diff shape → commi
 
 - `uv lock --check` exits 0 (R2).
 - `git grep -n 'ruff==' pyproject.toml` shows exactly `ruff==0.16.2` (R1).
-- Diff-shape check for R4: `git diff main --stat` lists only files the formatter owns plus
+- Diff-shape check for R4, scoped to the `style:` commit alone (the design-record files —
+  ADR, spec, plan — land in their own commits outside this check): `git diff --name-only`
+  for that commit lists only files the formatter owns plus
   `pyproject.toml`, `uv.lock`, and the `.pre-commit-config.yaml` `rev:` line; check the
   extension mix against the fresh `ruff format --check` run (currently: all `.md`), and
   spot-check hunks carry formatter output only — inside Markdown ```python fences:
