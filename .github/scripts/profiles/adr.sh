@@ -119,7 +119,12 @@ check_supersede_link() {
       err_full "E-SUPERSEDE-DANGLING: $label: supersession link names $RECORD_DIR/$link, which is not a record here"
     fi
   done < <(status_region "$file" |
-    sed -n 's/^\(> \*\*\|- \*\*Status:\*\* \|- Status: \)Superseded by \[\(ADR-\)\{0,1\}[0-9]\{4\}\](\([^)]*\)).*/\3/p')
+    # Three expressions rather than one with `\|` alternation: `\|` is a GNU extension, and
+    # under the BSD/macOS sed this gate also runs on it matches as a literal pipe — every
+    # extraction would silently miss. Each prefix excludes the others, so no line is read twice.
+    sed -n -e 's/^> \*\*Superseded by \[\(ADR-\)\{0,1\}[0-9]\{4\}\](\([^)]*\)).*/\2/p' \
+      -e 's/^- \*\*Status:\*\* Superseded by \[\(ADR-\)\{0,1\}[0-9]\{4\}\](\([^)]*\)).*/\2/p' \
+      -e 's/^- Status: Superseded by \[\(ADR-\)\{0,1\}[0-9]\{4\}\](\([^)]*\)).*/\2/p')
 }
 
 profile_check_extra() {
