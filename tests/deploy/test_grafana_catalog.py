@@ -10,7 +10,7 @@ from tests.deploy.grafana_catalog import catalog_series
 
 
 def test_catalog_has_expected_series_count() -> None:
-    assert len(catalog_series()) == 25
+    assert len(catalog_series()) == 26
 
 
 def test_catalog_includes_known_instruments() -> None:

@@ -322,6 +322,20 @@ def _row_reconciler(grid: _Grid) -> None:
     )
     grid.add(
         _timeseries(
+            "Reaping-lane budget unattempted",
+            [
+                _target(
+                    _rate("kdive_reconciler_lane_budget_unattempted", "lane"),
+                    "{{lane}}",
+                )
+            ],
+            unit="ops",
+            stacked=True,
+        ),
+        width=4,
+    )
+    grid.add(
+        _timeseries(
             "Errors by category",
             [_target(_rate("kdive_errors", "error_category"), "{{error_category}}")],
             unit="ops",
