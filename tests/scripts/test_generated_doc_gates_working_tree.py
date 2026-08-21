@@ -47,8 +47,10 @@ pytestmark = pytest.mark.skipif(_JUST is None, reason="just is required to drive
 
 _SHADOW_NOTE = "stale shadow kdive must never be imported by the doc gates (#1987)"
 
-# Every generated-artifact gate the issue names, plus its mutating counterpart where
-# one exists: a stale render that passes a check would also *write* a stale artifact.
+# Every generated-artifact gate named by #1987, plus the two sibling gates whose
+# generators also import kdive (rbac-matrix-check, cli-verbs-check) and each pinned
+# gate's mutating counterpart where one exists: a stale render that passes a check
+# would also *write* a stale artifact.
 _GATES = [
     "config-docs-check",
     "docs-check",
@@ -56,6 +58,8 @@ _GATES = [
     "doc-constants-check",
     "env-docs-check",
     "mcp-spec-check",
+    "rbac-matrix-check",
+    "cli-verbs-check",
 ]
 
 
