@@ -327,8 +327,8 @@ def _build_config(instance: RemoteLibvirtInstance) -> RemoteLibvirtConfig:
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when the URI is not mutual-TLS-safe (wrong
-            scheme, ``no_verify``, or an operator-set ``pkipath``) or the gdbstub range is
-            malformed, out of range, or inverted.
+            scheme, ``no_verify``, ``tls_priority``, or an operator-set ``pkipath``) or the
+            gdbstub range is malformed, out of range, or inverted.
     """
     validate_remote_uri(instance.uri)
     gdb_port_min, gdb_port_max = _parse_gdbstub_range(instance)

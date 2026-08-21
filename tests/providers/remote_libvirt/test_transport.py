@@ -65,6 +65,10 @@ def _config(uri: str = "qemu+tls://host.example/system") -> RemoteLibvirtConfig:
         # ';' separators, and percent-unescaped names must not slip past either.
         "qemu+tls://host.example/system?keepalive_interval=5;Tls_Priority=NONE:+ANON-ECDH",
         "qemu+tls://host.example/system?tls%5Fpriority=NONE:+ANON-ECDH",
+        # libvirt honors a valueless name (empty string) and a duplicate name; the name-set
+        # check rejects both spellings without any per-case logic.
+        "qemu+tls://host.example/system?tls_priority",
+        "qemu+tls://host.example/system?tls_priority=NORMAL&tls_priority=NONE:+ANON-ECDH",
     ],
 )
 def test_validate_rejects_unsafe_uris(uri: str) -> None:

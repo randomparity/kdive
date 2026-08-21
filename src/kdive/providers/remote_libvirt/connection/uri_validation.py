@@ -12,11 +12,13 @@ REQUIRED_REMOTE_SCHEME = "qemu+tls"
 
 
 def _query_param_names(query: str) -> set[str]:
-    """The lowercased parameter names of a URI query, split the way libvirt splits it.
+    """The lowercased parameter names of a URI query, split conservatively like libvirt's.
 
-    libvirt's URI parser treats both ``&`` and ``;`` as separators, percent-unescapes
-    parameter names, and matches them case-insensitively (``STRCASEEQ`` in the remote
-    driver), so the fail-closed check must see every spelling libvirt would honor.
+    libvirt's URI parser percent-unescapes parameter names, matches them case-insensitively
+    (``STRCASEEQ`` in the remote driver), and splits on ``&`` — falling back to ``;`` only
+    when no ``&`` remains. Splitting on both separators unconditionally yields a **superset**
+    of the names libvirt would extract (a phantom extra name in mixed-separator queries),
+    which can only over-reject, never under-reject — the fail-closed direction.
     """
     names: set[str] = set()
     for chunk in query.replace(";", "&").split("&"):
@@ -37,10 +39,13 @@ def validate_remote_transport(uri: str) -> None:
     TLS-affecting remote-driver URI parameters reviewed (libvirt remote URIs): ``no_verify``
     (turns server-cert verification off), ``pkipath`` (operator-controlled credential source),
     and ``tls_priority`` (GnuTLS priority string; can select anonymous or weak ciphersuites).
-    These are the only documented query parameters that participate in the x509 handshake;
-    the remaining remote-driver parameters (``mode``, ``proxy``, ``keepalive_*``,
-    ``socket``/``command``/``port``, path/name) do not affect the TLS negotiation. Each of the
-    three is rejected below or in :func:`validate_remote_uri`.
+    The remote driver also extracts an undocumented ``no_sanity`` boolean, which gates only
+    the local structural pre-flight of the loaded certs (``virNetTLSCertSanityCheck``); peer
+    verification is independent of it, and the cert material comes from secret refs rather
+    than the URI, so it is accepted. Everything else (``mode``, ``proxy``, ``keepalive_*``,
+    ``socket``/``command``/``port``, path/name) does not participate in the x509 handshake.
+    Of the TLS-affecting set, ``no_verify`` and ``tls_priority`` are rejected here and
+    ``pkipath`` in :func:`validate_remote_uri`.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` for a non-``qemu+tls`` scheme, a ``no_verify``
