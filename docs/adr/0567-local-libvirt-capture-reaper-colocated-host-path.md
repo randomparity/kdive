@@ -27,13 +27,24 @@ the worker's in-job `reclaim` already unlinks these exact files as a plain host 
 
 ## Decision
 
-Local-libvirt's `CaptureReaper` is a reconciler-side reaper, not a worker-side sweep. Over one
+Local-libvirt's `CaptureReaper` is a reconciler-side reaper, not a worker-side sweep. The
+decision's prerequisites are the standing local-libvirt deployment assumptions: a root
+reconciler colocated with the worker on the kdive host (the same root process the ADR-0111
+domain reaper and the dump-volume reaper already require). Over one
 `KDIVE_LIBVIRT_URI` connection (default `qemu:///system`) it detaches
 `capture_qom_id(job_id)` from the captured domain by QMP `object-del`, tolerating an
 already-missing domain or filter; it then unlinks `pcap_path(system_id, job_id)` directly on
 the shared filesystem, tolerating an already-missing file. It does not use the
 `remote_libvirt_reaper_connections` reachability seam — that seam bounds a remote TCP connect,
-and the local URI has no dial to bound.
+and the local URI has no dial to bound. Process placement is deliberate and two-sided: the
+prepare-time pre-delete below runs in the **worker** before attach, while this reaper's
+detach-and-unlink runs in the **reconciler** during the sweep; neither moves to the other
+process.
+
+Verification of this decision is the implementing spec's test matrix
+(`docs/workflow/specs/2026-08-20-local-capture-reaper-design.md`): call-order proof of
+detach-before-unlink, tolerance of each absent state, the `INFRASTRUCTURE_FAILURE` unlink
+path, the prepare pre-delete's job-keyed scope, and the wiring flip that makes the kind
 
 Local also closes its prepare-time pre-delete gap. Remote's `prepare` pre-deletes the job's own
 stale volume before capture (#1947); local's only prepared the directory. Local `prepare` now
