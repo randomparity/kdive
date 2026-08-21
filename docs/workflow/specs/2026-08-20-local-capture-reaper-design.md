@@ -27,7 +27,10 @@ stale-pcap gap.
   Every tolerated absence proceeds: a missing filter still unlinks; a missing domain ends the
   detach step with no QMP call attempted (there is no domain to address) and the unlink still
   runs — so a row with a missing domain *and* a missing filter reclaims cleanly and returns
-  `True` (test case 4b). A present domain whose QMP `object-del` fails for any non-absence
+  `True` (test case 4b). Domain absence is detected by the typed
+  `libvirt.VIR_ERR_NO_DOMAIN` error code on `lookupByName` — no message matcher needed, unlike
+  the filter path; any other lookup error raises. A present domain whose QMP `object-del`
+  fails for any non-absence
   reason — transitional state, locked monitor, permission — is not tolerated: it raises
   `CONTROL_FAILURE` and the sweep defers the row (test case 6); the reaper does not
   distinguish domain lifecycle states beyond presence.
