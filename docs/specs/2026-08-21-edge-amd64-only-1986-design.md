@@ -35,7 +35,8 @@ observed ppc64le `:edge` consumer between releases).
 - `timeout-minutes` re-sized 350 → 300 with the #1983 convention: the binding case is the tag
   build (observed 132/241 min, n=2, provisional); the main-push shape is provisionally ≲30 min
   pending observation.
-- `docs/adr/0572-*.md` new; `docs/adr/0359-*.md` status region gains the supersession banner and
+- `docs/adr/0572-edge-builds-amd64-only-releases-stay-multiarch.md` new;
+  `docs/adr/0359-multiarch-app-image.md` status region gains the supersession banner and
   status link (both spellings gate-checked); `docs/development/releasing.md` multi-arch
   paragraph updated.
 

@@ -23,6 +23,8 @@ and the generic-cluster equivalent is given alongside.
   so with the chart default `IfNotPresent` a node that cached an older `edge` keeps serving it
   across `helm install`/`upgrade` — silently running stale code (the demo `values-demo.yaml` sets
   this for you). Only a fully offline cluster needs the build-and-load path in step 1.
+  `:edge` is amd64-only ([ADR-0572](../../development/cross-platform.md)); on a `ppc64le`
+  cluster pin a signed `:X.Y.Z` release tag, which publishes multi-arch.
 - **External backends** the cluster can reach: Postgres, an S3-compatible object store
   (MinIO/AWS S3), and an OIDC issuer. For a throwaway demo instead, the first-party bundled-backend
   path (`-f deploy/helm/kdive/values-demo.yaml`, verified with `helm test`) stands up in-chart

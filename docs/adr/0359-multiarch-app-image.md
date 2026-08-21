@@ -1,6 +1,7 @@
 # ADR 0359 — Multi-arch kdive application image (amd64 + ppc64le)
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0572](0572-edge-builds-amd64-only-releases-stay-multiarch.md)
+> **Superseded by [0572](0572-edge-builds-amd64-only-releases-stay-multiarch.md)** (2026-08-21)
 - **Date:** 2026-07-15
 - **Issue:** #1185
 - **Epic:** #1189 (cross-platform dev tooling)
