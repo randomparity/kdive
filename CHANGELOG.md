@@ -128,6 +128,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist reap-once capture convergence in migration 0115
 - Reclaim orphaned traffic captures to convergence
 - Wire the capture sweep with both providers disabled
+- Remote-libvirt CaptureReaper detaches filter, then deletes volume
 
 ### Changed
 
@@ -198,6 +199,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cut duplicated rationale from the reaping-latency diff
 - Mask the status bullet only where the preamble is examined
 - Drop a guard in mask_status_bullet that cannot fire
+- Move pcap_volume_name beside capture_qom_id in ports
 
 ### Documentation
 
@@ -1135,6 +1137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reflow the stop_daemons poll comment
 - Let ruff format the git argv
 - Apply ruff format to the new surplus-remedy test
+- Merge the split ports.traffic imports into two plain lines
 
 ## [0.4.0] - 2026-07-23
 
