@@ -1157,6 +1157,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the supersede extractor portable to BSD sed
 - Pin generated-artifact gates to the working tree's src
 - Cover lane budget metric in dashboard, refresh tool reference, drop ADR ref from tool surface
+- Restore the KDIVE_RELEASE build-arg a range edit dropped
+- Record the ADR-0359 supersession and qualify :edge arch claims
 
 ### Build
 
