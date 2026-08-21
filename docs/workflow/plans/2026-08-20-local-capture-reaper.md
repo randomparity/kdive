@@ -32,6 +32,9 @@ pytest. Spec: `docs/workflow/specs/2026-08-20-local-capture-reaper-design.md`. D
 - Doc-style guard: plain factual prose; no "critical/robust/comprehensive/elegant"; no
   "Sprint".
 - No schema/migration, no MCP surface change, no remote-libvirt behavior change.
+- Rollback: each task ends at exactly one commit; `git revert`-style reset of that commit
+  (or `git checkout -- <files>` before it is made) returns the tree to the task's start
+  state — no task depends on another task's uncommitted work.
 - libvirt binding method names are camelCase — mark each with
   `# noqa: N802 - libvirt binding name` where ruff's N rules see it (existing files already
   carry these).
@@ -50,6 +53,11 @@ Task 3's composition consumes `LocalLibvirtCaptureReaper.from_env()`.
 **Where it fits**: the port implementation; nothing else in this plan works without it.
 
 **Steps**:
+
+0. Baseline: run
+   `uv run python -m pytest tests/providers/local_libvirt/test_reaping.py tests/reconciler/test_capture_reaping_wiring.py -q`
+   and confirm every existing test passes. If the baseline is red, stop and resolve it
+   before writing any test — a red baseline masks the new tests' expected failures.
 
 1. Write the failing tests first — append to `tests/providers/local_libvirt/test_reaping.py`
    (the file currently tests only `LibvirtInfraReaper`; keep those tests untouched). New
@@ -139,6 +147,8 @@ Task 3's composition consumes `LocalLibvirtCaptureReaper.from_env()`.
        def monitor(domain, cmd, flags):
            order.append("object-del")
            return "{}"
+
+       reaper = _reaper(conn, monitor)
 
        def _record_unlink(capture: OrphanedCapture) -> None:
            order.append("unlink")
@@ -256,7 +266,7 @@ Task 3's composition consumes `LocalLibvirtCaptureReaper.from_env()`.
 
    import libvirt
 
-   from kdive.config import config
+   import kdive.config as config
    from kdive.domain.errors import CategorizedError, ErrorCategory
    from kdive.providers.infra.reaping import OrphanedCapture, OwnedDomain
    from kdive.providers.local_libvirt.settings import LIBVIRT_URI
@@ -404,10 +414,6 @@ Task 3's composition consumes `LocalLibvirtCaptureReaper.from_env()`.
            )
    ```
 
-   If `kdive.config` exposes `require` differently than `config.require(...)`, match the
-   exact call shape used in `lifecycle/traffic_capture.py` (`import kdive.config as config`;
-   `config.require(LIBVIRT_URI)`) — copy that file's import and call verbatim.
-
 4. Run `uv run python -m pytest tests/providers/local_libvirt/test_reaping.py -q`. Expected:
    all pass (existing `LibvirtInfraReaper` tests plus the new ones). Then `just lint` and
    `just type` — both clean.
@@ -519,9 +525,7 @@ and untouched here. No later task consumes this beyond the existing handler.
            prepare_pcap_dir(system_id)
            stale = pcap_path(system_id, job_id)
            try:
-               stale.unlink(missing_ok=True)
-           except FileNotFoundError:
-               pass
+               stale.unlink(missing_ok=True)  # missing_ok already silences absence
            except OSError as err:
                _log.warning(
                    "stale pcap %s could not be removed; filter-dump truncates it on attach",
