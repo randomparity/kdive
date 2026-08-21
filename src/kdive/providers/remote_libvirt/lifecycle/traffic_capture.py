@@ -39,12 +39,8 @@ import libvirt
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.traffic import (
-    TrafficCapturer as TrafficCapturer,
-)
-from kdive.providers.ports.traffic import (
-    pcap_volume_name,
-)
+from kdive.providers.ports.traffic import TrafficCapturer as TrafficCapturer
+from kdive.providers.ports.traffic import pcap_volume_name
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
 from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,
