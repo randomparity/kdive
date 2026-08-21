@@ -14,7 +14,8 @@ image set is fenced against an arch-support matrix
 images are built or published multi-arch
 ([ADR-0357](../adr/0357-multi-arch-mock-oidc-image.md),
 [ADR-0358](../adr/0358-publish-mock-oidc-image.md),
-[ADR-0359](../adr/0359-multiarch-app-image.md)).
+[ADR-0359](../adr/0359-multiarch-app-image.md); for the app image that is the
+release tags — `:edge` is amd64-only, [ADR-0572](../adr/0572-edge-builds-amd64-only-releases-stay-multiarch.md)).
 
 ## Host prerequisites
 
@@ -77,7 +78,7 @@ file against it, live in [ADR-0356](../adr/0356-cross-platform-dev-containers.md
 | `prom/prometheus` | pulls | upstream multi-arch (`obs` profile) |
 | `grafana/grafana` | **no image** | opt-in `obs` profile only; dashboards unavailable on ppc64le |
 | mock OIDC issuer | builds/pulls | in-repo mirror (`deploy/mock-oidc`) — see below |
-| `kdive` app image | builds/pulls | repo `Dockerfile`, published multi-arch — see below |
+| `kdive` app image | builds/pulls | repo `Dockerfile`; release tags publish multi-arch, `:edge` is amd64-only — see below |
 
 ### The mock OIDC issuer
 
@@ -115,11 +116,14 @@ build: ./deploy/mock-oidc
 ### The kdive app image
 
 `ghcr.io/randomparity/kdive` is published as a `linux/amd64,linux/ppc64le`
-manifest from the release path
-([ADR-0359](../adr/0359-multiarch-app-image.md)). The `Dockerfile` guards its
+manifest on a `vX.Y.Z` release tag
+([ADR-0359](../adr/0359-multiarch-app-image.md)); the rolling `:edge` built on
+every push to `main` is amd64-only
+([ADR-0572](../adr/0572-edge-builds-amd64-only-releases-stay-multiarch.md)).
+The `Dockerfile` guards its
 `ppc64le` source-build steps (`grpcio` against system OpenSSL/zlib, the
 autotools `drgn` build with `libkdumpfile`) behind `TARGETARCH`, so the `amd64`
-image is unchanged. A POWER operator can `docker pull` the app tier rather than
+image is unchanged. A POWER operator can `docker pull` a release tag rather than
 build it. As with the OIDC mirror, `KDIVE_IMAGE` overrides the compose tag
 (`${KDIVE_IMAGE:-kdive:dev}`) to drive a pre-built image; unset, `build: .` builds
 `kdive:dev` from source and local dev is unchanged.

@@ -3,6 +3,8 @@ name: release-image
 # Build and publish the kdive container image on a SemVer tag, then attach an SBOM,
 # generate provenance, and cosign-sign the immutable digest keyless/OIDC (ADR-0088
 # decision 8). The PR build-without-push lives in ci.yml; this is the release path.
+# A main push builds linux/amd64 only so :edge stays cheap (ADR-0572); a v* tag adds
+# the emulated linux/ppc64le leg for a multi-arch release manifest (ADR-0359).
 on:
   push:
     branches: [main]
@@ -23,27 +25,27 @@ jobs:
   publish:
     name: build · push · sbom · sign
     runs-on: ubuntu-latest
-    # Observed 152-248 min across the last 19 successful runs, all of them main pushes; no apt
-    # step. The emulated linux/ppc64le leg is the whole of that (ADR-0359) and its spread is
-    # already 1.6x min-to-max, so this bound sits just under the 360-minute default it replaces
-    # rather than far below it — the honest value for this job, not a comfortable one.
+    # This job has two shapes (ADR-0572) and one bound, so the binding case sets it.
     #
-    # Sized up rather than down for two reasons. The two v* tag builds to date — v0.3.0 at 132
-    # min and v0.4.0 at 241 min, both successful — sit inside that range, but a tag build does
-    # strictly more work, emitting an SBOM and max provenance per platform, the ppc64le one
-    # under the same emulation that accounts for the whole four hours; v0.4.0 landing at the top
-    # of the range is what that costs. And a fired timeout here is not merely a red check, which
-    # is the second reason and the one that decides the direction: `Build and push` runs with
-    # `push: true`, so a cut-off that lands after it leaves the digest and its :X.Y.Z, :X.Y and
-    # :latest tags in GHCR with `Sign the published digest` never reached — a published,
-    # :latest-tagged, unsigned release image, which nothing in this workflow cleans up and
-    # which costs an uncached ~4h rebuild to replace. That gap is not new (the 360-minute
-    # ceiling ended the job the same way) and #1991 owns closing it; this value only decides
-    # how wide the window is, and at this job's runtime the bound buys 10 minutes out of 360.
+    # A main push now builds linux/amd64 only, natively: nothing compiles from source, so the
+    # expected runtime collapses to the native build plus layer push. Provisional bound ≲30 min
+    # pending observation: the same Dockerfile's amd64 build is observed at ~2.5 min in ci.yml's
+    # PR job, which does not push layers. No apt step (ADR-0566).
     #
-    # This job cannot be meaningfully bounded from observation until the observation is
-    # smaller, which is what #1986 tracks; the value is re-sized there (ADR-0566, #1983).
-    timeout-minutes: 350
+    # A v* tag build keeps the emulated ppc64le leg and per-platform SBOM/provenance, and it is
+    # the binding case for this value: observed 132 min (v0.3.0) and 241 min (v0.4.0), n=2,
+    # itself provisional against a future release doing more work. Sized 300 = max observed
+    # plus ~25% headroom, clear of the 360-minute default it replaces; both figures follow the
+    # #1983 convention of an observed figure with its basis, re-sized when observation improves.
+    #
+    # A fired timeout here is not merely a red check: `Build and push` runs with `push: true`,
+    # so a cut-off that lands after it leaves the digest and its :X.Y.Z, :X.Y and :latest tags
+    # in GHCR with `Sign the published digest` never reached — a published, :latest-tagged,
+    # unsigned release image, which nothing in this workflow cleans up and which costs an
+    # uncached multi-hour rebuild to replace. That gap is not new (the 350- and 360-minute
+    # ceilings ended the job the same way) and #1991 owns closing it; this value only decides
+    # how wide the window is.
+    timeout-minutes: 300
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,8 +68,10 @@ jobs:
           fi
 
       - name: Set up QEMU
-        # Registers binfmt_misc handlers so buildx can build the linux/ppc64le layer
-        # under emulation on this amd64 runner (ADR-0359). No POWER runner is required.
+        # Registers binfmt_misc handlers so buildx can build the linux/ppc64le layer under
+        # emulation on this amd64 runner (ADR-0359). No POWER runner is required. Tag-only:
+        # a main push builds amd64 only and never needs the handlers (ADR-0572).
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Buildx
@@ -100,8 +104,8 @@ jobs:
       - name: Resolve build provenance
         # The short SHA baked into the image (ADR-0370). --short=12 pins the width so it matches
         # the wheel built by release.yml for the same tag; this shallow checkout still has HEAD.
-        # Fail loudly on an empty SHA: this job has no runtime --version assertion (the multi-arch
-        # manifest is pushed, never loaded/run), so a silent empty SHA would skip the Dockerfile
+        # Fail loudly on an empty SHA: this job has no runtime --version assertion (the pushed
+        # manifest is never loaded/run), so a silent empty SHA would skip the Dockerfile
         # stamp and publish a release image mislabeled X.Y.Z-dev with no gate to catch it.
         id: prov
         run: |
@@ -120,11 +124,11 @@ jobs:
           build-args: |
             KDIVE_COMMIT=${{ steps.prov.outputs.sha }}
             KDIVE_RELEASE=${{ startsWith(github.ref, 'refs/tags/v') }}
-          # Publish a multi-arch manifest (ADR-0359). ppc64le builds under QEMU emulation,
-          # which compiles the sdist-only deps (grpcio, drgn, libvirt-python) from source and
-          # is the slow leg of this job; the tradeoff and its alternatives are recorded in the
-          # ADR. amd64 builds natively and its layers are unchanged.
-          platforms: linux/amd64,linux/ppc64le
+          # Publish a multi-arch manifest on a release tag (ADR-0359): ppc64le builds under
+          # QEMU emulation, which compiles the sdist-only deps (grpcio, drgn, libvirt-python)
+          # from source and is the slow leg of the job. A main push builds amd64 only so :edge
+          # stays cheap (ADR-0572); between releases a POWER host pins the newest :X.Y.Z.
+          platforms: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/ppc64le' || 'linux/amd64' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # SBOM + max provenance are release artifacts; a per-commit (:edge) SBOM is
