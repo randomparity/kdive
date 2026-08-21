@@ -1,9 +1,10 @@
 """Guard: CI's apt installs are bounded and retried, and every workflow job declares a timeout.
 
-Two guarantees, one record (ADR-0566), because one is why the other exists. The apt half is
-bounded, retried and written down exactly once. The job half — the `declares_a_timeout` test
-below — began as its backstop and is now the repo-wide rule for every workflow, apt or not
-(#1983); a workflow author who trips a red check from this file is most likely tripping that.
+Two guarantees. The apt half is bounded, retried and written down exactly once in ADR-0566;
+the job half — the `declares_a_timeout` test below — began as its backstop, is now the repo-wide
+rule for every workflow, apt or not, and is recorded in ADR-0571, which supersedes ADR-0566's
+package-installing scope (#1983). A workflow author who trips a red check from this file is most
+likely tripping that.
 
 `Install libvirt build headers` wedged for 13 and 33 minutes on two runs in one afternoon
 against a ~15s normal (#1978), and each time a human had to notice and cancel the job. The
@@ -167,13 +168,13 @@ def test_every_job_in_every_workflow_declares_a_timeout() -> None:
     emulated build burns the same six hours, and scoping this to `_APT_WORKFLOWS` left five
     workflows on the default with nothing to say so.
 
-    **What this does not check, so a green run is not read as more than it is.** ADR-0566's
+    **What this does not check, so a green run is not read as more than it is.** ADR-0571's
     convention has two halves — a value *sized from the job's observed runtime*, and that figure
     written in a comment beside it — and only the first is mechanised here, as presence and as a
     real bound. Nothing ties a declared number to any measurement: a job whose true cost is 15
     seconds can carry 300 with no comment and pass. Checking for a comment would only ever prove
     a `#` is present, never that its figure is current or true, so the provenance half of the
-    convention is held by review and by ADR-0566, not by this test. `records.yml` is the one job
+    convention is held by review and by ADR-0571, not by this test. `records.yml` is the one job
     already carrying a value with no observation written down.
 
     Two declared shapes bound nothing and are rejected outright (#1994). A non-positive value —
