@@ -188,8 +188,9 @@ dump-volume reaper, `RemoteLibvirtInfraReaper` — which backs the `leaked_domai
 - **The gate bounds the connect, not the call.** A host that completes the TCP handshake and then
   stalls — in the TLS handshake, or in a wedged libvirtd's RPC — is still unbounded, and still holds
   its transaction for as long as it stalls. What limits the blast radius there is the lane budget:
-  such a host costs the pass one candidate, not the whole batch. ADR-0568 accepts this residual
-  permanently.
+  such a host costs the pass one candidate, not the whole batch. Bounding a stalled RPC is #1981;
+  the two shapes weighed for it are in the rejected list.
+  (#1981's outcome: ADR-0568 accepts this residual permanently.)
 - **The gate runs after the per-op pkipath is materialized**, because it sits in the injected
   `open_connection` seam that `remote_connection` calls from inside `materialized_pkipath`. An
   unreachable host therefore still costs one materialize-and-delete cycle of TLS material on
@@ -261,17 +262,19 @@ dump-volume reaper, `RemoteLibvirtInfraReaper` — which backs the `leaked_domai
   knob for a hazard the lane budget already caps. Worth revisiting if the budget proves to be spent
   on re-probing rather than on work.
 - **`virConnectSetKeepAlive` on the reaper connection.** Detects a peer that stops answering and
-  fails pending RPCs, which is the post-handshake stall the gate does not cover. Rejected on two
-  grounds: it needs the server side to have keepalive enabled and reports failure — potentially
+  fails pending RPCs, which is the post-handshake stall the gate does not cover. Rejected for now on
+  two grounds: it needs the server side to have keepalive enabled and reports failure — potentially
   closing the connection — against a peer that does not, which is a fail-closed change to every
   existing deployment's reaper path; and it detects a *dead* peer, not a live libvirtd whose storage
-  call is blocked, which is the stall shape a reaping lane actually meets. ADR-0568 rejects this
-  permanently: the lane budget already bounds the residual at one candidate per pass.
+  call is blocked, which is the stall shape a reaping lane actually meets. It is the cheaper of the
+  two escalations if the residual proves load-bearing.
+  (#1981's outcome: ADR-0568 rejects it permanently — the lane budget already caps the residual at
+  one candidate per pass, so the residual never proves load-bearing.)
 - **Extending ADR-0558's supervised child process to reaping.** The other escalation, and the only
-  shape that bounds a live-but-blocked peer. Genuinely more than the hazard needs: a supervisor,
+  shape that bounds a live-but-blocked peer. Genuinely more than #1980's hazard needs: a supervisor,
   a quiescence protocol, and a spool per reaper call, for a lane whose dominant failure is a host
-  that never answers. ADR-0568 rejects this permanently: the lane budget already caps the residual at
-  one candidate per pass.
+  that never answers.
+  (#1981's outcome: ADR-0568 rejects it permanently for the same reason.)
 - **Deriving the lane budget from the reconcile interval instead of a new setting.** Ties the two
   together: an operator lengthening the interval to reduce load would silently lengthen the hold on
   the System lock that every `runs.bind` waits behind. The knobs answer different questions.
