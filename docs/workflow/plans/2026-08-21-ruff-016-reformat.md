@@ -40,10 +40,13 @@ v0.15.15 → v0.16.2.
   `uv lock --check`, `just check-mermaid`, `just adr-status-check`, `just docs-links`,
   `just docs-paths`, and finally `just ci` (the local aggregate mirroring CI's individually
   gated recipes).
-- Worktree quirk: `.github/scripts/mermaid-check/node_modules` is gitignored; symlink it
-  from the primary checkout before running `just check-mermaid`:
+- Worktree quirk: `.github/scripts/mermaid-check/node_modules` is missing in a fresh
+  worktree; symlink it from the primary checkout before running `just check-mermaid`:
   `ln -sfn /home/dave/src/kdive/.github/scripts/mermaid-check/node_modules
-  .github/scripts/mermaid-check/node_modules`.
+  .github/scripts/mermaid-check/node_modules`. Note: `.gitignore`'s trailing-slash
+  `node_modules/` pattern matches real directories but not symlinks — git check-ignore
+  rejects the link, so it shows as `?? .github/scripts/mermaid-check/node_modules` in every
+  `git status --short` through Tasks 2–4. It must never be staged.
 
 ## Task 1 — Bump both ruff pins and relock
 
@@ -102,9 +105,10 @@ Steps:
 3. Post-commit re-check: commit-time prek hooks (trailing-whitespace, end-of-file-fixer,
    detect-secrets) may mutate or reject staged files after Task 2's verification. Run
    `git show --stat HEAD` → extension mix matches Task 2's result; `git diff HEAD^ HEAD --
-   '*.py'` → empty. If a fixer hook fired, its modifications are non-formatter output: STOP
-   and dispose them like any other shape violation — never silently re-stage them into the
-   `style:` commit.
+   '*.py'` → empty. If a fixer hook fired, its modifications are non-formatter output:
+   STOP and dispose them with
+   `git restore --staged --worktree -- <mutated files>` (never `git reset --hard`; denied
+   by settings policy), re-run `uv run ruff format .`, and restart Task 3 from step 1.
 4. Re-run guardrails: `just lint` (expect: `ruff check .` silent, `ruff format --check .`
    green), `just type`, `just test`, `just check-mermaid`, `just docs-links`,
    `just docs-paths`.
@@ -133,3 +137,8 @@ Acceptance criteria: ADR-0569 reads Accepted in the PR's final commit; guard gre
 
 Single-commit revert of the `style:` commit restores the tree and pins wholesale; `uv sync`
 afterwards restores the old environment. No data, schema, or external state involved.
+
+If Task 4 has run, the revert is a pair: revert both the `style:` commit and the ADR
+acceptance commit (or drop the acceptance commit before pushing), so the record never says
+Accepted for an unrealized decision — `adr-status-check` catches shipped-but-Proposed drift
+only and will not flag Accepted-but-unrealized; nothing else catches a half-revert.
