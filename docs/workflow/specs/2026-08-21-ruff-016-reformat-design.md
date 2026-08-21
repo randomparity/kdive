@@ -19,7 +19,10 @@ again.
 - **R3 (format)** — `uv run ruff format .` applied repo-wide under 0.16.2 — the formatter
   alone, not `just format`, whose `ruff check --fix` half applies semantic lint autofixes
   the commit shape forbids; afterwards `just lint` green (`ruff check .` reports nothing,
-  `ruff format --check .` exits 0).
+  `ruff format --check .` exits 0). Empirically (verified with `uvx ruff@0.16.2`) the
+  reformat set is ~207 Markdown files — 0.16 formats Python code blocks in `.md` fences by
+  default — with no `.py` file in it; the spec's steps do not depend on that staying true,
+  but the diff inspection below is where it gets re-checked.
 - **R4 (commit shape)** — all reformatted files land in a single `style:` commit together
   with the pin and lockfile change; `git diff` against `main` contains no semantic edits.
   Verified mechanically: the diff touches only formatting (see §Verification) and the full
@@ -44,12 +47,13 @@ installs 0.16.2) → `uv run ruff format .` → inspect the diff shape → commi
 
 - `uv lock --check` exits 0 (R2).
 - `git grep -n 'ruff==' pyproject.toml` shows exactly `ruff==0.16.2` (R1).
-- Diff-shape check for R4: `git diff main --stat` lists only `.py`/docs/config files the
-  formatter owns plus `pyproject.toml`, `uv.lock`, and the `.pre-commit-config.yaml`
-  `rev:` line; spot-check `git diff main -- '*.py'` hunks carry formatter output only —
-  whitespace/quote/string-prefix normalization plus expected docstring-code-fence
-  blank-line edits (string-literal content, runtime-visible; the `just ci` test run backs
-  them). No identifier or other literal changes. Anything else stops the ship.
+- Diff-shape check for R4: `git diff main --stat` lists only files the formatter owns plus
+  `pyproject.toml`, `uv.lock`, and the `.pre-commit-config.yaml` `rev:` line; check the
+  extension mix against the fresh `ruff format --check` run (currently: all `.md`), and
+  spot-check hunks carry formatter output only — inside Markdown ```python fences:
+  comment-spacing and blank-line normalization (served-docs content edits, expected and
+  backed by the `just ci` test run). No identifier or other literal changes. Anything else
+  stops the ship.
 - `.pre-commit-config.yaml` diff is exactly the `rev:` line, now `rev: v0.16.2` (R1);
   `prek validate-config` or `prek run --help` unaffected — no hook id or arg changes.
 - `uv run ruff check .` exits 0 under 0.16.2 before merge — the headline benefit (weekly
