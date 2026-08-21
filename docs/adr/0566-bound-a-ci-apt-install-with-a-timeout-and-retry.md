@@ -4,6 +4,8 @@
 
 Accepted (2026-08-17)
 
+> **Superseded by [0571](0571-every-job-in-every-workflow-declares-a-timeout.md)** (2026-08-21)
+
 ## Context
 
 `Install libvirt build headers` wedged twice in one afternoon: 33 minutes on the
