@@ -14,26 +14,42 @@ stale-pcap gap.
 
 - **R1 (order)** — the reaper detaches `capture_qom_id(job_id)` on the captured domain
   *before* unlinking `pcap_path(system_id, job_id)`. A genuine filter/detach error aborts
-  before the unlink. Tests assert call order.
+  before the unlink. Tests assert call order. After a successful `object-del` the filter is
+  destroyed synchronously and its file handle closed, so no QEMU write survives into the
+  unlink; the residual — a truncated pcap nobody reads — is accepted because the owning job is
+  dead and reclaim's purpose is space, not artifact fidelity.
 - **R2 (tolerance)** — an already-missing domain (`VIR_ERR_NO_DOMAIN`), an already-missing
   filter, and an already-missing pcap file (`missing_ok`) are each tolerated and do not fail
   the reclaim. The filter-absence matcher is the live capturer's exact message-text matcher
   (`traffic_capture.py` `_is_not_found`): the raised `libvirt.libvirtError`'s lowercased text
-  must contain `"not found"` or `"devicenotfound"`. It is message-based because QMP
-  passthrough errors carry no distinct `VIR_ERR_*` code (the live capturer's module docstring
-  documents this); a timeout or protocol error text does not match, so a genuine detach
-  failure still aborts before the unlink.
+  must contain `"not found"` or `"devicenotfound"`. A timeout or protocol error text does not
+  match, so a genuine detach failure still aborts before the unlink.
   Every tolerated absence proceeds: a missing filter still unlinks; a missing domain ends the
   detach step with no QMP call attempted (there is no domain to address) and the unlink still
   runs — so a row with a missing domain *and* a missing filter reclaims cleanly and returns
-  `True` (test case 4b).
+  `True` (test case 4b). A present domain whose QMP `object-del` fails for any non-absence
+  reason — transitional state, locked monitor, permission — is not tolerated: it raises
+  `CONTROL_FAILURE` and the sweep defers the row (test case 6); the reaper does not
+  distinguish domain lifecycle states beyond presence.
+  Known fragility, inherited unchanged from the live capturer and the remote reaper: the
+  matcher is message-text-based because QMP passthrough errors carry no `VIR_ERR_*` code, so
+  a libvirt/QMP wording change could misclassify an absence. Tolerated matches are logged at
+  info with the qom id and domain, which is the monitoring signal for unexpected tolerance.
 - **R3 (colocation answered)** — answered by ADR-0567: reconciler-side reaper over
   `qemu:///system`, unlink on the shared host path. The implementation is that shape.
 - **R4 (stale pcap settled)** — closed: `LocalLibvirtTrafficCapture.prepare` unlinks this
   job's own stale pcap (best-effort, `missing_ok`, suppress `OSError`) before returning the
   path. Job-keyed only — never a whole-System sweep, which would remove a concurrent
   capture's live file.
-- **R5 (guardrails)** — `just ci` green.
+
+The per-job advisory ownership fence (ADR-0556) is what keeps the reaper off a live worker's
+row: a worker holds the fence from before prepare through reclaim, so the prepare/attach
+window and the sweep cannot interleave for one job; a file orphaned after a worker death is
+the sweep's candidate by design.
+- **R5 (guardrails)** — `just ci` green (the justfile's `ci:` recipe — the repo's full PR
+  gate: lint, type, shell/workflow lints, mermaid, doc and config guards, and the test suite;
+  falsifiable by its exit status). The component gate for this change is the test matrix in
+  §Testing plus the wiring tests.
 
 ## Components
 
