@@ -70,8 +70,12 @@ installs 0.16.2) → `uv run ruff format .` → inspect the diff shape → commi
 Dependency-change trigger, scoped honestly: this is a dev-tooling bump; no runtime surface
 changes.
 
-- **Boundary inventory** — two supply-chain edges: `uv sync` fetching ruff 0.16.2 from
-  PyPI, and prek fetching the `ruff-pre-commit` v0.16.2 hook repo from GitHub. Nothing is
+- **Boundary inventory** — three edges: `uv sync` fetching ruff 0.16.2 from
+  PyPI; prek fetching the `ruff-pre-commit` v0.16.2 hook repo from GitHub; and the
+  secrets-scanning guardrail — the reformat splits inline `# pragma: allowlist secret`
+  comments off their secret lines in doc fences, so `.secrets.baseline` gains three audited
+  false-positive entries (example credentials in plan docs, recorded decision #2005).
+  Nothing is
   added to what the shipped service can reach; neither ruff copy ships in any artifact.
 - **Actor model** — an attacker controlling PyPI package content or the hook repo's tag.
   Trust placement: PyPI plus uv's lockfile hash verification for the first edge; for the
@@ -82,7 +86,8 @@ changes.
   --locked` (what CI runs) refuses a mismatched artifact. The hook edge is controlled by
   the pinned `rev:` tag on a first-party (astral-sh) repository; no new control added.
 - **Out of scope** — runtime dependency risk (none touched), CI action references
-  (untouched), secrets (none involved).
+  (untouched). Secrets are involved only as scanner false positives in docs (above); no
+  runtime secret path changes.
 
 ## Testing
 
