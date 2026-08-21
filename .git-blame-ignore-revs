@@ -1,2 +1,2 @@
-# ruff 0.16 whitespace-only formatter reformat (ADR-0569), merged via PR #2006
+# ruff 0.16 formatter-output reformat of Markdown python fences (ADR-0569), merged via PR #2006
 bf1c6b94802e7061c9e0d20759a2b133e2ab7d21
