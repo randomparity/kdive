@@ -3,9 +3,12 @@
 Mirrors the worker's per-job telemetry for the reconciler's per-pass boundary: one span
 per reconcile pass (``kind=INTERNAL``), a pass-duration histogram, and a reconcile-lag
 gauge — the wall-clock gap between the *scheduled* pass start and the *actual* start,
-which grows when a pass overruns its interval (a backlogged or wedged reconciler). Labels
-are restricted to the allowlist (``outcome``); no tenant/principal identifier travels as a
-label (ADR-0090 §4).
+which grows when a pass overruns its interval (a backlogged or wedged reconciler). The
+``kdive.reconciler.repairs`` counter carries the per-repair-kind counts (ADR-0190 A) and
+``kdive.reconciler.lane_budget_unattempted`` carries, per reaping lane, the candidates the
+lane's ADR-0565 pass budget stopped it from starting (#1982). Labels are restricted to
+the allowlist (``outcome``, ``repair_kind``, ``lane``); no tenant/principal identifier
+travels as a label (ADR-0090 §4).
 
 When no telemetry is wired (unit tests, a process without OTel),
 :meth:`ReconcilerTelemetry.disabled` yields a no-op so the loop code path is unconditional.
@@ -67,6 +70,14 @@ class ReconcilerTelemetry:
             unit="1",
             description="Categorized failures at their backend origin, by error category.",
         )
+        self._lane_budget_unattempted: Counter = meter.create_counter(
+            "kdive.reconciler.lane_budget_unattempted",
+            unit="1",
+            description=(
+                "Candidates a reaping lane left unattempted after spending its pass budget "
+                "(ADR-0565)."
+            ),
+        )
 
     @classmethod
     def disabled(cls) -> ReconcilerTelemetry:
@@ -96,6 +107,19 @@ class ReconcilerTelemetry:
             self._repairs.add(count, {"repair_kind": repair_kind})
         for _ in failures:
             self._errors.add(1, {"error_category": ErrorCategory.INFRASTRUCTURE_FAILURE.value})
+
+    def record_lane_budget_unattempted(self, counts: Mapping[str, int]) -> None:
+        """Emit per-lane candidates a spent pass budget left unattempted (#1982).
+
+        Args:
+            counts: ``{lane: count}`` keyed by the lanes' log names (``capture``,
+                ``dump-volume``); each count (including 0) is added so the series is
+                present from the first pass. Signal, not failure — never ``kdive.errors``.
+        """
+        if not self._enabled:
+            return
+        for lane, count in counts.items():
+            self._lane_budget_unattempted.add(count, {"lane": lane})
 
     @contextlib.contextmanager
     def pass_span(self) -> Iterator[_PassSpan]:

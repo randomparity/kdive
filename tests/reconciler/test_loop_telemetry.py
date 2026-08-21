@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from datetime import timedelta
 from typing import cast
 
@@ -125,13 +125,14 @@ def _metric_meta(reader: InMemoryMetricReader, name: str) -> tuple[str, str]:
 
 
 def test_instrument_names_and_units() -> None:
-    """The four instruments use their documented names + units (ADR-0090 §5)."""
+    """The five instruments use their documented names + units (ADR-0090 §5)."""
     telemetry, reader, _ = _telemetry()
     # Touch every instrument so each series is exported.
     with telemetry.pass_span() as span:
         span.set_outcome("ok")
     telemetry.observe_lag(0.0)
     telemetry.record_repairs({"orphaned_systems": 0}, failures=["orphaned_systems"])
+    telemetry.record_lane_budget_unattempted({"capture": 0, "dump-volume": 2})
 
     names = _metric_names(reader)
     assert {
@@ -139,12 +140,14 @@ def test_instrument_names_and_units() -> None:
         "kdive.reconcile.lag",
         "kdive.reconciler.repairs",
         "kdive.errors",
+        "kdive.reconciler.lane_budget_unattempted",
     } <= names
 
     assert _metric_meta(reader, "kdive.reconcile.duration")[0] == "s"
     assert _metric_meta(reader, "kdive.reconcile.lag")[0] == "s"
     assert _metric_meta(reader, "kdive.reconciler.repairs")[0] == "1"
     assert _metric_meta(reader, "kdive.errors")[0] == "1"
+    assert _metric_meta(reader, "kdive.reconciler.lane_budget_unattempted")[0] == "1"
 
 
 def test_observe_lag_records_zero_gap() -> None:
@@ -235,6 +238,22 @@ def test_record_repairs_disabled_is_noop() -> None:
     telemetry = ReconcilerTelemetry.disabled()
     # No meter wired; must be a silent no-op rather than raising.
     telemetry.record_repairs({"orphaned_systems": 1}, failures=["orphaned_systems"])
+
+
+def test_record_lane_budget_unattempted_emits_per_lane_counts() -> None:
+    """Each lane's unattempted count is added under its own `lane` label, zeros included."""
+    telemetry, reader, _ = _telemetry()
+    telemetry.record_lane_budget_unattempted({"capture": 4, "dump-volume": 0})
+
+    points = _counter_points(reader, "kdive.reconciler.lane_budget_unattempted")
+    assert points[(("lane", "capture"),)] == 4
+    assert points[(("lane", "dump-volume"),)] == 0
+
+
+def test_record_lane_budget_unattempted_disabled_is_noop() -> None:
+    telemetry = ReconcilerTelemetry.disabled()
+    # No meter wired; must be a silent no-op rather than raising.
+    telemetry.record_lane_budget_unattempted({"capture": 1, "dump-volume": 1})
 
 
 def test_disabled_pass_span_is_noop() -> None:
@@ -342,6 +361,7 @@ class _RecordingTelemetry:
     def __init__(self) -> None:
         self.lags: list[float] = []
         self.recorded: list[tuple[object, object]] = []
+        self.lane_unattempted: list[Mapping[str, int]] = []
         self.span = _RecordingSpan()
 
     def observe_lag(self, lag_seconds: float) -> None:
@@ -349,6 +369,9 @@ class _RecordingTelemetry:
 
     def record_repairs(self, counts: object, failures: object) -> None:
         self.recorded.append((counts, failures))
+
+    def record_lane_budget_unattempted(self, counts: Mapping[str, int]) -> None:
+        self.lane_unattempted.append(counts)
 
     @contextlib.contextmanager
     def pass_span(self) -> Iterator[_RecordingSpan]:
@@ -415,6 +438,26 @@ def test_pass_loop_records_repair_counts_and_failures(
     counts, failures = telemetry.recorded[0]
     assert counts == report.repair_counts
     assert failures == ("leaked_domains",)
+
+
+def test_pass_loop_records_lane_budget_unattempted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One pass forwards the report's per-lane unattempted counts to telemetry (#1982)."""
+    telemetry = _RecordingTelemetry()
+    report = ReconcileReport(
+        expired_allocations=0,
+        orphaned_systems=0,
+        abandoned_jobs=0,
+        dead_sessions=0,
+        leaked_domains=0,
+        idempotency_keys_gc_count=0,
+        reaped_captures=2,
+        captures_budget_unattempted=5,
+        dump_volumes_budget_unattempted=3,
+        failures=(),
+    )
+    _run_one_pass(monkeypatch, telemetry, report)
+
+    assert telemetry.lane_unattempted == [{"capture": 5, "dump-volume": 3}]
 
 
 def test_pass_loop_observes_nonnegative_lag(monkeypatch: pytest.MonkeyPatch) -> None:

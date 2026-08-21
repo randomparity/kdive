@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Protocol
 from uuid import UUID
@@ -77,6 +78,24 @@ DEFAULT_CAPTURE_RETRY_CAP = timedelta(hours=6)
 # Caps the doubling exponent so a row failing for a very long time cannot overflow the interval
 # arithmetic; the LEAST against the cap already bounds the result long before this bites.
 _BACKOFF_EXPONENT_CAP = 20
+
+
+@dataclass(frozen=True, slots=True)
+class ReapLaneOutcome:
+    """What one host-state reaping-lane pass did (ADR-0565, #1982).
+
+    ``reaped`` keeps the lane's existing meaning — what was reclaimed; a candidate the budget
+    left unattempted is not counted. ``budget_unattempted`` is the count of candidates the pass
+    would otherwise have attempted but its budget stopped it from starting; ``0`` when the pass
+    drained its worklist. Ending short is not a fault and raises nothing — the count is signal,
+    surfaced through the pass report and telemetry, never ``kdive.errors``.
+    """
+
+    #: Which lane ran — the same name the budget log line uses.
+    lane: str
+    reaped: int
+    budget_unattempted: int = 0
+
 
 _TERMINAL_CAPTURE_STATE_VALUES = (
     JobState.SUCCEEDED.value,
@@ -201,8 +220,12 @@ def _lane_deadline(budget: timedelta) -> float:
     return time.monotonic() + budget.total_seconds()
 
 
-def _budget_spent(deadline: float, lane: str, *, remaining: int) -> bool:
-    """Whether ``lane`` must stop starting candidates, logging what it leaves behind (ADR-0565).
+def _budget_spent(deadline: float, lane: str, *, remaining: int) -> int | None:
+    """How many candidates ``lane`` leaves behind if it must stop starting them now (ADR-0565).
+
+    Returns :data:`None` while the budget lasts, else ``remaining`` — the count of candidates the
+    pass would otherwise have attempted. The caller surfaces that count on the lane's
+    :class:`ReapLaneOutcome` (#1982); the INFO line stays as the human-readable echo.
 
     Called only **between** candidates, before the next candidate's transaction opens, so a spent
     budget can never unwind a transaction that is already open. That placement is the whole of the
@@ -211,18 +234,17 @@ def _budget_spent(deadline: float, lane: str, *, remaining: int) -> bool:
     transaction — and releasing the ownership fence or the System lock — with host state still
     being mutated.
 
-    Ending short is not a fault and is not counted. The INFO line naming the unattempted count is
-    the whole of the signal today; making it observable beyond the log is #1982.
+    Ending short is not a fault and is not counted as one.
     """
     if time.monotonic() < deadline:
-        return False
+        return None
     _log.info(
         "reconciler: %s lane ended its pass on the budget with %d candidate(s) unattempted; "
         "they are re-derived next pass",
         lane,
         remaining,
     )
-    return True
+    return remaining
 
 
 async def repair_leaked_domains(conn: AsyncConnection, reaper: InfraReaper) -> int:
@@ -375,7 +397,7 @@ async def reap_orphaned_dump_volumes(
     grace: timedelta,
     *,
     budget: timedelta = DEFAULT_LANE_BUDGET,
-) -> int:
+) -> ReapLaneOutcome:
     """Delete host_dump volumes orphaned by a non-graceful worker/host crash (ADR-0094, ADR-0562).
 
     Each candidate's final classification and its delete run in **one transaction holding
@@ -408,15 +430,17 @@ async def reap_orphaned_dump_volumes(
     then stalls is bounded only by this budget, which caps it at one volume per pass (#1981).
 
     Returns:
-        The number of volumes deleted. Skips — a contended System, a live holder, a volume in the
-        grace window, a volume whose identity changed, a volume no reachable host held, and a volume
-        the budget left unattempted — are not counted and are not faults.
+        A :class:`ReapLaneOutcome`: ``reaped`` is the number of volumes deleted; skips — a
+        contended System, a live holder, a volume in the grace window, a volume whose identity
+        changed, a volume no reachable host held — and a volume the budget left unattempted are
+        not counted as reaped. ``budget_unattempted`` reports how many due volumes the budget
+        stopped the lane from starting (#1982); ``0`` when the pass drained its worklist.
     """
     require_top_level_transaction(conn, "the host_dump orphan sweep")
     await reap_stale_host_dump_volume_leases(conn)
     volumes = await reaper.list_dump_volumes()
     if not volumes:
-        return 0
+        return ReapLaneOutcome("dump-volume", 0)
     deadline = _lane_deadline(budget)
     # In its own transaction, so the connection is idle again afterwards. On the reconciler's
     # non-autocommit pool connection a bare `execute` opens a transaction that lives until the pool
@@ -426,19 +450,19 @@ async def reap_orphaned_dump_volumes(
     # exists for).
     async with conn.transaction():
         cutoff_epoch = await _now_epoch(conn) - grace.total_seconds()
-    # Filtered before the loop rather than skipped inside it, so the unattempted count the budget
-    # logs is the number of volumes this pass would otherwise have deleted. Counting the trailing
-    # slice of the raw list would report a backlog that is mostly volumes still inside the grace
-    # window, which the lane was never going to touch — and that log line is the whole of the signal
-    # a truncated lane leaves (#1982).
+    # Filtered before the loop rather than skipped inside it, so ``budget_unattempted`` counts
+    # only volumes this pass would otherwise have deleted. Counting the trailing slice of the raw
+    # list would report a backlog that is mostly volumes still inside the grace window, which the
+    # lane was never going to touch (#1982).
     due = [volume for volume in volumes if volume.mtime_epoch_s < cutoff_epoch]
     reaped = 0
     for index, volume in enumerate(due):
-        if _budget_spent(deadline, "dump-volume", remaining=len(due) - index):
-            break
+        unattempted = _budget_spent(deadline, "dump-volume", remaining=len(due) - index)
+        if unattempted is not None:
+            return ReapLaneOutcome("dump-volume", reaped, unattempted)
         if await _delete_if_still_orphaned(conn, reaper, volume):
             reaped += 1
-    return reaped
+    return ReapLaneOutcome("dump-volume", reaped)
 
 
 async def _delete_if_still_orphaned(
@@ -511,7 +535,7 @@ async def reap_orphaned_captures(
     retry_base: timedelta,
     retry_cap: timedelta,
     budget: timedelta = DEFAULT_LANE_BUDGET,
-) -> int:
+) -> ReapLaneOutcome:
     """Reclaim traffic-capture host state orphaned by a terminal job row (ADR-0556).
 
     Nothing outside a ``capture_traffic`` job reclaims its host state: a dead worker can leave an
@@ -542,22 +566,26 @@ async def reap_orphaned_captures(
     leading group and the next pass reaches it first.
 
     Returns:
-        The number of captures this pass reclaimed. Every other outcome is not a fault and is not
-        counted: a fenced row, a row whose ownership chain has no Resource name, a provider that
-        declined, and a provider that raised are all deferred behind a database-clock retry
-        deadline with bounded backoff, and remain observable in the per-row logs.
+        A :class:`ReapLaneOutcome`: ``reaped`` is the number of captures this pass reclaimed.
+        Every other outcome is not a fault and is not counted as reaped: a fenced row, a row
+        whose ownership chain has no Resource name, a provider that declined, and a provider that
+        raised are all deferred behind a database-clock retry deadline with bounded backoff, and
+        remain observable in the per-row logs. ``budget_unattempted`` reports how many selected
+        candidates the budget stopped the lane from dispatching (#1982); ``0`` when the pass
+        dispatched its whole batch.
     """
     require_top_level_transaction(conn, "the orphaned capture sweep")
     kinds = dispatchable_capture_kinds(reapers)
     if not kinds or batch <= 0:
-        return 0
+        return ReapLaneOutcome("capture", 0)
     async with conn.transaction():
         candidates = await _orphaned_capture_rows(conn, kinds, settle, batch)
     deadline = _lane_deadline(budget)
     reaped = 0
     for index, row in enumerate(candidates):
-        if _budget_spent(deadline, "capture", remaining=len(candidates) - index):
-            break
+        unattempted = _budget_spent(deadline, "capture", remaining=len(candidates) - index)
+        if unattempted is not None:
+            return ReapLaneOutcome("capture", reaped, unattempted)
         if await _reclaim_capture(
             conn,
             reapers[str(row["provider_kind"])],
@@ -566,7 +594,7 @@ async def reap_orphaned_captures(
             retry_cap=retry_cap,
         ):
             reaped += 1
-    return reaped
+    return ReapLaneOutcome("capture", reaped)
 
 
 async def _orphaned_capture_rows(
