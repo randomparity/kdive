@@ -40,6 +40,7 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.traffic import TrafficCapturer as TrafficCapturer
+from kdive.providers.ports.traffic import pcap_volume_name
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
 from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,
@@ -53,9 +54,9 @@ _log = logging.getLogger(__name__)
 # A remote System's traffic rides a libvirt-managed dir/fs storage pool; only those pool types
 # expose a host directory the filter-dump can write into and libvirt can then list as a volume.
 _DIR_POOL_TYPES = frozenset({"dir", "fs", "netfs"})
-# The deterministic per-job pcap volume name carries the owning System (for the stale sweep) and
-# the job (uniqueness). ``kdive-pcap-<system_id>-<job_id>.pcap``.
-_PCAP_VOLUME_SUFFIX = ".pcap"
+# The deterministic per-job pcap volume name convention lives in providers.ports.traffic beside
+# capture_qom_id: the capturer and the ADR-0556 reaper must spell the destination identically,
+# and the gated-child overlay shadows this module, so the shared convention cannot live here.
 
 # Operator guidance when the remote hypervisor could not write the capture pcap into the pool.
 REMOTE_PCAP_WRITE_REMEDIATION = (
@@ -64,11 +65,6 @@ REMOTE_PCAP_WRITE_REMEDIATION = (
     "runtime user can create files in (the pool already backs the domain's disk images, so this "
     "usually indicates a full or read-only pool filesystem)"
 )
-
-
-def pcap_volume_name(system_id: UUID, job_id: UUID) -> str:
-    """The deterministic per-job pcap volume filename inside the storage pool."""
-    return f"kdive-pcap-{system_id}-{job_id}{_PCAP_VOLUME_SUFFIX}"
 
 
 class _CaptureVolume(Protocol):
@@ -440,5 +436,4 @@ __all__ = [
     "RemoteLibvirtTrafficCapture",
     "REMOTE_PCAP_WRITE_REMEDIATION",
     "discover_netdev_id",
-    "pcap_volume_name",
 ]

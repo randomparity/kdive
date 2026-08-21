@@ -38,6 +38,20 @@ def capture_qom_id(job_id: UUID) -> str:
     return f"kdive-dump-{job_id}"
 
 
+_PCAP_VOLUME_SUFFIX = ".pcap"
+
+
+def pcap_volume_name(system_id: UUID, job_id: UUID) -> str:
+    """The deterministic per-job remote pcap volume filename inside the storage pool.
+
+    Defined here, beside :func:`capture_qom_id`, for the same reason: the capture that creates
+    the destination and the ADR-0556 reaper that reclaims it must spell it identically, and the
+    gated-child overlay shadows the lifecycle capturer module, so the shared convention cannot
+    live there. System-scoped for operator diagnosability, job-scoped for uniqueness.
+    """
+    return f"kdive-pcap-{system_id}-{job_id}{_PCAP_VOLUME_SUFFIX}"
+
+
 def _canonical_bytes(model: BaseModel) -> bytes:
     payload = model.model_dump(mode="json", exclude_none=True)
     return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()

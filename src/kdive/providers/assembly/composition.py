@@ -497,14 +497,16 @@ class ProviderComposition:
 
         Only the two kinds that implement traffic capture appear. A future provider's
         capture-reclamation contract needs its own decision rather than inheriting support from a
-        capability flag, so fault-inject contributes nothing even when it is enabled. Both entries
-        are currently ``NullCaptureReaper``, which is disabled wiring: the sweep leaves those kinds
-        out of selection entirely, so neither can be dispatched or marked complete until #1947 and
-        #1948 each register their own.
+        capability flag, so fault-inject contributes nothing even when it is enabled.
+        Remote-libvirt registers its concrete reaper (#1947); local-libvirt is still
+        ``NullCaptureReaper`` disabled wiring (#1948), which the sweep leaves out of selection
+        entirely so it can neither be dispatched nor marked complete.
         """
         builders: dict[ResourceKind, Callable[[], CaptureReaper]] = {
             ResourceKind.LOCAL_LIBVIRT: local_composition.build_capture_reaper,
-            ResourceKind.REMOTE_LIBVIRT: remote_composition.build_capture_reaper,
+            ResourceKind.REMOTE_LIBVIRT: lambda: remote_composition.build_capture_reaper(
+                secret_registry=self._secret_registry
+            ),
         }
         return MappingProxyType(
             {
