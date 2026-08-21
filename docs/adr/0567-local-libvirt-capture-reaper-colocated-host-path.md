@@ -16,8 +16,10 @@ write it (ADR-0385). ADR-0556 explicitly delegated one question to #1948: can th
 performing reconciliation reach that worker-owned path, or must the port contract execute
 worker-side?
 
-The deployment facts answer it. Local-libvirt's defining property is that the provider host
-*is* the kdive host: the pcap path is a fixed absolute path on that host's filesystem, and the
+The deployment facts answer it. Local-libvirt requires the provider host to be the kdive host —
+`qemu:///system` is a local URI, so a "local" provider on a remote host is a contradiction, and
+the pcap path exists only on that host's filesystem. The pcap path is a fixed absolute path on
+that host, and the
 reconciler for this kind already drives local-host state over the same `qemu:///system`
 connection the worker uses — the `InfraReaper` (ADR-0111) destroys local domains and the
 dump-volume reaper reclaims local files from the reconciler process today. The reconciler and
