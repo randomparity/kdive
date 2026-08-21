@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from uuid import uuid4
 
 import libvirt
@@ -139,3 +140,61 @@ def test_reclaim_deletes_file_and_tolerates_absent(tmp_path) -> None:
     cap.reclaim(str(dest))
     assert not dest.exists()
     cap.reclaim(str(dest))  # second reclaim (already gone) must not raise
+
+
+def test_prepare_pre_deletes_this_jobs_stale_pcap(monkeypatch, tmp_path) -> None:
+    """An at-least-once retry starts from a clean file (ADR-0567); job-keyed, not a sweep."""
+    system_id, job_id, other_job = uuid4(), uuid4(), uuid4()
+    stale = tmp_path / f"{system_id}-{job_id}.pcap"
+    concurrent = tmp_path / f"{system_id}-{other_job}.pcap"
+    stale.write_bytes(b"stale")
+    concurrent.write_bytes(b"live")
+    monkeypatch.setattr(traffic_capture_module, "prepare_pcap_dir", lambda _sid: None)
+    monkeypatch.setattr(
+        traffic_capture_module,
+        "pcap_path",
+        lambda sid, jid: tmp_path / f"{sid}-{jid}.pcap",
+    )
+
+    _capturer(_noop_monitor).prepare(system_id, job_id)
+
+    assert not stale.exists()  # this job's stale file is gone
+    assert concurrent.read_bytes() == b"live"  # a different job's file survives
+
+
+def test_prepare_tolerates_an_absent_stale_pcap(monkeypatch, tmp_path) -> None:
+    system_id, job_id = uuid4(), uuid4()
+    monkeypatch.setattr(traffic_capture_module, "prepare_pcap_dir", lambda _sid: None)
+    monkeypatch.setattr(
+        traffic_capture_module,
+        "pcap_path",
+        lambda sid, jid: tmp_path / f"{sid}-{jid}.pcap",
+    )
+
+    dest = _capturer(_noop_monitor).prepare(system_id, job_id)  # must not raise
+
+    assert dest == str(tmp_path / f"{system_id}-{job_id}.pcap")
+
+
+def test_prepare_logs_a_permission_failure_but_still_succeeds(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    """A suppressed unlink failure is operator-visible, never silent (ADR-0567)."""
+    system_id, job_id = uuid4(), uuid4()
+    stale = tmp_path / f"{system_id}-{job_id}.pcap"
+    stale.write_bytes(b"stale")
+    monkeypatch.setattr(traffic_capture_module, "prepare_pcap_dir", lambda _sid: None)
+    monkeypatch.setattr(
+        traffic_capture_module,
+        "pcap_path",
+        lambda sid, jid: tmp_path / f"{sid}-{jid}.pcap",
+    )
+
+    def _refuse(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError(1, "operation not permitted")
+
+    monkeypatch.setattr(Path, "unlink", _refuse)
+    with caplog.at_level("WARNING"):
+        dest = _capturer(_noop_monitor).prepare(system_id, job_id)
+    assert dest == str(stale)  # prepare still returns the path
+    assert "could not be removed" in caplog.text
