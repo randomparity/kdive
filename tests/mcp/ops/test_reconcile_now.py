@@ -152,6 +152,9 @@ def test_reconcile_now_clean_state_returns_zero_summary(migrated_url: str) -> No
         assert resp.data["promoted_allocations"] == 0
         assert resp.data["queue_timeouts"] == 0
         assert resp.data["reconciled_inventory"] == 0
+        # The budgeted reaping lanes drained: nothing was left unattempted (#1982).
+        assert resp.data["captures_budget_unattempted"] == 0
+        assert resp.data["dump_volumes_budget_unattempted"] == 0
         repair_counts = resp.data["repair_counts"]
         assert isinstance(repair_counts, dict)
         assert tuple(repair_counts) == ALL_REPAIR_KINDS

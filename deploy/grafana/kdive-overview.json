@@ -837,6 +837,50 @@
     },
     {
       "type": "timeseries",
+      "title": "Reaping-lane budget unattempted",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (lane) (rate(kdive_reconciler_lane_budget_unattempted[$__rate_interval]))",
+          "legendFormat": "{{lane}}",
+          "refId": "A",
+          "range": true
+        }
+      ],
+      "id": 22,
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 0,
+        "y": 69
+      }
+    },
+    {
+      "type": "timeseries",
       "title": "Errors by category",
       "datasource": {
         "type": "prometheus",
@@ -871,11 +915,11 @@
           "range": true
         }
       ],
-      "id": 22,
+      "id": 23,
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
+        "x": 4,
         "y": 69
       }
     },
@@ -883,7 +927,7 @@
       "type": "row",
       "title": "Jobs / workers",
       "collapsed": false,
-      "id": 23,
+      "id": 24,
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -928,7 +972,7 @@
           "range": true
         }
       ],
-      "id": 24,
+      "id": 25,
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -972,7 +1016,7 @@
           "range": true
         }
       ],
-      "id": 25,
+      "id": 26,
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1016,7 +1060,7 @@
           "range": true
         }
       ],
-      "id": 26,
+      "id": 27,
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1060,7 +1104,7 @@
           "range": true
         }
       ],
-      "id": 27,
+      "id": 28,
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1072,7 +1116,7 @@
       "type": "row",
       "title": "Provider operations",
       "collapsed": false,
-      "id": 28,
+      "id": 29,
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -1117,7 +1161,7 @@
           "range": true
         }
       ],
-      "id": 29,
+      "id": 30,
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1161,7 +1205,7 @@
           "range": true
         }
       ],
-      "id": 30,
+      "id": 31,
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1173,7 +1217,7 @@
       "type": "row",
       "title": "Capture",
       "collapsed": false,
-      "id": 31,
+      "id": 32,
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -1218,7 +1262,7 @@
           "range": true
         }
       ],
-      "id": 32,
+      "id": 33,
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -1262,7 +1306,7 @@
           "range": true
         }
       ],
-      "id": 33,
+      "id": 34,
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -1306,7 +1350,7 @@
           "range": true
         }
       ],
-      "id": 34,
+      "id": 35,
       "gridPos": {
         "h": 8,
         "w": 8,

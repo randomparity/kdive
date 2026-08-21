@@ -330,7 +330,7 @@ def test_the_sweep_cannot_delete_the_volume_of_a_capture_claimed_mid_pass(
 
             async def _sweep() -> int:
                 async with pool.connection() as conn:
-                    return await reap_orphaned_dump_volumes(conn, reaper, _GRACE)
+                    return (await reap_orphaned_dump_volumes(conn, reaper, _GRACE)).reaped
 
             sweep = asyncio.create_task(_sweep())
             handler: asyncio.Task[object] | None = None
@@ -430,7 +430,7 @@ def test_a_live_lease_holds_the_sweep_off_an_hour_old_volume(migrated_url: str) 
                     "the mint must not hold LockScope.SYSTEM across the provider operation"
                 )
                 async with pool.connection() as conn:
-                    assert await reap_orphaned_dump_volumes(conn, reaper, _GRACE) == 0
+                    assert (await reap_orphaned_dump_volumes(conn, reaper, _GRACE)).reaped == 0
             finally:
                 retriever.resume.set()
             outcome = await handler
@@ -496,7 +496,7 @@ def test_the_same_pass_reclaims_the_volume_once_no_holder_remains(migrated_url: 
                         "UPDATE jobs SET state = 'succeeded' WHERE id = %s", (claimed.id,)
                     )
                 async with pool.connection() as conn:
-                    assert await reap_orphaned_dump_volumes(conn, reaper, _GRACE) == 1
+                    assert (await reap_orphaned_dump_volumes(conn, reaper, _GRACE)).reaped == 1
             finally:
                 retriever.resume.set()
             await handler

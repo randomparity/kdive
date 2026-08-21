@@ -88,9 +88,10 @@ async def _reap(
 ) -> int:
     """Run one pass on a non-autocommit connection, as the reconciler pool hands one over."""
     async with await psycopg.AsyncConnection.connect(url) as conn:
-        return await reap_orphaned_captures(
+        outcome = await reap_orphaned_captures(
             conn, reapers, settle=settle, batch=batch, retry_base=retry_base, retry_cap=retry_cap
         )
+        return outcome.reaped
 
 
 def test_reclaims_a_terminal_capture_past_the_settle_window(migrated_url: str) -> None:
@@ -828,7 +829,7 @@ def test_the_sweep_runs_under_the_real_reconciler_role(migrated_url: str) -> Non
                         retry_base=DEFAULT_CAPTURE_RETRY_BASE,
                         retry_cap=DEFAULT_CAPTURE_RETRY_CAP,
                     )
-                assert reaped == 1
+                assert reaped.reaped == 1
                 assert [capture.job_id for capture in reaper.seen] == [job_id]
                 assert await _reap_state(admin, job_id) == (1, False, True)
             finally:

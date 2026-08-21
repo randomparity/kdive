@@ -55,6 +55,7 @@ from kdive.reconciler.cleanup.images import (
 from kdive.reconciler.cleanup.images import (
     repair_leaked_images as _repair_leaked_images,
 )
+from kdive.reconciler.cleanup.provider_reaping import ReapLaneOutcome
 from kdive.reconciler.cleanup.runtime_resources import ResourceProbe
 from kdive.reconciler.cleanup.runtime_resources import (
     reap_expired_runtime_resources as _reap_expired_runtime_resources,
@@ -202,18 +203,22 @@ DEFAULT_DEBUG_SESSION_STALE_AFTER = timedelta(minutes=2)
 DEFAULT_IMAGE_PUBLISH_GRACE = timedelta(seconds=3600)
 
 type _RepairFn = Callable[[AsyncConnection], Awaitable[int]]
+#: The two budgeted reaping lanes return a full outcome instead of a bare count (#1982); the
+#: plan runner unpacks it into the reaped count plus the report's per-lane signal fields.
+type _LaneRepairFn = Callable[[AsyncConnection], Awaitable[ReapLaneOutcome]]
+type _AnyRepairFn = _RepairFn | _LaneRepairFn
 
 
 @dataclass(frozen=True, slots=True)
 class _RepairSpec:
     name: str
-    repair: _RepairFn
+    repair: _AnyRepairFn
 
 
 @dataclass(frozen=True, slots=True)
 class _RepairCatalogEntry:
     name: str
-    factory: Callable[[InfraReaper, ReconcileConfig, timedelta], _RepairFn | None]
+    factory: Callable[[InfraReaper, ReconcileConfig, timedelta], _AnyRepairFn | None]
     report_field: str | None = None
 
 
@@ -247,6 +252,11 @@ class ReconcileReport:
     remote_system_object_versions_deleted: int = 0
     reaped_dump_volumes: int = 0
     reaped_captures: int = 0
+    #: Candidates the capture lane's ADR-0565 pass budget stopped it from starting (#1982).
+    #: Signal, not failure — never folded into ``reaped_captures`` and never ``kdive.errors``.
+    captures_budget_unattempted: int = 0
+    #: Same, for the dump-volume lane.
+    dump_volumes_budget_unattempted: int = 0
     reaped_runtime_resources: int = 0
     investigation_artifacts_gc_count: int = 0
     expired_build_artifacts_gc_count: int = 0
@@ -261,14 +271,41 @@ class ReconcileReport:
     repair_counts: Mapping[str, int] = field(default_factory=dict, compare=False)
 
     @classmethod
-    def from_counts(cls, counts: Mapping[str, int], failures: Sequence[str]) -> ReconcileReport:
+    def from_counts(
+        cls,
+        counts: Mapping[str, int],
+        failures: Sequence[str],
+        lane_outcomes: Mapping[str, ReapLaneOutcome] | None = None,
+    ) -> ReconcileReport:
+        """Build a report from repair counts keyed by ``_RepairSpec.name``.
+
+        ``lane_outcomes`` optionally carries the :class:`ReapLaneOutcome` of the two budgeted
+        reaping lanes, keyed by their repair-kind names; the per-lane unattempted counts land on
+        the report's scalar fields and everything else on the report is unchanged (#1982).
+        """
         full_counts = _repair_count_defaults(counts)
         report_counts = cast("dict[str, Any]", _report_field_counts(full_counts))
+        outcomes = lane_outcomes or {}
+        capture_outcome = outcomes.get("reaped_captures")
+        volume_outcome = outcomes.get("reaped_dump_volumes")
         return cls(
+            captures_budget_unattempted=(
+                capture_outcome.budget_unattempted if capture_outcome else 0
+            ),
+            dump_volumes_budget_unattempted=(
+                volume_outcome.budget_unattempted if volume_outcome else 0
+            ),
             failures=tuple(failures),
             repair_counts=full_counts,
             **report_counts,
         )
+
+    def lane_budget_unattempted(self) -> Mapping[str, int]:
+        """Per-lane unattempted-candidate counts, keyed by the lanes' log names (telemetry)."""
+        return {
+            "capture": self.captures_budget_unattempted,
+            "dump-volume": self.dump_volumes_budget_unattempted,
+        }
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -669,7 +706,7 @@ async def reconcile_once(
     per-domain ``destroy`` in :func:`_repair_leaked_domains` is caught individually, so
     the irreversible case (a domain destroyed, then a later failure) keeps its count.
     """
-    counts, failures = await _run_repair_plan(
+    counts, failures, lane_outcomes = await _run_repair_plan(
         pool,
         _repair_plan(
             reaper=reaper,
@@ -678,7 +715,7 @@ async def reconcile_once(
         ),
     )
 
-    return ReconcileReport.from_counts(counts, failures)
+    return ReconcileReport.from_counts(counts, failures, lane_outcomes)
 
 
 def _image_publish_grace() -> timedelta:
@@ -715,17 +752,30 @@ def _upload_window_ttl() -> timedelta:
 
 async def _run_repair_plan(
     pool: AsyncConnectionPool, repairs: tuple[_RepairSpec, ...]
-) -> tuple[dict[str, int], list[str]]:
+) -> tuple[dict[str, int], list[str], dict[str, ReapLaneOutcome]]:
+    """Run each repair on a fresh pooled connection, isolating failures.
+
+    Returns the per-kind counts, the names of repairs that raised, and the
+    :class:`ReapLaneOutcome` of the budgeted reaping lanes (the two repairs whose repair
+    function returns an outcome rather than a bare int; #1982).
+    """
     counts = _repair_count_defaults({})
     failures: list[str] = []
+    lane_outcomes: dict[str, ReapLaneOutcome] = {}
     for spec in repairs:
         try:
             async with pool.connection() as conn:
-                counts[spec.name] = await spec.repair(conn)
+                result = await spec.repair(conn)
         except Exception:  # noqa: BLE001 - isolate each repair; one failure must not starve the rest
             _log.warning("reconciler: repair %s failed this pass", spec.name, exc_info=True)
             failures.append(spec.name)
-    return counts, failures
+            continue
+        if isinstance(result, ReapLaneOutcome):
+            counts[spec.name] = result.reaped
+            lane_outcomes[spec.name] = result
+        else:
+            counts[spec.name] = result
+    return counts, failures, lane_outcomes
 
 
 class Reconciler:
@@ -812,6 +862,7 @@ class Reconciler:
                 try:
                     report = await self.run_once()
                     self._telemetry.record_repairs(report.repair_counts, report.failures)
+                    self._telemetry.record_lane_budget_unattempted(report.lane_budget_unattempted())
                 except Exception:  # noqa: BLE001 - a durable reconciler survives a transient per-pass error
                     span.set_outcome("error")
                     _log.exception("reconcile pass failed; continuing after %ss", interval)

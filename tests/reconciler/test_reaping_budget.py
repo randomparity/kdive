@@ -45,6 +45,7 @@ from kdive.reconciler.cleanup.provider_reaping import (
     DEFAULT_CAPTURE_RETRY_BASE,
     DEFAULT_CAPTURE_RETRY_CAP,
     DEFAULT_LANE_BUDGET,
+    ReapLaneOutcome,
     reap_orphaned_captures,
     reap_orphaned_dump_volumes,
 )
@@ -157,7 +158,9 @@ class _ShieldedDumpVolumeReaper:
             await asyncio.gather(task, return_exceptions=True)
 
 
-async def _reap_captures(url: str, reapers: dict[str, CaptureReaper], *, budget: timedelta) -> int:
+async def _reap_captures(
+    url: str, reapers: dict[str, CaptureReaper], *, budget: timedelta
+) -> ReapLaneOutcome:
     async with await psycopg.AsyncConnection.connect(url) as conn:
         return await reap_orphaned_captures(
             conn,
@@ -170,7 +173,9 @@ async def _reap_captures(url: str, reapers: dict[str, CaptureReaper], *, budget:
         )
 
 
-async def _reap_volumes(url: str, reaper: DumpVolumeReaper, *, budget: timedelta) -> int:
+async def _reap_volumes(
+    url: str, reaper: DumpVolumeReaper, *, budget: timedelta
+) -> ReapLaneOutcome:
     async with await psycopg.AsyncConnection.connect(url) as conn:
         return await reap_orphaned_dump_volumes(conn, reaper, _GRACE, budget=budget)
 
@@ -201,7 +206,7 @@ def test_capture_lane_holds_its_fence_until_the_provider_call_finishes(migrated_
             assert reaper.fence_held_at_end == [True]
             # Corroborating, but not sufficient on its own: _dispatch_capture catches Exception, so
             # a TimeoutError would read as a decline and defer rather than as a lost fence.
-            assert reaped == 1
+            assert reaped.reaped == 1
             assert await reap_state(conn, job_id) == (1, False, True)
 
     asyncio.run(_run())
@@ -218,7 +223,7 @@ def test_dump_volume_lane_holds_its_system_lock_until_the_delete_finishes(
         await reaper.drain()
 
         assert reaper.lock_held_at_end == [True]
-        assert reaped == 1
+        assert reaped.reaped == 1
 
     asyncio.run(_run())
 
@@ -236,7 +241,9 @@ def test_capture_lane_stops_dispatching_once_the_budget_is_spent(migrated_url: s
                 _, run_id = await seed_chain(conn, domain_name="kdive-stored")
                 job_ids.append(await seed_capture_job(conn, run_id))
 
-            assert await _reap_captures(migrated_url, {REMOTE: reaper}, budget=_BUDGET) == 1
+            assert (
+                await _reap_captures(migrated_url, {REMOTE: reaper}, budget=_BUDGET)
+            ).reaped == 1
             await reaper.drain()
 
             # Exactly one provider call: the first candidate outlived the budget, and the check
@@ -262,7 +269,7 @@ def test_dump_volume_lane_stops_deleting_once_the_budget_is_spent(migrated_url: 
     reaper = _ShieldedDumpVolumeReaper(migrated_url, volumes)
 
     async def _run() -> None:
-        assert await _reap_volumes(migrated_url, reaper, budget=_BUDGET) == 1
+        assert (await _reap_volumes(migrated_url, reaper, budget=_BUDGET)).reaped == 1
         await reaper.drain()
         assert reaper.deleted == [volumes[0].name]
         # As above: this is the test that actually reaches `break`, so it is where the System lock
@@ -277,9 +284,60 @@ def test_a_budget_that_is_not_spent_attempts_every_candidate(migrated_url: str) 
     reaper = _ShieldedDumpVolumeReaper(migrated_url, volumes, seconds=0.0)
 
     async def _run() -> None:
-        assert await _reap_volumes(migrated_url, reaper, budget=timedelta(seconds=30)) == 3
+        outcome = await _reap_volumes(migrated_url, reaper, budget=timedelta(seconds=30))
+        assert (outcome.reaped, outcome.budget_unattempted) == (3, 0)
         await reaper.drain()
         assert reaper.deleted == [v.name for v in volumes]
+
+
+def test_a_drained_capture_pass_leaves_no_candidate_unattempted(migrated_url: str) -> None:
+    reaper = _ShieldedCaptureReaper(migrated_url, seconds=0.0)
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as conn:
+            for _ in range(3):
+                _, run_id = await seed_chain(conn, domain_name="kdive-stored")
+                await seed_capture_job(conn, run_id)
+
+            outcome = await _reap_captures(
+                migrated_url, {REMOTE: reaper}, budget=timedelta(seconds=30)
+            )
+            assert (outcome.reaped, outcome.budget_unattempted) == (3, 0)
+
+    asyncio.run(_run())
+
+
+# --- the budget's unattempted count is signal on the lane outcome (#1982) ------------------------
+
+
+def test_a_truncated_capture_lane_reports_the_candidates_its_budget_left_unattempted(
+    migrated_url: str,
+) -> None:
+    reaper = _ShieldedCaptureReaper(migrated_url)
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as conn:
+            for _ in range(3):
+                _, run_id = await seed_chain(conn, domain_name="kdive-stored")
+                await seed_capture_job(conn, run_id)
+
+            outcome = await _reap_captures(migrated_url, {REMOTE: reaper}, budget=_BUDGET)
+            # One candidate dispatched before the budget spent; the other two reported as left
+            # behind — and none of the three folded into the reaped count.
+            assert (outcome.reaped, outcome.budget_unattempted) == (1, 2)
+
+    asyncio.run(_run())
+
+
+def test_a_truncated_dump_volume_lane_reports_the_volumes_its_budget_left_unattempted(
+    migrated_url: str,
+) -> None:
+    volumes = [_orphan_volume(uuid4()) for _ in range(3)]
+    reaper = _ShieldedDumpVolumeReaper(migrated_url, volumes)
+
+    async def _run() -> None:
+        outcome = await _reap_volumes(migrated_url, reaper, budget=_BUDGET)
+        assert (outcome.reaped, outcome.budget_unattempted) == (1, 2)
 
     asyncio.run(_run())
 
@@ -298,7 +356,7 @@ def test_a_slow_candidate_listing_does_not_starve_the_dump_volume_lane(migrated_
     )
 
     async def _run() -> None:
-        assert await _reap_volumes(migrated_url, reaper, budget=_BUDGET) == 1
+        assert (await _reap_volumes(migrated_url, reaper, budget=_BUDGET)).reaped == 1
         assert reaper.deleted == [volumes[0].name]
 
     asyncio.run(_run())

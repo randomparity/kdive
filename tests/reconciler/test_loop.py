@@ -19,6 +19,7 @@ from kdive.providers.infra.reaping import DumpVolume, InfraReaper, NullReaper
 from kdive.reconciler import loop
 from kdive.reconciler.cleanup.artifact_retention import ArtifactObjectDeleter
 from kdive.reconciler.cleanup.provider_reaping import (
+    ReapLaneOutcome,
     reap_console_collectors,
     reap_orphaned_dump_volumes,
     repair_leaked_domains,
@@ -96,10 +97,34 @@ def test_reconcile_report_fields_are_catalog_backed() -> None:
     scalar_fields = {
         field.name
         for field in fields(ReconcileReport)
-        if field.name not in {"failures", "repair_counts"}
+        if field.name
+        not in {
+            "failures",
+            "repair_counts",
+            "captures_budget_unattempted",
+            "dump_volumes_budget_unattempted",
+        }
     }
     assert set(loop._REPORT_FIELDS) == scalar_fields
     assert set(loop._REPORT_FIELDS) <= set(loop._REPORT_FIELD_TO_REPAIR_KIND)
+
+
+def test_the_report_carries_the_lanes_budget_unattempted_counts() -> None:
+    """Budget-unattempted candidates land on their own fields, never on reaped (#1982)."""
+    report = ReconcileReport.from_counts(
+        {},
+        [],
+        {
+            "reaped_captures": ReapLaneOutcome("capture", reaped=2, budget_unattempted=5),
+            "reaped_dump_volumes": ReapLaneOutcome("dump-volume", reaped=1, budget_unattempted=3),
+        },
+    )
+    assert (report.captures_budget_unattempted, report.dump_volumes_budget_unattempted) == (5, 3)
+    assert (report.reaped_captures, report.reaped_dump_volumes) == (0, 0)
+    assert report.lane_budget_unattempted() == {"capture": 5, "dump-volume": 3}
+    # A pass with no lane outcomes at all reads as fully drained.
+    drained = ReconcileReport.from_counts({}, [])
+    assert drained.lane_budget_unattempted() == {"capture": 0, "dump-volume": 0}
 
 
 def test_orphaned_system_enqueues_gc_teardown(migrated_url: str) -> None:
