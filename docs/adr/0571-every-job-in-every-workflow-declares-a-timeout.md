@@ -54,9 +54,11 @@ with no apt step does not carry that term.
 actionlint reject `timeout-minutes` on such a job, so requiring it here would deadlock the first
 reusable-workflow caller against the repo's own lint gate. The exemption is not taken on trust:
 the callee is resolved against the repository root, as GitHub resolves it, and must be one of
-the workflow files the guard enumerates — an out-of-repo callee is not checkable here, and a
-local callee that names no real file fails the guard rather than silently skipping the job's
-check (PR #2014).
+the workflow files the guard enumerates. Anything else reddens the guard — a local callee that
+names no real file, and an out-of-repo `owner/repo/…` callee alike, which resolves to no
+enumerated file and is refused outright rather than silently exempting the job's check
+(PR #2014). Introducing a remote reusable-workflow caller therefore means extending the guard
+first.
 
 `tests/guards/test_apt_install_is_bounded.py` owns the wiring. **Five of its tests are static**:
 no workflow calls `apt-get` directly, every package-installing workflow reaches the shared
@@ -83,21 +85,23 @@ files it checks, so a workflow added tomorrow is inside the rule with no edit to
 the guard. The job-count floor in the test goes slack as jobs are added by design; it is a
 tripwire against a silently shrinking check, not a coverage assertion.
 
-The reusable-workflow exemption remains a real gap in coverage: the jobs inside a reusable
-workflow this repo calls are checked when the guard reads the callee's own file, but an
-out-of-repo callee's jobs are invisible and run on the 360-minute default. Nothing in this
-record changes that; it is recorded so the exemption is read as scoped, not absolute.
+The reusable-workflow exemption is scoped, not absolute: the jobs inside a reusable workflow
+this repo calls are checked when the guard reads the callee's own file. A caller of an
+out-of-repo callee cannot exist on this branch today — the guard refuses any `uses:` value that
+does not resolve to an enumerated workflow file — so admitting one is a deliberate future
+change that must extend the guard with it, and decide then how those jobs' timeouts are
+bounded.
 
 ## Considered & rejected
 
-**An append-only amendment to ADR-0566**, the route PR #1984 used for ADR-0430. Rejected: the
-stale sentence is a decision statement, not a description. Widening an Accepted record's
-Decision in place would change the scope of a decision with no record of who decided it or why,
-and a later reader could not distinguish the amendment from the original judgement. The
-descriptive drift at :137–144 is downstream of the same decision, so amending the description
-while leaving the decision would split them; and the four/six miscount is uncorrectable in
-place regardless, because correcting it removes lines that `check_sections_append_only`
-rejects.
+**An append-only amendment to ADR-0566**, the route PR #1972 used for ADR-0430 (#1942).
+Rejected: the stale sentence is a decision statement, not a description. Widening an Accepted
+record's Decision in place would change the scope of a decision with no record of who decided
+it or why, and a later reader could not distinguish the amendment from the original judgement.
+The descriptive drift at :137–144 is downstream of the same decision, so amending the
+description while leaving the decision would split them; and the four/six miscount is
+uncorrectable in place regardless, because correcting it removes lines that
+`check_sections_append_only` rejects.
 
 **Leaving ADR-0566 untouched and relying on the guard's failure messages**, which since #1992
 already tell a tripped reader that the rule covers every workflow. Rejected as the whole fix: a
