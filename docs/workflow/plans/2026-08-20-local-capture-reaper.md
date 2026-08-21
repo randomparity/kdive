@@ -140,8 +140,6 @@ Task 3's composition consumes `LocalLibvirtCaptureReaper.from_env()`.
            order.append("object-del")
            return "{}"
 
-       reaper = _reaper(conn, monitor)
-
        def _record_unlink(capture: OrphanedCapture) -> None:
            order.append("unlink")
 
@@ -265,9 +263,11 @@ Task 3's composition consumes `LocalLibvirtCaptureReaper.from_env()`.
    from kdive.providers.ports.traffic import capture_qom_id
    from kdive.providers.shared.runtime_paths import pcap_path
    ```
-
-   (`asyncio`, `Callable`, `Protocol` are already imported; add `Callable` from
-   `collections.abc` if absent.) Append at the end of the module:
+   (`asyncio` and `Protocol` are already imported; `Callable` is not. Add
+   `from collections.abc import Callable` beside the existing `collections.abc`-adjacent
+   imports, and extend the existing reaping import to
+   `from kdive.providers.infra.reaping import OrphanedCapture, OwnedDomain`.)
+   Append at the end of the module:
 
    ```python
    _log = logging.getLogger(__name__)
@@ -432,7 +432,8 @@ and untouched here. No later task consumes this beyond the existing handler.
 
 1. Write the failing tests — append to `tests/providers/local_libvirt/test_traffic_capture.py`
    (reuse the existing `_capturer` helper and its monkeypatch pattern from
-   `test_prepare_prepares_dir_and_returns_worker_pcap_path`):
+   `test_prepare_prepares_dir_and_returns_worker_pcap_path`; add `from pathlib import Path`
+   to the file's imports — the permission test's `_refuse` signature needs it):
 
    ```python
    def test_prepare_pre_deletes_this_jobs_stale_pcap(monkeypatch, tmp_path) -> None:
@@ -467,6 +468,30 @@ and untouched here. No later task consumes this beyond the existing handler.
        dest = _capturer(_noop_monitor).prepare(system_id, job_id)  # must not raise
 
        assert dest == str(tmp_path / f"{system_id}-{job_id}.pcap")
+
+
+   def test_prepare_logs_a_permission_failure_but_still_succeeds(
+       monkeypatch, tmp_path, caplog
+   ) -> None:
+       """A suppressed unlink failure is operator-visible, never silent (plan review finding)."""
+       system_id, job_id = uuid4(), uuid4()
+       stale = tmp_path / f"{system_id}-{job_id}.pcap"
+       stale.write_bytes(b"stale")
+       monkeypatch.setattr(traffic_capture_module, "prepare_pcap_dir", lambda _sid: None)
+       monkeypatch.setattr(
+           traffic_capture_module,
+           "pcap_path",
+           lambda sid, jid: tmp_path / f"{sid}-{jid}.pcap",
+       )
+
+       def _refuse(self: Path, missing_ok: bool = False) -> None:
+           raise PermissionError(1, "operation not permitted")
+
+       monkeypatch.setattr(Path, "unlink", _refuse)
+       with caplog.at_level("WARNING"):
+           dest = _capturer(_noop_monitor).prepare(system_id, job_id)
+       assert dest == str(stale)  # prepare still returns the path
+       assert "could not be removed" in caplog.text
    ```
 
 2. Run
@@ -483,19 +508,27 @@ and untouched here. No later task consumes this beyond the existing handler.
 
            The confined qemu:///system hypervisor writes the filter-dump as the QEMU runtime user,
            so the dir is owned to that user and SELinux-labelled ``svirt_image_t`` (ADR-0385); a
-           genuine write failure surfaces loudly at :meth:`fetch` via a short/absent file.
-
            Pre-deletes this job's own stale pcap first (ADR-0567), so an at-least-once retry of a
            job whose prior attempt died mid-capture starts from a clean file — job-keyed, never a
-           whole-System sweep, which would remove a concurrent capture's live file. Best-effort
-           (every ``OSError`` suppressed): a file that could not be removed is truncated by
-           filter-dump on attach, and a job that dies anyway leaves the file to the reconciler's
-           capture reaper.
+           whole-System sweep, which would remove a concurrent capture's live file. Best-effort:
+           an absent file is the quiet common case; any other ``OSError`` (e.g. a permission
+           failure inside the QEMU-owned dir) is logged with the path — a file that could not be
+           removed is truncated by filter-dump on attach, and a job that dies anyway leaves the
+           file to the reconciler's capture reaper.
            """
            prepare_pcap_dir(system_id)
-           with contextlib.suppress(OSError):
-               pcap_path(system_id, job_id).unlink(missing_ok=True)
-           return str(pcap_path(system_id, job_id))
+           stale = pcap_path(system_id, job_id)
+           try:
+               stale.unlink(missing_ok=True)
+           except FileNotFoundError:
+               pass
+           except OSError as err:
+               _log.warning(
+                   "stale pcap %s could not be removed; filter-dump truncates it on attach",
+                   stale,
+                   exc_info=err,
+               )
+           return str(stale)
    ```
 
 4. Run
@@ -568,11 +601,18 @@ calls `local_composition.build_capture_reaper` — no assembly code change.
        return LocalLibvirtCaptureReaper.from_env()
    ```
 
-   Update the import block: add `LocalLibvirtCaptureReaper` to the existing
-   `kdive.providers.local_libvirt.reaping` import (the file already imports
-   `LibvirtInfraReaper`-adjacent names — check the exact import line; it imports
-   `CaptureReaper, InfraReaper, NullCaptureReaper` from `kdive.providers.infra.reaping`).
-   `NullCaptureReaper` becomes unused in this file — remove it from that import.
+   Update the two import lines exactly:
+
+   - replace `from kdive.providers.infra.reaping import CaptureReaper, InfraReaper, NullCaptureReaper`
+     (line 32) with `from kdive.providers.infra.reaping import CaptureReaper, InfraReaper`;
+   - replace `from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper`
+     (line 52) with
+     `from kdive.providers.local_libvirt.reaping import (
+         LibvirtInfraReaper,
+         LocalLibvirtCaptureReaper,
+     )`.
+
+   (`NullCaptureReaper` becomes unused in this file — that replacement removes it.)
 
 4. Update the two stale comments that say local ships disabled:
 
