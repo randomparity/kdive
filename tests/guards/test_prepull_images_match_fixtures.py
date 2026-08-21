@@ -14,14 +14,19 @@ duplication. It is deliberately **read-only** over all four files: it parses tex
 imports the fixtures, so it needs no Docker, no network, and no running daemon. It parses the
 constants *by name* rather than by line number, so it survives edits around them.
 
-Stdlib + pytest only, matching `test_workflow_action_pins.py`: this reads the tree, not the
-project.
+Stdlib, `pyyaml` and pytest: this reads the tree, not the project. `pyyaml` is a declared
+dependency and is how `tests/guards/test_apt_install_is_bounded.py` already parses these same
+workflow files — the job-level checks below need a real parser, because a regex that recognises
+a job key by its line shape cannot see one carrying a trailing comment and silently skips the
+job it guards (#1993).
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+
+import yaml
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PULL_SCRIPT = _ROOT / "scripts" / "pull-test-images.sh"
@@ -40,33 +45,60 @@ _FIXTURE_CONSTANTS = {
 _IMAGES_ARRAY = re.compile(r"^(?:readonly\s+)?IMAGES=\((?P<body>.*?)^\)", re.MULTILINE | re.DOTALL)
 _QUOTED = re.compile(r'"(?P<image>[^"\s]+)"')
 
-#: ``run: just pull-test-images`` and ``run: just test`` as whole steps. Anchored at the line
-#: end so ``just test-compose-volumes`` and ``just test-ansible`` are not mistaken for the suite.
-_PREPULL_STEP = re.compile(r"^\s*run:\s*just pull-test-images\s*$", re.MULTILINE)
-_TEST_STEP = re.compile(r"^\s*run:\s*just test\s*$", re.MULTILINE)
-
-#: A job key: two-space indent under the top-level ``jobs:`` mapping.
-_JOBS_BLOCK = re.compile(r"^jobs:$", re.MULTILINE)
-_JOB_KEY = re.compile(r"^  (?P<job>[A-Za-z0-9_-]+):$", re.MULTILINE)
+#: ``run: just pull-test-images`` and ``run: just test`` as whole step values, compared exact
+#: after whitespace strip so ``just test-compose-volumes`` and ``just test-ansible`` are not
+#: mistaken for the suite.
+_PREPULL_STEP = "just pull-test-images"
+_TEST_STEP = "just test"
 
 
-def _jobs(text: str) -> dict[str, str]:
-    """Split a workflow into ``{job name: that job's YAML}``.
+def _jobs(path: Path) -> dict[str, object]:
+    """Parse a workflow into ``{job name: that job's mapping}``.
 
-    "Before" has to mean *earlier in the same job*, not merely earlier in the file. A pre-pull
-    step sitting in an unrelated job textually above another job's ``just test`` satisfies a
-    whole-file ordering check while pre-pulling nothing for the job that runs the suite — the
-    drift an ordinary workflow refactor produces, and the one this guard exists to catch.
+    The values are typed `object`, not `dict`, because nothing here has validated them — a
+    malformed workflow can put anything under a job key, and claiming `dict` would move that
+    check from the callers, which do it, into a signature, which cannot.
+
+    Per job, not per file: a pre-pull step sitting in an unrelated job satisfies a whole-file
+    ordering check while pre-pulling nothing for the job that runs the suite.
+
+    `yaml.safe_load` rather than a line-anchored regex over the text (#1993). A regex that
+    recognises a job by `^  name:$` cannot see `  image-build:  # pulls the base layer` or
+    `"image-build":` — both ordinary YAML — and a job it cannot see is a job whose steps it
+    never checks. That failure is silent in both directions: the job never lands in any
+    assertion, and the per-workflow floor below only catches workflows that lose *all* their
+    suite jobs, never one that lost one to invisibility. `pyyaml` is a declared dependency and
+    `tests/guards/test_apt_install_is_bounded.py` already parses these same files with it, so
+    this is one parser where the tree had two.
     """
-    block = _JOBS_BLOCK.search(text)
-    if block is None:
-        return {}
-    body = text[block.end() :]
-    bounds = list(_JOB_KEY.finditer(body))
-    ends = [*(match.start() for match in bounds[1:]), len(body)]
-    return {
-        match.group("job"): body[match.end() : end] for match, end in zip(bounds, ends, strict=True)
-    }
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    jobs = document.get("jobs", {}) if isinstance(document, dict) else {}
+    return jobs if isinstance(jobs, dict) else {}
+
+
+def _job_run_steps(job: object) -> list[str]:
+    """Every ``run:`` value directly under one job's ``steps:``, in step order, stripped.
+
+    Typed ``object`` because nothing here has validated the job mapping — same reasoning as
+    `_jobs`. Steps without their own ``run:`` (``uses:``, ``name:``-only) and anything that is
+    not a step mapping contribute nothing; a job with no readable ``steps:`` has no run values.
+    Stripping absorbs the trailing newline a block-scalar ``run: |`` value keeps after parsing,
+    so the exact comparisons against `_TEST_STEP`/`_PREPULL_STEP` see the same string however
+    the workflow spells the value.
+    """
+    if not isinstance(job, dict):
+        return []
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        return []
+    runs: list[str] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        run = step.get("run")
+        if isinstance(run, str):
+            runs.append(run.strip())
+    return runs
 
 
 def _fixture_image(rel_path: str, constant: str) -> str:
@@ -130,16 +162,17 @@ def test_every_suite_workflow_prepulls_before_it_runs_the_suite() -> None:
     # weaker forms pass while a suite-running job pre-pulls nothing.
     suite_jobs: dict[str, int] = {}
     for name in _SUITE_WORKFLOWS:
-        jobs = _jobs((_WORKFLOWS / name).read_text(encoding="utf-8"))
+        jobs = _jobs(_WORKFLOWS / name)
         assert jobs, f"no jobs parsed out of {name} — the workflow layout changed (ADR-0553)"
         suite_jobs[name] = 0
 
-        for job_name, body in jobs.items():
-            test_steps = [match.start() for match in _TEST_STEP.finditer(body)]
+        for job_name, job in jobs.items():
+            runs = _job_run_steps(job)
+            test_steps = [index for index, run in enumerate(runs) if run == _TEST_STEP]
             if not test_steps:
                 continue
             suite_jobs[name] += 1
-            prepull_steps = [match.start() for match in _PREPULL_STEP.finditer(body)]
+            prepull_steps = [index for index, run in enumerate(runs) if run == _PREPULL_STEP]
 
             assert len(prepull_steps) == len(test_steps), (
                 f"{name} job `{job_name}` has {len(test_steps)} `run: just test` step(s) but "
@@ -163,3 +196,29 @@ def test_every_suite_workflow_prepulls_before_it_runs_the_suite() -> None:
         "If the suite moved to another recipe, re-point _TEST_STEP; if a workflow stopped "
         "running it, drop it from _SUITE_WORKFLOWS (ADR-0553)."
     )
+
+
+def test_a_trailing_comment_does_not_hide_a_job_from_the_guard(tmp_path: Path) -> None:
+    """The blind spot that motivated the real parser (#1993, sibling of PR #1992).
+
+    A job key written with a trailing comment — `image-build:  # pulls the base layer` — is
+    ordinary YAML and invisible to a regex that recognises a job only by `^  name:$`. Under
+    the old splitter this workflow parsed to no jobs at all, so the ordering check above
+    silently skipped it instead of guarding it; this test pins the parser to seeing the job.
+    """
+    workflow = tmp_path / "commented.yml"
+    workflow.write_text(
+        "jobs:\n"
+        "  image-build:  # pulls the base layer\n"
+        "    steps:\n"
+        "      - run: just pull-test-images\n"
+        "      - run: just test\n",
+        encoding="utf-8",
+    )
+
+    jobs = _jobs(workflow)
+    assert "image-build" in jobs, (
+        "a job key carrying a trailing comment is invisible to the job splitter, so the "
+        "ordering guard skips it entirely (#1993)"
+    )
+    assert _job_run_steps(jobs["image-build"]) == [_PREPULL_STEP, _TEST_STEP]
