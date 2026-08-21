@@ -37,13 +37,19 @@ and the local URI has no dial to bound.
 
 Local also closes its prepare-time pre-delete gap. Remote's `prepare` pre-deletes the job's own
 stale volume before capture (#1947); local's only prepared the directory. Local `prepare` now
-unlinks this job's own `pcap_path` (job-keyed, never a whole-System sweep) best-effort before
-returning it, so an at-least-once retry of a job whose prior attempt died mid-capture starts
-from a clean file.
+unlinks this job's own `pcap_path` (job-keyed, never a whole-System sweep) before returning it,
+suppressing every `OSError` — absence and permission failure alike. Best-effort is sound here
+(unlike the reaper's unlink) because the job path has convergent backstops: a file that could
+not be removed is truncated by `filter-dump` on attach, and a job that dies anyway leaves the
+file to the sweep.
 
 The reaper's unlink is *not* best-effort: an `OSError` other than absence raises
 `INFRASTRUCTURE_FAILURE` so the sweep defers the row and retries, instead of marking a row
 complete while the file remains.
+The sweep's existing per-row contract makes every such failure observable: ADR-0556 logs one
+row's failure with ``(system_id, job_id)`` without stopping the pass, and a raise (unlike a
+``False`` decline) logs its traceback, so a deferred row's infrastructure cause is readable
+from reconciler logs.
 
 ## Consequences
 
@@ -75,6 +81,13 @@ complete while the file remains.
   result; the reaper has no other result to protect, and a swallowed failure would mark the
   row complete with the file still on disk — false convergence against ADR-0556's reap-once
   marker.
+- **Do nothing and rely on worker-side reclaim only.** The in-job `reclaim` already unlinks
+  these exact worker-local files, and the pcap is not a shared storage pool. But every leak
+  class begins where the owning job never reached that reclaim — a worker killed mid-capture
+  orphans both the filter and the file — and a terminal job does not retry, so the existing
+  path converges none of the three leak classes. ADR-0556's rejection of "do nothing" for the
+  sweep applies per kind; declining local's entry would leave local-libvirt rows permanently
+  ineligible while remote rows converge.
 - **Reuse `LocalLibvirtTrafficCapture.detach`** instead of a standalone QMP detach. The
   capturer's `_lookup` raises on a missing domain, while the reaper contract requires
   tolerating one; sharing would mean weakening the live-capture path's failure contract to
