@@ -1135,6 +1135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump the docker-images group across 1 directory with 2 updates
 - Pin the ppc64le uv wheel to 0.11.31
 - Update cryptography to 50.0.0
+- Bump astral-sh/setup-uv in the github-actions group
 
 ### Security
 
