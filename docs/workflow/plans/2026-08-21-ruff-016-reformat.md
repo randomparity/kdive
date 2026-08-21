@@ -97,36 +97,40 @@ normalization.
 
 Steps:
 
-1. Stage explicit paths only:
+1. Install commit hooks (a fresh worktree has none — `git worktree add` does not copy
+   them): `prek install`. The step-4 hook-mutation contingency below applies only once
+   this is done.
+2. Stage explicit paths only:
    `git add pyproject.toml .pre-commit-config.yaml uv.lock && git add -u '*.md'`
-   then confirm `git status --short` shows nothing unexpected staged.
-2. Commit: subject `style: adopt ruff 0.16 formatter output (ADR-0569)`; body noting #2003
+   then confirm `git status --short` shows nothing unexpected staged (the node_modules
+   symlink from Global Constraints is expected and never staged).
+3. Commit: subject `style: adopt ruff 0.16 formatter output (ADR-0569)`; body noting #2003
    and that the diff is formatter output over ~207 Markdown files plus the two pins and the
    lockfile.
-3. Post-commit re-check: commit-time prek hooks (trailing-whitespace, end-of-file-fixer,
+4. Post-commit re-check: commit-time prek hooks (trailing-whitespace, end-of-file-fixer,
    detect-secrets) may mutate or reject staged files after Task 2's verification. Run
    `git show --stat HEAD` → extension mix matches Task 2's result; `git diff HEAD^ HEAD --
-   `'*.py'` → empty. If a fixer hook fired, its modifications are non-formatter output:
+   '*.py'` → empty. If a fixer hook fired, its modifications are non-formatter output:
    STOP and dispose them with
    `git restore --staged --worktree -- <mutated files>` (never `git reset --hard`; denied
-   by settings policy), re-run `uv run ruff format .`, and restart Task 3 from step 1. If
+   by settings policy), re-run `uv run ruff format .`, and restart from step 1. If
    restarting reproduces the identical hook mutation, the formatter and the fixer disagree
-   on the same bytes: stop looping — dispose the disagreement by hand as a recorded
-   decision instead.
-4. Re-run guardrails: `just lint` (expect: `ruff check .` silent, `ruff format --check .`
+   on the same bytes: stop looping — dispose the disagreement by hand and record the
+   decision by filing a GitHub issue in the same turn (repo convention for deferred
+   findings); reference the issue from the style commit body.
+5. Re-run guardrails: `just lint` (expect: `ruff check .` silent, `ruff format --check .`
    green), `just type`, `just test`, `just check-mermaid`, `just docs-links`,
    `just docs-paths`.
-5. Run the full aggregate: `just ci` → exit 0.
-6. If a post-commit gate fails (a docs guard or a test asserting on fenced examples can
+6. Run the full aggregate: `just ci` → exit 0.
+7. If a post-commit gate fails (a docs guard or a test asserting on fenced examples can
    legitimately trip on fence-content edits), fix within the formatter-output-plus-pins
    surface and `git commit --amend` while the branch is unpushed, or `git revert` the
    style commit and restart from Task 2. Never stack follow-up commits onto this dedicated
    change, and never hand-patch fence content merely to appease a failing check — like a
-   new lint diagnostic, that failure needs disposition first.
-   A fence-content assertion failure (a test or docs guard asserting on reformatted fence
-   text) has no in-surface fix: stop and get an operator decision, with two viable
-   outcomes — the assertion is stale (its expectation fix lands as its own functional
-   commit after this change merges) or the reformat is wrong for that fence (revert).
+   new lint diagnostic, that failure needs disposition first. A fence-content assertion
+   failure specifically has no in-surface fix: revert is the only in-constraint outcome
+   unless the operator explicitly authorizes merging with a documented red gate — in which
+   case file the stale-expectation fix as its own issue before merge.
 
 Acceptance criteria: one `style:` commit containing exactly the four kinds of content above;
 `just ci` green.
