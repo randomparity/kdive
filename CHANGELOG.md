@@ -703,6 +703,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Call the ignored commit formatter-output, not whitespace-only
 - Scope the records-gate link claim to single-line links
 - Regenerate tool reference for ops.reconcile_now envelope fields
+- Record the repo-wide job timeout rule as ADR-0571 (#1995)
+- Fix ADR-0571's callee-exemption wording and amendment precedent
 
 ### Fixed
 
