@@ -2,7 +2,8 @@
 
 Implements #2003 per ADR-0569 (Proposed) and
 `docs/workflow/specs/2026-08-21-ruff-016-reformat-design.md`. Charter token
-`scope-2003-9d11`.
+`scope-2003-9d11` (supersedes `scope-2003-7c42`, which the spec header still cites — the
+superseding WORK:SCOPE block is the authority).
 
 ## Goal
 
@@ -15,7 +16,8 @@ files), so grouped Dependabot bumps carrying ruff pass `lint · type · test` ag
 No code architecture: this is a toolchain-pin change plus mechanical formatter output. The
 only structural fact is commit shape — the design-record files (ADR, spec, this plan) are
 already committed separately; the `style:` commit carries exactly the formatter output plus
-the two version pins and the lockfile.
+the two version pins and the lockfile. ADR-0569 ratifies (Proposed → Accepted) in this PR's
+final commit, after the gate is green.
 
 ## Tech stack
 
@@ -31,9 +33,9 @@ v0.15.15 → v0.16.2.
   --fix` half applies semantic lint autofixes the commit shape forbids).
 - One `style:` commit carries all formatter output + both pins + `uv.lock`. Design-record
   files never enter it.
-- Diff hunks carry formatter output only. On this tree that means Markdown ```` ```python ````
-  fence normalization (comment spacing, blank lines); expected extension mix: all `.md`.
-  Any identifier or literal change outside fences stops the ship.
+- Diff hunks carry formatter output only. On this tree that means Markdown
+  ```python fence normalization (comment spacing, blank lines); expected extension mix: all
+  `.md`. Any identifier or literal change outside fences stops the ship.
 - Guardrails (run from the worktree root): `just lint`, `just type`, `just test`,
   `uv lock --check`, `just check-mermaid`, `just adr-status-check`, `just docs-links`,
   `just docs-paths`, and finally `just ci` (the local aggregate mirroring CI's individually
@@ -82,7 +84,7 @@ Steps:
    - `git diff -- '*.py'` → empty. No Python source changes.
    - Spot-check three hunks: `git diff -- docs/adr/0021-reconciler-loop-drift-repair.md`
      and two others of your choosing — comment-spacing and blank-line normalization inside
-     ```` ```python ```` fences only.
+     ```python fences only.
 
 Acceptance criteria: formatter idempotent, no `.py` diffs, hunks are fence-only
 normalization.
@@ -97,13 +99,35 @@ Steps:
 2. Commit: subject `style: adopt ruff 0.16 formatter output (ADR-0569)`; body noting #2003
    and that the diff is formatter output over ~207 Markdown files plus the two pins and the
    lockfile.
-3. Re-run guardrails: `just lint` (expect: `ruff check .` silent, `ruff format --check .`
+3. Post-commit re-check: commit-time prek hooks (trailing-whitespace, end-of-file-fixer,
+   detect-secrets) may mutate or reject staged files after Task 2's verification. Run
+   `git show --stat HEAD` → extension mix matches Task 2's result; `git diff HEAD^ HEAD --
+   '*.py'` → empty. If a fixer hook fired, its modifications are non-formatter output: STOP
+   and dispose them like any other shape violation — never silently re-stage them into the
+   `style:` commit.
+4. Re-run guardrails: `just lint` (expect: `ruff check .` silent, `ruff format --check .`
    green), `just type`, `just test`, `just check-mermaid`, `just docs-links`,
    `just docs-paths`.
-4. Run the full aggregate: `just ci` → exit 0.
+5. Run the full aggregate: `just ci` → exit 0.
 
 Acceptance criteria: one `style:` commit containing exactly the four kinds of content above;
 `just ci` green.
+
+## Task 4 — Ratify ADR-0569
+
+Files: `docs/adr/0569-adopt-the-ruff-016-formatter-output-in-one-dedicated-reformat.md`.
+
+Steps (only after Task 3's `just ci` is green — this is the implementing PR's final
+commit, per the ADR's Status note and the docs/adr/README.md ratification rule):
+
+1. Edit the ADR's `## Status` section from `Proposed (2026-08-21) — flips to Accepted in
+   the implementing PR's final commit, per the docs/adr/README.md ratification rule.` to
+   `Accepted (2026-08-21)`. Touch nothing else in the file.
+2. `git add docs/adr/0569-adopt-the-ruff-016-formatter-output-in-one-dedicated-reformat.md
+   && git commit -m "docs(adr): accept ADR-0569 on merge ratification"`.
+3. Verify: `just adr-status-check` → `ADR status guard: ... no shipped-but-Proposed drift.`
+
+Acceptance criteria: ADR-0569 reads Accepted in the PR's final commit; guard green.
 
 ## Rollback
 

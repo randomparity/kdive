@@ -1,6 +1,7 @@
 # Ruff 0.16 formatter adoption — design
 
-Implements #2003 under ADR-0569. Charter: `WORK:SCOPE` token `scope-2003-7c42` on the issue.
+Implements #2003 under ADR-0569. Charter: `WORK:SCOPE` token `scope-2003-9d11`
+(supersedes `scope-2003-7c42`; see the superseding WORK:SCOPE block on the issue).
 
 ## Outcome
 
