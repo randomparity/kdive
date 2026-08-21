@@ -23,8 +23,10 @@ stale-pcap gap.
   passthrough errors carry no distinct `VIR_ERR_*` code (the live capturer's module docstring
   documents this); a timeout or protocol error text does not match, so a genuine detach
   failure still aborts before the unlink.
-  Every tolerated absence still proceeds to the next step (missing domain still unlinks; a
-  missing filter still unlinks).
+  Every tolerated absence proceeds: a missing filter still unlinks; a missing domain ends the
+  detach step with no QMP call attempted (there is no domain to address) and the unlink still
+  runs — so a row with a missing domain *and* a missing filter reclaims cleanly and returns
+  `True` (test case 4b).
 - **R3 (colocation answered)** — answered by ADR-0567: reconciler-side reaper over
   `qemu:///system`, unlink on the shared host path. The implementation is that shape.
 - **R4 (stale pcap settled)** — closed: `LocalLibvirtTrafficCapture.prepare` unlinks this
@@ -107,6 +109,8 @@ tmp_path for the pcap file), mirroring `tests/providers/remote_libvirt/reaping/t
 2. Order: monitor `object-del` recorded before the pcap unlink (call-order assertion, R1).
 3. Missing filter tolerated → unlink still happens (R2).
 4. Missing domain tolerated → unlink still happens (R2).
+4b. Missing domain *and* missing pcap together → no QMP call attempted, unlink attempted,
+    returns `True` (the concurrent-absence flow R2 specifies).
 5. Missing pcap tolerated → returns True (R2).
 6. Non-not-found monitor error → `CategorizedError` CONTROL_FAILURE, no unlink, connection
    closed (R1's abort-before-unlink).
@@ -125,7 +129,11 @@ calls — the identical transport behavior of the live capturer and the ADR-0111
 `InfraReaper`, over a local unix socket with no TCP dial to bound. A wedged libvirt daemon
 stalling a reaper call is sweep-level exposure this change neither creates nor widens; the
 pass budget already limits a stall to one candidate per pass, and bounding the stall itself is
-owned by #1981.
+owned by #1981. The residual is accepted for this entry under that explicit condition: stall
+bounding stays unbounded until #1981's sweep-level bounding lands, and the exposure is
+identical to the already-shipped local reapers running on the same reconciler process — this
+entry adds no new stall surface. A wedged call is cleared by reconciler restart; the row stays
+eligible and is retried on the next pass.
 
 ## Threat model
 
