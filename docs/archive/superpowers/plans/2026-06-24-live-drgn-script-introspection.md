@@ -219,6 +219,7 @@ Run: `uv run python -m pytest tests/providers/debug_common/test_introspect.py -q
 # src/kdive/providers/shared/debug_common/introspect.py
 from kdive.providers.ports import LiveScriptOutput  # add to imports
 
+
 def assemble_script_output(
     stdout: str, *, byte_cap: int, secret_registry: SecretRegistry
 ) -> LiveScriptOutput:
@@ -315,6 +316,7 @@ def run(
     pid = self._spawn(domain, program, args, input_data=input_data)
     return self._await_exit(domain, pid)
 
+
 def _spawn(
     self, domain: GuestDomain, program: str, args: list[str], *, input_data: str | None = None
 ) -> int:
@@ -357,6 +359,7 @@ git commit -m "feat(remote): pass guest-exec input-data stdin to GuestAgentExec.
 from pathlib import Path
 
 HELPER = Path("deploy/remote-libvirt-guest-helpers/kdive-drgn")
+
 
 def test_helper_has_run_script_stdin_mode():
     text = HELPER.read_text()
@@ -428,7 +431,9 @@ def test_run_script_returns_capped_redacted_stdout():
         secret_registry=reg,
         run_live_script=lambda handle, script, timeout_sec: "d_hash_shift = 0x14\n",
     )
-    out = port.run_script(transport_handle="x", script="print(prog['d_hash_shift'])", timeout_sec=5.0)
+    out = port.run_script(
+        transport_handle="x", script="print(prog['d_hash_shift'])", timeout_sec=5.0
+    )
     assert "0x14" in out.output and out.truncated is False
 
 
@@ -453,6 +458,7 @@ Run: `uv run python -m pytest tests/providers/local_libvirt/test_introspect_drgn
 type _RunLiveScript = Callable[[str, str, float], str]
 _LIVE_SCRIPT_OUTPUT_BYTE_CAP = _REPORT_BYTE_CAP  # 1 MiB, reuse the report cap order
 
+
 def run_script(self, *, transport_handle: str, script: str, timeout_sec: float) -> LiveScriptOutput:
     if self._run_live_script is None:
         raise CategorizedError(
@@ -462,7 +468,9 @@ def run_script(self, *, transport_handle: str, script: str, timeout_sec: float) 
     try:
         stdout = self._run_live_script(transport_handle, script, timeout_sec)
     except Exception as exc:  # noqa: BLE001 - any seam fault becomes a typed failure
-        raise _normalize_attach_error(exc, "drgn could not run the script in the live guest") from exc
+        raise _normalize_attach_error(
+            exc, "drgn could not run the script in the live guest"
+        ) from exc
     return assemble_script_output(
         stdout, byte_cap=_LIVE_SCRIPT_OUTPUT_BYTE_CAP, secret_registry=self._secret_registry
     )
@@ -554,8 +562,7 @@ All three concrete classes (`LocalLibvirtLiveIntrospect` Task 6, `RemoteLibvirtL
 ```python
 # src/kdive/providers/ports/retrieve.py — extend the LiveIntrospector Protocol
 class LiveIntrospector(Protocol):
-    def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
-        ...
+    def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput: ...
 
     def run_script(
         self, *, transport_handle: str, script: str, timeout_sec: float
@@ -575,8 +582,10 @@ class LiveIntrospector(Protocol):
 # src/kdive/providers/fault_inject/debug/introspect.py — synthetic, never admitted
 from kdive.providers.ports import IntrospectOutput, LiveScriptOutput
 
+
 class FaultInjectIntrospect:
     ...
+
     def run_script(
         self, *, transport_handle: str, script: str, timeout_sec: float
     ) -> LiveScriptOutput:
@@ -593,7 +602,9 @@ from kdive.providers.fault_inject.debug.introspect import FaultInjectIntrospect
 
 
 def test_run_script_returns_synthetic_output():
-    out = FaultInjectIntrospect().run_script(transport_handle="x", script="print(1)", timeout_sec=5.0)
+    out = FaultInjectIntrospect().run_script(
+        transport_handle="x", script="print(1)", timeout_sec=5.0
+    )
     assert out.output == "" and out.truncated is False
 ```
 
@@ -645,7 +656,7 @@ def test_fault_inject_does_not_advertise_live_script(...):
 - [ ] **Step 3: Implement** — in local + remote composition:
 
 ```python
-supported_introspection=frozenset({"offline-vmcore", "live", "live-script"}),
+supported_introspection = (frozenset({"offline-vmcore", "live", "live-script"}),)
 ```
 
 - [ ] **Step 4: Run — expect PASS**.
@@ -738,15 +749,22 @@ _LIVE_SCRIPT: IntrospectionMode = "live-script"
 _TIMEOUT_FLOOR = 1.0
 _DEFAULT_SCRIPT_TIMEOUT = 30.0
 
+
 def _clamp_timeout(requested: float) -> float:
     ceiling = float(config.require(LIVE_SCRIPT_MAX_TIMEOUT_SECONDS))
     if not math.isfinite(requested) or requested < _TIMEOUT_FLOOR:
         requested = _TIMEOUT_FLOOR
     return min(requested, ceiling)
 
+
 async def introspect_script(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, session_id: str, script: str,
-    timeout_sec: float, introspector: LiveIntrospector,
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    session_id: str,
+    script: str,
+    timeout_sec: float,
+    introspector: LiveIntrospector,
 ) -> ToolResponse:
     """Run a caller drgn script over a live drgn-live DebugSession; return capped stdout."""
     clamped = _clamp_timeout(timeout_sec)
@@ -766,13 +784,17 @@ async def introspect_script(
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(session_id, exc)
         return ToolResponse.success(
-            session_id, "succeeded",
+            session_id,
+            "succeeded",
             suggested_next_actions=["introspect.script", "debug.end_session"],
-            data=cast(ResponseData, {
-                "output": output.output,
-                "truncated": str(output.truncated).lower(),
-                "transcript_sensitivity": "sensitive",
-            }),
+            data=cast(
+                ResponseData,
+                {
+                    "output": output.output,
+                    "truncated": str(output.truncated).lower(),
+                    "transcript_sensitivity": "sensitive",
+                },
+            ),
         )
 ```
 

@@ -19,10 +19,10 @@ Each forces a job row into an invariant-violating state
 tool, and asserts the response was degraded AND that the degrade was logged:
 
 ```python
-assert resp.error_category == "infrastructure_failure"   # PASSED
+assert resp.error_category == "infrastructure_failure"  # PASSED
 assert any(
     record.exc_info is not None and f"job {job_id}" in record.message
-    for record in caplog.records                          # assert False
+    for record in caplog.records  # assert False
 )
 ```
 

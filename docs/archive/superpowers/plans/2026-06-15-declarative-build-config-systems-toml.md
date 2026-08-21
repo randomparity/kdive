@@ -53,9 +53,9 @@ The migration runner (`src/kdive/db/migrate.py`) auto-discovers `schema/NNNN_*.s
 In `tests/scripts/test_m2_portability_gate.py`, add the new migration to the expected frozenset (it sits next to the existing build-config entries near line 165):
 
 ```python
-                "src/kdive/db/schema/0034_build_config_catalog_source.sql",
-                "src/kdive/db/schema/0035_build_config_catalog_source_config.sql",
-                "src/kdive/mcp/tools/catalog/build_configs.py",
+("src/kdive/db/schema/0034_build_config_catalog_source.sql",)
+("src/kdive/db/schema/0035_build_config_catalog_source_config.sql",)
+("src/kdive/mcp/tools/catalog/build_configs.py",)
 ```
 
 - [ ] **Step 2: Run the meta-test to verify it fails**
@@ -68,8 +68,8 @@ Expected: FAIL — the expected frozenset no longer equals `ALLOWED_FILES` (the 
 In `scripts/m2_portability_gate.py`, inside `ALLOWED_FILES`, add next to the existing migration entries (with a brief comment matching the file's style):
 
 ```python
-    # ADR-0122: declarative [[build_config]] source='config' CHECK widen (provider-agnostic core).
-    "src/kdive/db/schema/0035_build_config_catalog_source_config.sql",
+# ADR-0122: declarative [[build_config]] source='config' CHECK widen (provider-agnostic core).
+("src/kdive/db/schema/0035_build_config_catalog_source_config.sql",)
 ```
 
 - [ ] **Step 4: Create the migration file**
@@ -189,9 +189,7 @@ def validate_build_config_name(name: str) -> str:
     reaches the key builder (which blocks only `/` and control chars, not `..`/whitespace/case).
     """
     if not _NAME_PATTERN.fullmatch(name):
-        raise ValueError(
-            f"build-config name {name!r} must match ^[a-z0-9][a-z0-9_-]{{0,63}}$"
-        )
+        raise ValueError(f"build-config name {name!r} must match ^[a-z0-9][a-z0-9_-]{{0,63}}$")
     return name
 
 
@@ -304,7 +302,9 @@ async def test_upsert_config_writes_source_config(db_conn) -> None:
         upsert_config_build_config,
     )
 
-    await upsert_config_build_config(db_conn, "kdump", "system/build-configs/kdump/kdump.config", "abc123", "desc")
+    await upsert_config_build_config(
+        db_conn, "kdump", "system/build-configs/kdump/kdump.config", "abc123", "desc"
+    )
     prov = await read_build_config_provenance(db_conn, "kdump")
     assert prov == ("abc123", "config", "desc")
 
@@ -466,9 +466,7 @@ def test_build_config_duplicate_name_raises() -> None:
 @pytest.mark.parametrize("name", ["", "Kdump", "kd/ump"])
 def test_build_config_bad_name_raises(name: str) -> None:
     with pytest.raises(InventoryError):
-        InventoryDoc.parse(
-            {"schema_version": 2, "build_config": [{"name": name, "content": "a"}]}
-        )
+        InventoryDoc.parse({"schema_version": 2, "build_config": [{"name": name, "content": "a"}]})
 
 
 def test_build_config_empty_content_raises() -> None:
@@ -576,7 +574,7 @@ def test_validate_rejects_over_cap_build_config(tmp_path, monkeypatch, capsys) -
     monkeypatch.setenv("KDIVE_MAX_BUILD_CONFIG_BYTES", "10")
     path = tmp_path / "systems.toml"
     path.write_text(
-        'schema_version = 2\n'
+        "schema_version = 2\n"
         '[[build_config]]\nname = "kdump"\ncontent = "CONFIG_KEXEC=y_way_too_long"\n'
     )
     assert validate_systems(path) != 0
@@ -782,7 +780,9 @@ async def test_benign_seed_adoption_does_not_warn(db_conn, object_store) -> None
 
 async def test_over_cap_skips_with_warn(db_conn, object_store, monkeypatch) -> None:
     monkeypatch.setenv("KDIVE_MAX_BUILD_CONFIG_BYTES", "5")
-    diff = await reconcile_build_configs(db_conn, _doc("kdump", "way too long content"), object_store)
+    diff = await reconcile_build_configs(
+        db_conn, _doc("kdump", "way too long content"), object_store
+    )
     assert [r.name for r in diff.warned] == ["kdump"]
     assert await read_build_config_provenance(db_conn, "kdump") is None  # never published
 
@@ -923,7 +923,9 @@ async def _reconcile_one(
                 retention_class=_RETENTION_CLASS,
             )
         )
-        await upsert_config_build_config(conn, frag.name, _key_of(written), sha256, frag.description)
+        await upsert_config_build_config(
+            conn, frag.name, _key_of(written), sha256, frag.description
+        )
         if prior is None:
             diff.created.append(_record(frag.name))
             return

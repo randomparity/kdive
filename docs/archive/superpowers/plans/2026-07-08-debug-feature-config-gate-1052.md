@@ -158,14 +158,23 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
     FeatureRequirement(
         "rootfs_mount",
         "Mount the kdive squashfs+overlay rootfs the guest boots from.",
-        _plain("SQUASHFS", "SQUASHFS_ZSTD", "OVERLAY_FS", "BLK_DEV_LOOP", "XFS_FS", "XFS_POSIX_ACL"),
+        _plain(
+            "SQUASHFS", "SQUASHFS_ZSTD", "OVERLAY_FS", "BLK_DEV_LOOP", "XFS_FS", "XFS_POSIX_ACL"
+        ),
     ),
     FeatureRequirement(
         CRASH_CAPTURE,
         "Reserve a crashkernel and capture a vmcore via kdump.",
         _plain(
-            "KEXEC", "KEXEC_CORE", "KEXEC_FILE", "CRASH_DUMP", "VMCORE_INFO",
-            "PROC_VMCORE", "FW_CFG_SYSFS", "RELOCATABLE", "RANDOMIZE_BASE",
+            "KEXEC",
+            "KEXEC_CORE",
+            "KEXEC_FILE",
+            "CRASH_DUMP",
+            "VMCORE_INFO",
+            "PROC_VMCORE",
+            "FW_CFG_SYSFS",
+            "RELOCATABLE",
+            "RANDOMIZE_BASE",
         ),
         gate_required=(
             frozenset({"KEXEC_CORE"}),
@@ -284,8 +293,8 @@ def test_y_and_m_are_enabled():
 def test_not_set_absent_and_n_are_disabled():
     cfg = parse_kernel_config(_SAMPLE)
     assert not cfg.is_enabled("RANDOMIZE_BASE")  # is not set
-    assert not cfg.is_enabled("KASAN")           # =n
-    assert not cfg.is_enabled("CRASH_DUMP")      # absent
+    assert not cfg.is_enabled("KASAN")  # =n
+    assert not cfg.is_enabled("CRASH_DUMP")  # absent
 
 
 def test_string_and_int_values_are_not_enabled():
@@ -387,8 +396,17 @@ from kdive.kernel_config.requirements import CRASH_CAPTURE, feature_requirement
 from kdive.kernel_config.support import feature_supported, missing_symbols, unmet_clauses
 
 _CRASH = feature_requirement(CRASH_CAPTURE)
-_FULL = frozenset({"KEXEC_CORE", "KEXEC", "CRASH_DUMP", "PROC_VMCORE", "VMCORE_INFO",
-                   "FW_CFG_SYSFS", "RELOCATABLE"})
+_FULL = frozenset(
+    {
+        "KEXEC_CORE",
+        "KEXEC",
+        "CRASH_DUMP",
+        "PROC_VMCORE",
+        "VMCORE_INFO",
+        "FW_CFG_SYSFS",
+        "RELOCATABLE",
+    }
+)
 
 
 def test_kaslr_off_full_gate_set_is_supported():
@@ -487,7 +505,9 @@ from uuid import uuid4
 
 from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.sensitivity import Sensitivity  # confirm module: `rg -n "class Sensitivity" src/kdive`
+from kdive.domain.sensitivity import (
+    Sensitivity,
+)  # confirm module: `rg -n "class Sensitivity" src/kdive`
 from kdive.kernel_config.fetch import load_effective_config
 
 _GOOD = b"CONFIG_KEXEC=y\nCONFIG_PROC_VMCORE=y\n"
@@ -544,9 +564,7 @@ def test_present_config_parses():
 def test_store_error_fails_open_to_none():
     conn = _FakeConn({"object_key": "k"})
     exc = CategorizedError("gone", category=ErrorCategory.STALE_HANDLE)
-    got = asyncio.run(
-        load_effective_config(conn, uuid4(), store_factory=lambda: _Store(exc=exc))
-    )
+    got = asyncio.run(load_effective_config(conn, uuid4(), store_factory=lambda: _Store(exc=exc)))
     assert got is None
 
 
@@ -787,6 +805,7 @@ Add an assertion (in `tests/mcp/catalog/test_expected_uploads_tool.py`) that `ex
 ```python
 def test_expected_uploads_points_at_feature_config_requirements():
     from kdive.mcp.tools.catalog.artifacts.expected_uploads import expected_uploads
+
     resp = expected_uploads()
     assert "artifacts.feature_config_requirements" in str(resp.suggested_next_actions or resp.data)
 ```
@@ -945,26 +964,24 @@ Expected: FAIL (no gate — job enqueues).
 - [ ] **Step 3: Add the gate**
 
 ```python
-            resolved = _resolve_capture_method(run_id, method, system, runtime)
-            if isinstance(resolved, ToolResponse):
-                return resolved
-            capture_method = resolved
+resolved = _resolve_capture_method(run_id, method, system, runtime)
+if isinstance(resolved, ToolResponse):
+    return resolved
+capture_method = resolved
 
-            if capture_method is CaptureMethod.KDUMP:
-                config = await load_effective_config(conn, uid)
-                if config is not None:
-                    unmet = unmet_clauses(config, feature_requirement(CRASH_CAPTURE))
-                    if unmet:
-                        return _config_error(
-                            run_id,
-                            detail=(
-                                "uploaded kernel config lacks symbols required for a kdump vmcore"
-                            ),
-                            data={
-                                "reason": "kernel_missing_crash_config",
-                                "missing": missing_symbols(unmet),
-                            },
-                        )
+if capture_method is CaptureMethod.KDUMP:
+    config = await load_effective_config(conn, uid)
+    if config is not None:
+        unmet = unmet_clauses(config, feature_requirement(CRASH_CAPTURE))
+        if unmet:
+            return _config_error(
+                run_id,
+                detail=("uploaded kernel config lacks symbols required for a kdump vmcore"),
+                data={
+                    "reason": "kernel_missing_crash_config",
+                    "missing": missing_symbols(unmet),
+                },
+            )
 ```
 
 Add imports (top of module):

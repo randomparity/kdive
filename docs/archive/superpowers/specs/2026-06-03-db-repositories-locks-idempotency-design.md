@@ -48,6 +48,7 @@ written.
 M = TypeVar("M", bound=DomainModel)
 S = TypeVar("S", bound=StrEnum)
 
+
 class Repository(Generic[M]):
     def __init__(
         self,
@@ -60,6 +61,7 @@ class Repository(Generic[M]):
     async def insert(self, conn: AsyncConnection, obj: M) -> M: ...
     async def get(self, conn: AsyncConnection, obj_id: UUID) -> M | None: ...
 
+
 class StatefulRepository(Repository[M], Generic[M, S]):
     def __init__(
         self,
@@ -71,9 +73,7 @@ class StatefulRepository(Repository[M], Generic[M, S]):
         json_columns: frozenset[str] = frozenset(),
     ) -> None: ...
 
-    async def update_state(
-        self, conn: AsyncConnection, obj_id: UUID, new_state: S
-    ) -> M: ...
+    async def update_state(self, conn: AsyncConnection, obj_id: UUID, new_state: S) -> M: ...
 ```
 
 Module-level instances (the eight durable objects):
@@ -152,6 +152,7 @@ class LockScope(StrEnum):
     ALLOCATION = "allocation"
     SYSTEM = "system"
 
+
 @asynccontextmanager
 async def advisory_xact_lock(
     conn: AsyncConnection, scope: LockScope, key: UUID
@@ -195,6 +196,7 @@ loud error.
 
 ```python
 JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
+
 
 async def run_step(
     conn: AsyncConnection,

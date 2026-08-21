@@ -313,7 +313,9 @@ def test_default_resolver_registers_only_local_libvirt() -> None:
 
     resolver = composition.build_provider_resolver()
     assert resolver.registered_kinds() == frozenset({ResourceKind.LOCAL_LIBVIRT})
-    assert resolver.resolve(ResourceKind.LOCAL_LIBVIRT).component_sources.provider == "local-libvirt"
+    assert (
+        resolver.resolve(ResourceKind.LOCAL_LIBVIRT).component_sources.provider == "local-libvirt"
+    )
 
 
 def test_enabling_fault_inject_before_it_exists_fails_closed() -> None:
@@ -327,11 +329,12 @@ def test_enabling_fault_inject_before_it_exists_fails_closed() -> None:
 `tests/reconciler/test_main.py` — replace the `_FakeRuntime` class **and** its monkeypatch (the old class is then unused — remove it) with a fake resolver:
 
 ```python
-    class _FakeResolver:
-        async def register_all_discovery(self, pool: object) -> None:
-            events.append("discover")
+class _FakeResolver:
+    async def register_all_discovery(self, pool: object) -> None:
+        events.append("discover")
 
-    monkeypatch.setattr(composition, "build_provider_resolver", lambda **kw: _FakeResolver())
+
+monkeypatch.setattr(composition, "build_provider_resolver", lambda **kw: _FakeResolver())
 ```
 
 (`__main__._run_reconciler` does `from kdive.providers.composition import build_provider_resolver` at call time, so patching the attribute on `composition` is sufficient — keep the existing `from kdive.providers import composition` reference at line 28.)
@@ -391,23 +394,35 @@ type HandlerRegistrar = Callable[[HandlerRegistry, ProviderResolver], None]
 `_plain`'s ignored slot becomes `ProviderResolver`. The provider-aware **tool** lambdas resolve the local runtime (MCP registrar modules unchanged):
 
 ```python
+(
     lambda app, pool, resolver, registry: systems_tools.register(
         app, pool, provider_runtime=resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
     ),
-    ...
+)
+...
+(
     lambda app, pool, resolver, registry: runs_tools.register(
         app, pool, provider_runtime=resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
     ),
+)
+(
     lambda app, pool, resolver, registry: vmcore_tools.register(
         app, pool, provider_runtime=resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
     ),
+)
+(
     lambda app, pool, resolver, registry: debug_tools.register(
-        app, pool, provider_runtime=resolver.resolve(ResourceKind.LOCAL_LIBVIRT),
+        app,
+        pool,
+        provider_runtime=resolver.resolve(ResourceKind.LOCAL_LIBVIRT),
         secret_registry=registry,
     ),
+)
+(
     lambda app, pool, resolver, registry: introspect.register(
         app, pool, provider_runtime=resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
     ),
+)
 ```
 
 The **handler** registrars in this task STILL pass the resolved local runtime (planes are migrated in Task 4):
@@ -462,9 +477,10 @@ Update both docstrings to say "provider resolver".
 In `_run_reconciler` replace the import and call:
 
 ```python
-    from kdive.providers.composition import build_provider_resolver
-    ...
-    await _register_provider_resources(pool, build_provider_resolver())
+from kdive.providers.composition import build_provider_resolver
+
+...
+await _register_provider_resources(pool, build_provider_resolver())
 ```
 
 Change `_register_provider_resources` to take a `ProviderResolver`:
@@ -709,8 +725,7 @@ from kdive.providers.composition import build_provider_resolver
 def _check_allowed_kinds(conn: psycopg.Connection) -> set[str]:
     """Read the kinds admitted by the live resources_kind_check constraint."""
     row = conn.execute(
-        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-        "WHERE conname = 'resources_kind_check'"
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'resources_kind_check'"
     ).fetchone()
     assert row is not None, "resources_kind_check constraint is missing"
     # pg renders the CHECK as ... ARRAY['local-libvirt'::text, ...]; the single-quoted

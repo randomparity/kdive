@@ -139,6 +139,7 @@ def test_operator_upsert_then_seed_guard_preserves_operator(migrated_url: str) -
         assert entry.object_key == "k/op"
         assert entry.sha256 == "shaop"
         assert entry.description == "op desc"
+
     asyncio.run(_run())
 
 
@@ -151,6 +152,7 @@ def test_operator_upsert_empty_description_preserves_prior(migrated_url: str) ->
         assert entry is not None
         assert entry.source == "operator"
         assert entry.description == "kept desc"
+
     asyncio.run(_run())
 ```
 
@@ -253,6 +255,7 @@ def test_seed_skips_operator_override(migrated_url: str, minio_store: ObjectStor
         assert entry is not None
         assert entry.source == "operator"
         assert entry.sha256 == "operatorsha"
+
     asyncio.run(_run())
 ```
 
@@ -342,11 +345,17 @@ Extend `tests/mcp/catalog/test_build_configs_tool.py` (it lives under `tests/mcp
 
 ```python
 _PLATFORM_ADMIN = RequestContext(
-    principal="op-1", agent_session="sess-1", projects=(), roles={},
+    principal="op-1",
+    agent_session="sess-1",
+    projects=(),
+    roles={},
     platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
 )
 _PLATFORM_OPERATOR = RequestContext(
-    principal="op-1", agent_session="sess-1", projects=(), roles={},
+    principal="op-1",
+    agent_session="sess-1",
+    projects=(),
+    roles={},
     platform_roles=frozenset({PlatformRole.PLATFORM_OPERATOR}),
 )
 ```
@@ -357,36 +366,48 @@ Tests:
 def test_set_publishes_and_get_reports_operator_source(migrated_url, minio_store):
     async def _run():
         async with _pool(migrated_url) as pool:
-            resp = await set_build_config(pool, minio_store, _PLATFORM_ADMIN, name="kdump",
-                                          content="CONFIG_X=y\n", description="d")
+            resp = await set_build_config(
+                pool,
+                minio_store,
+                _PLATFORM_ADMIN,
+                name="kdump",
+                content="CONFIG_X=y\n",
+                description="d",
+            )
             assert resp.status == "published"
             assert resp.data["source"] == "operator"
             async with pool.connection() as conn:
                 got = await read_build_config(conn, minio_store, name="kdump")
         assert got.data["content"] == "CONFIG_X=y\n"
         assert got.data["source"] == "operator"
+
     asyncio.run(_run())
 
 
 def test_set_requires_platform_admin(migrated_url, minio_store):
     async def _run():
         async with _pool(migrated_url) as pool:
-            resp = await set_build_config(pool, minio_store, _PLATFORM_OPERATOR, name="kdump",
-                                          content="x\n", description="")
+            resp = await set_build_config(
+                pool, minio_store, _PLATFORM_OPERATOR, name="kdump", content="x\n", description=""
+            )
         assert resp.status == "error"
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+
     asyncio.run(_run())
 
 
 def test_set_rejects_bad_name_and_empty_content(migrated_url, minio_store):
     async def _run():
         async with _pool(migrated_url) as pool:
-            bad = await set_build_config(pool, minio_store, _PLATFORM_ADMIN, name="../etc",
-                                         content="x\n", description="")
-            empty = await set_build_config(pool, minio_store, _PLATFORM_ADMIN, name="kdump",
-                                           content="", description="")
+            bad = await set_build_config(
+                pool, minio_store, _PLATFORM_ADMIN, name="../etc", content="x\n", description=""
+            )
+            empty = await set_build_config(
+                pool, minio_store, _PLATFORM_ADMIN, name="kdump", content="", description=""
+            )
         assert bad.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert empty.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+
     asyncio.run(_run())
 ```
 
@@ -420,46 +441,85 @@ _MAX_DESCRIPTION_BYTES = 1024
 
 
 async def set_build_config(
-    pool: AsyncConnectionPool, store: ObjectStore, ctx: RequestContext,
-    *, name: str, content: str, description: str,
+    pool: AsyncConnectionPool,
+    store: ObjectStore,
+    ctx: RequestContext,
+    *,
+    name: str,
+    content: str,
+    description: str,
 ) -> ToolResponse:
     """Publish/replace a build-config fragment (platform_admin; ADR-0119)."""
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
     except AuthorizationError:
-        await audit_platform_denial(pool, ctx, tool=_SET_TOOL, scope=f"denied:{name}",
-                                    args={"name": name})
-        return ToolResponse.failure(name, ErrorCategory.AUTHORIZATION_DENIED,
-                                    suggested_next_actions=[_SET_TOOL])
+        await audit_platform_denial(
+            pool, ctx, tool=_SET_TOOL, scope=f"denied:{name}", args={"name": name}
+        )
+        return ToolResponse.failure(
+            name, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_SET_TOOL]
+        )
     if not _NAME_RE.match(name):
-        return ToolResponse.failure(name, ErrorCategory.CONFIGURATION_ERROR,
-                                    suggested_next_actions=[_SET_TOOL], data={"field": "name"})
+        return ToolResponse.failure(
+            name,
+            ErrorCategory.CONFIGURATION_ERROR,
+            suggested_next_actions=[_SET_TOOL],
+            data={"field": "name"},
+        )
     data = content.encode("utf-8")
     cap = int(config.require(MAX_BUILD_CONFIG_BYTES))
     if not data or len(data) > cap:
-        return ToolResponse.failure(name, ErrorCategory.CONFIGURATION_ERROR,
-                                    suggested_next_actions=[_SET_TOOL],
-                                    data={"field": "content", "limit": cap, "actual": len(data)})
+        return ToolResponse.failure(
+            name,
+            ErrorCategory.CONFIGURATION_ERROR,
+            suggested_next_actions=[_SET_TOOL],
+            data={"field": "content", "limit": cap, "actual": len(data)},
+        )
     if len(description.encode("utf-8")) > _MAX_DESCRIPTION_BYTES:
-        return ToolResponse.failure(name, ErrorCategory.CONFIGURATION_ERROR,
-                                    suggested_next_actions=[_SET_TOOL], data={"field": "description"})
+        return ToolResponse.failure(
+            name,
+            ErrorCategory.CONFIGURATION_ERROR,
+            suggested_next_actions=[_SET_TOOL],
+            data={"field": "description"},
+        )
     sha256 = hashlib.sha256(data).hexdigest()
     with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn, conn.transaction(), \
-                advisory_xact_lock(conn, LockScope.BUILD_CONFIG, name):
-            written = await asyncio.to_thread(store.put_artifact, ArtifactWriteRequest(
-                tenant="system", owner_kind="build-configs", owner_id=name,
-                name=f"{name}.config", data=data, sensitivity=Sensitivity.REDACTED,
-                retention_class="build-config"))
+        async with (
+            pool.connection() as conn,
+            conn.transaction(),
+            advisory_xact_lock(conn, LockScope.BUILD_CONFIG, name),
+        ):
+            written = await asyncio.to_thread(
+                store.put_artifact,
+                ArtifactWriteRequest(
+                    tenant="system",
+                    owner_kind="build-configs",
+                    owner_id=name,
+                    name=f"{name}.config",
+                    data=data,
+                    sensitivity=Sensitivity.REDACTED,
+                    retention_class="build-config",
+                ),
+            )
             await upsert_operator_build_config(conn, name, written.key, sha256, description)
-            await audit.record_platform(conn, principal=ctx.principal,
-                agent_session=ctx.agent_session, event=audit.PlatformAuditEvent(
-                    tool=_SET_TOOL, scope=name,
+            await audit.record_platform(
+                conn,
+                principal=ctx.principal,
+                agent_session=ctx.agent_session,
+                event=audit.PlatformAuditEvent(
+                    tool=_SET_TOOL,
+                    scope=name,
                     args={"name": name, "sha256": sha256, "bytes": len(data)},
-                    platform_role=held_platform_roles(ctx), actor=actor_for(ctx)))
-    return ToolResponse.success(name, "published",
+                    platform_role=held_platform_roles(ctx),
+                    actor=actor_for(ctx),
+                ),
+            )
+    return ToolResponse.success(
+        name,
+        "published",
         suggested_next_actions=["buildconfig.get"],
-        data={"name": name, "sha256": sha256, "bytes": len(data), "source": "operator"})
+        data={"name": name, "sha256": sha256, "bytes": len(data), "source": "operator"},
+    )
 ```
 
 Register inside `register()`:
@@ -475,8 +535,9 @@ async def buildconfig_set_tool(
     nonlocal _store
     if _store is None:
         _store = _resolve_store()
-    return await set_build_config(pool, _store, current_context(), name=name,
-                                  content=content, description=description)
+    return await set_build_config(
+        pool, _store, current_context(), name=name, content=content, description=description
+    )
 ```
 
 Add `from kdive.log import bind_context` and `import kdive.config as config` and `import hashlib`. Confirm `record_platform` runs on the same `conn`/transaction as the upsert (atomic row+audit).

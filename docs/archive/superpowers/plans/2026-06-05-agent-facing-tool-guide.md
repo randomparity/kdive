@@ -288,17 +288,14 @@ def test_every_parameter_has_a_description() -> None:
 
 def test_every_tool_has_a_valid_maturity() -> None:
     valid = {"implemented", "partial", "planned"}
-    offenders = [
-        t.name for t in TOOLS if (t.meta or {}).get("maturity") not in valid
-    ]
+    offenders = [t.name for t in TOOLS if (t.meta or {}).get("maturity") not in valid]
     assert not offenders, f"tools with missing/invalid maturity: {offenders}"
 
 
 def test_destructive_hint_matches_reviewed_set() -> None:
     hinted = {t.name for t in TOOLS if (t.annotations and t.annotations.destructiveHint)}
     assert hinted == _docmeta.DESTRUCTIVE_TOOLS, (
-        f"destructiveHint set {sorted(hinted)} != reviewed set "
-        f"{sorted(_docmeta.DESTRUCTIVE_TOOLS)}"
+        f"destructiveHint set {sorted(hinted)} != reviewed set {sorted(_docmeta.DESTRUCTIVE_TOOLS)}"
     )
 
 
@@ -363,68 +360,74 @@ from kdive.mcp.tools import _docmeta
 Replace the bodies in `register()` (`runs.py:628-654`) with:
 
 ```python
-    @app.tool(
-        name="runs.get",
-        annotations=_docmeta.read_only(),
-        meta={"maturity": "implemented"},
-    )
-    async def runs_get(
-        run_id: Annotated[str, Field(description="The Run to render.")],
-    ) -> ToolResponse:
-        """Render a Run; a failed Run maps to a failure envelope. Requires project membership."""
-        return await get_run(pool, current_context(), run_id)
+@app.tool(
+    name="runs.get",
+    annotations=_docmeta.read_only(),
+    meta={"maturity": "implemented"},
+)
+async def runs_get(
+    run_id: Annotated[str, Field(description="The Run to render.")],
+) -> ToolResponse:
+    """Render a Run; a failed Run maps to a failure envelope. Requires project membership."""
+    return await get_run(pool, current_context(), run_id)
 
-    @app.tool(
-        name="runs.create",
-        annotations=_docmeta.mutating(),
-        meta={"maturity": "implemented"},
-    )
-    async def runs_create(
-        investigation_id: Annotated[str, Field(description="Investigation to attach the Run to.")],
-        system_id: Annotated[str, Field(description="Ready System (active Allocation) to bind.")],
-        build_profile: Annotated[dict[str, Any], Field(description="Build profile for the Run's kernel.")],
-    ) -> ToolResponse:
-        """Bind a Run to a ready System and Investigation in one transaction. Requires operator."""
-        return await create_run(
-            pool,
-            current_context(),
-            investigation_id=investigation_id,
-            system_id=system_id,
-            build_profile=build_profile,
-        )
 
-    @app.tool(
-        name="runs.build",
-        annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+@app.tool(
+    name="runs.create",
+    annotations=_docmeta.mutating(),
+    meta={"maturity": "implemented"},
+)
+async def runs_create(
+    investigation_id: Annotated[str, Field(description="Investigation to attach the Run to.")],
+    system_id: Annotated[str, Field(description="Ready System (active Allocation) to bind.")],
+    build_profile: Annotated[
+        dict[str, Any], Field(description="Build profile for the Run's kernel.")
+    ],
+) -> ToolResponse:
+    """Bind a Run to a ready System and Investigation in one transaction. Requires operator."""
+    return await create_run(
+        pool,
+        current_context(),
+        investigation_id=investigation_id,
+        system_id=system_id,
+        build_profile=build_profile,
     )
-    async def runs_build(
-        run_id: Annotated[str, Field(description="The Run to build.")],
-    ) -> ToolResponse:
-        """Enqueue the kernel build job for a Run; poll jobs.* for completion. Requires operator."""
-        return await build_run(pool, current_context(), run_id)
 
-    @app.tool(
-        name="runs.install",
-        annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
-    )
-    async def runs_install(
-        run_id: Annotated[str, Field(description="The Run whose built kernel to install.")],
-    ) -> ToolResponse:
-        """Enqueue the install job for a built Run; poll jobs.* for completion. Requires operator."""
-        return await install_run(pool, current_context(), run_id)
 
-    @app.tool(
-        name="runs.boot",
-        annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
-    )
-    async def runs_boot(
-        run_id: Annotated[str, Field(description="The Run whose installed kernel to boot.")],
-    ) -> ToolResponse:
-        """Enqueue the boot job for an installed Run; poll jobs.* for completion. Requires operator."""
-        return await boot_run(pool, current_context(), run_id)
+@app.tool(
+    name="runs.build",
+    annotations=_docmeta.mutating(),
+    meta={"maturity": "partial"},
+)
+async def runs_build(
+    run_id: Annotated[str, Field(description="The Run to build.")],
+) -> ToolResponse:
+    """Enqueue the kernel build job for a Run; poll jobs.* for completion. Requires operator."""
+    return await build_run(pool, current_context(), run_id)
+
+
+@app.tool(
+    name="runs.install",
+    annotations=_docmeta.mutating(),
+    meta={"maturity": "partial"},
+)
+async def runs_install(
+    run_id: Annotated[str, Field(description="The Run whose built kernel to install.")],
+) -> ToolResponse:
+    """Enqueue the install job for a built Run; poll jobs.* for completion. Requires operator."""
+    return await install_run(pool, current_context(), run_id)
+
+
+@app.tool(
+    name="runs.boot",
+    annotations=_docmeta.mutating(),
+    meta={"maturity": "partial"},
+)
+async def runs_boot(
+    run_id: Annotated[str, Field(description="The Run whose installed kernel to boot.")],
+) -> ToolResponse:
+    """Enqueue the boot job for an installed Run; poll jobs.* for completion. Requires operator."""
+    return await boot_run(pool, current_context(), run_id)
 ```
 
 - [ ] **Step 3: Verify the runs.* tools now pass description/maturity checks**
@@ -743,7 +746,9 @@ def render_namespace(namespace: str, docs: list[ToolDoc]) -> str:
         if d.params:
             lines += ["| Parameter | Type | Required | Description |", "|---|---|---|---|"]
             for p in sorted(d.params, key=lambda x: x.name):
-                lines.append(f"| `{p.name}` | `{p.type}` | {'yes' if p.required else 'no'} | {p.description} |")
+                lines.append(
+                    f"| `{p.name}` | `{p.type}` | {'yes' if p.required else 'no'} | {p.description} |"
+                )
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -751,7 +756,9 @@ def render_namespace(namespace: str, docs: list[ToolDoc]) -> str:
 def render_index(docs: list[ToolDoc]) -> str:
     lines = [_HEADER, "", "# Tool reference", "", "| Tool | Maturity |", "|---|---|"]
     for d in sorted(docs, key=lambda x: x.name):
-        lines.append(f"| [`{d.name}`]({d.namespace}.md#{d.name.replace('.', '')}) | `{d.maturity}` |")
+        lines.append(
+            f"| [`{d.name}`]({d.namespace}.md#{d.name.replace('.', '')}) | `{d.maturity}` |"
+        )
     return "\n".join(lines) + "\n"
 
 

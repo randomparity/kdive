@@ -571,7 +571,9 @@ def test_force_crash_marker_refuses_racing_power(migrated_url: str) -> None:
                 system_id = await _seed_system(pool, SystemState.READY, domain_name=f"kdive-{i}")
                 ctrl = _RecordingController()
                 resolver = provider_resolver(provisioner=_TrackingProvisioner(), controller=ctrl)
-                cjob = await _enqueue(pool, JobKind.FORCE_CRASH, system_id, f"{system_id}:force_crash")
+                cjob = await _enqueue(
+                    pool, JobKind.FORCE_CRASH, system_id, f"{system_id}:force_crash"
+                )
                 pjob = await _enqueue(pool, JobKind.POWER, system_id, f"{system_id}:power")
 
                 async def run_crash(job: Job = cjob, resolver=resolver) -> None:
@@ -669,16 +671,22 @@ Create `tests/reconciler/test_stalled_crashing_recovery.py`. Model each case: a 
 
 ```python
 # AC5: no active force_crash job (FAILED / CANCELED / absent) -> crashed + detach + audit.
-def test_recovers_crashing_with_failed_job(migrated_url): ...       # job FAILED -> system crashed
-def test_recovers_crashing_with_canceled_job(migrated_url): ...     # job CANCELED -> system crashed
-def test_recovers_crashing_with_no_job_row(migrated_url): ...       # no force_crash row -> crashed
+def test_recovers_crashing_with_failed_job(migrated_url): ...  # job FAILED -> system crashed
+def test_recovers_crashing_with_canceled_job(migrated_url): ...  # job CANCELED -> system crashed
+def test_recovers_crashing_with_no_job_row(migrated_url): ...  # no force_crash row -> crashed
 # AC5, detach path (guards the hand-copied _detach_sessions_reconciler SQL):
-def test_recovers_crashing_detaches_live_session(migrated_url): ...  # LIVE session -> detached + audited
+def test_recovers_crashing_detaches_live_session(
+    migrated_url,
+): ...  # LIVE session -> detached + audited
 # AC5a: active job -> left alone.
-def test_leaves_crashing_with_running_valid_lease(migrated_url): ...  # running, lease ahead -> crashing
-def test_leaves_crashing_with_queued_job(migrated_url): ...          # queued -> crashing
+def test_leaves_crashing_with_running_valid_lease(
+    migrated_url,
+): ...  # running, lease ahead -> crashing
+def test_leaves_crashing_with_queued_job(migrated_url): ...  # queued -> crashing
 # AC5b: lease-lapsed running with attempts remaining -> left alone this tick (a worker reclaims).
-def test_leaves_crashing_with_lease_lapsed_running(migrated_url): ...  # running, lease past, attempt<max -> crashing
+def test_leaves_crashing_with_lease_lapsed_running(
+    migrated_url,
+): ...  # running, lease past, attempt<max -> crashing
 ```
 
 The `test_recovers_crashing_detaches_live_session` case is the guard for the new hand-copied
@@ -821,10 +829,12 @@ _repair_stalled_crashing_systems = system_repairs.repair_stalled_crashing_system
 add `"_repair_stalled_crashing_systems"` to the `__all__`-style export tuple (~line 121), and insert a catalog entry **immediately after** the `"abandoned_jobs"` entry (so it runs after `repair_abandoned_jobs` dead-letters zombies) in `_REPAIR_CATALOG` (~line 375):
 
 ```python
-    _RepairCatalogEntry("abandoned_jobs", lambda _r, _c, _g: _repair_abandoned_jobs),
+(_RepairCatalogEntry("abandoned_jobs", lambda _r, _c, _g: _repair_abandoned_jobs),)
+(
     _RepairCatalogEntry(
         "stalled_crashing_systems", lambda _r, _c, _g: _repair_stalled_crashing_systems
     ),
+)
 ```
 
 - [ ] **Step 6: Run tests to verify they pass**

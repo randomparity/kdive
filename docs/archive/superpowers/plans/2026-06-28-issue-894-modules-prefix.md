@@ -25,9 +25,7 @@ Add this test after `test_repack_modules_subtree_skips_path_traversal_members`:
 
 ```python
 @pytest.mark.parametrize("prefix", ("./", "/"))
-def test_repack_modules_subtree_normalizes_prefixed_members(
-    tmp_path: Path, prefix: str
-) -> None:
+def test_repack_modules_subtree_normalizes_prefixed_members(tmp_path: Path, prefix: str) -> None:
     version = "7.0.0-dirty"
     combined = tmp_path / "kernel.tar.gz"
     buf = io.BytesIO()

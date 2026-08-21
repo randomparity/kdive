@@ -52,9 +52,9 @@ meta = maturity_meta(
     "partial",
     reason=MaturityReason.LIVE_DEPENDENCY,
     detail="Boots the installed kernel through the provider; the install→boot path "
-           "is exercised only under the gated live_vm/live_stack markers.",
+    "is exercised only under the gated live_vm/live_stack markers.",
     promotion="Boot verified by a non-gated test or a recorded live_stack run that "
-              "asserts the booted kernel identity.",
+    "asserts the booted kernel identity.",
     providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
 )
 ```

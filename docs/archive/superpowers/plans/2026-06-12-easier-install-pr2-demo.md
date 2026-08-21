@@ -707,7 +707,9 @@ def test_bundled_path_wires_backends_into_config() -> None:
     res = _template("bundledBackends=true", "demoAcknowledged=true")
     assert res.returncode == 0, res.stderr
     # The demo apps must reach the in-chart services, not render empty config.
-    dsn = "postgresql://kdive:kdive-demo@kdive-kdive-postgres:5432/kdive"  # pragma: allowlist secret
+    dsn = (
+        "postgresql://kdive:kdive-demo@kdive-kdive-postgres:5432/kdive"  # pragma: allowlist secret
+    )
     assert f'KDIVE_DATABASE_URL: "{dsn}"' in res.stdout
     assert 'KDIVE_S3_ENDPOINT_URL: "http://kdive-kdive-minio:9000"' in res.stdout
     assert 'KDIVE_OIDC_ISSUER: "http://kdive-kdive-oidc:8080/default"' in res.stdout

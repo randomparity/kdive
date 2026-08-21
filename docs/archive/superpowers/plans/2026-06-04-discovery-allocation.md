@@ -211,46 +211,47 @@ from kdive.domain.errors import ErrorCategory
 Add inside the `ToolResponse` class (after `from_job`):
 
 ```python
-    @classmethod
-    def success(
-        cls,
-        object_id: str,
-        status: str,
-        *,
-        suggested_next_actions: list[str] | None = None,
-        refs: dict[str, str] | None = None,
-        data: dict[str, str] | None = None,
-    ) -> ToolResponse:
-        """Build a non-failure envelope.
+@classmethod
+def success(
+    cls,
+    object_id: str,
+    status: str,
+    *,
+    suggested_next_actions: list[str] | None = None,
+    refs: dict[str, str] | None = None,
+    data: dict[str, str] | None = None,
+) -> ToolResponse:
+    """Build a non-failure envelope.
 
-        ``status`` must not be a failure status (``failed``/``error``); passing one is a
-        producer bug and the model validator raises, surfacing the misuse at construction.
-        """
-        return cls(
-            object_id=object_id,
-            status=status,
-            suggested_next_actions=suggested_next_actions or [],
-            refs=refs or {},
-            data=data or {},
-        )
+    ``status`` must not be a failure status (``failed``/``error``); passing one is a
+    producer bug and the model validator raises, surfacing the misuse at construction.
+    """
+    return cls(
+        object_id=object_id,
+        status=status,
+        suggested_next_actions=suggested_next_actions or [],
+        refs=refs or {},
+        data=data or {},
+    )
 
-    @classmethod
-    def failure(
-        cls,
-        object_id: str,
-        category: ErrorCategory,
-        *,
-        suggested_next_actions: list[str] | None = None,
-        data: dict[str, str] | None = None,
-    ) -> ToolResponse:
-        """Build a tool-level failure envelope (``status="error"`` + ``category``)."""
-        return cls(
-            object_id=object_id,
-            status="error",
-            error_category=category.value,
-            suggested_next_actions=suggested_next_actions or [],
-            data=data or {},
-        )
+
+@classmethod
+def failure(
+    cls,
+    object_id: str,
+    category: ErrorCategory,
+    *,
+    suggested_next_actions: list[str] | None = None,
+    data: dict[str, str] | None = None,
+) -> ToolResponse:
+    """Build a tool-level failure envelope (``status="error"`` + ``category``)."""
+    return cls(
+        object_id=object_id,
+        status="error",
+        error_category=category.value,
+        suggested_next_actions=suggested_next_actions or [],
+        data=data or {},
+    )
 ```
 
 - [ ] **Step 4: Run to verify it passes**
@@ -457,15 +458,11 @@ def test_admit_blocks_behind_a_held_resource_lock(migrated_url: str) -> None:
     # Deterministic proof admit acquires LockScope.RESOURCE: pre-hold it on conn A and
     # assert admit on conn B cannot complete until A releases.
     async def _run() -> None:
-        async with _conn(migrated_url) as seed, _conn(migrated_url) as a, _conn(
-            migrated_url
-        ) as b:
+        async with _conn(migrated_url) as seed, _conn(migrated_url) as a, _conn(migrated_url) as b:
             res = await _seed_resource(seed, cap=1)
             async with a.transaction():
                 async with advisory_xact_lock(a, LockScope.RESOURCE, res.id):
-                    task = asyncio.ensure_future(
-                        admit(b, CTX, resource=res, project="proj")
-                    )
+                    task = asyncio.ensure_future(admit(b, CTX, resource=res, project="proj"))
                     await asyncio.sleep(0.3)
                     assert not task.done()  # blocked on the resource lock
                 # leaving the lock + transaction releases the lock
@@ -968,9 +965,7 @@ def _parse_system_id(meta_xml: str) -> str | None:
 class LocalLibvirtDiscovery:
     """The `DiscoveryPlane` for the local libvirt host."""
 
-    def __init__(
-        self, *, host_uri: str, connect: Connect, concurrent_allocation_cap: int
-    ) -> None:
+    def __init__(self, *, host_uri: str, connect: Connect, concurrent_allocation_cap: int) -> None:
         self.host_uri = host_uri
         self._connect = connect
         self.concurrent_allocation_cap = concurrent_allocation_cap
@@ -1026,9 +1021,7 @@ class LocalLibvirtDiscovery:
         owned: list[OwnedInfra] = []
         for domain in conn.listAllDomains():
             try:
-                meta = domain.metadata(
-                    libvirt.VIR_DOMAIN_METADATA_ELEMENT, _KDIVE_METADATA_NS, 0
-                )
+                meta = domain.metadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, _KDIVE_METADATA_NS, 0)
             except libvirt.libvirtError as exc:
                 if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN_METADATA:
                     continue  # untagged → not ours
@@ -1442,7 +1435,9 @@ from tests.providers.local_libvirt.conftest import FakeLibvirtConn
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _ctx(role: Role | None = Role.OPERATOR, *, projects: tuple[str, ...] = ("proj",)) -> RequestContext:
+def _ctx(
+    role: Role | None = Role.OPERATOR, *, projects: tuple[str, ...] = ("proj",)
+) -> RequestContext:
     roles = {"proj": role} if role is not None else {}
     return RequestContext(principal="user-1", agent_session="s", projects=projects, roles=roles)
 
@@ -1843,12 +1838,20 @@ async def release_allocation(
                             )
                         if current.state in _RELEASABLE:
                             await _transition_and_audit(
-                                conn, ctx, uid, current.state,
-                                AllocationState.RELEASING, project=alloc.project,
+                                conn,
+                                ctx,
+                                uid,
+                                current.state,
+                                AllocationState.RELEASING,
+                                project=alloc.project,
                             )
                         await _transition_and_audit(
-                            conn, ctx, uid, AllocationState.RELEASING,
-                            AllocationState.RELEASED, project=alloc.project,
+                            conn,
+                            ctx,
+                            uid,
+                            AllocationState.RELEASING,
+                            AllocationState.RELEASED,
+                            project=alloc.project,
                         )
             except IllegalTransition:
                 # Backstop for an interleaving the lock did not cover (e.g. a future
@@ -1884,7 +1887,9 @@ async def list_allocations(
             except ValueError:
                 _log.warning("allocation row violates the response invariant; degraded")
                 responses.append(
-                    ToolResponse.failure(str(row.get("id", "?")), ErrorCategory.INFRASTRUCTURE_FAILURE)
+                    ToolResponse.failure(
+                        str(row.get("id", "?")), ErrorCategory.INFRASTRUCTURE_FAILURE
+                    )
                 )
         return responses
 

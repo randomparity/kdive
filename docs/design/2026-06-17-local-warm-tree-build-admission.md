@@ -58,9 +58,7 @@ A pure function checks the warm-tree source for a `LOCAL` host and raises on an 
 value, reusing the predicate and messages `sync_tree` already owns:
 
 ```python
-def check_warm_tree_source_admission(
-    kernel_src: str, *, host_kind: BuildHostKind
-) -> None:
+def check_warm_tree_source_admission(kernel_src: str, *, host_kind: BuildHostKind) -> None:
     """Reject a LOCAL warm-tree build whose KDIVE_KERNEL_SRC is unset or unusable.
 
     No-op for non-LOCAL hosts (git lanes do not read KDIVE_KERNEL_SRC). For a LOCAL

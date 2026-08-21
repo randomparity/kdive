@@ -320,9 +320,7 @@ def select_newest(entries: list[VmcoreEntry]) -> VmcoreEntry | None:
     return max(entries, key=lambda e: e.mtime)
 
 
-def harvest_vmcore(
-    reader: GuestCoreReader, overlay: str, *, max_bytes: int
-) -> bytes | None:
+def harvest_vmcore(reader: GuestCoreReader, overlay: str, *, max_bytes: int) -> bytes | None:
     """Read the newest ``/var/crash/*/vmcore`` from ``overlay``; ``None`` if none present.
 
     Raises:
@@ -472,9 +470,7 @@ def read_via_tempfile(data: bytes, path_reader: Callable[[Path], str]) -> str:
         return path_reader(Path(handle.name))
 
 
-def extract_dmesg_or_sentinel(
-    data: bytes, extractor: Callable[[Path], bytes]
-) -> bytes:
+def extract_dmesg_or_sentinel(data: bytes, extractor: Callable[[Path], bytes]) -> bytes:
     """Extract dmesg from the core bytes; degrade to the sentinel, but never hide a missing drgn.
 
     Mirrors remote host_dump: a `MISSING_DEPENDENCY` (drgn absent) is an operator fault that
@@ -587,14 +583,16 @@ Expected: FAIL (set mismatch — production still omits KDUMP, the test now expe
 In `src/kdive/providers/local_libvirt/composition.py`, change lines 114-116 to:
 
 ```python
-        supported_capture_methods=frozenset(
-            {
-                CaptureMethod.CONSOLE,
-                CaptureMethod.HOST_DUMP,
-                CaptureMethod.GDBSTUB,
-                CaptureMethod.KDUMP,
-            }
-        ),
+supported_capture_methods = (
+    frozenset(
+        {
+            CaptureMethod.CONSOLE,
+            CaptureMethod.HOST_DUMP,
+            CaptureMethod.GDBSTUB,
+            CaptureMethod.KDUMP,
+        }
+    ),
+)
 ```
 
 - [ ] **Step 4: Implement the real seams + `from_env` wiring in `retrieve.py`**
@@ -608,7 +606,9 @@ import logging
 
 import libvirt  # ty: ignore[unresolved-import]  # operator-provided C extension
 
-from kdive.providers.local_libvirt.settings import LIBVIRT_URI  # KDIVE_LIBVIRT_URI (default qemu:///system)
+from kdive.providers.local_libvirt.settings import (
+    LIBVIRT_URI,
+)  # KDIVE_LIBVIRT_URI (default qemu:///system)
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.local_libvirt.retrieve_kdump import (
     GuestCoreReader,
@@ -650,7 +650,9 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
             entries: list[VmcoreEntry] = []
             for path in g.glob_expand("/var/crash/*/vmcore"):
                 st = g.statns(path)
-                entries.append(VmcoreEntry(path=path, mtime=st["st_mtime_sec"], size_bytes=st["st_size"]))
+                entries.append(
+                    VmcoreEntry(path=path, mtime=st["st_mtime_sec"], size_bytes=st["st_size"])
+                )
             return entries
         finally:
             g.close()
@@ -707,11 +709,11 @@ does (resolve the provider config/settings object and call `.require(LIBVIRT_URI
 the existing settings import rather than re-deriving the default string.
 
 ```python
-
-
 def _real_wait_for_vmcore(system_id: UUID) -> bytes | None:  # pragma: no cover - live_vm
     _force_off_domain(system_id)
-    return harvest_vmcore(_LibguestfsCoreReader(), overlay_path(system_id), max_bytes=MAX_CORE_BYTES)
+    return harvest_vmcore(
+        _LibguestfsCoreReader(), overlay_path(system_id), max_bytes=MAX_CORE_BYTES
+    )
 
 
 def _real_read_build_id(data: bytes) -> str:  # pragma: no cover - live_vm (drgn)
@@ -812,10 +814,12 @@ In `src/kdive/mcp/tools/lifecycle/vmcore.py`, change the `providers=` text (line
 reflect that local-libvirt now does KDUMP:
 
 ```python
-            providers=(
-                "local-libvirt: HOST_DUMP/KDUMP; remote-libvirt: HOST_DUMP/KDUMP; "
-                "fault-inject: simulated HOST_DUMP."
-            ),
+providers = (
+    (
+        "local-libvirt: HOST_DUMP/KDUMP; remote-libvirt: HOST_DUMP/KDUMP; "
+        "fault-inject: simulated HOST_DUMP."
+    ),
+)
 ```
 
 - [ ] **Step 3: Add the runbook Tier 3 section**

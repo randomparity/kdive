@@ -107,8 +107,12 @@ _SELECTED = [
     {"name": "fedora-kdive-remote-base-43", "distro": "fedora", "source": "virt-builder"},
     {"name": "ubuntu-2404-kdive-remote-base", "distro": "ubuntu", "source": "cloud-image"},
     {"name": "rocky-10-kdive-remote-base", "distro": "rocky", "source": "cloud-image"},
-    {"name": "bare-kdive-remote-base", "distro": "bare", "source": "scratch",
-     "root_device": "/dev/vda1"},
+    {
+        "name": "bare-kdive-remote-base",
+        "distro": "bare",
+        "source": "scratch",
+        "root_device": "/dev/vda1",
+    },
 ]
 
 _CONTEXT = {

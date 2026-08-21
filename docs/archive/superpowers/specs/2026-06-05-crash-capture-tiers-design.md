@@ -107,7 +107,9 @@ async def vmcore_fetch(
     system_id: Annotated[str, Field(description="The crashed System whose core to capture.")],
     method: Annotated[
         Literal["host_dump", "kdump"],
-        Field(description="Core-producing capture method; the provider rejects an unsupported one."),
+        Field(
+            description="Core-producing capture method; the provider rejects an unsupported one."
+        ),
     ] = "host_dump",
 ) -> ToolResponse: ...
 ```
@@ -136,11 +138,12 @@ remains a `host_dump`/`kdump` core reader (it needs a core).
 ```python
 class LibvirtDebugOptions(_ProfileBase):
     preserve_on_crash: bool = False  # Tier 1: pvpanic device + <on_crash>preserve> + panic=0
-    gdbstub: bool = False            # Tier 2: QEMU -gdb arg + nokaslr
+    gdbstub: bool = False  # Tier 2: QEMU -gdb arg + nokaslr
+
 
 class LibvirtProfile(_ProfileBase):
     ...
-    crashkernel: NonEmptyStr | None = None   # was required; now kdump-only
+    crashkernel: NonEmptyStr | None = None  # was required; now kdump-only
     debug: LibvirtDebugOptions = Field(default_factory=LibvirtDebugOptions)
 ```
 

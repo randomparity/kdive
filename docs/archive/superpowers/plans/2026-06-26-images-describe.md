@@ -271,15 +271,16 @@ Thread `package_versions` into `_provenance(... , package_versions=package_versi
 Add the degrade helper:
 
 ```python
-    def _capture_versions(self, scratch: Path, requested: tuple[str, ...]) -> dict[str, str]:
-        """Installed versions for the requested packages; ``{}`` (logged) on inspector failure."""
-        try:
-            installed = self._tools.inspect_versions(scratch)
-        except CategorizedError:
-            _log.warning("package-version capture failed; provenance omits package_versions",
-                         exc_info=True)
-            return {}
-        return {name: installed[name] for name in requested if name in installed}
+def _capture_versions(self, scratch: Path, requested: tuple[str, ...]) -> dict[str, str]:
+    """Installed versions for the requested packages; ``{}`` (logged) on inspector failure."""
+    try:
+        installed = self._tools.inspect_versions(scratch)
+    except CategorizedError:
+        _log.warning(
+            "package-version capture failed; provenance omits package_versions", exc_info=True
+        )
+        return {}
+    return {name: installed[name] for name in requested if name in installed}
 ```
 
 Update `_provenance` to take `package_versions: dict[str, str]` and add it **only when
@@ -386,15 +387,16 @@ output before `publish_qcow2`:
 ```
 
 ```python
-    def _capture_versions(self, qcow2: Path, requested: tuple[str, ...]) -> dict[str, str]:
-        try:
-            installed = self._tools.inspect_versions(qcow2)
-        except CategorizedError:
-            _log.warning("package-version capture failed; provenance omits package_versions",
-                         exc_info=True)
-            return {}
-        wanted = _guest_agent_packages(requested)
-        return {name: installed[name] for name in wanted if name in installed}
+def _capture_versions(self, qcow2: Path, requested: tuple[str, ...]) -> dict[str, str]:
+    try:
+        installed = self._tools.inspect_versions(qcow2)
+    except CategorizedError:
+        _log.warning(
+            "package-version capture failed; provenance omits package_versions", exc_info=True
+        )
+        return {}
+    wanted = _guest_agent_packages(requested)
+    return {name: installed[name] for name in wanted if name in installed}
 ```
 
 `_provenance(spec, *, size, package_versions)` adds `record["package_versions"] =
@@ -448,6 +450,7 @@ async def test_describe_public_row_carries_full_detail(migrated_url: str) -> Non
         assert d["root_device"] == "/dev/vda" and d["digest"] == "sha256:abc"
         assert d["capabilities"] == [] and d["provenance"] == {}
         assert "object_key" not in d and "path" not in d
+
     asyncio.run(_run())
 
 
@@ -457,6 +460,7 @@ async def test_describe_owned_private_visible(migrated_url: str) -> None:
             iid = await _insert(pool, name="mine", visibility="private", owner="proj-a")
             resp = await catalog_images.describe_image(pool, _ctx("proj-a"), iid)
         assert resp.status != "error" and resp.data["name"] == "mine"
+
     asyncio.run(_run())
 
 
@@ -466,10 +470,14 @@ async def test_describe_unauthorized_private_is_not_found(migrated_url: str) -> 
             iid = await _insert(pool, name="theirs", visibility="private", owner="proj-b")
             visible = await catalog_images.describe_image(pool, _ctx("proj-a"), iid)
             unknown = await catalog_images.describe_image(
-                pool, _ctx("proj-a"), "00000000-0000-0000-0000-000000000000")
+                pool, _ctx("proj-a"), "00000000-0000-0000-0000-000000000000"
+            )
         assert visible.status == "error" and visible.error_category == "not_found"
         # No existence leak: byte-identical to a genuinely-unknown id.
-        assert visible.model_dump(exclude={"object_id"}) == unknown.model_dump(exclude={"object_id"})
+        assert visible.model_dump(exclude={"object_id"}) == unknown.model_dump(
+            exclude={"object_id"}
+        )
+
     asyncio.run(_run())
 
 
@@ -478,6 +486,7 @@ async def test_describe_malformed_id_is_configuration_error(migrated_url: str) -
         async with _pool(migrated_url) as pool:
             resp = await catalog_images.describe_image(pool, _ctx(), "not-a-uuid")
         assert resp.status == "error" and resp.error_category == "configuration_error"
+
     asyncio.run(_run())
 
 
@@ -490,6 +499,7 @@ async def test_describe_withholds_staged_path(migrated_url: str) -> None:
             resp = await catalog_images.describe_image(pool, _ctx(), iid)
         assert "path" not in resp.data
         assert secret not in str(resp.model_dump())
+
     asyncio.run(_run())
 ```
 
@@ -659,7 +669,7 @@ async def images_describe(args: argparse.Namespace) -> int:
 `src/kdive/cli/commands/registry.py` (next to the `images list` Verb at line 133):
 
 ```python
-    Verb("images", "describe", reads.images_describe, "images.describe", ("image_id",)),
+(Verb("images", "describe", reads.images_describe, "images.describe", ("image_id",)),)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**

@@ -37,6 +37,7 @@ schema bound would leak a raw `ValidationError` (ADR-0247/0259).
 ```python
 LABEL_MAX_LEN = 200
 
+
 def validate_label(label: str | None) -> str | None:
     """Return the cleaned label, or None. Raise CategorizedError(configuration_error,
     details={"reason": "invalid_label"}) for an invalid label (ADR-0264)."""

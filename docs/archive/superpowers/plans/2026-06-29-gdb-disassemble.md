@@ -57,8 +57,12 @@ def test_disassembly_rows_extracts_instruction_rows() -> None:
             message="done",
             payload={
                 "asm_insns": [
-                    {"address": "0xffffffff81000000", "func-name": "panic",
-                     "offset": "0", "inst": "push %rbp"},
+                    {
+                        "address": "0xffffffff81000000",
+                        "func-name": "panic",
+                        "offset": "0",
+                        "inst": "push %rbp",
+                    },
                     {"address": "0xffffffff81000001", "inst": "mov %rsp,%rbp"},
                 ]
             },
@@ -70,9 +74,10 @@ def test_disassembly_rows_extracts_instruction_rows() -> None:
 
 def test_disassembly_rows_empty_for_missing_or_non_list_asm_insns() -> None:
     assert disassembly_rows([MiRecord(type="result", message="done", payload={})]) == []
-    assert disassembly_rows(
-        [MiRecord(type="result", message="done", payload={"asm_insns": "oops"})]
-    ) == []
+    assert (
+        disassembly_rows([MiRecord(type="result", message="done", payload={"asm_insns": "oops"})])
+        == []
+    )
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -144,14 +149,10 @@ git commit -m "feat(921): add disassembly parser + port models" -m "Co-Authored-
 # --- disassembly (ADR-0276) ----------------------------------------------------------------
 
 
-def _disasm_controller(
-    insns: list[dict[str, object]], command: str
-) -> _FakeMiController:
+def _disasm_controller(insns: list[dict[str, object]], command: str) -> _FakeMiController:
     return _FakeMiController(
         responses={
-            command: [
-                {"type": "result", "message": "done", "payload": {"asm_insns": list(insns)}}
-            ]
+            command: [{"type": "result", "message": "done", "payload": {"asm_insns": list(insns)}}]
         }
     )
 
@@ -160,15 +161,27 @@ def test_disassemble_symbol_resolves_then_disassembles(tmp_path: Path) -> None:
     controller = _FakeMiController(
         responses={
             "-data-evaluate-expression &schedule": [
-                {"type": "result", "message": "done",
-                 "payload": {"value": "0xffffffff81000000 <schedule>"}}
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {"value": "0xffffffff81000000 <schedule>"},
+                }
             ],
             "-data-disassemble -s 0xffffffff81000000 -e 0xffffffff81000400 -- 0": [
-                {"type": "result", "message": "done",
-                 "payload": {"asm_insns": [
-                     {"address": "0xffffffff81000000", "func-name": "schedule",
-                      "offset": "0", "inst": "push %rbp"},
-                 ]}}
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {
+                        "asm_insns": [
+                            {
+                                "address": "0xffffffff81000000",
+                                "func-name": "schedule",
+                                "offset": "0",
+                                "inst": "push %rbp",
+                            },
+                        ]
+                    },
+                }
             ],
         }
     )
@@ -183,9 +196,7 @@ def test_disassemble_symbol_resolves_then_disassembles(tmp_path: Path) -> None:
 
 def test_disassemble_address_skips_symbol_resolution(tmp_path: Path) -> None:
     command = "-data-disassemble -s 0x1000 -e 0x1400 -- 0"
-    controller = _disasm_controller(
-        [{"address": "0x1000", "inst": "nop"}], command
-    )
+    controller = _disasm_controller([{"address": "0x1000", "inst": "nop"}], command)
     result = _engine().disassemble(
         _attachment(controller, tmp_path), symbol=None, address=0x1000, instruction_count=64
     )
@@ -215,9 +226,7 @@ def test_disassemble_rejects_bad_count_before_command(bad: int, tmp_path: Path) 
     assert controller.written == []
 
 
-@pytest.mark.parametrize(
-    ("symbol", "address"), [("schedule", 0x1000), (None, None)]
-)
+@pytest.mark.parametrize(("symbol", "address"), [("schedule", 0x1000), (None, None)])
 def test_disassemble_rejects_bad_target(
     symbol: str | None, address: int | None, tmp_path: Path
 ) -> None:
@@ -225,7 +234,9 @@ def test_disassemble_rejects_bad_target(
     with pytest.raises(CategorizedError) as exc:
         _engine().disassemble(
             _attachment(controller, tmp_path),
-            symbol=symbol, address=address, instruction_count=64,
+            symbol=symbol,
+            address=address,
+            instruction_count=64,
         )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["code"] == "bad_target"
@@ -273,14 +284,22 @@ def test_disassemble_shrink_retry_returns_prefix(tmp_path: Path) -> None:
     controller = _FakeMiController(
         responses={
             "-data-disassemble -s 0x1000 -e 0x1400 -- 0": [
-                {"type": "result", "message": "error",
-                 "payload": {"msg": "Cannot access memory at address 0x1400"}}
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Cannot access memory at address 0x1400"},
+                }
             ],
             "-data-disassemble -s 0x1000 -e 0x1200 -- 0": [
-                {"type": "result", "message": "done",
-                 "payload": {"asm_insns": [
-                     {"address": f"0x{0x1000 + i:x}", "inst": "nop"} for i in range(80)
-                 ]}}
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {
+                        "asm_insns": [
+                            {"address": f"0x{0x1000 + i:x}", "inst": "nop"} for i in range(80)
+                        ]
+                    },
+                }
             ],
         }
     )
@@ -296,8 +315,11 @@ def test_disassemble_no_instructions_when_floor_window_unreadable(tmp_path: Path
     controller = _FakeMiController(
         responses={
             f"-data-disassemble -s 0x1000 -e 0x{0x1000 + span:x} -- 0": [
-                {"type": "result", "message": "error",
-                 "payload": {"msg": "Cannot access memory at address 0x1000"}}
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Cannot access memory at address 0x1000"},
+                }
             ]
             for span in (1024, 512, 256, 128, 64, 32, 16)
         }
@@ -313,8 +335,7 @@ def test_disassemble_passes_through_unrelated_gdb_error(tmp_path: Path) -> None:
     controller = _FakeMiController(
         responses={
             "-data-disassemble -s 0x1000 -e 0x1400 -- 0": [
-                {"type": "result", "message": "error",
-                 "payload": {"msg": "Some other gdb failure"}}
+                {"type": "result", "message": "error", "payload": {"msg": "Some other gdb failure"}}
             ]
         }
     )
@@ -369,121 +390,121 @@ _NO_MEMORY_RE = re.compile(r"cannot access memory", re.IGNORECASE)
 - [ ] **Step 5: Add the engine methods** after `read_frame` / `_stack_command` (before `_redact_frame`):
 
 ```python
-    # --- disassembly (ADR-0276) -----------------------------------------------------------
+# --- disassembly (ADR-0276) -----------------------------------------------------------
 
-    def disassemble(
-        self,
-        attachment: GdbMiAttachment,
-        *,
-        symbol: str | None = None,
-        address: int | None = None,
-        instruction_count: int = 64,
-    ) -> GdbDisassembly:
-        """Disassemble a bounded forward window around ``symbol`` or ``address`` (ADR-0276).
 
-        Validates the count and target before any disassemble command, then issues
-        ``-data-disassemble -s START -e START+count*16 -- 0`` and slices the result to
-        ``instruction_count`` (``truncated`` when more follow). A memory-access ``^error`` from
-        an oversized window drives a shrink-retry down to a one-instruction floor.
-        """
-        if (
-            not isinstance(instruction_count, int)
-            or instruction_count < 1
-            or instruction_count > MAX_DISASSEMBLE_INSTRUCTIONS
-        ):
-            raise _config_error(
-                f"instruction_count must be between 1 and {MAX_DISASSEMBLE_INSTRUCTIONS}",
-                code="bad_instruction_count",
-                details={"instruction_count": instruction_count},
-            )
-        start = self._disassemble_start(attachment, symbol=symbol, address=address)
-        no_instructions = CategorizedError(
-            "gdb/MI returned no instructions",
-            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-            details={"code": "no_instructions"},
+def disassemble(
+    self,
+    attachment: GdbMiAttachment,
+    *,
+    symbol: str | None = None,
+    address: int | None = None,
+    instruction_count: int = 64,
+) -> GdbDisassembly:
+    """Disassemble a bounded forward window around ``symbol`` or ``address`` (ADR-0276).
+
+    Validates the count and target before any disassemble command, then issues
+    ``-data-disassemble -s START -e START+count*16 -- 0`` and slices the result to
+    ``instruction_count`` (``truncated`` when more follow). A memory-access ``^error`` from
+    an oversized window drives a shrink-retry down to a one-instruction floor.
+    """
+    if (
+        not isinstance(instruction_count, int)
+        or instruction_count < 1
+        or instruction_count > MAX_DISASSEMBLE_INSTRUCTIONS
+    ):
+        raise _config_error(
+            f"instruction_count must be between 1 and {MAX_DISASSEMBLE_INSTRUCTIONS}",
+            code="bad_instruction_count",
+            details={"instruction_count": instruction_count},
         )
-        rows = disassembly_rows(
-            self._disassemble_command(
-                attachment, start, instruction_count, missing=no_instructions
-            )
+    start = self._disassemble_start(attachment, symbol=symbol, address=address)
+    no_instructions = CategorizedError(
+        "gdb/MI returned no instructions",
+        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+        details={"code": "no_instructions"},
+    )
+    rows = disassembly_rows(
+        self._disassemble_command(attachment, start, instruction_count, missing=no_instructions)
+    )
+    if not rows:
+        raise no_instructions
+    parsed = [self._instruction_from(row) for row in rows]
+    truncated = len(parsed) > instruction_count
+    instructions = [self._redact_instruction(insn) for insn in parsed[:instruction_count]]
+    return GdbDisassembly(instructions=instructions, truncated=truncated)
+
+
+def _disassemble_start(
+    self, attachment: GdbMiAttachment, *, symbol: str | None, address: int | None
+) -> int:
+    has_symbol = symbol is not None
+    has_address = address is not None
+    if has_symbol == has_address:
+        raise _config_error(
+            "exactly one of symbol or address is required",
+            code="bad_target",
+            details={"symbol": symbol, "address": address},
         )
-        if not rows:
-            raise no_instructions
-        parsed = [self._instruction_from(row) for row in rows]
-        truncated = len(parsed) > instruction_count
-        instructions = [
-            self._redact_instruction(insn) for insn in parsed[:instruction_count]
-        ]
-        return GdbDisassembly(instructions=instructions, truncated=truncated)
-
-    def _disassemble_start(
-        self, attachment: GdbMiAttachment, *, symbol: str | None, address: int | None
-    ) -> int:
-        has_symbol = symbol is not None
-        has_address = address is not None
-        if has_symbol == has_address:
-            raise _config_error(
-                "exactly one of symbol or address is required",
-                code="bad_target",
-                details={"symbol": symbol, "address": address},
-            )
-        if symbol is not None:
-            return self.resolve_symbol(attachment, symbol)
-        if not isinstance(address, int) or address < 0 or address > 0xFFFFFFFFFFFFFFFF:
-            raise _config_error(
-                "address out of range", code="bad_address", details={"address": address}
-            )
-        return address
-
-    def _disassemble_command(
-        self,
-        attachment: GdbMiAttachment,
-        start: int,
-        instruction_count: int,
-        *,
-        missing: CategorizedError,
-    ) -> list[MiRecord]:
-        """Issue the range disassemble, shrinking the window on a memory-access ``^error``.
-
-        gdb errors on the whole range when the tail is unmapped, so a valid START near the top
-        of the loaded image is salvaged by halving the byte span down to one maximal instruction;
-        only an unreadable floor window raises ``missing`` (``no_instructions``).
-        """
-        span = instruction_count * MAX_INSTRUCTION_BYTES
-        last_exc: CategorizedError | None = None
-        while True:
-            command = f"-data-disassemble -s 0x{start:x} -e 0x{start + span:x} -- 0"
-            try:
-                return self.execute_mi_command(attachment, command)
-            except CategorizedError as exc:
-                if not self._is_unreadable_memory(exc):
-                    raise
-                last_exc = exc
-                if span <= MAX_INSTRUCTION_BYTES:
-                    raise missing from last_exc
-                span = max(span // 2, MAX_INSTRUCTION_BYTES)
-
-    def _is_unreadable_memory(self, exc: CategorizedError) -> bool:
-        if exc.category is not ErrorCategory.DEBUG_ATTACH_FAILURE:
-            return False
-        payload = exc.details.get("payload")
-        msg = payload.get("msg") if isinstance(payload, dict) else None
-        return isinstance(msg, str) and bool(_NO_MEMORY_RE.search(msg))
-
-    def _instruction_from(self, payload: dict[str, Any]) -> GdbInstruction:
-        return GdbInstruction(
-            address=payload.get("address") if isinstance(payload.get("address"), str) else None,
-            inst=payload.get("inst") if isinstance(payload.get("inst"), str) else None,
-            func_name=(
-                payload.get("func-name") if isinstance(payload.get("func-name"), str) else None
-            ),
-            offset=mi_int(payload.get("offset")),
+    if symbol is not None:
+        return self.resolve_symbol(attachment, symbol)
+    if not isinstance(address, int) or address < 0 or address > 0xFFFFFFFFFFFFFFFF:
+        raise _config_error(
+            "address out of range", code="bad_address", details={"address": address}
         )
+    return address
 
-    def _redact_instruction(self, instruction: GdbInstruction) -> GdbInstruction:
-        return GdbInstruction.model_validate(
-            self._redactor().redact_value(instruction.model_dump(mode="json"))
-        )
+
+def _disassemble_command(
+    self,
+    attachment: GdbMiAttachment,
+    start: int,
+    instruction_count: int,
+    *,
+    missing: CategorizedError,
+) -> list[MiRecord]:
+    """Issue the range disassemble, shrinking the window on a memory-access ``^error``.
+
+    gdb errors on the whole range when the tail is unmapped, so a valid START near the top
+    of the loaded image is salvaged by halving the byte span down to one maximal instruction;
+    only an unreadable floor window raises ``missing`` (``no_instructions``).
+    """
+    span = instruction_count * MAX_INSTRUCTION_BYTES
+    last_exc: CategorizedError | None = None
+    while True:
+        command = f"-data-disassemble -s 0x{start:x} -e 0x{start + span:x} -- 0"
+        try:
+            return self.execute_mi_command(attachment, command)
+        except CategorizedError as exc:
+            if not self._is_unreadable_memory(exc):
+                raise
+            last_exc = exc
+            if span <= MAX_INSTRUCTION_BYTES:
+                raise missing from last_exc
+            span = max(span // 2, MAX_INSTRUCTION_BYTES)
+
+
+def _is_unreadable_memory(self, exc: CategorizedError) -> bool:
+    if exc.category is not ErrorCategory.DEBUG_ATTACH_FAILURE:
+        return False
+    payload = exc.details.get("payload")
+    msg = payload.get("msg") if isinstance(payload, dict) else None
+    return isinstance(msg, str) and bool(_NO_MEMORY_RE.search(msg))
+
+
+def _instruction_from(self, payload: dict[str, Any]) -> GdbInstruction:
+    return GdbInstruction(
+        address=payload.get("address") if isinstance(payload.get("address"), str) else None,
+        inst=payload.get("inst") if isinstance(payload.get("inst"), str) else None,
+        func_name=(payload.get("func-name") if isinstance(payload.get("func-name"), str) else None),
+        offset=mi_int(payload.get("offset")),
+    )
+
+
+def _redact_instruction(self, instruction: GdbInstruction) -> GdbInstruction:
+    return GdbInstruction.model_validate(
+        self._redactor().redact_value(instruction.model_dump(mode="json"))
+    )
 ```
 
 - [ ] **Step 6: Run the engine tests to verify they pass**
@@ -610,18 +631,37 @@ def test_disassemble_returns_disassembled(migrated_url: str) -> None:
             controller = _FakeMiController(
                 {
                     "-data-disassemble -s 0x1000 -e 0x1080 -- 0": [
-                        {"type": "result", "message": "done",
-                         "payload": {"asm_insns": [
-                             {"address": "0x1000", "inst": "nop", "func-name": "f", "offset": "0"},
-                         ]}}
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {
+                                "asm_insns": [
+                                    {
+                                        "address": "0x1000",
+                                        "inst": "nop",
+                                        "func-name": "f",
+                                        "offset": "0",
+                                    },
+                                ]
+                            },
+                        }
                     ]
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
             resp = await run_engine_op(
-                pool, _ctx(), session_id, runtime,
-                _op_for("disassemble", runtime, session_id,
-                        symbol=None, address=0x1000, instruction_count=8),
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for(
+                    "disassemble",
+                    runtime,
+                    session_id,
+                    symbol=None,
+                    address=0x1000,
+                    instruction_count=8,
+                ),
             )
         assert resp.status == "disassembled"
         assert resp.data["instruction_count"] == 1
@@ -646,9 +686,18 @@ def test_disassemble_no_instructions_is_categorized(migrated_url: str) -> None:
             )
             runtime = _runtime(_CountingAttach(controller))
             resp = await run_engine_op(
-                pool, _ctx(), session_id, runtime,
-                _op_for("disassemble", runtime, session_id,
-                        symbol=None, address=0x1000, instruction_count=8),
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for(
+                    "disassemble",
+                    runtime,
+                    session_id,
+                    symbol=None,
+                    address=0x1000,
+                    instruction_count=8,
+                ),
             )
         assert resp.status == "error"
         assert resp.error_category == "debug_attach_failure"
@@ -701,12 +750,12 @@ def _register_debug_disassemble(
         meta=_gdbmi_maturity(),
     )
     async def debug_disassemble(
-        session_id: Annotated[
-            str, Field(description="The live DebugSession to disassemble on.")
-        ],
+        session_id: Annotated[str, Field(description="The live DebugSession to disassemble on.")],
         symbol: Annotated[
             str | None,
-            Field(description="Bare C function/symbol name to disassemble around (or use address)."),
+            Field(
+                description="Bare C function/symbol name to disassemble around (or use address)."
+            ),
         ] = None,
         address: Annotated[
             int | None,

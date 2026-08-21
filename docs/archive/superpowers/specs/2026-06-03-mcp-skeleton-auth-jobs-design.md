@@ -152,9 +152,9 @@ middleware; this is asserted by a test so an upstream regression is caught.
 ```python
 @dataclass(frozen=True)
 class RequestContext:
-    principal: str            # token `sub`
-    agent_session: str | None # token `agent_session` claim, optional in M0
-    projects: tuple[str, ...] # token `projects` claim (may be empty)
+    principal: str  # token `sub`
+    agent_session: str | None  # token `agent_session` claim, optional in M0
+    projects: tuple[str, ...]  # token `projects` claim (may be empty)
 ```
 
 - `context_from_claims(claims: Mapping[str, object]) -> RequestContext` derives the
@@ -291,11 +291,13 @@ _PLANE_REGISTRARS = (jobs.register,)
 # without touching __main__.py.
 _HANDLER_REGISTRARS: tuple[Callable[[HandlerRegistry], None], ...] = ()
 
+
 def build_app(pool: AsyncConnectionPool, *, verifier: JWTVerifier | None = None) -> FastMCP:
     app = FastMCP(name="kdive", auth=verifier or build_verifier())
     for register in _PLANE_REGISTRARS:
         register(app, pool)
     return app
+
 
 def build_handler_registry() -> HandlerRegistry:
     registry = HandlerRegistry()

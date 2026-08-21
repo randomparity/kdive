@@ -50,8 +50,17 @@ from kdive.mcp.middleware.transport_trace import mcp_trace_enabled
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [(None, False), ("0", False), ("false", False), ("off", False), ("no", False),
-     ("1", True), ("true", True), ("YES", True), ("On", True)],
+    [
+        (None, False),
+        ("0", False),
+        ("false", False),
+        ("off", False),
+        ("no", False),
+        ("1", True),
+        ("true", True),
+        ("YES", True),
+        ("On", True),
+    ],
 )
 def test_mcp_trace_enabled_resolves_truthy_set(monkeypatch, raw, expected) -> None:
     if raw is None:
@@ -519,6 +528,7 @@ async def run_server(
     trace_enabled: bool,
 ) -> None:
     ...
+
     async def serve_mcp(pool, heartbeat, probe) -> None:
         del heartbeat, probe
         app = build_app(pool, secret_registry=secret_registry)
@@ -529,6 +539,7 @@ async def run_server(
             uvicorn_config=server_uvicorn_config(),
             middleware=server_http_middleware(trace_enabled=trace_enabled),
         )
+
     ...
 ```
 
@@ -539,7 +550,10 @@ flag in `_handle_server`. The final form (no placeholder — write exactly this)
 
 ```python
 from kdive.mcp.middleware.transport_trace import mcp_trace_enabled
+
 ...
+
+
 def _handle_server(args, secret_registry, telemetry) -> None:
     del args
     initialized = _require_telemetry("server", telemetry)
@@ -706,6 +720,7 @@ def test_trace_wraps_fastmcp_transport_mount() -> None:
     http_app = app.http_app(middleware=server_http_middleware(trace_enabled=True))
     # The outermost user middleware in the assembled Starlette app is the trace middleware.
     from kdive.mcp.middleware.transport_trace import TransportTraceMiddleware
+
     assert any(
         getattr(m, "cls", None) is TransportTraceMiddleware
         for m in getattr(http_app, "user_middleware", [])

@@ -180,9 +180,7 @@ class _FakeSection:
 @pytest.mark.asyncio
 async def test_generate_report_runs_each_section_with_shared_as_of() -> None:
     scope = ReportScope(projects=("proj",), all_projects=False)
-    report = await generate_report(
-        None, scope, None, _AS_OF, sections=(_FakeSection(),)
-    )
+    report = await generate_report(None, scope, None, _AS_OF, sections=(_FakeSection(),))
     assert isinstance(report, Report)
     assert report.as_of == _AS_OF
     assert len(report.sections) == 1
@@ -482,8 +480,13 @@ class InventorySection:
     )
 
     async def gather(
-        self, conn: AsyncConnection, scope: ReportScope, window: Window,
-        as_of: datetime, *, cap: int,
+        self,
+        conn: AsyncConnection,
+        scope: ReportScope,
+        window: Window,
+        as_of: datetime,
+        *,
+        cap: int,
     ) -> SectionRows:
         params: list[object] = []
         where = ""
@@ -512,8 +515,13 @@ class LeasesSection:
     columns = ("allocation_id", "project", "principal", "state", "lease_expiry", "status")
 
     async def gather(
-        self, conn: AsyncConnection, scope: ReportScope, window: Window,
-        as_of: datetime, *, cap: int,
+        self,
+        conn: AsyncConnection,
+        scope: ReportScope,
+        window: Window,
+        as_of: datetime,
+        *,
+        cap: int,
     ) -> SectionRows:
         params: list[object] = [list(_ACTIVE_STATES), as_of, list(_ACTIVE_STATES), as_of]
         scope_clause = ""
@@ -542,8 +550,13 @@ class ImagesSection:
     columns = ("provider", "name", "arch", "format", "visibility", "owner", "state")
 
     async def gather(
-        self, conn: AsyncConnection, scope: ReportScope, window: Window,
-        as_of: datetime, *, cap: int,
+        self,
+        conn: AsyncConnection,
+        scope: ReportScope,
+        window: Window,
+        as_of: datetime,
+        *,
+        cap: int,
     ) -> SectionRows:
         # Mirror catalog/images.py visibility: public, or private owned by an in-scope project.
         params: list[object] = []
@@ -554,9 +567,7 @@ class ImagesSection:
             params.append(list(scope.projects))
         sql = (
             "SELECT provider, name, arch, format, visibility, owner, state "
-            "FROM image_catalog WHERE "
-            + visibility
-            + " ORDER BY provider, name, arch LIMIT %s"
+            "FROM image_catalog WHERE " + visibility + " ORDER BY provider, name, arch LIMIT %s"
         )
         params.append(cap + 1)
         async with conn.cursor(row_factory=dict_row) as cur:
@@ -570,8 +581,13 @@ class ActivitySection:
     columns = ("run_id", "project", "system_id", "state", "created_at")
 
     async def gather(
-        self, conn: AsyncConnection, scope: ReportScope, window: Window,
-        as_of: datetime, *, cap: int,
+        self,
+        conn: AsyncConnection,
+        scope: ReportScope,
+        window: Window,
+        as_of: datetime,
+        *,
+        cap: int,
     ) -> SectionRows:
         # Default the window end to as_of for point-in-time consistency.
         effective: Window = window
@@ -604,8 +620,13 @@ class CostsSection:
     columns = ("project", "principal", "reserved", "reconciled", "variance")
 
     async def gather(
-        self, conn: AsyncConnection, scope: ReportScope, window: Window,
-        as_of: datetime, *, cap: int,
+        self,
+        conn: AsyncConnection,
+        scope: ReportScope,
+        window: Window,
+        as_of: datetime,
+        *,
+        cap: int,
     ) -> SectionRows:
         report = await accounting_ledger.report(
             conn, projects=list(scope.projects), group_by="principal", window=window
@@ -711,8 +732,10 @@ def _report() -> Report:
         truncated=False,
     )
     leases = Section(
-        key="leases", columns=("allocation_id",),
-        rows=({"allocation_id": "a1"},), truncated=True,
+        key="leases",
+        columns=("allocation_id",),
+        rows=({"allocation_id": "a1"},),
+        truncated=True,
     )
     return Report(sections=(inv, leases), as_of=_AS_OF)
 
@@ -852,7 +875,10 @@ from kdive.security.authz.rbac import PlatformRole, Role
 def _ctx(*, projects=("proj",), role=Role.VIEWER, platform=frozenset()):  # noqa: ANN001,ANN202
     roles = {p: role for p in projects} if role is not None else {}
     return RequestContext(
-        principal="u1", agent_session="s", projects=projects, roles=roles,
+        principal="u1",
+        agent_session="s",
+        projects=projects,
+        roles=roles,
         platform_roles=platform,
     )
 
@@ -882,8 +908,10 @@ async def test_all_projects_requires_platform_auditor(pool, seed) -> None:  # no
     denied = await generate_all_projects(pool, _ctx(), window=None, formats=["csv"])
     assert denied.error_category == "authorization_denied"
     ok = await generate_all_projects(
-        pool, _ctx(platform=frozenset({PlatformRole.PLATFORM_AUDITOR})),
-        window=None, formats=["csv"],
+        pool,
+        _ctx(platform=frozenset({PlatformRole.PLATFORM_AUDITOR})),
+        window=None,
+        formats=["csv"],
     )
     assert ok.status == "ok"
 
@@ -983,7 +1011,7 @@ from kdive.mcp.tools.reports import register as register_report_tools
 Append to `_PLANE_REGISTRARS` (using the existing `_pool_only_plane_registrar` wrapper):
 
 ```python
-    _pool_only_plane_registrar(register_report_tools),
+(_pool_only_plane_registrar(register_report_tools),)
 ```
 
 - [ ] **Step 4: Run to verify it passes**
@@ -1082,7 +1110,8 @@ async def gc_report_artifacts(
         except Exception:  # noqa: BLE001 - one object failure must not starve the rest
             _log.warning(
                 "reconciler: deleting report artifact object %s failed; retry next pass",
-                object_key, exc_info=True,
+                object_key,
+                exc_info=True,
             )
             continue
         async with conn.transaction(), conn.cursor() as cur:
@@ -1170,7 +1199,9 @@ def test_redact_rows_scrubs_secret_in_inline_and_render() -> None:
                 truncated=False,
             ),
         ),
-        as_of=__import__("datetime").datetime(2026, 6, 22, tzinfo=__import__("datetime").timezone.utc),
+        as_of=__import__("datetime").datetime(
+            2026, 6, 22, tzinfo=__import__("datetime").timezone.utc
+        ),
     )
     redactor = Redactor(secret_values=[_SECRET])
     redacted = _redact_rows(report, redactor)

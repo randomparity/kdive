@@ -196,9 +196,7 @@ def test_failure_carries_optional_refs() -> None:
     from kdive.domain.errors import ErrorCategory
     from kdive.mcp.responses import ToolResponse
 
-    resp = ToolResponse.failure(
-        "run-1", ErrorCategory.INSTALL_FAILURE, refs={"kernel": "s3://b/k"}
-    )
+    resp = ToolResponse.failure("run-1", ErrorCategory.INSTALL_FAILURE, refs={"kernel": "s3://b/k"})
     assert resp.refs == {"kernel": "s3://b/k"}
     assert resp.error_category == ErrorCategory.INSTALL_FAILURE.value
     assert resp.retryable is False  # category-iff-failure invariant still holds
@@ -756,12 +754,20 @@ def test_failed_run_envelope_keeps_investigation_and_artifacts() -> None:
 If the module has no `_make_run` factory, construct directly, e.g.:
 
 ```python
-    run = Run(
-        id=uuid4(), created_at=_DT, updated_at=_DT, principal="user-1", project="proj",
-        investigation_id=inv_id, system_id=None, target_kind=ResourceKind.LOCAL_LIBVIRT,
-        state=RunState.SUCCEEDED, build_profile={...},
-        kernel_ref="s3://bucket/vmlinuz", debuginfo_ref="s3://bucket/vmlinux",
-    )
+run = Run(
+    id=uuid4(),
+    created_at=_DT,
+    updated_at=_DT,
+    principal="user-1",
+    project="proj",
+    investigation_id=inv_id,
+    system_id=None,
+    target_kind=ResourceKind.LOCAL_LIBVIRT,
+    state=RunState.SUCCEEDED,
+    build_profile={...},
+    kernel_ref="s3://bucket/vmlinuz",
+    debuginfo_ref="s3://bucket/vmlinux",
+)
 ```
 
 - [ ] **Step 2: Run — expect failure**
@@ -779,7 +785,10 @@ from kdive.mcp.tools.lifecycle._recovery import build_profile_summary
 
 def _run_recovery(run: Run) -> dict[str, JsonValue]:
     """Investigation link + redaction-safe build summary, on the Run row (#568)."""
-    return {"investigation_id": str(run.investigation_id), **build_profile_summary(run.build_profile)}
+    return {
+        "investigation_id": str(run.investigation_id),
+        **build_profile_summary(run.build_profile),
+    }
 
 
 def _run_artifact_refs(run: Run) -> dict[str, str]:
@@ -874,11 +883,20 @@ _DT = datetime(2026, 6, 18, tzinfo=UTC)
 
 def test_system_envelope_excludes_ssh_credential_ref() -> None:
     system = System(
-        id=uuid4(), created_at=_DT, updated_at=_DT, principal="u", project="proj",
-        allocation_id=uuid4(), state=SystemState.READY,
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="u",
+        project="proj",
+        allocation_id=uuid4(),
+        state=SystemState.READY,
         provisioning_profile={
-            "schema_version": 1, "arch": "x86_64", "boot_method": "direct-kernel",
-            "vcpu": 2, "memory_mb": 4096, "disk_gb": 20,
+            "schema_version": 1,
+            "arch": "x86_64",
+            "boot_method": "direct-kernel",
+            "vcpu": 2,
+            "memory_mb": 4096,
+            "disk_gb": 20,
             "provider": {"local-libvirt": {"ssh_credential_ref": f"file:///run/{_PLANTED}"}},
         },
     )
@@ -888,11 +906,18 @@ def test_system_envelope_excludes_ssh_credential_ref() -> None:
 
 def test_run_envelope_excludes_git_remote_token() -> None:
     run = Run(
-        id=uuid4(), created_at=_DT, updated_at=_DT, principal="u", project="proj",
-        investigation_id=uuid4(), system_id=None, target_kind=ResourceKind.LOCAL_LIBVIRT,
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="u",
+        project="proj",
+        investigation_id=uuid4(),
+        system_id=None,
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
         state=RunState.SUCCEEDED,
         build_profile={
-            "source": "server", "build_host": "build-1",
+            "source": "server",
+            "build_host": "build-1",
             # Secret embedded as a path segment (not basic-auth userinfo, which the
             # detect-secrets hook would flag); the test asserts it does not leak.
             "kernel_source_ref": {"git": {"remote": f"https://h/{_PLANTED}/r.git", "ref": "main"}},
@@ -936,6 +961,7 @@ def test_resume_from_read_tools(migrated_url: str) -> None:
         assert sys_resp.data["resource_kind"] is not None
         assert run_resp.data["system_id"] == system_id
         assert run_resp.data["investigation_id"] is not None
+
     asyncio.run(_run())
 ```
 

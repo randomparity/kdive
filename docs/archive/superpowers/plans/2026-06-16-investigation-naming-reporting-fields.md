@@ -46,9 +46,7 @@ def test_investigations_description_length_check(pg_conn: psycopg.Connection) ->
         "VALUES ('t', 'open', 'p', 'proj')"
     )
     with pytest.raises(psycopg.errors.CheckViolation):
-        pg_conn.execute(
-            "UPDATE investigations SET description = repeat('x', 4097)"
-        )
+        pg_conn.execute("UPDATE investigations SET description = repeat('x', 4097)")
 ```
 
 (Confirm `pytest` and `psycopg` are already imported in the file; they are.)
@@ -123,6 +121,7 @@ def test_open_persists_description(migrated_url: str) -> None:
                 )
                 row = await cur.fetchone()
             assert row["description"] == "oops in xfs"
+
     asyncio.run(scenario())
 
 
@@ -136,6 +135,7 @@ def test_open_empty_description_stores_null(migrated_url: str) -> None:
                 )
                 row = await cur.fetchone()
             assert row["description"] is None
+
     asyncio.run(scenario())
 
 
@@ -144,6 +144,7 @@ def test_open_overlong_description_is_config_error(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await _open(pool, _ctx(), project="proj", title="t", description="x" * 4097)
             assert resp.error_category == "configuration_error"
+
     asyncio.run(scenario())
 
 
@@ -152,6 +153,7 @@ def test_open_overlong_title_is_config_error(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await _open(pool, _ctx(), project="proj", title="x" * 201)
             assert resp.error_category == "configuration_error"
+
     asyncio.run(scenario())
 ```
 
@@ -200,10 +202,10 @@ Pass `description=normalized_description` into the `Investigation(...)` construc
 Extend the `investigations_open` wrapper with the new optional param:
 
 ```python
-        description: Annotated[
-            str | None,
-            Field(description="Optional free-form description for reporting (<=4096 chars)."),
-        ] = None,
+description: Annotated[
+    str | None,
+    Field(description="Optional free-form description for reporting (<=4096 chars)."),
+] = (None,)
 ```
 
 and thread it into the `open_investigation(...)` call.
@@ -247,6 +249,7 @@ def test_get_reports_title_and_description(migrated_url: str) -> None:
             assert resp.data["external_refs"] == []
             assert resp.data["state"] == "open"
             assert resp.data["last_run_at"] is None
+
     asyncio.run(scenario())
 ```
 
@@ -260,17 +263,15 @@ Expected: FAIL — `data` lacks `title`/`description`; `external_refs` is `"0"` 
 Replace the `data=...` in `_envelope_for_investigation`:
 
 ```python
-    data: dict[str, object] = {
-        "project": inv.project,
-        "title": inv.title,
-        "description": inv.description,
-        "external_refs": [r.model_dump() for r in inv.external_refs],
-        "state": inv.state.value,
-        "last_run_at": inv.last_run_at.isoformat() if inv.last_run_at else None,
-    }
-    return ToolResponse.success(
-        str(inv.id), inv.state.value, suggested_next_actions=actions, data=data
-    )
+data: dict[str, object] = {
+    "project": inv.project,
+    "title": inv.title,
+    "description": inv.description,
+    "external_refs": [r.model_dump() for r in inv.external_refs],
+    "state": inv.state.value,
+    "last_run_at": inv.last_run_at.isoformat() if inv.last_run_at else None,
+}
+return ToolResponse.success(str(inv.id), inv.state.value, suggested_next_actions=actions, data=data)
 ```
 
 In `open_investigation`, replace the hand-built success envelope
@@ -305,9 +306,12 @@ def test_set_updates_title_and_description(migrated_url: str) -> None:
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
             opened = await _open(pool, _ctx(), project="proj", title="old")
-            resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id, title="new", description="note")
+            resp = await inv_tools.set_investigation(
+                pool, _ctx(), opened.object_id, title="new", description="note"
+            )
             assert resp.data["title"] == "new"
             assert resp.data["description"] == "note"
+
     asyncio.run(scenario())
 
 
@@ -317,6 +321,7 @@ def test_set_clear_description_with_empty_string(migrated_url: str) -> None:
             opened = await _open(pool, _ctx(), project="proj", title="t", description="x")
             resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id, description="")
             assert resp.data["description"] is None
+
     asyncio.run(scenario())
 
 
@@ -324,8 +329,11 @@ def test_set_omitting_description_leaves_it(migrated_url: str) -> None:
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
             opened = await _open(pool, _ctx(), project="proj", title="t", description="keep")
-            resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id, title="renamed")
+            resp = await inv_tools.set_investigation(
+                pool, _ctx(), opened.object_id, title="renamed"
+            )
             assert resp.data["description"] == "keep"
+
     asyncio.run(scenario())
 
 
@@ -335,6 +343,7 @@ def test_set_requires_at_least_one_field(migrated_url: str) -> None:
             opened = await _open(pool, _ctx(), project="proj", title="t")
             resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id)
             assert resp.error_category == "configuration_error"
+
     asyncio.run(scenario())
 
 
@@ -342,8 +351,11 @@ def test_set_overlong_title_is_config_error(migrated_url: str) -> None:
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
             opened = await _open(pool, _ctx(), project="proj", title="t")
-            resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id, title="x" * 201)
+            resp = await inv_tools.set_investigation(
+                pool, _ctx(), opened.object_id, title="x" * 201
+            )
             assert resp.error_category == "configuration_error"
+
     asyncio.run(scenario())
 
 
@@ -355,11 +367,13 @@ def test_set_on_closed_is_config_error(migrated_url: str) -> None:
             resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id, title="new")
             assert resp.error_category == "configuration_error"
             assert resp.data["current_status"] == "closed"
+
     asyncio.run(scenario())
 
 
 def test_set_reads_preexisting_overlong_title(migrated_url: str) -> None:
     """Finding-1 regression: a title written before the bound stays readable/editable."""
+
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -372,6 +386,7 @@ def test_set_reads_preexisting_overlong_title(migrated_url: str) -> None:
                 inv_id = (await cur.fetchone())["id"]
             resp = await inv_tools.get_investigation(pool, _ctx(), str(inv_id))
             assert resp.status == "open"  # read did not raise on the 300-char title
+
     asyncio.run(scenario())
 ```
 
@@ -519,6 +534,7 @@ def test_list_scopes_to_viewer_projects(migrated_url: str) -> None:
             resp = await inv_tools.list_investigations(pool, _ctx())
             assert resp.data["count"] == "2"
             assert {i.data["title"] for i in resp.items} == {"a", "b"}
+
     asyncio.run(scenario())
 
 
@@ -530,6 +546,7 @@ def test_list_state_filter(migrated_url: str) -> None:
             await inv_tools.close_investigation(pool, _ctx(), opened.object_id)
             resp = await inv_tools.list_investigations(pool, _ctx(), state="open")
             assert {i.data["title"] for i in resp.items} == {"b"}
+
     asyncio.run(scenario())
 
 
@@ -538,6 +555,7 @@ def test_list_bad_state_is_config_error(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await inv_tools.list_investigations(pool, _ctx(), state="nonsense")
             assert resp.error_category == "configuration_error"
+
     asyncio.run(scenario())
 
 
@@ -552,6 +570,7 @@ def test_investigation_row_error_envelope() -> None:
 
 def test_list_degrades_one_invalid_row(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """One row failing model_validate degrades to an error item; the rest still render."""
+
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
             await _open(pool, _ctx(), project="proj", title="good-a")
@@ -570,6 +589,7 @@ def test_list_degrades_one_invalid_row(migrated_url: str, monkeypatch: pytest.Mo
             assert resp.data["count"] == "2"
             statuses = sorted(i.status for i in resp.items)
             assert statuses == ["error", "open"]  # one degraded, one healthy
+
     asyncio.run(scenario())
 ```
 

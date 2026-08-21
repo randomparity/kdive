@@ -87,7 +87,7 @@ async def tools_invoke(name: str, arguments: dict[str, Any] | None = None) -> To
     try:
         return await app.call_tool(name, arguments or {}, run_middleware=True)
     except NotFoundError:
-        return _unknown_tool_response(name)        # configuration_error → "use tools.search"
+        return _unknown_tool_response(name)  # configuration_error → "use tools.search"
     except ValidationError as exc:
         return _bad_arguments_response(name, exc)  # configuration_error, inner field errors
 ```

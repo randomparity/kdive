@@ -522,9 +522,7 @@ def _stub(bindir: Path, name: str, body: str) -> None:
 
 def _run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     assert BASH is not None
-    return subprocess.run(
-        [BASH, str(SCRIPT)], env=env, capture_output=True, text=True, check=False
-    )
+    return subprocess.run([BASH, str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
 
 
 def test_all_healthy_exits_zero(tmp_path: Path) -> None:

@@ -29,9 +29,12 @@ def rootfs_upload_fetch_from_env() -> UploadFetch:
         with psycopg.connect(config.require(DATABASE_URL)) as conn:
             encoding, uncompressed_size = read_rootfs_upload_encoding(conn, upload.system_id)
         return fetch_uploaded_rootfs(
-            object_store_from_env(), upload,
-            encoding=encoding, uncompressed_size=uncompressed_size,
+            object_store_from_env(),
+            upload,
+            encoding=encoding,
+            uncompressed_size=uncompressed_size,
         )
+
     return _fetch
 ```
 

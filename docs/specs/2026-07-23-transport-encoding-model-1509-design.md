@@ -19,8 +19,10 @@ compressed transport wrapper around a larger canonical object. See ADR-0437 for 
 `ManifestEntry` (a `NamedTuple`) gains two optional trailing fields:
 
 ```python
-encoding: str | None = None          # transport codec; None / "identity" ⇒ identity (verbatim)
-uncompressed_size: int | None = None # canonical-object size in bytes; required with a non-identity encoding
+encoding: str | None = None  # transport codec; None / "identity" ⇒ identity (verbatim)
+uncompressed_size: int | None = (
+    None  # canonical-object size in bytes; required with a non-identity encoding
+)
 ```
 
 Codec constants live in the new `transport_encoding` module (below) and are imported by the
@@ -67,17 +69,22 @@ manifests deserialize as identity. No migration (manifests are ephemeral, reaped
 class RangedReadStore(Protocol):
     def get_range(self, key: str, *, start: int, length: int) -> bytes: ...
 
+
 @dataclass(frozen=True)
 class StripDecodeRequest:
     key: str
-    compressed_size: int    # total stored transport bytes to range over
-    expected_sha256: str    # base64 SHA-256 of the compressed bytes (transport verify)
+    compressed_size: int  # total stored transport bytes to range over
+    expected_sha256: str  # base64 SHA-256 of the compressed bytes (transport verify)
     uncompressed_size: int  # canonical-object bound (gzip-bomb guard)
+
 
 class StripDecodeResult(NamedTuple):
     uncompressed_bytes: int
 
-def strip_gzip_to_writer(store: RangedReadStore, request: StripDecodeRequest, writer: IO[bytes]) -> StripDecodeResult: ...
+
+def strip_gzip_to_writer(
+    store: RangedReadStore, request: StripDecodeRequest, writer: IO[bytes]
+) -> StripDecodeResult: ...
 ```
 
 Single pass, modeled on `_decompress_bounded` but writer-oriented: sequential ranged GETs of

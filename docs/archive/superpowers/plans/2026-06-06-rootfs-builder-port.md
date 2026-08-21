@@ -96,8 +96,12 @@ def test_dir_honors_absolute_xdg_data_home() -> None:
 
 def test_dir_ignores_empty_or_relative_xdg_data_home() -> None:
     base = {"HOME": "/home/u"}
-    assert managed_key_dir(env={**base, "XDG_DATA_HOME": ""}) == Path("/home/u/.local/share/kdive/ssh")
-    assert managed_key_dir(env={**base, "XDG_DATA_HOME": "rel/path"}) == Path("/home/u/.local/share/kdive/ssh")
+    assert managed_key_dir(env={**base, "XDG_DATA_HOME": ""}) == Path(
+        "/home/u/.local/share/kdive/ssh"
+    )
+    assert managed_key_dir(env={**base, "XDG_DATA_HOME": "rel/path"}) == Path(
+        "/home/u/.local/share/kdive/ssh"
+    )
 
 
 def test_dir_override_wins() -> None:
@@ -119,8 +123,12 @@ def test_dir_refuses_control_character() -> None:
 
 def test_key_paths_are_under_dir() -> None:
     env = {"HOME": "/home/u"}
-    assert managed_private_key_path(env=env) == Path("/home/u/.local/share/kdive/ssh/id_kdive_ed25519")
-    assert managed_public_key_path(env=env) == Path("/home/u/.local/share/kdive/ssh/id_kdive_ed25519.pub")
+    assert managed_private_key_path(env=env) == Path(
+        "/home/u/.local/share/kdive/ssh/id_kdive_ed25519"
+    )
+    assert managed_public_key_path(env=env) == Path(
+        "/home/u/.local/share/kdive/ssh/id_kdive_ed25519.pub"
+    )
 
 
 def test_path_functions_do_no_io(tmp_path: Path) -> None:
@@ -192,7 +200,9 @@ def test_missing_ssh_keygen_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         ensure_managed_keypair(env={"HOME": str(tmp_path)})
 
 
-def test_run_keygen_wraps_non_filenotfound_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_keygen_wraps_non_filenotfound_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def _boom(*_args: object, **_kwargs: object) -> object:
         raise PermissionError("permission denied")
 
@@ -337,7 +347,9 @@ def managed_key_dir(env: Mapping[str, str] | None = None) -> Path:
     if override is not None:
         candidate = Path(override).expanduser()
         if not override or not candidate.is_absolute():
-            raise ManagedKeyError(f"{KEY_DIR_ENV} must be a non-empty absolute path; got {override!r}")
+            raise ManagedKeyError(
+                f"{KEY_DIR_ENV} must be a non-empty absolute path; got {override!r}"
+            )
         key_dir = candidate
     else:
         xdg = environ.get("XDG_DATA_HOME")
@@ -408,7 +420,9 @@ def _ensure_private_dir(key_dir: Path) -> None:
 
 
 def _generate_keypair(private_key: Path, public_key: Path) -> None:
-    _run_keygen(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(private_key), "-C", KEY_COMMENT, "-q"])
+    _run_keygen(
+        ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(private_key), "-C", KEY_COMMENT, "-q"]
+    )
     _enforce_private_mode(private_key)
     # ssh-keygen creates the public half subject to the process umask, so chmod it explicitly
     # to keep the mode deterministic regardless of the build host's umask.
@@ -442,7 +456,9 @@ def _run_keygen(argv: list[str]) -> str:
     except OSError as exc:
         raise ManagedKeyError(f"cannot run ssh-keygen: {exc}") from exc
     if completed.returncode != 0:
-        raise ManagedKeyError(f"ssh-keygen failed (exit {completed.returncode}): {completed.stderr.strip()}")
+        raise ManagedKeyError(
+            f"ssh-keygen failed (exit {completed.returncode}): {completed.stderr.strip()}"
+        )
     return completed.stdout
 
 
@@ -463,7 +479,9 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     want_public = args == ["--ensure-public-key"]
     if args and not want_public:
-        print("Usage: python -m kdive.prereqs.managed_ssh_key [--ensure-public-key]", file=sys.stderr)
+        print(
+            "Usage: python -m kdive.prereqs.managed_ssh_key [--ensure-public-key]", file=sys.stderr
+        )
         return 2
     try:
         private_key = ensure_managed_keypair()

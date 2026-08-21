@@ -104,11 +104,20 @@ ALTER TABLE jobs ADD CONSTRAINT jobs_kind_check
 
 ```python
 from kdive.domain.operations.jobs import JobKind
-from kdive.jobs.payloads import CaptureTrafficPayload, model_for_kind  # model_for_kind: existing lookup
+from kdive.jobs.payloads import (
+    CaptureTrafficPayload,
+    model_for_kind,
+)  # model_for_kind: existing lookup
+
 
 def test_capture_traffic_payload_roundtrips_and_is_registered():
-    p = CaptureTrafficPayload(run_id="11111111-1111-1111-1111-111111111111",
-                              duration_s=30, max_bytes=67108864, snaplen=128, capture_filter="tcp port 80")
+    p = CaptureTrafficPayload(
+        run_id="11111111-1111-1111-1111-111111111111",
+        duration_s=30,
+        max_bytes=67108864,
+        snaplen=128,
+        capture_filter="tcp port 80",
+    )
     assert p.run_id.endswith("111")
     assert model_for_kind(JobKind.CAPTURE_TRAFFIC) is CaptureTrafficPayload
     # capture_filter is optional
@@ -157,6 +166,7 @@ Register it in `_ACTIVE_PAYLOAD_MODELS`: `JobKind.CAPTURE_TRAFFIC: CaptureTraffi
 ```python
 from kdive.providers.local_libvirt.lifecycle import xml as xmlmod
 
+
 def test_ssh_netdev_id_is_shared_constant():
     assert xmlmod.SYSTEM_SSH_NETDEV_ID == "kdivessh"
 ```
@@ -188,6 +198,7 @@ def test_ssh_netdev_id_is_shared_constant():
 
 ```python
 from kdive.providers.core.runtime import ProviderRuntime, ProviderSupport
+
 
 def test_traffic_capture_is_fail_closed_by_default():
     # ProviderSupport default is False; ProviderRuntime.traffic_capturer default is None.
@@ -259,27 +270,44 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.traffic_capture import LocalLibvirtTrafficCapture
 
+
 class _FakeDomain:
     def __init__(self, monitor):
         self._monitor = monitor  # callable(cmd_json) -> str
 
+
 class _FakeConn:
-    def __init__(self, domain): self._domain = domain
-    def lookupByName(self, name): return self._domain
-    def close(self): return 0
+    def __init__(self, domain):
+        self._domain = domain
+
+    def lookupByName(self, name):
+        return self._domain
+
+    def close(self):
+        return 0
+
 
 def _capturer(monitor):
     dom = _FakeDomain(monitor)
     return LocalLibvirtTrafficCapture(connect=lambda: _FakeConn(dom), monitor=monitor), dom
 
+
 def test_attach_deletes_stale_then_adds_filter_dump():
     seen = []
+
     def monitor(dom, cmd, flags):
-        seen.append(json.loads(cmd)); return "{}"
+        seen.append(json.loads(cmd))
+        return "{}"
+
     cap, _ = _capturer(monitor)
     # patch libvirt_qemu.qemuMonitorCommand to call `monitor` (see impl note)
-    cap.attach("kdive-x", qom_id="kdive-dump-J", netdev_id="kdivessh",
-               dest_path="/var/lib/kdive/pcap/S/J.pcap", snaplen=128)
+    cap.attach(
+        "kdive-x",
+        qom_id="kdive-dump-J",
+        netdev_id="kdivessh",
+        dest_path="/var/lib/kdive/pcap/S/J.pcap",
+        snaplen=128,
+    )
     assert seen[0]["execute"] == "object-del" and seen[0]["arguments"]["id"] == "kdive-dump-J"
     add = seen[1]
     assert add["execute"] == "object-add"
@@ -290,30 +318,41 @@ def test_attach_deletes_stale_then_adds_filter_dump():
     assert args["file"] == "/var/lib/kdive/pcap/S/J.pcap"
     assert args["maxlen"] == 128
 
+
 def test_attach_swallows_object_not_found_on_first_run(monkeypatch):
     calls = []
+
     def monitor(dom, cmd, flags):
-        c = json.loads(cmd); calls.append(c["execute"])
+        c = json.loads(cmd)
+        calls.append(c["execute"])
         if c["execute"] == "object-del":
             raise libvirt.libvirtError("Device 'kdive-dump-J' not found")  # QMP DeviceNotFound
         return "{}"
+
     cap, _ = _capturer(monitor)
-    cap.attach("kdive-x", qom_id="kdive-dump-J", netdev_id="kdivessh",
-               dest_path="/p.pcap", snaplen=128)  # must NOT raise
+    cap.attach(
+        "kdive-x", qom_id="kdive-dump-J", netdev_id="kdivessh", dest_path="/p.pcap", snaplen=128
+    )  # must NOT raise
     assert calls == ["object-del", "object-add"]
+
 
 def test_attach_reraises_other_monitor_error_as_control_failure():
     def monitor(dom, cmd, flags):
         raise libvirt.libvirtError("some other monitor failure")
+
     cap, _ = _capturer(monitor)
     with pytest.raises(CategorizedError) as ei:
         cap.attach("kdive-x", qom_id="q", netdev_id="kdivessh", dest_path="/p", snaplen=128)
     assert ei.value.category is ErrorCategory.CONTROL_FAILURE
 
+
 def test_detach_issues_object_del():
     seen = []
+
     def monitor(dom, cmd, flags):
-        seen.append(json.loads(cmd)); return "{}"
+        seen.append(json.loads(cmd))
+        return "{}"
+
     cap, _ = _capturer(monitor)
     cap.detach("kdive-x", qom_id="kdive-dump-J")
     assert seen[0]["execute"] == "object-del" and seen[0]["arguments"]["id"] == "kdive-dump-J"
@@ -361,28 +400,42 @@ Note: the injected `monitor(domain, cmd_json, flags)` seam (default bound to `li
 import struct
 from kdive.artifacts.pcap_count import count_pcap_packets
 
-def _hdr(magic): return struct.pack("=IHHiIII", magic, 2, 4, 0, 0, 65535, 1)
-def _rec_le(n): return struct.pack("<IIII", 0, 0, n, n) + b"\x00" * n
-def _rec_be(n): return struct.pack(">IIII", 0, 0, n, n) + b"\x00" * n
+
+def _hdr(magic):
+    return struct.pack("=IHHiIII", magic, 2, 4, 0, 0, 65535, 1)
+
+
+def _rec_le(n):
+    return struct.pack("<IIII", 0, 0, n, n) + b"\x00" * n
+
+
+def _rec_be(n):
+    return struct.pack(">IIII", 0, 0, n, n) + b"\x00" * n
+
 
 def test_header_only_is_zero():
-    assert count_pcap_packets(struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)) == 0
+    assert count_pcap_packets(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)) == 0
+
 
 def test_little_endian_two_records():
-    body = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1) + _rec_le(4) + _rec_le(8)
+    body = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1) + _rec_le(4) + _rec_le(8)
     assert count_pcap_packets(body) == 2
+
 
 def test_big_endian_two_records():
-    body = struct.pack(">IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1) + _rec_be(4) + _rec_be(8)
+    body = struct.pack(">IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1) + _rec_be(4) + _rec_be(8)
     assert count_pcap_packets(body) == 2
 
+
 def test_nanosecond_magic_counts():
-    body = struct.pack("<IHHiIII", 0xa1b23c4d, 2, 4, 0, 0, 65535, 1) + _rec_le(4)
+    body = struct.pack("<IHHiIII", 0xA1B23C4D, 2, 4, 0, 0, 65535, 1) + _rec_le(4)
     assert count_pcap_packets(body) == 1
 
+
 def test_truncated_tail_counts_whole_records_only():
-    body = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1) + _rec_le(4) + b"\x00\x00\x00"
+    body = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1) + _rec_le(4) + b"\x00\x00\x00"
     assert count_pcap_packets(body) == 1
+
 
 def test_not_a_pcap_is_zero():
     assert count_pcap_packets(b"garbage") == 0
@@ -441,11 +494,14 @@ def count_pcap_packets(data: bytes) -> int:
 ```python
 _PCAP_DIR = "/var/lib/kdive/pcap"
 
+
 def pcap_dir(system_id: UUID) -> Path:
     return Path(_PCAP_DIR) / str(system_id)
 
+
 def pcap_path(system_id: UUID, job_id: UUID) -> Path:
     return pcap_dir(system_id) / f"{job_id}.pcap"
+
 
 def read_pcap_bytes(path: Path) -> bytes:
     """Read a captured pcap whole; a non-root worker under qemu:///system may hit the readback wall."""
@@ -457,8 +513,12 @@ def read_pcap_bytes(path: Path) -> bytes:
         raise CategorizedError(
             "failed to read captured pcap",
             category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"operation": "read_pcap", "path": str(path),
-                     "error": type(err).__name__, "remediation": WORKER_READABILITY_REMEDIATION},
+            details={
+                "operation": "read_pcap",
+                "path": str(path),
+                "error": type(err).__name__,
+                "remediation": WORKER_READABILITY_REMEDIATION,
+            },
         ) from err
     except OSError as err:
         raise CategorizedError(
@@ -495,24 +555,30 @@ from pathlib import Path
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.security.artifacts import bpf_filter as bf
 
+
 def test_hygiene_accepts_none_and_normal():
     assert bf.hygiene_reason(None) is None
     assert bf.hygiene_reason("tcp port 80 and host 10.0.0.5") is None
 
+
 def test_hygiene_rejects_too_long():
     assert bf.hygiene_reason("a" * (bf.MAX_FILTER_LEN + 1)) == "too_long"
+
 
 def test_hygiene_rejects_non_printable():
     assert bf.hygiene_reason("tcp\nport 80") == "non_printable"
 
+
 def test_validate_bpf_accepts_valid(tmp_path):
     bf.validate_bpf("tcp port 80")  # tcpdump -d compiles → no raise
+
 
 def test_validate_bpf_rejects_garbage():
     with pytest.raises(CategorizedError) as ei:
         bf.validate_bpf("this is not a filter )(")
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert ei.value.details.get("reason") == "invalid_filter"
+
 
 def test_validate_bpf_metachars_are_not_shell_interpreted(tmp_path):
     # A shell metachar payload is passed as one argv element; tcpdump -d just fails to compile it.
@@ -560,12 +626,14 @@ def _run(args: list[str], op: str) -> None:
         proc = subprocess.run(args, capture_output=True, text=True, timeout=30, check=False)  # noqa: S603
     except (OSError, subprocess.SubprocessError) as err:
         raise CategorizedError(
-            f"{op} failed to run", category=ErrorCategory.CONFIGURATION_ERROR,
+            f"{op} failed to run",
+            category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "invalid_filter", "error": type(err).__name__},
         ) from err
     if proc.returncode != 0:
         raise CategorizedError(
-            f"{op} rejected the capture filter", category=ErrorCategory.CONFIGURATION_ERROR,
+            f"{op} rejected the capture filter",
+            category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "invalid_filter", "stderr": proc.stderr.strip()[:500]},
         )
 
@@ -603,23 +671,34 @@ def trim_pcap(src: Path, dst: Path, expr: str) -> None:
 import asyncio, pytest
 from kdive.jobs.handlers.control.capture_traffic import run_capture_loop, LoopResult
 
+
 async def _drive(sizes, canceled_at=None, max_bytes=10_000, max_polls=5):
     calls = {"n": 0}
+
     async def stat():
-        i = min(calls["n"], len(sizes) - 1); return sizes[i]
-    async def sleep(_): calls["n"] += 1
+        i = min(calls["n"], len(sizes) - 1)
+        return sizes[i]
+
+    async def sleep(_):
+        calls["n"] += 1
+
     async def canceled():
         return canceled_at is not None and calls["n"] >= canceled_at
-    return await run_capture_loop(stat=stat, sleep=sleep, canceled=canceled,
-                                  max_bytes=max_bytes, max_polls=max_polls)
+
+    return await run_capture_loop(
+        stat=stat, sleep=sleep, canceled=canceled, max_bytes=max_bytes, max_polls=max_polls
+    )
+
 
 def test_loop_stops_at_duration():
     r = asyncio.run(_drive([100, 200, 300], max_polls=3))
     assert r.truncated is False and r.canceled is False
 
+
 def test_loop_stops_at_max_bytes():
     r = asyncio.run(_drive([100, 5000, 20000], max_bytes=10_000, max_polls=9))
     assert r.truncated is True and r.canceled is False
+
 
 def test_loop_stops_on_cancel():
     r = asyncio.run(_drive([100, 100, 100], canceled_at=2, max_polls=9))
@@ -635,10 +714,12 @@ def test_loop_stops_on_cancel():
 ```python
 POLL_INTERVAL_SECONDS = 0.5
 
+
 @dataclass(frozen=True, slots=True)
 class LoopResult:
     truncated: bool
     canceled: bool
+
 
 async def run_capture_loop(*, stat, sleep, canceled, max_bytes, max_polls) -> LoopResult:
     for _ in range(max_polls):
@@ -710,14 +791,31 @@ Handler flow (`capture_traffic_handler`):
 
 ```python
 async def capture_traffic_system(
-    pool, ctx, *, resolver: ProviderResolver, run_id, duration_s, max_bytes, snaplen,
-    capture_filter, idempotency_key,
+    pool,
+    ctx,
+    *,
+    resolver: ProviderResolver,
+    run_id,
+    duration_s,
+    max_bytes,
+    snaplen,
+    capture_filter,
+    idempotency_key,
 ) -> ToolResponse:
     return await with_runtime_for_run(
-        pool, resolver, ctx, run_id,
+        pool,
+        resolver,
+        ctx,
+        run_id,
         lambda runtime: _capture_traffic(
-            pool, ctx, run_id=run_id, duration_s=duration_s, max_bytes=max_bytes,
-            snaplen=snaplen, capture_filter=capture_filter, idempotency_key=idempotency_key,
+            pool,
+            ctx,
+            run_id=run_id,
+            duration_s=duration_s,
+            max_bytes=max_bytes,
+            snaplen=snaplen,
+            capture_filter=capture_filter,
+            idempotency_key=idempotency_key,
             runtime=runtime,
         ),
         required_role=Role.CONTRIBUTOR,
@@ -742,28 +840,51 @@ async def capture_traffic_system(
     meta=_docmeta.maturity_meta("implemented"),
 )
 async def capture_traffic(
-    run_id: Annotated[str, Field(description="The Run whose bound System's guest traffic to capture.")],
-    duration_s: Annotated[int, Field(
-        ge=CAPTURE_MIN_DURATION_S, le=CAPTURE_MAX_DURATION_S,
-        description=f"Capture window in seconds ({CAPTURE_MIN_DURATION_S}-{CAPTURE_MAX_DURATION_S}).",
-    )] = CAPTURE_DEFAULT_DURATION_S,
-    max_bytes: Annotated[int, Field(
-        ge=CAPTURE_MIN_BYTES, le=CAPTURE_MAX_BYTES,
-        description=f"Stop early when the pcap reaches this many bytes ({CAPTURE_MIN_BYTES}-{CAPTURE_MAX_BYTES}).",
-    )] = CAPTURE_DEFAULT_BYTES,
-    snaplen: Annotated[int, Field(
-        ge=CAPTURE_MIN_SNAPLEN, le=CAPTURE_MAX_SNAPLEN,
-        description=f"Bytes captured per packet ({CAPTURE_MIN_SNAPLEN}-{CAPTURE_MAX_SNAPLEN}); {CAPTURE_DEFAULT_SNAPLEN} captures headers.",
-    )] = CAPTURE_DEFAULT_SNAPLEN,
-    capture_filter: Annotated[str | None, Field(
-        description="Optional pcap-filter(7)/tcpdump BPF expression applied after capture (e.g. 'tcp port 80').",
-    )] = None,
+    run_id: Annotated[
+        str, Field(description="The Run whose bound System's guest traffic to capture.")
+    ],
+    duration_s: Annotated[
+        int,
+        Field(
+            ge=CAPTURE_MIN_DURATION_S,
+            le=CAPTURE_MAX_DURATION_S,
+            description=f"Capture window in seconds ({CAPTURE_MIN_DURATION_S}-{CAPTURE_MAX_DURATION_S}).",
+        ),
+    ] = CAPTURE_DEFAULT_DURATION_S,
+    max_bytes: Annotated[
+        int,
+        Field(
+            ge=CAPTURE_MIN_BYTES,
+            le=CAPTURE_MAX_BYTES,
+            description=f"Stop early when the pcap reaches this many bytes ({CAPTURE_MIN_BYTES}-{CAPTURE_MAX_BYTES}).",
+        ),
+    ] = CAPTURE_DEFAULT_BYTES,
+    snaplen: Annotated[
+        int,
+        Field(
+            ge=CAPTURE_MIN_SNAPLEN,
+            le=CAPTURE_MAX_SNAPLEN,
+            description=f"Bytes captured per packet ({CAPTURE_MIN_SNAPLEN}-{CAPTURE_MAX_SNAPLEN}); {CAPTURE_DEFAULT_SNAPLEN} captures headers.",
+        ),
+    ] = CAPTURE_DEFAULT_SNAPLEN,
+    capture_filter: Annotated[
+        str | None,
+        Field(
+            description="Optional pcap-filter(7)/tcpdump BPF expression applied after capture (e.g. 'tcp port 80').",
+        ),
+    ] = None,
     idempotency_key: Annotated[str | None, Field(description="Optional idempotency key.")] = None,
 ) -> ToolResponse:
     """Capture host-side guest network traffic into a Run-owned pcap. ..."""
     return await capture_traffic_system(
-        pool, current_context(), resolver=resolver, run_id=run_id, duration_s=duration_s,
-        max_bytes=max_bytes, snaplen=snaplen, capture_filter=capture_filter,
+        pool,
+        current_context(),
+        resolver=resolver,
+        run_id=run_id,
+        duration_s=duration_s,
+        max_bytes=max_bytes,
+        snaplen=snaplen,
+        capture_filter=capture_filter,
         idempotency_key=idempotency_key,
     )
 ```

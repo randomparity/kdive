@@ -669,7 +669,9 @@ def test_provision_admits_defined_system_without_profile(migrated_url: str) -> N
                 )
                 audit_row = await cur.fetchone()
         assert sys_row is not None and sys_row["state"] == "provisioning"
-        assert alloc_row is not None and alloc_row["state"] == "active"  # untouched (flipped at define)
+        assert (
+            alloc_row is not None and alloc_row["state"] == "active"
+        )  # untouched (flipped at define)
         assert audit_row is not None and audit_row["n"] == 1
 
     asyncio.run(_run())
@@ -764,54 +766,52 @@ async def _provision_locked(
 Inside `_provision_locked`, replace the existing-System branch and the create block — from the `existing = await _find_system_for_allocation(conn, alloc_id)` line down to and including the `SYSTEMS.insert(...)` that constructs the `System(... state=SystemState.PROVISIONING ...)` — with:
 
 ```python
-        existing = await _find_system_for_allocation(conn, alloc_id)
-        if existing is not None:
-            if existing.state in _TERMINAL_SYSTEM:
-                return _config_error(
-                    str(existing.id), data={"current_status": existing.state.value}
-                )
-            if existing.state is SystemState.DEFINED:
-                return await _admit_defined(conn, ctx, alloc, existing)
-            job = await queue.enqueue(
-                conn,
-                JobKind.PROVISION,
-                {"system_id": str(existing.id)},
-                _authorizing(ctx, alloc.project),
-                f"{alloc_id}:provision",
-            )
-            return _system_job_envelope(job, existing.id)
-        if profile is None:
-            return _config_error(str(alloc_id), data={"reason": "profile_required"})
-        try:
-            reject_rootfs_without_upload_window(profile.provider.local_libvirt.rootfs)
-        except CategorizedError as exc:
-            return ToolResponse.failure(str(alloc_id), exc.category)
-        if alloc.state is not AllocationState.GRANTED:
-            return _config_error(str(alloc_id), data={"current_status": alloc.state.value})
-        # New System: enforce the per-project max_concurrent_systems quota under the held
-        # project lock. Fail-closed — no quota row → denied (ADR-0007 §4); a denial writes
-        # no System, no job, and leaves the allocation granted (the all-or-nothing rule).
-        if not await _within_system_quota(conn, alloc.project):
-            return ToolResponse.failure(
-                str(alloc_id),
-                ErrorCategory.QUOTA_EXCEEDED,
-                suggested_next_actions=["systems.get", "allocations.list"],
-            )
-        now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
-        system = await SYSTEMS.insert(
-            conn,
-            System(
-                id=uuid4(),
-                created_at=now,
-                updated_at=now,
-                principal=ctx.principal,
-                agent_session=ctx.agent_session,
-                project=alloc.project,
-                allocation_id=alloc_id,
-                state=SystemState.PROVISIONING,
-                provisioning_profile=profile.model_dump(by_alias=True),
-            ),
-        )
+existing = await _find_system_for_allocation(conn, alloc_id)
+if existing is not None:
+    if existing.state in _TERMINAL_SYSTEM:
+        return _config_error(str(existing.id), data={"current_status": existing.state.value})
+    if existing.state is SystemState.DEFINED:
+        return await _admit_defined(conn, ctx, alloc, existing)
+    job = await queue.enqueue(
+        conn,
+        JobKind.PROVISION,
+        {"system_id": str(existing.id)},
+        _authorizing(ctx, alloc.project),
+        f"{alloc_id}:provision",
+    )
+    return _system_job_envelope(job, existing.id)
+if profile is None:
+    return _config_error(str(alloc_id), data={"reason": "profile_required"})
+try:
+    reject_rootfs_without_upload_window(profile.provider.local_libvirt.rootfs)
+except CategorizedError as exc:
+    return ToolResponse.failure(str(alloc_id), exc.category)
+if alloc.state is not AllocationState.GRANTED:
+    return _config_error(str(alloc_id), data={"current_status": alloc.state.value})
+# New System: enforce the per-project max_concurrent_systems quota under the held
+# project lock. Fail-closed — no quota row → denied (ADR-0007 §4); a denial writes
+# no System, no job, and leaves the allocation granted (the all-or-nothing rule).
+if not await _within_system_quota(conn, alloc.project):
+    return ToolResponse.failure(
+        str(alloc_id),
+        ErrorCategory.QUOTA_EXCEEDED,
+        suggested_next_actions=["systems.get", "allocations.list"],
+    )
+now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
+system = await SYSTEMS.insert(
+    conn,
+    System(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        principal=ctx.principal,
+        agent_session=ctx.agent_session,
+        project=alloc.project,
+        allocation_id=alloc_id,
+        state=SystemState.PROVISIONING,
+        provisioning_profile=profile.model_dump(by_alias=True),
+    ),
+)
 ```
 
 Then add `_admit_defined` immediately after the `_provision_locked` function:
@@ -1148,9 +1148,13 @@ def test_define_upload_provision_reaches_ready_with_committed_rootfs(
 
             # 3. the agent PUTs the qcow2 (staged directly into the store for the test)
             minio_store.put_artifact(
-                "local", "systems", sys_id, "rootfs",
+                "local",
+                "systems",
+                sys_id,
+                "rootfs",
                 data=b"rootfs-image-bytes",
-                sensitivity=Sensitivity.SENSITIVE, retention_class="rootfs",
+                sensitivity=Sensitivity.SENSITIVE,
+                retention_class="rootfs",
             )
 
             # 4. provision admits the DEFINED System (no profile re-passed)
@@ -1223,21 +1227,35 @@ async def _defined_system_via_tool(pool: AsyncConnectionPool, *, project: str = 
         res = await RESOURCES.insert(
             conn,
             Resource(
-                id=uuid4(), created_at=_DT, updated_at=_DT, kind=ResourceKind.LOCAL_LIBVIRT,
-                pool="local-libvirt", cost_class="local", status=ResourceStatus.AVAILABLE,
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                kind=ResourceKind.LOCAL_LIBVIRT,
+                pool="local-libvirt",
+                cost_class="local",
+                status=ResourceStatus.AVAILABLE,
                 host_uri="qemu:///system",
             ),
         )
         await QUOTAS.upsert(
             conn,
-            Quota(project=project, max_concurrent_allocations=1_000_000,
-                  max_concurrent_systems=1_000_000, updated_at=_DT),
+            Quota(
+                project=project,
+                max_concurrent_allocations=1_000_000,
+                max_concurrent_systems=1_000_000,
+                updated_at=_DT,
+            ),
         )
         alloc = await ALLOCATIONS.insert(
             conn,
             Allocation(
-                id=uuid4(), created_at=_DT, updated_at=_DT, principal="user-1", project=project,
-                resource_id=res.id, state=AllocationState.GRANTED,
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project=project,
+                resource_id=res.id,
+                state=AllocationState.GRANTED,
             ),
         )
     ctx = RequestContext(
@@ -1308,25 +1326,41 @@ async def _defined_system_via_define(url: str, *, project: str = "proj") -> UUID
             res = await RESOURCES.insert(
                 conn,
                 Resource(
-                    id=uuid4(), created_at=_DT, updated_at=_DT, kind=ResourceKind.LOCAL_LIBVIRT,
-                    pool="local-libvirt", cost_class="local", status=ResourceStatus.AVAILABLE,
+                    id=uuid4(),
+                    created_at=_DT,
+                    updated_at=_DT,
+                    kind=ResourceKind.LOCAL_LIBVIRT,
+                    pool="local-libvirt",
+                    cost_class="local",
+                    status=ResourceStatus.AVAILABLE,
                     host_uri="qemu:///system",
                 ),
             )
             await QUOTAS.upsert(
                 conn,
-                Quota(project=project, max_concurrent_allocations=1_000_000,
-                      max_concurrent_systems=1_000_000, updated_at=_DT),
+                Quota(
+                    project=project,
+                    max_concurrent_allocations=1_000_000,
+                    max_concurrent_systems=1_000_000,
+                    updated_at=_DT,
+                ),
             )
             alloc = await ALLOCATIONS.insert(
                 conn,
                 Allocation(
-                    id=uuid4(), created_at=_DT, updated_at=_DT, principal="user-1",
-                    project=project, resource_id=res.id, state=AllocationState.GRANTED,
+                    id=uuid4(),
+                    created_at=_DT,
+                    updated_at=_DT,
+                    principal="user-1",
+                    project=project,
+                    resource_id=res.id,
+                    state=AllocationState.GRANTED,
                 ),
             )
         ctx = RequestContext(
-            principal="user-1", agent_session="s", projects=(project,),
+            principal="user-1",
+            agent_session="s",
+            projects=(project,),
             roles={project: Role.OPERATOR},
         )
         resp = await systems_tools.define_system(
@@ -1392,7 +1426,7 @@ Replace the now-false "no producer yet (#111)" / "unreachable until #111" commen
 
 `systems.py` `_NON_TERMINAL_SYSTEM` (line 170) — drop `# forward-plumbing: no producer yet (#111)`, leaving:
 ```python
-    SystemState.DEFINED,
+(SystemState.DEFINED,)
 ```
 
 `systems.py` `_commit_uploaded_rootfs` docstring — remove the "Forward-plumbing: the provisioning tool boundary rejects an upload rootfs until the DEFINED producer lands (#111) ..." paragraph; replace with:

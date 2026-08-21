@@ -74,14 +74,26 @@ shape: there is no Run lifecycle slot for capture, so capture records on the Job
 ### `providers/local_libvirt/retrieve.py`
 
 ```python
-class CaptureOutput(NamedTuple): raw: StoredArtifact; redacted: StoredArtifact; vmcore_build_id: str
+class CaptureOutput(NamedTuple):
+    raw: StoredArtifact
+    redacted: StoredArtifact
+    vmcore_build_id: str
+
+
 class Retriever(Protocol):
     def capture(self, system_id: UUID) -> CaptureOutput: ...
 
-class CrashOutput(NamedTuple): results: dict[str, object]; transcript: str; truncated: bool
+
+class CrashOutput(NamedTuple):
+    results: dict[str, object]
+    transcript: str
+    truncated: bool
+
+
 class CrashPostmortem(Protocol):
-    def run(self, *, vmcore_ref: str, debuginfo_ref: str,
-            expected_build_id: str, commands: list[str]) -> CrashOutput: ...
+    def run(
+        self, *, vmcore_ref: str, debuginfo_ref: str, expected_build_id: str, commands: list[str]
+    ) -> CrashOutput: ...
 ```
 
 `LocalLibvirtRetrieve` realizes both, seam-injected exactly like `LocalLibvirtBuild`:

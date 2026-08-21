@@ -155,9 +155,7 @@ def test_warm_tree_admission_rejects_empty_for_local() -> None:
     from kdive.providers.shared.build_host.workspace import KERNEL_SRC_UNSET_DETAIL
 
     with pytest.raises(CategorizedError) as excinfo:
-        build_host_selection.check_warm_tree_source_admission(
-            "", host_kind=BuildHostKind.LOCAL
-        )
+        build_host_selection.check_warm_tree_source_admission("", host_kind=BuildHostKind.LOCAL)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert str(excinfo.value) == KERNEL_SRC_UNSET_DETAIL
 
@@ -178,9 +176,7 @@ def test_warm_tree_admission_admits_usable_local(tmp_path) -> None:
     )  # no raise
 
 
-@pytest.mark.parametrize(
-    "kind", [BuildHostKind.SSH, BuildHostKind.EPHEMERAL_LIBVIRT]
-)
+@pytest.mark.parametrize("kind", [BuildHostKind.SSH, BuildHostKind.EPHEMERAL_LIBVIRT])
 def test_warm_tree_admission_noop_for_non_local(kind: BuildHostKind) -> None:
     build_host_selection.check_warm_tree_source_admission("", host_kind=kind)  # no raise
 ```
@@ -201,9 +197,7 @@ from kdive.providers.shared.build_host.workspace import warm_tree_source_error
 Add after `check_source_kind_compatibility` (after line 63):
 
 ```python
-def check_warm_tree_source_admission(
-    kernel_src: str, *, host_kind: BuildHostKind
-) -> None:
+def check_warm_tree_source_admission(kernel_src: str, *, host_kind: BuildHostKind) -> None:
     """Reject a LOCAL warm-tree build whose ``KDIVE_KERNEL_SRC`` is unset or unusable.
 
     A no-op for any non-``LOCAL`` host kind (git/remote lanes never read

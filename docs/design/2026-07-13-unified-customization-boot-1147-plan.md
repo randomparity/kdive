@@ -61,8 +61,14 @@
 # tests/images/families/test_steps.py
 from pathlib import Path
 from kdive.images.families.steps import (
-    InstallPackages, Mkdir, RunCommand, StageFile, UploadFile, WriteFile,
+    InstallPackages,
+    Mkdir,
+    RunCommand,
+    StageFile,
+    UploadFile,
+    WriteFile,
 )
+
 
 def test_steps_are_frozen_value_objects():
     assert Mkdir("/d").path == "/d"
@@ -71,6 +77,7 @@ def test_steps_are_frozen_value_objects():
     assert UploadFile(Path("/h"), "/g", mode="0755").mode == "0755"
     assert InstallPackages(("a", "b")).names == ("a", "b")
     assert RunCommand("echo hi").sh == "echo hi"
+
 
 def test_uploadfile_mode_defaults_none():
     assert UploadFile(Path("/h"), "/g").mode is None
@@ -106,39 +113,61 @@ This is the "one list, two renderers" refactor. **Deliverable:** the shared `_fe
 from pathlib import Path
 from kdive.images.families.renderers import render_argv
 from kdive.images.families.steps import (
-    InstallPackages, Mkdir, RunCommand, StageFile, UploadFile, WriteFile,
+    InstallPackages,
+    Mkdir,
+    RunCommand,
+    StageFile,
+    UploadFile,
+    WriteFile,
 )
+
 
 def test_render_argv_maps_each_step():
     cleanup: list[Path] = []
-    argv = render_argv([
-        Mkdir("/seed"),
-        InstallPackages(("drgn", "kexec-tools")),
-        RunCommand("systemctl enable kdump.service"),
-        WriteFile("/etc/machine-id", "0a1b"),
-        UploadFile(Path("/h/u.service"), "/etc/systemd/system/kdive-ready.service"),
-    ], cleanup=cleanup)
+    argv = render_argv(
+        [
+            Mkdir("/seed"),
+            InstallPackages(("drgn", "kexec-tools")),
+            RunCommand("systemctl enable kdump.service"),
+            WriteFile("/etc/machine-id", "0a1b"),
+            UploadFile(Path("/h/u.service"), "/etc/systemd/system/kdive-ready.service"),
+        ],
+        cleanup=cleanup,
+    )
     assert argv == [
-        "--mkdir", "/seed",
-        "--install", "drgn,kexec-tools",
-        "--run-command", "systemctl enable kdump.service",
-        "--write", "/etc/machine-id:0a1b",
-        "--upload", "/h/u.service:/etc/systemd/system/kdive-ready.service",
+        "--mkdir",
+        "/seed",
+        "--install",
+        "drgn,kexec-tools",
+        "--run-command",
+        "systemctl enable kdump.service",
+        "--write",
+        "/etc/machine-id:0a1b",
+        "--upload",
+        "/h/u.service:/etc/systemd/system/kdive-ready.service",
     ]
+
 
 def test_stagefile_uploads_a_tempfile_with_content(tmp_path):
     cleanup: list[Path] = []
-    argv = render_argv([StageFile("/etc/cloud/x.cfg", "datasource_list: [ NoCloud ]\n")],
-                       cleanup=cleanup)
+    argv = render_argv(
+        [StageFile("/etc/cloud/x.cfg", "datasource_list: [ NoCloud ]\n")], cleanup=cleanup
+    )
     assert argv[0] == "--upload"
     src, _, dest = argv[1].partition(":")
     assert dest == "/etc/cloud/x.cfg"
     assert Path(src).read_text() == "datasource_list: [ NoCloud ]\n"
     assert cleanup == [Path(src)]
 
+
 def test_uploadfile_mode_appends_chmod():
     argv = render_argv([UploadFile(Path("/h/k"), "/usr/local/sbin/k", mode="0755")], cleanup=[])
-    assert argv == ["--upload", "/h/k:/usr/local/sbin/k", "--run-command", "chmod 0755 /usr/local/sbin/k"]
+    assert argv == [
+        "--upload",
+        "/h/k:/usr/local/sbin/k",
+        "--run-command",
+        "chmod 0755 /usr/local/sbin/k",
+    ]
 ```
 
 - [ ] **Step 2: Run — FAIL (no `render_argv`).**
@@ -198,9 +227,12 @@ This unit is the **bootstrap** — there is no in-guest `systemctl enable` for i
 
 ```python
 from kdive.images.families.renderers import (
-    partition_steps, render_firstboot_script, render_firstboot_unit,
+    partition_steps,
+    render_firstboot_script,
+    render_firstboot_unit,
 )
 from kdive.images.families.steps import InstallPackages, Mkdir, RunCommand, WriteFile
+
 
 def test_partition_separates_file_and_exec_ops():
     steps = [Mkdir("/d"), InstallPackages(("a",)), WriteFile("/f", "x"), RunCommand("y")]
@@ -208,16 +240,20 @@ def test_partition_separates_file_and_exec_ops():
     assert file_ops == [Mkdir("/d"), WriteFile("/f", "x")]
     assert exec_ops == [InstallPackages(("a",)), RunCommand("y")]
 
+
 def test_firstboot_script_shape():
     s = render_firstboot_script(
         [InstallPackages(("drgn", "kexec-tools")), RunCommand("systemctl enable kdump.service")],
-        console_device="hvc0", unit_name="kdive-customize.service",
+        console_device="hvc0",
+        unit_name="kdive-customize.service",
         script_path="/usr/local/sbin/kdive-customize",
-        ok_marker="kdive-customize-ok", fail_marker="kdive-customize-failed")
+        ok_marker="kdive-customize-ok",
+        fail_marker="kdive-customize-failed",
+    )
     assert s.startswith("#!/bin/sh\nset -e\n")
     assert "trap 'echo kdive-customize-failed > /dev/hvc0" in s
     assert "dnf -y install drgn kexec-tools" in s
-    assert "systemctl enable kdump.service" in s      # an exec-step, runs in-guest
+    assert "systemctl enable kdump.service" in s  # an exec-step, runs in-guest
     # self-removal targets the unit, its wants-symlink, and the script
     assert "rm -f /etc/systemd/system/kdive-customize.service" in s
     assert "multi-user.target.wants/kdive-customize.service" in s
@@ -225,6 +261,7 @@ def test_firstboot_script_shape():
     assert "trap - EXIT" in s
     assert s.rstrip().endswith("systemctl poweroff")
     assert "echo kdive-customize-ok > /dev/hvc0" in s
+
 
 def test_firstboot_unit_orders_after_network_and_wants_multiuser():
     u = render_firstboot_unit(script_path="/usr/local/sbin/kdive-customize")
@@ -265,31 +302,44 @@ from kdive.providers.local_libvirt.lifecycle.xml import render_customization_dom
 
 BID = UUID("11111111-2222-3333-4444-555555555555")
 
+
 def test_build_domain_name_is_reconciler_safe():
     name = build_domain_name(BID)
     assert name == f"kdive-build-{BID}"
     assert system_id_from_domain_name(name) is None  # never reaped as a System
 
+
 def test_customization_domain_pseries_tcg():
     xml = render_customization_domain_xml(
-        BID, arch="ppc64le", disk_path="/d.qcow2",
-        kernel_path=Path("/k/vmlinuz"), initrd_path=Path("/k/initrd"),
-        accel="tcg", emulator="/usr/bin/qemu-system-ppc64")
+        BID,
+        arch="ppc64le",
+        disk_path="/d.qcow2",
+        kernel_path=Path("/k/vmlinuz"),
+        initrd_path=Path("/k/initrd"),
+        accel="tcg",
+        emulator="/usr/bin/qemu-system-ppc64",
+    )
     root = ET.fromstring(xml)
     assert root.get("type") == "qemu"
     assert root.findtext("name") == f"kdive-build-{BID}"
     assert root.findtext("on_reboot") == "destroy"
-    assert root.find("cpu") is None                      # TCG: no <cpu>
+    assert root.find("cpu") is None  # TCG: no <cpu>
     assert root.findtext("devices/emulator") == "/usr/bin/qemu-system-ppc64"
     assert "root=/dev/vda console=hvc0 rw" in root.findtext("os/cmdline")
     # egress NIC present with restrict=off (namespaced qemu:arg)
     assert any("restrict=off" in (a.get("value") or "") for a in root.iter())
 
+
 def test_customization_domain_x86_kvm_has_no_emulator_and_egress_on():
     xml = render_customization_domain_xml(
-        BID, arch="x86_64", disk_path="/d.qcow2",
-        kernel_path=Path("/k/vmlinuz"), initrd_path=Path("/k/initrd"),
-        accel="kvm", emulator=None)
+        BID,
+        arch="x86_64",
+        disk_path="/d.qcow2",
+        kernel_path=Path("/k/vmlinuz"),
+        initrd_path=Path("/k/initrd"),
+        accel="kvm",
+        emulator=None,
+    )
     root = ET.fromstring(xml)
     assert root.get("type") == "kvm"
     assert root.find("devices/emulator") is None
@@ -320,24 +370,31 @@ def test_customization_domain_x86_kvm_has_no_emulator_and_egress_on():
 
 ```python
 from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
-    CustomizeVerdict, classify_customization_console as C,
+    CustomizeVerdict,
+    classify_customization_console as C,
 )
+
 
 def test_ok_marker_wins():
     assert C(b"...\nkdive-customize-ok\n") is CustomizeVerdict.OK
 
+
 def test_fail_marker():
     assert C(b"dnf: No match\nkdive-customize-failed\n") is CustomizeVerdict.FAILED
 
+
 def test_genuine_oops_fails():
     assert C(b"Oops: 0000 [#1] SMP\n") is CustomizeVerdict.FAILED
+
 
 def test_benign_tcg_stall_is_pending():
     assert C(b"rcu: INFO: rcu_sched detected stalls on CPUs\n") is CustomizeVerdict.PENDING
     assert C(b"watchdog: BUG: soft lockup - CPU#0 stuck for 22s!\n") is CustomizeVerdict.PENDING
 
+
 def test_real_bug_still_fails():
     assert C(b"BUG: unable to handle kernel paging request\n") is CustomizeVerdict.FAILED
+
 
 def test_pending_when_quiet():
     assert C(b"[  ok  ] Started systemd-logind\n") is CustomizeVerdict.PENDING
@@ -405,9 +462,11 @@ def test_success_seals_and_holds_conn_open_until_end():
         read_console=lambda _bid: next(reads),
         domain_settled=lambda _bid: False,
         sleep=lambda _s: events.append("sleep"),
-        window_polls=lambda _a: 10)
+        window_polls=lambda _a: 10,
+    )
     run_customization_boot(BID, "<domain/>", accel="tcg", seams=seams)
-    assert conn.closed_after_force_off is True   # conn not closed before force-off
+    assert conn.closed_after_force_off is True  # conn not closed before force-off
+
 
 def test_fail_marker_raises_provisioning_failure_with_tail():
     seams = _seams_reading(b"dnf error: nothing provides libfoo\nkdive-customize-failed\n")
@@ -416,15 +475,18 @@ def test_fail_marker_raises_provisioning_failure_with_tail():
     assert ei.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert "libfoo" in ei.value.details["console_tail"]
 
+
 def test_genuine_fault_raises():
     seams = _seams_reading(b"Oops: 0000 [#1]\n")
     with pytest.raises(CategorizedError):
         run_customization_boot(BID, "<domain/>", accel="tcg", seams=seams)
 
+
 def test_settled_without_ok_marker_fails():
     seams = _seams(read=b"partial\n", settled=True)
     with pytest.raises(CategorizedError):
         run_customization_boot(BID, "<domain/>", accel="tcg", seams=seams)
+
 
 def test_window_exhaustion_is_boot_timeout():
     seams = _seams(read=b"still booting\n", settled=False, polls=2)
@@ -432,18 +494,22 @@ def test_window_exhaustion_is_boot_timeout():
         run_customization_boot(BID, "<domain/>", accel="tcg", seams=seams)
     assert ei.value.category is ErrorCategory.BOOT_TIMEOUT
 
+
 def test_unreadable_console_propagates_and_tears_down(monkeypatch):
     # ADR-0223 root:0600 wall: the first read raises CONFIGURATION_ERROR; it must
     # propagate (not be swallowed) AND the domain must still be force-off in finally.
     domain = FakeDomain(events := [])
+
     def raise_perm(_bid):
-        raise CategorizedError("failed to read console log",
-                               category=ErrorCategory.CONFIGURATION_ERROR)
+        raise CategorizedError(
+            "failed to read console log", category=ErrorCategory.CONFIGURATION_ERROR
+        )
+
     seams = _seams_custom(read_console=raise_perm, domain=domain)
     with pytest.raises(CategorizedError) as ei:
         run_customization_boot(BID, "<domain/>", accel="tcg", seams=seams)
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert domain.destroyed is True   # finally force-off ran despite the raise
+    assert domain.destroyed is True  # finally force-off ran despite the raise
 ```
 
 - [ ] **Step 2: Run — FAIL.**
@@ -496,18 +562,20 @@ def test_rhel_build_uses_customization_boot(tmp_path):
     plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path, tools=calls.as_tools())
     out = plane.build(_spec(name="fedora-kdive-ready-44", arch="x86_64"))
     assert calls.customization_boot_ran
-    assert calls.boot_accel == "kvm"                # resolve_accel seam drove the branch
+    assert calls.boot_accel == "kvm"  # resolve_accel seam drove the branch
     assert calls.boot_domain_name.startswith("kdive-build-")
     assert calls.normalize_relabel is False
     assert calls.sealed and calls.seal_selinux is True
-    assert calls.probed_path == calls.staged_path   # provenance from staged, not scratch
+    assert calls.probed_path == calls.staged_path  # provenance from staged, not scratch
     assert not calls.virt_customize_ran
+
 
 def test_ppc64le_build_boots_under_tcg(tmp_path):
     calls = _RecordingBootTools(accel=("tcg", "/usr/bin/qemu-system-ppc64"))
     plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path, tools=calls.as_tools())
     plane.build(_spec(name="fedora-kdive-ready-44-ppc64le", arch="ppc64le"))
-    assert calls.boot_accel == "tcg"                # TCG branch is unit-covered
+    assert calls.boot_accel == "tcg"  # TCG branch is unit-covered
+
 
 def test_debian_build_stays_on_virt_customize(tmp_path):
     calls = _RecordingBootTools()
@@ -515,9 +583,11 @@ def test_debian_build_stays_on_virt_customize(tmp_path):
     plane.build(_spec(name="debian-kdive-ready-13", arch="x86_64", family="debian"))
     assert calls.virt_customize_ran and not calls.customization_boot_ran
 
+
 def test_boot_failure_aborts_publish(tmp_path):
-    calls = _RecordingBootTools(boot_raises=CategorizedError("dnf failed",
-        category=ErrorCategory.PROVISIONING_FAILURE))
+    calls = _RecordingBootTools(
+        boot_raises=CategorizedError("dnf failed", category=ErrorCategory.PROVISIONING_FAILURE)
+    )
     plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path, tools=calls.as_tools())
     with pytest.raises(CategorizedError):
         plane.build(_spec(name="fedora-kdive-ready-44"))

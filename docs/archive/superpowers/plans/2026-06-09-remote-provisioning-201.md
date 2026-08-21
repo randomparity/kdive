@@ -227,8 +227,12 @@ Body unchanged. `OpenConnection` alias and `_LibvirtConn` stay for discovery.
 ```python
 def test_render_domain_xml_carries_agent_channel_gdb_and_metadata() -> None:
     xml = render_domain_xml(
-        SYSTEM_ID, _remote_profile(), pool="kdive", volume="kdive-...-overlay.qcow2",
-        gdb_addr="10.0.0.5", gdb_port=47001,
+        SYSTEM_ID,
+        _remote_profile(),
+        pool="kdive",
+        volume="kdive-...-overlay.qcow2",
+        gdb_addr="10.0.0.5",
+        gdb_port=47001,
     )
     root = fromstring(xml)  # defusedxml in tests is fine
     channel = root.find("./devices/channel/target[@name='org.qemu.guest_agent.0']")
@@ -264,7 +268,9 @@ def test_allocate_exhausted_range_raises_provisioning_failure() -> None:
 
 
 def test_render_volume_xml_backing_store() -> None:
-    xml = render_volume_xml("kdive-X-overlay.qcow2", capacity_bytes=42, backing_path="/p/base.qcow2")
+    xml = render_volume_xml(
+        "kdive-X-overlay.qcow2", capacity_bytes=42, backing_path="/p/base.qcow2"
+    )
     root = fromstring(xml)
     assert root.findtext("./name") == "kdive-X-overlay.qcow2"
     assert root.findtext("./capacity") == "42"

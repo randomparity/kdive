@@ -242,20 +242,10 @@ Add `_apply_patch` to the test import block and `import shutil` at the top of th
 # --- _apply_patch -------------------------------------------------------------------
 
 _GOOD_PATCH = (
-    "--- a/init/main.c\n"
-    "+++ b/init/main.c\n"
-    "@@ -1,2 +1,2 @@\n"
-    " line1\n"
-    "-line2\n"
-    "+line2-patched\n"
+    "--- a/init/main.c\n+++ b/init/main.c\n@@ -1,2 +1,2 @@\n line1\n-line2\n+line2-patched\n"
 )
 _BAD_PATCH = (
-    "--- a/init/main.c\n"
-    "+++ b/init/main.c\n"
-    "@@ -1,2 +1,2 @@\n"
-    " nomatch1\n"
-    "-nomatch2\n"
-    "+nomatch3\n"
+    "--- a/init/main.c\n+++ b/init/main.c\n@@ -1,2 +1,2 @@\n nomatch1\n-nomatch2\n+nomatch3\n"
 )
 
 
@@ -429,7 +419,9 @@ def test_sync_tree_rsync_nonzero_is_infrastructure_failure(
     src.mkdir()
 
     def _fail(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args=[], returncode=23, stdout="", stderr="rsync: disk full")
+        return subprocess.CompletedProcess(
+            args=[], returncode=23, stdout="", stderr="rsync: disk full"
+        )
 
     monkeypatch.setattr(build_module.shutil, "which", lambda _name: "/usr/bin/rsync")
     monkeypatch.setattr(build_module.subprocess, "run", _fail)

@@ -112,8 +112,12 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 
 def test_parse_build_config_row_round_trips_fields() -> None:
     entry = parse_build_config_row(
-        {"name": "kdump", "object_key": "system/build-configs/kdump/kdump.config",
-         "sha256": "abc", "description": "kdump options"}
+        {
+            "name": "kdump",
+            "object_key": "system/build-configs/kdump/kdump.config",
+            "sha256": "abc",
+            "description": "kdump options",
+        }
     )
     assert entry == BuildConfigEntry(
         name="kdump",
@@ -192,8 +196,7 @@ def parse_build_config_row(row: dict[str, Any]) -> BuildConfigEntry:
 
 
 _SELECT = (
-    "SELECT name, object_key, sha256, description "
-    "FROM build_config_catalog WHERE name = %(name)s"
+    "SELECT name, object_key, sha256, description FROM build_config_catalog WHERE name = %(name)s"
 )
 
 
@@ -323,7 +326,9 @@ async def _stored_sha(conn: AsyncConnection, name: str) -> str | None:
     return row["sha256"] if row is not None else None
 
 
-async def _upsert(conn: AsyncConnection, name: str, object_key: str, sha256: str, desc: str) -> None:
+async def _upsert(
+    conn: AsyncConnection, name: str, object_key: str, sha256: str, desc: str
+) -> None:
     async with conn.cursor() as cur:
         await cur.execute(
             "INSERT INTO build_config_catalog (name, object_key, sha256, description) "
@@ -515,7 +520,10 @@ def _merge_config(  # pragma: no cover - live_vm
     fragment_path.write_bytes(fragment_bytes)
     merge = subprocess.run(  # noqa: S603 - fixed argv, no shell
         ["scripts/kconfig/merge_config.sh", "-m", ".config", str(fragment_path)],
-        cwd=workspace, capture_output=True, text=True, check=False,
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
         timeout=_MAKE_TIMEOUT_S,
     )
     if merge.returncode != 0:
@@ -673,10 +681,9 @@ from kdive.mcp.tools.catalog.build_configs import read_build_config
 async def test_buildconfig_get_returns_inline_bytes_and_sha(db_pool, object_store) -> None:
     async with db_pool.connection() as conn:
         await seed_build_configs(conn, object_store)  # publishes the packaged kdump fragment
-    data = (
-        __import__("kdive.build_configs.seed", fromlist=["KDUMP_FRAGMENT_PATH"])
-        .KDUMP_FRAGMENT_PATH.read_bytes()
-    )
+    data = __import__(
+        "kdive.build_configs.seed", fromlist=["KDUMP_FRAGMENT_PATH"]
+    ).KDUMP_FRAGMENT_PATH.read_bytes()
 
     async with db_pool.connection() as conn:
         resp = await read_build_config(conn, object_store, name="kdump")

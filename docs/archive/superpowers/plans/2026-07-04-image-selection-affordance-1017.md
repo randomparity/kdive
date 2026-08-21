@@ -116,6 +116,7 @@ def test_image_entry_accepts_max_length_description():
 ```python
 description: str = ""
 
+
 @field_validator("description")
 @classmethod
 def _check_description(cls, value: str) -> str:
@@ -204,16 +205,23 @@ Add `_MAX_IMAGE_DESCRIPTION = 280` near the top of the module.
 def test_parse_os_release_quoted_and_unquoted():
     text = 'ID=fedora\nVERSION_ID=43\nPRETTY_NAME="Fedora Linux 43"\n'
     assert _parse_os_release(text) == {
-        "id": "fedora", "version_id": "43", "pretty_name": "Fedora Linux 43"}
+        "id": "fedora",
+        "version_id": "43",
+        "pretty_name": "Fedora Linux 43",
+    }
+
 
 def test_parse_os_release_id_only_partial():
     assert _parse_os_release("ID=debian\n") == {"id": "debian"}
 
+
 def test_parse_os_release_missing_id_returns_none():
     assert _parse_os_release('PRETTY_NAME="X"\n') is None
 
+
 def test_parse_os_release_skips_comments_and_blanks():
     assert _parse_os_release("# c\n\nID=rocky\n") == {"id": "rocky"}
+
 
 def test_parse_os_release_malformed_returns_none_or_partial():
     assert _parse_os_release("garbage-no-equals\n") is None

@@ -238,9 +238,7 @@ async def _count_jobs(conn: psycopg.AsyncConnection) -> int:
 def test_enqueue_inserts_queued_job(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
-            job = await queue.enqueue(
-                conn, JobKind.BUILD, {"x": 1}, {"principal": "alice"}, "dk-1"
-            )
+            job = await queue.enqueue(conn, JobKind.BUILD, {"x": 1}, {"principal": "alice"}, "dk-1")
             assert isinstance(job, Job)
             assert job.state is JobState.QUEUED
             assert job.attempt == 0
@@ -487,7 +485,9 @@ Expected: FAIL with `AttributeError: module 'kdive.jobs.queue' has no attribute 
 Append to `src/kdive/jobs/queue.py`:
 
 ```python
-async def dequeue(conn: AsyncConnection, worker_id: str, *, lease: timedelta = DEFAULT_LEASE) -> Job | None:
+async def dequeue(
+    conn: AsyncConnection, worker_id: str, *, lease: timedelta = DEFAULT_LEASE
+) -> Job | None:
     """Claim the oldest eligible job for ``worker_id``, charging an attempt.
 
     Eligible: ``queued``, or ``running`` with a lapsed lease (an abandoned job), and
@@ -558,7 +558,9 @@ def test_heartbeat_renews_for_owner(migrated_url: str) -> None:
             claimed = await queue.dequeue(conn, "w1", lease=timedelta(seconds=10))
             assert claimed is not None
             assert await queue.heartbeat(conn, claimed.id, "w1", lease=timedelta(minutes=5)) is True
-            cur = await conn.execute("SELECT lease_expires_at FROM jobs WHERE id = %s", (claimed.id,))
+            cur = await conn.execute(
+                "SELECT lease_expires_at FROM jobs WHERE id = %s", (claimed.id,)
+            )
             renewed = (await cur.fetchone())[0]
             assert renewed > claimed.lease_expires_at
 
@@ -791,15 +793,21 @@ def test_init_rejects_interval_above_third_of_lease() -> None:
     reg = HandlerRegistry()
     with pytest.raises(ValueError, match="heartbeat_interval"):
         Worker(
-            object(), reg, worker_id="w1",
-            lease=timedelta(seconds=3), heartbeat_interval=timedelta(seconds=2),
+            object(),
+            reg,
+            worker_id="w1",
+            lease=timedelta(seconds=3),
+            heartbeat_interval=timedelta(seconds=2),
         )
 
 
 def test_init_accepts_interval_at_third_of_lease() -> None:
     Worker(
-        object(), HandlerRegistry(), worker_id="w1",
-        lease=timedelta(seconds=3), heartbeat_interval=timedelta(seconds=1),
+        object(),
+        HandlerRegistry(),
+        worker_id="w1",
+        lease=timedelta(seconds=3),
+        heartbeat_interval=timedelta(seconds=1),
     )
 
 
@@ -1047,7 +1055,9 @@ def test_run_once_dead_letters_after_max_attempts(migrated_url: str) -> None:
             reg.register(JobKind.BUILD, always_raises)
             worker = Worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
-                job = await queue.enqueue(conn, JobKind.BUILD, {}, {"p": "a"}, "dk-poison", max_attempts=3)
+                job = await queue.enqueue(
+                    conn, JobKind.BUILD, {}, {"p": "a"}, "dk-poison", max_attempts=3
+                )
 
             for _ in range(3):
                 await worker.run_once()
@@ -1104,8 +1114,11 @@ def test_heartbeat_renews_live_lease(migrated_url: str) -> None:
             reg = HandlerRegistry()
             reg.register(JobKind.BUILD, slow)
             worker = Worker(
-                pool, reg, worker_id="w1",
-                lease=timedelta(seconds=1), heartbeat_interval=timedelta(milliseconds=250),
+                pool,
+                reg,
+                worker_id="w1",
+                lease=timedelta(seconds=1),
+                heartbeat_interval=timedelta(milliseconds=250),
             )
             async with pool.connection() as conn:
                 job = await queue.enqueue(conn, JobKind.BUILD, {}, {"p": "a"}, "dk-hb-live")
@@ -1124,8 +1137,8 @@ def test_heartbeat_renews_live_lease(migrated_url: str) -> None:
                 )
                 t2, owner = await cur.fetchone()
 
-            assert t2 > t1            # the heartbeat advanced the lease mid-run
-            assert owner == "w1"      # never reclaimed
+            assert t2 > t1  # the heartbeat advanced the lease mid-run
+            assert owner == "w1"  # never reclaimed
             await task
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.SUCCEEDED

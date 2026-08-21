@@ -77,7 +77,9 @@ def test_access_token_resolves_in_on_list_tools() -> None:
 
     probe = _TokenProbe()
     app.add_middleware(probe)
-    token = mint(kp, subject="alice", projects=["proj-a"], roles={"proj-a": "viewer"})  # mint is kw-only; `subject=`, not `sub=`
+    token = mint(
+        kp, subject="alice", projects=["proj-a"], roles={"proj-a": "viewer"}
+    )  # mint is kw-only; `subject=`, not `sub=`
 
     async def _run() -> None:
         async with Client(app, auth=token) as client:
@@ -512,8 +514,13 @@ def test_record_usage_rejects_bad_outcome(migrated_url: str) -> None:
                 await record_usage(
                     conn,
                     UsageEvent(
-                        principal="a", agent_session=None, project=None,
-                        tool="t", outcome="bogus", actor="agent", client_id=None,
+                        principal="a",
+                        agent_session=None,
+                        project=None,
+                        tool="t",
+                        outcome="bogus",
+                        actor="agent",
+                        client_id=None,
                     ),
                 )
                 await conn.commit()
@@ -658,16 +665,16 @@ def _outcomes(migrated_url: str, tool: str, behavior, monkeypatch) -> list[tuple
             except Exception:
                 pass
             async with pool.connection() as conn:
-                cur = await conn.execute(
-                    "SELECT tool, outcome, principal FROM tool_invocation"
-                )
+                cur = await conn.execute("SELECT tool, outcome, principal FROM tool_invocation")
                 return await cur.fetchall()
 
     return asyncio.run(_run())
 
 
 def test_ok_outcome(migrated_url, monkeypatch) -> None:
-    async def ok(_c): return ToolResponse.success("jobs.get")
+    async def ok(_c):
+        return ToolResponse.success("jobs.get")
+
     rows = _outcomes(migrated_url, "jobs.get", ok, monkeypatch)
     assert rows == [("jobs.get", "ok", "alice")]
 
@@ -675,18 +682,23 @@ def test_ok_outcome(migrated_url, monkeypatch) -> None:
 def test_denied_via_envelope(migrated_url, monkeypatch) -> None:
     async def denied(_c):
         return ToolResponse.failure("x", ErrorCategory.AUTHORIZATION_DENIED)
+
     rows = _outcomes(migrated_url, "x", denied, monkeypatch)
     assert rows[0][1] == "denied"
 
 
 def test_denied_via_propagated_exception(migrated_url, monkeypatch) -> None:
-    async def boom(_c): raise DestructiveOpDenied("nope")
+    async def boom(_c):
+        raise DestructiveOpDenied("nope")
+
     rows = _outcomes(migrated_url, "control.power", boom, monkeypatch)
     assert rows[0][1] == "denied"
 
 
 def test_error_outcome(migrated_url, monkeypatch) -> None:
-    async def err(_c): raise RuntimeError("boom")
+    async def err(_c):
+        raise RuntimeError("boom")
+
     rows = _outcomes(migrated_url, "y", err, monkeypatch)
     assert rows[0][1] == "error"
 
@@ -698,7 +710,10 @@ def test_recording_failure_is_swallowed(migrated_url, monkeypatch) -> None:
     async def _run():
         pool = AsyncConnectionPool(migrated_url, open=False)  # never opened
         mw = UsageTrackingMiddleware(pool, acquire_timeout=0.05)
-        async def ok(_c): return ToolResponse.success("jobs.get")
+
+        async def ok(_c):
+            return ToolResponse.success("jobs.get")
+
         return await mw.on_call_tool(_Ctx("jobs.get"), ok)
 
     result = asyncio.run(_run())
@@ -763,8 +778,10 @@ class UsageTrackingMiddleware(Middleware):
                 actor=actor_for(ctx),  # from kdive.mcp.tools._platform_auth
                 client_id=ctx.client_id,
             )
-            async with self._pool.connection(timeout=self._acquire_timeout) as conn, \
-                    conn.transaction():
+            async with (
+                self._pool.connection(timeout=self._acquire_timeout) as conn,
+                conn.transaction(),
+            ):
                 await record_usage(conn, event)
         except Exception:
             _log.warning("usage recording failed for tool", exc_info=True)
@@ -826,7 +843,8 @@ def test_exposure_map_covers_every_registered_tool() -> None:
     # Spot-pin a few that MUST stay gated (a regression to PUBLIC would be silent).
     assert scope_for("control.power") is ExposureScope.PROJECT_ADMIN
     assert scope_for("ops.reconcile_now") in {
-        ExposureScope.PLATFORM_OPERATOR, ExposureScope.PLATFORM_ADMIN
+        ExposureScope.PLATFORM_OPERATOR,
+        ExposureScope.PLATFORM_ADMIN,
     }
     assert scope_for("allocations.request") is ExposureScope.PROJECT_OPERATOR
 ```
@@ -863,15 +881,13 @@ For each tool, read its registrar's `require_role` / `require_platform_role` cal
 In `app.py`, after `app.add_middleware(BindingErrorMiddleware())` add the two new ones. `TelemetryMiddleware` stays outermost (added first); add `UsageTrackingMiddleware` right after it and `ToolExposureMiddleware` after that:
 
 ```python
-    app.add_middleware(
-        TelemetryMiddleware(
-            tracer=trace.get_tracer("kdive.mcp"), meter=metrics.get_meter("kdive.mcp")
-        )
-    )
-    app.add_middleware(UsageTrackingMiddleware(pool))
-    app.add_middleware(ToolExposureMiddleware())
-    app.add_middleware(DenialAuditMiddleware(pool))
-    app.add_middleware(BindingErrorMiddleware())
+app.add_middleware(
+    TelemetryMiddleware(tracer=trace.get_tracer("kdive.mcp"), meter=metrics.get_meter("kdive.mcp"))
+)
+app.add_middleware(UsageTrackingMiddleware(pool))
+app.add_middleware(ToolExposureMiddleware())
+app.add_middleware(DenialAuditMiddleware(pool))
+app.add_middleware(BindingErrorMiddleware())
 ```
 
 (Ordering note: `on_call_tool` runs added-order on the way in; `UsageTrackingMiddleware` added before `DenialAuditMiddleware` sees the denial *envelope* on the way out — exactly what `_classify` needs. `ToolExposureMiddleware` only hooks `on_list_tools`, so its position among the `on_call_tool` chain is immaterial. Import both new classes at the top of `app.py`.)
@@ -908,8 +924,8 @@ def test_viewer_list_tools_is_reduced_over_transport() -> None:
     # Build the app with a real JWTVerifier and drive list_tools with a viewer token.
     # (Mirror the harness in tests/integration/test_wire_harness.py for app+client setup.)
     ...
-    viewer_names = {...}   # from client.list_tools() with viewer token
-    admin_names = {...}    # with platform_admin+admin token
+    viewer_names = {...}  # from client.list_tools() with viewer token
+    admin_names = {...}  # with platform_admin+admin token
     assert "control.power" in admin_names
     assert "control.power" not in viewer_names
     assert viewer_names < admin_names

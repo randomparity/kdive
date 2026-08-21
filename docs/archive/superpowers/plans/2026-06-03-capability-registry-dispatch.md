@@ -132,9 +132,7 @@ def test_boundop_carries_contract_and_callable() -> None:
         called.append("x")
         return "ok"
 
-    bound = BoundOp(
-        provider_id="p-1", operation="build", contract=contract, call=fake_call
-    )
+    bound = BoundOp(provider_id="p-1", operation="build", contract=contract, call=fake_call)
     assert bound.provider_id == "p-1"
     assert bound.contract is contract
     assert bound.call() == "ok"
@@ -321,9 +319,7 @@ def build_capability(
     contract: OpContract = DEFAULT_CONTRACT,
 ) -> Capability:
     """Construct a Capability for the local-libvirt kind (test helper)."""
-    return Capability(
-        plane=plane, operation=operation, resource_kind=LIBVIRT, contract=contract
-    )
+    return Capability(plane=plane, operation=operation, resource_kind=LIBVIRT, contract=contract)
 
 
 class FakeProvider:
@@ -873,9 +869,7 @@ class CapabilityRegistry:
         for capability in capabilities:
             key = _key(capability)
             if key in seen:
-                raise ValueError(
-                    f"provider {provider_id!r} advertises {key} twice in one call"
-                )
+                raise ValueError(f"provider {provider_id!r} advertises {key} twice in one call")
             seen.add(key)
             method = getattr(provider, capability.operation, None)
             if not callable(method):
@@ -887,9 +881,7 @@ class CapabilityRegistry:
                 )
             existing = self._candidates.get(key)
             if existing and existing[0].capability.contract != capability.contract:
-                raise ValueError(
-                    f"contract for {key} diverges from an already-registered provider"
-                )
+                raise ValueError(f"contract for {key} diverges from an already-registered provider")
 
         self._provider_ids.add(provider_id)
         for capability in capabilities:
@@ -1040,101 +1032,100 @@ Expected: the dispatch tests FAIL with `AttributeError: 'CapabilityRegistry' obj
 Append these two methods inside the `CapabilityRegistry` class (after `register`):
 
 ```python
-    def dispatch(
-        self,
-        plane: Plane,
-        operation: str,
-        resource_kind: ResourceKind,
-        *,
-        pin: str | None = None,
-    ) -> BoundOp:
-        """Resolve a requested operation to a bound provider op (ADR-0009).
+def dispatch(
+    self,
+    plane: Plane,
+    operation: str,
+    resource_kind: ResourceKind,
+    *,
+    pin: str | None = None,
+) -> BoundOp:
+    """Resolve a requested operation to a bound provider op (ADR-0009).
 
-        Selection: an explicit ``pin`` (a ``provider_id``) wins outright; otherwise
-        candidates are ordered by health, then ``cost_class`` ascending, then
-        ``provider_id`` ascending, and the first is bound. Health orders but never
-        filters — an ``offline``-only key still dispatches.
+    Selection: an explicit ``pin`` (a ``provider_id``) wins outright; otherwise
+    candidates are ordered by health, then ``cost_class`` ascending, then
+    ``provider_id`` ascending, and the first is bound. Health orders but never
+    filters — an ``offline``-only key still dispatches.
 
-        Args:
-            plane: The requested plane.
-            operation: The requested operation (a plane method name).
-            resource_kind: The resource kind to dispatch for.
-            pin: Optional ``provider_id`` to force a specific provider.
+    Args:
+        plane: The requested plane.
+        operation: The requested operation (a plane method name).
+        resource_kind: The resource kind to dispatch for.
+        pin: Optional ``provider_id`` to force a specific provider.
 
-        Returns:
-            A :class:`BoundOp` carrying the chosen provider's bound method and the
-            operation's contract.
+    Returns:
+        A :class:`BoundOp` carrying the chosen provider's bound method and the
+        operation's contract.
 
-        Raises:
-            CategorizedError: ``NOT_IMPLEMENTED`` if no provider advertises the key,
-                if ``pin`` names a provider that does not advertise it, or if the
-                selected provider no longer exposes the method.
-        """
-        key = (plane, operation, resource_kind)
-        details: dict[str, object] = {
-            "plane": plane,
-            "operation": operation,
-            "resource_kind": resource_kind,
-            "pin": pin,
-        }
-        candidates = self._candidates.get(key)
-        if not candidates:
-            raise CategorizedError(
-                f"no provider advertises {key}",
-                category=ErrorCategory.NOT_IMPLEMENTED,
-                details=details,
-            )
-
-        chosen, deciding = self._select(candidates, pin)
-        if chosen is None:
-            raise CategorizedError(
-                f"pin {pin!r} does not advertise {key}",
-                category=ErrorCategory.NOT_IMPLEMENTED,
-                details=details,
-            )
-
-        method = getattr(chosen.provider, operation, None)
-        if not callable(method):
-            raise CategorizedError(
-                f"provider {chosen.provider_id!r} no longer honors {operation!r}",
-                category=ErrorCategory.NOT_IMPLEMENTED,
-                details=details,
-            )
-
-        _log.debug(
-            "capability dispatch %s/%s/%s -> %s of %s (by %s)",
-            plane,
-            operation,
-            resource_kind,
-            chosen.provider_id,
-            [c.provider_id for c in candidates],
-            deciding,
+    Raises:
+        CategorizedError: ``NOT_IMPLEMENTED`` if no provider advertises the key,
+            if ``pin`` names a provider that does not advertise it, or if the
+            selected provider no longer exposes the method.
+    """
+    key = (plane, operation, resource_kind)
+    details: dict[str, object] = {
+        "plane": plane,
+        "operation": operation,
+        "resource_kind": resource_kind,
+        "pin": pin,
+    }
+    candidates = self._candidates.get(key)
+    if not candidates:
+        raise CategorizedError(
+            f"no provider advertises {key}",
+            category=ErrorCategory.NOT_IMPLEMENTED,
+            details=details,
         )
-        return BoundOp(chosen.provider_id, operation, chosen.capability.contract, method)
 
-    @staticmethod
-    def _select(
-        candidates: list[_Candidate], pin: str | None
-    ) -> tuple[_Candidate | None, str]:
-        """Pick the winning candidate and the step that decided it."""
-        if pin is not None:
-            for candidate in candidates:
-                if candidate.provider_id == pin:
-                    return candidate, "pin"
-            return None, "pin"
-        ordered = sorted(
-            candidates,
-            key=lambda c: (_HEALTH_RANK[c.health], c.cost_class, c.provider_id),
+    chosen, deciding = self._select(candidates, pin)
+    if chosen is None:
+        raise CategorizedError(
+            f"pin {pin!r} does not advertise {key}",
+            category=ErrorCategory.NOT_IMPLEMENTED,
+            details=details,
         )
-        winner = ordered[0]
-        if len(ordered) == 1:
-            return winner, "sole"
-        runner_up = ordered[1]
-        if winner.health != runner_up.health:
-            return winner, "health"
-        if winner.cost_class != runner_up.cost_class:
-            return winner, "cost_class"
-        return winner, "provider_id"
+
+    method = getattr(chosen.provider, operation, None)
+    if not callable(method):
+        raise CategorizedError(
+            f"provider {chosen.provider_id!r} no longer honors {operation!r}",
+            category=ErrorCategory.NOT_IMPLEMENTED,
+            details=details,
+        )
+
+    _log.debug(
+        "capability dispatch %s/%s/%s -> %s of %s (by %s)",
+        plane,
+        operation,
+        resource_kind,
+        chosen.provider_id,
+        [c.provider_id for c in candidates],
+        deciding,
+    )
+    return BoundOp(chosen.provider_id, operation, chosen.capability.contract, method)
+
+
+@staticmethod
+def _select(candidates: list[_Candidate], pin: str | None) -> tuple[_Candidate | None, str]:
+    """Pick the winning candidate and the step that decided it."""
+    if pin is not None:
+        for candidate in candidates:
+            if candidate.provider_id == pin:
+                return candidate, "pin"
+        return None, "pin"
+    ordered = sorted(
+        candidates,
+        key=lambda c: (_HEALTH_RANK[c.health], c.cost_class, c.provider_id),
+    )
+    winner = ordered[0]
+    if len(ordered) == 1:
+        return winner, "sole"
+    runner_up = ordered[1]
+    if winner.health != runner_up.health:
+        return winner, "health"
+    if winner.cost_class != runner_up.cost_class:
+        return winner, "cost_class"
+    return winner, "provider_id"
 ```
 
 - [ ] **Step 7: Run the full provider test suite**

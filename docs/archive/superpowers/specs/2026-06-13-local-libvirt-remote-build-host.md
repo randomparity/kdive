@@ -105,8 +105,9 @@ In `providers/ports/build.py`, add beside `Builder`:
 ```python
 @runtime_checkable
 class TransportCapableBuilder(Builder, Protocol):
-    def over_transport(self, transport, *, host_workspace_root, git_remote, git_ref,
-                       secret_registry) -> Builder: ...
+    def over_transport(
+        self, transport, *, host_workspace_root, git_remote, git_ref, secret_registry
+    ) -> Builder: ...
 ```
 
 In `jobs/handlers/runs.py`:

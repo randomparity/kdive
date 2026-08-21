@@ -146,6 +146,7 @@ exactly what makes the smoke test able to assert the `-dev` shape deterministica
 ```python
 import re
 
+
 def test_version_reports_baked_provenance() -> None:
     res = _run(_image(), "python", "-m", "kdive", "--version")
     assert res.returncode == 0, res.stderr

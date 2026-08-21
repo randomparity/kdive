@@ -157,9 +157,7 @@ def test_stop_failure_warns_but_does_not_raise_and_unlinks(tmp_path: Path) -> No
     # teardown must be best-effort: warn, not raise (so it can never mask a body error
     # or wedge the run), and always unlink so the next run starts clean.
     with pytest.warns(UserWarning, match="stop"):
-        with xdist_backend.shared_container(
-            tmp_path, "pg", start=_FakeContainer.start, stop=boom
-        ):
+        with xdist_backend.shared_container(tmp_path, "pg", start=_FakeContainer.start, stop=boom):
             pass  # sole holder; refcount hits 0 and stop() raises internally
     assert not (tmp_path / "kdive-pg.json").exists()
 ```
@@ -494,10 +492,7 @@ def _server_url_without_db(url: str) -> str:
 
 def _worker_db_name() -> str:
     """A fresh per-worker, run-unique database name."""
-    return (
-        f"kdive_test_{xdist_backend.xdist_worker_id()}_"
-        f"{xdist_backend.worker_namespace_token()}"
-    )
+    return f"kdive_test_{xdist_backend.xdist_worker_id()}_{xdist_backend.worker_namespace_token()}"
 
 
 def _provision_worker_db(server_url: str, dbname: str | None = None) -> tuple[str, str]:
@@ -542,9 +537,7 @@ def _acquire_pg_server(
         pytest.skip(f"testcontainers not installed: {exc}")
 
     root = xdist_backend.per_run_root(tmp_path_factory)
-    manager = xdist_backend.shared_container(
-        root, "pg", start=_start_postgres, stop=_stop_postgres
-    )
+    manager = xdist_backend.shared_container(root, "pg", start=_start_postgres, stop=_stop_postgres)
     try:
         server_url = manager.__enter__()  # only container start can fail here
     except Exception as exc:  # Docker daemon unreachable / image pull failure.
@@ -622,9 +615,7 @@ def test_provision_and_drop_roundtrip_against_real_server() -> None:
         again_url, _ = db_conftest._provision_worker_db(server, dbname=name)
         assert again_url == worker_url  # same name reused
         with psycopg.connect(again_url) as conn:
-            got = conn.execute(
-                "SELECT to_regclass('public.marker')"
-            ).fetchone()[0]
+            got = conn.execute("SELECT to_regclass('public.marker')").fetchone()[0]
             assert got is None  # database was dropped and recreated clean
         db_conftest._drop_worker_db(server, name)
         with pytest.raises(psycopg.OperationalError):
@@ -691,7 +682,9 @@ def test_override_env_selects_endpoint_and_creds(monkeypatch: pytest.MonkeyPatch
     monkeypatch.delenv("KDIVE_TEST_S3_ACCESS_KEY", raising=False)
     endpoint, access, secret = store_conftest._select_s3_endpoint()
     assert endpoint == "http://minio.example:9000"
-    assert access == "minioadmin" and secret == "minioadmin"  # pragma: allowlist secret - compose defaults
+    assert (
+        access == "minioadmin" and secret == "minioadmin"
+    )  # pragma: allowlist secret - compose defaults
 
 
 def test_bucket_name_is_per_worker_unique() -> None:
@@ -709,9 +702,11 @@ def test_override_selected_without_starting_a_container(
         raise AssertionError("override path must not start a container")
 
     monkeypatch.setattr(store_conftest, "_start_minio", _boom)
-    with store_conftest._acquire_minio_endpoint(
-        tmp_path_factory, require_docker=False
-    ) as (endpoint, _access, _secret):
+    with store_conftest._acquire_minio_endpoint(tmp_path_factory, require_docker=False) as (
+        endpoint,
+        _access,
+        _secret,
+    ):
         assert endpoint == "http://minio.example:9000"
 
 
@@ -733,9 +728,7 @@ def test_readiness_error_propagates_not_skipped(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     monkeypatch.delenv("KDIVE_TEST_S3_URL", raising=False)
-    monkeypatch.setattr(
-        store_conftest, "_start_minio", lambda: ("http://h:9000", "cid")
-    )
+    monkeypatch.setattr(store_conftest, "_start_minio", lambda: ("http://h:9000", "cid"))
     monkeypatch.setattr(store_conftest, "_stop_minio", lambda cid: None)
     with pytest.raises(ValueError):  # a body error must NOT become pytest.skip
         with store_conftest._acquire_minio_endpoint(tmp_path_factory, require_docker=False):
@@ -767,10 +760,7 @@ def _select_s3_endpoint() -> tuple[str, str, str]:
 
 
 def _worker_bucket_name() -> str:
-    return (
-        f"kdive-test-{xdist_backend.xdist_worker_id()}-"
-        f"{xdist_backend.worker_namespace_token()}"
-    )
+    return f"kdive-test-{xdist_backend.xdist_worker_id()}-{xdist_backend.worker_namespace_token()}"
 
 
 def _start_minio() -> tuple[str, str]:
@@ -787,8 +777,7 @@ def _start_minio() -> tuple[str, str]:
     )
     container.start()
     endpoint = (
-        f"http://{container.get_container_host_ip()}:"
-        f"{container.get_exposed_port(_MINIO_PORT)}"
+        f"http://{container.get_container_host_ip()}:{container.get_exposed_port(_MINIO_PORT)}"
     )
     return endpoint, container.get_wrapped_container().id
 
@@ -855,9 +844,7 @@ def _acquire_minio_endpoint(
         pytest.skip(f"testcontainers not installed: {exc}")
 
     root = xdist_backend.per_run_root(tmp_path_factory)
-    manager = xdist_backend.shared_container(
-        root, "minio", start=_start_minio, stop=_stop_minio
-    )
+    manager = xdist_backend.shared_container(root, "minio", start=_start_minio, stop=_stop_minio)
     try:
         endpoint = manager.__enter__()  # only container start can fail here
     except Exception as exc:  # Docker daemon unreachable / image pull failure.
@@ -971,6 +958,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 # tests/integration/test_shared_backend_real.py
 """Real-container proof that shared_container starts exactly one backend and stops
 it by id (AC1 real, AC6b). Skips without Docker; hard-fails under KDIVE_REQUIRE_DOCKER."""
+
 from __future__ import annotations
 
 import os

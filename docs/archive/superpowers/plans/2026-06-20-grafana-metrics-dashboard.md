@@ -439,11 +439,7 @@ Append to `tests/deploy/test_grafana_dashboard.py`:
 
 ```python
 def _all_exprs() -> list[str]:
-    return [
-        t["expr"]
-        for p in build_dashboard()["panels"]
-        for t in p.get("targets", [])
-    ]
+    return [t["expr"] for p in build_dashboard()["panels"] for t in p.get("targets", [])]
 
 
 def test_rows_1_to_3_present() -> None:
@@ -487,10 +483,7 @@ def _rate(name: str, by: str) -> str:
 
 def _quantile(name: str, quant: float, by: tuple[str, ...] = ()) -> str:
     grouping = ", ".join(("le", *by))
-    return (
-        f"histogram_quantile({quant}, "
-        f"sum by ({grouping}) (rate({name}_bucket[{_RATE_WINDOW}])))"
-    )
+    return f"histogram_quantile({quant}, sum by ({grouping}) (rate({name}_bucket[{_RATE_WINDOW}])))"
 
 
 def _panel(kind: str, title: str, targets: list[dict], unit: str, stacked: bool) -> dict:
@@ -508,7 +501,9 @@ def _panel(kind: str, title: str, targets: list[dict], unit: str, stacked: bool)
     }
 
 
-def _timeseries(title: str, targets: list[dict], *, unit: str = "short", stacked: bool = False) -> dict:
+def _timeseries(
+    title: str, targets: list[dict], *, unit: str = "short", stacked: bool = False
+) -> dict:
     return _panel("timeseries", title, targets, unit, stacked)
 
 
@@ -856,7 +851,12 @@ def _row_build(grid: _Grid) -> None:
     grid.add(
         _timeseries(
             "Build-phase duration p95",
-            [_target(_quantile("kdive_build_phase_duration", 0.95, ("build_phase",)), "{{build_phase}}")],
+            [
+                _target(
+                    _quantile("kdive_build_phase_duration", 0.95, ("build_phase",)),
+                    "{{build_phase}}",
+                )
+            ],
             unit="s",
         ),
         width=12,

@@ -72,8 +72,14 @@ In `profile_examples.py`, `_NEXT_ACTIONS` becomes:
 
 ```python
 _NEXT_ACTIONS = [
-    "resources.list", "shapes.list", "accounting.estimate", "allocations.request",
-    "systems.provision", "systems.get", "systems.teardown", "allocations.release",
+    "resources.list",
+    "shapes.list",
+    "accounting.estimate",
+    "allocations.request",
+    "systems.provision",
+    "systems.get",
+    "systems.teardown",
+    "allocations.release",
 ]
 ```
 

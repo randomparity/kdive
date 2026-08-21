@@ -282,10 +282,14 @@ def _spine_preflight() -> tuple[OidcIssuer, str, str]:
     """Resolve issuer + stack URL + DB URL, or skip with the exact fix (ADR-0035 §4)."""
     image = os.environ.get(_GUEST_IMAGE_ENV)
     if not image or not Path(image).exists():
-        pytest.skip(f"{_GUEST_IMAGE_ENV} unset or missing; run scripts/live-vm/build-guest-image.sh")
+        pytest.skip(
+            f"{_GUEST_IMAGE_ENV} unset or missing; run scripts/live-vm/build-guest-image.sh"
+        )
     tree = os.environ.get(_KERNEL_TREE_ENV)
     if not tree or not Path(tree).exists():
-        pytest.skip(f"{_KERNEL_TREE_ENV} unset or missing; run scripts/live-vm/fetch-kernel-tree.sh")
+        pytest.skip(
+            f"{_KERNEL_TREE_ENV} unset or missing; run scripts/live-vm/fetch-kernel-tree.sh"
+        )
     db_url = os.environ.get(_DATABASE_URL_ENV)
     if not db_url:
         pytest.skip(f"{_DATABASE_URL_ENV} unset; bring up the stack (see the live-stack runbook)")
@@ -297,7 +301,9 @@ def _spine_preflight() -> tuple[OidcIssuer, str, str]:
 def _ok(envelope: ToolResponse, phase_name: str) -> ToolResponse:
     """Return the envelope if non-failure, else raise a SpinePhaseError naming the phase."""
     if envelope.status in {"error", "failed"}:
-        raise SpinePhaseError(phase_name, f"{envelope.status} envelope", error_category=envelope.error_category)
+        raise SpinePhaseError(
+            phase_name, f"{envelope.status} envelope", error_category=envelope.error_category
+        )
     return envelope
 ```
 
@@ -360,9 +366,7 @@ async def _count_audit(db_url: str, *, object_id: str, transition: str, principa
     return int(row[0]) if row else 0
 
 
-async def _count_audit_suffix(
-    db_url: str, *, object_id: str, suffix: str, principal: str
-) -> int:
+async def _count_audit_suffix(db_url: str, *, object_id: str, suffix: str, principal: str) -> int:
     """Count audit_log rows whose transition ends with ``suffix`` (robust to the prior state).
 
     The teardown handler writes ``f"{old.value}->torn_down"``; the prior state depends on the
@@ -426,7 +430,9 @@ async def _drain_job(client: LiveStackClient, phase_name: str, job_id: str) -> T
         if env.status == "succeeded":
             return env
         if env.status in {"failed", "canceled"}:
-            raise SpinePhaseError(phase_name, f"job {env.status}", error_category=env.error_category)
+            raise SpinePhaseError(
+                phase_name, f"job {env.status}", error_category=env.error_category
+            )
         if time.monotonic() >= deadline:  # non-terminal return: a worker stall
             raise SpinePhaseError(phase_name, "drain_timeout")
         await asyncio.sleep(_POLL_INTERVAL_S)
@@ -442,7 +448,9 @@ async def _await_system_state(
         if env.status == target:
             return
         if env.status in {"error", "failed"}:
-            raise SpinePhaseError(phase_name, f"system {env.status}", error_category=env.error_category)
+            raise SpinePhaseError(
+                phase_name, f"system {env.status}", error_category=env.error_category
+            )
         if time.monotonic() >= deadline:
             raise SpinePhaseError(phase_name, f"system did not reach {target}")
         await asyncio.sleep(_POLL_INTERVAL_S)
@@ -603,33 +611,45 @@ def test_spine_over_the_wire() -> None:
         async with op, admin:
             # 1. allocate
             async with phase("allocate"):
-                env = _ok(await op.call_tool(
-                    "allocations.request", project=_PROJECT, vcpus=2, memory_gb=2
-                ), "allocate")
+                env = _ok(
+                    await op.call_tool(
+                        "allocations.request", project=_PROJECT, vcpus=2, memory_gb=2
+                    ),
+                    "allocate",
+                )
                 allocation_id = env.object_id
             # out-of-band: grant the destructive capability scope (ADR-0045 §1)
             await _grant_force_crash_scope(db_url, allocation_id)
             # 2. provision (async; system_id is in data, NOT object_id)
             async with phase("provision"):
-                env = _ok(await op.call_tool(
-                    "systems.provision", allocation_id=allocation_id, profile=_provision_profile()
-                ), "provision")
+                env = _ok(
+                    await op.call_tool(
+                        "systems.provision",
+                        allocation_id=allocation_id,
+                        profile=_provision_profile(),
+                    ),
+                    "provision",
+                )
                 system_id = env.data["system_id"]
                 await _await_system_state(op, "provision", system_id, "ready")
             # 3. open-investigation
             async with phase("open-investigation"):
-                env = _ok(await op.call_tool(
-                    "investigations.open", project=_PROJECT, title="spine"
-                ), "open-investigation")
+                env = _ok(
+                    await op.call_tool("investigations.open", project=_PROJECT, title="spine"),
+                    "open-investigation",
+                )
                 investigation_id = env.object_id
             # 4. create-run
             async with phase("create-run"):
-                env = _ok(await op.call_tool(
-                    "runs.create",
-                    investigation_id=investigation_id,
-                    system_id=system_id,
-                    build_profile=_build_profile(),
-                ), "create-run")
+                env = _ok(
+                    await op.call_tool(
+                        "runs.create",
+                        investigation_id=investigation_id,
+                        system_id=system_id,
+                        build_profile=_build_profile(),
+                    ),
+                    "create-run",
+                )
                 run_id = env.object_id
             # 5/6/7. build → install → boot (each enqueues a job; drain to succeeded)
             for step in ("build", "install", "boot"):
@@ -638,13 +658,17 @@ def test_spine_over_the_wire() -> None:
                     await _drain_job(op, step, env.object_id)
             # 8. attach + gdb-MI probe
             async with phase("attach"):
-                env = _ok(await op.call_tool(
-                    "debug.start_session", run_id=run_id, transport="gdbstub"
-                ), "attach")
+                env = _ok(
+                    await op.call_tool("debug.start_session", run_id=run_id, transport="gdbstub"),
+                    "attach",
+                )
                 session_id = env.object_id
-                _ok(await op.call_tool(
-                    "debug.read_registers", session_id=session_id, registers=["rip"]
-                ), "attach")
+                _ok(
+                    await op.call_tool(
+                        "debug.read_registers", session_id=session_id, registers=["rip"]
+                    ),
+                    "attach",
+                )
             # operator is denied force_crash (gate returns authorization_denied envelope)
             async with phase("crash-rbac-negative"):
                 denied = await op.call_tool("control.force_crash", system_id=system_id)
@@ -661,7 +685,9 @@ def test_spine_over_the_wire() -> None:
                 cores = await op.call_tool("vmcore.list", system_id=system_id)
                 assert isinstance(cores, list) and cores, "no vmcore artifact listed (#1)"
                 refs = [v for c in cores for v in c.refs.values()]
-                assert refs and all(not r.endswith("/vmcore") for r in refs), "raw vmcore leaked (#1)"
+                assert refs and all(not r.endswith("/vmcore") for r in refs), (
+                    "raw vmcore leaked (#1)"
+                )
             # 11. introspect (redacted report; #3 redaction)
             async with phase("introspect"):
                 env = _ok(await op.call_tool("introspect.from_vmcore", run_id=run_id), "introspect")
@@ -669,34 +695,53 @@ def test_spine_over_the_wire() -> None:
                 assert "hunter2" not in report and "password=" not in report, "secret leaked (#3)"
             # 12. release (Allocation only; System untouched)
             async with phase("release"):
-                _ok(await op.call_tool("allocations.release", allocation_id=allocation_id), "release")
+                _ok(
+                    await op.call_tool("allocations.release", allocation_id=allocation_id),
+                    "release",
+                )
             # reconciler-driven teardown → torn_down (≥30s + worker drain)
             async with phase("teardown"):
                 await _await_system_state(op, "teardown", system_id, "torn_down")
 
         # --- #2 audit attribution (driver principal vs system:reconciler) ---
         principal = f"operator-{_PROJECT}"
-        assert await _count_audit(
-            db_url, object_id=system_id, transition="ready->crashed", principal=f"admin-{_PROJECT}"
-        ) == 1, "force_crash not audited under admin (#2)"
-        assert await _count_audit(
-            db_url, object_id=allocation_id, transition="releasing->released", principal=principal
-        ) >= 1, "release not audited under operator (#2)"
+        assert (
+            await _count_audit(
+                db_url,
+                object_id=system_id,
+                transition="ready->crashed",
+                principal=f"admin-{_PROJECT}",
+            )
+            == 1
+        ), "force_crash not audited under admin (#2)"
+        assert (
+            await _count_audit(
+                db_url,
+                object_id=allocation_id,
+                transition="releasing->released",
+                principal=principal,
+            )
+            >= 1
+        ), "release not audited under operator (#2)"
         # teardown is attributed to the reconciler, NOT the driver (ADR-0021). The handler
         # writes f"{old.value}->torn_down"; the spine crashed the guest first, so the prior
         # state is `crashed` → the row is `crashed->torn_down` (NOT `ready->torn_down`). Match
         # the suffix to stay robust to the prior state, and do NOT let the #5 DB check satisfy
         # the audit half of #2.
-        assert await _count_audit_suffix(
-            db_url, object_id=system_id, suffix="->torn_down", principal="system:reconciler"
-        ) >= 1, "teardown not audited under system:reconciler (#2)"
+        assert (
+            await _count_audit_suffix(
+                db_url, object_id=system_id, suffix="->torn_down", principal="system:reconciler"
+            )
+            >= 1
+        ), "teardown not audited under system:reconciler (#2)"
         # --- #5 teardown: DB torn_down + no OwnedInfra ---
         assert await _system_torn_down_unowned(db_url, system_id), "system not torn_down (#5)"
         from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
         import libvirt  # noqa: PLC0415 — only importable on a libvirt host (live_stack path)
 
         disc = LocalLibvirtDiscovery(
-            host_uri="qemu:///system", connect=lambda: libvirt.open("qemu:///system"),
+            host_uri="qemu:///system",
+            connect=lambda: libvirt.open("qemu:///system"),
             concurrent_allocation_cap=2,
         )
         owned_ids = {o["system_id"] for o in disc.list_owned()}

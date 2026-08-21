@@ -334,6 +334,7 @@ In `debug_common/gdbmi.py`, change the `GdbMiEngine.__init__` signature to accep
 ```python
 from kdive.providers.debug_common.hostpolicy import HostPolicy, require_loopback
 
+
 class GdbMiEngine:
     def __init__(
         self,
@@ -463,8 +464,9 @@ _REFS = TlsCertRefs(client_cert_ref="c", client_key_ref="k", ca_cert_ref="a")
 
 
 def _config(*, gdb_addr="10.0.0.5"):
-    return RemoteLibvirtConfig(uri="qemu+tls://h/system", cert_refs=_REFS,
-                               concurrent_allocation_cap=1, gdb_addr=gdb_addr)
+    return RemoteLibvirtConfig(
+        uri="qemu+tls://h/system", cert_refs=_REFS, concurrent_allocation_cap=1, gdb_addr=gdb_addr
+    )
 
 
 def _connect(*, resolve_port, probe, config=None):
@@ -483,8 +485,11 @@ def test_open_gdbstub_returns_handle_for_reachable_stub():
 
 
 def test_open_gdbstub_unset_gdb_addr_is_configuration_error():
-    c = _connect(resolve_port=lambda system: 47002, probe=lambda host, port: True,
-                 config=_config(gdb_addr=None))
+    c = _connect(
+        resolve_port=lambda system: 47002,
+        probe=lambda host, port: True,
+        config=_config(gdb_addr=None),
+    )
     with pytest.raises(CategorizedError) as exc:
         c.open_transport(SystemHandle("kdive-sys"), "gdbstub")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -500,6 +505,7 @@ def test_open_gdbstub_unreachable_is_debug_attach_failure():
 def test_open_gdbstub_socket_fault_is_transport_failure():
     def boom(host, port):
         raise OSError("connection refused")
+
     c = _connect(resolve_port=lambda system: 47002, probe=boom)
     with pytest.raises(CategorizedError) as exc:
         c.open_transport(SystemHandle("kdive-sys"), "gdbstub")
@@ -674,8 +680,9 @@ def test_remote_attach_seam_off_gate_reports_missing_dependency():
     # Off the live_vm gate the debuginfo resolver is a fail-closed seam; the seam surfaces
     # MISSING_DEPENDENCY before spawning gdb.
     with pytest.raises(CategorizedError) as exc:
-        remote_attach_seam(host="10.0.0.5", port=47002, run_id="r1",
-                           transcript_path=Path("/tmp/t.jsonl"))
+        remote_attach_seam(
+            host="10.0.0.5", port=47002, run_id="r1", transcript_path=Path("/tmp/t.jsonl")
+        )
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
 
 
@@ -779,12 +786,23 @@ from kdive.providers.remote_libvirt.introspect import RemoteVmcoreIntrospect
 
 
 class _FakeProgram:
-    def iter_tasks(self): return []
-    def iter_modules(self): return []
-    def uts(self): return {"release": "6.1.0"}
-    def boot_cmdline(self): return "ro"
-    def cpus_online(self): return 1
-    def mem_total_pages(self): return 1
+    def iter_tasks(self):
+        return []
+
+    def iter_modules(self):
+        return []
+
+    def uts(self):
+        return {"release": "6.1.0"}
+
+    def boot_cmdline(self):
+        return "ro"
+
+    def cpus_online(self):
+        return 1
+
+    def mem_total_pages(self):
+        return 1
 
 
 def _vmcore_introspect(*, open_program=None, run_helper=None, fetch=None, build_id=lambda b: "BID"):
@@ -817,14 +835,19 @@ def test_from_vmcore_build_id_mismatch_is_configuration_error():
 
 def test_from_vmcore_returns_redacted_report():
     from kdive.providers.debug_common.introspect import (
-        helper_modules, helper_sysinfo, helper_tasks,
+        helper_modules,
+        helper_sysinfo,
+        helper_tasks,
     )
+
     helpers = {"tasks": helper_tasks, "modules": helper_modules, "sysinfo": helper_sysinfo}
     introspect = _vmcore_introspect(
         open_program=lambda core, vmlinux: _FakeProgram(),
         run_helper=lambda prog, name: helpers[name](prog),
     )
-    out = introspect.from_vmcore(vmcore_ref="core", debuginfo_ref="vmlinux", expected_build_id="BID")
+    out = introspect.from_vmcore(
+        vmcore_ref="core", debuginfo_ref="vmlinux", expected_build_id="BID"
+    )
     assert out.sysinfo["release"] == "6.1.0"
     assert out.truncated is False
 ```
@@ -943,8 +966,11 @@ class RemoteVmcoreIntrospect:
             modules = self._run_helper(program, "modules")
             sysinfo = self._run_helper(program, "sysinfo")
         return assemble_report(
-            tasks, modules, sysinfo,
-            byte_cap=_REPORT_BYTE_CAP, secret_registry=self._secret_registry,
+            tasks,
+            modules,
+            sysinfo,
+            byte_cap=_REPORT_BYTE_CAP,
+            secret_registry=self._secret_registry,
         )
 
     def _open(self, core: Path, vmlinux: Path) -> _Program:
@@ -1044,27 +1070,39 @@ class _ScriptedAgent:
             return json.dumps({"return": {"pid": pid}})
         if payload["execute"] == "guest-exec-status":
             result = self._pending.pop(payload["arguments"]["pid"])
-            return json.dumps({"return": {
-                "exited": True, "exitcode": result.exit_status,
-                "out-data": base64.b64encode(result.stdout).decode(),
-                "err-data": base64.b64encode(result.stderr).decode(),
-            }})
+            return json.dumps(
+                {
+                    "return": {
+                        "exited": True,
+                        "exitcode": result.exit_status,
+                        "out-data": base64.b64encode(result.stdout).decode(),
+                        "err-data": base64.b64encode(result.stderr).decode(),
+                    }
+                }
+            )
         raise AssertionError(payload)
 
 
 class _FakeDomain:
-    def __init__(self, name): self._name = name
-    def name(self): return self._name
+    def __init__(self, name):
+        self._name = name
+
+    def name(self):
+        return self._name
 
 
 class _FakeConn:
-    def lookupByName(self, name): return _FakeDomain(name)  # noqa: N802 - libvirt binding name
-    def close(self): pass
+    def lookupByName(self, name):
+        return _FakeDomain(name)  # noqa: N802 - libvirt binding name
+
+    def close(self):
+        pass
 
 
 def _config_remote():
-    return RemoteLibvirtConfig(uri="qemu+tls://h/system", cert_refs=_REFS,
-                               concurrent_allocation_cap=1, gdb_addr="10.0.0.5")
+    return RemoteLibvirtConfig(
+        uri="qemu+tls://h/system", cert_refs=_REFS, concurrent_allocation_cap=1, gdb_addr="10.0.0.5"
+    )
 
 
 def _live(agent):
@@ -1088,12 +1126,21 @@ def test_introspect_live_unknown_helper_is_configuration_error():
 
 
 def test_introspect_live_runs_allowlisted_helper_through_real_guest_agent():
-    section = {"release": "6.1.0", "version": "v", "machine": "x86_64", "nodename": "n",
-               "boot_cmdline": "ro", "cpus_online": 1, "mem_total_pages": 1}
+    section = {
+        "release": "6.1.0",
+        "version": "v",
+        "machine": "x86_64",
+        "nodename": "n",
+        "boot_cmdline": "ro",
+        "cpus_online": 1,
+        "mem_total_pages": 1,
+    }
     agent = _ScriptedAgent(lambda argv: AgentExecResult(0, json.dumps(section).encode(), b""))
     live = _live(agent)
     out = live.introspect_live(transport_handle="kdive-sys", helper="sysinfo")
-    assert agent.argvs == [["/usr/local/sbin/kdive-drgn", "sysinfo"]]  # the single allowlisted program
+    assert agent.argvs == [
+        ["/usr/local/sbin/kdive-drgn", "sysinfo"]
+    ]  # the single allowlisted program
     assert out.sysinfo["release"] == "6.1.0"
 
 
@@ -1207,8 +1254,11 @@ class RemoteLiveIntrospect:
         modules = section if helper == "modules" else {}
         sysinfo = section if helper == "sysinfo" else {}
         return assemble_report(
-            tasks, modules, sysinfo,
-            byte_cap=_REPORT_BYTE_CAP, secret_registry=self._secret_registry,
+            tasks,
+            modules,
+            sysinfo,
+            byte_cap=_REPORT_BYTE_CAP,
+            secret_registry=self._secret_registry,
         )
 
     def _run_in_guest(self, domain_name: str, helper: str) -> dict[str, object]:
@@ -1294,7 +1344,8 @@ def test_remote_runtime_wires_connect_and_introspect_ports():
     from kdive.providers.remote_libvirt.connect import RemoteLibvirtConnect
     from kdive.providers.remote_libvirt.debug import remote_attach_seam
     from kdive.providers.remote_libvirt.introspect import (
-        RemoteLiveIntrospect, RemoteVmcoreIntrospect,
+        RemoteLiveIntrospect,
+        RemoteVmcoreIntrospect,
     )
     from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -1305,6 +1356,7 @@ def test_remote_runtime_wires_connect_and_introspect_ports():
     assert isinstance(runtime.live_introspector, RemoteLiveIntrospect)
     # control/retrieve stay stubbed (issue #206)
     from kdive.providers.remote_libvirt.planes import UnimplementedController
+
     assert isinstance(runtime.controller, UnimplementedController)
 ```
 
@@ -1333,33 +1385,31 @@ Remove `UnimplementedConnector` and `UnimplementedIntrospector` from the
 In `build_remote_runtime`, replace the stub bindings:
 
 ```python
-    builder = RemoteLibvirtBuild.from_env(secret_registry=secret_registry)
-    installer = RemoteLibvirtInstall.from_env(secret_registry=secret_registry)
-    retriever = UnimplementedRetriever()
-    vmcore_introspector = RemoteVmcoreIntrospect.from_env(secret_registry=secret_registry)
-    live_introspector = RemoteLiveIntrospect.from_env(secret_registry=secret_registry)
-    ...
-    return ProviderRuntime(
-        provisioner=RemoteLibvirtProvision(secret_registry=secret_registry),
-        builder=builder,
-        installer=installer,
-        booter=installer,
-        connector=RemoteLibvirtConnect.from_env(),
-        controller=UnimplementedController(),
-        retriever=retriever,
-        crash_postmortem=retriever,
-        vmcore_introspector=vmcore_introspector,
-        live_introspector=live_introspector,
-        supported_capture_methods=frozenset(),
-        discovery_registrar=register_remote_host,
-        attach_seam=remote_attach_seam,
-        debug_engine=GdbMiEngine(
-            redactor_factory=lambda: Redactor(registry=secret_registry)
-        ),
-        component_sources=_remote_component_sources(),
-        build_config_validator=builder.validate_config_ref,
-        rootfs_validator=lambda _rootfs: None,
-    )
+builder = RemoteLibvirtBuild.from_env(secret_registry=secret_registry)
+installer = RemoteLibvirtInstall.from_env(secret_registry=secret_registry)
+retriever = UnimplementedRetriever()
+vmcore_introspector = RemoteVmcoreIntrospect.from_env(secret_registry=secret_registry)
+live_introspector = RemoteLiveIntrospect.from_env(secret_registry=secret_registry)
+...
+return ProviderRuntime(
+    provisioner=RemoteLibvirtProvision(secret_registry=secret_registry),
+    builder=builder,
+    installer=installer,
+    booter=installer,
+    connector=RemoteLibvirtConnect.from_env(),
+    controller=UnimplementedController(),
+    retriever=retriever,
+    crash_postmortem=retriever,
+    vmcore_introspector=vmcore_introspector,
+    live_introspector=live_introspector,
+    supported_capture_methods=frozenset(),
+    discovery_registrar=register_remote_host,
+    attach_seam=remote_attach_seam,
+    debug_engine=GdbMiEngine(redactor_factory=lambda: Redactor(registry=secret_registry)),
+    component_sources=_remote_component_sources(),
+    build_config_validator=builder.validate_config_ref,
+    rootfs_validator=lambda _rootfs: None,
+)
 ```
 
 Update the `build_remote_runtime` docstring to drop "fail-fast stubs for the connect/debug …

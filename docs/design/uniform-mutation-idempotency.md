@@ -60,9 +60,15 @@ async def resolve_envelope_replay(
 ) -> ToolResponse | None:
     """Return the stored envelope for (principal, key) under `kind`, or None."""
 
+
 async def record_envelope(
-    conn: AsyncConnection, *, principal: str, key: str, project: str,
-    kind: str, envelope: ToolResponse
+    conn: AsyncConnection,
+    *,
+    principal: str,
+    key: str,
+    project: str,
+    kind: str,
+    envelope: ToolResponse,
 ) -> None:
     """Persist `envelope` for (principal, key) in the caller's transaction.
 
@@ -70,6 +76,7 @@ async def record_envelope(
     can roll back and re-resolve (read-after-conflict); it does NOT itself map to a
     category (mapping happens at the handler's catch boundary, outside the aborted txn).
     """
+
 
 def validate_idempotency_key(key: str) -> None:
     """Raise CategorizedError(CONFIGURATION_ERROR) if `key` is empty or > 200 chars."""
@@ -80,8 +87,13 @@ identical everywhere, so it lives in the helper too:
 
 ```python
 async def record_or_resolve(
-    conn: AsyncConnection, *, principal: str, key: str, project: str,
-    kind: str, envelope: ToolResponse
+    conn: AsyncConnection,
+    *,
+    principal: str,
+    key: str,
+    project: str,
+    kind: str,
+    envelope: ToolResponse,
 ) -> ToolResponse:
     """Record `envelope` under (principal, key); on a PK collision re-resolve and
     return the prior envelope. Returns the stored/own envelope, or raises
@@ -122,19 +134,25 @@ durable effect.
 
 ```python
 async with pool.connection() as conn:
-    obj = await load_and_authorize(conn, ...)   # run/system + RBAC (existing)
+    obj = await load_and_authorize(conn, ...)  # run/system + RBAC (existing)
     if idempotency_key is not None:
         replay = await resolve_envelope_replay(
-            conn, principal=ctx.principal, key=idempotency_key, kind=_KIND)
+            conn, principal=ctx.principal, key=idempotency_key, kind=_KIND
+        )
         if replay is not None:
             return replay
-    async with conn.transaction():              # existing commit/enqueue block
-        job = await enqueue(...)                 # existing
-        envelope = job_envelope(job, ...)        # existing
+    async with conn.transaction():  # existing commit/enqueue block
+        job = await enqueue(...)  # existing
+        envelope = job_envelope(job, ...)  # existing
         if idempotency_key is not None:
             await record_envelope(
-                conn, principal=ctx.principal, key=idempotency_key,
-                project=obj.project, kind=_KIND, envelope=envelope)
+                conn,
+                principal=ctx.principal,
+                key=idempotency_key,
+                project=obj.project,
+                kind=_KIND,
+                envelope=envelope,
+            )
     return envelope
 ```
 
@@ -199,7 +217,7 @@ Each in-scope registrar adds the parameter, exactly as `allocations.request` alr
 idempotency_key: Annotated[
     str | None,
     Field(description="Replay-safe key; a repeated key returns the prior envelope."),
-] = None,
+] = (None,)
 ```
 
 and forwards it to the handler. No annotation change (`_docmeta.mutating()` unchanged); no

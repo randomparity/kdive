@@ -73,7 +73,9 @@ async def drain_job(
         if env.status == "succeeded":
             return env
         if env.status in {"failed", "canceled"}:
-            raise SpinePhaseError(phase_name, f"job {env.status}", error_category=env.error_category)
+            raise SpinePhaseError(
+                phase_name, f"job {env.status}", error_category=env.error_category
+            )
         if time.monotonic() >= deadline:
             raise SpinePhaseError(phase_name, "drain_timeout")
         await asyncio.sleep(POLL_INTERVAL_S)
@@ -95,7 +97,9 @@ async def await_system_state(
         if env.status == target:
             return
         if env.status in {"error", "failed"}:
-            raise SpinePhaseError(phase_name, f"system {env.status}", error_category=env.error_category)
+            raise SpinePhaseError(
+                phase_name, f"system {env.status}", error_category=env.error_category
+            )
         if time.monotonic() >= deadline:
             raise SpinePhaseError(phase_name, f"system did not reach {target}")
         await asyncio.sleep(POLL_INTERVAL_S)
@@ -306,7 +310,9 @@ import pytest
 from kdive.profiles.provisioning import ProvisioningProfile
 
 _REMOTE_URI_ENV = "KDIVE_REMOTE_LIBVIRT_URI"
-_BASE_IMAGE_ENV = "KDIVE_REMOTE_BASE_IMAGE_VOLUME"  # test/runbook input -> profile.base_image_volume
+_BASE_IMAGE_ENV = (
+    "KDIVE_REMOTE_BASE_IMAGE_VOLUME"  # test/runbook input -> profile.base_image_volume
+)
 _KERNEL_TREE_ENV = "KDIVE_KERNEL_SRC"
 _PROJECT = "remote-spine-proj"
 _AGENT_SESSION = "remote-spine-sess"
@@ -399,7 +405,9 @@ def _remote_spine_preflight() -> tuple[OidcIssuer, str, str]:
                 "(remote-live-stack runbook)"
             )
     if not os.environ.get(_BASE_IMAGE_ENV):
-        pytest.skip(f"{_BASE_IMAGE_ENV} unset; stage the base-OS volume (remote-live-stack runbook)")
+        pytest.skip(
+            f"{_BASE_IMAGE_ENV} unset; stage the base-OS volume (remote-live-stack runbook)"
+        )
     db_url = os.environ.get(_DATABASE_URL_ENV)
     if not db_url:
         pytest.skip(f"{_DATABASE_URL_ENV} unset; bring up the stack (remote-live-stack runbook)")
@@ -410,7 +418,11 @@ def _remote_spine_preflight() -> tuple[OidcIssuer, str, str]:
 
 def _token(issuer: OidcIssuer, *, role: str, platform_roles: list[str] | None = None) -> str:
     return mint_role_token(
-        issuer, project=_PROJECT, agent_session=_AGENT_SESSION, role=role, platform_roles=platform_roles
+        issuer,
+        project=_PROJECT,
+        agent_session=_AGENT_SESSION,
+        role=role,
+        platform_roles=platform_roles,
     )
 
 
@@ -469,19 +481,29 @@ def test_remote_spine_over_the_wire() -> None:
             async with phase("provision"):
                 env = ok(
                     await scalar(
-                        op, "systems.provision", allocation_id=allocation_id, profile=_remote_provision_profile()
+                        op,
+                        "systems.provision",
+                        allocation_id=allocation_id,
+                        profile=_remote_provision_profile(),
                     ),
                     "provision",
                 )
                 system_id = env.data["system_id"]
                 await await_system_state(op, "provision", system_id, "ready")
             async with phase("open-investigation"):
-                env = ok(await scalar(op, "investigations.open", project=_PROJECT, title="remote-spine"), "open-investigation")
+                env = ok(
+                    await scalar(op, "investigations.open", project=_PROJECT, title="remote-spine"),
+                    "open-investigation",
+                )
                 investigation_id = env.object_id
             async with phase("create-run"):
                 env = ok(
                     await scalar(
-                        op, "runs.create", investigation_id=investigation_id, system_id=system_id, build_profile=_build_profile()
+                        op,
+                        "runs.create",
+                        investigation_id=investigation_id,
+                        system_id=system_id,
+                        build_profile=_build_profile(),
                     ),
                     "create-run",
                 )
@@ -491,9 +513,17 @@ def test_remote_spine_over_the_wire() -> None:
                     env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
                     await drain_job(op, step, env.object_id)
             async with phase("attach"):
-                env = ok(await scalar(op, "debug.start_session", run_id=run_id, transport="gdbstub"), "attach")
+                env = ok(
+                    await scalar(op, "debug.start_session", run_id=run_id, transport="gdbstub"),
+                    "attach",
+                )
                 session_id = env.object_id
-                ok(await scalar(op, "debug.read_registers", session_id=session_id, registers=["rip"]), "attach")
+                ok(
+                    await scalar(
+                        op, "debug.read_registers", session_id=session_id, registers=["rip"]
+                    ),
+                    "attach",
+                )
             async with phase("crash-rbac-negative"):
                 denied = await scalar(op, "control.force_crash", system_id=system_id)
                 if denied.status != "error" or denied.error_category != "authorization_denied":
@@ -503,13 +533,17 @@ def test_remote_spine_over_the_wire() -> None:
                 await await_system_state(admin, "crash", system_id, "crashed")
             async with phase("capture"):
                 # Remote is KDUMP-only (ADR-0084); pin the method (fetch defaults to host_dump).
-                env = ok(await scalar(op, "vmcore.fetch", system_id=system_id, method="kdump"), "capture")
+                env = ok(
+                    await scalar(op, "vmcore.fetch", system_id=system_id, method="kdump"), "capture"
+                )
                 await drain_job(op, "capture", env.object_id, deadline_s=_CAPTURE_DEADLINE_S)
                 cores = await op.call_tool("vmcore.list", system_id=system_id)
                 assert isinstance(cores, list) and cores, "no vmcore artifact listed"
                 refs = [v for c in cores for v in c.refs.values()]
                 assert refs, "no vmcore refs"
-                assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs), "raw vmcore leaked"
+                assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs), (
+                    "raw vmcore leaked"
+                )
             async with phase("introspect"):
                 env = ok(await scalar(op, "introspect.from_vmcore", run_id=run_id), "introspect")
                 report = env.data.get("report", "")
@@ -521,7 +555,12 @@ def test_remote_spine_over_the_wire() -> None:
                 await await_system_state(op, "teardown", system_id, "torn_down")
             async with phase("report"):
                 await assert_report(
-                    base_url, auditor_token, db_url, window_start, project=_PROJECT, artifact_name="remote-accounting-report.json"
+                    base_url,
+                    auditor_token,
+                    db_url,
+                    window_start,
+                    project=_PROJECT,
+                    artifact_name="remote-accounting-report.json",
                 )
 
     asyncio.run(_run())
@@ -622,9 +661,13 @@ def render_report(touched: dict[str, int]) -> str:
         for path, count in sorted(bad.items()):
             lines.append(f"| {count} | `{path}` |")
         lines.append("")
-        lines.append("**Verdict: gate FAILED** — provider-specific changes reached the core surface.")
+        lines.append(
+            "**Verdict: gate FAILED** — provider-specific changes reached the core surface."
+        )
     else:
-        lines.append("**Verdict: gate passed** — no core surface touched outside the ADR-0076 allowlist.")
+        lines.append(
+            "**Verdict: gate passed** — no core surface touched outside the ADR-0076 allowlist."
+        )
     lines.append("")
     return "\n".join(lines)
 ```
@@ -647,14 +690,27 @@ def _measure() -> dict[str, int] | None:
         )
         return None
     log = subprocess.run(
-        ["git", "log", "--numstat", "--no-merges", "--no-renames", "--format=",
-         f"{BASELINE_TAG}..HEAD", "--", *CORE_PREFIXES],
-        capture_output=True, text=True, check=True,
+        [
+            "git",
+            "log",
+            "--numstat",
+            "--no-merges",
+            "--no-renames",
+            "--format=",
+            f"{BASELINE_TAG}..HEAD",
+            "--",
+            *CORE_PREFIXES,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     )
     touched = parse_numstat(log.stdout)
     net = subprocess.run(
         ["git", "diff", "--numstat", "--no-renames", f"{BASELINE_TAG}..HEAD", "--", *CORE_PREFIXES],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     for path, count in parse_numstat(net.stdout).items():
         touched[path] = max(touched.get(path, 0), count)

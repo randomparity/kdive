@@ -97,7 +97,9 @@ def test_local_env_defaults_are_repo_independent(monkeypatch) -> None:
 
     env = local_env_defaults()
 
-    assert env["KDIVE_DATABASE_URL"] == "postgresql://kdive:kdive@localhost:5432/kdive"  # pragma: allowlist secret
+    assert (
+        env["KDIVE_DATABASE_URL"] == "postgresql://kdive:kdive@localhost:5432/kdive"
+    )  # pragma: allowlist secret
     assert env["KDIVE_STACK_BASE_URL"] == "http://127.0.0.1:8000/mcp"
     assert env["KDIVE_KERNEL_SRC"] == "/home/operator/src/linux"
     assert "/home/operator/src/kdive" not in " ".join(env.values())
@@ -1021,7 +1023,9 @@ def test_default_catalog_rootfs_entries_are_qcow2_vda() -> None:
         assert entry.source.kind == "local"
 
 
-def test_catalog_path_can_be_overridden_by_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_catalog_path_can_be_overridden_by_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fixture = tmp_path / "catalog"
     (fixture / "rootfs").mkdir(parents=True)
     (fixture / "manifest.yaml").write_text(
@@ -1396,23 +1400,26 @@ In `tests/providers/local_libvirt/test_build.py`, first extend `_Seams`:
 Update its methods:
 
 ```python
-    def checkout(self, run_id: UUID, profile: ServerBuildProfile, workspace: Path) -> None:
-        self.checkout_calls += 1
-        self.call_order.append("checkout")
+def checkout(self, run_id: UUID, profile: ServerBuildProfile, workspace: Path) -> None:
+    self.checkout_calls += 1
+    self.call_order.append("checkout")
 
-    def run_olddefconfig(self, workspace: Path) -> int:
-        self.olddefconfig_calls += 1
-        self.call_order.append("olddefconfig")
-        return self.olddefconfig_returncode
 
-    def read_config(self, workspace: Path) -> str:
-        self.call_order.append("read_config")
-        return self.config_text
+def run_olddefconfig(self, workspace: Path) -> int:
+    self.olddefconfig_calls += 1
+    self.call_order.append("olddefconfig")
+    return self.olddefconfig_returncode
 
-    def run_make(self, workspace: Path) -> int:
-        self.make_calls += 1
-        self.call_order.append("make")
-        return self.make_returncode
+
+def read_config(self, workspace: Path) -> str:
+    self.call_order.append("read_config")
+    return self.config_text
+
+
+def run_make(self, workspace: Path) -> int:
+    self.make_calls += 1
+    self.call_order.append("make")
+    return self.make_returncode
 ```
 
 Update `_builder(...)` to pass `run_olddefconfig=seams.run_olddefconfig`.

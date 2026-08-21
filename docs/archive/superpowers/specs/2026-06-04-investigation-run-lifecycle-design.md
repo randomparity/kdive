@@ -163,6 +163,7 @@ async def create_run(pool, ctx, *, investigation_id, system_id, build_profile) -
 async def get_run(pool, ctx, run_id) -> ToolResponse: ...
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None: ...
 
+
 _RUN_HOSTABLE = frozenset({SystemState.READY})
 _SYSTEM_GONE = frozenset({SystemState.TORN_DOWN, SystemState.FAILED, SystemState.CRASHED})
 _ALLOC_HOSTABLE = frozenset({AllocationState.ACTIVE})

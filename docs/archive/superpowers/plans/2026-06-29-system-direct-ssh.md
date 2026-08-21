@@ -435,11 +435,11 @@ _LOCK = "/root/.ssh/.kdive-authz.lock"
 # authorized_keys 0600 only if an exact line match is absent. "$1" is the key argv element — never
 # interpolated into the shell string.
 _REMOTE_CMD = (
-    'mkdir -p /root/.ssh && chmod 700 /root/.ssh && '
-    f'flock {_LOCK} sh -c \''
-    'touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && '
+    "mkdir -p /root/.ssh && chmod 700 /root/.ssh && "
+    f"flock {_LOCK} sh -c '"
+    "touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && "
     'grep -qxF "$1" /root/.ssh/authorized_keys || printf "%s\\n" "$1" '
-    ">> /root/.ssh/authorized_keys' _ \"$1\""
+    '>> /root/.ssh/authorized_keys\' _ "$1"'
 )
 
 
@@ -688,14 +688,18 @@ async def ssh_info(
 
 In `registrar.py`, add `_register_systems_ssh_info(app, pool, resolver)` mirroring `_register_systems_get` but `resolver`-aware, and call it from `register(...)`:
 ```python
-def _register_systems_ssh_info(app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver) -> None:
+def _register_systems_ssh_info(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="systems.ssh_info",
         annotations=_docmeta.read_only(),
         meta={"maturity": "partial"},
     )
     async def systems_ssh_info(
-        system_id: Annotated[str, Field(description="The ready System to return SSH coordinates for.")],
+        system_id: Annotated[
+            str, Field(description="The ready System to return SSH coordinates for.")
+        ],
     ) -> ToolResponse:
         """Return SSH connection coordinates (user, host, port, jump_host) for a ready System."""
         return await ssh_info(pool, current_context(), system_id, resolver=resolver)
@@ -764,21 +768,27 @@ async def test_viewer_denied(ready_system_env) -> None:
 @pytest.mark.anyio
 async def test_malformed_key_synchronous_config_error(ready_system_env) -> None:
     env = ready_system_env(recorded_endpoint=("127.0.0.1", 22022), role="operator")
-    resp = await authorize_ssh_key(env.pool, env.ctx, str(env.system_id), "not-a-key", resolver=env.resolver)
+    resp = await authorize_ssh_key(
+        env.pool, env.ctx, str(env.system_id), "not-a-key", resolver=env.resolver
+    )
     assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
 
 
 @pytest.mark.anyio
 async def test_not_ready_readiness_failure(ready_system_env) -> None:
     env = ready_system_env(state="provisioning", role="operator")
-    resp = await authorize_ssh_key(env.pool, env.ctx, str(env.system_id), _GOOD, resolver=env.resolver)
+    resp = await authorize_ssh_key(
+        env.pool, env.ctx, str(env.system_id), _GOOD, resolver=env.resolver
+    )
     assert resp.error_category == ErrorCategory.READINESS_FAILURE.value
 
 
 @pytest.mark.anyio
 async def test_happy_path_enqueues_job_with_normalized_key(ready_system_env) -> None:
     env = ready_system_env(recorded_endpoint=("127.0.0.1", 22022), role="operator")
-    resp = await authorize_ssh_key(env.pool, env.ctx, str(env.system_id), f"  {_GOOD}\n", resolver=env.resolver)
+    resp = await authorize_ssh_key(
+        env.pool, env.ctx, str(env.system_id), f"  {_GOOD}\n", resolver=env.resolver
+    )
     assert resp.status == "running"
     assert env.last_enqueued.kind.value == "authorize_ssh_key"
     assert env.last_enqueued.payload["public_key"] == _GOOD  # stripped/normalized
@@ -865,7 +875,8 @@ def _register_systems_authorize_ssh_key(
     async def systems_authorize_ssh_key(
         system_id: Annotated[str, Field(description="The ready System to authorize the key on.")],
         public_key: Annotated[
-            str, Field(description="The agent SSH public key to authorize in the guest root account.")
+            str,
+            Field(description="The agent SSH public key to authorize in the guest root account."),
         ],
     ) -> ToolResponse:
         """Authorize an agent SSH public key in a ready System's guest root account."""

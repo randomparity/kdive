@@ -75,8 +75,8 @@ def mint_token(
     *,
     subject: str,
     projects: Sequence[str],
-    roles: Mapping[str, str],            # nested-object claim: {project: role}
-    platform_roles: Sequence[str] | None = None,   # flat array claim
+    roles: Mapping[str, str],  # nested-object claim: {project: role}
+    platform_roles: Sequence[str] | None = None,  # flat array claim
     agent_session: str | None = None,
 ) -> str: ...
 ```
@@ -105,8 +105,8 @@ issuer's audience so the minted token targets the verifier.
 class LiveStackClient:
     def __init__(self, client: fastmcp.Client) -> None: ...
     @classmethod
-    def over_http(cls, base_url: str, token: str) -> Self: ...   # streamable HTTP + bearer
-    async def list_tools(self) -> list[str]: ...                 # tool names
+    def over_http(cls, base_url: str, token: str) -> Self: ...  # streamable HTTP + bearer
+    async def list_tools(self) -> list[str]: ...  # tool names
     async def call_tool(self, name: str, **args) -> ToolResponse | list[ToolResponse]: ...
 ```
 

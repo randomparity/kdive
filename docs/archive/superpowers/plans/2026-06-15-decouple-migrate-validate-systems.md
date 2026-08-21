@@ -220,13 +220,18 @@ def test_validate_valid_file_returns_zero(tmp_path: Path) -> None:
     assert validate_systems(path) == 0
 
 
-def test_validate_malformed_file_returns_one(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_validate_malformed_file_returns_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     path = tmp_path / "systems.toml"
     path.write_text("this is = not valid toml [[", encoding="utf-8")
     assert validate_systems(path) == 1
     assert "error:" in capsys.readouterr().err
 
-def test_validate_missing_explicit_path_returns_one(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+
+def test_validate_missing_explicit_path_returns_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     missing = tmp_path / "absent.toml"
     assert validate_systems(missing) == 1
     # The InventoryError "cannot read" message names the path (actionable for the ConfigMap
@@ -401,11 +406,13 @@ def _handle_seed_build_configs(
 Add the command to the `_COMMANDS` tuple (after the `migrate` entry, line 234). It is **not** `runnable=True` — like `seed-demo`/`reconcile-systems` it reads config lazily (`seed_build_configs_step` calls `config.require(DATABASE_URL)`):
 
 ```python
+(
     _Command(
         "seed-build-configs",
         "publish packaged build-config fragments to the object store",
         _handle_seed_build_configs,
     ),
+)
 ```
 
 - [ ] **Step 4: Run the wiring test + guardrails**

@@ -58,10 +58,12 @@ class StoredArtifact(NamedTuple):
     sensitivity: Sensitivity
     retention_class: str
 
+
 class FetchedArtifact(NamedTuple):
     data: bytes
     sensitivity: Sensitivity
     retention_class: str
+
 
 class ObjectStore:
     def __init__(self, client: S3Client, bucket: str) -> None: ...
@@ -80,7 +82,9 @@ class ObjectStore:
 
     def get_artifact(self, key: str, etag: str) -> FetchedArtifact: ...
 
+
 def object_store_from_env() -> ObjectStore: ...
+
 
 def register_artifact_row(
     stored: StoredArtifact,

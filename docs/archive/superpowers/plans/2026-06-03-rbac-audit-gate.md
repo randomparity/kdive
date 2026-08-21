@@ -360,8 +360,13 @@ async def _seed_allocation(conn: psycopg.AsyncConnection) -> Allocation:
         conn,
         Resource.model_validate(
             dict(
-                id=uuid4(), created_at=_DT, updated_at=_DT, kind=ResourceKind.LOCAL_LIBVIRT,
-                pool="p", cost_class="c", status=ResourceStatus.AVAILABLE,
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                kind=ResourceKind.LOCAL_LIBVIRT,
+                pool="p",
+                cost_class="c",
+                status=ResourceStatus.AVAILABLE,
                 host_uri="qemu:///system",
             )
         ),
@@ -370,8 +375,13 @@ async def _seed_allocation(conn: psycopg.AsyncConnection) -> Allocation:
         conn,
         Allocation.model_validate(
             dict(
-                id=uuid4(), created_at=_DT, updated_at=_DT, principal="alice", project="proj",
-                resource_id=res.id, state=AllocationState.REQUESTED,
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="alice",
+                project="proj",
+                resource_id=res.id,
+                state=AllocationState.REQUESTED,
             )
         ),
     )
@@ -405,10 +415,7 @@ def test_args_digest_uuid_datetime_pins_canonical_encoding() -> None:
     # form so a change to the encoding (and thus the digest) is caught.
     u = UUID("12345678-1234-5678-1234-567812345678")
     when = datetime(2026, 1, 1, tzinfo=UTC)
-    canonical = (
-        '{"id":"12345678-1234-5678-1234-567812345678",'
-        '"when":"2026-01-01 00:00:00+00:00"}'
-    )
+    canonical = '{"id":"12345678-1234-5678-1234-567812345678","when":"2026-01-01 00:00:00+00:00"}'
     expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     assert args_digest({"id": u, "when": when}) == expected
 
@@ -418,9 +425,14 @@ def test_record_writes_one_row(migrated_url: str) -> None:
         async with await _connect(migrated_url) as conn:
             obj_id = uuid4()
             audit_id = await record(
-                conn, _ctx(), tool="systems.teardown", object_kind="systems",
-                object_id=obj_id, transition="ready->torn_down",
-                args={"system_id": str(obj_id)}, project="proj",
+                conn,
+                _ctx(),
+                tool="systems.teardown",
+                object_kind="systems",
+                object_id=obj_id,
+                transition="ready->torn_down",
+                args={"system_id": str(obj_id)},
+                project="proj",
             )
             assert isinstance(audit_id, UUID)
             async with conn.cursor() as cur:
@@ -431,8 +443,14 @@ def test_record_writes_one_row(migrated_url: str) -> None:
                 )
                 row = await cur.fetchone()
             assert row == (
-                "alice", "sess-1", "proj", "systems.teardown", "systems", obj_id,
-                "ready->torn_down", args_digest({"system_id": str(obj_id)}),
+                "alice",
+                "sess-1",
+                "proj",
+                "systems.teardown",
+                "systems",
+                obj_id,
+                "ready->torn_down",
+                args_digest({"system_id": str(obj_id)}),
             )
             assert await _count_audit(conn) == 1
 
@@ -444,8 +462,13 @@ def test_record_rejects_ungranted_project(migrated_url: str) -> None:
         async with await _connect(migrated_url) as conn:
             with pytest.raises(AuthError):
                 await record(
-                    conn, _ctx(), tool="systems.teardown", object_kind="systems",
-                    object_id=uuid4(), transition="ready->torn_down", args={},
+                    conn,
+                    _ctx(),
+                    tool="systems.teardown",
+                    object_kind="systems",
+                    object_id=uuid4(),
+                    transition="ready->torn_down",
+                    args={},
                     project="not-granted",
                 )
             assert await _count_audit(conn) == 0
@@ -460,8 +483,13 @@ def test_record_in_transition_transaction_is_atomic(migrated_url: str) -> None:
             async with conn.transaction():
                 await ALLOCATIONS.update_state(conn, alloc.id, AllocationState.GRANTED)
                 await record(
-                    conn, _ctx(), tool="allocations.grant", object_kind="allocations",
-                    object_id=alloc.id, transition="requested->granted", args={},
+                    conn,
+                    _ctx(),
+                    tool="allocations.grant",
+                    object_kind="allocations",
+                    object_id=alloc.id,
+                    transition="requested->granted",
+                    args={},
                     project="proj",
                 )
             assert await _count_audit(conn) == 1  # exactly one row per transition
@@ -482,8 +510,13 @@ def test_record_rolls_back_with_failed_transition(migrated_url: str) -> None:
                 async with conn.transaction():
                     await ALLOCATIONS.update_state(conn, alloc.id, AllocationState.GRANTED)
                     await record(
-                        conn, _ctx(), tool="allocations.grant", object_kind="allocations",
-                        object_id=alloc.id, transition="requested->granted", args={},
+                        conn,
+                        _ctx(),
+                        tool="allocations.grant",
+                        object_kind="allocations",
+                        object_id=alloc.id,
+                        transition="requested->granted",
+                        args={},
                         project="proj",
                     )
                     raise _Boom  # abort the whole transaction
@@ -563,9 +596,7 @@ async def record(
             the append-only row.
     """
     if project not in ctx.projects:
-        raise AuthError(
-            f"cannot audit under project {project!r} not granted to {ctx.principal!r}"
-        )
+        raise AuthError(f"cannot audit under project {project!r} not granted to {ctx.principal!r}")
     async with conn.cursor() as cur:
         await cur.execute(
             "INSERT INTO audit_log "
@@ -644,8 +675,14 @@ def _ctx(role: Role = Role.ADMIN) -> RequestContext:
 def _allocation(scope: dict[str, Any]) -> Allocation:
     return Allocation.model_validate(
         dict(
-            id=uuid4(), created_at=_DT, updated_at=_DT, principal="alice", project="proj",
-            resource_id=uuid4(), state=AllocationState.ACTIVE, capability_scope=scope,
+            id=uuid4(),
+            created_at=_DT,
+            updated_at=_DT,
+            principal="alice",
+            project="proj",
+            resource_id=uuid4(),
+            state=AllocationState.ACTIVE,
+            capability_scope=scope,
         )
     )
 

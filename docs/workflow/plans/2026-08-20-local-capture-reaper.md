@@ -388,9 +388,7 @@ Task 3's composition consumes `LocalLibvirtCaptureReaper.from_env()`.
                        capture.domain_name,
                    )
                    return
-               raise self._control_failure(
-                   "removing capture filter on", capture.domain_name
-               ) from exc
+               raise self._control_failure("removing capture filter on", capture.domain_name) from exc
 
        def _unlink_pcap(self, capture: OrphanedCapture) -> None:
            """Remove the job's pcap file, tolerating absence; any other OSError raises."""

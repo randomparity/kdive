@@ -49,17 +49,28 @@ inlined in `force_release`. Extract it so `drain` routes through *the same path*
 
 ```python
 async def breakglass_release_allocation(
-    pool, ctx, *, alloc: Allocation, tool: str, reason: str,
+    pool,
+    ctx,
+    *,
+    alloc: Allocation,
+    tool: str,
+    reason: str,
 ) -> ReleaseOutcome:
     """Audit-then-release one allocation via the break-glass path (shared by
     ops.force_release and resources.drain force_release)."""
-    await _record_breakglass(pool, ctx, tool=tool, project=alloc.project,
-                             object_id=str(alloc.id), reason=reason)
-    _log.warning("break-glass release of allocation %s in project %s by %s via %s",
-                 alloc.id, alloc.project, ctx.principal, tool)
+    await _record_breakglass(
+        pool, ctx, tool=tool, project=alloc.project, object_id=str(alloc.id), reason=reason
+    )
+    _log.warning(
+        "break-glass release of allocation %s in project %s by %s via %s",
+        alloc.id,
+        alloc.project,
+        ctx.principal,
+        tool,
+    )
     return await release_with_backstops(
-        pool, alloc.id, project=alloc.project,
-        audit_writer=_breakglass_audit_writer(ctx.principal))
+        pool, alloc.id, project=alloc.project, audit_writer=_breakglass_audit_writer(ctx.principal)
+    )
 ```
 
 Refactor `force_release` to resolve its `alloc`, then call this helper with

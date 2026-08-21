@@ -145,7 +145,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 The enum⊆SQL direction comes for free by registering the constraint in `CHECK_ENUMS`. Add the entry to the `CHECK_ENUMS` list near the top of `tests/db/test_migrate.py`:
 
 ```python
-    ("run_steps_state_check", idempotency._RunStepState),
+(("run_steps_state_check", idempotency._RunStepState),)
 ```
 
 and add the import at the top of the file:
@@ -270,9 +270,7 @@ def test_claim_run_step_raises_on_unknown_state(migrated_url: str) -> None:
             # claim_run_step reads state straight from the DB with no injection seam,
             # so stage corrupt data by dropping the CHECK on this test's own freshly
             # migrated database (no leak into other tests).
-            await conn.execute(
-                "ALTER TABLE run_steps DROP CONSTRAINT run_steps_state_check"
-            )
+            await conn.execute("ALTER TABLE run_steps DROP CONSTRAINT run_steps_state_check")
             await conn.execute(
                 "INSERT INTO run_steps (run_id, step, state) VALUES (%s, 's', 'bogus')",
                 (run_id,),

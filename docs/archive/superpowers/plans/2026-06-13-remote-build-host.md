@@ -62,11 +62,15 @@ from tests.db.conftest import migrated_pool  # existing fixture pattern
 
 pytestmark = pytest.mark.usefixtures("require_docker")
 
+
 async def test_build_hosts_seed_and_lease_fk(migrated_conn):
-    row = await (await migrated_conn.execute(
-        "SELECT kind, enabled, state FROM build_hosts WHERE name = 'worker-local'"
-    )).fetchone()
+    row = await (
+        await migrated_conn.execute(
+            "SELECT kind, enabled, state FROM build_hosts WHERE name = 'worker-local'"
+        )
+    ).fetchone()
     assert row == ("local", True, "ready")
+
 
 async def test_build_host_leases_fk_restrict(migrated_conn):
     # inserting a lease for a missing host violates the FK
@@ -147,11 +151,16 @@ VALUES ('00000000-0000-0000-0000-0000000000c0', 'worker-local', 'local',
 ```python
 # tests/domain/test_errors.py
 from kdive.domain.errors import ErrorCategory
+
+
 def test_capacity_exhausted_value():
     assert ErrorCategory.CAPACITY_EXHAUSTED.value == "capacity_exhausted"
 
+
 # tests/cli/test_errors.py (add)
 from kdive.cli.errors import exit_code_for_category
+
+
 def test_capacity_exhausted_exit_code():
     assert exit_code_for_category("capacity_exhausted") == 6
 ```
@@ -184,6 +193,8 @@ In `cli/errors.py` `_CODES`:
 - [ ] **Step 1: Failing test.**
 ```python
 from kdive.db.locks import LockScope
+
+
 def test_build_host_scope():
     assert LockScope.BUILD_HOST.value == "build_host"
 ```
@@ -212,11 +223,12 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 
 WORKER_LOCAL_ID = UUID("00000000-0000-0000-0000-0000000000c0")
 
+
 @dataclass(slots=True, frozen=True)
 class BuildHost:
     id: UUID
     name: str
-    kind: str            # 'local' | 'ssh'
+    kind: str  # 'local' | 'ssh'
     address: str | None
     ssh_credential_ref: str | None
     workspace_root: str
@@ -224,8 +236,10 @@ class BuildHost:
     enabled: bool
     state: str
 
+
 async def get_by_name(conn: AsyncConnection, name: str) -> BuildHost | None: ...
 async def lease_count(conn: AsyncConnection, host_id: UUID) -> int: ...
+
 
 async def try_acquire_lease(conn: AsyncConnection, host: BuildHost, run_id: UUID) -> bool:
     """Acquire one capacity lease for run_id under the BUILD_HOST lock. Caller is INSIDE a
@@ -233,17 +247,19 @@ async def try_acquire_lease(conn: AsyncConnection, host: BuildHost, run_id: UUID
     the host is full. Idempotent: a re-acquire for the same run_id is a no-op True."""
     await advisory_xact_lock(conn, LockScope.BUILD_HOST, host.id)
     # idempotent re-acquire
-    existing = await (await conn.execute(
-        "SELECT 1 FROM build_host_leases WHERE run_id = %s", (run_id,))).fetchone()
+    existing = await (
+        await conn.execute("SELECT 1 FROM build_host_leases WHERE run_id = %s", (run_id,))
+    ).fetchone()
     if existing is not None:
         return True
     count = await lease_count(conn, host.id)
     if count >= host.max_concurrent:
         return False
     await conn.execute(
-        "INSERT INTO build_host_leases (run_id, build_host_id) VALUES (%s, %s)",
-        (run_id, host.id))
+        "INSERT INTO build_host_leases (run_id, build_host_id) VALUES (%s, %s)", (run_id, host.id)
+    )
     return True
+
 
 async def release_lease(conn: AsyncConnection, run_id: UUID) -> None:
     await conn.execute("DELETE FROM build_host_leases WHERE run_id = %s", (run_id,))
@@ -270,38 +286,50 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+
 @dataclass(slots=True, frozen=True)
 class CommandResult:
     returncode: int
     stdout: str
     stderr: str
 
+
 @dataclass(slots=True, frozen=True)
 class PresignedUpload:
     url: str
     fields: dict[str, str]
 
+
 class BuildTransport(Protocol):
     def run(self, argv: list[str], *, cwd: str, timeout_s: int) -> CommandResult: ...
     def read_text(self, path: str) -> str: ...
-    def read_bytes(self, path: str) -> bytes: ...                 # small files (.config, build-id note)
-    def write_bytes(self, path: str, data: bytes) -> None: ...    # ship fragment/patch bytes
+    def read_bytes(self, path: str) -> bytes: ...  # small files (.config, build-id note)
+    def write_bytes(self, path: str, data: bytes) -> None: ...  # ship fragment/patch bytes
     def clone(self, remote: str, ref: str, dest: str) -> None: ...
-    def upload_file(self, path: str, presigned: PresignedUpload) -> str: ...  # host PUTs the
+    def upload_file(self, path: str, presigned: PresignedUpload) -> str:
+        ...  # host PUTs the
         # (possibly large) artifact straight to S3 (worker never holds the bytes — ADR-0099
         # decision 6); returns the stored object's etag/checksum. Local impl reads the file and
         # PUTs via the worker object store; ssh impl runs `curl -T <path> <url>` on the host.
+
     def cleanup(self, path: str) -> None: ...
+
 
 class LocalBuildTransport:
     """Today's behavior behind the port: fixed-argv subprocess + local file IO."""
+
     def run(self, argv, *, cwd, timeout_s):  # mirrors run_make_target's subprocess.run
         ...
-    def read_text(self, path): return Path(path).read_text()
+    def read_text(self, path):
+        return Path(path).read_text()
+
     ...
+
     def clone(self, remote, ref, dest):
-        raise CategorizedError("git provenance is not valid for a local build host",
-                               category=ErrorCategory.CONFIGURATION_ERROR)
+        raise CategorizedError(
+            "git provenance is not valid for a local build host",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
 ```
 
 **Behavior-preservation guard (the back-compat test):** assert `LocalBuildTransport.run(...)` issues the identical argv/timeout/`check=False` call as the pre-refactor `run_make_target` — drive it with a fake `subprocess.run` (monkeypatch) and assert the captured argv equals `["make", "-C", cwd, ...]`. Do **not** assert a golden `BuildOutput` (keys are per-run).
@@ -326,12 +354,16 @@ Constructor takes `(address, identity_path, secret_registry)`. `run` builds a fi
 ```python
 def clone(self, remote: str, ref: str, dest: str) -> None:
     self.run(["git", "init", dest], cwd="/", timeout_s=GIT_TIMEOUT)
-    self.run(["git", "-C", dest, "fetch", "--depth", "1", remote, ref], cwd="/", timeout_s=GIT_TIMEOUT)
+    self.run(
+        ["git", "-C", dest, "fetch", "--depth", "1", remote, ref], cwd="/", timeout_s=GIT_TIMEOUT
+    )
     res = self.run(["git", "-C", dest, "checkout", "FETCH_HEAD"], cwd="/", timeout_s=GIT_TIMEOUT)
     if res.returncode != 0:
-        raise CategorizedError("git ref could not be checked out on the build host",
-                               category=ErrorCategory.CONFIGURATION_ERROR,
-                               details={"stderr": redacted_tail(res.stderr)})
+        raise CategorizedError(
+            "git ref could not be checked out on the build host",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"stderr": redacted_tail(res.stderr)},
+        )
 ```
 
 Argv is fixed (no shell), so remote/ref shape is validated (reject control chars / leading `-`) before use. All returned stderr passes `redacted_tail` before it enters any `CategorizedError.details`.
@@ -365,11 +397,14 @@ Add factory helpers that build the orchestrator seams from a `BuildTransport`, e
 def transport_run_step(t: BuildTransport, args: list[str], timeout_s: int) -> RunStep:
     def _step(ws: Path) -> int:
         return t.run(["make", "-C", str(ws), *args], cwd=str(ws), timeout_s=timeout_s).returncode
+
     return _step
+
 
 def transport_read_config(t: BuildTransport) -> ReadConfig:
     def _read(ws: Path) -> str:
         return t.read_text(str(ws / ".config"))
+
     return _read
 ```
 The transport-backed `Checkout` writes the config fragment and (when present) the resolved patch bytes to the workspace via `t.write_bytes`, runs `git apply` over `t.run`, and applies the same silent-skip guards by reading target files back via `t.read_bytes` before/after. The worker still runs `_validate_final_config` on the read-back `.config` (unchanged).
@@ -430,9 +465,10 @@ class GitSourceRef(BaseModel):
     remote: NonEmptyStr
     ref: NonEmptyStr
 
+
 class ServerBuildProfile(_BuildProfileBase):
     source: Literal["server"] = "server"
-    kernel_source_ref: NonEmptyStr | _GitSourceWrapper   # {"git": {...}} | "path-string"
+    kernel_source_ref: NonEmptyStr | _GitSourceWrapper  # {"git": {...}} | "path-string"
     build_host: NonEmptyStr | None = None
     config: ComponentRef | None = None
     profile_requirements: ProfileRequirementsRef | None = None

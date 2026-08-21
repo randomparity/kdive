@@ -141,9 +141,7 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
             if isinstance(result, Mapping):
                 outcome = cast("Mapping[str, object]", result).get("boot_outcome")
                 boot_outcome = outcome if isinstance(outcome, str) else None
-    return StepProgress(
-        install=states["install"], boot=states["boot"], boot_outcome=boot_outcome
-    )
+    return StepProgress(install=states["install"], boot=states["boot"], boot_outcome=boot_outcome)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -197,9 +195,7 @@ def test_get_built_only_run_steps_and_install_action(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
             resp = await get_run(pool, _ctx(), run_id)
-        assert resp.data["steps"] == {
-            "build": "succeeded", "install": "pending", "boot": "pending"
-        }
+        assert resp.data["steps"] == {"build": "succeeded", "install": "pending", "boot": "pending"}
         assert resp.suggested_next_actions == ["runs.get", "runs.install"]
 
     asyncio.run(_run())
@@ -224,7 +220,9 @@ def test_get_installed_run_recommends_boot(migrated_url: str) -> None:
             await _insert_step(pool, run_id, "install", "succeeded", {})
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.data["steps"] == {
-            "build": "succeeded", "install": "succeeded", "boot": "pending"
+            "build": "succeeded",
+            "install": "succeeded",
+            "boot": "pending",
         }
         assert resp.suggested_next_actions == ["runs.get", "runs.boot"]
 
@@ -253,9 +251,7 @@ def test_get_expected_crash_boot_recommends_triage(migrated_url: str) -> None:
                 pool, run_id, "boot", "succeeded", {"boot_outcome": "expected_crash_observed"}
             )
             resp = await get_run(pool, _ctx(), run_id)
-        assert resp.suggested_next_actions == [
-            "runs.get", "postmortem.triage", "vmcore.fetch"
-        ]
+        assert resp.suggested_next_actions == ["runs.get", "postmortem.triage", "vmcore.fetch"]
 
     asyncio.run(_run())
 
@@ -352,11 +348,7 @@ from kdive.services.runs.steps import step_progress as _step_progress
 Inside `get_run`, after `active_sessions = await active_session_ids_for_run(conn, run.id)` (still inside the `async with pool.connection() as conn` block), add:
 
 ```python
-            progress = (
-                await _step_progress(conn, run.id)
-                if run.state is RunState.SUCCEEDED
-                else None
-            )
+progress = await _step_progress(conn, run.id) if run.state is RunState.SUCCEEDED else None
 ```
 
 and pass it through:

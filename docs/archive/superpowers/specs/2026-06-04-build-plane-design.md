@@ -119,9 +119,10 @@ Mirroring the `Provisioner` realized port (distinct from the capability-dispatch
 
 ```python
 class BuildOutput(NamedTuple):
-    kernel_ref: str       # object-store key of the bootable kernel image
-    debuginfo_ref: str    # object-store key of the build-id-keyed vmlinux/debuginfo
-    build_id: str         # the kernel's GNU build-id (hex), the symbolization key
+    kernel_ref: str  # object-store key of the bootable kernel image
+    debuginfo_ref: str  # object-store key of the build-id-keyed vmlinux/debuginfo
+    build_id: str  # the kernel's GNU build-id (hex), the symbolization key
+
 
 class Builder(Protocol):
     def build(self, run_id: UUID, profile: BuildProfile) -> BuildOutput: ...

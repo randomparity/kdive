@@ -56,12 +56,16 @@ def test_forward_first_hit_from_start():
 def test_forward_paging_enumerates_then_exhausts():
     first = jump_find(BODY, terms=("BUG:",), direction="forward", byte_offset=0, max_bytes=4096)
     assert first is not None and first.next_offset is not None
-    second = jump_find(BODY, terms=("BUG:",), direction="forward", byte_offset=first.next_offset, max_bytes=4096)
+    second = jump_find(
+        BODY, terms=("BUG:",), direction="forward", byte_offset=first.next_offset, max_bytes=4096
+    )
     assert second is not None
     assert second.match_offset == BODY.index(b"tail BUG:") + len("tail ")
     # no further matches forward
     assert second.next_offset is not None
-    third = jump_find(BODY, terms=("BUG:",), direction="forward", byte_offset=second.next_offset, max_bytes=4096)
+    third = jump_find(
+        BODY, terms=("BUG:",), direction="forward", byte_offset=second.next_offset, max_bytes=4096
+    )
     assert third is None
 
 
@@ -81,25 +85,37 @@ def test_backward_negative_offset_also_end():
 def test_backward_paging_walks_up_then_exhausts():
     last = jump_find(BODY, terms=("BUG:",), direction="backward", byte_offset=0, max_bytes=4096)
     assert last is not None
-    prev = jump_find(BODY, terms=("BUG:",), direction="backward", byte_offset=last.next_offset, max_bytes=4096)
+    prev = jump_find(
+        BODY, terms=("BUG:",), direction="backward", byte_offset=last.next_offset, max_bytes=4096
+    )
     assert prev is not None and prev.match_offset == BODY.index(b"BUG: panic")
     assert prev.next_offset is None  # first line reached
 
 
 def test_or_terms_jump_to_nearest_forward():
-    hit = jump_find(BODY, terms=("absent", "three"), direction="forward", byte_offset=0, max_bytes=4096)
+    hit = jump_find(
+        BODY, terms=("absent", "three"), direction="forward", byte_offset=0, max_bytes=4096
+    )
     assert hit is not None and hit.match_offset == BODY.index(b"three")
 
 
 def test_no_match_returns_none():
-    assert jump_find(BODY, terms=("nonexistent",), direction="forward", byte_offset=0, max_bytes=4096) is None
-    assert jump_find(BODY, terms=("nonexistent",), direction="backward", byte_offset=0, max_bytes=4096) is None
+    assert (
+        jump_find(BODY, terms=("nonexistent",), direction="forward", byte_offset=0, max_bytes=4096)
+        is None
+    )
+    assert (
+        jump_find(BODY, terms=("nonexistent",), direction="backward", byte_offset=0, max_bytes=4096)
+        is None
+    )
 
 
 def test_match_at_offset_zero():
     body = b"BUG: at start\nmore\n"
     hit = jump_find(body, terms=("BUG:",), direction="forward", byte_offset=0, max_bytes=4096)
-    assert hit is not None and hit.match_offset == 0 and hit.window_start == 0 and hit.match_line == 1
+    assert (
+        hit is not None and hit.match_offset == 0 and hit.window_start == 0 and hit.match_line == 1
+    )
 
 
 def test_match_at_eof_no_trailing_newline():
@@ -310,8 +326,12 @@ def test_get_find_backward_from_end(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store,
-                find="BUG:", direction="backward",
+                pool,
+                _ctx(),
+                artifact_id=red_id,
+                store_factory=lambda: store,
+                find="BUG:",
+                direction="backward",
             )
             assert resp.data["match_offset"] == body.rindex(b"BUG:")
 
@@ -355,8 +375,11 @@ def test_get_backward_no_find_is_tail(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             resp = await artifacts_get(
-                pool, _ctx(), artifact_id=red_id,
-                store_factory=lambda: _SearchStore(body), direction="backward",
+                pool,
+                _ctx(),
+                artifact_id=red_id,
+                store_factory=lambda: _SearchStore(body),
+                direction="backward",
             )
             assert str(resp.data["content"]).endswith("line 9999\n")
             assert int(resp.data["next_offset"]) > 0
@@ -377,7 +400,11 @@ Extract a loader returning the plaintext body or a degraded/`drift` state (prese
 
 ```python
 async def artifacts_get(
-    pool, ctx, *, artifact_id, byte_offset=0,
+    pool,
+    ctx,
+    *,
+    artifact_id,
+    byte_offset=0,
     max_bytes=ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
     find: str | None = None,
     direction: JumpDirection = "forward",
@@ -396,16 +423,23 @@ async def artifacts_get(
     if loaded.drift:
         return _config_error(artifact_id)
     if find is not None:
-        data = _find_response_data(loaded, terms=terms, direction=direction,
-                                   byte_offset=byte_offset, max_bytes=max_bytes,
-                                   artifact_id=artifact_id)
+        data = _find_response_data(
+            loaded,
+            terms=terms,
+            direction=direction,
+            byte_offset=byte_offset,
+            max_bytes=max_bytes,
+            artifact_id=artifact_id,
+        )
         if isinstance(data, ToolResponse):
             return data
     else:
-        data = _window_response_data(loaded, byte_offset=byte_offset,
-                                     max_bytes=max_bytes, direction=direction)
-    return ToolResponse.success(artifact_id, "available",
-                                suggested_next_actions=["artifacts.get"], refs=refs, data=data)
+        data = _window_response_data(
+            loaded, byte_offset=byte_offset, max_bytes=max_bytes, direction=direction
+        )
+    return ToolResponse.success(
+        artifact_id, "available", suggested_next_actions=["artifacts.get"], refs=refs, data=data
+    )
 ```
 
 Helper rules:
@@ -465,7 +499,7 @@ find: Annotated[
             "ASCII). Omit for a plain window."
         )
     ),
-] = None,
+] = (None,)
 direction: Annotated[
     JumpDirection,
     Field(
@@ -475,7 +509,7 @@ direction: Annotated[
             "(read the tail and page up); a positive byte_offset bounds it."
         )
     ),
-] = "forward",
+] = ("forward",)
 ```
 
 Regenerate and review the committed tool reference: `just docs`.

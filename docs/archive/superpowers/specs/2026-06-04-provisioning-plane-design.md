@@ -83,21 +83,25 @@ control/retrieve planes (#21/#22), or the reconciler loop (#12, already merged).
 ### `provisioning.py` — the Provisioning plane (pure libvirt)
 
 ```python
-_KDIVE_METADATA_NS = discovery._KDIVE_METADATA_NS   # the read-side contract, imported
+_KDIVE_METADATA_NS = discovery._KDIVE_METADATA_NS  # the read-side contract, imported
 
-type Connect = Callable[[], LibvirtConn]            # zero-arg; returns a live connection
+type Connect = Callable[[], LibvirtConn]  # zero-arg; returns a live connection
 
 SUPPORTED_DOMAIN_XML_PARAMS = frozenset({"machine"})
 
-def domain_name_for(system_id: UUID) -> str: ...    # "kdive-{system_id}"
-def validate_profile(profile: ProvisioningProfile) -> None: ...   # raises CONFIGURATION_ERROR on unknown domain_xml_params
+
+def domain_name_for(system_id: UUID) -> str: ...  # "kdive-{system_id}"
+def validate_profile(
+    profile: ProvisioningProfile,
+) -> None: ...  # raises CONFIGURATION_ERROR on unknown domain_xml_params
 def render_domain_xml(system_id: UUID, profile: ProvisioningProfile) -> str: ...
+
 
 class LocalLibvirtProvisioning:
     def __init__(self, *, connect: Connect) -> None: ...
     @classmethod
-    def from_env(cls) -> LocalLibvirtProvisioning: ...     # lambda: libvirt.open(KDIVE_LIBVIRT_URI)
-    def provision(self, system_id: UUID, profile: ProvisioningProfile) -> str: ...   # -> domain_name
+    def from_env(cls) -> LocalLibvirtProvisioning: ...  # lambda: libvirt.open(KDIVE_LIBVIRT_URI)
+    def provision(self, system_id: UUID, profile: ProvisioningProfile) -> str: ...  # -> domain_name
     def teardown(self, domain_name: str) -> None: ...
 ```
 
@@ -160,11 +164,15 @@ async def provision_system(pool, ctx, *, allocation_id, profile) -> ToolResponse
 async def get_system(pool, ctx, system_id) -> ToolResponse: ...
 async def teardown_system(pool, ctx, system_id) -> ToolResponse: ...
 
+
 async def provision_handler(conn, job, provisioning: LocalLibvirtProvisioning) -> str | None: ...
 async def teardown_handler(conn, job, provisioning: LocalLibvirtProvisioning) -> str | None: ...
 
+
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None: ...
-def register_handlers(registry: HandlerRegistry, *, provisioning: LocalLibvirtProvisioning | None = None) -> None: ...
+def register_handlers(
+    registry: HandlerRegistry, *, provisioning: LocalLibvirtProvisioning | None = None
+) -> None: ...
 ```
 
 #### `systems.provision(allocation_id, profile)` — synchronous mint + enqueue

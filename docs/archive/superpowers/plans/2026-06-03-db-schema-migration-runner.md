@@ -188,15 +188,22 @@ CHECK_ENUMS = [
 ]
 
 OBJECT_TABLES = {
-    "resources", "allocations", "systems", "investigations", "runs",
-    "run_steps", "debug_sessions", "jobs", "artifacts", "audit_log",
+    "resources",
+    "allocations",
+    "systems",
+    "investigations",
+    "runs",
+    "run_steps",
+    "debug_sessions",
+    "jobs",
+    "artifacts",
+    "audit_log",
 }
 
 
 def _tables(conn: psycopg.Connection) -> set[str]:
     rows = conn.execute(
-        "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema = 'public'"
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
     ).fetchall()
     return {r[0] for r in rows}
 
@@ -330,9 +337,7 @@ def test_check_constraint_covers_every_enum_value(
     assert not missing, f"{constraint} is missing enum values {missing}"
 
 
-def test_advisory_lock_serializes_migrators(
-    pg_conn: psycopg.Connection, postgres_url: str
-) -> None:
+def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgres_url: str) -> None:
     """A second migrator blocks on the migration advisory lock until the first frees it."""
     with psycopg.connect(postgres_url) as holder:  # autocommit=False: holds the xact lock
         holder.execute(
@@ -620,9 +625,7 @@ def discover_migrations(schema_dir: Path | None = None) -> list[Migration]:
     for path in sorted(directory.glob("*.sql")):
         match = _FILENAME_RE.match(path.name)
         if match is None:
-            raise MigrationError(
-                f"migration filename {path.name!r} does not match NNNN_*.sql"
-            )
+            raise MigrationError(f"migration filename {path.name!r} does not match NNNN_*.sql")
         version = match.group(1)
         if version in seen:
             raise MigrationError(
@@ -659,9 +662,7 @@ def apply_migrations(conn: psycopg.Connection) -> list[str]:
     by_version = {m.version: m for m in migrations}
     applied_now: list[str] = []
     with conn.transaction():
-        conn.execute(
-            "SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK_CLASS_MIGRATION, _LOCK_OBJID)
-        )
+        conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK_CLASS_MIGRATION, _LOCK_OBJID))
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -679,9 +680,7 @@ def apply_migrations(conn: psycopg.Connection) -> list[str]:
         for version, checksum in recorded.items():
             migration = by_version.get(version)
             if migration is None:
-                raise MigrationError(
-                    f"applied migration {version} is missing from {SCHEMA_DIR}"
-                )
+                raise MigrationError(f"applied migration {version} is missing from {SCHEMA_DIR}")
             if migration.checksum != checksum:
                 raise MigrationError(
                     f"applied migration {migration.filename} checksum changed; "
@@ -692,8 +691,7 @@ def apply_migrations(conn: psycopg.Connection) -> list[str]:
                 continue
             conn.execute(migration.sql)
             conn.execute(
-                "INSERT INTO schema_migrations (version, filename, checksum) "
-                "VALUES (%s, %s, %s)",
+                "INSERT INTO schema_migrations (version, filename, checksum) VALUES (%s, %s, %s)",
                 (migration.version, migration.filename, migration.checksum),
             )
             applied_now.append(migration.version)

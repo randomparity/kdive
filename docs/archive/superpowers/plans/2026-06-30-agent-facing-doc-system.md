@@ -89,6 +89,7 @@ from typing import Literal
 
 from kdive.domain.catalog.resources import ResourceKind
 
+
 # extend the dataclass (add fields after mime_type)
 @dataclass(frozen=True, slots=True)
 class DocResource:
@@ -196,6 +197,7 @@ Expected: FAIL — `register()` got an unexpected keyword `resolver` (current si
 ```python
 # registrar.py — register()
 from kdive.providers.core.resolver import ProviderResolver
+
 
 def register(app: FastMCP, *, resolver: ProviderResolver) -> int:
     """Register every allowlisted doc whose provider gate is satisfied.
@@ -427,9 +429,7 @@ class DocExposureMiddleware(Middleware):
             return resources
         return [r for r in resources if audience.get(str(r.uri), "all") != "operator"]
 
-    async def on_read_resource(
-        self, context: Any, call_next: Callable[[Any], Any]
-    ) -> Any:
+    async def on_read_resource(self, context: Any, call_next: Callable[[Any], Any]) -> Any:
         uri = str(context.message.uri)
         if audience_by_uri().get(uri, "all") == "operator":
             try:
@@ -512,9 +512,10 @@ Expected: FAIL — `runs.build_install_boot` not in the summary.
 Edit the `build_boot_debug` `summary` string (currently ends "... A warm-tree server build (runs.build, after runs.create) is the secondary single-host path."). Replace that sentence with:
 
 ```python
-            "The single-host server-build lane (runs.build, after runs.create) is the "
-            "secondary single-host path; prefer runs.build_install_boot to run that lane "
-            "as one pollable job when you choose it. "
+"The single-host server-build lane (runs.build, after runs.create) is the"
+
+"secondary single-host path; prefer runs.build_install_boot to run that lane "
+"as one pollable job when you choose it. "
 ```
 
 The replacement keeps the **contiguous** substring "secondary single-host" because the
@@ -708,6 +709,7 @@ Every live tool in the namespace must appear as a `` `ns.tool` `` token. Keep pr
 - [ ] **Step 3: Register the five docs** in `DOC_RESOURCES` (`registrar.py`), each `audience="all"`, `required_kind=None`:
 
 ```python
+(
     DocResource(
         uri="resource://kdive/docs/guide/agent-index.md",
         source="docs/guide/agent-index.md",
@@ -716,6 +718,8 @@ Every live tool in the namespace must appear as a `` `ns.tool` `` token. Keep pr
         title="Driving a kdive investigation",
         description="The typical investigation session mapped to toolsets, with a per-toolset guide link.",
     ),
+)
+(
     DocResource(
         uri="resource://kdive/docs/guide/toolsets/runs.md",
         source="docs/guide/toolsets/runs.md",
@@ -724,7 +728,8 @@ Every live tool in the namespace must appear as a `` `ns.tool` `` token. Keep pr
         title="runs toolset",
         description="How each runs.* tool helps an investigation (build / install / boot lifecycle).",
     ),
-    # …artifacts, debug, systems — same shape, content_file="toolsets-<ns>.md", name="toolset-<ns>".
+)
+# …artifacts, debug, systems — same shape, content_file="toolsets-<ns>.md", name="toolset-<ns>".
 ```
 
 - [ ] **Step 4: Generate snapshots**

@@ -41,7 +41,7 @@ Changelog = "https://github.com/randomparity/kdive/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
-  "ruff==0.15.22",
+  "ruff==0.16.2",
   "ty==0.0.62",
   "pytest==9.1.1",
   "pytest-xdist==3.8.0",
@@ -61,6 +61,9 @@ kdivectl = "kdive.cli.__main__:main"
 [tool.ruff]
 line-length = 100
 target-version = "py314"
+# Merged ADRs are append-only records (docs/adr/README.md, records gate): the formatter
+# must never rewrite their sections, so the whole directory stays out of `ruff format`.
+extend-exclude = ["docs/adr"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

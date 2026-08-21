@@ -41,8 +41,9 @@ drop-and-recreates `jobs_kind_check` with the new value appended, following
 
 ```python
 class ReclaimInvestigationRootfsPayload(_PayloadBase):
-    investigation_id: str          # UUID
-    artifact_ids: list[str]        # the due rows the reconciler selected; UUIDs
+    investigation_id: str  # UUID
+    artifact_ids: list[str]  # the due rows the reconciler selected; UUIDs
+
 
 # An EMPTY list is deliberate, not a degenerate case: a past-grace investigation with no rootfs
 # rows still gets a job, because the handler's drain tail is the only path that reaps a

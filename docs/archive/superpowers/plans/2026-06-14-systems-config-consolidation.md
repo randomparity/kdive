@@ -164,18 +164,32 @@ from kdive.inventory.errors import InventoryError
 def _doc(**overrides):
     base = {
         "schema_version": 2,
-        "image": [{
-            "provider": "remote-libvirt", "name": "base", "arch": "x86_64",
-            "format": "qcow2", "root_device": "/dev/vda", "visibility": "public",
-            "source": {"kind": "staged", "volume": "base.qcow2"},
-        }],
-        "remote_libvirt": [{
-            "name": "h1", "uri": "qemu+tls://h1/system", "gdb_addr": "10.0.0.1",
-            "gdbstub_range": "47000:47099", "client_cert_ref": "c.pem",
-            "client_key_ref": "k.pem", "ca_cert_ref": "ca.pem",  # pragma: allowlist secret - filename ref
-            "base_image": "base", "cost_class": "remote",
-            "concurrent_allocation_cap": 1, "shapes": ["small"],
-        }],
+        "image": [
+            {
+                "provider": "remote-libvirt",
+                "name": "base",
+                "arch": "x86_64",
+                "format": "qcow2",
+                "root_device": "/dev/vda",
+                "visibility": "public",
+                "source": {"kind": "staged", "volume": "base.qcow2"},
+            }
+        ],
+        "remote_libvirt": [
+            {
+                "name": "h1",
+                "uri": "qemu+tls://h1/system",
+                "gdb_addr": "10.0.0.1",
+                "gdbstub_range": "47000:47099",
+                "client_cert_ref": "c.pem",
+                "client_key_ref": "k.pem",
+                "ca_cert_ref": "ca.pem",  # pragma: allowlist secret - filename ref
+                "base_image": "base",
+                "cost_class": "remote",
+                "concurrent_allocation_cap": 1,
+                "shapes": ["small"],
+            }
+        ],
     }
     base.update(overrides)
     return base
@@ -188,18 +202,30 @@ def test_wellformed_parses():
 
 
 def test_s3_source_requires_digest_field_present():
-    d = _doc(image=[{
-        "provider": "local-libvirt", "name": "i", "arch": "x86_64",
-        "format": "qcow2", "root_device": "/dev/vda", "visibility": "public",
-        "source": {"kind": "s3", "object_key": "k", "digest": "sha256:ab"},
-    }])
+    d = _doc(
+        image=[
+            {
+                "provider": "local-libvirt",
+                "name": "i",
+                "arch": "x86_64",
+                "format": "qcow2",
+                "root_device": "/dev/vda",
+                "visibility": "public",
+                "source": {"kind": "s3", "object_key": "k", "digest": "sha256:ab"},
+            }
+        ]
+    )
     assert InventoryDoc.model_validate(d).image[0].source.object_key == "k"
 
 
 def test_duplicate_image_identity_rejected():
     img = {
-        "provider": "local-libvirt", "name": "dup", "arch": "x86_64",
-        "format": "qcow2", "root_device": "/dev/vda", "visibility": "public",
+        "provider": "local-libvirt",
+        "name": "dup",
+        "arch": "x86_64",
+        "format": "qcow2",
+        "root_device": "/dev/vda",
+        "visibility": "public",
         "source": {"kind": "staged", "volume": "v.qcow2"},
     }
     with pytest.raises(InventoryError):
@@ -269,9 +295,7 @@ class StagedSource(BaseModel):
     volume: str
 
 
-ImageSource = Annotated[
-    S3Source | BuildSource | StagedSource, Field(discriminator="kind")
-]
+ImageSource = Annotated[S3Source | BuildSource | StagedSource, Field(discriminator="kind")]
 
 
 class ImageEntry(BaseModel):
@@ -337,20 +361,25 @@ class InventoryDoc(BaseModel):
         seen: set[tuple[str, str, str]] = set()
         for img in self.image:
             if img.identity in seen:
-                raise InventoryError(f"image[{img.name}]", "identity", "duplicate (provider,name,arch)")
+                raise InventoryError(
+                    f"image[{img.name}]", "identity", "duplicate (provider,name,arch)"
+                )
             seen.add(img.identity)
         declared = {img.name for img in self.image}
         for inst in self.remote_libvirt:
             if inst.base_image not in declared:
                 raise InventoryError(
-                    f"remote_libvirt[{inst.name}]", "base_image",
+                    f"remote_libvirt[{inst.name}]",
+                    "base_image",
                     f"names undeclared image {inst.base_image!r}",
                 )
         for group in (self.remote_libvirt, self.local_libvirt, self.fault_inject, self.build_host):
             names = [i.name for i in group]
             dupes = {n for n in names if names.count(n) > 1}
             if dupes:
-                raise InventoryError("instance", "name", f"duplicate instance names {sorted(dupes)}")
+                raise InventoryError(
+                    "instance", "name", f"duplicate instance names {sorted(dupes)}"
+                )
         return self
 ```
 
@@ -481,13 +510,14 @@ def load_inventory_optional(path: Path) -> InventoryDoc | None:
 Add `InventoryDoc.parse` classmethod in `model.py`:
 
 ```python
-    @classmethod
-    def parse(cls, data: dict) -> "InventoryDoc":
-        from pydantic import ValidationError
-        try:
-            return cls.model_validate(data)
-        except ValidationError as exc:
-            raise InventoryError("inventory", "schema", str(exc)) from exc
+@classmethod
+def parse(cls, data: dict) -> "InventoryDoc":
+    from pydantic import ValidationError
+
+    try:
+        return cls.model_validate(data)
+    except ValidationError as exc:
+        raise InventoryError("inventory", "schema", str(exc)) from exc
 ```
 
 - [ ] **Step 4: Run to verify it passes**
@@ -523,7 +553,8 @@ from kdive.inventory.reconcile_images import reconcile_images
 
 
 async def test_staged_image_registers_with_volume(pg_conn, write_toml):
-    doc = load_inventory(write_toml("""
+    doc = load_inventory(
+        write_toml("""
         schema_version = 2
         [[image]]
         provider = "remote-libvirt"
@@ -532,7 +563,8 @@ async def test_staged_image_registers_with_volume(pg_conn, write_toml):
         [image.source]
         kind = "staged"
         volume = "base.qcow2"
-    """))
+    """)
+    )
     diff = await reconcile_images(pg_conn, doc)
     row = await _one(pg_conn, "base")
     assert row["state"] == "registered"
@@ -542,7 +574,8 @@ async def test_staged_image_registers_with_volume(pg_conn, write_toml):
 
 
 async def test_s3_image_without_digest_stays_defined(pg_conn, write_toml):
-    doc = load_inventory(write_toml("""
+    doc = load_inventory(
+        write_toml("""
         schema_version = 2
         [[image]]
         provider = "local-libvirt"
@@ -551,7 +584,8 @@ async def test_s3_image_without_digest_stays_defined(pg_conn, write_toml):
         [image.source]
         kind = "s3"
         object_key = "rootfs/i.qcow2"
-    """))   # no digest, object assumed absent in fake store
+    """)
+    )  # no digest, object assumed absent in fake store
     diff = await reconcile_images(pg_conn, doc)
     row = await _one(pg_conn, "i")
     assert row["state"] == "defined"
@@ -560,9 +594,11 @@ async def test_s3_image_without_digest_stays_defined(pg_conn, write_toml):
 
 async def test_reconcile_never_overwrites_realized_object_key(pg_conn, write_toml):
     # Seed a build-realized row (state=registered, object_key set, managed_by=config).
-    await _insert_registered_build_row(pg_conn, name="built", object_key="rootfs/built.qcow2",
-                                       digest="sha256:dead")
-    doc = load_inventory(write_toml("""
+    await _insert_registered_build_row(
+        pg_conn, name="built", object_key="rootfs/built.qcow2", digest="sha256:dead"
+    )
+    doc = load_inventory(
+        write_toml("""
         schema_version = 2
         [[image]]
         provider = "local-libvirt"
@@ -571,30 +607,32 @@ async def test_reconcile_never_overwrites_realized_object_key(pg_conn, write_tom
         [image.source]
         kind = "build"
         base = "fedora-43"
-    """))
+    """)
+    )
     await reconcile_images(pg_conn, doc)
     row = await _one(pg_conn, "built")
-    assert row["state"] == "registered"          # NOT downgraded to defined
+    assert row["state"] == "registered"  # NOT downgraded to defined
     assert row["object_key"] == "rootfs/built.qcow2" and row["digest"] == "sha256:dead"
 
 
 async def test_prune_removes_only_config_rows_absent_from_config(pg_conn, write_toml):
-    await _insert_registered_build_row(pg_conn, name="runtime-img", object_key="k",
-                                       digest="sha256:1", managed_by="runtime")
+    await _insert_registered_build_row(
+        pg_conn, name="runtime-img", object_key="k", digest="sha256:1", managed_by="runtime"
+    )
     await _insert_config_staged_row(pg_conn, name="stale-config", volume="v.qcow2")
     doc = load_inventory(write_toml("schema_version = 2\n"))  # empty: nothing declared
     diff = await reconcile_images(pg_conn, doc)
-    assert await _exists(pg_conn, "runtime-img")             # runtime row untouched
-    assert not await _exists(pg_conn, "stale-config")        # config row pruned (idle)
+    assert await _exists(pg_conn, "runtime-img")  # runtime row untouched
+    assert not await _exists(pg_conn, "stale-config")  # config row pruned (idle)
     assert "stale-config" in {p.name for p in diff.pruned}
 
 
 async def test_prune_of_in_use_image_cordons_not_deletes(pg_conn, write_toml):
     await _insert_config_staged_row(pg_conn, name="busy", volume="v.qcow2")
-    await _attach_dependent_system(pg_conn, image_name="busy")   # live dependent
+    await _attach_dependent_system(pg_conn, image_name="busy")  # live dependent
     doc = load_inventory(write_toml("schema_version = 2\n"))
     diff = await reconcile_images(pg_conn, doc)
-    assert await _exists(pg_conn, "busy")                    # NOT deleted
+    assert await _exists(pg_conn, "busy")  # NOT deleted
     assert "busy" in {c.name for c in diff.cordoned}
 
 
@@ -603,12 +641,17 @@ async def test_relaxed_check_rejects_both_or_neither(pg_conn):
     # non-'defined' row with BOTH object_key+volume or NEITHER. A typo in the CHECK passes the
     # happy-path tests but silently allows an invalid row, so assert the rejection directly.
     import psycopg
+
     with pytest.raises(psycopg.errors.CheckViolation):
         await _raw_insert_image(pg_conn, state="registered", object_key="k", volume="v")  # both
     with pytest.raises(psycopg.errors.CheckViolation):
-        await _raw_insert_image(pg_conn, state="registered", object_key=None, volume=None)  # neither
+        await _raw_insert_image(
+            pg_conn, state="registered", object_key=None, volume=None
+        )  # neither
     with pytest.raises(psycopg.errors.CheckViolation):
-        await _raw_insert_image(pg_conn, state="defined", object_key="k", volume=None)  # defined w/ key
+        await _raw_insert_image(
+            pg_conn, state="defined", object_key="k", volume=None
+        )  # defined w/ key
     # valid shapes succeed:
     await _raw_insert_image(pg_conn, state="registered", object_key="k", volume=None)
     await _raw_insert_image(pg_conn, state="registered", object_key=None, volume="v")
@@ -706,16 +749,18 @@ async def test_loop_inventory_pass_is_fault_isolated(pg_conn, monkeypatch, tmp_p
     bad.write_text("schema_version = 2\n[[image]\n")  # malformed
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(bad))
     report = await reconcile_once(pg_conn, _config_with_inventory_spec())
-    assert "reconcile_inventory" in report.failures        # this pass failed
-    assert report.counts["reaped_active_allocations"] >= 0 # siblings still ran
+    assert "reconcile_inventory" in report.failures  # this pass failed
+    assert report.counts["reaped_active_allocations"] >= 0  # siblings still ran
 
 
-async def test_loop_inventory_pass_skips_quietly_when_default_file_absent(pg_conn, monkeypatch, tmp_path):
+async def test_loop_inventory_pass_skips_quietly_when_default_file_absent(
+    pg_conn, monkeypatch, tmp_path
+):
     # systems.toml is gitignored; an absent DEFAULT file is the normal pre-config state and
     # must NOT mark the pass failed every loop iteration.
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "does-not-exist.toml"))
     report = await reconcile_once(pg_conn, _config_with_inventory_spec())
-    assert "reconcile_inventory" not in report.failures     # absent default != failure
+    assert "reconcile_inventory" not in report.failures  # absent default != failure
 ```
 
 - [ ] **Step 2: Run to verify it fails.** `uv run pytest tests/integration/test_reconcile_inventory.py -k "fault_isolated or absent" -v` → FAIL.

@@ -139,7 +139,9 @@ def _report_artifact_dir() -> Path:
     does not dirty the working tree or get walked by whole-tree tooling (ADR-0046 §3).
     """
     override = os.environ.get(_ARTIFACT_DIR_ENV)
-    base = Path(override) if override else Path(tempfile.gettempdir()) / "kdive-live-stack-artifacts"
+    base = (
+        Path(override) if override else Path(tempfile.gettempdir()) / "kdive-live-stack-artifacts"
+    )
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -251,13 +253,19 @@ async def _assert_report(
     assert reserved == db_reserved, f"wire reserved {reserved} != DB {db_reserved} (#101)"
     assert reconciled == db_reconciled, f"wire reconciled {reconciled} != DB {db_reconciled} (#101)"
     artifact = _write_report_artifact(
-        {"scope": env.data["scope"], "window": [window_start.isoformat(), None],
-         "project_row": row, "total": total}
+        {
+            "scope": env.data["scope"],
+            "window": [window_start.isoformat(), None],
+            "project_row": row,
+            "total": total,
+        }
     )
     assert artifact.exists(), f"report artifact not written at {artifact} (#101)"
     written = json.loads(artifact.read_text())
     assert Decimal(str(written["project_row"]["reserved"])) == reserved, "artifact reserved drift"
-    assert Decimal(str(written["project_row"]["reconciled"])) == reconciled, "artifact reconciled drift"
+    assert Decimal(str(written["project_row"]["reconciled"])) == reconciled, (
+        "artifact reconciled drift"
+    )
     assert Decimal(str(written["project_row"]["variance"])) == variance, "artifact variance drift"
 ```
 

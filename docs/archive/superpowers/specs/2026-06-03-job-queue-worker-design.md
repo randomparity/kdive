@@ -71,10 +71,14 @@ owns *how a job is admitted, claimed, kept alive, and finalized*; it does not ow
 type JobHandler = Callable[[AsyncConnection, Job], Awaitable[str | None]]
 # returns a result_ref (object-store key) or None; raises to fail the job.
 
+
 class DuplicateHandler(RuntimeError): ...
 
+
 class HandlerRegistry:
-    def register(self, kind: JobKind, handler: JobHandler) -> None: ...  # raises DuplicateHandler on a second register for a kind
+    def register(
+        self, kind: JobKind, handler: JobHandler
+    ) -> None: ...  # raises DuplicateHandler on a second register for a kind
     def get(self, kind: JobKind) -> JobHandler | None: ...
 ```
 
@@ -96,15 +100,20 @@ read with `dict_row` and validated through `Job.model_validate`, matching
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_LEASE = timedelta(minutes=5)
 
+
 async def enqueue(
     conn, kind, payload, authorizing, dedup_key, *, max_attempts=DEFAULT_MAX_ATTEMPTS
 ) -> Job: ...
 
+
 async def dequeue(conn, worker_id, *, lease=DEFAULT_LEASE) -> Job | None: ...
+
 
 async def heartbeat(conn, job_id, worker_id, *, lease=DEFAULT_LEASE) -> bool: ...
 
+
 async def complete(conn, job_id, worker_id, result_ref) -> Job | None: ...
+
 
 async def fail(conn, job, error_category, *, terminal=False) -> Job: ...
 ```
@@ -205,14 +214,22 @@ does not give handlers a terminal signal (that is a later, additive change). Wit
 ```python
 class Worker:
     def __init__(
-        self, pool, registry, *, worker_id,
+        self,
+        pool,
+        registry,
+        *,
+        worker_id,
         lease=DEFAULT_LEASE,
         heartbeat_interval=timedelta(seconds=30),
         poll_interval=timedelta(seconds=1),
-    ) -> None: ...  # raises ValueError unless heartbeat_interval <= lease / 3 and pool.max_size >= 2
+    ) -> (
+        None
+    ): ...  # raises ValueError unless heartbeat_interval <= lease / 3 and pool.max_size >= 2
 
-    async def run_once(self) -> Job | None: ...      # claim+dispatch one job; None if queue empty
-    async def run(self, stop: asyncio.Event) -> None: ...  # loop run_once; sleep poll_interval when idle; exit on stop
+    async def run_once(self) -> Job | None: ...  # claim+dispatch one job; None if queue empty
+    async def run(
+        self, stop: asyncio.Event
+    ) -> None: ...  # loop run_once; sleep poll_interval when idle; exit on stop
 ```
 
 `__init__` rejects `heartbeat_interval > lease / 3`: the `/ 3` margin lets two

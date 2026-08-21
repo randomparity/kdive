@@ -263,6 +263,7 @@ async def _wait_through_cancellation(task: asyncio.Task[object]) -> bool:
     task.result()
     return cancelled
 
+
 provider_task = asyncio.create_task(asyncio.to_thread(installer.install, request))
 try:
     cancelled = await _wait_through_cancellation(provider_task)

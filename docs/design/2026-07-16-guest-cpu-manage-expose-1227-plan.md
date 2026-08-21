@@ -134,7 +134,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```python
 # add to tests/providers/test_libvirt_xml.py
 from kdive.providers.shared.libvirt_xml import (
-    ParsedHostCpu, parse_host_capabilities_cpu, parse_selectable_cpus,
+    ParsedHostCpu,
+    parse_host_capabilities_cpu,
+    parse_selectable_cpus,
 )
 
 _HOST_CAPS = """
@@ -268,7 +270,8 @@ def test_selectable_cpus_per_arch():
         {"selectable_cpus": {"x86_64": ["qemu64", "x86-64-v2"], "ppc64le": ["POWER9", "POWER10"]}}
     )
     assert caps.selectable_cpus() == {
-        "x86_64": ["qemu64", "x86-64-v2"], "ppc64le": ["POWER9", "POWER10"]
+        "x86_64": ["qemu64", "x86-64-v2"],
+        "ppc64le": ["POWER9", "POWER10"],
     }
 
 
@@ -411,7 +414,9 @@ def _native_kvm_arch(guest_arches: Mapping[str, Mapping[str, str]], host_arch: s
     return None
 
 
-def _discover_local_host_cpu(conn: _LibvirtConn, caps_xml: str, native_arch: str | None) -> dict[str, Any] | None:
+def _discover_local_host_cpu(
+    conn: _LibvirtConn, caps_xml: str, native_arch: str | None
+) -> dict[str, Any] | None:
     """Native host CPU: host <cpu> for x86 passthrough, host-model domcaps for native ppc64le."""
     if native_arch is None:
         return None
@@ -419,7 +424,9 @@ def _discover_local_host_cpu(conn: _LibvirtConn, caps_xml: str, native_arch: str
         parsed = parse_host_capabilities_cpu(caps_xml)  # passthrough-honest host block
     else:
         try:
-            dom_caps = conn.getDomainCapabilities(None, native_arch, arch_traits(native_arch).machine, "kvm")
+            dom_caps = conn.getDomainCapabilities(
+                None, native_arch, arch_traits(native_arch).machine, "kvm"
+            )
         except libvirt.libvirtError:
             _log.warning("getDomainCapabilities failed; omitting host_cpu", exc_info=True)
             return None
@@ -448,7 +455,9 @@ def _discover_selectable_cpus(
                 emulator, guest_arch, arch_traits(guest_arch).machine, virttype
             )
         except libvirt.libvirtError:
-            _log.warning("getDomainCapabilities failed for %s; omitting selectable_cpus", guest_arch)
+            _log.warning(
+                "getDomainCapabilities failed for %s; omitting selectable_cpus", guest_arch
+            )
             continue
         models = parse_selectable_cpus(dom_caps)
         if models:
@@ -552,30 +561,45 @@ from kdive.profiles.provisioning import ProvisioningProfile
 
 
 def test_cpu_pin_parsed():
-    prof = ProvisioningProfile.model_validate({
-        "arch": "x86_64",
-        "provider": {"local-libvirt": {"rootfs": {"kind": "catalog", "name": "rocky9"},
-                                       "cpu": {"model": "x86-64-v2"}}},
-    })
+    prof = ProvisioningProfile.model_validate(
+        {
+            "arch": "x86_64",
+            "provider": {
+                "local-libvirt": {
+                    "rootfs": {"kind": "catalog", "name": "rocky9"},
+                    "cpu": {"model": "x86-64-v2"},
+                }
+            },
+        }
+    )
     assert prof.provider.local_libvirt.cpu.model == "x86-64-v2"
 
 
 def test_cpu_pin_defaults_none():
-    prof = ProvisioningProfile.model_validate({
-        "arch": "x86_64",
-        "provider": {"local-libvirt": {"rootfs": {"kind": "catalog", "name": "rocky9"}}},
-    })
+    prof = ProvisioningProfile.model_validate(
+        {
+            "arch": "x86_64",
+            "provider": {"local-libvirt": {"rootfs": {"kind": "catalog", "name": "rocky9"}}},
+        }
+    )
     assert prof.provider.local_libvirt.cpu is None
 
 
 def test_cpu_pin_rejects_empty_model():
     import pytest
+
     with pytest.raises(ValueError):
-        ProvisioningProfile.model_validate({
-            "arch": "x86_64",
-            "provider": {"local-libvirt": {"rootfs": {"kind": "catalog", "name": "rocky9"},
-                                           "cpu": {"model": ""}}},
-        })
+        ProvisioningProfile.model_validate(
+            {
+                "arch": "x86_64",
+                "provider": {
+                    "local-libvirt": {
+                        "rootfs": {"kind": "catalog", "name": "rocky9"},
+                        "cpu": {"model": ""},
+                    }
+                },
+            }
+        )
 ```
 
 (The **wire** provider key is the hyphenated alias `local-libvirt` — `ResourceKind.LOCAL_LIBVIRT.value` — not the Python field name `local_libvirt_section`. `ProviderSection` has `extra="forbid"`, so the underscore key is rejected. The read-side accessor is `prof.provider.local_libvirt`. Copy an existing `test_provisioning.py` profile dict to be certain.)
@@ -647,16 +671,28 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```python
 # add to tests/providers/local_libvirt/test_xml.py
 def test_pinned_cpu_renders_custom_mode():
-    xml = render_domain_xml(system_id, _profile_with_cpu_pin("x86-64-v2"), disk_path="/d.qcow2",
-                            ssh_port=2222, kernel_path=Path("/k"), initrd_path=None)
-    assert "<cpu mode=\"custom\" check=\"partial\"><model>x86-64-v2</model></cpu>" in xml
+    xml = render_domain_xml(
+        system_id,
+        _profile_with_cpu_pin("x86-64-v2"),
+        disk_path="/d.qcow2",
+        ssh_port=2222,
+        kernel_path=Path("/k"),
+        initrd_path=None,
+    )
+    assert '<cpu mode="custom" check="partial"><model>x86-64-v2</model></cpu>' in xml
 
 
 def test_unpinned_cpu_byte_identical_x86_kvm():
     # No cpu pin -> exactly the pre-1227 host-passthrough block, unchanged.
-    xml = render_domain_xml(system_id, _profile_no_pin(), disk_path="/d.qcow2", ssh_port=2222,
-                            kernel_path=Path("/k"), initrd_path=None)
-    assert "<cpu mode=\"host-passthrough\" />" in xml or "<cpu mode=\"host-passthrough\"/>" in xml
+    xml = render_domain_xml(
+        system_id,
+        _profile_no_pin(),
+        disk_path="/d.qcow2",
+        ssh_port=2222,
+        kernel_path=Path("/k"),
+        initrd_path=None,
+    )
+    assert '<cpu mode="host-passthrough" />' in xml or '<cpu mode="host-passthrough"/>' in xml
 ```
 
 Also add a TCG unpinned assertion (no `<cpu>` element) and a ppc64le-KVM unpinned assertion (`host-model`), matching the existing renderer golden tests.
@@ -739,7 +775,9 @@ Expected: FAIL.
 Add a helper called from the mint path (co-located with the accel/fadump checks in `_resolve_new_system_bindings` or the profile-policy validation — wherever the bound `caps` is already in scope). It must run against `caps.selectable_cpus()`:
 
 ```python
-def require_pinned_cpu_selectable(profile: ProvisioningProfile, caps: ResourceCapabilities | None) -> None:
+def require_pinned_cpu_selectable(
+    profile: ProvisioningProfile, caps: ResourceCapabilities | None
+) -> None:
     """Reject a CPU pin the bound host cannot deliver for the profile arch (ADR-0369, fail-closed).
 
     Validates host-deliverability only — NOT that the rootfs image can run on the pinned model
@@ -799,8 +837,10 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```python
 # add to tests/providers/test_libvirt_xml.py
 def test_parse_domain_resolved_cpu_concrete_model():
-    xml = ("<domain><os><type arch='x86_64'>hvm</type></os>"
-           "<cpu mode='custom'><model>x86-64-v2</model></cpu></domain>")
+    xml = (
+        "<domain><os><type arch='x86_64'>hvm</type></os>"
+        "<cpu mode='custom'><model>x86-64-v2</model></cpu></domain>"
+    )
     parsed = parse_domain_resolved_cpu(xml)
     assert parsed.model == "x86-64-v2" and parsed.arch == "x86_64"
 
@@ -899,24 +939,28 @@ Expected: FAIL.
 Add a **generic** state-guarded payload write to `StatefulRepository` (so `SYSTEMS` gains it), using `Jsonb` (the module's existing import — there is no `Json` in scope) and a caller-supplied column identifier:
 
 ```python
-    async def set_json_column(
-        self, conn: AsyncConnection, obj_id: UUID, column: str,
-        value: dict[str, JsonValue] | None, allowed_states: frozenset[S],
-    ) -> bool:
-        """Write a jsonb ``column`` only while the row is in ``allowed_states`` (ADR-0369).
+async def set_json_column(
+    self,
+    conn: AsyncConnection,
+    obj_id: UUID,
+    column: str,
+    value: dict[str, JsonValue] | None,
+    allowed_states: frozenset[S],
+) -> bool:
+    """Write a jsonb ``column`` only while the row is in ``allowed_states`` (ADR-0369).
 
-        A state-guarded payload write (distinct from :meth:`update_state`, which transitions the
-        state column). No-ops on a terminal row (crashed/reaped) so a post-provision live read
-        cannot resurrect a value on a torn-down System. Returns whether a row was updated. Generic
-        (``column`` is any jsonb column) so it is valid on every ``StatefulRepository``.
-        """
-        payload = Jsonb(value) if value is not None else None
-        query = sql.SQL(
-            "UPDATE {table} SET {column} = %s WHERE id = %s AND state = ANY(%s) RETURNING id"
-        ).format(table=sql.Identifier(self._table), column=sql.Identifier(column))
-        async with conn.cursor() as cur:
-            await cur.execute(query, (payload, obj_id, [s.value for s in allowed_states]))
-            return await cur.fetchone() is not None
+    A state-guarded payload write (distinct from :meth:`update_state`, which transitions the
+    state column). No-ops on a terminal row (crashed/reaped) so a post-provision live read
+    cannot resurrect a value on a torn-down System. Returns whether a row was updated. Generic
+    (``column`` is any jsonb column) so it is valid on every ``StatefulRepository``.
+    """
+    payload = Jsonb(value) if value is not None else None
+    query = sql.SQL(
+        "UPDATE {table} SET {column} = %s WHERE id = %s AND state = ANY(%s) RETURNING id"
+    ).format(table=sql.Identifier(self._table), column=sql.Identifier(column))
+    async with conn.cursor() as cur:
+        await cur.execute(query, (payload, obj_id, [s.value for s in allowed_states]))
+        return await cur.fetchone() is not None
 ```
 
 **Wiring (finding-driven — this is the least-obvious part, pinned concretely against the handler scope).** `read_resolved_cpu` lives on `LocalLibvirtProvisioning`, **not** on the `Provisioner` protocol (`providers/ports/lifecycle.py` — it declares only `provision`/`teardown`/`reprovision`), and remote/fault-inject have no live local domain to read. Keep it local-only and narrow, and place the block where the needed names are actually in scope:
@@ -927,18 +971,21 @@ Add a **generic** state-guarded payload write to `StatefulRepository` (so `SYSTE
 4. **Off the event loop:** the blocking libvirt read runs via `asyncio.to_thread`, matching the handler's existing idiom (`_provider_lifecycle_call` already uses `asyncio.to_thread`; a direct blocking libvirt call starves the worker loop, cf. #583).
 
 ```python
-   # in provision_handler / reprovision_handler, after _execute_system_lifecycle_call(...) succeeds:
-   if binding.kind is ResourceKind.LOCAL_LIBVIRT and isinstance(provisioner, LocalLibvirtProvisioning):
-       try:
-           resolved = await asyncio.to_thread(provisioner.read_resolved_cpu, system.id)
-       except (libvirt.libvirtError, CategorizedError) as _exc:
-           _log.warning("resolved_cpu read failed; recording null", exc_info=True)
-           resolved = None
-       async with conn.transaction():
-           await SYSTEMS.set_json_column(
-               conn, system.id, "resolved_cpu", resolved,
-               allowed_states=frozenset({SystemState.PROVISIONING, SystemState.READY}),
-           )
+# in provision_handler / reprovision_handler, after _execute_system_lifecycle_call(...) succeeds:
+if binding.kind is ResourceKind.LOCAL_LIBVIRT and isinstance(provisioner, LocalLibvirtProvisioning):
+    try:
+        resolved = await asyncio.to_thread(provisioner.read_resolved_cpu, system.id)
+    except (libvirt.libvirtError, CategorizedError) as _exc:
+        _log.warning("resolved_cpu read failed; recording null", exc_info=True)
+        resolved = None
+    async with conn.transaction():
+        await SYSTEMS.set_json_column(
+            conn,
+            system.id,
+            "resolved_cpu",
+            resolved,
+            allowed_states=frozenset({SystemState.PROVISIONING, SystemState.READY}),
+        )
 ```
 
 **New imports `systems.py` needs** (it does not import these today): `ResourceKind` (`kdive.domain.catalog.resources`), `LocalLibvirtProvisioning` (`kdive.providers.local_libvirt.lifecycle.provisioning`), and `libvirt` with a scoped `# ty: ignore[unresolved-import]`. `asyncio`/`SYSTEMS`/`_log`/`SystemState` are already imported (confirm).

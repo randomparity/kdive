@@ -94,14 +94,20 @@ reconciler loop (separate issue).
 ### `discovery.py` — the Discovery plane + registration bridge
 
 ```python
-type Connect = Callable[[], LibvirtConn]   # zero-arg; returns a live connection
+type Connect = Callable[[], LibvirtConn]  # zero-arg; returns a live connection
+
 
 class LocalLibvirtDiscovery:
-    def __init__(self, *, host_uri: str, connect: Connect, concurrent_allocation_cap: int) -> None: ...
+    def __init__(
+        self, *, host_uri: str, connect: Connect, concurrent_allocation_cap: int
+    ) -> None: ...
     @classmethod
-    def from_env(cls) -> LocalLibvirtDiscovery: ...     # reads KDIVE_LIBVIRT_URI + KDIVE_LIBVIRT_ALLOCATION_CAP
+    def from_env(
+        cls,
+    ) -> LocalLibvirtDiscovery: ...  # reads KDIVE_LIBVIRT_URI + KDIVE_LIBVIRT_ALLOCATION_CAP
     def list_resources(self) -> list[ResourceRecord]: ...
     def list_owned(self) -> list[OwnedInfra]: ...
+
 
 async def register_local_libvirt_resource(
     conn: AsyncConnection, discovery: LocalLibvirtDiscovery, *, pool: str, cost_class: str
@@ -173,14 +179,20 @@ async def register_local_libvirt_resource(
 @dataclass(frozen=True)
 class AdmissionOutcome:
     granted: bool
-    allocation: Allocation | None       # the granted row, or None on denial
-    reason: str | None                  # e.g. "at_capacity" on denial
+    allocation: Allocation | None  # the granted row, or None on denial
+    reason: str | None  # e.g. "at_capacity" on denial
     cap: int
-    in_use: int                         # non-terminal count observed under the lock
+    in_use: int  # non-terminal count observed under the lock
 
-_NON_TERMINAL = (AllocationState.REQUESTED, AllocationState.GRANTED,
-                 AllocationState.ACTIVE, AllocationState.RELEASING)
+
+_NON_TERMINAL = (
+    AllocationState.REQUESTED,
+    AllocationState.GRANTED,
+    AllocationState.ACTIVE,
+    AllocationState.RELEASING,
+)
 _CAP_KEY = "concurrent_allocation_cap"
+
 
 async def admit(
     conn: AsyncConnection, ctx: RequestContext, *, resource: Resource, project: str
@@ -243,7 +255,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None: ...
 ### `allocations.py` — `allocations.request` / `.get` / `.release` / `.list`
 
 ```python
-async def request_allocation(pool, ctx, *, project, resource_id=None, kind=None) -> ToolResponse: ...
+async def request_allocation(
+    pool, ctx, *, project, resource_id=None, kind=None
+) -> ToolResponse: ...
 async def get_allocation(pool, ctx, allocation_id) -> ToolResponse: ...
 async def release_allocation(pool, ctx, allocation_id) -> ToolResponse: ...
 async def list_allocations(pool, ctx, *, project, limit) -> list[ToolResponse]: ...

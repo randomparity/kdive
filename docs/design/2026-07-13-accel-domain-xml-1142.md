@@ -58,9 +58,9 @@ existing `str | None` contract, message, and `accepted_values` details are uncha
 provider calls the same helper:
 
 ```python
-caps = conn.getCapabilities()                       # libvirtError -> INFRASTRUCTURE_FAILURE
+caps = conn.getCapabilities()  # libvirtError -> INFRASTRUCTURE_FAILURE
 guest_arches = parse_guest_arches(caps, SUPPORTED_ARCHES)
-resolved = resolve_accel_emulator(guest_arches, profile.arch)   # raises on arch-absent
+resolved = resolve_accel_emulator(guest_arches, profile.arch)  # raises on arch-absent
 accel, emulator = resolved if resolved is not None else ("kvm", None)
 ```
 

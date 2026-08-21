@@ -268,7 +268,10 @@ shape is:
 ```python
 def test_single_kernel_captures_version_and_config(build_plane_factory):
     tools = _tools_with(
-        probe_boot_entries=lambda _p: ["vmlinuz-6.11.4-301.fc41.x86_64", "config-6.11.4-301.fc41.x86_64"],
+        probe_boot_entries=lambda _p: [
+            "vmlinuz-6.11.4-301.fc41.x86_64",
+            "config-6.11.4-301.fc41.x86_64",
+        ],
         probe_kernel_config=lambda _p, ver: f"# config for {ver}\nCONFIG_X=y\n",
     )
     output = build_plane_factory(tools=tools).build(_spec())
@@ -278,7 +281,10 @@ def test_single_kernel_captures_version_and_config(build_plane_factory):
 
 def test_multi_kernel_omits_version_and_config(build_plane_factory):
     tools = _tools_with(
-        probe_boot_entries=lambda _p: ["vmlinuz-6.11.4-301.fc41.x86_64", "vmlinuz-6.10.0-1.fc41.x86_64"],
+        probe_boot_entries=lambda _p: [
+            "vmlinuz-6.11.4-301.fc41.x86_64",
+            "vmlinuz-6.10.0-1.fc41.x86_64",
+        ],
         probe_kernel_config=lambda _p, ver: "SHOULD-NOT-BE-CALLED",
     )
     output = build_plane_factory(tools=tools).build(_spec())
@@ -390,41 +396,42 @@ def _default_kernel_version(entries: list[str]) -> str | None:
 and the method:
 
 ```python
-    def _capture_boot_facts(self, scratch: Path) -> _BootFacts:
-        """Boot facts from one ``/boot`` listing: kernel count, default version, and config.
+def _capture_boot_facts(self, scratch: Path) -> _BootFacts:
+    """Boot facts from one ``/boot`` listing: kernel count, default version, and config.
 
-        Lists ``/boot`` once via the injected probe and derives (a) ``boot_kernel_count`` via
-        ``baseline_kernel_names`` (ADR-0295), (b) the ``default_kernel_version`` — the lone
-        non-rescue kernel, else ``None`` when zero/many (ambiguous), and (c) the
-        ``/boot/config-<ver>`` bytes for that version via ``probe_kernel_config`` (ADR-0317).
-        Advisory: any probe failure degrades every fact to absent so the build still publishes.
-        """
-        try:
-            entries = self._tools.probe_boot_entries(scratch)
-        except CategorizedError:
-            _log.warning("boot-entries probe failed; provenance omits boot facts")
-            return _BootFacts(None, None, None)
-        if entries is None:
-            return _BootFacts(None, None, None)
-        count = len(baseline_kernel_names(entries))
-        version = _default_kernel_version(entries)
-        config = self._capture_kernel_config(scratch, version)
-        return _BootFacts(count, version, config)
+    Lists ``/boot`` once via the injected probe and derives (a) ``boot_kernel_count`` via
+    ``baseline_kernel_names`` (ADR-0295), (b) the ``default_kernel_version`` — the lone
+    non-rescue kernel, else ``None`` when zero/many (ambiguous), and (c) the
+    ``/boot/config-<ver>`` bytes for that version via ``probe_kernel_config`` (ADR-0317).
+    Advisory: any probe failure degrades every fact to absent so the build still publishes.
+    """
+    try:
+        entries = self._tools.probe_boot_entries(scratch)
+    except CategorizedError:
+        _log.warning("boot-entries probe failed; provenance omits boot facts")
+        return _BootFacts(None, None, None)
+    if entries is None:
+        return _BootFacts(None, None, None)
+    count = len(baseline_kernel_names(entries))
+    version = _default_kernel_version(entries)
+    config = self._capture_kernel_config(scratch, version)
+    return _BootFacts(count, version, config)
 
-    def _capture_kernel_config(self, scratch: Path, version: str | None) -> bytes | None:
-        """The image's ``/boot/config-<version>`` bytes, or ``None`` (ADR-0317).
 
-        Only probed when ``version`` is known (a single baseline kernel). Advisory: a probe
-        failure or an absent config degrades to ``None`` so the build still publishes.
-        """
-        if version is None:
-            return None
-        try:
-            text = self._tools.probe_kernel_config(scratch, version)
-        except CategorizedError:
-            _log.warning("kernel-config probe failed; provenance omits the config offer")
-            return None
-        return text.encode("utf-8") if text is not None else None
+def _capture_kernel_config(self, scratch: Path, version: str | None) -> bytes | None:
+    """The image's ``/boot/config-<version>`` bytes, or ``None`` (ADR-0317).
+
+    Only probed when ``version`` is known (a single baseline kernel). Advisory: a probe
+    failure or an absent config degrades to ``None`` so the build still publishes.
+    """
+    if version is None:
+        return None
+    try:
+        text = self._tools.probe_kernel_config(scratch, version)
+    except CategorizedError:
+        _log.warning("kernel-config probe failed; provenance omits the config offer")
+        return None
+    return text.encode("utf-8") if text is not None else None
 ```
 
 5. Add `default_kernel_version: str | None` to `_provenance`'s signature and body (mirror
@@ -754,7 +761,7 @@ In `src/kdive/jobs/handlers/image_build.py`, add to the `PublishRequest(...)` co
 in `image_build_handler`:
 
 ```python
-        kernel_config=output.kernel_config,
+kernel_config = (output.kernel_config,)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**

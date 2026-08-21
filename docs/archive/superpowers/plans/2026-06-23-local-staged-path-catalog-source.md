@@ -50,21 +50,31 @@ import pytest
 from pydantic import ValidationError
 from kdive.inventory.model import ImageEntry, StagedPathSource
 
+
 def _entry(**over):
-    base = dict(provider="local-libvirt", name="fedora", arch="x86_64", format="qcow2",
-                root_device="/dev/vda", visibility="public",
-                source={"kind": "staged-path", "path": "/var/lib/kdive/rootfs/fedora.qcow2"})
+    base = dict(
+        provider="local-libvirt",
+        name="fedora",
+        arch="x86_64",
+        format="qcow2",
+        root_device="/dev/vda",
+        visibility="public",
+        source={"kind": "staged-path", "path": "/var/lib/kdive/rootfs/fedora.qcow2"},
+    )
     base.update(over)
     return ImageEntry.model_validate(base)
+
 
 def test_staged_path_source_parses():
     e = _entry()
     assert isinstance(e.source, StagedPathSource)
     assert e.source.path == "/var/lib/kdive/rootfs/fedora.qcow2"
 
+
 def test_staged_path_rejects_relative_path():
     with pytest.raises(ValidationError):
         _entry(source={"kind": "staged-path", "path": "rootfs/fedora.qcow2"})
+
 
 def test_staged_path_rejects_private_visibility():
     with pytest.raises(ValidationError):
@@ -143,22 +153,48 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```python
 def test_staged_path_row_accepts_path_only(pg_conn):
     migrate.apply_migrations(pg_conn)
-    _insert_image(pg_conn, state="registered", object_key=None, volume=None, path="/var/lib/kdive/rootfs/x.img", digest=None)
+    _insert_image(
+        pg_conn,
+        state="registered",
+        object_key=None,
+        volume=None,
+        path="/var/lib/kdive/rootfs/x.img",
+        digest=None,
+    )
+
 
 def test_registered_row_rejects_two_of_three_sources(pg_conn):
     migrate.apply_migrations(pg_conn)
     with pytest.raises(psycopg.errors.CheckViolation):
-        _insert_image(pg_conn, state="registered", object_key="images/x", volume=None, path="/var/lib/kdive/rootfs/x.img", digest="sha256:" + "0"*64)
+        _insert_image(
+            pg_conn,
+            state="registered",
+            object_key="images/x",
+            volume=None,
+            path="/var/lib/kdive/rootfs/x.img",
+            digest="sha256:" + "0" * 64,
+        )
+
 
 def test_registered_row_rejects_no_source(pg_conn):
     migrate.apply_migrations(pg_conn)
     with pytest.raises(psycopg.errors.CheckViolation):
-        _insert_image(pg_conn, state="registered", object_key=None, volume=None, path=None, digest=None)
+        _insert_image(
+            pg_conn, state="registered", object_key=None, volume=None, path=None, digest=None
+        )
+
 
 def test_defined_row_rejects_path(pg_conn):
     migrate.apply_migrations(pg_conn)
     with pytest.raises(psycopg.errors.CheckViolation):
-        _insert_image(pg_conn, state="defined", object_key=None, volume=None, path="/var/lib/kdive/rootfs/x.img", digest=None)
+        _insert_image(
+            pg_conn,
+            state="defined",
+            object_key=None,
+            volume=None,
+            path="/var/lib/kdive/rootfs/x.img",
+            digest=None,
+        )
 ```
 
 Update `_insert_image` to accept and bind `path` (column list + value).
@@ -262,16 +298,28 @@ def _realize(
 Update `_create_entry` to unpack 6 and add `path` to the column list + values:
 
 ```python
-    state, object_key, volume, path, digest, warning = _realize(entry, None, head)
-    await conn.execute(
-        "INSERT INTO image_catalog "
-        "(provider, name, arch, format, root_device, visibility, capabilities, "
-        " object_key, volume, path, digest, state, managed_by) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-        (entry.provider, entry.name, entry.arch, entry.format, entry.root_device,
-         entry.visibility.value, entry.capabilities, object_key, volume, path, digest,
-         state, CONFIG_MANAGED_BY),
-    )
+state, object_key, volume, path, digest, warning = _realize(entry, None, head)
+await conn.execute(
+    "INSERT INTO image_catalog "
+    "(provider, name, arch, format, root_device, visibility, capabilities, "
+    " object_key, volume, path, digest, state, managed_by) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+    (
+        entry.provider,
+        entry.name,
+        entry.arch,
+        entry.format,
+        entry.root_device,
+        entry.visibility.value,
+        entry.capabilities,
+        object_key,
+        volume,
+        path,
+        digest,
+        state,
+        CONFIG_MANAGED_BY,
+    ),
+)
 ```
 
 Update `_update_entry`: unpack 6, add `path` to the `realized` change-detection dict and the UPDATE SET list:
@@ -314,17 +362,33 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ```python
 def test_resolve_public_sync_matches_arch(pg_conn):
-    _insert_registered(pg_conn, provider="local-libvirt", name="fed", arch="x86_64", path="/r/x.img")
-    _insert_registered(pg_conn, provider="local-libvirt", name="fed", arch="aarch64", path="/r/a.img")
+    _insert_registered(
+        pg_conn, provider="local-libvirt", name="fed", arch="x86_64", path="/r/x.img"
+    )
+    _insert_registered(
+        pg_conn, provider="local-libvirt", name="fed", arch="aarch64", path="/r/a.img"
+    )
     row = resolve_public_rootfs_sync(pg_conn, "local-libvirt", "fed", "x86_64")
     assert row is not None and row.path == "/r/x.img"
 
+
 def test_resolve_public_sync_misses_unknown_arch(pg_conn):
-    _insert_registered(pg_conn, provider="local-libvirt", name="fed", arch="x86_64", path="/r/x.img")
+    _insert_registered(
+        pg_conn, provider="local-libvirt", name="fed", arch="x86_64", path="/r/x.img"
+    )
     assert resolve_public_rootfs_sync(pg_conn, "local-libvirt", "fed", "riscv64") is None
 
+
 def test_resolve_public_sync_ignores_private(pg_conn):
-    _insert_registered(pg_conn, provider="local-libvirt", name="fed", arch="x86_64", path="/r/x.img", visibility="private", owner="proj")
+    _insert_registered(
+        pg_conn,
+        provider="local-libvirt",
+        name="fed",
+        arch="x86_64",
+        path="/r/x.img",
+        visibility="private",
+        owner="proj",
+    )
     assert resolve_public_rootfs_sync(pg_conn, "local-libvirt", "fed", "x86_64") is None
 ```
 
@@ -357,8 +421,11 @@ def resolve_public_rootfs_sync(
     no registered public image of that arch is declared.
     """
     params = {
-        "provider": provider, "name": name, "arch": arch,
-        "registered": ImageState.REGISTERED.value, "public": ImageVisibility.PUBLIC.value,
+        "provider": provider,
+        "name": name,
+        "arch": arch,
+        "registered": ImageState.REGISTERED.value,
+        "public": ImageVisibility.PUBLIC.value,
     }
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_RESOLVE_PUBLIC_SYNC_SQL, params)
@@ -397,28 +464,65 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 def _exploding_factory():
     def _f():
         raise AssertionError("store factory must not be called for staged-path")
+
     return _f
 
+
 def test_sync_fetch_staged_path_returns_validated_path_without_store(pg_conn, tmp_path):
-    f = tmp_path / "x.img"; f.write_bytes(b"data")
+    f = tmp_path / "x.img"
+    f.write_bytes(b"data")
     _insert_registered(pg_conn, provider="local-libvirt", name="fed", arch="x86_64", path=str(f))
-    out = fetch_registered_rootfs_sync(pg_conn, _exploding_factory(),
-        allowed_roots=[tmp_path], provider="local-libvirt", name="fed", arch="x86_64", cache_dir=tmp_path / ".cache")
+    out = fetch_registered_rootfs_sync(
+        pg_conn,
+        _exploding_factory(),
+        allowed_roots=[tmp_path],
+        provider="local-libvirt",
+        name="fed",
+        arch="x86_64",
+        cache_dir=tmp_path / ".cache",
+    )
     assert out == f.resolve()  # factory never called -> no AssertionError
 
+
 def test_sync_fetch_staged_path_outside_roots_rejected(pg_conn, tmp_path):
-    outside = tmp_path / "x.img"; outside.write_bytes(b"d")
-    _insert_registered(pg_conn, provider="local-libvirt", name="fed", arch="x86_64", path=str(outside))
+    outside = tmp_path / "x.img"
+    outside.write_bytes(b"d")
+    _insert_registered(
+        pg_conn, provider="local-libvirt", name="fed", arch="x86_64", path=str(outside)
+    )
     with pytest.raises(CategorizedError) as ei:
-        fetch_registered_rootfs_sync(pg_conn, _exploding_factory(), allowed_roots=[tmp_path / "roots"],
-            provider="local-libvirt", name="fed", arch="x86_64", cache_dir=tmp_path / ".cache")
+        fetch_registered_rootfs_sync(
+            pg_conn,
+            _exploding_factory(),
+            allowed_roots=[tmp_path / "roots"],
+            provider="local-libvirt",
+            name="fed",
+            arch="x86_64",
+            cache_dir=tmp_path / ".cache",
+        )
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
 
+
 def test_sync_fetch_s3_downloads_and_caches(pg_conn, tmp_path):
-    data = b"qcow"; digest = "sha256:" + hashlib.sha256(data).hexdigest()
-    _insert_registered(pg_conn, provider="local-libvirt", name="img", arch="x86_64", object_key="images/img", digest=digest)
-    out = fetch_registered_rootfs_sync(pg_conn, lambda: _store_returning(data), allowed_roots=[tmp_path],
-        provider="local-libvirt", name="img", arch="x86_64", cache_dir=tmp_path / ".cache")
+    data = b"qcow"
+    digest = "sha256:" + hashlib.sha256(data).hexdigest()
+    _insert_registered(
+        pg_conn,
+        provider="local-libvirt",
+        name="img",
+        arch="x86_64",
+        object_key="images/img",
+        digest=digest,
+    )
+    out = fetch_registered_rootfs_sync(
+        pg_conn,
+        lambda: _store_returning(data),
+        allowed_roots=[tmp_path],
+        provider="local-libvirt",
+        name="img",
+        arch="x86_64",
+        cache_dir=tmp_path / ".cache",
+    )
     assert out.read_bytes() == data
 ```
 
@@ -474,7 +578,9 @@ def fetch_registered_rootfs_sync(
         if cached.is_file():
             return cached
     except OSError as err:
-        raise _cache_io_error(provider=provider, name=name, object_key=object_key, cache_path=cached, err=err) from err
+        raise _cache_io_error(
+            provider=provider, name=name, object_key=object_key, cache_path=cached, err=err
+        ) from err
     fetched = store.get_artifact(object_key, None)
     actual = "sha256:" + hashlib.sha256(fetched.data).hexdigest()
     if actual != digest:
@@ -489,7 +595,9 @@ def fetch_registered_rootfs_sync(
         tmp.replace(cached)
     except OSError as err:
         _unlink_tmp_cache(tmp)
-        raise _cache_io_error(provider=provider, name=name, object_key=object_key, cache_path=cached, err=err) from err
+        raise _cache_io_error(
+            provider=provider, name=name, object_key=object_key, cache_path=cached, err=err
+        ) from err
     return cached
 ```
 
@@ -525,13 +633,21 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```python
 # test_materialize.py
 def test_catalog_staged_path_materializes_via_fetch(tmp_path):
-    f = tmp_path / "x.img"; f.write_bytes(b"d")
+    f = tmp_path / "x.img"
+    f.write_bytes(b"d")
     seen = {}
+
     def _fetch(ref, arch):
-        seen["arch"] = arch; return f
+        seen["arch"] = arch
+        return f
+
     ref = CatalogComponentRef(kind="catalog", provider="local-libvirt", name="fed")
-    out = materialize_rootfs_base(ref, context=RootfsMaterializationContext(
-        allowed_roots=[tmp_path], arch="x86_64", catalog_fetch=_fetch))
+    out = materialize_rootfs_base(
+        ref,
+        context=RootfsMaterializationContext(
+            allowed_roots=[tmp_path], arch="x86_64", catalog_fetch=_fetch
+        ),
+    )
     assert out == f and seen["arch"] == "x86_64"
 ```
 
@@ -543,6 +659,7 @@ def test_catalog_staged_path_materializes_via_fetch(tmp_path):
 
 ```python
 """Synchronous rootfs catalog fetch for the local-libvirt provision lane (ADR-0228)."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -576,8 +693,12 @@ def rootfs_catalog_fetch_from_env(allowed_roots: list[Path]) -> CatalogFetch:
     def _fetch(ref: CatalogComponentRef, arch: str) -> Path:
         with psycopg.connect(config.require(DATABASE_URL)) as conn:
             return fetch_registered_rootfs_sync(
-                conn, object_store_from_env,
-                allowed_roots=allowed_roots, provider=ref.provider, name=ref.name, arch=arch,
+                conn,
+                object_store_from_env,
+                allowed_roots=allowed_roots,
+                provider=ref.provider,
+                name=ref.name,
+                arch=arch,
                 cache_dir=_CACHE_DIR,
             )
 
@@ -617,14 +738,29 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ```python
 async def test_images_list_omits_staged_path(pool):
-    await _insert_registered(pool, provider="local-libvirt", name="fed", arch="x86_64", path="/var/lib/kdive/rootfs/secret.img", visibility="public")
+    await _insert_registered(
+        pool,
+        provider="local-libvirt",
+        name="fed",
+        arch="x86_64",
+        path="/var/lib/kdive/rootfs/secret.img",
+        visibility="public",
+    )
     resp = await list_images(pool, _ctx())
     blob = json.dumps(resp.model_dump())
     assert "/var/lib/kdive/rootfs/secret.img" not in blob
     assert any(i.data["name"] == "fed" for i in resp.items)
 
+
 async def test_fixtures_list_omits_staged_path(pool):
-    await _insert_registered(pool, provider="local-libvirt", name="fed", arch="x86_64", path="/var/lib/kdive/rootfs/secret.img", visibility="public")
+    await _insert_registered(
+        pool,
+        provider="local-libvirt",
+        name="fed",
+        arch="x86_64",
+        path="/var/lib/kdive/rootfs/secret.img",
+        visibility="public",
+    )
     resp = await list_fixtures(pool)
     assert "/var/lib/kdive/rootfs/secret.img" not in json.dumps(resp.model_dump())
 ```
@@ -660,9 +796,20 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ```python
 def test_emit_staged_path_source():
-    row = ImageRow(provider="local-libvirt", name="fed", arch="x86_64", format="qcow2",
-                   root_device="/dev/vda", visibility="public", capabilities=[],
-                   object_key=None, volume=None, path="/var/lib/kdive/rootfs/fed.img", digest=None, state="registered")
+    row = ImageRow(
+        provider="local-libvirt",
+        name="fed",
+        arch="x86_64",
+        format="qcow2",
+        root_device="/dev/vda",
+        visibility="public",
+        capabilities=[],
+        object_key=None,
+        volume=None,
+        path="/var/lib/kdive/rootfs/fed.img",
+        digest=None,
+        state="registered",
+    )
     out = "\n".join(_emit_image_source(row))
     assert 'kind = "staged-path"' in out and 'path = "/var/lib/kdive/rootfs/fed.img"' in out
 ```

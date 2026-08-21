@@ -36,11 +36,15 @@
 def test_nonzero_exit_with_empty_stdout_is_infrastructure_failure() -> None:
     with pytest.raises(CategorizedError) as exc:
         run_crash_postmortem(
-            vmcore_ref="core-ref", debuginfo_ref="debug-ref",
-            expected_build_id="deadbeef", commands=["sys"],
+            vmcore_ref="core-ref",
+            debuginfo_ref="debug-ref",
+            expected_build_id="deadbeef",
+            commands=["sys"],
             fetch_object=lambda ref: b"CORE",
             read_build_id=lambda data: "deadbeef",
-            run_crash=lambda v, c, s: CrashResult(exit_status=1, stdout=b"  \n", stderr=b"cannot open core"),
+            run_crash=lambda v, c, s: CrashResult(
+                exit_status=1, stdout=b"  \n", stderr=b"cannot open core"
+            ),
             secret_registry=SecretRegistry(),
         )
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -50,11 +54,15 @@ def test_nonzero_exit_with_empty_stdout_is_infrastructure_failure() -> None:
 
 def test_nonzero_exit_with_transcript_is_returned_not_discarded() -> None:
     out = run_crash_postmortem(
-        vmcore_ref="core-ref", debuginfo_ref="debug-ref",
-        expected_build_id="deadbeef", commands=["sys", "struct nope"],
+        vmcore_ref="core-ref",
+        debuginfo_ref="debug-ref",
+        expected_build_id="deadbeef",
+        commands=["sys", "struct nope"],
         fetch_object=lambda ref: b"CORE",
         read_build_id=lambda data: "deadbeef",
-        run_crash=lambda v, c, s: CrashResult(exit_status=1, stdout=b"SYSTEM MAP: ...\n", stderr=b"struct: invalid"),
+        run_crash=lambda v, c, s: CrashResult(
+            exit_status=1, stdout=b"SYSTEM MAP: ...\n", stderr=b"struct: invalid"
+        ),
         secret_registry=SecretRegistry(),
     )
     assert out.transcript == "SYSTEM MAP: ...\n"
@@ -65,11 +73,15 @@ def test_nonzero_exit_stderr_is_redacted_and_capped() -> None:
     registry.register("hunter2-secret", scope=None)
     with pytest.raises(CategorizedError) as exc:
         run_crash_postmortem(
-            vmcore_ref="core-ref", debuginfo_ref="debug-ref",
-            expected_build_id="deadbeef", commands=["sys"],
+            vmcore_ref="core-ref",
+            debuginfo_ref="debug-ref",
+            expected_build_id="deadbeef",
+            commands=["sys"],
             fetch_object=lambda ref: b"CORE",
             read_build_id=lambda data: "deadbeef",
-            run_crash=lambda v, c, s: CrashResult(exit_status=2, stdout=b"", stderr=b"key=hunter2-secret " + b"x" * 4000),
+            run_crash=lambda v, c, s: CrashResult(
+                exit_status=2, stdout=b"", stderr=b"key=hunter2-secret " + b"x" * 4000
+            ),
             secret_registry=registry,
         )
     assert "hunter2-secret" not in exc.value.details["stderr"]
@@ -154,7 +166,9 @@ def test_real_run_crash_builds_fixed_argv_and_pipes_script(monkeypatch) -> None:
 
     monkeypatch.setattr(crash_postmortem, "_exec_crash", fake_exec)
     out = _real_run_crash(
-        Path("/tmp/x.vmlinux"), Path("/tmp/x.vmcore"), "sys\nquit\n",
+        Path("/tmp/x.vmlinux"),
+        Path("/tmp/x.vmcore"),
+        "sys\nquit\n",
         crash_path_finder=lambda name: "/usr/bin/crash",
     )
     assert out.stdout == b"OK"
@@ -274,6 +288,7 @@ git commit -m "feat(retrieve): add real crash(8) runner alongside the stub"
 # tests/providers/local_libvirt/test_retrieve.py
 def test_local_retrieve_wires_real_crash_runner() -> None:
     from kdive.providers.shared.debug_common.crash_postmortem import _real_run_crash
+
     r = LocalLibvirtRetrieve.from_env(secret_registry=SecretRegistry())
     assert r._run_crash is _real_run_crash
 ```
@@ -285,6 +300,7 @@ def test_local_retrieve_wires_real_crash_runner() -> None:
 import inspect
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.shared.debug_common.crash_postmortem import _real_run_crash
+
 
 def test_remote_facade_defaults_to_real_crash_runner() -> None:
     default = inspect.signature(RemoteLibvirtRetrieve.__init__).parameters["run_crash"].default

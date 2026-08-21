@@ -56,12 +56,10 @@ Task 1 (Part 1) is independent of Tasks 2–3. Task 2 must run **before** Task 3
 In `tests/provider_components/test_catalog.py`, replace the `profiles/console.yaml` write (lines 37–52) so it carries no `requires:` block:
 
 ```python
-    (fixture / "profiles" / "console.yaml").write_text(
-        "provider: local-libvirt\n"
-        "name: console-ready_x86_64\n"
-        "arch: x86_64\n",
-        encoding="utf-8",
-    )
+(fixture / "profiles" / "console.yaml").write_text(
+    "provider: local-libvirt\nname: console-ready_x86_64\narch: x86_64\n",
+    encoding="utf-8",
+)
 ```
 
 The `(fixture / "configs").mkdir()` line (12) is now unused but harmless; leave it or remove it — either keeps the test valid.
@@ -315,13 +313,15 @@ Delete the entire `_override_identity_lock` helper (lines 330–336).
 `_audit_clear` (lines 339–358): drop `source_kind` from the `scope` string and `args` dict:
 
 ```python
-        event=audit.PlatformAuditEvent(
-            tool=_CLEAR_TOOL,
-            scope=f"{identity.resource_kind}:{identity.name}",
-            args={"resource_kind": identity.resource_kind, "name": identity.name},
-            platform_role=held_platform_roles(ctx),
-            actor=actor_for(ctx),
-        ),
+event = (
+    audit.PlatformAuditEvent(
+        tool=_CLEAR_TOOL,
+        scope=f"{identity.resource_kind}:{identity.name}",
+        args={"resource_kind": identity.resource_kind, "name": identity.name},
+        platform_role=held_platform_roles(ctx),
+        actor=actor_for(ctx),
+    ),
+)
 ```
 
 - [ ] **Step 4: Remove `source_kind` from the `@app.tool` wrapper**

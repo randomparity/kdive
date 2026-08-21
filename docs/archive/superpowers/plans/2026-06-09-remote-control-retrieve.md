@@ -744,7 +744,9 @@ class FakeAgent:
 class FakeAgentExec:
     """Stands in for GuestAgentExec.run: scripts inspect/upload, simulates a rebooting agent."""
 
-    def __init__(self, *, inspect: bytes, unreachable_before: int = 0, upload_exit: int = 0) -> None:
+    def __init__(
+        self, *, inspect: bytes, unreachable_before: int = 0, upload_exit: int = 0
+    ) -> None:
         self._inspect = inspect
         self._unreachable = unreachable_before
         self._upload_exit = upload_exit
@@ -779,7 +781,9 @@ class FakeStore:
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         self.put_requests.append(request)
-        return StoredArtifact(request.key(), "etag-red", request.sensitivity, request.retention_class)
+        return StoredArtifact(
+            request.key(), "etag-red", request.sensitivity, request.retention_class
+        )
 
 
 def _retrieve(agent_exec: FakeAgentExec, store: FakeStore, tmp_path: Path) -> RemoteLibvirtRetrieve:
@@ -1410,11 +1414,11 @@ from kdive.providers.remote_libvirt.retrieve import RemoteLibvirtRetrieve
 (delete `retriever = UnimplementedRetriever()`), and in the `ProviderRuntime(...)` call:
 
 ```python
-        controller=RemoteLibvirtControl.from_env(secret_registry=secret_registry),
-        retriever=retriever,
-        crash_postmortem=retriever,
-        ...
-        supported_capture_methods=frozenset({CaptureMethod.KDUMP}),
+controller = (RemoteLibvirtControl.from_env(secret_registry=secret_registry),)
+retriever = (retriever,)
+crash_postmortem = (retriever,)
+...
+supported_capture_methods = (frozenset({CaptureMethod.KDUMP}),)
 ```
 
 4. Update the `build_remote_runtime` docstring: drop "fail-fast stubs for the control/retrieve plane the later M2 issue supplies"; state control/retrieve are real (ADR-0084). Update the inline comment above `supported_capture_methods` to note the kdump two-phase path landed.

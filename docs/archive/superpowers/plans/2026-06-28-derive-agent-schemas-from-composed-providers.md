@@ -316,9 +316,7 @@ def project_tool_schema(parameters: dict, kinds: frozenset[ResourceKind]) -> dic
     if isinstance(section_def, dict) and isinstance(section_def.get("properties"), dict):
         live = aliases_for(kinds)
         section_def["properties"] = {
-            alias: schema
-            for alias, schema in section_def["properties"].items()
-            if alias in live
+            alias: schema for alias, schema in section_def["properties"].items() if alias in live
         }
     return projected
 
@@ -422,9 +420,7 @@ def build_profile_examples(
         kinds: The providers composed in this deployment (``resolver.registered_kinds()``);
             one example is emitted per composed kind, ordered by ``ResourceKind``.
     """
-    providers = [
-        PROVIDER_SECTIONS[kind].alias for kind in ResourceKind if kind in kinds
-    ]
+    providers = [PROVIDER_SECTIONS[kind].alias for kind in ResourceKind if kind in kinds]
     items = [_example_item(provider, doc) for provider in providers]
     return ToolResponse.collection(
         _OBJECT_ID,
@@ -797,11 +793,13 @@ def describe_tool(tool: Tool, kinds: frozenset[ResourceKind]) -> dict[str, JsonV
 Capture `resolver` in the `tools.search` closure and pass `resolver.registered_kinds()` to `describe_tool` for each match:
 
 ```python
-        kinds = resolver.registered_kinds()
-        data={
-            "matches": cast("JsonValue", [describe_tool(t, kinds) for t in matches]),
-            "truncated": len(ranked) > limit,
-        },
+kinds = resolver.registered_kinds()
+data = (
+    {
+        "matches": cast("JsonValue", [describe_tool(t, kinds) for t in matches]),
+        "truncated": len(ranked) > limit,
+    },
+)
 ```
 
 Import `project_listed_tool` from `kdive.mcp.middleware.exposure` and `ResourceKind`.
@@ -914,9 +912,7 @@ from kdive.mcp.tool_payloads import ResourceByKind
 from kdive.providers.core.resolver import ProviderResolver
 
 
-def _guard_resource_kind(
-    request: AllocationRequestPayload, resolver: ProviderResolver
-) -> None:
+def _guard_resource_kind(request: AllocationRequestPayload, resolver: ProviderResolver) -> None:
     """Reject a kind-selected resource whose kind is not composed (ADR-0269).
 
     A pool/id selector names no kind, so the guard is a no-op there — resolution fails
@@ -954,11 +950,13 @@ assembly-aware registrar mirroring `_register_systems_tools` (tool_registration.
 
 ```python
 # src/kdive/mcp/tool_registration.py
-def _register_allocations_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
+def _register_allocations_tools(
+    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
+) -> None:
     allocations_tools.register(app, pool, resolver=assembly.resolver)
 
-# in PLANE_REGISTRARS, replace `_pool_only_plane_registrar(allocations_tools.register)` with:
-    _register_allocations_tools,
+    # in PLANE_REGISTRARS, replace `_pool_only_plane_registrar(allocations_tools.register)` with:
+    (_register_allocations_tools,)
 ```
 
 In `systems/registrar.py`, in each profile-accepting closure (`systems.define`, `systems.provision`, `systems.reprovision`), guard the parsed profile's kind before proceeding:

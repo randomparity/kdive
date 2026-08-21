@@ -46,9 +46,17 @@ def _resolver_with_plane(plane: object) -> object:
             assert kind is ResourceKind.LOCAL_LIBVIRT
             unused = cast(Any, object())
             return ProviderRuntime(
-                profile_policy=unused, provisioner=unused, builder=unused, installer=unused,
-                booter=unused, connector=unused, controller=unused, retriever=unused,
-                crash_postmortem=unused, vmcore_introspector=unused, live_introspector=unused,
+                profile_policy=unused,
+                provisioner=unused,
+                builder=unused,
+                installer=unused,
+                booter=unused,
+                connector=unused,
+                controller=unused,
+                retriever=unused,
+                crash_postmortem=unused,
+                vmcore_introspector=unused,
+                live_introspector=unused,
                 rootfs_build_plane=cast(Any, plane),
             )
 
@@ -98,14 +106,12 @@ Expected: FAIL — stdout is empty (the command prints nothing today), so the eq
 In `src/kdive/images/rootfs_command.py`: add `import shlex` near the top imports (after `import logging`, keep import order ruff-clean). Change `run_build_rootfs` so the move targets the resolved path and the success branch prints the wiring line. Replace the tail of `run_build_rootfs`:
 
 ```python
-    dest = Path(args.dest).resolve()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(output.qcow2_path), str(dest))
-    dest.chmod(0o644)
-    _log.info(
-        "built rootfs %s digest=%s; set KDIVE_GUEST_IMAGE to this path", dest, output.digest
-    )
-    print(f"export KDIVE_GUEST_IMAGE={shlex.quote(str(dest))}")
+dest = Path(args.dest).resolve()
+dest.parent.mkdir(parents=True, exist_ok=True)
+shutil.move(str(output.qcow2_path), str(dest))
+dest.chmod(0o644)
+_log.info("built rootfs %s digest=%s; set KDIVE_GUEST_IMAGE to this path", dest, output.digest)
+print(f"export KDIVE_GUEST_IMAGE={shlex.quote(str(dest))}")
 ```
 
 (`Path.resolve()` makes the printed path absolute and canonical regardless of cwd; the `_log.info` summary logs that same resolved `dest`. `print` writes to stdout; the logger writes to stderr — see the spec's eval-safety invariant.)

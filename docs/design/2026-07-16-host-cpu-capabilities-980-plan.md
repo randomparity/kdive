@@ -332,12 +332,20 @@ from kdive.domain.catalog.resource_capabilities import ResourceCapabilities
 
 def test_host_cpu_reads_full_shape():
     caps = ResourceCapabilities.from_mapping(
-        {"host_cpu": {"model": "Skylake-Client-IBRS", "vendor": "Intel",
-                      "arch": "x86_64", "baseline_level": "x86-64-v3"}}
+        {
+            "host_cpu": {
+                "model": "Skylake-Client-IBRS",
+                "vendor": "Intel",
+                "arch": "x86_64",
+                "baseline_level": "x86-64-v3",
+            }
+        }
     )
     assert caps.host_cpu() == {
-        "model": "Skylake-Client-IBRS", "vendor": "Intel",
-        "arch": "x86_64", "baseline_level": "x86-64-v3",
+        "model": "Skylake-Client-IBRS",
+        "vendor": "Intel",
+        "arch": "x86_64",
+        "baseline_level": "x86-64-v3",
     }
 
 
@@ -673,7 +681,9 @@ In `records.py`, add to `System` (after `accel`):
 
 ```python
 SYSTEMS = StatefulRepository(
-    System, "systems", SystemState,
+    System,
+    "systems",
+    SystemState,
     json_columns=frozenset({"provisioning_profile", "resolved_cpu"}),
 )
 ```

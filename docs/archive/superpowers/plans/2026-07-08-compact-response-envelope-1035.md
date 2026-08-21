@@ -230,8 +230,11 @@ def test_enabled_compacts_content_text_block(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_enabled_preserves_direct_failure_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     env = ToolResponse.failure("obj", ErrorCategory.NOT_FOUND)  # suppressed constant detail
-    out = _drive(ToolResult(structured_content=env.model_dump(mode="json")),
-                 enabled=True, monkeypatch=monkeypatch)
+    out = _drive(
+        ToolResult(structured_content=env.model_dump(mode="json")),
+        enabled=True,
+        monkeypatch=monkeypatch,
+    )
     sc = out.structured_content
     assert sc["error_category"] == ErrorCategory.NOT_FOUND.value
     assert sc["retryable"] is False
@@ -240,10 +243,14 @@ def test_enabled_preserves_direct_failure_fields(monkeypatch: pytest.MonkeyPatch
 
 def test_enabled_drops_null_detail_on_from_job_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     # A worker-plane FAILED envelope: failure status, category set, detail=None by design.
-    env = ToolResponse(object_id="job-1", status="failed",
-                       error_category=ErrorCategory.BUILD_FAILURE.value)
-    out = _drive(ToolResult(structured_content=env.model_dump(mode="json")),
-                 enabled=True, monkeypatch=monkeypatch)
+    env = ToolResponse(
+        object_id="job-1", status="failed", error_category=ErrorCategory.BUILD_FAILURE.value
+    )
+    out = _drive(
+        ToolResult(structured_content=env.model_dump(mode="json")),
+        enabled=True,
+        monkeypatch=monkeypatch,
+    )
     sc = out.structured_content
     assert sc["error_category"] == ErrorCategory.BUILD_FAILURE.value
     assert sc["retryable"] is False
@@ -257,7 +264,9 @@ def test_enabled_passes_superset_dict_through_unchanged(monkeypatch: pytest.Monk
     assert out is result  # untouched — extra key survives
 
 
-def test_enabled_passes_non_dict_structured_content_through(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_enabled_passes_non_dict_structured_content_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     result = ToolResult(content=[])  # no structured_content
     out = _drive(result, enabled=True, monkeypatch=monkeypatch)
     assert out is result
@@ -441,14 +450,12 @@ _log = logging.getLogger(__name__)
 In `build_app`, register `CompactResponseMiddleware` **unconditionally** as the **first** middleware — before `TelemetryMiddleware` — and emit the startup log only when the flag is on. Insert this immediately before the existing first `app.add_middleware(TelemetryMiddleware(...))` block:
 
 ```python
-    app.add_middleware(CompactResponseMiddleware())  # first == outermost (ADR-0314)
-    if compact_responses_enabled():
-        _log.info("compact_responses enabled")
-    app.add_middleware(
-        TelemetryMiddleware(
-            tracer=trace.get_tracer("kdive.mcp"), meter=metrics.get_meter("kdive.mcp")
-        )
-    )
+app.add_middleware(CompactResponseMiddleware())  # first == outermost (ADR-0314)
+if compact_responses_enabled():
+    _log.info("compact_responses enabled")
+app.add_middleware(
+    TelemetryMiddleware(tracer=trace.get_tracer("kdive.mcp"), meter=metrics.get_meter("kdive.mcp"))
+)
 ```
 
 Rationale: first-added is outermost, so it processes the response last — after Telemetry/Usage read the full envelope and after DenialAudit/BindingError synthesize their envelopes. **Register unconditionally** — the middleware's `on_call_tool` no-ops per call via `compact_responses_enabled()` when off (one negligible frame), so the ordering test can build the app with the flag off and still find the middleware, and a runtime flag flip takes effect without rebuilding the app. Only the `_log.info` is gated, satisfying the "silent when off" test.

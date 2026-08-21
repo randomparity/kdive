@@ -188,6 +188,7 @@ Add an eighth op following the `_read_memory_op` / `_register_debug_read_memory`
               suggested_next_actions=["debug.read_memory", "debug.read_registers"],
               data={"symbol": name, "address": f"0x{address:x}"},
           )
+
       return op
   ```
 - Register `debug.resolve_symbol` with `_docmeta.read_only()` + `_gdbmi_maturity()`, a

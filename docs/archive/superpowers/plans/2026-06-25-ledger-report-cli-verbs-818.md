@@ -64,7 +64,9 @@ def test_render_report_table_has_rows_then_totals_footer(capsys) -> None:
 
 
 def test_render_report_empty_rows_still_prints_header_and_totals(capsys) -> None:
-    render_report([], {"scope": "all-projects"}, columns=_COLS, total_columns=["scope"], as_json=False)
+    render_report(
+        [], {"scope": "all-projects"}, columns=_COLS, total_columns=["scope"], as_json=False
+    )
     out = capsys.readouterr().out
     assert "project" in out and "scope" in out and "all-projects" in out
 
@@ -110,7 +112,9 @@ def render_report(
     projected_totals = {c: totals.get(c) for c in total_columns}
     if as_json:
         projected_rows = [{c: row.get(c) for c in columns} for row in rows]
-        print(json.dumps({"items": projected_rows, "totals": projected_totals}, indent=2, default=str))
+        print(
+            json.dumps({"items": projected_rows, "totals": projected_totals}, indent=2, default=str)
+        )
         return
     render(rows, columns=columns, as_json=False)
     print()
@@ -177,9 +181,7 @@ def test_report_all_window_until_only_is_half_open(monkeypatch, capsys) -> None:
     # The symmetric half-open direction: only --until sets the second bound, first is null.
     client = _install_session(monkeypatch, _report_collection([], {}))
     asyncio.run(
-        reads.ledger_report_all(
-            _args(group_by=None, since=None, until="2026-12-31T00:00:00+00:00")
-        )
+        reads.ledger_report_all(_args(group_by=None, since=None, until="2026-12-31T00:00:00+00:00"))
     )
     assert client.calls == [
         ("accounting.report_all_projects", {"window": [None, "2026-12-31T00:00:00+00:00"]})
@@ -189,7 +191,9 @@ def test_report_all_window_until_only_is_half_open(monkeypatch, capsys) -> None:
 def test_report_granted_splits_projects(monkeypatch, capsys) -> None:
     client = _install_session(monkeypatch, _report_collection([], {}))
     asyncio.run(
-        reads.ledger_report_granted(_args(group_by=None, since=None, until=None, projects="a, b ,c"))
+        reads.ledger_report_granted(
+            _args(group_by=None, since=None, until=None, projects="a, b ,c")
+        )
     )
     assert client.calls == [("accounting.report_granted_set", {"projects": ["a", "b", "c"]})]
 
@@ -213,28 +217,47 @@ def test_report_granted_all_empty_projects_is_usage_error(monkeypatch, capsys) -
 
 
 def test_report_renders_rows_and_totals_json(monkeypatch, capsys) -> None:
-    items = [_item("p", "ok", {"project": "p", "principal": "", "reserved": "20", "reconciled": "-19", "variance": "1"})]
+    items = [
+        _item(
+            "p",
+            "ok",
+            {
+                "project": "p",
+                "principal": "",
+                "reserved": "20",
+                "reconciled": "-19",
+                "variance": "1",
+            },
+        )
+    ]
     totals = {
-        "scope": "all-projects", "group_by": "", "project_count": "1",
-        "total_project": "*", "total_principal": "",
-        "total_reserved": "20", "total_reconciled": "-19", "total_variance": "1",
+        "scope": "all-projects",
+        "group_by": "",
+        "project_count": "1",
+        "total_project": "*",
+        "total_principal": "",
+        "total_reserved": "20",
+        "total_reconciled": "-19",
+        "total_variance": "1",
     }
     _install_session(monkeypatch, _report_collection(items, totals))
     asyncio.run(
-        reads.ledger_report_all(argparse.Namespace(json=True, group_by=None, since=None, until=None))
+        reads.ledger_report_all(
+            argparse.Namespace(json=True, group_by=None, since=None, until=None)
+        )
     )
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["items"] == [
         {"project": "p", "principal": "", "reserved": "20", "reconciled": "-19", "variance": "1"}
     ]
-    assert parsed["totals"]["total_reserved"] == "20" and parsed["totals"]["scope"] == "all-projects"
+    assert (
+        parsed["totals"]["total_reserved"] == "20" and parsed["totals"]["scope"] == "all-projects"
+    )
 
 
 def test_report_all_denial_exits_authorization_denied(monkeypatch, capsys) -> None:
     _install_session(monkeypatch, _denied("report"))
-    code = asyncio.run(
-        reads.ledger_report_all(_args(group_by=None, since=None, until=None))
-    )
+    code = asyncio.run(reads.ledger_report_all(_args(group_by=None, since=None, until=None)))
     assert code == 3
 ```
 
@@ -410,6 +433,7 @@ In `src/kdive/cli/commands/registry.py`, add the field to the `Verb` dataclass (
 Add the two entries to `REGISTRY` immediately after the existing `("ledger", "show", …)` entry:
 
 ```python
+(
     Verb(
         "ledger",
         "report-all",
@@ -418,6 +442,8 @@ Add the two entries to `REGISTRY` immediately after the existing `("ledger", "sh
         options=("group_by", "since", "until"),
         help="platform-wide accounting rollup (requires a platform_auditor token)",
     ),
+)
+(
     Verb(
         "ledger",
         "report-granted",
@@ -426,6 +452,7 @@ Add the two entries to `REGISTRY` immediately after the existing `("ledger", "sh
         options=("projects", "group_by", "since", "until"),
         help="accounting rollup across your granted projects",
     ),
+)
 ```
 
 Wire the help into `_verb_parser` — change its `add_parser` call from

@@ -74,12 +74,16 @@ advertisement read:
 
 ```python
 BOOT_MEMBER_FORMATS: Mapping[str, FormatContract] = {
-    "x86_64": FormatContract(container="bzImage",
-                             magic=(MagicPin(offset=0x202, hex=_BZIMAGE_MAGIC.hex()),)),
-    "ppc64le": FormatContract(container="ELF (vmlinux)", magic=(
-        MagicPin(offset=0, hex=_ELF64LE_PREFIX.hex()),       # magic + 64-bit + LE
-        MagicPin(offset=0x12, hex=_EM_PPC64_LE16.hex()),     # e_machine == EM_PPC64
-    )),
+    "x86_64": FormatContract(
+        container="bzImage", magic=(MagicPin(offset=0x202, hex=_BZIMAGE_MAGIC.hex()),)
+    ),
+    "ppc64le": FormatContract(
+        container="ELF (vmlinux)",
+        magic=(
+            MagicPin(offset=0, hex=_ELF64LE_PREFIX.hex()),  # magic + 64-bit + LE
+            MagicPin(offset=0x12, hex=_EM_PPC64_LE16.hex()),  # e_machine == EM_PPC64
+        ),
+    ),
 }
 ```
 

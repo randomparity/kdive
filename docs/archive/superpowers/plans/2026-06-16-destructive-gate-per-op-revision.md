@@ -438,11 +438,11 @@ If `Any` becomes unused after this removal, drop it from the `typing` import (le
 `src/kdive/db/repositories.py:261` — change:
 
 ```python
-    json_columns=frozenset({"capability_scope", "pcie_claim", "requested_pcie_specs"}),
+json_columns = (frozenset({"capability_scope", "pcie_claim", "requested_pcie_specs"}),)
 ```
 to:
 ```python
-    json_columns=frozenset({"pcie_claim", "requested_pcie_specs"}),
+json_columns = (frozenset({"pcie_claim", "requested_pcie_specs"}),)
 ```
 
 - [ ] **Step 5: Remove the admission writes**

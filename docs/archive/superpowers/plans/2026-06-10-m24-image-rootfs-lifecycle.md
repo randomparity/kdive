@@ -142,6 +142,7 @@ async def resolve_rootfs(
     (provider, name)); otherwise the public image; else None.
     """
 
+
 # images/seed.py
 async def seed_defined_rootfs(conn: AsyncConnection, path: Path | None = None) -> int:
     """Register the baseline rootfs catalog as `defined` rows (metadata, object_key NULL),
@@ -182,11 +183,13 @@ class RootfsBuildSpec:
     source_image_digest: str
     capabilities: tuple[str, ...]
 
+
 @dataclass(frozen=True, slots=True)
 class RootfsBuildOutput:
     qcow2_path: Path
-    digest: str            # content digest of the produced qcow2
-    provenance: dict[str, object]   # pinned inputs + build args
+    digest: str  # content digest of the produced qcow2
+    provenance: dict[str, object]  # pinned inputs + build args
+
 
 class RootfsBuildPlane(Protocol):
     def build(self, spec: RootfsBuildSpec) -> RootfsBuildOutput: ...
@@ -234,6 +237,7 @@ class RootfsBuildPlane(Protocol):
 class PublishRequest:
     """The fields needed to create an image row — NOT a built ImageCatalogEntry
     (which carries id/object_key/state/pending_since that publish assigns)."""
+
     provider: str
     name: str
     arch: str
@@ -242,9 +246,10 @@ class PublishRequest:
     digest: str
     capabilities: tuple[str, ...]
     provenance: dict[str, object]
-    visibility: str                 # "public" | "private"
-    owner: str | None = None        # owning project iff private
+    visibility: str  # "public" | "private"
+    owner: str | None = None  # owning project iff private
     expires_at: datetime | None = None
+
 
 async def publish_image(
     conn: AsyncConnection, store: ObjectStore, *, request: PublishRequest, source: Path
@@ -284,10 +289,19 @@ def validate_guest_contract(qcow2_path: Path, *, required: Sequence[str]) -> Non
     helpers are absent.
     """
 
+
 # services/images/upload.py
 async def register_private_upload(
-    conn: AsyncConnection, store: ObjectStore, *, project: str, principal: str,
-    name: str, provider: str, arch: str, quarantine_key: str, expires_at: datetime,
+    conn: AsyncConnection,
+    store: ObjectStore,
+    *,
+    project: str,
+    principal: str,
+    name: str,
+    provider: str,
+    arch: str,
+    quarantine_key: str,
+    expires_at: datetime,
 ) -> ImageCatalogEntry:
     """Under the PROJECT lock: enforce the per-project count/bytes quota (fail-closed),
     validate the quarantined object's guest contract, then **delegate to
@@ -318,9 +332,15 @@ async def register_private_upload(
 `lambda conn: _repair_leaked_domains(conn, reaper)` does today):
 
 ```python
-async def repair_leaked_images(conn, store, *, grace: timedelta) -> int: ...      # object, no row, past grace → delete object
-async def repair_dangling_images(conn, store) -> int: ...                          # row, object HEAD missing past deadline → remove row
-async def repair_expired_private_images(conn, store) -> int: ...                   # private & expires_at<now(), reference-guarded + extend-fenced → delete object+row
+async def repair_leaked_images(
+    conn, store, *, grace: timedelta
+) -> int: ...  # object, no row, past grace → delete object
+async def repair_dangling_images(
+    conn, store
+) -> int: ...  # row, object HEAD missing past deadline → remove row
+async def repair_expired_private_images(
+    conn, store
+) -> int: ...  # private & expires_at<now(), reference-guarded + extend-fenced → delete object+row
 ```
 
 **Loop wiring** (the modify surface is larger than one file): thread the image object-store

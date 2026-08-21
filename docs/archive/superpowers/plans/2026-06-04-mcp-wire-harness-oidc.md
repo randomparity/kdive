@@ -296,9 +296,7 @@ class OidcIssuer:
         """Resolve the issuer from ``KDIVE_OIDC_*``; raise if the base URL is unset."""
         base_url = os.environ.get("KDIVE_OIDC_ISSUER")
         if not base_url:
-            raise RuntimeError(
-                "KDIVE_OIDC_ISSUER is not set; cannot reach the mock-OIDC issuer"
-            )
+            raise RuntimeError("KDIVE_OIDC_ISSUER is not set; cannot reach the mock-OIDC issuer")
         return cls(
             base_url=base_url,
             audience=os.environ.get("KDIVE_OIDC_AUDIENCE", _DEFAULT_AUDIENCE),
@@ -375,9 +373,7 @@ def _authorization_code(issuer: OidcIssuer, claims: Mapping[str, object]) -> str
     except urllib.error.HTTPError as exc:
         location = exc.headers.get("Location")
         if exc.code in (301, 302, 303, 307, 308) and location:
-            code = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(location).query)).get(
-                "code"
-            )
+            code = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(location).query)).get("code")
             if code:
                 return code
         raise RuntimeError(
@@ -565,9 +561,7 @@ class LiveStackClient:
         tools = await self._client.list_tools()
         return [tool.name for tool in tools]
 
-    async def call_tool(
-        self, name: str, **args: object
-    ) -> ToolResponse | list[ToolResponse]:
+    async def call_tool(self, name: str, **args: object) -> ToolResponse | list[ToolResponse]:
         """Call ``name`` and parse the structured output into ``ToolResponse``.
 
         Reads ``CallToolResult.structured_content`` — a clean dict. A ``list[ToolResponse]``
@@ -633,7 +627,7 @@ def _issuer_reachable(issuer: OidcIssuer) -> bool:
     try:
         with urllib.request.urlopen(issuer.jwks_uri, timeout=5) as response:  # noqa: S310
             return response.status == 200
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except urllib.error.URLError, TimeoutError, OSError:
         return False
 
 

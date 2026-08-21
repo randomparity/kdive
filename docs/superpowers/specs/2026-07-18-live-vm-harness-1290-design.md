@@ -104,11 +104,12 @@ no env and carry no such constraint.
 @dataclass(frozen=True, slots=True)
 class LiveDomain:
     name: str
-    domain: object            # the libvirt virDomain (opaque; libvirt ships no stubs)
-    conn: object              # the owning connection
+    domain: object  # the libvirt virDomain (opaque; libvirt ships no stubs)
+    conn: object  # the owning connection
     uri: str
     ssh_port: int | None
     console_log: Path | None
+
 
 @contextmanager
 def boot_throwaway_domain(
@@ -256,19 +257,22 @@ skip/fail decision:
 ```python
 class LiveVmEnvState(Enum):
     AVAILABLE = "available"
-    ABSENT = "absent"          # required env unset -> skip
+    ABSENT = "absent"  # required env unset -> skip
     MISCONFIGURED = "misconfigured"  # env set but wrong (missing file, ...) -> fail loud
+
 
 @dataclass(frozen=True, slots=True)
 class ThrowawayContract:
     rootfs: Path
     libvirt_uri: str
 
+
 @dataclass(frozen=True, slots=True)
 class ProvisionedContract:
     system_id: str
     libvirt_uri: str
     # KDIVE_S3_* presence asserted here (fail-loud when partially set)
+
 
 def resolve_throwaway_contract(default_uri: str) -> EnvResolution[ThrowawayContract]: ...
 def resolve_provisioned_contract(default_uri: str) -> EnvResolution[ProvisionedContract]: ...

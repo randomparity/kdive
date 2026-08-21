@@ -81,9 +81,7 @@ class ProjectMembershipDenied(AuthError):
 ```python
 def require_project(ctx: RequestContext, project: str) -> str:
     if project not in ctx.projects:
-        raise ProjectMembershipDenied(
-            f"project {project!r} is not granted to {ctx.principal!r}"
-        )
+        raise ProjectMembershipDenied(f"project {project!r} is not granted to {ctx.principal!r}")
     return project
 ```
 
