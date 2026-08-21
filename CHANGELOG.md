@@ -132,6 +132,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Local-libvirt CaptureReaper detaches filter, then unlinks pcap
 - Pre-delete this job's stale pcap in local prepare
 - Wire local-libvirt's capture reaper into the sweep
+- Surface reaping-lane budget truncation on report, telemetry, and ops.reconcile_now
 
 ### Changed
 
@@ -701,6 +702,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the reviewed TLS-parameter set and its basis
 - Call the ignored commit formatter-output, not whitespace-only
 - Scope the records-gate link claim to single-line links
+- Regenerate tool reference for ops.reconcile_now envelope fields
 
 ### Fixed
 
@@ -1154,6 +1156,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve supersession links in status lines and [ADR-NNNN] spellings
 - Keep the supersede extractor portable to BSD sed
 - Pin generated-artifact gates to the working tree's src
+- Cover lane budget metric in dashboard, refresh tool reference, drop ADR ref from tool surface
 
 ### Build
 
