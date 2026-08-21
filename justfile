@@ -3,6 +3,17 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # Pinned git-cliff version — referenced by the changelog recipe and release.yml (one place).
 GIT_CLIFF := "git-cliff@2.13.1"
 
+# Import path that puts the working tree's src/ first for every recipe that
+# executes repository code (#1987). The project's editable install appends src/
+# to sys.path AFTER ambient PYTHONPATH and site-packages, so a stale kdive
+# earlier on sys.path -- an exported PYTHONPATH pointing at another checkout,
+# or a non-editable install left in the venv when UV_NO_SYNC=1 suppresses uv's
+# auto-repair -- silently feeds generators and guards outdated registry data
+# whose rendered output matches the stale committed artifact: the gate passes
+# locally and fails only in CI. Prepending src/ makes each verdict describe the
+# exact tree being checked.
+WORKTREE_PYTHONPATH := justfile_directory() + "/src" + "${PYTHONPATH:+:$PYTHONPATH}"
+
 # List available recipes.
 default:
     @just --list
@@ -454,7 +465,7 @@ release VERSION:
 
 # Regenerate the agent-facing tool reference from the live registry (mutating).
 docs:
-    uv run python scripts/gen_tool_reference.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_tool_reference.py
 
 # Verify the committed tool reference matches a fresh generation (CI gate).
 docs-check:
@@ -462,7 +473,7 @@ docs-check:
     set -euo pipefail
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    uv run python -c "from scripts.gen_tool_reference import write_reference; from pathlib import Path; write_reference(Path('$tmp'))"
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -c "from scripts.gen_tool_reference import write_reference; from pathlib import Path; write_reference(Path('$tmp'))"
     # config.md is generated separately (just config-docs-check); exclude it from the
     # tool-reference directory diff so the two generators can share docs/guide/reference/.
     if ! diff -ru --exclude=config.md docs/guide/reference "$tmp"; then
@@ -472,7 +483,7 @@ docs-check:
 
 # Regenerate the committed config reference from the registry (mutating).
 config-docs:
-    uv run python scripts/gen_config_reference.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_config_reference.py
 
 # Verify the committed config reference matches a fresh generation (CI gate).
 config-docs-check:
@@ -480,7 +491,7 @@ config-docs-check:
     set -euo pipefail
     tmp="$(mktemp)"
     trap 'rm -f "$tmp"' EXIT
-    uv run python -c "from pathlib import Path; from scripts.gen_config_reference import write_reference; write_reference(Path('$tmp'))"
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -c "from pathlib import Path; from scripts.gen_config_reference import write_reference; write_reference(Path('$tmp'))"
     if ! diff -u docs/guide/reference/config.md "$tmp"; then
         echo "config reference is stale — run 'just config-docs' and commit" >&2
         exit 1
@@ -488,35 +499,35 @@ config-docs-check:
 
 # Regenerate the packaged MCP doc-resource snapshots from canonical docs/ (ADR-0151).
 resources-docs:
-    uv run python scripts/gen_doc_resources.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_doc_resources.py
 
 # Verify the committed doc-resource snapshots match canonical docs/ (CI gate, ADR-0151).
 resources-docs-check:
-    uv run python scripts/gen_doc_resources.py --check
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_doc_resources.py --check
 
 # Regenerate code-derived doc constants (tool count, upload ceiling) from source (ADR-0410).
 doc-constants:
-    uv run python -m scripts.gen_doc_constants
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -m scripts.gen_doc_constants
 
 # Verify code-derived doc constants match their source of truth (CI gate, ADR-0410).
 doc-constants-check:
-    uv run python -m scripts.gen_doc_constants --check
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -m scripts.gen_doc_constants --check
 
 # Regenerate the role->tool visibility matrix in docs/guide/safety-and-rbac.md (#347).
 rbac-matrix:
-    uv run python scripts/gen_rbac_tool_matrix.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_rbac_tool_matrix.py
 
 # Verify the committed role->tool visibility matrix is current (also gated by `just test`).
 rbac-matrix-check:
-    uv run python scripts/gen_rbac_tool_matrix.py --check
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_rbac_tool_matrix.py --check
 
 # Regenerate the committed kdivectl verb descriptors from the live tool schemas (mutating, #1447).
 cli-verbs:
-    uv run python scripts/gen_cli_verbs.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_cli_verbs.py
 
 # Verify the committed kdivectl verb descriptors match a fresh generation (CI gate, #1447).
 cli-verbs-check:
-    uv run python scripts/gen_cli_verbs.py --check
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_cli_verbs.py --check
 
 # Structural guard: no KDIVE_* env read outside kdive.config (ADR-0087). Stdlib-only.
 config-guard:
@@ -524,13 +535,13 @@ config-guard:
 
 # Coverage guard: every KDIVE_* token is documented (registry or external_env.py). Stdlib-only.
 env-docs-check:
-    uv run python scripts/check_env_documented.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/check_env_documented.py
 
 # Fail when the pinned mcp library no longer advertises the protocol range src/kdive/mcp
 # declares (ADR-0537). Offline by design — the upstream half runs on a weekly cron
 # (mcp-spec-drift.yml), so no PR depends on github.com being reachable.
 mcp-spec-check:
-    uv run python scripts/check_mcp_spec_version.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/check_mcp_spec_version.py
 
 # Immutability guard: no modify/delete/rename of an existing src/kdive/db/schema/*.sql
 # (only new migrations may be added). Applied migrations are byte-immutable (ADR-0015);

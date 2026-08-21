@@ -24,7 +24,11 @@ readonly ROOT="${1:-.}"
 # "source<TAB>uri" lines, one per DOC_RESOURCES entry — the allowlist is the single source of
 # truth, so this script cannot drift from what registrar.py actually serves.
 mapfile -t entries < <(
-  uv run --project "${REPO_ROOT}" python3 -c '
+  # Working-tree-first import path (#1987): the editable install appends src/ to
+  # sys.path after ambient PYTHONPATH, so an unpinning here could read DOC_RESOURCES
+  # from a stale kdive elsewhere on sys.path.
+  PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:$PYTHONPATH}" \
+    uv run --project "${REPO_ROOT}" python3 -c '
 from kdive.mcp.resources.registrar import DOC_RESOURCES
 
 for e in DOC_RESOURCES:
