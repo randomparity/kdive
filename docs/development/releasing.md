@@ -48,12 +48,14 @@ produces both the wheel/sdist GitHub Release and the release image — and also 
   immutable `@sha256` digest ([ADR-0088](../adr/0088-deployment-packaging.md) decision 8).
   The SBOM and provenance are release-only; the signature is not.
 
-**Multi-arch.** Each push builds a `linux/amd64,linux/ppc64le` manifest ([ADR-0359](../adr/0359-multiarch-app-image.md)),
-so a POWER host pulls the same tag as an x86_64 host. amd64 builds natively; the ppc64le leg
-builds under QEMU emulation on the amd64 runner (`docker/setup-qemu-action`), compiling the
-sdist-only deps (`grpcio`, `drgn`, `libvirt-python`) from source — this is the slow leg of the
-job, and no POWER runner is required. The cosign signature and SBOM cover the multi-arch
-manifest digest.
+**Multi-arch.** A `vX.Y.Z` tag build produces a `linux/amd64,linux/ppc64le` manifest
+([ADR-0359](../adr/0359-multiarch-app-image.md)), so a POWER host pulls the same tag as an
+x86_64 host. A push to `main` builds **amd64 only** ([ADR-0572](../adr/0572-edge-builds-amd64-only-releases-stay-multiarch.md)):
+`:edge` and `:sha-<short>` are single-platform, and between releases a POWER host pins the
+newest `:X.Y.Z` instead. amd64 builds natively; the ppc64le leg builds under QEMU emulation on
+the amd64 runner (`docker/setup-qemu-action`), compiling the sdist-only deps (`grpcio`, `drgn`,
+`libvirt-python`) from source — this is the slow leg of the job, and no POWER runner is
+required. The cosign signature and SBOM cover the manifest digest.
 
 **One-time setup — make the package public.** GHCR packages are created private on first
 push and visibility cannot be set from the workflow. After the first `main` push publishes
