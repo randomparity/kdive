@@ -16,8 +16,13 @@ stale-pcap gap.
   *before* unlinking `pcap_path(system_id, job_id)`. A genuine filter/detach error aborts
   before the unlink. Tests assert call order.
 - **R2 (tolerance)** — an already-missing domain (`VIR_ERR_NO_DOMAIN`), an already-missing
-  filter (QMP "not found" message text, same matcher as the live capturer), and an
-  already-missing pcap file (`missing_ok`) are each tolerated and do not fail the reclaim.
+  filter, and an already-missing pcap file (`missing_ok`) are each tolerated and do not fail
+  the reclaim. The filter-absence matcher is the live capturer's exact message-text matcher
+  (`traffic_capture.py` `_is_not_found`): the raised `libvirt.libvirtError`'s lowercased text
+  must contain `"not found"` or `"devicenotfound"`. It is message-based because QMP
+  passthrough errors carry no distinct `VIR_ERR_*` code (the live capturer's module docstring
+  documents this); a timeout or protocol error text does not match, so a genuine detach
+  failure still aborts before the unlink.
   Every tolerated absence still proceeds to the next step (missing domain still unlinks; a
   missing filter still unlinks).
 - **R3 (colocation answered)** — answered by ADR-0567: reconciler-side reaper over
@@ -107,13 +112,20 @@ tmp_path for the pcap file), mirroring `tests/providers/remote_libvirt/reaping/t
    closed (R1's abort-before-unlink).
 7. Non-absence unlink OSError (permission) → `CategorizedError` INFRASTRUCTURE_FAILURE.
 8. `from_env` defaults: reads `KDIVE_LIBVIRT_URI`, lazy (no connection at construction).
-9. Prepare pre-delete: a stale file at `pcap_path` is gone after `prepare`; absent file is a
-   no-op; a concurrent-capture file for a different job on the same System survives (R4's
-   job-keyed scope).
+9. Prepare pre-delete: creates two distinct job-id files under the same System's pcap dir,
+   invokes `prepare` for one job, and asserts that job's stale file is gone while the other
+   job's file is unchanged; an absent stale file is a no-op (R4's job-keyed scope).
 
 Wiring tests (`tests/reconciler/test_capture_reaping_wiring.py`): the local kind flips from
 disabled to concrete — `dispatchable_capture_kinds` now yields both kinds; the two
 `{"remote-libvirt"}`-only assertions become `{"local-libvirt", "remote-libvirt"}`.
+
+Timeout posture: the reaper issues libvirt's default (unbounded) local-socket connect and QMP
+calls — the identical transport behavior of the live capturer and the ADR-0111 local
+`InfraReaper`, over a local unix socket with no TCP dial to bound. A wedged libvirt daemon
+stalling a reaper call is sweep-level exposure this change neither creates nor widens; the
+pass budget already limits a stall to one candidate per pass, and bounding the stall itself is
+owned by #1981.
 
 ## Threat model
 
